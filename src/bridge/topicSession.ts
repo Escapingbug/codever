@@ -89,6 +89,9 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
     }
 
     function queuedSendAndTrack(msg: ChannelMessage, toolUseId?: string): void {
+        // Reserve synchronously so subsequent events see this toolUseId as tracked
+        // (the real messageId will be filled in once the async send completes)
+        if (toolUseId) toolMessageTracker.reserve(toolUseId)
         sendChain = sendChain.then(async () => {
             try {
                 const result = await channelPort.send(msg)
@@ -101,8 +104,23 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         })
     }
 
-    function queuedEdit(messageId: string | number, msg: ChannelMessage): void {
+    function queuedEdit(toolUseId: string, msg: ChannelMessage): void {
         sendChain = sendChain.then(async () => {
+            // Resolve the real messageId at execution time — by now the preceding
+            // send in the chain has completed and tracker has the real value
+            const messageId = toolMessageTracker.get(toolUseId)
+            if (!messageId) {
+                glog(`[TopicSession] queuedEdit: no messageId for toolUseId=${toolUseId}, falling back to send`)
+                try {
+                    const result = await channelPort.send(msg)
+                    if (result.messageId !== undefined) {
+                        toolMessageTracker.set(toolUseId, Number(result.messageId))
+                    }
+                } catch (e) {
+                    glog(`[TopicSession] Failed to send fallback message: ${e instanceof Error ? e.message : e}`)
+                }
+                return
+            }
             try {
                 if (channelPort.edit) {
                     await channelPort.edit(messageId, msg)
@@ -329,14 +347,11 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
                 : { text: msg.text, format: 'html', replyMarkup: msg.replyMarkup }
 
             // Progressive tool display: if this is a tool event and we already have
-            // a message for this toolUseId, edit the existing message instead of sending new
-            if (msg.isToolEvent && msg.toolUseId) {
-                const existingMessageId = toolMessageTracker.get(msg.toolUseId)
-                if (existingMessageId) {
-                    queuedEdit(existingMessageId, channelMsg)
-                    // Don't emit message.outgoing for edits (they're updates, not new messages)
-                    continue
-                }
+            // a message for this toolUseId (reserved or sent), edit the existing message
+            if (msg.isToolEvent && msg.toolUseId && toolMessageTracker.has(msg.toolUseId)) {
+                queuedEdit(msg.toolUseId, channelMsg)
+                // Don't emit message.outgoing for edits (they're updates, not new messages)
+                continue
             }
 
             queuedSendAndTrack(channelMsg, msg.toolUseId)

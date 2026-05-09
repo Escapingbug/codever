@@ -178,13 +178,24 @@ function renderToolResultInline(name: string, output: string, isError: boolean):
 
 export class ToolMessageTracker {
     private messages = new Map<string, number>()
+    /** Sentinel value indicating a message has been reserved but the real messageId isn't known yet */
+    private static readonly RESERVED = -1
+
+    /** Reserve a slot for this toolUseId before the async send completes.
+     *  This ensures subsequent events see the toolUseId as "already tracked"
+     *  and route to edit instead of sending a new message. */
+    reserve(toolUseId: string): void {
+        this.messages.set(toolUseId, ToolMessageTracker.RESERVED)
+    }
 
     set(toolUseId: string, messageId: number): void {
         this.messages.set(toolUseId, messageId)
     }
 
     get(toolUseId: string): number | undefined {
-        return this.messages.get(toolUseId)
+        const val = this.messages.get(toolUseId)
+        if (val === ToolMessageTracker.RESERVED) return undefined
+        return val
     }
 
     has(toolUseId: string): boolean {
@@ -198,7 +209,9 @@ export class ToolMessageTracker {
     finalizeAll(): Array<{ toolUseId: string; messageId: number }> {
         const pending: Array<{ toolUseId: string; messageId: number }> = []
         for (const [toolUseId, messageId] of this.messages) {
-            pending.push({ toolUseId, messageId })
+            if (messageId !== ToolMessageTracker.RESERVED) {
+                pending.push({ toolUseId, messageId })
+            }
         }
         this.messages.clear()
         return pending
