@@ -6,6 +6,7 @@ import { ConversationJournal } from './semantic'
 import { ChannelProjector } from './channelProjector'
 import { DeliveryOutbox } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
+import { createProviderInstance, getProvider } from '@/providers/registry'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
 
@@ -23,6 +24,7 @@ export interface SemanticSessionRuntimeConfig {
     outbox?: DeliveryOutbox
     onLog?: (message: string) => void
     onProviderSessionId?: (sessionId: string) => void
+    onProviderChanged?: (providerName: string, provider: AgentProvider) => void
 }
 
 export class SemanticSessionRuntime {
@@ -266,11 +268,25 @@ export class SemanticSessionRuntime {
                 this.recordCommand('verbose', { verboseLevel })
                 return
             }
-            case 'provider':
-                this.config.providerName = args || this.config.providerName
+            case 'provider': {
+                const providerName = args || this.config.providerName
+                const provider = createProviderInstance(providerName) ?? getProvider(providerName)
+                if (!provider) {
+                    this.recordCommand('provider', { providerName, error: 'Provider not found' })
+                    await this.send({ text: `❌ Provider not found: ${providerName}`, format: 'html' })
+                    return
+                }
+                if (provider !== this.config.provider) {
+                    await this.config.provider.destroy?.()
+                }
+                this.config.provider = provider
+                this.config.providerName = providerName
                 this.config.providerSessionId = null
+                this.adapter = createProviderSemanticAdapter(providerName)
+                this.config.onProviderChanged?.(providerName, provider)
                 this.recordCommand('provider', { providerName: this.config.providerName })
                 return
+            }
             case 'resume':
                 this.config.providerSessionId = args || null
                 this.recordCommand('resume', { sessionId: this.config.providerSessionId })

@@ -1,6 +1,6 @@
 import type { Context } from 'grammy'
 import type { SessionManager } from '@/bridge/sessionManager'
-import { makeTopicKey } from '@/bridge/sessionManager'
+import { isGenericTopic, makeTopicKey } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { getProvider, getDefaultProvider } from '@/providers/registry'
 import {
@@ -412,16 +412,22 @@ async function handleProviderCallback(c: Context, data: string, sessionManager: 
         config.setDefaultProvider(providerName)
         await c.answerCallbackQuery(`Default provider set to ${providerName}`)
         try { await c.editMessageText(`✅ Default provider set to <b>${providerName}</b>`, { parse_mode: 'HTML' }) } catch {}
+    } else if (isGenericTopic(messageThreadId)) {
+        sessionManager.setGroupSettings(chatId, { providerName })
+        await c.answerCallbackQuery(`Provider for new sessions set to ${providerName}`)
+        try { await c.editMessageText(`✅ Provider for new sessions set to <b>${providerName}</b>.`, { parse_mode: 'HTML' }) } catch {}
     } else {
         const topicKey = makeTopicKey(chatId, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        if (topicSession) {
-            await topicSession.dispatch({ kind: 'command', name: 'provider', args: providerName, source: 'channel' })
+        if (!topicSession) {
+            await c.answerCallbackQuery('No active session in this topic')
+            try { await c.editMessageText('⚠️ No active session in this topic. Send a message first, then switch provider.', { parse_mode: 'HTML' }) } catch {}
+            return
         }
-        sessionManager.setGroupSettings(chatId, { providerName })
+        await topicSession.dispatch({ kind: 'command', name: 'provider', args: providerName, source: 'channel' })
         config.clearTopicConversation(topicKey)
-        await c.answerCallbackQuery(`Provider set to ${providerName}`)
-        try { await c.editMessageText(`✅ Provider set to <b>${providerName}</b>. Session will restart.`, { parse_mode: 'HTML' }) } catch {}
+        await c.answerCallbackQuery(`Session provider set to ${providerName}`)
+        try { await c.editMessageText(`✅ Provider for this session set to <b>${providerName}</b>. Session will restart.`, { parse_mode: 'HTML' }) } catch {}
     }
 }
 

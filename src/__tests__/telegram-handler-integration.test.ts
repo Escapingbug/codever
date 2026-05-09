@@ -239,13 +239,35 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
     it('provider callback should dispatch runtime provider switch command', async () => {
         const bot = createBot()
         const session = createSession('idle')
+        const sessionManager = createSessionManager()
         const topicSessions = new Map([['-100:10', session]])
-        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        registerCallbackHandlers(bot, { sessionManager, topicSessions })
 
         await bot.runCallback('provider:mock-acp')
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'provider', args: 'mock-acp', source: 'channel' })
+        expect(sessionManager.setGroupSettings).not.toHaveBeenCalled()
         expect(session.queryLoop.setProviderName).not.toHaveBeenCalled()
+    })
+
+    it('provider callback in the generic topic updates the default for new sessions', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const sessionManager = createSessionManager()
+        const topicSessions = new Map([['-100:main', session]])
+        registerCallbackHandlers(bot, { sessionManager, topicSessions })
+
+        await bot.runCallback('provider:mock-acp', {
+            callbackQuery: {
+                data: 'provider:mock-acp',
+                message: {
+                    chat: { id: -100, type: 'supergroup' },
+                },
+            },
+        })
+
+        expect(session.dispatch).not.toHaveBeenCalled()
+        expect(sessionManager.setGroupSettings).toHaveBeenCalledWith(-100, { providerName: 'mock-acp' })
     })
 
     it('mode callback should dispatch runtime permission mode command', async () => {
