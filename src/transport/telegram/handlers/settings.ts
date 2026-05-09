@@ -54,6 +54,12 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
 
         const current = queryLoop?.model || groupSettings?.model || 'default'
         const models = provider.getAvailableModels()
+        if (models.length === 0) {
+            await c.reply(`Current model: <b>${current}</b>\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
+                parse_mode: 'HTML',
+            })
+            return
+        }
         await c.reply(`Current model: <b>${current}</b>\nSelect a provider:`, {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models)

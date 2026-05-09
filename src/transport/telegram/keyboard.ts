@@ -58,9 +58,6 @@ const MODELS_PER_PAGE = 10
 export function modelKeyboard(models: ModelEntry[], page: number = 0): InlineKeyboard {
     if (models.length === 0) {
         return new InlineKeyboard()
-            .text('Sonnet', 'model:sonnet')
-            .text('Opus', 'model:opus')
-            .text('Haiku', 'model:haiku')
     }
 
     const totalPages = Math.ceil(models.length / MODELS_PER_PAGE)
@@ -110,9 +107,6 @@ export function groupModelsByProvider(models: ModelEntry[]): Map<string, ModelEn
 export function modelProviderKeyboard(models: ModelEntry[]): InlineKeyboard {
     if (models.length === 0) {
         return new InlineKeyboard()
-            .text('Sonnet', 'model:sonnet')
-            .text('Opus', 'model:opus')
-            .text('Haiku', 'model:haiku')
     }
 
     const groups = groupModelsByProvider(models)
