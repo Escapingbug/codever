@@ -8,6 +8,7 @@ import type { AgentEvent } from '@/providers/types'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { ChannelMessage, ChannelPort, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
 import type { MiddlewarePipeline } from '@/middleware/pipeline'
+import { registerProvider } from '@/providers/registry'
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
@@ -438,6 +439,8 @@ describe('Semantic runtime integration chain', () => {
 
     it('keeps provider switch as a runtime command instead of mutating QueryLoop directly', async () => {
         const provider = createProvider([])
+        const nextProvider = createProvider([], { name: 'opencode' })
+        registerProvider(nextProvider, () => nextProvider)
         const channel = createChannel()
         const runtime = new SemanticSessionRuntime({
             sessionId: 'session-1',

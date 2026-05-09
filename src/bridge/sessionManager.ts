@@ -21,6 +21,10 @@ export function normalizeThreadId(threadId?: number): number | undefined {
     return threadId
 }
 
+export function isGenericTopic(threadId?: number): boolean {
+    return normalizeThreadId(threadId) === undefined
+}
+
 export function makeTopicKey(chatId: number, threadId?: number): string {
     const normalized = normalizeThreadId(threadId)
     return normalized ? `${chatId}:${normalized}` : `${chatId}:main`

@@ -82,6 +82,11 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
                 const topicKey = makeTopicKey(queryLoop.groupChatId, queryLoop.messageThreadId ?? undefined)
                 config.saveTopicState(topicKey, { conversationId: sessionId })
             }
+        },
+        onProviderChanged: (providerName, nextProvider) => {
+            queryLoop.setProvider(nextProvider)
+            queryLoop.setProviderName(providerName)
+            queryLoop.setConversationId(null)
         }
     })
 

@@ -1,6 +1,6 @@
 import type { Context } from 'grammy'
 import type { SessionManager } from '@/bridge/sessionManager'
-import { makeTopicKey } from '@/bridge/sessionManager'
+import { isGenericTopic, makeTopicKey } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { getProvider, getDefaultProvider, listProviders } from '@/providers/registry'
 import {
@@ -123,9 +123,13 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const topicSession = topicSessions.get(topicKey)
         const queryLoop = topicSession?.queryLoop
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
-        const current = queryLoop?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const genericTopic = isGenericTopic(messageThreadId)
+        const current = genericTopic
+            ? groupSettings?.providerName || config.getDefaultProvider()
+            : queryLoop?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const target = genericTopic ? 'new sessions' : 'this session'
         const providers = listProviders()
-        await c.reply(`Current provider: <b>${current}</b>\nSelect provider for this group:`, {
+        await c.reply(`Current provider: <b>${current}</b>\nSelect provider for ${target}:`, {
             parse_mode: 'HTML',
             reply_markup: providerKeyboard(providers, current)
         })
