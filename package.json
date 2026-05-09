@@ -1,0 +1,35 @@
+{
+  "name": "codever",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telegram-driven Claude Code remote agent",
+  "type": "module",
+  "bin": {
+    "codever": "./bin/codever.js",
+    "codever-mcp": "./dist/mcp/stdio.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run && vitest run --config vitest.e2e.config.ts",
+    "test:unit": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.19.0",
+    "@opencode-ai/sdk": "^1.4.3",
+    "@tencent-ai/agent-sdk": "^0.3.121",
+    "chalk": "^5.3.0",
+    "conf": "^12.0.0",
+    "grammy": "^1.30.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.4"
+  }
+}

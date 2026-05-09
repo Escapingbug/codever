@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+tmp/
+.pi/.gitnexus/
+repro/
+test-*.js
+test-*.mjs
+test-*.py
+test_*.py
+filter-sessions.js
+nul
+test-path.cjs
