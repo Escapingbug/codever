@@ -60,6 +60,10 @@ export class SemanticSessionRuntime {
             return this.cancel()
         }
 
+        if (input.kind === 'command' && input.name === 'progress') {
+            return this.handleProgressCommand()
+        }
+
         if ((input.kind === 'user_message' || input.kind === 'scheduled_message') && (this.state === 'querying' || this.state === 'finalizing')) {
             void this.send({ text: '📨 Agent is working. Your message has been queued and will be processed when the current task completes.', format: 'html' })
         }
@@ -288,17 +292,9 @@ export class SemanticSessionRuntime {
                 this.recordCommand('send_message', { message: args ?? '' })
                 await this.send({ text: args ?? '', format: 'html' })
                 return
-            case 'progress': {
-                const elapsedSeconds = this.turnStartedAt ? Math.floor((Date.now() - this.turnStartedAt) / 1000) : 0
-                this.recordCommand('progress', { state: this.state, elapsedSeconds, lastToolName: this.lastToolName })
-                await this.send({
-                    text: this.state === 'querying'
-                        ? `🔄 Task in progress: ${elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`
-                        : '✅ No active task',
-                    format: 'html',
-                })
+            case 'progress':
+                await this.handleProgressCommand()
                 return
-            }
             case 'tables': {
                 const channelTables = this.getChannelTables()
                 const tables = channelTables.length > 0 ? channelTables : this.recentTables
@@ -308,6 +304,17 @@ export class SemanticSessionRuntime {
             default:
                 this.recordCommand(name, { args })
         }
+    }
+
+    private async handleProgressCommand(): Promise<void> {
+        const elapsedSeconds = this.turnStartedAt ? Math.floor((Date.now() - this.turnStartedAt) / 1000) : 0
+        this.recordCommand('progress', { state: this.state, elapsedSeconds, lastToolName: this.lastToolName })
+        await this.send({
+            text: this.state === 'querying'
+                ? `🔄 Task in progress: ${elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`
+                : '✅ No active task',
+            format: 'html',
+        })
     }
 
     private createPermissionHandler(): AgentPermissionHandler {
