@@ -1,0 +1,56 @@
+import { describe, expect, it, vi } from 'vitest'
+import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
+import type { ChannelPort, ChannelMessage } from '@/bridge/channelPort'
+
+function createChannelPort(sent: string[]): ChannelPort {
+    return {
+        send: vi.fn(async (message: ChannelMessage) => {
+            sent.push(message.text)
+            return { messageId: sent.length }
+        }),
+        edit: vi.fn(async (_messageId, message: ChannelMessage) => {
+            sent.push(`edit:${message.text}`)
+        }),
+        requestDecision: vi.fn(async () => ({ value: 'ok' })),
+        notifyStatus: vi.fn(),
+    }
+}
+
+describe('DeliveryOutbox', () => {
+    it('serializes sends in enqueue order', async () => {
+        const sent: string[] = []
+        const outbox = new DeliveryOutbox({ channelPort: createChannelPort(sent) })
+
+        void outbox.send({ text: 'first', format: 'plain' })
+        void outbox.send({ text: 'second', format: 'plain' })
+        await outbox.drain()
+
+        expect(sent).toEqual(['first', 'second'])
+        expect(outbox.list().map(r => r.status)).toEqual(['sent', 'sent'])
+    })
+
+    it('resolves deferred edits after earlier sends can publish message ids', async () => {
+        const sent: string[] = []
+        let messageId: number | undefined
+        const outbox = new DeliveryOutbox({ channelPort: createChannelPort(sent) })
+
+        void outbox.send({ text: 'tool started', format: 'html' }, (result) => {
+            messageId = Number(result.messageId)
+        })
+        void outbox.editDeferred(() => messageId, { text: 'tool completed', format: 'html' })
+        await outbox.drain()
+
+        expect(sent).toEqual(['tool started', 'edit:tool completed'])
+        expect(outbox.list().map(r => r.status)).toEqual(['sent', 'edited'])
+    })
+
+    it('falls back to send when an edit has no message id', async () => {
+        const sent: string[] = []
+        const outbox = new DeliveryOutbox({ channelPort: createChannelPort(sent) })
+
+        await outbox.editDeferred(() => undefined, { text: 'fallback', format: 'html' })
+
+        expect(sent).toEqual(['fallback'])
+        expect(outbox.list()[0].status).toBe('sent')
+    })
+})

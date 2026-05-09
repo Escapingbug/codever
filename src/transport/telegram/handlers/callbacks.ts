@@ -30,7 +30,7 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
         if (!data) return
 
         if (data.startsWith('perm:')) {
-            await handlePermissionCallback(c, data, sessionManager)
+            await handlePermissionCallback(c, data, sessionManager, topicSessions)
             return
         }
 
@@ -109,7 +109,7 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
     })
 }
 
-async function handlePermissionCallback(c: Context, data: string, sessionManager: SessionManager): Promise<void> {
+async function handlePermissionCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
     const parts = data.split(':')
     const action = parts[1] as 'allow' | 'session' | 'deny'
     const requestId = parts[2]
@@ -117,15 +117,12 @@ async function handlePermissionCallback(c: Context, data: string, sessionManager
     const queryLoop = sessionManager.getSessionForPermission(requestId)
     if (queryLoop) {
         const decision = action === 'deny' ? 'deny' as const : 'allow' as const
-        const handled = queryLoop.resolvePermission(requestId, decision)
-        if (handled) {
-            sessionManager.removePermission(requestId)
-            const label = action === 'deny' ? '❌ Denied' : '✅ Allowed'
-            await c.answerCallbackQuery(label)
-            try { await c.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }) } catch {}
-        } else {
-            await c.answerCallbackQuery('Request expired or already handled')
-        }
+        const topicSession = Array.from(topicSessions.values()).find(session => session.queryLoop === queryLoop)
+        await topicSession?.dispatch({ kind: 'decision_response', decisionId: requestId, value: decision, source: 'channel' })
+        sessionManager.removePermission(requestId)
+        const label = action === 'deny' ? '❌ Denied' : '✅ Allowed'
+        await c.answerCallbackQuery(label)
+        try { await c.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }) } catch {}
         return
     }
 
@@ -152,7 +149,7 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     const queryLoop = topicSession?.queryLoop
 
     if (queryLoop) {
-        queryLoop.setModel(model)
+        await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
     }
     sessionManager.setGroupSettings(chatId, { model })
     const providerName = queryLoop?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
@@ -250,18 +247,14 @@ async function handleTimeoutCallback(c: Context, data: string, sessionManager: S
     const queryLoop = topicSession?.queryLoop
 
     if (action === 'continue') {
-        if (queryLoop) {
-            queryLoop.setTimeoutExtended(true)
-            // Emit event so timeoutMiddleware can reset its internal state.
-            // Without this, the middleware's timeoutNotified flag stays true
-            // and periodic "still waiting" messages continue every 60s.
-            queryLoop.bus.emit({ type: 'timeout.continue', sessionId: queryLoop.id })
+        if (topicSession) {
+            await topicSession.dispatch({ kind: 'command', name: 'timeout_continue', source: 'channel' })
         }
         try { await c.editMessageText('⏳ Continuing to wait... (periodic status updates active)') } catch {}
         await c.answerCallbackQuery('Continuing to wait')
     } else if (action === 'stop') {
-        if (queryLoop && (queryLoop.state === 'querying' || queryLoop.state === 'canceling')) {
-            try { await queryLoop.interrupt('stop') } catch {}
+        if (topicSession && (topicSession.state === 'querying' || topicSession.state === 'canceling')) {
+            try { await topicSession.dispatch({ kind: 'cancel', reason: 'user', source: 'channel' }) } catch {}
             try { await c.editMessageText('⏹️ Stopped. Next message will continue in the same conversation.') } catch {}
             await c.answerCallbackQuery('Stopped')
         } else if (queryLoop) {
@@ -312,7 +305,7 @@ async function handleModeCallback(c: Context, data: string, sessionManager: Sess
     const queryLoop = topicSession?.queryLoop
 
     if (queryLoop) {
-        queryLoop.providerSettings.permissionMode = mode
+        await topicSession.dispatch({ kind: 'command', name: 'mode', args: mode, source: 'channel' })
     }
     sessionManager.setGroupSettings(chatId, { permissionMode: mode })
     await c.answerCallbackQuery(`Mode set to ${mode}`)
@@ -399,12 +392,7 @@ async function handleProviderCallback(c: Context, data: string, sessionManager: 
         const topicKey = makeTopicKey(chatId, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
-            topicSession.queryLoop.setProviderName(providerName)
-            topicSession.queryLoop.setConversationId(null)
-            topicSession.queryLoop.resetRequested = true
-            if (topicSession.queryLoop.state === 'querying' || topicSession.queryLoop.state === 'canceling') {
-                try { await topicSession.queryLoop.interrupt('new') } catch {}
-            }
+            await topicSession.dispatch({ kind: 'command', name: 'provider', args: providerName, source: 'channel' })
         }
         sessionManager.setGroupSettings(chatId, { providerName })
         config.clearTopicConversation(topicKey)

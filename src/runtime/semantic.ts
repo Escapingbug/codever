@@ -1,0 +1,137 @@
+import type { AgentEvent } from '@/providers/types'
+
+export type SessionInputSource = 'channel' | 'scheduler' | 'mcp' | 'system'
+
+export interface SemanticMeta {
+    id: string
+    sessionId: string
+    turnId: string
+    provider: string
+    seq: number
+    timestamp: number
+    sourcePhase: 'live' | 'replay' | 'tailDrain' | 'synthetic'
+    raw?: unknown
+}
+
+export interface UserRef {
+    id?: string
+    username?: string
+    displayName?: string
+}
+
+export type SessionInput =
+    | {
+        kind: 'user_message'
+        text: string
+        source: SessionInputSource
+        user?: UserRef
+    }
+    | {
+        kind: 'command'
+        name: string
+        args?: string
+        source: SessionInputSource
+        user?: UserRef
+    }
+    | {
+        kind: 'decision_response'
+        decisionId: string
+        value: unknown
+        source: SessionInputSource
+        user?: UserRef
+    }
+    | {
+        kind: 'cancel'
+        reason: 'user' | 'timeout' | 'replace' | 'new'
+        source: SessionInputSource
+        user?: UserRef
+    }
+    | {
+        kind: 'scheduled_message'
+        text: string
+        context?: string
+        source: 'scheduler'
+    }
+
+export interface DecisionOption {
+    id: string
+    label: string
+    value: unknown
+    style?: 'default' | 'primary' | 'danger'
+}
+
+export type ConversationEvent =
+    | {
+        kind: 'turn_started'
+        meta: SemanticMeta
+    }
+    | {
+        kind: 'assistant_text_delta'
+        meta: SemanticMeta
+        text: string
+    }
+    | {
+        kind: 'tool'
+        meta: SemanticMeta
+        phase: 'started' | 'updated' | 'completed' | 'failed'
+        toolCallId: string
+        toolName: string
+        category?: 'read' | 'edit' | 'write' | 'execute' | 'search' | 'agent' | 'unknown'
+        input?: unknown
+        output?: unknown
+        isError?: boolean
+    }
+    | {
+        kind: 'decision_request'
+        meta: SemanticMeta
+        decisionId: string
+        title: string
+        body?: string
+        options: DecisionOption[]
+        required: boolean
+        source: 'provider' | 'codever'
+    }
+    | {
+        kind: 'mode_change'
+        meta: SemanticMeta
+        mode: string
+        options?: DecisionOption[]
+    }
+    | {
+        kind: 'command_result'
+        meta: SemanticMeta
+        command: string
+        output: unknown
+    }
+    | {
+        kind: 'turn_finished'
+        meta: SemanticMeta
+        status: 'success' | 'error' | 'cancelled' | 'max_turns'
+        summary?: string
+    }
+    | {
+        kind: 'provider_raw'
+        meta: SemanticMeta
+        providerEvent: AgentEvent
+    }
+
+export class ConversationJournal {
+    private events: ConversationEvent[] = []
+    private ids = new Set<string>()
+
+    append(event: ConversationEvent): boolean {
+        if (this.ids.has(event.meta.id)) return false
+        this.ids.add(event.meta.id)
+        this.events.push(event)
+        return true
+    }
+
+    list(): ConversationEvent[] {
+        return [...this.events]
+    }
+
+    clear(): void {
+        this.events = []
+        this.ids.clear()
+    }
+}

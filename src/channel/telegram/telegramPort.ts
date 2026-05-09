@@ -57,7 +57,7 @@ export class TelegramPort implements ChannelPort {
                             Number(messageId),
                             segment.text,
                             {
-                                entities: segment.entities,
+                                entities: segment.entities as any,
                                 ...buildMessageThreadParams(this.threadId),
                             },
                         )
@@ -97,11 +97,12 @@ export class TelegramPort implements ChannelPort {
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
         return new Promise((resolve) => {
+            const requestId = Date.now()
             const keyboard = {
                 inline_keyboard: [
                     request.options.map(opt => ({
                         text: opt.label,
-                        callback_data: `decision:${opt.value}:${Date.now()}`,
+                        callback_data: `decision:${requestId}:${opt.value}`,
                     })),
                 ],
             }
@@ -132,7 +133,7 @@ export class TelegramPort implements ChannelPort {
     }
 
     sendChatAction(action: string): void {
-        this.bot.api.sendChatAction(this.chatId, action, buildChatActionThreadParams(this.threadId)).catch(e => console.warn('[telegramPort] sendChatAction failed:', e instanceof Error ? e.message : e))
+        this.bot.api.sendChatAction(this.chatId, action as any, buildChatActionThreadParams(this.threadId)).catch(e => console.warn('[telegramPort] sendChatAction failed:', e instanceof Error ? e.message : e))
     }
 
     /**
@@ -195,7 +196,7 @@ export class TelegramPort implements ChannelPort {
                     const entities = hadMarker ? undefined : segment.entities
 
                     const msg = await this.bot.api.sendMessage(this.chatId, cleanedText, {
-                        entities,
+                        entities: entities as any,
                         reply_markup: markup as any,
                         ...buildMessageThreadParams(this.threadId),
                     })

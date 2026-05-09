@@ -5,6 +5,7 @@
  */
 
 import type { QueryLoopState } from '@/core/types'
+import type { SessionInput } from '@/runtime/semantic'
 
 export interface ChannelMessage {
     text: string
@@ -64,6 +65,9 @@ export interface ChannelPort {
 export interface TopicSession {
     /** Push a user message into the session */
     receiveInput(input: { text: string; username?: string }): void
+
+    /** Push a semantic input into the session actor/runtime */
+    dispatch(input: SessionInput): Promise<void>
 
     /** Destroy the session and clean up resources */
     destroy(): Promise<void>

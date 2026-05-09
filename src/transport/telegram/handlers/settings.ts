@@ -44,8 +44,8 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
                 await c.reply(`Model "<b>${args}</b>" not found.\n\nAvailable: ${modelNames}`, { parse_mode: 'HTML' })
                 return
             }
-            if (queryLoop) {
-                queryLoop.setModel(found.id)
+            if (topicSession) {
+                await topicSession.dispatch({ kind: 'command', name: 'model', args: found.id, source: 'channel' })
             }
             sessionManager.setGroupSettings(c.chat.id, { model: found.id })
             await c.reply(`✅ Model set to: <b>${found.id}</b>`, { parse_mode: 'HTML' })
@@ -208,7 +208,7 @@ export async function performResume(
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
     if (topicSession) {
-        topicSession.queryLoop.setConversationId(sessionId)
+        await topicSession.dispatch({ kind: 'command', name: 'resume', args: sessionId, source: 'channel' })
     }
     config.saveTopicState(topicKey, { conversationId: sessionId })
     await ctx.reply(`🔄 Resuming session <code>${shortId}</code>. Send a message to continue.`, { parse_mode: 'HTML' })

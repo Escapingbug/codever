@@ -128,10 +128,9 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
 
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
-            const queryLoop = topicSession.queryLoop
-            if (queryLoop.state === 'querying' || queryLoop.state === 'canceling') {
+            if (topicSession.state === 'querying' || topicSession.state === 'canceling') {
                 try {
-                    await queryLoop.interrupt('stop')
+                    await topicSession.dispatch({ kind: 'cancel', reason: 'user', source: 'channel' })
                     await c.reply('⏹️ Interrupted. Next message will continue in the same conversation.')
                 } catch (e) {
                     await c.reply('⏹️ Interrupt sent (query may have already finished).')
@@ -150,18 +149,11 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
 
         const topicSession = topicSessions.get(topicKey)
-        const progress = topicSession?.getProgress()
-        if (!progress) {
+        if (!topicSession) {
             await c.reply('✅ No active task')
             return
         }
-
-        const elapsed = formatElapsed(progress.elapsedSeconds)
-        if (progress.lastToolName) {
-            await c.reply(`🔄 Task in progress: ${elapsed} elapsed\nCurrent tool: ${escapeHtml(progress.lastToolName)}\nUse /stop to abort`, { parse_mode: 'HTML' })
-        } else {
-            await c.reply(`🔄 Task in progress: ${elapsed} elapsed\nUse /stop to abort`, { parse_mode: 'HTML' })
-        }
+        await topicSession.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
     })
 
     bot.command(['new', 'reset'], async (c: Context) => {
@@ -171,15 +163,10 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
 
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
-            const queryLoop = topicSession.queryLoop
-            const prevSessionId = queryLoop.conversationId
+            const prevSessionId = topicSession.queryLoop.conversationId
             const prevShortId = prevSessionId?.slice(0, 8)
-            queryLoop.setConversationId(null)
             config.clearTopicConversation(topicKey)
-            queryLoop.resetRequested = true
-            if (queryLoop.state === 'querying' || queryLoop.state === 'canceling') {
-                try { await queryLoop.interrupt('new') } catch {}
-            }
+            await topicSession.dispatch({ kind: 'command', name: 'new', source: 'channel' })
             if (prevShortId) {
                 await c.reply(`🔄 Previous session <code>${prevShortId}</code> ended. New session created — send a message to start fresh.`, { parse_mode: 'HTML' })
             } else {
@@ -197,7 +184,7 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
 
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
-            await topicSession.queryLoop.destroy()
+            await topicSession.dispatch({ kind: 'command', name: 'archive', source: 'channel' })
             topicSessions.delete(topicKey)
             sessionManager.removeSession(topicSession.queryLoop.id)
             sessionManager.archiveGroup(topicKey)
@@ -315,7 +302,7 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
                         await c.reply('⚠️ Timeout must be between 10 and 600 seconds')
                         return
                     }
-                    if (queryLoop) queryLoop.setTimeoutSeconds(seconds)
+                    if (topicSession) await topicSession.dispatch({ kind: 'command', name: 'timeout', args: String(seconds), source: 'channel' })
                     sessionManager.setGroupSettings(groupChatId, { timeoutSeconds: seconds })
                     await c.reply(`✅ Timeout set to <b>${seconds}s</b>`, { parse_mode: 'HTML' })
                     break
