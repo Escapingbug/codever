@@ -209,6 +209,18 @@ export class AcpProvider implements AgentProvider {
         await this.init()
     }
 
+    async destroy(): Promise<void> {
+        try {
+            await this.clientManager.close()
+        } finally {
+            this.initialized = false
+            this.initPromise = null
+            this._initError = null
+            this.activeSessionId = null
+            this.activeAbortSignal = null
+        }
+    }
+
     startQuery(prompt: string, config: AgentQueryConfig): AgentQueryHandle {
         const events = new PushableAsyncIterable<AgentEvent>()
         const clientManager = this.clientManager

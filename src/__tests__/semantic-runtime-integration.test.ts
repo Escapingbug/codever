@@ -207,9 +207,9 @@ describe('Semantic runtime integration chain', () => {
         }))
     })
 
-    it('recovers a crashed provider through mocked reinit before accepting another input', async () => {
+    it('recovers a crashed provider through mocked reinit before running the same input', async () => {
         let ready = false
-        const provider = createProvider([], {
+        const provider = createProvider([{ kind: 'result', status: 'success' }], {
             isReady: vi.fn(() => ready),
             wasReady: vi.fn(() => true),
             reinit: vi.fn(async () => {
@@ -232,7 +232,34 @@ describe('Semantic runtime integration chain', () => {
             '⚠️ Agent process crashed, reconnecting...',
             '✅ Agent reconnected',
         ])
-        expect(provider.startQuery).not.toHaveBeenCalled()
+        expect(provider.startQuery).toHaveBeenCalledWith('hello', expect.any(Object))
+    })
+
+    it('initializes a fresh session-scoped provider before running the first input', async () => {
+        let ready = false
+        const provider = createProvider([{ kind: 'text', text: 'started' }, { kind: 'result', status: 'success' }], {
+            isReady: vi.fn(() => ready),
+            init: vi.fn(async () => {
+                ready = true
+            }),
+        } as Partial<AgentProvider>)
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'first prompt', source: 'channel' })
+
+        expect((provider as AgentProvider & { init: ReturnType<typeof vi.fn> }).init).toHaveBeenCalled()
+        expect(provider.startQuery).toHaveBeenCalledWith('first prompt', expect.any(Object))
+        expect(channel.sent.map(m => m.text)).toEqual([
+            '⏳ Agent is starting up, please wait...',
+            'started',
+        ])
     })
 
     it('interrupts an active provider turn when cancel is dispatched through the semantic runtime', async () => {

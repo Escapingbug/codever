@@ -118,6 +118,7 @@ function createSessionManager() {
         unarchiveGroup: vi.fn(),
         archiveGroup: vi.fn(),
         removeSession: vi.fn(),
+        releaseCreationLock: vi.fn(),
         getGroupSettings: vi.fn(() => ({ providerName: 'mock-acp' })),
         setGroupSettings: vi.fn(),
         getSessionByGroup: vi.fn(() => undefined),
@@ -158,6 +159,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('archive', createContext())
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'archive', source: 'channel' })
+        expect(session.destroy).toHaveBeenCalled()
         expect(session.queryLoop.destroy).not.toHaveBeenCalled()
     })
 

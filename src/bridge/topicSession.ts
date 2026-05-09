@@ -98,6 +98,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
 
     async function destroy(): Promise<void> {
         await runtime.destroy()
+        await provider.destroy?.()
         await queryLoop.destroy()
     }
 

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     createQueryLoop: vi.fn(),
     createTopicSession: vi.fn(),
     getProvider: vi.fn(() => ({ name: 'mock-provider' })),
+    createProviderInstance: vi.fn(() => ({ name: 'mock-provider' })),
     getDefaultProvider: vi.fn(() => 'mock-acp'),
     getTopicState: vi.fn((): any => undefined),
     clearTopicQueryInProgress: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock('@/config', () => ({
 
 vi.mock('@/providers/registry', () => ({
     getProvider: mocks.getProvider,
+    createProviderInstance: mocks.createProviderInstance,
 }))
 
 vi.mock('@/bridge/topicSession', () => ({
@@ -151,6 +153,8 @@ describe('Telegram message router integration', () => {
         vi.clearAllMocks()
         mocks.getDefaultProvider.mockReturnValue('mock-acp')
         mocks.getTopicState.mockReturnValue(undefined)
+        mocks.getProvider.mockImplementation(() => ({ name: 'mock-provider' }))
+        mocks.createProviderInstance.mockImplementation(() => ({ name: 'mock-provider' }))
         mocks.createQueryLoop.mockImplementation(createQueryLoop)
         mocks.createTopicSession.mockImplementation(() => createTopicSession())
     })
@@ -197,6 +201,11 @@ describe('Telegram message router integration', () => {
     it('keeps different Telegram topics isolated in the same group', async () => {
         const bot = createBot()
         const topicSessions = new Map<string, any>()
+        const firstProvider = { name: 'mock-acp', instanceId: 'provider-1' }
+        const secondProvider = { name: 'mock-acp', instanceId: 'provider-2' }
+        mocks.createProviderInstance
+            .mockReturnValueOnce(firstProvider)
+            .mockReturnValueOnce(secondProvider)
         const sessionManager = createSessionManager({
             registerTopicSession: vi.fn((topicKey: string, session: any) => topicSessions.set(topicKey, session)),
         })
@@ -207,6 +216,8 @@ describe('Telegram message router integration', () => {
 
         expect(sessionManager.registerTopicSession).toHaveBeenCalledWith('-100:10', expect.any(Object))
         expect(sessionManager.registerTopicSession).toHaveBeenCalledWith('-100:20', expect.any(Object))
+        expect(mocks.createTopicSession).toHaveBeenNthCalledWith(1, expect.objectContaining({ provider: firstProvider }))
+        expect(mocks.createTopicSession).toHaveBeenNthCalledWith(2, expect.objectContaining({ provider: secondProvider }))
         expect(topicSessions.get('-100:10')).not.toBe(topicSessions.get('-100:20'))
         expect(topicSessions.get('-100:10').receiveInput).toHaveBeenCalledWith({ text: 'topic 10', username: 'alice' })
         expect(topicSessions.get('-100:20').receiveInput).toHaveBeenCalledWith({ text: 'topic 20', username: 'alice' })

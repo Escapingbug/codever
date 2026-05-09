@@ -80,4 +80,7 @@ export interface AgentProvider {
 
     /** Clear provider-specific session state (e.g., opencode session ID) */
     clearSessionId?(): void
+
+    /** Release provider-owned resources such as ACP subprocesses. */
+    destroy?(): Promise<void>
 }

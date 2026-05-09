@@ -185,8 +185,10 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
             await topicSession.dispatch({ kind: 'command', name: 'archive', source: 'channel' })
+            await topicSession.destroy()
             topicSessions.delete(topicKey)
             sessionManager.removeSession(topicSession.queryLoop.id)
+            sessionManager.releaseCreationLock(topicKey)
             sessionManager.archiveGroup(topicKey)
             await c.reply('📦 Session archived. Use /cwd to start a new session.')
             return

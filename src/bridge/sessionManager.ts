@@ -2,7 +2,7 @@ import { config } from '@/config'
 import type { EventBus } from '@/core/eventBus'
 import { QueryLoop } from '@/core/queryLoop'
 import { DefaultEventBus } from '@/core/eventBus'
-import { getProvider, getDefaultProvider } from '@/providers/registry'
+import { createProviderInstance, getProvider, getDefaultProvider } from '@/providers/registry'
 import type { TopicSession } from './channelPort'
 
 /** Telegram General topic thread ID — sendMessage rejects this, so we normalize it to "main". */
@@ -235,7 +235,7 @@ export class SessionManager {
         this.removeSession(oldSession.id)
 
         // Get the new provider
-        const provider = getProvider(newProviderName) ?? getDefaultProvider()
+        const provider = createProviderInstance(newProviderName) ?? getProvider(newProviderName) ?? getDefaultProvider()
 
         // Create a new session with the same channel info
         const bus = this._eventBus ?? new DefaultEventBus()

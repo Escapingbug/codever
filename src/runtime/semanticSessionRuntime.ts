@@ -111,7 +111,7 @@ export class SemanticSessionRuntime {
     private async runTurn(prompt: string): Promise<void> {
         if (!this.config.provider.isReady()) {
             await this.handleProviderNotReady()
-            return
+            if (!this.config.provider.isReady()) return
         }
 
         const turnId = randomUUID()

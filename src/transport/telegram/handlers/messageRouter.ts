@@ -9,7 +9,7 @@ import type { TopicSession } from '@/bridge/channelPort'
 import { createMiddlewarePipeline } from '@/middleware/pipeline'
 import { createFormattingMiddleware } from '@/middleware/formatting'
 import { createTimeoutMiddleware } from '@/middleware/timeout'
-import { getProvider } from '@/providers/registry'
+import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { Bot } from 'grammy'
 import type { GroupLogger } from '@/utils/groupLogger'
 
@@ -117,7 +117,8 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                 }
             } else {
                 const groupSettings = sessionManager.getGroupSettings(groupChatId)
-                const providerName = groupSettings?.providerName || config.getDefaultProvider()
+                const configuredProviderName = groupSettings?.providerName || config.getDefaultProvider()
+                const providerName = getProvider(configuredProviderName) ? configuredProviderName : config.getDefaultProvider()
                 const topicState = config.getTopicState(topicKey)
 
                 let conversationId = topicState?.conversationId
@@ -146,8 +147,15 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                 sessionManager.registerSession(queryLoop, groupChatId, messageThreadId)
                 glog(groupChatId, `[session] Created QueryLoop id=${queryLoop.id.slice(0, 8)} provider=${queryLoop.providerName}`)
 
-                // Create the bridge: wire QueryLoop + Provider + ChannelPort + Pipeline
-                const provider = getProvider(providerName) ?? getProvider(config.getDefaultProvider())!
+                // Create the bridge: wire QueryLoop + session-scoped Provider + ChannelPort + Pipeline.
+                // Provider instances own ACP subprocess state, so sharing one across topics breaks concurrency.
+                const provider = createProviderInstance(providerName) ?? createProviderInstance(config.getDefaultProvider())
+                if (!provider) {
+                    sessionManager.removeSession(queryLoop.id)
+                    sessionManager.releaseCreationLock(topicKey)
+                    await c.reply(`❌ Provider "${providerName}" is not available.`)
+                    return
+                }
                 const channelPort = new TelegramPort(botInstance, groupChatId, messageThreadId)
 
                 // Track current queryId for timeout callbacks (set on query.started)

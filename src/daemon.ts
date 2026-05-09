@@ -48,9 +48,9 @@ async function main() {
     const opencodeProvider = new OpencodeProvider()
     const codebuddyProvider = new CodebuddyProvider()
     const agentProvider = new AgentProvider()
-    registerProvider(opencodeProvider)
-    registerProvider(codebuddyProvider)
-    registerProvider(agentProvider)
+    registerProvider(opencodeProvider, () => new OpencodeProvider())
+    registerProvider(codebuddyProvider, () => new CodebuddyProvider())
+    registerProvider(agentProvider, () => new AgentProvider())
 
     const initProviders = async () => {
         for (const name of listProviders()) {
@@ -211,6 +211,12 @@ async function main() {
         scheduler.stopAll()
 
         daemonApi.stop()
+
+        for (const topicSession of Array.from(sessionManager.getTopicSessionsMap().values())) {
+            try { await topicSession.destroy() } catch (e) {
+                console.error(`[daemon] Failed to destroy topic session: ${e instanceof Error ? e.message : e}`)
+            }
+        }
 
         // NOTE: We intentionally do NOT clear conversationId for mid-query sessions.
         // The agent (opencode/codebuddy) persists session data to disk (e.g. SQLite).
