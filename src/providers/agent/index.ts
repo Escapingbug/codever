@@ -15,6 +15,7 @@ import type { ModelEntry } from '@/providers/provider'
 const AGENT_ACP_COMMAND = 'agent'
 const AGENT_ACP_ARGS = ['acp']
 const AGENT_MODELS_ARGS = ['models']
+const AGENT_MODEL_PROVIDER = 'cursor'
 
 export class AgentProvider extends AcpProvider {
     constructor() {
@@ -69,7 +70,7 @@ export function parseAgentModels(stdout: string): ModelEntry[] {
         const id = line.slice(0, separatorIndex).trim()
         const name = line.slice(separatorIndex + 3).trim()
         if (!id || !name) continue
-        models.push({ id, name })
+        models.push({ id, name, provider: AGENT_MODEL_PROVIDER })
     }
     return models
 }

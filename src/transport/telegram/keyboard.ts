@@ -54,6 +54,7 @@ export function verboseKeyboard(): InlineKeyboard {
 }
 
 const MODELS_PER_PAGE = 10
+const MODEL_PROVIDERS_PER_PAGE = 10
 
 export function modelKeyboard(models: ModelEntry[], page: number = 0): InlineKeyboard {
     if (models.length === 0) {
@@ -104,7 +105,7 @@ export function groupModelsByProvider(models: ModelEntry[]): Map<string, ModelEn
  * Level 1: Select provider
  * Level 2: Select model from provider
  */
-export function modelProviderKeyboard(models: ModelEntry[]): InlineKeyboard {
+export function modelProviderKeyboard(models: ModelEntry[], page: number = 0): InlineKeyboard {
     if (models.length === 0) {
         return new InlineKeyboard()
     }
@@ -114,11 +115,26 @@ export function modelProviderKeyboard(models: ModelEntry[]): InlineKeyboard {
 
     // Show providers as buttons (2 per row)
     const providers = Array.from(groups.keys()).sort()
-    for (let i = 0; i < providers.length; i++) {
-        const provider = providers[i]
+    const totalPages = Math.ceil(providers.length / MODEL_PROVIDERS_PER_PAGE)
+    const safePage = Math.min(Math.max(page, 0), Math.max(totalPages - 1, 0))
+    const start = safePage * MODEL_PROVIDERS_PER_PAGE
+    const pageProviders = providers.slice(start, start + MODEL_PROVIDERS_PER_PAGE)
+    for (let i = 0; i < pageProviders.length; i++) {
+        const provider = pageProviders[i]
         const count = groups.get(provider)!.length
         kb.text(`${provider} (${count})`, `mprov:${provider}`)
         if (i % 2 === 1) kb.row()
+    }
+
+    if (totalPages > 1) {
+        kb.row()
+        if (safePage > 0) {
+            kb.text('⬅️ Prev', `mprovlist:${safePage - 1}`)
+        }
+        kb.text(`${safePage + 1}/${totalPages}`, `mprovlist:${safePage}`)
+        if (safePage < totalPages - 1) {
+            kb.text('Next ➡️', `mprovlist:${safePage + 1}`)
+        }
     }
 
     return kb

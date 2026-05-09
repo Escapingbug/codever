@@ -49,6 +49,11 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
             return
         }
 
+        if (data.startsWith('mprovlist:')) {
+            await handleModelProviderListCallback(c, data, sessionManager, topicSessions)
+            return
+        }
+
         if (data.startsWith('mprov:')) {
             await handleModelProviderCallback(c, data, sessionManager, topicSessions)
             return
@@ -209,6 +214,25 @@ async function handleModelProviderCallback(c: Context, data: string, sessionMana
             })
         } catch {}
     }
+    await c.answerCallbackQuery()
+}
+
+async function handleModelProviderListCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
+    const page = parseInt(data.split(':')[1], 10)
+    if (!c.callbackQuery) return
+    const chatId = c.callbackQuery.message?.chat.id
+    if (!chatId) return
+
+    const groupSettings = sessionManager.getGroupSettings(chatId)
+    const providerName = groupSettings?.providerName || config.getDefaultProvider()
+    const agentProvider = getProvider(providerName) ?? getDefaultProvider()
+    const models = agentProvider.getAvailableModels()
+    try {
+        await c.editMessageText('Select a provider:', {
+            parse_mode: 'HTML',
+            reply_markup: modelProviderKeyboard(models, Number.isNaN(page) ? 0 : page)
+        })
+    } catch {}
     await c.answerCallbackQuery()
 }
 
