@@ -11,8 +11,11 @@ export interface ToolBubbleState {
 const TOOL_NAME_ALIASES: Record<string, string> = {
     bash: 'Bash',
     read: 'Read',
+    'read file': 'Read',
     edit: 'Edit',
+    'edit file': 'Edit',
     write: 'Write',
+    'write file': 'Write',
     glob: 'Glob',
     grep: 'Grep',
     agent: 'Agent',
@@ -145,6 +148,7 @@ function renderToolResultInline(name: string, output: string, isError: boolean):
     }
 
     if (name === 'Glob' || name === 'Grep') {
+        if (!sanitizedOutput.trim()) return null
         const lines = sanitizedOutput.trim().split('\n').filter(Boolean)
         return `${isError ? '❌' : '✅'} ${lines.length} match${lines.length !== 1 ? 'es' : ''}`
     }

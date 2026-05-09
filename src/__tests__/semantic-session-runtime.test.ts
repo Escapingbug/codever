@@ -52,6 +52,7 @@ describe('SemanticSessionRuntime', () => {
             provider,
             providerName: 'test-acp',
             channelPort: createChannel(sent, statuses),
+            providerSettings: { verboseLevel: 2 },
         })
 
         await runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
@@ -82,6 +83,7 @@ describe('SemanticSessionRuntime', () => {
             provider,
             providerName: 'test-acp',
             channelPort: createChannel(sent, statuses),
+            providerSettings: { verboseLevel: 2 },
         })
 
         await runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
@@ -90,5 +92,31 @@ describe('SemanticSessionRuntime', () => {
         expect(sent[0].text).toContain('npm test')
         expect(sent[1].text).toContain('EDIT:')
         expect(sent[1].text).toContain('passed')
+    })
+
+    it('suppresses successful tool output at normal verbose level', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const provider = createProvider([
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running' },
+            { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: 'passed', isError: false },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel(sent, statuses),
+            providerSettings: { verboseLevel: 1 },
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
+
+        expect(sent).toHaveLength(2)
+        expect(sent[0].text).toContain('npm test')
+        expect(sent[1].text).toContain('EDIT:')
+        expect(sent[1].text).toContain('npm test')
+        expect(sent[1].text).not.toContain('passed')
     })
 })

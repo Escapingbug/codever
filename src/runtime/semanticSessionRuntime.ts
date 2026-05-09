@@ -205,11 +205,16 @@ export class SemanticSessionRuntime {
     }
 
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
-        const messages = this.projector.project(event)
+        const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
         for (const projected of messages) {
             this.captureTables(projected.message)
             await this.deliver(projected.message, projected.toolUseId, projected.isToolEvent)
         }
+    }
+
+    private getVerboseLevel(): 0 | 1 | 2 {
+        const value = this.config.providerSettings?.verboseLevel
+        return value === 0 || value === 1 || value === 2 ? value : 1
     }
 
     private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false): Promise<void> {

@@ -12,8 +12,18 @@ export interface ProjectedMessage {
     semanticEvent?: ConversationEvent
 }
 
+export interface ChannelProjectorOptions {
+    verboseLevel?: 0 | 1 | 2
+}
+
+interface ProjectedToolState {
+    toolName: string
+    input?: unknown
+}
+
 export class ChannelProjector {
     private textBuffer = ''
+    private toolStates = new Map<string, ProjectedToolState>()
 
     fromPipelineOutput(output: OutputMessage, semanticEvent?: ConversationEvent): ProjectedMessage {
         return {
@@ -27,7 +37,7 @@ export class ChannelProjector {
         }
     }
 
-    project(event: ConversationEvent): ProjectedMessage[] {
+    project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {
             case 'assistant_text_delta':
                 this.textBuffer += event.text
@@ -36,7 +46,7 @@ export class ChannelProjector {
             case 'tool':
                 return [
                     ...this.flushText(),
-                    this.projectTool(event),
+                    this.projectTool(event, options),
                 ]
 
             case 'decision_request':
@@ -109,6 +119,7 @@ export class ChannelProjector {
 
     reset(): void {
         this.textBuffer = ''
+        this.toolStates.clear()
     }
 
     private flushText(semanticEvent?: ConversationEvent): ProjectedMessage[] {
@@ -154,7 +165,11 @@ export class ChannelProjector {
         }
     }
 
-    private projectTool(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {
+    private projectTool(event: Extract<ConversationEvent, { kind: 'tool' }>, options: ChannelProjectorOptions): ProjectedMessage {
+        const existing = this.toolStates.get(event.toolCallId)
+        const toolName = isGenericToolName(event.toolName) && existing?.toolName ? existing.toolName : event.toolName
+        const input = event.input !== undefined ? event.input : existing?.input
+        this.toolStates.set(event.toolCallId, { toolName, input })
         const status = event.phase === 'failed'
             ? 'interrupted'
             : event.phase === 'completed'
@@ -162,13 +177,16 @@ export class ChannelProjector {
                 : event.phase === 'updated'
                     ? 'running'
                     : 'pending'
+        const includeOutput = shouldIncludeToolOutput(event, options.verboseLevel ?? 1)
         return {
             message: {
                 text: formatToolBubble({
-                    toolName: event.toolName,
-                    input: event.input,
+                    toolName,
+                    input,
                     status,
-                    output: typeof event.output === 'string' ? event.output : event.output === undefined ? undefined : formatUnknown(event.output),
+                    output: includeOutput
+                        ? typeof event.output === 'string' ? event.output : event.output === undefined ? undefined : formatUnknown(event.output)
+                        : undefined,
                     isError: event.isError,
                 }),
                 format: 'html',
@@ -179,6 +197,16 @@ export class ChannelProjector {
             semanticEvent: event,
         }
     }
+}
+
+function isGenericToolName(toolName: string | undefined): boolean {
+    return !toolName || toolName === 'tool' || toolName === 'tool_call'
+}
+
+function shouldIncludeToolOutput(event: Extract<ConversationEvent, { kind: 'tool' }>, verboseLevel: 0 | 1 | 2): boolean {
+    if (event.phase !== 'completed' && event.phase !== 'failed') return false
+    if (event.isError) return true
+    return verboseLevel >= 2
 }
 
 function formatUnknown(value: unknown): string {

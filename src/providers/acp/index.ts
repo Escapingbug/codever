@@ -17,7 +17,7 @@ import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import { AcpClientManager, type AcpClientManagerConfig } from './AcpClientManager'
 import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput } from './eventAdapter'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
-import type { SessionNotification, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
+import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,6 +36,61 @@ function getCodeverMcpServerPath(): string {
         // Fallback: assume cwd
         return resolve(process.cwd(), 'dist', 'mcp', 'stdio.js')
     }
+}
+
+interface ToolCallSnapshot {
+    toolName: string
+    input: unknown
+    rawInput?: string
+    toolKind?: string
+    locations?: Array<{ path: string; line?: number }>
+}
+
+function mapSessionUpdateWithToolState(update: SessionUpdate, toolCalls: Map<string, ToolCallSnapshot>): AgentEvent[] {
+    return normalizeToolEvents(mapSessionUpdate(update), toolCalls)
+}
+
+function normalizeToolEvents(events: AgentEvent[], toolCalls: Map<string, ToolCallSnapshot>): AgentEvent[] {
+    return events.map(event => {
+        if (event.kind === 'tool_use') {
+            const toolUseId = event.toolUseId
+            if (!toolUseId) return event
+
+            const existing = toolCalls.get(toolUseId)
+            const toolName = existing && isMissingToolName(event.toolName) ? existing.toolName : event.toolName
+            const input = existing && (event.input === undefined || event.input === null) ? existing.input : event.input
+            const normalized = {
+                ...event,
+                toolName,
+                input,
+                ...(event.rawInput === undefined && existing?.rawInput !== undefined ? { rawInput: existing.rawInput } : {}),
+                ...(event.toolKind === undefined && existing?.toolKind !== undefined ? { toolKind: existing.toolKind } : {}),
+                ...(event.locations === undefined && existing?.locations !== undefined ? { locations: existing.locations } : {}),
+            }
+
+            toolCalls.set(toolUseId, {
+                toolName: normalized.toolName,
+                input: normalized.input,
+                rawInput: normalized.rawInput,
+                toolKind: normalized.toolKind,
+                locations: normalized.locations,
+            })
+            return normalized
+        }
+
+        if (event.kind === 'tool_result') {
+            const toolUseId = event.toolUseId
+            if (!toolUseId || event.toolName) return event
+            const existing = toolCalls.get(toolUseId)
+            return existing?.toolName ? { ...event, toolName: existing.toolName } : event
+        }
+
+        return event
+    })
+}
+
+function isMissingToolName(toolName: string | undefined): boolean {
+    return !toolName || toolName === 'tool_call'
 }
 
 /**
@@ -490,12 +545,13 @@ export class AcpProvider implements AgentProvider {
                     console.error(`[acp] Drained ${drained} historical updates from resumed session (loadSession path)`)
                 }
 
+                const toolCalls = new Map<string, ToolCallSnapshot>()
                 const updateConsumer = async () => {
                     while (!events.done) {
                         try {
                             const notification = await clientManager.waitForSessionUpdate(sessionId!)
                             if (events.done) break
-                            const agentEvents = mapSessionUpdate(notification.update)
+                            const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls)
                             for (const event of agentEvents) {
                                 if (events.done) break
                                 const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
@@ -534,7 +590,7 @@ export class AcpProvider implements AgentProvider {
                     while (remaining) {
                         const updateType = (remaining.update as any)?.sessionUpdate ?? '?'
                         console.error(`[acp] dequeueSessionUpdate: updateType=${updateType}`)
-                        const agentEvents = mapSessionUpdate(remaining.update)
+                        const agentEvents = mapSessionUpdateWithToolState(remaining.update, toolCalls)
                         for (const event of agentEvents) {
                             if (events.done) break
                             const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
