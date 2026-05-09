@@ -83,6 +83,21 @@ describe('TelegramPort', () => {
             // Should have been called at least twice for splitting
             expect(bot.api.sendMessage).toHaveBeenCalled()
         })
+
+        it('splits long HTML messages without leaving code tags unbalanced', async () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+
+            await port.send({ text: `<code>${'A'.repeat(5000)}</code>`, format: 'html' })
+
+            const sentTexts = apiCalls
+                .filter(call => call.method === 'sendMessage')
+                .map(call => String(call.args[1]))
+            expect(sentTexts.length).toBeGreaterThan(1)
+            for (const text of sentTexts) {
+                expect(count(text, '<code>')).toBe(count(text, '</code>'))
+            }
+        })
     })
 
     describe('edit', () => {
@@ -138,3 +153,7 @@ describe('TelegramPort', () => {
         })
     })
 })
+
+function count(text: string, needle: string): number {
+    return text.split(needle).length - 1
+}

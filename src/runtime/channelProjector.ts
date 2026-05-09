@@ -87,7 +87,7 @@ export class ChannelProjector {
                 ]
 
             case 'turn_finished':
-                return this.flushText(event)
+                return this.projectTurnFinished(event)
 
             case 'turn_started':
             case 'provider_raw':
@@ -121,6 +121,37 @@ export class ChannelProjector {
             isTerminal: semanticEvent?.kind === 'turn_finished',
             semanticEvent,
         }]
+    }
+
+    private projectTurnFinished(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): ProjectedMessage[] {
+        const messages = this.flushText(event)
+        if (event.status === 'success') return messages
+
+        messages.push({
+            message: {
+                text: this.formatTurnFinishedStatus(event),
+                format: 'html',
+            },
+            isToolEvent: false,
+            isTerminal: true,
+            semanticEvent: event,
+        })
+        return messages
+    }
+
+    private formatTurnFinishedStatus(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): string {
+        const summary = event.summary?.trim()
+        const detail = summary ? `\n<pre>${escapeHtml(summary)}</pre>` : `\n<code>${escapeHtml(event.status)}</code>`
+
+        switch (event.status) {
+            case 'cancelled':
+                return `⏹️ <b>Task interrupted</b>${detail}`
+            case 'max_turns':
+                return `⚠️ <b>Task stopped: max turns reached</b>${detail}`
+            case 'error':
+            default:
+                return `❌ <b>Agent error</b>${detail}`
+        }
     }
 
     private projectTool(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {

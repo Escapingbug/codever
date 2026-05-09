@@ -113,6 +113,22 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
 
+    it('shows provider error results even when the agent emits no text', async () => {
+        const { topicSession, channel } = createTopicHarness([
+            { kind: 'result', status: 'error', summary: 'ProviderModelNotFoundError: missing <model>' },
+        ])
+
+        topicSession.receiveInput({ text: 'hello', username: 'alice' })
+        await delay(30)
+
+        expect(channel.sent).toHaveLength(1)
+        expect(channel.sent[0]).toMatchObject({
+            format: 'html',
+        })
+        expect(channel.sent[0].text).toContain('Agent error')
+        expect(channel.sent[0].text).toContain('ProviderModelNotFoundError: missing &lt;model&gt;')
+    })
+
     it('projects ACP plan updates into channel decision UI without Telegram/ACP e2e', async () => {
         const channel = createChannel()
         const provider = createProvider([

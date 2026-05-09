@@ -16,7 +16,12 @@ export interface DeliveryRecord {
 export interface DeliveryOutboxConfig {
     channelPort: ChannelPort
     onFailure?: (record: DeliveryRecord) => void
+    maxRateLimitRetries?: number
+    maxRateLimitDelayMs?: number
 }
+
+const DEFAULT_RATE_LIMIT_RETRIES = 3
+const DEFAULT_MAX_RATE_LIMIT_DELAY_MS = 60_000
 
 export class DeliveryOutbox {
     private chain: Promise<void> = Promise.resolve()
@@ -29,7 +34,7 @@ export class DeliveryOutbox {
         const record = this.createRecord('send', message)
         this.chain = this.chain.then(async () => {
             try {
-                const result = await this.config.channelPort.send(message)
+                const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
                 record.status = 'sent'
                 record.messageId = result.messageId
                 onSent?.(result)
@@ -57,14 +62,14 @@ export class DeliveryOutbox {
         record.messageId = messageId
         this.chain = this.chain.then(async () => {
             try {
-                await this.config.channelPort.edit!(messageId, message)
+                await this.withRateLimitRetry(() => this.config.channelPort.edit!(messageId, message))
                 record.status = 'edited'
             } catch (error) {
                 record.status = 'failed'
                 record.error = error
                 this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    await this.config.channelPort.send(message)
+                    await this.withRateLimitRetry(() => this.config.channelPort.send(message))
                 }
             } finally {
                 record.completedAt = Date.now()
@@ -84,7 +89,7 @@ export class DeliveryOutbox {
                     return
                 }
                 try {
-                    const result = await this.config.channelPort.send(message)
+                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
                     record.status = 'sent'
                     record.messageId = result.messageId
                 } catch (error) {
@@ -97,15 +102,16 @@ export class DeliveryOutbox {
             }
 
             record.messageId = messageId
+            const edit = this.config.channelPort.edit
             try {
-                await this.config.channelPort.edit(messageId, message)
+                await this.withRateLimitRetry(() => edit(messageId, message))
                 record.status = 'edited'
             } catch (error) {
                 record.status = 'failed'
                 record.error = error
                 this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    const result = await this.config.channelPort.send(message)
+                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
                     record.status = 'sent'
                     record.messageId = result.messageId
                 }
@@ -136,4 +142,50 @@ export class DeliveryOutbox {
         this.records.push(record)
         return record
     }
+
+    private async withRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {
+        const maxRetries = this.config.maxRateLimitRetries ?? DEFAULT_RATE_LIMIT_RETRIES
+        const maxDelayMs = this.config.maxRateLimitDelayMs ?? DEFAULT_MAX_RATE_LIMIT_DELAY_MS
+
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await operation()
+            } catch (error) {
+                const retryAfterMs = getRetryAfterMs(error)
+                if (retryAfterMs === null || attempt >= maxRetries) {
+                    throw error
+                }
+                await delay(Math.min(retryAfterMs, maxDelayMs))
+            }
+        }
+    }
+}
+
+function getRetryAfterMs(error: unknown): number | null {
+    const retryAfter = getNestedRetryAfter(error)
+    if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter >= 0) {
+        return retryAfter * 1000
+    }
+
+    const message = error instanceof Error ? error.message : String(error)
+    const match = /retry after (\d+)/i.exec(message)
+    if (!match) return null
+    return Number.parseInt(match[1], 10) * 1000
+}
+
+function getNestedRetryAfter(error: unknown): unknown {
+    if (!error || typeof error !== 'object') return undefined
+    const record = error as Record<string, unknown>
+    const parameters = record.parameters
+    if (parameters && typeof parameters === 'object' && 'retry_after' in parameters) {
+        return (parameters as Record<string, unknown>).retry_after
+    }
+    if ('retry_after' in record) {
+        return record.retry_after
+    }
+    return undefined
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
 }

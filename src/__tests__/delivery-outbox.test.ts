@@ -53,4 +53,24 @@ describe('DeliveryOutbox', () => {
         expect(sent).toEqual(['fallback'])
         expect(outbox.list()[0].status).toBe('sent')
     })
+
+    it('waits for Telegram retry_after before retrying rate-limited sends', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.send).mockRejectedValueOnce(new Error("Call to 'sendMessage' failed! (429: Too Many Requests: retry after 34)"))
+            const outbox = new DeliveryOutbox({ channelPort: channel })
+
+            const delivery = outbox.send({ text: 'rate limited', format: 'plain' })
+            await vi.advanceTimersByTimeAsync(34_000)
+            const record = await delivery
+
+            expect(record.status).toBe('sent')
+            expect(channel.send).toHaveBeenCalledTimes(2)
+            expect(sent).toEqual(['rate limited'])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
 })

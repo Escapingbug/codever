@@ -6,6 +6,7 @@
 import type { Bot } from 'grammy'
 import type { ChannelPort, ChannelMessage, ChannelSendResult, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
 import { tgmdConvert, tgmdTableImage } from '@/utils/tgmdrender'
+import { splitHtmlChunks } from '@/utils/formatting'
 import { InputFile } from 'grammy'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
 
@@ -212,7 +213,7 @@ export class TelegramPort implements ChannelPort {
     }
 
     private async sendHtml(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
-        const chunks = this.splitText(text)
+        const chunks = splitHtmlChunks(text, MAX_MESSAGE_LENGTH)
         let firstMessageId: number | undefined
         for (let i = 0; i < chunks.length; i++) {
             const isLast = i === chunks.length - 1
