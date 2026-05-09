@@ -112,13 +112,50 @@ describe('TelegramPort', () => {
     })
 
     describe('notifyStatus', () => {
-        it('does not throw for status notifications', () => {
+        it('sends an acknowledgement with provider, cwd, and model when a query starts', () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+
+            port.notifyStatus({ state: 'querying', cwd: '/tmp/<repo>', provider: 'test&provider', model: 'model<1>' })
+
+            expect(apiCalls[0]).toEqual({
+                method: 'sendMessage',
+                args: [
+                    -100123,
+                    [
+                        '🔄 Agent started working...',
+                        'Provider: <code>test&amp;provider</code>',
+                        'Cwd: <code>/tmp/&lt;repo&gt;</code>',
+                        'Model: <code>model&lt;1&gt;</code>',
+                    ].join('\n'),
+                    expect.objectContaining({
+                        parse_mode: 'HTML',
+                        message_thread_id: 42,
+                    }),
+                ],
+            })
+        })
+
+        it('omits model from the acknowledgement when no model is selected', () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+
+            port.notifyStatus({ state: 'querying', cwd: '/tmp', provider: 'test' })
+
+            expect(String(apiCalls[0].args[1])).toBe([
+                '🔄 Agent started working...',
+                'Provider: <code>test</code>',
+                'Cwd: <code>/tmp</code>',
+            ].join('\n'))
+        })
+
+        it('does not send status messages for idle transitions', () => {
             const { bot } = createMockBot()
             const port = new TelegramPort(bot, -100123, 42)
 
-            expect(() => {
-                port.notifyStatus({ state: 'querying', cwd: '/tmp', provider: 'test' })
-            }).not.toThrow()
+            port.notifyStatus({ state: 'idle', cwd: '/tmp', provider: 'test' })
+
+            expect(bot.api.sendMessage).not.toHaveBeenCalled()
         })
     })
 

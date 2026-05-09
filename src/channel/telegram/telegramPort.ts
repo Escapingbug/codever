@@ -129,8 +129,23 @@ export class TelegramPort implements ChannelPort {
     }
 
     notifyStatus(status: SessionStatus): void {
-        // Status notifications are handled by the renderer/handler layer
-        // This could send a status message to the channel if desired
+        if (status.state !== 'querying') return
+
+        const details = [
+            '🔄 Agent started working...',
+            `Provider: <code>${this.escapeHtml(status.provider)}</code>`,
+            `Cwd: <code>${this.escapeHtml(status.cwd)}</code>`,
+        ]
+        if (status.model) {
+            details.push(`Model: <code>${this.escapeHtml(status.model)}</code>`)
+        }
+
+        this.bot.api.sendMessage(this.chatId, details.join('\n'), {
+            parse_mode: 'HTML',
+            ...buildMessageThreadParams(this.threadId),
+        }).catch((e) => {
+            console.error('[TelegramPort] Failed to send status notification:', e instanceof Error ? e.message : e)
+        })
     }
 
     sendChatAction(action: string): void {

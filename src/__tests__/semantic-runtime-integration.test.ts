@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { QueryLoop } from '@/core/queryLoop'
 import { DefaultEventBus } from '@/core/eventBus'
 import { createTopicSession } from '@/bridge/topicSession'
+import { TelegramPort } from '@/channel/telegram/telegramPort'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import type { AgentEvent } from '@/providers/types'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
@@ -111,6 +112,46 @@ describe('Semantic runtime integration chain', () => {
         expect(queryLoop.conversationId).toBe('provider-session')
         expect(channel.sent.map(m => m.text)).toEqual(['integrated response'])
         expect(channel.statuses.map(s => s.state)).toEqual(['querying', 'idle'])
+    })
+
+    it('sends a Telegram start acknowledgement with provider, cwd, and selected model through TopicSession', async () => {
+        const provider = createProvider([{ kind: 'result', status: 'success' }])
+        const bot = {
+            api: {
+                sendMessage: vi.fn(async () => ({ message_id: 1 })),
+            },
+        } as any
+        const channelPort = new TelegramPort(bot, -100, 10)
+        const pipeline = createNoopPipeline()
+        const queryLoop = new QueryLoop({
+            cwd: '/repo/<project>',
+            provider,
+            bus: new DefaultEventBus(),
+            providerName: 'mock&acp',
+            model: 'sonnet<4>',
+        })
+        queryLoop.groupChatId = -100
+        queryLoop.messageThreadId = 10
+
+        const topicSession = createTopicSession({
+            queryLoop,
+            provider,
+            channelPort,
+            pipeline,
+        })
+
+        topicSession.receiveInput({ text: 'hello', username: 'alice' })
+        await delay(30)
+
+        expect(bot.api.sendMessage).toHaveBeenCalledWith(-100, [
+            '🔄 Agent started working...',
+            'Provider: <code>mock&amp;acp</code>',
+            'Cwd: <code>/repo/&lt;project&gt;</code>',
+            'Model: <code>sonnet&lt;4&gt;</code>',
+        ].join('\n'), expect.objectContaining({
+            parse_mode: 'HTML',
+            message_thread_id: 10,
+        }))
     })
 
     it('shows provider error results even when the agent emits no text', async () => {
