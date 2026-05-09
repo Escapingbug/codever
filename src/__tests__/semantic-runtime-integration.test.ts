@@ -744,6 +744,43 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('replies to /progress while the current turn is still running', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const provider = createProvider([], {
+            startQuery: vi.fn((): AgentQueryHandle => ({
+                events: (async function* () {
+                    await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        })
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: channel,
+        })
+
+        const running = runtime.dispatch({ kind: 'user_message', text: 'long', source: 'channel' })
+        await delay(10)
+        const progress = runtime.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
+        await delay(20)
+
+        try {
+            expect(channel.sent.map(m => m.text).join('\n')).toContain('Task in progress')
+        } finally {
+            release()
+            await running
+            await progress
+        }
+    })
+
     it('tracks rendered tables so /tables can return raw markdown after a mock channel turn', async () => {
         const provider = createProvider([
             { kind: 'text', text: '| A | B |\n|---|---|\n| 1 | 2 |\n' },
