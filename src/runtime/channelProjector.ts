@@ -88,6 +88,11 @@ export class ChannelProjector {
                 ]
 
             case 'command_result':
+                // Suppress messages for available_commands_update and config_option_update
+                const commandLower = event.command.toLowerCase()
+                if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option')) {
+                    return []
+                }
                 return [
                     ...this.flushText(),
                     {
@@ -329,14 +334,35 @@ function formatCommandResult(command: string, output: unknown): string {
 
     // config_option_update: show config changes
     if (commandLower.includes('config_option')) {
-        const config = asRecord(output)
-        if (config) {
+        // Try to extract configOptions array from output
+        let configArray: Array<{ name?: string; value?: unknown; description?: string }> = []
+
+        if (Array.isArray(output)) {
+            configArray = output as Array<{ name?: string; value?: unknown; description?: string }>
+        } else {
+            const record = asRecord(output)
+            if (record) {
+                // Try common field names for config options array
+                const options = record.configOptions ?? record.options ?? record.config
+                if (Array.isArray(options)) {
+                    configArray = options as Array<{ name?: string; value?: unknown; description?: string }>
+                }
+            }
+        }
+
+        if (configArray.length > 0) {
             const parts: string[] = ['<b>⚙️ Config Update</b>']
-            for (const [key, value] of Object.entries(config)) {
-                parts.push(`• ${escapeHtml(key)}: <code>${escapeHtml(String(value))}</code>`)
+            for (const opt of configArray) {
+                const name = opt.name ?? 'unknown'
+                const value = opt.value !== undefined ? String(opt.value) : ''
+                const desc = opt.description ? ` - ${opt.description}` : ''
+                parts.push(`• ${escapeHtml(name)}: <code>${escapeHtml(value)}</code>${desc ? ` ${escapeHtml(desc)}` : ''}`)
             }
             return parts.join('\n')
         }
+
+        // Fallback: don't dump JSON, just show a short message
+        return '⚙️ <b>Config updated</b>'
     }
 
     // Default: fallback to JSON dump with proper escaping
