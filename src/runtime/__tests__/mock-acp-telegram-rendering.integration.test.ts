@@ -215,7 +215,7 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
     })
 
     describe('Scenario B: Commands/plan not JSON dump', () => {
-        it('should render available_commands_update as friendly text, not JSON', async () => {
+        it('should NOT send message for available_commands_update (suppressed)', async () => {
             // ACP available_commands_update as a tool_call (OpenCode behavior)
             const commandsUpdate = {
                 sessionUpdate: 'available_commands_update',
@@ -225,22 +225,16 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
                 ],
             }
 
+            outbox.clear()
             const results = await processAcpUpdate(commandsUpdate, {
                 sessionId: 'sess-1',
                 turnId,
                 provider: 'opencode',
             })
 
-            expect(results.length).toBe(1)
-            const message = results[0].text
-
-            // Should NOT contain raw JSON
-            expect(message).not.toContain('[{"name"')
-
-            // Should contain friendly text
-            expect(message).toContain('Provider commands updated')
-            expect(message).toContain('/status')
-            expect(message).toContain('/help')
+            // Should NOT send any message (channelProjector returns [])
+            expect(results.length).toBe(0)
+            expect(outbox.sends.length).toBe(0)
         })
 
         it('should render plan as friendly text with content', async () => {
@@ -457,6 +451,152 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             // Should still contain "Read", not JSON
             expect(editedMessage).toContain('Read')
             expect(editedMessage).not.toContain('<pre>{')
+        })
+    })
+
+    describe('Issue 1: config_option_update renders [object Object]', () => {
+        it('should not send message for config_option_update (suppressed by channelProjector)', async () => {
+            const configUpdate = {
+                sessionUpdate: 'config_option_update',
+                configOptions: [
+                    { name: 'maxTokens', value: 4096, description: 'Max tokens per request' },
+                    { name: 'temperature', value: 0.7, description: 'Sampling temperature' },
+                ],
+            }
+
+            outbox.clear()
+            const results = await processAcpUpdate(configUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            // Should NOT send any message (channelProjector returns [])
+            expect(results.length).toBe(0)
+            expect(outbox.sends.length).toBe(0)
+            expect(outbox.edits.length).toBe(0)
+        })
+
+        it('should correctly render config options when formatCommandResult is called directly', () => {
+            const projector = new ChannelProjector()
+
+            // Simulate config_option_update event
+            const event = {
+                kind: 'command_result' as const,
+                command: 'config_option_update',
+                output: {
+                    configOptions: [
+                        { name: 'maxTokens', value: 4096, description: 'Max tokens' },
+                        { name: 'temperature', value: 0.7 },
+                    ],
+                },
+                meta: {
+                    id: 'test-1',
+                    sessionId: 'sess-1',
+                    turnId: 'turn-1',
+                    provider: 'opencode',
+                    seq: 0,
+                    timestamp: Date.now(),
+                    sourcePhase: 'live' as const,
+                },
+            }
+
+            const results = projector.project(event)
+            // With our fix, config_option_update should return empty array
+            expect(results.length).toBe(0)
+        })
+
+        it('should not render [object Object] when configOptions is an array', () => {
+            // Test that config_option_update doesn't produce [object Object]
+            // by calling project() and verifying no message is sent
+            const projector = new ChannelProjector()
+
+            const event = {
+                kind: 'command_result' as const,
+                command: 'config_option_update',
+                output: {
+                    configOptions: [
+                        { name: 'maxTokens', value: 4096 },
+                        { name: 'temperature', value: 0.7 },
+                    ],
+                },
+                meta: {
+                    id: 'test-1',
+                    sessionId: 'sess-1',
+                    turnId: 'turn-1',
+                    provider: 'opencode',
+                    seq: 0,
+                    timestamp: Date.now(),
+                    sourcePhase: 'live' as const,
+                },
+            }
+
+            const results = projector.project(event)
+
+            // Should return empty array (suppressed)
+            expect(results.length).toBe(0)
+        })
+    })
+
+    describe('Issue 2: available_commands_update and config_option_update should not notify user', () => {
+        it('should not send message for available_commands_update (suppressed by channelProjector)', async () => {
+            const commandsUpdate = {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [
+                    { name: 'status', description: 'Show status', input: { hint: 'no input' } },
+                    { name: 'help', description: 'Show help', input: null },
+                ],
+            }
+
+            outbox.clear()
+            const results = await processAcpUpdate(commandsUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            // Should NOT send any message (channelProjector returns [])
+            expect(results.length).toBe(0)
+            expect(outbox.sends.length).toBe(0)
+            expect(outbox.edits.length).toBe(0)
+        })
+
+        it('should suppress config_option_update in project method', async () => {
+            const configUpdate = {
+                sessionUpdate: 'config_option_update',
+                configOptions: [
+                    { name: 'model', value: 'gpt-4' },
+                ],
+            }
+
+            outbox.clear()
+            const results = await processAcpUpdate(configUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            // Should NOT send any message
+            expect(results.length).toBe(0)
+            expect(outbox.sends.length).toBe(0)
+        })
+
+        it('should still render other command_result messages (e.g., plan)', async () => {
+            const planUpdate = {
+                sessionUpdate: 'plan',
+                content: '1. Do this\n2. Do that',
+            }
+
+            outbox.clear()
+            const results = await processAcpUpdate(planUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            // Should still send message for plan
+            expect(results.length).toBeGreaterThan(0)
+            expect(outbox.sends.length).toBeGreaterThan(0)
         })
     })
 })

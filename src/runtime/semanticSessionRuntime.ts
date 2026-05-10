@@ -40,6 +40,8 @@ export class SemanticSessionRuntime {
     private lastToolName: string | null = null
     private turnStartedAt = 0
     private recentTables: string[] = []
+    private availableCommands: Array<Record<string, unknown>> = []
+    private lastConfigOptions: Array<Record<string, unknown>> = []
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
@@ -208,6 +210,31 @@ export class SemanticSessionRuntime {
     }
 
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
+        // Record available_commands_update and config_option_update to session state
+        if (event.kind === 'command_result') {
+            const commandLower = event.command.toLowerCase()
+            if (commandLower.includes('available_commands') || commandLower.includes('commands_update')) {
+                const commands = Array.isArray(event.output) ? event.output as Array<Record<string, unknown>> : []
+                this.availableCommands = commands
+                this.log(`[session] Updated available commands: ${commands.length} commands`)
+            }
+            if (commandLower.includes('config_option')) {
+                // Extract config options from output
+                let configArray: Array<Record<string, unknown>> = []
+                if (Array.isArray(event.output)) {
+                    configArray = event.output as Array<Record<string, unknown>>
+                } else if (event.output && typeof event.output === 'object') {
+                    const record = event.output as Record<string, unknown>
+                    const options = record.configOptions ?? record.options ?? record.config
+                    if (Array.isArray(options)) {
+                        configArray = options as Array<Record<string, unknown>>
+                    }
+                }
+                this.lastConfigOptions = configArray
+                this.log(`[session] Updated config options: ${configArray.length} options`)
+            }
+        }
+
         const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
         for (const projected of messages) {
             this.captureTables(projected.message)

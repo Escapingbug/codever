@@ -107,7 +107,7 @@ describe('ChannelProjector — command_result friendly rendering', () => {
         projector = new ChannelProjector()
     })
 
-    it('renders available_commands_update as a list, not JSON dump', () => {
+    it('suppresses available_commands_update message (no send to user)', () => {
         const event: Extract<ConversationEvent, { kind: 'command_result' }> = {
             kind: 'command_result',
             command: 'available_commands_update',
@@ -127,14 +127,9 @@ describe('ChannelProjector — command_result friendly rendering', () => {
         }
 
         const result = projector.project(event)
-        const message = result[0]?.message.text || ''
 
-        // Should NOT contain raw JSON
-        expect(message).not.toContain('[{"name"')
-        // Should contain formatted command list
-        expect(message).toContain('Provider commands updated')
-        expect(message).toContain('/status')
-        expect(message).toContain('/help')
+        // Should return empty array (suppressed)
+        expect(result).toHaveLength(0)
     })
 
     it('renders plan command_result with content', () => {
