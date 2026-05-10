@@ -27,6 +27,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     exitplanmode: 'ExitPlanMode',
     task: 'Task',
     skill: 'Skill',
+    'loaded skill': 'Skill',
 }
 
 function normalizeToolName(title: string): string {
@@ -146,9 +147,28 @@ export function mapSessionUpdate(update: SessionUpdate): AgentEvent[] {
 
         case 'tool_call': {
             const toolCall = update as AcpToolCall & { sessionUpdate: 'tool_call' }
+            const rawTitle = toolCall.title ?? ''
+            const normalizedTitle = rawTitle.toLowerCase()
+
+            // OpenCode sends "available_commands_update" as a tool_call title
+            // Convert it to a proper commands_update event
+            if (normalizedTitle === 'available_commands_update' || normalizedTitle === 'available commands update') {
+                const rawInput = parseRawInput(toolCall.rawInput)
+                const commands = Array.isArray(rawInput) ? rawInput : []
+                events.push({
+                    kind: 'commands_update',
+                    commands: commands.map((c: any) => ({
+                        name: c.name ?? c.command ?? '',
+                        description: c.description ?? '',
+                        inputHint: c.input?.hint ?? c.inputHint ?? null,
+                    })),
+                } as AgentCommandsUpdateEvent)
+                break
+            }
+
             events.push({
                 kind: 'tool_use',
-                toolName: normalizeToolName(toolCall.title),
+                toolName: normalizeToolName(rawTitle),
                 toolUseId: toolCall.toolCallId,
                 input: parseRawInput(toolCall.rawInput),
                 status: mapToolCallStatus(toolCall.status),
@@ -162,6 +182,15 @@ export function mapSessionUpdate(update: SessionUpdate): AgentEvent[] {
 
         case 'tool_call_update': {
             const toolUpdate = update as AcpToolCallUpdate & { sessionUpdate: 'tool_call_update' }
+            const rawTitle = toolUpdate.title ?? ''
+            const normalizedTitle = rawTitle.toLowerCase()
+
+            // Skip available_commands_update tool_call_update events entirely.
+            // The commands_update was already emitted from the tool_call case.
+            if (normalizedTitle === 'available_commands_update' || normalizedTitle === 'available commands update') {
+                break
+            }
+
             const isTerminal = toolUpdate.status === 'completed' || toolUpdate.status === 'failed'
 
             if (isTerminal) {

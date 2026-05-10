@@ -222,6 +222,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     exitplanmode: 'ExitPlanMode',
     task: 'Task',
     skill: 'Skill',
+    'loaded skill': 'Skill',
 }
 
 function normalizeToolName(name: string): string {
