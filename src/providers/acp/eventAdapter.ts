@@ -271,10 +271,44 @@ function mapToolCallStatus(status: string | undefined | null): 'pending' | 'runn
     return undefined
 }
 
+function looksLikeJsonStringify(str: string): boolean {
+    const trimmed = str.trim()
+    return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+           (trimmed.startsWith('[') && trimmed.endsWith(']'))
+}
+
+function formatMetadata(metadata: Record<string, unknown>): string {
+    const entries = Object.entries(metadata)
+        .filter(([, v]) => v != null)
+        .map(([key, value]) => {
+            const val = typeof value === 'string' ? value : JSON.stringify(value)
+            return `${key}: ${val}`
+        })
+    return entries.join('\n')
+}
+
 function extractToolOutput(toolUpdate: AcpToolCallUpdate): string {
     if (toolUpdate.rawOutput !== undefined && toolUpdate.rawOutput !== null) {
         if (typeof toolUpdate.rawOutput === 'string') return unwrapToolOutput(toolUpdate.rawOutput)
-        if (typeof toolUpdate.rawOutput === 'object') return unwrapToolOutput(toolUpdate.rawOutput as Record<string, unknown>)
+
+        if (typeof toolUpdate.rawOutput === 'object') {
+            const raw = toolUpdate.rawOutput as Record<string, unknown>
+            const mainOutput = unwrapToolOutput(raw)
+
+            // 如果主输出有效且不是 JSON stringify 的结果，直接返回
+            if (mainOutput && !looksLikeJsonStringify(mainOutput)) {
+                return mainOutput
+            }
+
+            // 尝试从 metadata 提取友好输出
+            if (raw.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata)) {
+                return formatMetadata(raw.metadata as Record<string, unknown>)
+            }
+
+            // fallback: 如果主输出非空，返回主输出；否则返回空字符串
+            return mainOutput || ''
+        }
+
         return String(toolUpdate.rawOutput)
     }
 
