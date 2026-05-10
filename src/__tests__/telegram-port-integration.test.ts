@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
+import { clearPendingDecisionsForTests, completePendingDecision } from '@/channel/telegram/decisionRegistry'
 
 const renderMocks = vi.hoisted(() => ({
     tgmdConvert: vi.fn(),
@@ -37,11 +38,16 @@ describe('TelegramPort integration', () => {
         renderMocks.tgmdTableImage.mockResolvedValue(Buffer.from('png'))
     })
 
+    afterEach(() => {
+        clearPendingDecisionsForTests()
+        vi.useRealTimers()
+    })
+
     it('renders channel decision requests into Telegram inline keyboard messages', async () => {
         const bot = createBot()
         const port = new TelegramPort(bot, -100, 10)
 
-        const response = await port.requestDecision({
+        const response = port.requestDecision({
             type: 'permission',
             title: 'Run Bash?',
             details: 'rm -rf tmp',
@@ -51,7 +57,6 @@ describe('TelegramPort integration', () => {
             ],
         })
 
-        expect(response).toEqual({ value: 'allow' })
         expect(bot.api.sendMessage).toHaveBeenCalledWith(-100, expect.stringContaining('Run Bash?'), expect.objectContaining({
             parse_mode: 'HTML',
             message_thread_id: 10,
@@ -62,6 +67,12 @@ describe('TelegramPort integration', () => {
                 ]],
             },
         }))
+
+        const markup = bot.api.sendMessage.mock.calls[0][2].reply_markup
+        const callbackData = markup.inline_keyboard[0][0].callback_data
+        const [, decisionId, encodedValue] = callbackData.split(':')
+        completePendingDecision(decisionId, decodeURIComponent(encodedValue))
+        await expect(response).resolves.toEqual({ value: 'allow' })
     })
 
     it('tracks rendered markdown tables so /tables can return raw table markdown', async () => {
@@ -97,7 +108,7 @@ describe('TelegramPort integration', () => {
         const bot = createBot()
         const port = new TelegramPort(bot, -100, 10)
 
-        await port.requestDecision({
+        const response = port.requestDecision({
             type: 'question',
             title: 'Choose mode',
             options: [{ label: 'Plan', value: 'plan' }],
@@ -106,5 +117,8 @@ describe('TelegramPort integration', () => {
         const markup = bot.api.sendMessage.mock.calls[0][2].reply_markup
         const callbackData = markup.inline_keyboard[0][0].callback_data
         expect(callbackData).toMatch(/^decision:[^:]+:plan$/)
+        const [, decisionId, encodedValue] = callbackData.split(':')
+        completePendingDecision(decisionId, decodeURIComponent(encodedValue))
+        await expect(response).resolves.toEqual({ value: 'plan' })
     })
 })

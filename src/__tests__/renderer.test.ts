@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createTelegramRenderer, type TelegramRenderer } from '@/transport/telegram/renderer'
+import { createTelegramRenderer, type TelegramRenderer } from '@/channel/telegram/renderer'
 
 // Mock grammy Bot
 function createMockBot() {

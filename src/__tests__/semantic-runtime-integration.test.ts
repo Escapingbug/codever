@@ -1,13 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { QueryLoop } from '@/core/queryLoop'
-import { DefaultEventBus } from '@/core/eventBus'
-import { createTopicSession } from '@/bridge/topicSession'
+import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import type { AgentEvent } from '@/providers/types'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { ChannelMessage, ChannelPort, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
-import type { MiddlewarePipeline } from '@/middleware/pipeline'
 import { registerProvider } from '@/providers/registry'
 
 function delay(ms: number): Promise<void> {
@@ -60,44 +57,28 @@ function createChannel(): ChannelPort & {
     }
 }
 
-function createNoopPipeline(): MiddlewarePipeline {
-    return {
-        processEvent: vi.fn(),
-        flush: vi.fn(async () => null),
-        flushSync: vi.fn(() => null),
-        splitMessage: vi.fn((text: string) => [text]),
-        reset: vi.fn(),
-        getFormatting: vi.fn(),
-        getTimeout: vi.fn(() => undefined),
-    } as unknown as MiddlewarePipeline
-}
-
 function createTopicHarness(events: AgentEvent[]) {
     const provider = createProvider(events)
     const channel = createChannel()
-    const pipeline = createNoopPipeline()
-    const queryLoop = new QueryLoop({
+    const sessionRecord = createTopicSessionRecord({
         cwd: '/repo',
-        provider,
-        bus: new DefaultEventBus(),
         providerName: provider.name,
+        groupChatId: -100,
+        messageThreadId: 10,
     })
-    queryLoop.groupChatId = -100
-    queryLoop.messageThreadId = 10
 
     const topicSession = createTopicSession({
-        queryLoop,
+        sessionRecord,
         provider,
         channelPort: channel,
-        pipeline,
     })
 
-    return { topicSession, provider, channel, pipeline, queryLoop }
+    return { topicSession, provider, channel, sessionRecord }
 }
 
 describe('Semantic runtime integration chain', () => {
-    it('routes TopicSession input through runtime without using the legacy pipeline path', async () => {
-        const { topicSession, provider, channel, pipeline, queryLoop } = createTopicHarness([
+    it('routes TopicSession input through the semantic runtime path', async () => {
+        const { topicSession, provider, channel, sessionRecord } = createTopicHarness([
             { kind: 'session_init', sessionId: 'provider-session' },
             { kind: 'text', text: 'integrated response' },
             { kind: 'result', status: 'success' },
@@ -109,8 +90,7 @@ describe('Semantic runtime integration chain', () => {
         expect(provider.startQuery).toHaveBeenCalledWith('hello', expect.objectContaining({
             cwd: '/repo',
         }))
-        expect(pipeline.processEvent).not.toHaveBeenCalled()
-        expect(queryLoop.conversationId).toBe('provider-session')
+        expect(sessionRecord.conversationId).toBe('provider-session')
         expect(channel.sent.map(m => m.text)).toEqual(['integrated response'])
         expect(channel.statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
@@ -123,22 +103,18 @@ describe('Semantic runtime integration chain', () => {
             },
         } as any
         const channelPort = new TelegramPort(bot, -100, 10)
-        const pipeline = createNoopPipeline()
-        const queryLoop = new QueryLoop({
+        const sessionRecord = createTopicSessionRecord({
             cwd: '/repo/<project>',
-            provider,
-            bus: new DefaultEventBus(),
             providerName: 'mock&acp',
             model: 'sonnet<4>',
+            groupChatId: -100,
+            messageThreadId: 10,
         })
-        queryLoop.groupChatId = -100
-        queryLoop.messageThreadId = 10
 
         const topicSession = createTopicSession({
-            queryLoop,
+            sessionRecord,
             provider,
             channelPort,
-            pipeline,
         })
 
         topicSession.receiveInput({ text: 'hello', username: 'alice' })
@@ -437,7 +413,7 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.sent.map(m => m.text)).toContain('late tail text')
     })
 
-    it('keeps provider switch as a runtime command instead of mutating QueryLoop directly', async () => {
+    it('keeps provider switch as a runtime command instead of mutating session metadata directly', async () => {
         const provider = createProvider([])
         const nextProvider = createProvider([], { name: 'opencode' })
         registerProvider(nextProvider, () => nextProvider)
@@ -778,7 +754,7 @@ describe('Semantic runtime integration chain', () => {
         expect(runtime.getState()).toBe('dead')
     })
 
-    it('reports runtime progress from an active turn without consulting QueryLoop timeout middleware', async () => {
+    it('reports runtime progress from an active turn without consulting legacy timeout middleware', async () => {
         let release!: () => void
         const hold = new Promise<void>(resolve => {
             release = resolve

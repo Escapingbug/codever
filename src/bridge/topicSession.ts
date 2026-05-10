@@ -2,92 +2,63 @@
  * TopicSession — Wires channel sessions to the semantic session runtime.
  */
 
-import type { QueryLoop } from '@/core/queryLoop'
-import { QueryLoop as QueryLoopClass } from '@/core/queryLoop'
 import type { AgentProvider } from '@/providers/provider'
-import type { QueryLoopState } from '@/core/types'
+import type { SessionState } from '@/core/types'
 import type { ChannelPort, TopicSession } from './channelPort'
-import type { MiddlewarePipeline } from '@/middleware/pipeline'
 import { config } from '@/config'
-import { getProvider, getDefaultProvider } from '@/providers/registry'
-import { DefaultEventBus } from '@/core/eventBus'
 import { makeTopicKey } from '@/bridge/sessionManager'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
+import { createSessionRecord, type SessionRecord, type SessionRecordOptions } from './sessionRecord'
 
-// --- QueryLoop factory ---
+// --- Session metadata factory ---
 
-export interface CreateQueryLoopOptions {
-    cwd: string
-    providerName: string
-    groupChatId: number
-    messageThreadId?: number
-    model?: string
-    verboseLevel?: 0 | 1 | 2
-    timeoutSeconds?: number
-    providerSettings?: Record<string, unknown>
-    conversationId?: string | null
-}
+export type CreateSessionRecordOptions = SessionRecordOptions
 
-export function createQueryLoop(options: CreateQueryLoopOptions): QueryLoop {
-    const provider = getProvider(options.providerName) ?? getDefaultProvider()
-    const eventBus = new DefaultEventBus()
-    const queryLoop = new QueryLoopClass({
-        cwd: options.cwd,
-        provider,
-        bus: eventBus,
-        model: options.model,
-        providerName: options.providerName,
-        verboseLevel: options.verboseLevel,
-        timeoutSeconds: options.timeoutSeconds,
-        providerSettings: options.providerSettings ?? {},
-    })
-    queryLoop.groupChatId = options.groupChatId
-    queryLoop.messageThreadId = options.messageThreadId ?? null
-    if (options.conversationId) {
-        queryLoop.setConversationId(options.conversationId)
-    }
-    return queryLoop
+export function createTopicSessionRecord(options: CreateSessionRecordOptions): SessionRecord {
+    return createSessionRecord(options)
 }
 
 export interface TopicSessionConfig {
-    queryLoop: QueryLoop
+    sessionRecord: SessionRecord
     provider: AgentProvider
     channelPort: ChannelPort
-    pipeline: MiddlewarePipeline
     /** Optional group logger */
     logger?: { group(chatId: number, line: string): void }
 }
 
 export function createTopicSession(options: TopicSessionConfig): TopicSession {
-    const { queryLoop, provider, channelPort, logger } = options
-    const chatId = queryLoop.groupChatId!
+    const { sessionRecord, provider, channelPort, logger } = options
+    const chatId = sessionRecord.groupChatId!
 
     function glog(line: string): void {
         if (logger) logger.group(chatId, line)
     }
 
     const runtime = new SemanticSessionRuntime({
-        sessionId: queryLoop.id,
-        cwd: queryLoop.cwd,
+        sessionId: sessionRecord.id,
+        cwd: sessionRecord.cwd,
         provider,
-        providerName: queryLoop.providerName,
+        providerName: sessionRecord.providerName,
         channelPort,
-        model: queryLoop.model,
-        providerSessionId: queryLoop.conversationId,
-        providerSettings: queryLoop.providerSettings,
+        model: sessionRecord.model,
+        providerSessionId: sessionRecord.conversationId,
+        providerSettings: sessionRecord.providerSettings,
         onLog: glog,
         onProviderSessionId: (sessionId) => {
-            queryLoop.setConversationId(sessionId)
-            if (queryLoop.groupChatId !== null) {
-                const topicKey = makeTopicKey(queryLoop.groupChatId, queryLoop.messageThreadId ?? undefined)
+            sessionRecord.setConversationId(sessionId)
+            if (sessionRecord.groupChatId !== null) {
+                const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
                 config.saveTopicState(topicKey, { conversationId: sessionId })
             }
         },
         onProviderChanged: (providerName, nextProvider) => {
-            queryLoop.setProvider(nextProvider)
-            queryLoop.setProviderName(providerName)
-            queryLoop.setConversationId(null)
-        }
+            sessionRecord.setProvider(nextProvider)
+            sessionRecord.setProviderName(providerName)
+            sessionRecord.setConversationId(null)
+        },
+        onAvailableCommands: (commands) => {
+            sessionRecord.availableCommands = commands
+        },
     })
 
     function receiveInput(input: { text: string; username?: string }): void {
@@ -97,14 +68,14 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
             source: 'channel',
             user: { username: input.username, displayName: input.username },
         }).catch((e) => {
-            glog(`[SessionActor] dispatch error: ${e instanceof Error ? e.message : e}`)
+            glog(`[TopicSession] dispatch error: ${e instanceof Error ? e.message : e}`)
         })
     }
 
     async function destroy(): Promise<void> {
         await runtime.destroy()
         await provider.destroy?.()
-        await queryLoop.destroy()
+        await sessionRecord.destroy()
     }
 
     return {
@@ -113,15 +84,15 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
             return runtime.dispatch(input)
         },
         destroy,
-        get state(): QueryLoopState {
+        get state(): SessionState {
             const state = runtime.getState()
             if (state === 'querying' || state === 'finalizing') return 'querying'
             if (state === 'canceling') return 'canceling'
             if (state === 'dead') return 'dead'
             return 'idle'
         },
-        get queryLoop() {
-            return queryLoop
+        get sessionRecord() {
+            return sessionRecord
         },
         get channelPort() {
             return channelPort

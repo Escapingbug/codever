@@ -9,12 +9,13 @@ import {
     modelProviderDetailKeyboard,
     resumeSessionKeyboard,
     timeoutKeyboard,
-} from '@/transport/telegram/keyboard'
+} from '@/channel/telegram/keyboard'
 import { escapeHtml } from '@/utils/formatting'
 import type { TopicSession } from '@/bridge/channelPort'
 import { getCwdForChat, performResume, sendSessionList } from './settings'
 import { consumePendingCwdPath } from './groupCommands'
 import { mkdirSync } from 'node:fs'
+import { completePendingDecision } from '@/channel/telegram/decisionRegistry'
 
 export interface CallbackHandlerContext {
     sessionManager: SessionManager
@@ -29,13 +30,8 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
         const data = c.callbackQuery.data
         if (!data) return
 
-        if (data.startsWith('perm:')) {
-            await handlePermissionCallback(c, data, sessionManager, topicSessions)
-            return
-        }
-
-        if (data.startsWith('ask:')) {
-            await handleAskCallback(c, data, sessionManager)
+        if (data.startsWith('decision:')) {
+            await handleDecisionCallback(c, data, topicSessions)
             return
         }
 
@@ -114,30 +110,39 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
     })
 }
 
-async function handlePermissionCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
+async function handleDecisionCallback(c: Context, data: string, topicSessions: Map<string, TopicSession>): Promise<void> {
     const parts = data.split(':')
-    const action = parts[1] as 'allow' | 'session' | 'deny'
-    const requestId = parts[2]
+    const decisionId = parts[1]
+    const value = decodeURIComponent(parts.slice(2).join(':') || '')
 
-    const queryLoop = sessionManager.getSessionForPermission(requestId)
-    if (queryLoop) {
-        const decision = action === 'deny' ? 'deny' as const : 'allow' as const
-        const topicSession = Array.from(topicSessions.values()).find(session => session.queryLoop === queryLoop)
-        await topicSession?.dispatch({ kind: 'decision_response', decisionId: requestId, value: decision, source: 'channel' })
-        sessionManager.removePermission(requestId)
-        const label = action === 'deny' ? '❌ Denied' : '✅ Allowed'
-        await c.answerCallbackQuery(label)
+    if (!decisionId) {
+        await c.answerCallbackQuery('Invalid decision')
+        return
+    }
+
+    if (completePendingDecision(decisionId, value)) {
+        await c.answerCallbackQuery(value === 'deny' ? '❌ Denied' : '✅ Selected')
         try { await c.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }) } catch {}
         return
     }
 
-    await c.answerCallbackQuery('Request expired or already handled')
-}
+    const chatId = c.callbackQuery?.message?.chat.id
+    const messageThreadId = c.callbackQuery?.message?.message_thread_id
+    if (!chatId) {
+        await c.answerCallbackQuery('Request expired or already handled')
+        return
+    }
 
-async function handleAskCallback(c: Context, data: string, sessionManager: SessionManager): Promise<void> {
-    // AskUserQuestion callbacks are handled via the permission handler
-    // This is a legacy path that should not be reached with CoreSession
-    await c.answerCallbackQuery('Not supported in this session type')
+    const topicKey = makeTopicKey(chatId, messageThreadId)
+    const topicSession = topicSessions.get(topicKey)
+    if (!topicSession) {
+        await c.answerCallbackQuery('Request expired or already handled')
+        return
+    }
+
+    await topicSession.dispatch({ kind: 'decision_response', decisionId, value, source: 'channel' })
+    await c.answerCallbackQuery('✅ Selected')
+    try { await c.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }) } catch {}
 }
 
 async function handleModelCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
@@ -151,13 +156,13 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     }
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
-    const queryLoop = topicSession?.queryLoop
+    const sessionRecord = topicSession?.sessionRecord
 
-    if (queryLoop) {
+    if (sessionRecord) {
         await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
     }
     sessionManager.setGroupSettings(chatId, { model })
-    const providerName = queryLoop?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+    const providerName = sessionRecord?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
     const provider = getProvider(providerName) ?? getDefaultProvider()
     const modelEntry = provider.getAvailableModels().find(m => m.id === model)
     const displayName = modelEntry?.name || model
@@ -268,7 +273,7 @@ async function handleTimeoutCallback(c: Context, data: string, sessionManager: S
 
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
-    const queryLoop = topicSession?.queryLoop
+    const sessionRecord = topicSession?.sessionRecord
 
     if (action === 'continue') {
         if (topicSession) {
@@ -281,7 +286,7 @@ async function handleTimeoutCallback(c: Context, data: string, sessionManager: S
             try { await topicSession.dispatch({ kind: 'cancel', reason: 'user', source: 'channel' }) } catch {}
             try { await c.editMessageText('⏹️ Stopped. Next message will continue in the same conversation.') } catch {}
             await c.answerCallbackQuery('Stopped')
-        } else if (queryLoop) {
+        } else if (sessionRecord) {
             // Session is idle but user clicked stop on a stale timeout message.
             // Just acknowledge it — the timeoutMiddleware has already been stopped
             // by the session.state_changed handler (Bug 1 fix).
@@ -306,10 +311,10 @@ async function handleVerboseCallback(c: Context, data: string, sessionManager: S
 
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
-    const queryLoop = topicSession?.queryLoop
+    const sessionRecord = topicSession?.sessionRecord
 
-    if (queryLoop) {
-        queryLoop.setVerboseLevel(level as 0 | 1 | 2)
+    if (sessionRecord) {
+        sessionRecord.setVerboseLevel(level as 0 | 1 | 2)
     }
     sessionManager.setGroupSettings(chatId, { verboseLevel: level as 0 | 1 | 2 })
     const labels = ['🔇 Quiet', '📊 Normal', '📢 Verbose']
@@ -326,9 +331,9 @@ async function handleModeCallback(c: Context, data: string, sessionManager: Sess
 
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
-    const queryLoop = topicSession?.queryLoop
+    const sessionRecord = topicSession?.sessionRecord
 
-    if (queryLoop) {
+    if (sessionRecord) {
         await topicSession.dispatch({ kind: 'command', name: 'mode', args: mode, source: 'channel' })
     }
     sessionManager.setGroupSettings(chatId, { permissionMode: mode })

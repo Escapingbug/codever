@@ -137,9 +137,9 @@ async function main() {
             // Find the topic session
             let topicSession = sessionManager.getTopicSessionByConversationId(req.sessionId)
             if (!topicSession) {
-                const queryLoop = sessionManager.getSession(req.sessionId)
-                if (queryLoop) {
-                    topicSession = sessionManager.getTopicSessionByQueryLoopId(queryLoop.id)
+                const sessionRecord = sessionManager.getSession(req.sessionId)
+                if (sessionRecord) {
+                    topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
                 }
             }
             if (topicSession) {
@@ -229,12 +229,12 @@ async function main() {
         // These can remain if the process was previously killed (SIGKILL) before
         // the query.completed event could clear them. On next startup they would
         // prevent session resumption, so we clean them up on graceful shutdown.
-        for (const queryLoop of sessionManager.listActiveSessions()) {
-            if (queryLoop.groupChatId !== null) {
-                const topicKey = makeTopicKey(queryLoop.groupChatId, queryLoop.messageThreadId ?? undefined)
+        for (const sessionRecord of sessionManager.listActiveSessions()) {
+            if (sessionRecord.groupChatId !== null) {
+                const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
                 const topicState = config.getTopicState(topicKey)
                 if (topicState?.queryInProgress) {
-                    console.error(`[daemon] Clearing stale queryInProgress for idle session ${queryLoop.id.slice(0, 8)} topicKey=${topicKey}`)
+                    console.error(`[daemon] Clearing stale queryInProgress for idle session ${sessionRecord.id.slice(0, 8)} topicKey=${topicKey}`)
                     config.clearTopicQueryInProgress(topicKey)
                 }
             }

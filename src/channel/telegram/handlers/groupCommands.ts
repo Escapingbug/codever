@@ -163,7 +163,7 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
 
         const topicSession = topicSessions.get(topicKey)
         if (topicSession) {
-            const prevSessionId = topicSession.queryLoop.conversationId
+            const prevSessionId = topicSession.sessionRecord.conversationId
             const prevShortId = prevSessionId?.slice(0, 8)
             config.clearTopicConversation(topicKey)
             await topicSession.dispatch({ kind: 'command', name: 'new', source: 'channel' })
@@ -187,7 +187,7 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
             await topicSession.dispatch({ kind: 'command', name: 'archive', source: 'channel' })
             await topicSession.destroy()
             topicSessions.delete(topicKey)
-            sessionManager.removeSession(topicSession.queryLoop.id)
+            sessionManager.removeSession(topicSession.sessionRecord.id)
             sessionManager.releaseCreationLock(topicKey)
             sessionManager.archiveGroup(topicKey)
             await c.reply('📦 Session archived. Use /cwd to start a new session.')
@@ -262,17 +262,17 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(groupChatId, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(groupChatId)
 
         const text = c.message?.text?.trim() || ''
         const parts = text.split(/\s+/).slice(1)
 
         if (parts.length === 0) {
-            const timeout = queryLoop?.timeoutSeconds ?? groupSettings?.timeoutSeconds ?? 180
-            const verbose = queryLoop?.verboseLevel ?? groupSettings?.verboseLevel ?? 1
-            const model = queryLoop?.model ?? groupSettings?.model ?? 'default'
-            const provider = queryLoop?.providerName ?? groupSettings?.providerName ?? config.getDefaultProvider()
+            const timeout = sessionRecord?.timeoutSeconds ?? groupSettings?.timeoutSeconds ?? 180
+            const verbose = sessionRecord?.verboseLevel ?? groupSettings?.verboseLevel ?? 1
+            const model = sessionRecord?.model ?? groupSettings?.model ?? 'default'
+            const provider = sessionRecord?.providerName ?? groupSettings?.providerName ?? config.getDefaultProvider()
             const verboseLabels = ['Quiet', 'Normal', 'Verbose']
             const lines = [
                 `<b>⚙️ Configuration</b>`,

@@ -3,12 +3,9 @@ import type { SessionManager } from '@/bridge/sessionManager'
 import { makeTopicKey } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { pairing } from '@/channel/telegram/pairing'
-import { createQueryLoop, createTopicSession } from '@/bridge/topicSession'
+import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
 import type { TopicSession } from '@/bridge/channelPort'
-import { createMiddlewarePipeline } from '@/middleware/pipeline'
-import { createFormattingMiddleware } from '@/middleware/formatting'
-import { createTimeoutMiddleware } from '@/middleware/timeout'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { Bot } from 'grammy'
 import type { GroupLogger } from '@/utils/groupLogger'
@@ -132,7 +129,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                     config.clearTopicQueryInProgress(topicKey)
                 }
 
-                const queryLoop = createQueryLoop({
+                const sessionRecord = createTopicSessionRecord({
                     cwd,
                     providerName,
                     groupChatId,
@@ -144,73 +141,41 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                     conversationId,
                 })
 
-                sessionManager.registerSession(queryLoop, groupChatId, messageThreadId)
-                glog(groupChatId, `[session] Created QueryLoop id=${queryLoop.id.slice(0, 8)} provider=${queryLoop.providerName}`)
+                sessionManager.registerSession(sessionRecord, groupChatId, messageThreadId)
+                glog(groupChatId, `[session] Created session record id=${sessionRecord.id.slice(0, 8)} provider=${sessionRecord.providerName}`)
 
-                // Create the bridge: wire QueryLoop + session-scoped Provider + ChannelPort + Pipeline.
+                // Create the bridge: wire session metadata + session-scoped Provider + ChannelPort.
                 // Provider instances own ACP subprocess state, so sharing one across topics breaks concurrency.
                 const provider = createProviderInstance(providerName) ?? createProviderInstance(config.getDefaultProvider())
                 if (!provider) {
-                    sessionManager.removeSession(queryLoop.id)
+                    sessionManager.removeSession(sessionRecord.id)
                     sessionManager.releaseCreationLock(topicKey)
                     await c.reply(`❌ Provider "${providerName}" is not available.`)
                     return
                 }
                 const channelPort = new TelegramPort(botInstance, groupChatId, messageThreadId)
 
-                // Track current queryId for timeout callbacks (set on query.started)
-                let currentQueryId = ''
-                const pipeline = createMiddlewarePipeline({
-                    formatting: createFormattingMiddleware(),
-                    timeout: createTimeoutMiddleware({
-                        timeoutSeconds: queryLoop.timeoutSeconds,
-                        onTimeout: (elapsed) => {
-                             queryLoop.bus.emit({ type: 'query.timeout', sessionId: queryLoop.id, queryId: currentQueryId, elapsed })
-                        },
-                        onTyping: () => {
-                            channelPort.sendChatAction?.('typing')
-                        },
-                    }),
-                    onDebug: (msg) => glog(groupChatId, msg),
-                })
-
-                // Keep pipeline's TimeoutMiddleware in sync when timeoutSeconds changes
-                queryLoop.onTimeoutSecondsChange = (seconds: number) => {
-                    pipeline.getTimeout()?.updateTimeoutSeconds(seconds)
-                }
-
-                queryLoop.onLog = (msg) => glog(groupChatId, msg)
+                sessionRecord.onLog = (msg) => glog(groupChatId, msg)
 
                 const bridge = createTopicSession({
-                    queryLoop,
+                    sessionRecord,
                     provider,
                     channelPort,
-                    pipeline,
                     logger: logger ? { group: (chatId: number, line: string) => logger.group(chatId, line) } : undefined,
                 })
 
                 sessionManager.registerTopicSession(topicKey, bridge)
 
-                queryLoop.bus.on('session.state_changed', (e) => {
+                sessionRecord.bus.on('session.state_changed', (e) => {
                     if (e.type !== 'session.state_changed') return
-                    if (e.sessionId !== queryLoop.id) return
+                    if (e.sessionId !== sessionRecord.id) return
                     if (e.to === 'dead') {
                         sessionManager.removeTopicSession(topicKey)
-                        sessionManager.removeSession(queryLoop.id)
+                        sessionManager.removeSession(sessionRecord.id)
                         sessionManager.clearGroupFailures(topicKey)
                         sessionManager.releaseCreationLock(topicKey)
                         glog(groupChatId, `[session] Session dead, cleaned up`)
                     }
-                    // Stop timeout middleware on idle/dead
-                    if (e.to === 'idle' || e.to === 'dead') {
-                        pipeline.getTimeout()?.stop()
-                    }
-                })
-
-                // Track current queryId for timeout callbacks
-                queryLoop.bus.on('query.started', (e) => {
-                    if (e.type !== 'query.started' || e.sessionId !== queryLoop.id) return
-                    currentQueryId = e.queryId
                 })
 
                 topicSession = bridge

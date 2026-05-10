@@ -1,10 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createListSessionsHandler, createSwitchSessionHandler, createGetStatusHandler, type SessionToolContext } from '@/mcp/tools/session'
 import { SessionManager } from '@/bridge/sessionManager'
-import { QueryLoop } from '@/core/queryLoop'
-import { DefaultEventBus } from '@/core/eventBus'
+import { createTopicSessionRecord } from '@/bridge/topicSession'
+import type { SessionRecord } from '@/bridge/sessionRecord'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
+
+function isToolResultError(result: unknown): boolean {
+    return typeof result === 'object'
+        && result !== null
+        && 'isError' in result
+        && (result as { isError?: boolean }).isError === true
+}
 
 function createMockProvider(): AgentProvider {
     return {
@@ -23,13 +30,12 @@ function createMockProvider(): AgentProvider {
     }
 }
 
-function createTestSession(provider?: AgentProvider): QueryLoop {
-    const bus = new DefaultEventBus()
-    return new QueryLoop({
+function createTestSession(provider?: AgentProvider): SessionRecord {
+    void provider
+    return createTopicSessionRecord({
         cwd: '/tmp/test',
-        provider: provider ?? createMockProvider(),
-        bus,
         providerName: 'test',
+        groupChatId: -100123,
     })
 }
 
@@ -59,7 +65,7 @@ describe('MCP Tools', () => {
             })
             const result = await handler({})
 
-            expect(result.isError).toBeFalsy()
+            expect(isToolResultError(result)).toBe(false)
         })
     })
 
@@ -107,7 +113,7 @@ describe('MCP Tools', () => {
             })
             const result = await handler({})
 
-            expect(result.isError).toBeFalsy()
+            expect(isToolResultError(result)).toBe(false)
             const text = JSON.stringify(result.content)
             expect(text).toContain('idle')
             expect(text).toContain('test')
@@ -122,7 +128,7 @@ describe('MCP Tools', () => {
             })
             const result = await handler({})
 
-            expect(result.isError).toBeFalsy()
+            expect(isToolResultError(result)).toBe(false)
         })
     })
 })

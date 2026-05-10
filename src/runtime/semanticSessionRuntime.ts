@@ -7,6 +7,7 @@ import { ChannelProjector } from './channelProjector'
 import { DeliveryOutbox } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
 import { createProviderInstance, getProvider } from '@/providers/registry'
+import type { ProviderCommand } from '@/providers/types'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
 
@@ -25,6 +26,7 @@ export interface SemanticSessionRuntimeConfig {
     onLog?: (message: string) => void
     onProviderSessionId?: (sessionId: string) => void
     onProviderChanged?: (providerName: string, provider: AgentProvider) => void
+    onAvailableCommands?: (commands: ProviderCommand[]) => void
 }
 
 export class SemanticSessionRuntime {
@@ -40,7 +42,7 @@ export class SemanticSessionRuntime {
     private lastToolName: string | null = null
     private turnStartedAt = 0
     private recentTables: string[] = []
-    private availableCommands: Array<Record<string, unknown>> = []
+    private availableCommands: ProviderCommand[] = []
     private lastConfigOptions: Array<Record<string, unknown>> = []
 
     constructor(private config: SemanticSessionRuntimeConfig) {
@@ -150,6 +152,10 @@ export class SemanticSessionRuntime {
                     this.config.providerSessionId = providerEvent.sessionId
                     this.config.onProviderSessionId?.(providerEvent.sessionId)
                 }
+                if (providerEvent.kind === 'commands_update') {
+                    this.availableCommands = providerEvent.commands
+                    this.config.onAvailableCommands?.(providerEvent.commands)
+                }
                 if (providerEvent.kind === 'tool_use') {
                     this.lastToolName = providerEvent.toolName
                 }
@@ -214,7 +220,7 @@ export class SemanticSessionRuntime {
         if (event.kind === 'command_result') {
             const commandLower = event.command.toLowerCase()
             if (commandLower.includes('available_commands') || commandLower.includes('commands_update')) {
-                const commands = Array.isArray(event.output) ? event.output as Array<Record<string, unknown>> : []
+                const commands = Array.isArray(event.output) ? event.output as ProviderCommand[] : []
                 this.availableCommands = commands
                 this.log(`[session] Updated available commands: ${commands.length} commands`)
             }

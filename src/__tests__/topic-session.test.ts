@@ -1,15 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createTopicSession, type TopicSessionConfig } from '@/bridge/topicSession'
-import { QueryLoop } from '@/core/queryLoop'
-import { DefaultEventBus } from '@/core/eventBus'
+import { createTopicSession, createTopicSessionRecord, type TopicSessionConfig } from '@/bridge/topicSession'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { AgentEvent, AgentResultEvent, AgentSessionInitEvent } from '@/providers/types'
 import type { ChannelPort, ChannelMessage, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
-import type { MiddlewarePipeline, OutputMessage } from '@/middleware/pipeline'
-import { createMiddlewarePipeline } from '@/middleware/pipeline'
-import { createFormattingMiddleware } from '@/middleware/formatting'
-
-import { QueryLoopState } from '@/core/types'
 
 function createMockProvider(events: AgentEvent[] = []): AgentProvider {
     return {
@@ -64,29 +57,19 @@ function createMockChannelPort(): ChannelPort & {
     }
 }
 
-function createPipeline(): MiddlewarePipeline {
-    return createMiddlewarePipeline({
-        formatting: createFormattingMiddleware(),
-    })
-}
-
 function createTestTopicConfig(overrides?: Partial<TopicSessionConfig>): TopicSessionConfig {
     const provider = createMockProvider([{ kind: 'result', status: 'success' }])
-    const bus = new DefaultEventBus()
-    const queryLoop = new QueryLoop({
+    const sessionRecord = createTopicSessionRecord({
         cwd: '/tmp/test',
-        provider,
-        bus,
         providerName: 'mock-provider',
+        groupChatId: -100123,
+        messageThreadId: 42,
     })
-    queryLoop.groupChatId = -100123
-    queryLoop.messageThreadId = 42
 
     return {
-        queryLoop,
+        sessionRecord,
         provider,
         channelPort: createMockChannelPort(),
-        pipeline: createPipeline(),
         ...overrides,
     }
 }
@@ -98,7 +81,7 @@ describe('TopicSession', () => {
             const topicSession = createTopicSession(config)
 
             expect(topicSession.state).toBe('idle')
-            expect(topicSession.queryLoop).toBe(config.queryLoop)
+            expect(topicSession.sessionRecord).toBe(config.sessionRecord)
         })
 
         it('receiveInput processes a user message through the session', async () => {
@@ -173,7 +156,7 @@ describe('TopicSession', () => {
             expect(errorMsgs.length).toBeGreaterThan(0)
         })
 
-        it('text events are sent through pipeline to channel', async () => {
+        it('text events are sent through the semantic runtime projector to channel', async () => {
             const provider = createMockProvider([
                 { kind: 'text', text: 'Hello from agent!' },
                 { kind: 'result', status: 'success' },
@@ -220,7 +203,7 @@ describe('TopicSession', () => {
             topicSession.receiveInput({ text: 'hello' })
             await new Promise(r => setTimeout(r, 100))
 
-            expect(config.queryLoop.conversationId).toBe('new-session-123')
+            expect(config.sessionRecord.conversationId).toBe('new-session-123')
         })
     })
 })

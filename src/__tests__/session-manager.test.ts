@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { SessionManager, makeTopicKey, normalizeThreadId, TELEGRAM_GENERAL_TOPIC_ID, type GroupSettings } from '@/bridge/sessionManager'
-import { QueryLoop } from '@/core/queryLoop'
+import { createTopicSessionRecord } from '@/bridge/topicSession'
+import type { SessionRecord } from '@/bridge/sessionRecord'
 import { DefaultEventBus } from '@/core/eventBus'
+import type { SessionEvent } from '@/core/types'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 
@@ -24,13 +26,12 @@ function createMockProvider(events: AgentEvent[] = []): AgentProvider {
     }
 }
 
-function createTestSession(provider?: AgentProvider): QueryLoop {
-    const bus = new DefaultEventBus()
-    return new QueryLoop({
+function createTestSession(provider?: AgentProvider): SessionRecord {
+    void provider
+    return createTopicSessionRecord({
         cwd: '/tmp/test',
-        provider: provider ?? createMockProvider([{ kind: 'result', status: 'success' }]),
-        bus,
         providerName: 'test',
+        groupChatId: -100,
     })
 }
 
@@ -182,7 +183,7 @@ describe('SessionManager', () => {
             sm.setEventBus(bus)
 
             const destroyedEvents: string[] = []
-            bus.on('session.destroyed', (e) => {
+            bus.on('session.destroyed', (e: SessionEvent) => {
                 if (e.type === 'session.destroyed') destroyedEvents.push(e.sessionId)
             })
 
@@ -192,31 +193,6 @@ describe('SessionManager', () => {
             sm.removeSession(session.id)
 
             expect(destroyedEvents).toContain(session.id)
-        })
-    })
-
-    describe('permissions', () => {
-        it('registerPermission and getSessionForPermission work', () => {
-            const sm = new SessionManager()
-            const session = createTestSession()
-
-            sm.registerPermission('req-123', session)
-            expect(sm.getSessionForPermission('req-123')).toBe(session)
-        })
-
-        it('getSessionForPermission returns undefined for unknown requestId', () => {
-            const sm = new SessionManager()
-            expect(sm.getSessionForPermission('unknown')).toBeUndefined()
-        })
-
-        it('removePermission deletes the mapping', () => {
-            const sm = new SessionManager()
-            const session = createTestSession()
-
-            sm.registerPermission('req-123', session)
-            sm.removePermission('req-123')
-
-            expect(sm.getSessionForPermission('req-123')).toBeUndefined()
         })
     })
 
@@ -344,8 +320,8 @@ describe('SessionManager', () => {
         })
     })
 
-    describe('deprecated aliases', () => {
-        it('registerCoreSession delegates to registerSession', () => {
+    describe('session record lookup helpers', () => {
+        it('registerSession stores records by id and group', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             session.groupChatId = -100
@@ -356,7 +332,7 @@ describe('SessionManager', () => {
             expect(sm.getSessionByGroup(-100)).toBe(session)
         })
 
-        it('getCoreSession delegates to getSession', () => {
+        it('getSession returns records by id', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             sm.registerSession(session, -100)
@@ -364,7 +340,7 @@ describe('SessionManager', () => {
             expect(sm.getSession(session.id)).toBe(session)
         })
 
-        it('getCoreSessionByGroup delegates to getSessionByGroup', () => {
+        it('getSessionByGroup returns records by topic', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             sm.registerSession(session, -100, 42)
@@ -372,7 +348,7 @@ describe('SessionManager', () => {
             expect(sm.getSessionByGroup(-100, 42)).toBe(session)
         })
 
-        it('hasCoreSessionInGroup delegates to hasSessionInGroup', () => {
+        it('hasSessionInGroup reports active group sessions', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             sm.registerSession(session, -100, 42)
@@ -380,23 +356,7 @@ describe('SessionManager', () => {
             expect(sm.hasSessionInGroup(-100)).toBe(true)
         })
 
-        it('registerCorePermission delegates to registerPermission', () => {
-            const sm = new SessionManager()
-            const session = createTestSession()
-            sm.registerPermission('req-1', session)
-
-            expect(sm.getSessionForPermission('req-1')).toBe(session)
-        })
-
-        it('getCoreSessionForPermission delegates to getSessionForPermission', () => {
-            const sm = new SessionManager()
-            const session = createTestSession()
-            sm.registerPermission('req-1', session)
-
-            expect(sm.getSessionForPermission('req-1')).toBe(session)
-        })
-
-        it('removeCoreSession delegates to removeSession', () => {
+        it('removeSession clears id and group indexes', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             session.groupChatId = -100
@@ -407,7 +367,7 @@ describe('SessionManager', () => {
             expect(sm.getSessionByGroup(-100)).toBeUndefined()
         })
 
-        it('listActiveCoreSessions delegates to listActiveSessions', () => {
+        it('listActiveSessions returns active records', () => {
             const sm = new SessionManager()
             const session = createTestSession()
             sm.registerSession(session, -100)

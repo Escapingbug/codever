@@ -25,7 +25,7 @@ Telegram update
   -> TelegramPort
 ```
 
-This is a **Telegram Topic Session Gateway with a Semantic Runtime**. Older names such as `CoreSession`, `SessionBridge`, and "Pipeline as the main runtime" describe a previous migration target, not the active architecture.
+This is a **Telegram Topic Session Gateway with a Semantic Runtime**.
 
 ## Project Principles
 
@@ -46,14 +46,14 @@ This is a **Telegram Topic Session Gateway with a Semantic Runtime**. Older name
 - **`TelegramPort` owns Telegram API details** including send, edit, table rendering, chat actions, and decision UI.
 - **`SessionManager` owns session lookup and persisted group/topic state.**
 - **Scheduled and MCP-injected messages use the same runtime path as user messages.**
-- **`QueryLoop` is compatibility/session metadata, not the primary runtime loop.**
+- **`SessionRecord` is metadata only.** Runtime behavior belongs in `SemanticSessionRuntime`.
 
 ## Component Map
 
 ```text
 src/
   daemon.ts                         # composition root
-  config.ts                         # persistent config and legacy migration
+  config.ts                         # persistent config and topic state
 
   bridge/
     channelPort.ts                  # ChannelPort and TopicSession interfaces
@@ -66,20 +66,15 @@ src/
     providerAdapter.ts              # AgentEvent -> ConversationEvent
     channelProjector.ts             # ConversationEvent -> ChannelMessage
     deliveryOutbox.ts               # serialized send/edit delivery
-    sessionActor.ts                 # legacy/experimental actor, not active main path
 
   channel/telegram/
     bot.ts                          # bot factory
     telegramPort.ts                 # ChannelPort implementation
     pairing.ts                      # user pairing
     toolBubble.ts                   # tool bubble formatting
-    agentFormatter.ts               # legacy formatter helpers
-
-  transport/telegram/
-    handlers/                       # active Telegram command/callback/message handlers
     keyboard.ts                     # inline keyboard builders
-    permissionUI.ts                 # older permission helper
     renderer.ts                     # markdown/html Telegram renderer
+    handlers/                       # active Telegram command/callback/message handlers
 
   providers/
     provider.ts                     # AgentProvider interface
@@ -92,24 +87,24 @@ src/
 
   mcp/
     stdio.ts                        # active MCP stdio entry
+    register.ts                     # shared MCP surface registration
     resources.ts                    # codever context resources/tools
     tools/                          # notify/session tools
 
   core/
-    queryLoop.ts                    # compatibility session state
     scheduler.ts                    # timed tasks
-    eventBus.ts                     # compatibility events
+    eventBus.ts                     # session lifecycle events
 ```
 
-## Current Cleanup Direction
+## Maintenance Guidance
 
-This project is in an architectural convergence phase. The goal is not to invent a new architecture, but to make the current semantic runtime architecture the only architecture:
+Preserve the semantic runtime architecture. New behavior should fit one of the existing ownership boundaries:
 
-1. Remove unused `MiddlewarePipeline` wiring from the active Telegram path.
-2. Shrink or rename `QueryLoop` into session metadata.
-3. Merge `transport/telegram` into `channel/telegram`.
-4. Delete or intentionally wire `runtime/sessionActor.ts`.
-5. Consolidate MCP server entry registration.
-6. Rewrite architecture tests around `SemanticSessionRuntime` boundaries.
+1. Runtime lifecycle and commands belong in `SemanticSessionRuntime`.
+2. Session lookup and persisted topic/group state belong in `SessionManager` and `config.ts`.
+3. Provider-specific event quirks belong in provider adapters.
+4. Visible message shaping belongs in `ChannelProjector`.
+5. Send/edit reliability belongs in `DeliveryOutbox`.
+6. Telegram API details belong in `TelegramPort` and `channel/telegram/handlers`.
 
 <!-- architecture:end -->

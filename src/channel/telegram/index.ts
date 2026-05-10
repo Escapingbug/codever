@@ -1,9 +1,6 @@
 export { createTelegramRenderer, type TelegramRenderer } from './renderer'
-export { TelegramPermissionHandler, type AskQuestion } from './permissionUI'
 export {
-    permissionKeyboard,
     modeKeyboard,
-    askQuestionKeyboard,
     verboseKeyboard,
     modelKeyboard,
     modelProviderKeyboard,
@@ -12,5 +9,4 @@ export {
     providerKeyboard,
     resumeSessionKeyboard,
     groupModelsByProvider,
-    type AskQuestion as AskQuestionType,
 } from './keyboard'

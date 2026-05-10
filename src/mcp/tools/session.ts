@@ -7,13 +7,13 @@
 import { z } from 'zod'
 import type { SessionManager } from '@/bridge/sessionManager'
 import type { AgentProvider } from '@/providers/provider'
-import type { QueryLoop } from '@/core/queryLoop'
+import type { SessionRecord } from '@/bridge/sessionRecord'
 
 export interface SessionToolContext {
     sessionManager: SessionManager
     getProvider: () => AgentProvider | null
     getCwd: () => string | undefined
-    getSession?: () => QueryLoop | undefined
+    getSession?: () => SessionRecord | undefined
 }
 
 export function createListSessionsHandler(ctx: SessionToolContext) {

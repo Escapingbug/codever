@@ -11,7 +11,7 @@ import {
     verboseKeyboard,
     providerKeyboard,
     resumeSessionKeyboard,
-} from '@/transport/telegram/keyboard'
+} from '@/channel/telegram/keyboard'
 import type { SessionEntry } from '@/providers/provider'
 import { escapeHtml } from '@/utils/formatting'
 import type { TopicSession } from '@/bridge/channelPort'
@@ -29,9 +29,9 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
-        const providerName = queryLoop?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const providerName = sessionRecord?.providerName || groupSettings?.providerName || config.getDefaultProvider()
         const provider = getProvider(providerName) ?? getDefaultProvider()
         const args = String((c as any).match ?? '').trim()
 
@@ -52,7 +52,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             return
         }
 
-        const current = queryLoop?.model || groupSettings?.model || 'default'
+        const current = sessionRecord?.model || groupSettings?.model || 'default'
         const models = provider.getAvailableModels()
         if (models.length === 0) {
             await c.reply(`Current model: <b>${current}</b>\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
@@ -71,10 +71,10 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
-        const current = (queryLoop?.providerSettings?.permissionMode as string) || groupSettings?.permissionMode || 'default'
-        const providerName = queryLoop?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const current = (sessionRecord?.providerSettings?.permissionMode as string) || groupSettings?.permissionMode || 'default'
+        const providerName = sessionRecord?.providerName || groupSettings?.providerName || config.getDefaultProvider()
         const provider = getProvider(providerName) ?? getDefaultProvider()
         const modes = provider.getAvailablePermissionModes()
         const codeverModes = ['approve-reads', 'approve-all', 'deny-all']
@@ -90,10 +90,10 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
         const labels = ['🔇 Quiet', '📊 Normal', '📢 Verbose']
-        const current = queryLoop?.verboseLevel ?? groupSettings?.verboseLevel ?? 1
+        const current = sessionRecord?.verboseLevel ?? groupSettings?.verboseLevel ?? 1
 
         const args = String((c as any).match ?? '').trim()
         if (args) {
@@ -102,8 +102,8 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
                 await c.reply(`Invalid level "${args}". Use 0 (Quiet), 1 (Normal), or 2 (Verbose).`, { parse_mode: 'HTML' })
                 return
             }
-            if (queryLoop) {
-                queryLoop.setVerboseLevel(level as 0 | 1 | 2)
+            if (sessionRecord) {
+                sessionRecord.setVerboseLevel(level as 0 | 1 | 2)
             }
             sessionManager.setGroupSettings(c.chat.id, { verboseLevel: level as 0 | 1 | 2 })
             await c.reply(`✅ Verbose set to <b>${labels[level]}</b>`, { parse_mode: 'HTML' })
@@ -121,12 +121,12 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
         const genericTopic = isGenericTopic(messageThreadId)
         const current = genericTopic
             ? groupSettings?.providerName || config.getDefaultProvider()
-            : queryLoop?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+            : sessionRecord?.providerName || groupSettings?.providerName || config.getDefaultProvider()
         const target = genericTopic ? 'new sessions' : 'this session'
         const providers = listProviders()
         await c.reply(`Current provider: <b>${current}</b>\nSelect provider for ${target}:`, {
@@ -140,9 +140,9 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(c.chat.id, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
-        const queryLoop = topicSession?.queryLoop
+        const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
-        const current = queryLoop?.timeoutSeconds ?? groupSettings?.timeoutSeconds ?? 180
+        const current = sessionRecord?.timeoutSeconds ?? groupSettings?.timeoutSeconds ?? 180
 
         const args = String((c as any).match ?? '').trim()
         if (args) {
@@ -151,8 +151,8 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
                 await c.reply(`⚠️ Timeout must be between 10 and 600 seconds`, { parse_mode: 'HTML' })
                 return
             }
-            if (queryLoop) {
-                queryLoop.setTimeoutSeconds(seconds)
+            if (sessionRecord) {
+                sessionRecord.setTimeoutSeconds(seconds)
             }
             sessionManager.setGroupSettings(c.chat.id, { timeoutSeconds: seconds })
             await c.reply(`✅ Timeout set to <b>${seconds}s</b>`, { parse_mode: 'HTML' })

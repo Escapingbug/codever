@@ -45,7 +45,7 @@ function normalizeToolName(name: string): string {
 }
 
 const SUPPRESS_RESULT_TOOLS = new Set([
-    'TodoWrite', 'Write', 'Edit', 'Read', 'WebSearch', 'WebFetch', 'ExitPlanMode', 'Task', 'Skill',
+    'TodoWrite', 'Write', 'Edit', 'Read', 'WebSearch', 'WebFetch', 'ExitPlanMode', 'Task',
 ])
 
 export function formatToolBubble(state: ToolBubbleState): string {

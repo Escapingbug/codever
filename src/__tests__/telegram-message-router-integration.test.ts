@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { registerMessageRouter } from '@/transport/telegram/handlers/messageRouter'
+import { registerMessageRouter } from '@/channel/telegram/handlers/messageRouter'
 
 const mocks = vi.hoisted(() => ({
-    createQueryLoop: vi.fn(),
+    createTopicSessionRecord: vi.fn(),
     createTopicSession: vi.fn(),
     getProvider: vi.fn(() => ({ name: 'mock-provider' })),
     createProviderInstance: vi.fn(() => ({ name: 'mock-provider' })),
@@ -29,7 +29,7 @@ vi.mock('@/providers/registry', () => ({
 }))
 
 vi.mock('@/bridge/topicSession', () => ({
-    createQueryLoop: mocks.createQueryLoop,
+    createTopicSessionRecord: mocks.createTopicSessionRecord,
     createTopicSession: mocks.createTopicSession,
 }))
 
@@ -41,23 +41,6 @@ vi.mock('@/channel/telegram/telegramPort', () => ({
             edit: vi.fn(),
         }
     }),
-}))
-
-vi.mock('@/middleware/pipeline', () => ({
-    createMiddlewarePipeline: vi.fn(() => ({
-        getTimeout: vi.fn(() => ({
-            updateTimeoutSeconds: vi.fn(),
-            stop: vi.fn(),
-        })),
-    })),
-}))
-
-vi.mock('@/middleware/formatting', () => ({
-    createFormattingMiddleware: vi.fn(() => ({})),
-}))
-
-vi.mock('@/middleware/timeout', () => ({
-    createTimeoutMiddleware: vi.fn(() => ({})),
 }))
 
 function createBot() {
@@ -83,10 +66,10 @@ function createBot() {
     }
 }
 
-function createQueryLoop() {
+function createSessionRecord() {
     const listeners: Record<string, Array<(event: any) => void>> = {}
     return {
-        id: 'query-loop-1',
+        id: 'session-record-1',
         providerName: 'mock-acp',
         timeoutSeconds: 180,
         groupChatId: null,
@@ -111,7 +94,7 @@ function createTopicSession() {
         dispatch: vi.fn(async () => {}),
         destroy: vi.fn(async () => {}),
         state: 'idle',
-        queryLoop: createQueryLoop(),
+        sessionRecord: createSessionRecord(),
         channelPort: {},
         getProgress: vi.fn(() => null),
     }
@@ -155,7 +138,7 @@ describe('Telegram message router integration', () => {
         mocks.getTopicState.mockReturnValue(undefined)
         mocks.getProvider.mockImplementation(() => ({ name: 'mock-provider' }))
         mocks.createProviderInstance.mockImplementation(() => ({ name: 'mock-provider' }))
-        mocks.createQueryLoop.mockImplementation(createQueryLoop)
+        mocks.createTopicSessionRecord.mockImplementation(createSessionRecord)
         mocks.createTopicSession.mockImplementation(() => createTopicSession())
     })
 
@@ -169,7 +152,7 @@ describe('Telegram message router integration', () => {
 
         await bot.emitMessage(createMessageContext('please inspect tests'))
 
-        expect(mocks.createQueryLoop).toHaveBeenCalledWith(expect.objectContaining({
+        expect(mocks.createTopicSessionRecord).toHaveBeenCalledWith(expect.objectContaining({
             cwd: '/repo',
             providerName: 'mock-acp',
             groupChatId: -100,
@@ -194,7 +177,7 @@ describe('Telegram message router integration', () => {
 
         await bot.emitMessage(createMessageContext('second message'))
 
-        expect(mocks.createQueryLoop).not.toHaveBeenCalled()
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
         expect(existing.receiveInput).toHaveBeenCalledWith({ text: 'second message', username: 'alice' })
     })
 
@@ -232,7 +215,7 @@ describe('Telegram message router integration', () => {
         await bot.emitMessage(ctx)
 
         expect(ctx.reply).toHaveBeenCalledWith('⚠️ Session creation in progress. Please wait a moment and try again.')
-        expect(mocks.createQueryLoop).not.toHaveBeenCalled()
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
     })
 
     it('does not create a session when the group has no cwd', async () => {
@@ -244,7 +227,7 @@ describe('Telegram message router integration', () => {
         await bot.emitMessage(ctx)
 
         expect(ctx.reply).toHaveBeenCalledWith('Please set working directory first: /cwd &lt;path&gt;', { parse_mode: 'HTML' })
-        expect(mocks.createQueryLoop).not.toHaveBeenCalled()
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
     })
 
     it('does not recreate an archived topic session until /cwd unarchives it', async () => {
@@ -256,7 +239,7 @@ describe('Telegram message router integration', () => {
         await bot.emitMessage(ctx)
 
         expect(ctx.reply).toHaveBeenCalledWith('📦 Session was archived. Use /cwd to set up a new session.')
-        expect(mocks.createQueryLoop).not.toHaveBeenCalled()
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
     })
 
     it('preserves persisted provider conversation id when creating a session after daemon restart', async () => {
@@ -271,14 +254,14 @@ describe('Telegram message router integration', () => {
         await bot.emitMessage(createMessageContext('resume after restart'))
 
         expect(mocks.clearTopicQueryInProgress).toHaveBeenCalledWith('-100:10')
-        expect(mocks.createQueryLoop).toHaveBeenCalledWith(expect.objectContaining({
+        expect(mocks.createTopicSessionRecord).toHaveBeenCalledWith(expect.objectContaining({
             conversationId: 'provider-session-1',
         }))
     })
 
     it('cleans up session maps when the created runtime reaches dead state', async () => {
-        const queryLoop = createQueryLoop()
-        mocks.createQueryLoop.mockReturnValue(queryLoop)
+        const sessionRecord = createSessionRecord()
+        mocks.createTopicSessionRecord.mockReturnValue(sessionRecord)
         const bot = createBot()
         const topicSessions = new Map<string, any>()
         const sessionManager = createSessionManager({
@@ -287,10 +270,10 @@ describe('Telegram message router integration', () => {
         registerMessageRouter(bot, { sessionManager, topicSessions, bot: bot as any })
 
         await bot.emitMessage(createMessageContext('start'))
-        queryLoop.bus.emit({ type: 'session.state_changed', sessionId: queryLoop.id, from: 'querying', to: 'dead' })
+        sessionRecord.bus.emit({ type: 'session.state_changed', sessionId: sessionRecord.id, from: 'querying', to: 'dead' })
 
         expect(sessionManager.removeTopicSession).toHaveBeenCalledWith('-100:10')
-        expect(sessionManager.removeSession).toHaveBeenCalledWith(queryLoop.id)
+        expect(sessionManager.removeSession).toHaveBeenCalledWith(sessionRecord.id)
         expect(sessionManager.releaseCreationLock).toHaveBeenCalledWith('-100:10')
     })
 

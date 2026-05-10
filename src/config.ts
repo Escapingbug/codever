@@ -5,9 +5,6 @@ import type { ScheduledTask } from './core/scheduler'
 
 export interface GroupState {
     cwd: string
-    claudeSessionId?: string // Deprecated: migrated to conversationId on read
-    conversationId?: string  // Deprecated: use topic-level conversationId instead
-    queryInProgress?: boolean   // Deprecated: use topic-level queryInProgress instead
     settings?: {
         model?: string
         permissionMode?: string
@@ -182,69 +179,17 @@ export const config = {
                 : existing.settings
         }
         getStore().set('groupState', all)
-        if (partial.conversationId !== undefined) {
-            console.error(`[config] saveGroupState: chatId=${chatId} conversationId=${partial.conversationId?.slice(0, 8) ?? 'null'}`)
-        }
     },
 
     getGroupState(chatId: number): GroupState | undefined {
         const all = getStore().get('groupState')
         const state = all[chatId.toString()]
         if (!state) return undefined
-        // Migrate old claudeSessionId to conversationId
-        if (state.claudeSessionId && !state.conversationId) {
-            state.conversationId = state.claudeSessionId
-            delete state.claudeSessionId
-            getStore().set('groupState', all)
-        }
-        console.error(`[config] getGroupState: chatId=${chatId} conversationId=${state.conversationId?.slice(0, 8) ?? 'null'} queryInProgress=${state.queryInProgress ?? false}`)
         return state
     },
 
     getAllGroupStates(): Record<string, GroupState> {
-        const all = getStore().get('groupState')
-        // Migrate old claudeSessionId to conversationId for all groups
-        let dirty = false
-        for (const state of Object.values(all)) {
-            if (state.claudeSessionId && !state.conversationId) {
-                state.conversationId = state.claudeSessionId
-                delete state.claudeSessionId
-                dirty = true
-            }
-        }
-        if (dirty) {
-            getStore().set('groupState', all)
-        }
-        return all
-    },
-
-    clearGroupConversation(chatId: number): void {
-        const all = getStore().get('groupState')
-        const key = chatId.toString()
-        if (all[key]) {
-            delete all[key].conversationId
-            delete all[key].claudeSessionId
-            all[key].queryInProgress = false
-            getStore().set('groupState', all)
-        }
-    },
-
-    setQueryInProgress(chatId: number): void {
-        const all = getStore().get('groupState')
-        const key = chatId.toString()
-        if (all[key]) {
-            all[key].queryInProgress = true
-            getStore().set('groupState', all)
-        }
-    },
-
-    clearQueryInProgress(chatId: number): void {
-        const all = getStore().get('groupState')
-        const key = chatId.toString()
-        if (all[key]) {
-            all[key].queryInProgress = false
-            getStore().set('groupState', all)
-        }
+        return getStore().get('groupState')
     },
 
     getDefaultProvider(): string {

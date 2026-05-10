@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { SessionManager, makeTopicKey } from '@/bridge/sessionManager'
-import { QueryLoop } from '@/core/queryLoop'
 import { DefaultEventBus } from '@/core/eventBus'
+import { createTopicSessionRecord } from '@/bridge/topicSession'
+import type { SessionRecord } from '@/bridge/sessionRecord'
 import { registerProvider, getProvider } from '@/providers/registry'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
@@ -25,13 +26,12 @@ function createMockProvider(name: string = 'mock-provider'): AgentProvider {
     }
 }
 
-function createTestSession(provider?: AgentProvider): QueryLoop {
-    const bus = new DefaultEventBus()
-    return new QueryLoop({
+function createTestSession(provider?: AgentProvider): SessionRecord {
+    void provider
+    return createTopicSessionRecord({
         cwd: '/tmp/test',
-        provider: provider ?? createMockProvider(),
-        bus,
         providerName: 'test',
+        groupChatId: -100123,
     })
 }
 
@@ -52,14 +52,13 @@ describe('SessionManager: switchProvider', () => {
 
         // Switch provider: destroy old, create new
             const newProvider = createMockProvider('new-provider')
-            const newSession = new QueryLoop({
+            const newSession = createTopicSessionRecord({
                 cwd: '/tmp/test',
-                provider: newProvider,
-                bus,
                 providerName: 'new-provider',
+                groupChatId: -100123,
+                messageThreadId: 42,
             })
-        newSession.groupChatId = -100123
-        newSession.messageThreadId = 42
+        newSession.setProvider(newProvider)
 
         // Destroy old session
         await oldSession.destroy()
@@ -112,14 +111,13 @@ describe('SessionManager: switchProvider', () => {
             sm.setEventBus(bus)
             sm.setGroupCwd(-100123, '/project/path')
 
-            const oldSession = new QueryLoop({
+            const oldSession = createTopicSessionRecord({
                 cwd: '/project/path',
-                provider: provider1,
-                bus,
                 providerName: 'provider-1',
+                groupChatId: -100123,
+                messageThreadId: 42,
             })
-            oldSession.groupChatId = -100123
-            oldSession.messageThreadId = 42
+            oldSession.setProvider(provider1)
             sm.registerSession(oldSession, -100123, 42)
 
             // Switch provider

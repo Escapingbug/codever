@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { AgentProvider, parseAgentModels } from '@/providers/agent'
-import { modelKeyboard, modelProviderDetailKeyboard, modelProviderKeyboard } from '@/transport/telegram/keyboard'
+import { modelKeyboard, modelProviderDetailKeyboard, modelProviderKeyboard } from '@/channel/telegram/keyboard'
 import type { ModelEntry } from '@/providers/provider'
 
 const { spawnSyncMock } = vi.hoisted(() => ({

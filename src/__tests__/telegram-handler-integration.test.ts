@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
-import { registerGroupHandlers } from '@/transport/telegram/handlers/groupCommands'
-import { registerSettingsHandlers } from '@/transport/telegram/handlers/settings'
-import { registerCallbackHandlers } from '@/transport/telegram/handlers/callbacks'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { registerGroupHandlers } from '@/channel/telegram/handlers/groupCommands'
+import { registerSettingsHandlers } from '@/channel/telegram/handlers/settings'
+import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
 import type { TopicSession } from '@/bridge/channelPort'
+import { clearPendingDecisionsForTests, registerPendingDecision } from '@/channel/telegram/decisionRegistry'
 
 vi.mock('@/channel/telegram/pairing', () => ({
     pairing: { isAuthorized: vi.fn(() => true) },
@@ -84,7 +85,7 @@ function createSession(state: TopicSession['state'] = 'querying'): TopicSession 
         dispatch: vi.fn(async () => {}),
         destroy: vi.fn(async () => {}),
         get state() { return state },
-        queryLoop: {
+        sessionRecord: {
             id: 'ql-1',
             state,
             conversationId: 'conv-1',
@@ -101,9 +102,6 @@ function createSession(state: TopicSession['state'] = 'querying'): TopicSession 
             setTimeoutExtended: vi.fn(),
             setProviderName: vi.fn(),
             destroy: vi.fn(async () => {}),
-            interrupt: vi.fn(async () => {}),
-            resolvePermission: vi.fn(() => true),
-            resetRequested: false,
             bus: { emit: vi.fn() },
         } as any,
         channelPort: {} as any,
@@ -122,12 +120,14 @@ function createSessionManager() {
         getGroupSettings: vi.fn(() => ({ providerName: 'mock-acp' })),
         setGroupSettings: vi.fn(),
         getSessionByGroup: vi.fn(() => undefined),
-        getSessionForPermission: vi.fn(() => undefined),
-        removePermission: vi.fn(),
     } as any
 }
 
 describe('Telegram handler integration with semantic runtime dispatch', () => {
+    afterEach(() => {
+        clearPendingDecisionsForTests()
+    })
+
     it('/stop dispatches a semantic cancel input', async () => {
         const bot = createBot()
         const session = createSession('querying')
@@ -150,7 +150,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(sessionManager.unarchiveGroup).toHaveBeenCalledWith('-100:10')
     })
 
-    it('/archive should dispatch an archive command instead of destroying QueryLoop directly', async () => {
+    it('/archive should dispatch an archive command before destroying the topic session', async () => {
         const bot = createBot()
         const session = createSession('idle')
         const topicSessions = new Map([['-100:10', session]])
@@ -160,10 +160,10 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'archive', source: 'channel' })
         expect(session.destroy).toHaveBeenCalled()
-        expect(session.queryLoop.destroy).not.toHaveBeenCalled()
+        expect(session.sessionRecord.destroy).not.toHaveBeenCalled()
     })
 
-    it('/progress should dispatch a runtime progress command instead of reading QueryLoop timeout state', async () => {
+    it('/progress should dispatch a runtime progress command instead of reading metadata timeout state', async () => {
         const bot = createBot()
         const session = createSession('querying')
         const topicSessions = new Map([['-100:10', session]])
@@ -185,10 +185,10 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('config', ctx)
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'timeout', args: '240', source: 'channel' })
-        expect(session.queryLoop.setTimeoutSeconds).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setTimeoutSeconds).not.toHaveBeenCalled()
     })
 
-    it('/new should dispatch a runtime reset command instead of mutating QueryLoop directly', async () => {
+    it('/new should dispatch a runtime reset command instead of mutating metadata directly', async () => {
         const bot = createBot()
         const session = createSession('idle')
         const topicSessions = new Map([['-100:10', session]])
@@ -197,7 +197,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('new', createContext())
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'new', source: 'channel' })
-        expect(session.queryLoop.setConversationId).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setConversationId).not.toHaveBeenCalled()
     })
 
     it('/model explicit selection should dispatch runtime model command', async () => {
@@ -209,7 +209,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('model', createContext('sonnet'))
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'sonnet', source: 'channel' })
-        expect(session.queryLoop.setModel).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setModel).not.toHaveBeenCalled()
     })
 
     it('/resume should dispatch runtime resume command after resolving the provider session id', async () => {
@@ -222,7 +222,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('resume', createContext('abcdef12'))
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'resume', args: expect.any(String), source: 'channel' })
-        expect(session.queryLoop.setConversationId).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setConversationId).not.toHaveBeenCalled()
     })
 
     it('model callback should dispatch runtime model command', async () => {
@@ -247,7 +247,33 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'provider', args: 'mock-acp', source: 'channel' })
         expect(sessionManager.setGroupSettings).not.toHaveBeenCalled()
-        expect(session.queryLoop.setProviderName).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setProviderName).not.toHaveBeenCalled()
+    })
+
+    it('decision callback resolves a pending TelegramPort request', async () => {
+        const bot = createBot()
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map() })
+        const { decisionId, promise } = registerPendingDecision()
+
+        await bot.runCallback(`decision:${decisionId}:deny`)
+
+        await expect(promise).resolves.toEqual({ value: 'deny' })
+    })
+
+    it('decision callback dispatches semantic decision response when no pending port request exists', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCallback('decision:plan-1:accept')
+
+        expect(session.dispatch).toHaveBeenCalledWith({
+            kind: 'decision_response',
+            decisionId: 'plan-1',
+            value: 'accept',
+            source: 'channel',
+        })
     })
 
     it('provider callback in the generic topic updates the default for new sessions', async () => {
@@ -279,7 +305,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCallback('mode:approve-all')
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'mode', args: 'approve-all', source: 'channel' })
-        expect(session.queryLoop.providerSettings.permissionMode).toBeUndefined()
+        expect(session.sessionRecord.providerSettings.permissionMode).toBeUndefined()
     })
 
     it('timeout continue callback should dispatch a runtime timeout-continue command', async () => {
@@ -291,19 +317,6 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCallback('timeout:continue')
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'timeout_continue', source: 'channel' })
-        expect(session.queryLoop.bus.emit).not.toHaveBeenCalled()
-    })
-
-    it('permission callback should dispatch a semantic decision response', async () => {
-        const bot = createBot()
-        const session = createSession('querying')
-        const sessionManager = createSessionManager()
-        sessionManager.getSessionForPermission = vi.fn(() => session.queryLoop)
-        registerCallbackHandlers(bot, { sessionManager, topicSessions: new Map([['-100:10', session]]) })
-
-        await bot.runCallback('perm:allow:req-1')
-
-        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'decision_response', decisionId: 'req-1', value: 'allow', source: 'channel' })
-        expect(session.queryLoop.resolvePermission).not.toHaveBeenCalled()
+        expect(session.sessionRecord.bus.emit).not.toHaveBeenCalled()
     })
 })

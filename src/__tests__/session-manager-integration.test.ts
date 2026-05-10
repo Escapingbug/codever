@@ -8,7 +8,7 @@ function createTopicSession(id: string, conversationId?: string | null): TopicSe
         dispatch: vi.fn(async () => {}),
         destroy: vi.fn(async () => {}),
         state: 'idle',
-        queryLoop: {
+        sessionRecord: {
             id,
             conversationId: conversationId ?? null,
             groupChatId: -100,
@@ -39,14 +39,14 @@ describe('SessionManager integration boundaries', () => {
         expect(manager.getTopicSessionByConversationId('missing')).toBeUndefined()
     })
 
-    it('finds topic sessions by QueryLoop id for daemon fallback routing', () => {
+    it('finds topic sessions by metadata id for daemon fallback routing', () => {
         const manager = new SessionManager()
         const session = createTopicSession('query-1', 'provider-session-1')
 
         manager.registerTopicSession('-100:10', session)
 
-        expect(manager.getTopicSessionByQueryLoopId('query-1')).toBe(session)
-        expect(manager.getTopicSessionByQueryLoopId('query-2')).toBeUndefined()
+        expect(manager.getTopicSessionBySessionId('query-1')).toBe(session)
+        expect(manager.getTopicSessionBySessionId('query-2')).toBeUndefined()
     })
 
     it('removes topic-session lookup entries when a runtime is archived or dies', () => {
@@ -58,7 +58,7 @@ describe('SessionManager integration boundaries', () => {
 
         expect(manager.getTopicSession('-100:10')).toBeUndefined()
         expect(manager.getTopicSessionByConversationId('provider-session-1')).toBeUndefined()
-        expect(manager.getTopicSessionByQueryLoopId('query-1')).toBeUndefined()
+        expect(manager.getTopicSessionBySessionId('query-1')).toBeUndefined()
     })
 
     it('keeps topic-session map ownership centralized for bot and daemon code paths', () => {

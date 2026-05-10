@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
-import { SessionManager } from '@/bridge/sessionManager'
-import { ChannelProjector } from '@/runtime/channelProjector'
 import type { ChannelMessage, ChannelPort, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
-import type { AgentEvent } from '@/providers/types'
+import type { AgentEvent, ProviderCommand } from '@/providers/types'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
 
 const configMocks = vi.hoisted(() => ({
@@ -15,6 +13,10 @@ vi.mock('@/config', () => ({
         saveTopicState: configMocks.saveTopicState,
     },
 }))
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 function createProvider(events: AgentEvent[]): AgentProvider {
     return {
@@ -48,9 +50,6 @@ function createChannel(): ChannelPort & {
             sent.push(message)
             return { messageId: sent.length }
         }),
-        edit: vi.fn(async (_messageId, message) => {
-            sent.push(message)
-        }),
         requestDecision: vi.fn(async (request): Promise<DecisionResponse> => {
             decisions.push(request)
             return { value: request.options[0]?.value ?? '' }
@@ -61,32 +60,33 @@ function createChannel(): ChannelPort & {
     }
 }
 
-describe('Architecture stability invariants', () => {
-    it('SessionManager stores lightweight session records for lookup and cleanup', () => {
-        const manager = new SessionManager()
+describe('SessionRecord metadata boundary', () => {
+    it('contains session metadata without runtime execution APIs', () => {
         const record = createTopicSessionRecord({
             cwd: '/repo',
             providerName: 'mock-provider',
             groupChatId: -100,
             messageThreadId: 10,
+            model: 'sonnet',
+            timeoutSeconds: 240,
+            providerSettings: { permissionMode: 'approve-all' },
             conversationId: 'provider-session',
         })
 
-        manager.registerSession(record, -100, 10)
-
-        expect(manager.getSession(record.id)).toBe(record)
-        expect(manager.getSessionByGroup(-100, 10)).toBe(record)
-        expect(manager.getSessionByConversationId('provider-session')).toBe(record)
-        expect(manager.listActiveSessions()).toEqual([record])
-
-        manager.removeSession(record.id)
-        expect(manager.getSession(record.id)).toBeUndefined()
-        expect(manager.getSessionByGroup(-100, 10)).toBeUndefined()
+        expect(record.cwd).toBe('/repo')
+        expect(record.providerName).toBe('mock-provider')
+        expect(record.model).toBe('sonnet')
+        expect(record.timeoutSeconds).toBe(240)
+        expect(record.providerSettings).toEqual({ permissionMode: 'approve-all' })
+        expect(record.conversationId).toBe('provider-session')
+        expect('processInput' in record).toBe(false)
+        expect('waitForPermission' in record).toBe(false)
+        expect('resolvePermission' in record).toBe(false)
     })
 
-    it('TopicSession uses the semantic runtime as the execution core', async () => {
+    it('TopicSession routes execution through SemanticSessionRuntime', async () => {
         const provider = createProvider([
-            { kind: 'text', text: 'hello from runtime' },
+            { kind: 'text', text: 'runtime response' },
             { kind: 'result', status: 'success' },
         ])
         const channel = createChannel()
@@ -98,20 +98,24 @@ describe('Architecture stability invariants', () => {
         })
         const topicSession = createTopicSession({ sessionRecord: record, provider, channelPort: channel })
 
-        await topicSession.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
+        topicSession.receiveInput({ text: 'hello', username: 'alice' })
+        await delay(30)
 
-        expect('processInput' in record).toBe(false)
-        expect(provider.startQuery).toHaveBeenCalledWith('inspect', expect.objectContaining({
+        expect(provider.startQuery).toHaveBeenCalledWith('hello', expect.objectContaining({
             cwd: '/repo',
             sessionId: undefined,
         }))
-        expect(channel.sent.map(message => message.text)).toEqual(['hello from runtime'])
-        expect(topicSession.state).toBe('idle')
+        expect(channel.sent.map(message => message.text)).toEqual(['runtime response'])
+        expect(channel.statuses.map(status => status.state)).toEqual(['querying', 'idle'])
     })
 
-    it('provider session metadata is persisted from runtime callbacks', async () => {
+    it('runtime updates provider session and available commands on the metadata record', async () => {
+        const commands: ProviderCommand[] = [
+            { name: 'review', description: 'Review current diff', inputHint: null },
+        ]
         const provider = createProvider([
-            { kind: 'session_init', sessionId: 'provider-session-1' },
+            { kind: 'session_init', sessionId: 'provider-session-2' },
+            { kind: 'commands_update', commands },
             { kind: 'result', status: 'success' },
         ])
         const channel = createChannel()
@@ -125,19 +129,7 @@ describe('Architecture stability invariants', () => {
 
         await topicSession.dispatch({ kind: 'user_message', text: 'hello', source: 'channel' })
 
-        expect(record.conversationId).toBe('provider-session-1')
-        expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', { conversationId: 'provider-session-1' })
-    })
-
-    it('ChannelProjector remains the projection boundary for semantic events', () => {
-        const projector = new ChannelProjector()
-        projector.project({
-            kind: 'assistant_text_delta',
-            meta: { id: 'e1', sessionId: 's1', turnId: 't1', seq: 1, timestamp: Date.now(), provider: 'mock', sourcePhase: 'live' },
-            text: 'projected text',
-        }, { verboseLevel: 1 })
-        const messages = projector.flush()
-
-        expect(messages.map(message => message.message.text)).toEqual(['projected text'])
+        expect(record.conversationId).toBe('provider-session-2')
+        expect(record.availableCommands).toEqual(commands)
     })
 })

@@ -1,16 +1,16 @@
-import type { QueryLoopEvent } from './types'
+import type { SessionEvent } from './types'
 
 export interface EventBus {
-    emit(event: QueryLoopEvent): void
-    on(type: string, handler: (event: QueryLoopEvent) => void | Promise<void>): () => void
-    once(type: string, handler: (event: QueryLoopEvent) => void | Promise<void>): () => void
+    emit(event: SessionEvent): void
+    on(type: string, handler: (event: SessionEvent) => void | Promise<void>): () => void
+    once(type: string, handler: (event: SessionEvent) => void | Promise<void>): () => void
     removeAllListeners(type?: string): void
 }
 
 export class DefaultEventBus implements EventBus {
-    private handlers = new Map<string, Set<(event: QueryLoopEvent) => void | Promise<void>>>()
+    private handlers = new Map<string, Set<(event: SessionEvent) => void | Promise<void>>>()
 
-    emit(event: QueryLoopEvent): void {
+    emit(event: SessionEvent): void {
         const handlers = this.handlers.get(event.type)
         if (!handlers) return
         for (const handler of handlers) {
@@ -28,7 +28,7 @@ export class DefaultEventBus implements EventBus {
         }
     }
 
-    on(type: string, handler: (event: QueryLoopEvent) => void | Promise<void>): () => void {
+    on(type: string, handler: (event: SessionEvent) => void | Promise<void>): () => void {
         let set = this.handlers.get(type)
         if (!set) {
             set = new Set()
@@ -43,8 +43,8 @@ export class DefaultEventBus implements EventBus {
         }
     }
 
-    once(type: string, handler: (event: QueryLoopEvent) => void | Promise<void>): () => void {
-        const wrapper = (event: QueryLoopEvent) => {
+    once(type: string, handler: (event: SessionEvent) => void | Promise<void>): () => void {
+        const wrapper = (event: SessionEvent) => {
             unsub()
             handler(event)
         }

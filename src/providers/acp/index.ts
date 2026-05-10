@@ -532,7 +532,7 @@ export class AcpProvider implements AgentProvider {
                         } catch (newErr) {
                             // Even new session creation failed — fall through to prompt
                             // the stale sessionId as a last resort. The prompt will likely
-                            // fail with "No conversation found" and QueryLoop's retry logic
+                            // fail with "No conversation found" and the runtime retry handling
                             // will handle it.
                             const newMsg = newErr instanceof Error ? newErr.message : String(newErr)
                             console.error(`[acp:${this.name}] newSession also failed after recovery failure: ${newMsg}. Attempting prompt with stale sessionId.`)

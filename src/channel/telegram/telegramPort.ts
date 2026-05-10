@@ -1,6 +1,6 @@
 /**
  * TelegramPort — ChannelPort implementation for Telegram via grammY.
- * Wraps the existing Telegram renderer and permission UI into the ChannelPort interface.
+ * Wraps Telegram rendering and decision UI behind the ChannelPort interface.
  */
 
 import type { Bot } from 'grammy'
@@ -9,6 +9,7 @@ import { tgmdConvert, tgmdTableImage } from '@/utils/tgmdrender'
 import { splitHtmlChunks } from '@/utils/formatting'
 import { InputFile } from 'grammy'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
+import { completePendingDecision, registerPendingDecision } from './decisionRegistry'
 
 const MAX_MESSAGE_LENGTH = 4000
 
@@ -97,35 +98,32 @@ export class TelegramPort implements ChannelPort {
     }
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
-        return new Promise((resolve) => {
-            const requestId = Date.now()
-            const keyboard = {
-                inline_keyboard: [
-                    request.options.map(opt => ({
-                        text: opt.label,
-                        callback_data: `decision:${requestId}:${opt.value}`,
-                    })),
-                ],
-            }
-
-            const text = request.type === 'permission'
-                ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
-                : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
-
-            this.bot.api.sendMessage(this.chatId, text, {
-                parse_mode: 'HTML',
-                reply_markup: keyboard,
-                ...buildMessageThreadParams(this.threadId),
-            }).catch((e) => {
-                console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
-            })
-
-            // Note: The actual callback handling is done by the handler layer.
-            // This simplified version resolves immediately — the real implementation
-            // would wire into the callback handler system.
-            // For now, this is a placeholder that will be connected during P6-Merge.
-            resolve({ value: request.options[0]?.value ?? '' })
+        const { decisionId, promise } = registerPendingDecision({
+            fallbackValue: request.type === 'permission' ? 'deny' : '',
         })
+        const keyboard = {
+            inline_keyboard: [
+                request.options.map(opt => ({
+                    text: opt.label,
+                    callback_data: `decision:${decisionId}:${encodeURIComponent(opt.value)}`,
+                })),
+            ],
+        }
+
+        const text = request.type === 'permission'
+            ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
+            : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
+
+        this.bot.api.sendMessage(this.chatId, text, {
+            parse_mode: 'HTML',
+            reply_markup: keyboard,
+            ...buildMessageThreadParams(this.threadId),
+        }).catch((e) => {
+            console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
+            completePendingDecision(decisionId, request.type === 'permission' ? 'deny' : '')
+        })
+
+        return promise
     }
 
     notifyStatus(status: SessionStatus): void {

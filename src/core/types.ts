@@ -1,13 +1,13 @@
 import type { AgentEvent } from '@/providers/types'
 
-export type QueryLoopState = 'idle' | 'querying' | 'canceling' | 'dead'
+export type SessionState = 'idle' | 'querying' | 'canceling' | 'dead'
 
 export type PermissionDecision = 'allow' | 'deny' | 'cancel'
 
-export type QueryLoopEvent =
+export type SessionEvent =
     | { type: 'session.created'; sessionId: string }
     | { type: 'session.destroyed'; sessionId: string }
-    | { type: 'session.state_changed'; sessionId: string; from: QueryLoopState; to: QueryLoopState }
+    | { type: 'session.state_changed'; sessionId: string; from: SessionState; to: SessionState }
     | { type: 'query.started'; sessionId: string; queryId: string }
     | { type: 'query.event'; sessionId: string; queryId: string; event: AgentEvent }
     | { type: 'query.completed'; sessionId: string; queryId: string; result: { status: string } }

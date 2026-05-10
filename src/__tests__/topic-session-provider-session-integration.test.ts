@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createTopicSession } from '@/bridge/topicSession'
+import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import { SessionManager } from '@/bridge/sessionManager'
 import type { AgentProvider } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
@@ -31,21 +31,17 @@ function createProvider(items: AgentEvent[] = []): AgentProvider {
     } as any
 }
 
-function createQueryLoop() {
-    return {
-        id: 'query-loop-1',
+function createSessionRecord() {
+    const record = createTopicSessionRecord({
         cwd: '/repo',
         groupChatId: -100,
         messageThreadId: 10,
         providerName: 'mock-acp',
         model: 'sonnet',
         providerSettings: { permissionMode: 'default' },
-        conversationId: null as string | null,
-        setConversationId: vi.fn(function (this: any, sessionId: string | null) {
-            this.conversationId = sessionId
-        }),
-        destroy: vi.fn(async () => {}),
-    } as any
+    })
+    vi.spyOn(record, 'setConversationId')
+    return record
 }
 
 function createChannelPort(): ChannelPort & { sent: string[] } {
@@ -69,13 +65,12 @@ describe('TopicSession provider session integration', () => {
             { kind: 'text', text: 'hello from provider', isFinal: true } as any,
             { kind: 'result', status: 'success' } as any,
         ])
-        const queryLoop = createQueryLoop()
+        const sessionRecord = createSessionRecord()
         const channelPort = createChannelPort()
         const topicSession = createTopicSession({
-            queryLoop,
+            sessionRecord,
             provider,
             channelPort,
-            pipeline: {} as any,
         })
         const manager = new SessionManager()
         manager.registerTopicSession('-100:10', topicSession)
@@ -83,7 +78,7 @@ describe('TopicSession provider session integration', () => {
         topicSession.receiveInput({ text: 'hello', username: 'alice' })
         await new Promise(resolve => setTimeout(resolve, 20))
 
-        expect(queryLoop.setConversationId).toHaveBeenCalledWith('provider-session-1')
+        expect(sessionRecord.setConversationId).toHaveBeenCalledWith('provider-session-1')
         expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', { conversationId: 'provider-session-1' })
         expect(manager.getTopicSessionByConversationId('provider-session-1')).toBe(topicSession)
         expect(channelPort.sent.join('\n')).toContain('hello from provider')
@@ -95,10 +90,9 @@ describe('TopicSession provider session integration', () => {
             { kind: 'result', status: 'success' } as any,
         ])
         const topicSession = createTopicSession({
-            queryLoop: createQueryLoop(),
+            sessionRecord: createSessionRecord(),
             provider,
             channelPort: createChannelPort(),
-            pipeline: {} as any,
         })
 
         await topicSession.dispatch({

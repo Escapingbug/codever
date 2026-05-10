@@ -1,9 +1,9 @@
 import { config } from '@/config'
 import type { EventBus } from '@/core/eventBus'
-import { QueryLoop } from '@/core/queryLoop'
 import { DefaultEventBus } from '@/core/eventBus'
 import { createProviderInstance, getProvider, getDefaultProvider } from '@/providers/registry'
 import type { TopicSession } from './channelPort'
+import { createSessionRecord, type SessionRecord } from './sessionRecord'
 
 /** Telegram General topic thread ID — sendMessage rejects this, so we normalize it to "main". */
 export const TELEGRAM_GENERAL_TOPIC_ID = 1
@@ -60,11 +60,10 @@ export interface GroupSettings {
 }
 
 export class SessionManager {
-    private queryLoops = new Map<string, QueryLoop>()
-    private groupSessions = new Map<string, QueryLoop>()
+    private sessions = new Map<string, SessionRecord>()
+    private groupSessions = new Map<string, SessionRecord>()
     private groupCwds = new Map<number, string>()
     private groupSettings = new Map<number, GroupSettings>()
-    private permissionMap = new Map<string, QueryLoop>()
     private archivedGroups = new Set<string>()
     private groupFailures = new Map<string, { count: number; lastFailure: number }>()
     private creatingSessions = new Set<string>()
@@ -101,24 +100,24 @@ export class SessionManager {
         this.creatingSessions.delete(topicKey)
     }
 
-    registerSession(session: QueryLoop, groupChatId: number, messageThreadId?: number): void {
+    registerSession(session: SessionRecord, groupChatId: number, messageThreadId?: number): void {
         const topicKey = makeTopicKey(groupChatId, messageThreadId)
-        this.queryLoops.set(session.id, session)
+        this.sessions.set(session.id, session)
         this.groupSessions.set(topicKey, session)
     }
 
-    getSession(id: string): QueryLoop | undefined {
-        return this.queryLoops.get(id)
+    getSession(id: string): SessionRecord | undefined {
+        return this.sessions.get(id)
     }
 
-    getSessionByGroup(chatId: number, messageThreadId?: number): QueryLoop | undefined {
+    getSessionByGroup(chatId: number, messageThreadId?: number): SessionRecord | undefined {
         const topicKey = makeTopicKey(chatId, messageThreadId)
         return this.groupSessions.get(topicKey)
     }
 
     /** Find a session by its provider-assigned conversation ID */
-    getSessionByConversationId(conversationId: string): QueryLoop | undefined {
-        for (const session of this.queryLoops.values()) {
+    getSessionByConversationId(conversationId: string): SessionRecord | undefined {
+        for (const session of this.sessions.values()) {
             if (session.conversationId === conversationId) return session
         }
         return undefined
@@ -153,27 +152,15 @@ export class SessionManager {
         return this.groupSettings.get(chatId)
     }
 
-    registerPermission(requestId: string, session: QueryLoop): void {
-        this.permissionMap.set(requestId, session)
-    }
-
-    getSessionForPermission(requestId: string): QueryLoop | undefined {
-        return this.permissionMap.get(requestId)
-    }
-
-    removePermission(requestId: string): void {
-        this.permissionMap.delete(requestId)
-    }
-
     removeSession(id: string): void {
-        const session = this.queryLoops.get(id)
+        const session = this.sessions.get(id)
         if (!session) return
         this._eventBus?.emit({ type: 'session.destroyed', sessionId: id })
         if (session.groupChatId !== null) {
             const topicKey = makeTopicKey(session.groupChatId, session.messageThreadId ?? undefined)
             this.groupSessions.delete(topicKey)
         }
-        this.queryLoops.delete(id)
+        this.sessions.delete(id)
     }
 
     recordGroupFailure(topicKey: string): void {
@@ -194,7 +181,7 @@ export class SessionManager {
         this.groupFailures.delete(topicKey)
     }
 
-    migrateTopicKey(oldTopicKey: string, newTopicKey: string): QueryLoop | null {
+    migrateTopicKey(oldTopicKey: string, newTopicKey: string): SessionRecord | null {
         const session = this.groupSessions.get(oldTopicKey)
         if (!session) return null
         this.groupSessions.delete(oldTopicKey)
@@ -220,16 +207,16 @@ export class SessionManager {
         this.archivedGroups.delete(topicKey)
     }
 
-    listActiveSessions(): QueryLoop[] {
-        return Array.from(this.queryLoops.values())
+    listActiveSessions(): SessionRecord[] {
+        return Array.from(this.sessions.values())
     }
 
     /**
      * Switch the provider for a session by destroying the old one and creating a new one.
      * The new session inherits groupChatId, messageThreadId, and group-level settings.
-     * Returns the new QueryLoop, or null if no session found at the given topicKey.
+     * Returns the new session metadata record, or null if no session found at the given topicKey.
      */
-    async switchProvider(chatId: number, messageThreadId: number | undefined, newProviderName: string): Promise<QueryLoop | null> {
+    async switchProvider(chatId: number, messageThreadId: number | undefined, newProviderName: string): Promise<SessionRecord | null> {
         const topicKey = makeTopicKey(chatId, messageThreadId)
         const oldSession = this.groupSessions.get(topicKey)
         if (!oldSession) return null
@@ -244,18 +231,18 @@ export class SessionManager {
         // Create a new session with the same channel info
         const bus = this._eventBus ?? new DefaultEventBus()
         const settings = this.getGroupSettings(chatId)
-        const newSession = new QueryLoop({
+        const newSession = createSessionRecord({
             cwd: this.getGroupCwd(chatId) ?? process.cwd(),
-            provider,
-            bus,
             providerName: newProviderName,
+            groupChatId: chatId,
+            messageThreadId,
             model: settings?.model,
             verboseLevel: settings?.verboseLevel,
             timeoutSeconds: settings?.timeoutSeconds,
             providerSettings: settings?.permissionMode ? { permissionMode: settings.permissionMode } : {},
+            bus,
         })
-        newSession.groupChatId = chatId
-        newSession.messageThreadId = messageThreadId ?? null
+        newSession.setProvider(provider)
 
         this.registerSession(newSession, chatId, messageThreadId)
         return newSession
@@ -271,16 +258,16 @@ export class SessionManager {
         return this.topicSessions.get(topicKey)
     }
 
-    getTopicSessionByQueryLoopId(queryLoopId: string): TopicSession | undefined {
+    getTopicSessionBySessionId(sessionId: string): TopicSession | undefined {
         for (const topicSession of this.topicSessions.values()) {
-            if (topicSession.queryLoop.id === queryLoopId) return topicSession
+            if (topicSession.sessionRecord.id === sessionId) return topicSession
         }
         return undefined
     }
 
     getTopicSessionByConversationId(conversationId: string): TopicSession | undefined {
         for (const topicSession of this.topicSessions.values()) {
-            if (topicSession.queryLoop.conversationId === conversationId) return topicSession
+            if (topicSession.sessionRecord.conversationId === conversationId) return topicSession
         }
         return undefined
     }

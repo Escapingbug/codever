@@ -369,6 +369,34 @@ export async function createTestBotClient(config: TestBotConfig): Promise<TestBo
                 if (logs[i].chatId === chatId) logs.splice(i, 1)
             }
         },
+
+        waitForDaemonLog(chatId: number, options: {
+            logDir: string
+            predicate: (lines: string[]) => boolean
+            timeoutMs?: number
+        }): Promise<string[]> {
+            const timeoutMs = options.timeoutMs ?? 120_000
+            const startedAt = Date.now()
+
+            return new Promise<string[]>((resolve, reject) => {
+                const poll = () => {
+                    const lines = readGroupLogFile(options.logDir, chatId)
+                    if (options.predicate(lines)) {
+                        resolve(lines)
+                        return
+                    }
+                    if (Date.now() - startedAt >= timeoutMs) {
+                        reject(new Error(
+                            `Timeout after ${timeoutMs}ms waiting for daemon log in chat ${chatId}. ` +
+                            `Last 5 lines: ${lines.slice(-5).join(' | ')}`
+                        ))
+                        return
+                    }
+                    setTimeout(poll, 500)
+                }
+                poll()
+            })
+        },
     }
 }
 

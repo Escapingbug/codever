@@ -9,8 +9,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { registerContextResources, registerContextTools } from './resources'
-import { registerNotifyTools } from './tools/notify'
+import { registerCodeverMcpSurface } from './register'
 
 async function main() {
     const server = new McpServer({
@@ -18,9 +17,7 @@ async function main() {
         version: '1.0.0',
     })
 
-    registerContextResources(server)
-    registerContextTools(server)
-    registerNotifyTools(server)
+    registerCodeverMcpSurface(server)
 
     const transport = new StdioServerTransport()
     await server.connect(transport)

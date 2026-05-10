@@ -2,7 +2,7 @@ import type { Context } from 'grammy'
 import type { SessionManager } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { pairing } from '@/channel/telegram/pairing'
-import { providerKeyboard } from '@/transport/telegram/keyboard'
+import { providerKeyboard } from '@/channel/telegram/keyboard'
 import { escapeHtml } from '@/utils/formatting'
 import { listProviders } from '@/providers/registry'
 
@@ -108,8 +108,8 @@ export function registerDmHandlers(bot: any, sessionManager: SessionManager, res
             // Append provider commands if available
             const chatId = ctx.chat!.id
             const threadId = ctx.message?.message_thread_id
-            const queryLoop = sessionManager.getSessionByGroup(chatId, threadId)
-            const commands = queryLoop?.availableCommands
+            const sessionRecord = sessionManager.getSessionByGroup(chatId, threadId)
+            const commands = sessionRecord?.availableCommands
             if (commands && commands.length > 0) {
                 helpText += '\n\n<b>Provider commands:</b>\n'
                 for (const cmd of commands) {

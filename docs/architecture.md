@@ -20,7 +20,7 @@ Telegram update
   -> TelegramPort
 ```
 
-This is the active architecture. Older design names such as `CoreSession`, `SessionBridge`, and "Pipeline as the main runtime" describe a previous migration target, not the current runtime path.
+This is the active architecture.
 
 ## 2. Design Principles
 
@@ -37,7 +37,7 @@ This is the active architecture. Older design names such as `CoreSession`, `Sess
 
 ```text
 Telegram message
-  -> transport/telegram/handlers/messageRouter.ts
+  -> channel/telegram/handlers/messageRouter.ts
   -> find or create TopicSession for chat/topic
   -> TopicSession.receiveInput()
   -> SemanticSessionRuntime.dispatch({ kind: "user_message" })
@@ -95,7 +95,7 @@ The composition root. It registers providers, loads persisted config, starts the
 
 ### 4.2 Telegram Handlers
 
-Current handlers live under `src/transport/telegram/handlers/` and are registered from `src/channel/telegram/bot.ts`.
+Current handlers live under `src/channel/telegram/handlers/` and are registered from `src/channel/telegram/bot.ts`.
 
 Responsibilities:
 
@@ -104,7 +104,7 @@ Responsibilities:
 - route Telegram messages to the correct topic session;
 - route callback queries back into the session runtime.
 
-The current directory split between `transport/telegram` and `channel/telegram` is a migration artifact. The desired final shape is one Telegram channel package.
+Telegram channel ownership is now consolidated under `src/channel/telegram`.
 
 ### 4.3 `SessionManager`
 
@@ -113,9 +113,8 @@ The current directory split between `transport/telegram` and `channel/telegram` 
 - group CWD and settings;
 - topic key normalization;
 - active `TopicSession` map;
-- compatibility `QueryLoop` lookup maps;
+- `SessionRecord` lookup maps;
 - provider switch bookkeeping;
-- permission lookup compatibility;
 - archived topic and cooldown state.
 
 It should remain the single place that answers "which runtime session belongs to this channel topic?"
@@ -124,7 +123,7 @@ It should remain the single place that answers "which runtime session belongs to
 
 `TopicSession` is the bridge object for a Telegram topic. It wraps:
 
-- a `QueryLoop` compatibility record;
+- a `SessionRecord` metadata record;
 - a session-scoped provider instance;
 - a `ChannelPort`;
 - a `SemanticSessionRuntime`.
@@ -147,22 +146,19 @@ Responsibilities:
 - project and deliver channel messages;
 - handle runtime commands such as model/provider/session changes.
 
-This is the main runtime. New lifecycle behavior should usually be implemented here, not in `QueryLoop`.
+This is the main runtime. New lifecycle behavior should usually be implemented here, not in metadata records.
 
-### 4.6 `QueryLoop`
+### 4.6 `SessionRecord`
 
-`QueryLoop` remains in the codebase but is no longer the primary execution loop for Telegram topic sessions.
+`SessionRecord` is the lightweight metadata record attached to a topic session.
 
 Current role:
 
-- stores session identity and settings used by handlers and tests;
-- exposes compatibility fields such as `groupChatId`, `messageThreadId`, `conversationId`, provider name, model, verbose level, timeout;
-- provides legacy state/event APIs that some tests and manager methods still use.
+- stores session identity and settings used by handlers;
+- exposes `groupChatId`, `messageThreadId`, `conversationId`, provider name, model, verbose level, timeout, provider settings, and provider commands;
+- emits session lifecycle events used by manager cleanup paths.
 
-Target role:
-
-- shrink or rename this into a session metadata object, for example `SessionRecord` or `TopicSessionState`;
-- remove runtime responsibilities such as `processInput()`, provider retry, message queueing, and permission waiting from the active path.
+There is no separate session loop in the active architecture.
 
 ### 4.7 `ProviderSemanticAdapter`
 
@@ -221,14 +217,14 @@ The active MCP stdio entry is `src/mcp/stdio.ts`. It registers:
 - context resources/tools from `src/mcp/resources.ts`;
 - notify tools from `src/mcp/tools/notify.ts`.
 
-`src/mcp/server.ts` contains a context-injected server factory used by tests and older code paths. The stdio entry is the one launched by ACP providers through `mcpServers`.
+Shared registration lives in `src/mcp/register.ts`; session tools from `src/mcp/tools/session.ts` are registered only when a daemon/runtime context provides a `SessionToolContext`.
 
 ## 5. Directory Map
 
 ```text
 src/
   daemon.ts                         # composition root
-  config.ts                         # persistent config and legacy migration
+  config.ts                         # persistent config and topic state
 
   bridge/
     channelPort.ts                  # ChannelPort and TopicSession interfaces
@@ -241,21 +237,15 @@ src/
     providerAdapter.ts              # AgentEvent -> ConversationEvent
     channelProjector.ts             # ConversationEvent -> ChannelMessage
     deliveryOutbox.ts               # serialized send/edit delivery
-    sessionActor.ts                 # legacy/experimental actor, not active main path
 
   channel/
     telegram/
       bot.ts                        # bot factory, registers handlers
       telegramPort.ts               # ChannelPort implementation
       pairing.ts                    # user pairing
-      agentFormatter.ts             # legacy formatter helpers still used by middleware/tests
       toolBubble.ts                 # tool bubble HTML formatting
-
-  transport/
-    telegram/
       handlers/                     # active Telegram command/callback/message handlers
       keyboard.ts                   # Telegram inline keyboard builders
-      permissionUI.ts               # older permission helper
       renderer.ts                   # markdown/html Telegram renderer
 
   providers/
@@ -269,50 +259,24 @@ src/
 
   mcp/
     stdio.ts                        # active MCP stdio server entry
+    register.ts                     # shared MCP surface registration
     resources.ts                    # codever context resources/tools
     tools/                          # notify/session tools
-    server.ts                       # context-injected MCP server factory
 
   core/
-    queryLoop.ts                    # compatibility session state, not main runtime
     scheduler.ts                    # timed tasks
-    eventBus.ts                     # compatibility events
-    types.ts                        # compatibility event/state types
+    eventBus.ts                     # session lifecycle events
+    types.ts                        # session event/state types
 
-  middleware/
-    pipeline.ts                     # legacy/compat pipeline, not the main runtime path
-    formatting.ts
-    timeout.ts
-    structureDetector.ts
 ```
 
-## 6. Current Migration State
+## 6. Persistence Notes
 
-The project has already removed the old Claude-specific and old launcher code:
+Topic-level state is the only active session persistence model. Group state stores shared channel settings such as cwd, model, provider, permission mode, verbosity, and timeout defaults.
 
-- `src/loop.ts`
-- `src/providers/telegramLauncher.ts`
-- `src/session/Session.ts`
-- `src/providers/claude/`
-- `src/claude/`
-- top-level `src/telegram/`
-- `src/providers/codebuddy/eventAdapter.ts`
+## 7. Current Ownership
 
-The remaining cleanup is architectural convergence, not another redesign.
-
-## 7. Known Inconsistencies To Clean Up
-
-1. **Dual session cores**: `SemanticSessionRuntime` is the active core, while `QueryLoop` still exposes runtime-like APIs. Shrink `QueryLoop` into metadata.
-2. **Unused pipeline wiring**: `messageRouter` still creates a `MiddlewarePipeline`, and `TopicSessionConfig` accepts it, but `SemanticSessionRuntime` does not use it. Remove this from the active path or explicitly mark it test-only.
-3. **Telegram package split**: `channel/telegram` and `transport/telegram` both contain active Telegram code. Merge handlers, renderer, keyboards, and port into one package boundary.
-4. **Legacy actor**: `runtime/sessionActor.ts` is only test-referenced. Either delete it or make it part of the runtime intentionally.
-5. **MCP entry duplication**: `mcp/stdio.ts` and `mcp/server.ts` register overlapping tools through different paths. Decide which is the public runtime entry and keep the other as a test helper if needed.
-6. **Config compatibility fields**: `claudeSessionId`, group-level `conversationId`, and group-level `queryInProgress` are legacy persistence fields. Keep migration reads, but avoid using them as new state.
-7. **Tests reflect multiple eras**: architecture tests still validate older `QueryLoop/Pipeline` assumptions. Rewrite them around semantic runtime invariants.
-
-## 8. Target Simplification
-
-The intended simple shape is:
+The current ownership chain is:
 
 ```text
 Telegram handlers
@@ -326,7 +290,7 @@ Telegram handlers
   -> TelegramPort
 ```
 
-Target ownership:
+Component ownership:
 
 - `SessionManager` owns lookup and persistence.
 - `TopicSession` owns wiring.
@@ -336,9 +300,9 @@ Target ownership:
 - `DeliveryOutbox` owns delivery reliability.
 - `TelegramPort` owns Telegram API details.
 
-Anything outside this chain should either be a utility, a test helper, or deleted.
+Anything outside this chain should either be a utility or a test helper.
 
-## 9. Stability Invariants
+## 8. Stability Invariants
 
 - One Telegram topic maps to one active `TopicSession`.
 - One `TopicSession` owns one session-scoped provider instance.
@@ -349,15 +313,5 @@ Anything outside this chain should either be a utility, a test helper, or delete
 - Provider switch creates or installs a new provider context and clears incompatible provider session identity.
 - Scheduled and MCP-injected messages use the same runtime path as user messages.
 - Telegram-specific behavior does not leak into provider adapters.
-- Persistence keeps backwards-compatible migration reads, but new state should be topic-level.
-
-## 10. Recommended Cleanup Order
-
-1. Update tests to assert the semantic runtime path.
-2. Remove unused `MiddlewarePipeline` construction from `messageRouter` and `TopicSessionConfig`.
-3. Rename or shrink `QueryLoop` into session metadata.
-4. Merge `transport/telegram` into `channel/telegram`.
-5. Decide whether `runtime/sessionActor.ts` is deleted or used.
-6. Consolidate MCP server entry registration.
-7. Remove or isolate legacy config APIs once migration safety is no longer needed.
+- Persistence is topic-level for session state; group state stores shared settings such as cwd/provider/model defaults.
 

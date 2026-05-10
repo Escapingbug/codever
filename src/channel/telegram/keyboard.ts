@@ -4,13 +4,6 @@ import type { ModelEntry } from '@/providers/provider'
 
 export type ResumeSessionEntry = SessionEntry & { cwd?: string; title: string }
 
-export function permissionKeyboard(requestId: string): InlineKeyboard {
-    return new InlineKeyboard()
-        .text('✅ Allow', `perm:allow:${requestId}`)
-        .text('✅ Always', `perm:session:${requestId}`)
-        .text('❌ Deny', `perm:deny:${requestId}`)
-}
-
 export function modeKeyboard(modes?: string[]): InlineKeyboard {
     if (modes && modes.length > 0) {
         const kb = new InlineKeyboard()
@@ -26,24 +19,6 @@ export function modeKeyboard(modes?: string[]): InlineKeyboard {
         .row()
         .text('bypassPermissions', 'mode:bypassPermissions')
         .text('plan', 'mode:plan')
-}
-
-export interface AskQuestion {
-    question: string
-    header: string
-    options: Array<{ label: string; description: string }>
-    multiSelect: boolean
-}
-
-export function askQuestionKeyboard(requestId: string, questions: AskQuestion[]): InlineKeyboard {
-    const kb = new InlineKeyboard()
-    for (let qIdx = 0; qIdx < questions.length; qIdx++) {
-        const q = questions[qIdx]
-        for (let oIdx = 0; oIdx < q.options.length; oIdx++) {
-            kb.text(q.options[oIdx].label, `ask:${requestId}:${qIdx}:${oIdx}`).row()
-        }
-    }
-    return kb
 }
 
 export function verboseKeyboard(): InlineKeyboard {

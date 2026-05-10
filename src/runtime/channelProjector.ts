@@ -1,5 +1,4 @@
 import type { ChannelMessage } from '@/bridge/channelPort'
-import type { OutputMessage } from '@/middleware/pipeline'
 import type { ConversationEvent } from './semantic'
 import { escapeHtml } from '@/utils/formatting'
 import { formatToolBubble } from '@/channel/telegram/toolBubble'
@@ -29,18 +28,6 @@ interface ProjectedToolState {
 export class ChannelProjector {
     private textBuffer = ''
     private toolStates = new Map<string, ProjectedToolState>()
-
-    fromPipelineOutput(output: OutputMessage, semanticEvent?: ConversationEvent): ProjectedMessage {
-        return {
-            message: output.isMarkdown
-                ? { text: output.text, format: 'markdown' }
-                : { text: output.text, format: 'html', replyMarkup: output.replyMarkup },
-            toolUseId: output.toolUseId,
-            isToolEvent: output.isToolEvent,
-            isTerminal: output.isDone,
-            semanticEvent,
-        }
-    }
 
     project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {

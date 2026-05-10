@@ -4,7 +4,7 @@
  * Design decisions:
  * - Supports both one-shot and recurring tasks.
  * - Persisted to config — survives codever restart.
- * - Triggers via onTrigger callback (typically QueryLoop.processInput()).
+ * - Triggers via onTrigger callback (typically TopicSession.receiveInput()).
  * - One-shot tasks are automatically deleted after firing.
  * - Recurring tasks re-register themselves after each firing.
  */
