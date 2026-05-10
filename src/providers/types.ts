@@ -20,6 +20,9 @@ export interface AgentToolUseEvent {
     locations?: Array<{ path: string; line?: number }>
     /** Extended thinking signature for tool use in reasoning mode */
     thoughtSignature?: string | null
+    /** Display title for the tool call (e.g. file path, descriptive title).
+     *  Separate from canonical toolName to avoid confusing path-like titles with tool names. */
+    displayTitle?: string
 }
 
 export interface AgentToolResultEvent {
@@ -29,6 +32,9 @@ export interface AgentToolResultEvent {
     isError: boolean
     /** Tool name carried with the result (avoids needing a separate lookup map) */
     toolName?: string
+    /** Display title for the tool call (e.g. file path, descriptive title).
+     *  Separate from canonical toolName to avoid confusing path-like titles with tool names. */
+    displayTitle?: string
     /** Preserved raw structured output (exitCode, stdout, etc.) before stringification */
     structuredOutput?: unknown
     /** Structured content blocks from ACP (text, diff, terminal) */

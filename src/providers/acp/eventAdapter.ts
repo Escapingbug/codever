@@ -16,18 +16,47 @@ import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
 const TOOL_NAME_ALIASES: Record<string, string> = {
     bash: 'Bash',
     read: 'Read',
+    'read file': 'Read',
+    read_file: 'Read',
     edit: 'Edit',
+    'edit file': 'Edit',
+    edit_file: 'Edit',
     write: 'Write',
+    'write file': 'Write',
+    write_file: 'Write',
     glob: 'Glob',
     grep: 'Grep',
     agent: 'Agent',
     websearch: 'WebSearch',
+    web_search: 'WebSearch',
     webfetch: 'WebFetch',
+    web_fetch: 'WebFetch',
     todowrite: 'TodoWrite',
+    todo_write: 'TodoWrite',
+    'todo write': 'TodoWrite',
+    todo: 'TodoWrite',
     exitplanmode: 'ExitPlanMode',
+    exit_plan_mode: 'ExitPlanMode',
     task: 'Task',
     skill: 'Skill',
     'loaded skill': 'Skill',
+}
+
+/** Canonical ACP tool names (normalized) that we trust as real tool names */
+const KNOWN_CANONICAL_TOOL_NAMES = new Set([
+    'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep',
+    'WebSearch', 'WebFetch', 'TodoWrite', 'ExitPlanMode',
+    'Task', 'Skill', 'Agent',
+])
+
+/** Check if a title string looks like a trusted canonical tool name */
+function isKnownToolName(title: string): boolean {
+    if (!title) return false
+    // Check exact match first
+    if (KNOWN_CANONICAL_TOOL_NAMES.has(title)) return true
+    // Check alias normalization
+    const normalized = title.toLowerCase()
+    return normalized in TOOL_NAME_ALIASES
 }
 
 export type AcpDebugLog = (line: string) => void
@@ -174,9 +203,17 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 break
             }
 
+            // Determine canonical toolName and displayTitle
+            // rawTitle might be the real tool name OR a file path / descriptive title
+            const isKnown = isKnownToolName(rawTitle)
+            const toolName = isKnown ? normalizeToolName(rawTitle) : 'tool_call'
+            // IMPORTANT: Do NOT use generic 'tool_call'/'tool' as displayTitle
+            const isGenericTitle = !rawTitle || rawTitle === 'tool_call' || rawTitle === 'tool'
+            const displayTitle = isKnown ? undefined : (isGenericTitle ? undefined : rawTitle)
+
             events.push({
                 kind: 'tool_use',
-                toolName: normalizeToolName(rawTitle),
+                toolName,
                 toolUseId: toolCall.toolCallId,
                 input: parseRawInput(toolCall.rawInput),
                 status: mapToolCallStatus(toolCall.status),
@@ -184,6 +221,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 isInputComplete: statusIndicatesComplete(toolCall.status),
                 ...(toolCall.kind ? { toolKind: toolCall.kind } : {}),
                 locations: mapLocations(toolCall.locations),
+                ...(displayTitle ? { displayTitle } : {}),
             })
             break
         }
@@ -200,24 +238,38 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
             }
 
             const isTerminal = toolUpdate.status === 'completed' || toolUpdate.status === 'failed'
+            const isKnown = isKnownToolName(rawTitle)
 
             if (isTerminal) {
+                // For terminal events (completed/failed), do NOT blindly derive canonical toolName from title.
+                // Only set toolName if the title is a known/canonical tool name.
+                // Otherwise omit toolName and set displayTitle so the projector can merge with prior state.
                 const output = extractToolOutput(toolUpdate)
-                const toolName = toolUpdate.title ? normalizeToolName(toolUpdate.title) : undefined
+                const toolName = isKnown ? normalizeToolName(rawTitle) : undefined
+                const displayTitle = isKnown ? undefined : (rawTitle || undefined)
+
                 events.push({
                     kind: 'tool_result',
                     toolUseId: toolUpdate.toolCallId,
                     output,
                     isError: statusIndicatesError(toolUpdate.status),
                     ...(toolName ? { toolName } : {}),
+                    ...(displayTitle ? { displayTitle } : {}),
                     ...(toolUpdate.rawOutput != null ? { structuredOutput: toolUpdate.rawOutput } : {}),
                     content: mapContentBlocks(toolUpdate.content ?? undefined),
                 })
             } else {
-                const toolName = toolUpdate.title ? normalizeToolName(toolUpdate.title) : undefined
+                // For non-terminal updates, title might be a file path or descriptive text.
+                // Only use as canonical toolName if it's a known tool name.
+                // Otherwise use 'tool_call' as generic and store title as displayTitle.
+                // IMPORTANT: Do NOT use generic 'tool_call'/'tool' as displayTitle - it's not descriptive.
+                const toolName = isKnown ? normalizeToolName(rawTitle) : 'tool_call'
+                const isGenericTitle = !rawTitle || rawTitle === 'tool_call' || rawTitle === 'tool'
+                const displayTitle = isKnown ? undefined : (isGenericTitle ? undefined : rawTitle)
+
                 events.push({
                     kind: 'tool_use',
-                    toolName: toolName ?? 'tool_call',
+                    toolName,
                     toolUseId: toolUpdate.toolCallId,
                     input: toolUpdate.rawInput != null ? parseRawInput(toolUpdate.rawInput) : undefined,
                     status: mapToolCallStatus(toolUpdate.status ?? undefined),
@@ -225,6 +277,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                     isInputComplete: statusIndicatesComplete(toolUpdate.status),
                     ...(toolUpdate.kind ? { toolKind: toolUpdate.kind } : {}),
                     locations: mapLocations(toolUpdate.locations ?? undefined),
+                    ...(displayTitle ? { displayTitle } : {}),
                 })
             }
             break

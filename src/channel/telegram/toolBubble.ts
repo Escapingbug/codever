@@ -6,23 +6,35 @@ export interface ToolBubbleState {
     status: 'pending' | 'running' | 'completed' | 'interrupted'
     output?: string
     isError?: boolean
+    displayTitle?: string
+    category?: 'read' | 'edit' | 'write' | 'execute' | 'search' | 'agent' | 'unknown'
+    content?: Array<{ type: 'content'; contentType: string; text?: string } | { type: 'diff'; path?: string; oldText?: string; newText?: string } | { type: 'terminal'; terminalId?: string }>
 }
 
 const TOOL_NAME_ALIASES: Record<string, string> = {
     bash: 'Bash',
     read: 'Read',
     'read file': 'Read',
+    read_file: 'Read',
+    todo_write: 'TodoWrite',
+    'todo write': 'TodoWrite',
+    todo: 'TodoWrite',
     edit: 'Edit',
     'edit file': 'Edit',
+    edit_file: 'Edit',
     write: 'Write',
     'write file': 'Write',
+    write_file: 'Write',
     glob: 'Glob',
     grep: 'Grep',
     agent: 'Agent',
     websearch: 'WebSearch',
+    web_search: 'WebSearch',
     webfetch: 'WebFetch',
+    web_fetch: 'WebFetch',
     todowrite: 'TodoWrite',
     exitplanmode: 'ExitPlanMode',
+    exit_plan_mode: 'ExitPlanMode',
     task: 'Task',
     skill: 'Skill',
     'loaded skill': 'Skill',
@@ -45,7 +57,9 @@ export function formatToolBubble(state: ToolBubbleState): string {
 
     const parts: string[] = []
 
-    parts.push(renderToolHeader(name, input))
+    // If displayTitle exists and toolName is canonical, show "ToolName: displayTitle"
+    // If displayTitle exists and toolName is generic, show displayTitle as the header
+    parts.push(renderToolHeader(name, input, state.displayTitle))
 
     if (isRunning) {
         parts.push('⏳')
@@ -59,8 +73,13 @@ export function formatToolBubble(state: ToolBubbleState): string {
     return parts.join('\n')
 }
 
-function renderToolHeader(name: string, input: Record<string, unknown> | undefined): string {
+function renderToolHeader(name: string, input: Record<string, unknown> | undefined, displayTitle?: string): string {
     const isEmptyInput = !input || (typeof input === 'object' && Object.keys(input).length === 0)
+
+    // Helper to extract file path from various field names
+    const getFilePath = (): string => {
+        return String((input as any)?.file_path || (input as any)?.filePath || (input as any)?.path || '')
+    }
 
     switch (name) {
         case 'Bash': {
@@ -70,16 +89,22 @@ function renderToolHeader(name: string, input: Record<string, unknown> | undefin
             return `💻 <code>$ ${escapeHtml(cmd)}</code>`
         }
         case 'Read': {
-            if (isEmptyInput) return '📖 <b>Read</b>'
-            return `📖 <b>Read</b>: <code>${escapeHtml(String((input as any)?.file_path || ''))}</code>`
+            const filePath = getFilePath()
+            const displayPath = displayTitle || filePath
+            if (!displayPath) return '📖 <b>Read</b>'
+            return `📖 <b>Read</b>: <code>${escapeHtml(displayPath)}</code>`
         }
         case 'Edit': {
-            if (isEmptyInput) return '✏️ <b>Edit</b>'
-            return `✏️ <b>Edit</b>: <code>${escapeHtml(String((input as any)?.file_path || ''))}</code>`
+            const filePath = getFilePath()
+            const displayPath = displayTitle || filePath
+            if (!displayPath) return '✏️ <b>Edit</b>'
+            return `✏️ <b>Edit</b>: <code>${escapeHtml(displayPath)}</code>`
         }
         case 'Write': {
-            if (isEmptyInput) return '📝 <b>Write</b>'
-            return `📝 <b>Write</b>: <code>${escapeHtml(String((input as any)?.file_path || ''))}</code>`
+            const filePath = getFilePath()
+            const displayPath = displayTitle || filePath
+            if (!displayPath) return '📝 <b>Write</b>'
+            return `📝 <b>Write</b>: <code>${escapeHtml(displayPath)}</code>`
         }
         case 'Glob': {
             if (isEmptyInput) return '🔍 <b>Glob</b>'
@@ -91,7 +116,9 @@ function renderToolHeader(name: string, input: Record<string, unknown> | undefin
         }
         case 'Agent': {
             const desc = (input as any)?.description || (input as any)?.prompt?.slice(0, 100) || ''
-            return `🤖 <b>Agent</b>: ${escapeHtml(String(desc))}`
+            const displayDesc = displayTitle || desc
+            if (!displayDesc) return '🤖 <b>Agent</b>'
+            return `🤖 <b>Agent</b>: ${escapeHtml(String(displayDesc))}`
         }
         case 'WebSearch': {
             if (isEmptyInput) return '🌐 <b>Search</b>'
@@ -111,10 +138,12 @@ function renderToolHeader(name: string, input: Record<string, unknown> | undefin
             return `📋 <b>Tasks</b>\n${lines.join('\n')}`
         }
         case 'ExitPlanMode': {
-            const planInput = (input as any)?.plan as string | undefined
+            // Show full plan content if available (HTML escaped)
+            const planContent = (input as any)?.plan as string | undefined
                 || (input as any)?.content as string | undefined
-            if (planInput && typeof planInput === 'string' && planInput.trim()) {
-                return `📋 <b>Plan ready for review</b>`
+                || displayTitle
+            if (planContent && typeof planContent === 'string' && planContent.trim()) {
+                return `📋 <b>Plan</b>\n<pre>${escapeHtml(planContent)}</pre>`
             }
             return '📋 <b>Exited plan mode</b>'
         }
@@ -122,17 +151,22 @@ function renderToolHeader(name: string, input: Record<string, unknown> | undefin
             const desc = (input as any)?.description as string | undefined
             const subagentType = (input as any)?.subagent_type as string | undefined
             const typeLabel = subagentType ? ` (${subagentType})` : ''
-            if (!desc) return `🚀 <b>Task</b>${typeLabel}`
-            return `🚀 <b>Task</b>${typeLabel}: ${escapeHtml(desc)}`
+            const displayDesc = displayTitle || desc
+            if (!displayDesc) return `🚀 <b>Task</b>${typeLabel}`
+            return `🚀 <b>Task</b>${typeLabel}: ${escapeHtml(displayDesc)}`
         }
         case 'Skill': {
             const skillName = (input as any)?.name as string | undefined
             const command = (input as any)?.command as string | undefined
-            if (skillName) return `⚡ <b>Skill</b>: <code>${escapeHtml(skillName)}</code>`
-            if (command) return `⚡ <b>Skill</b>: <code>${escapeHtml(command)}</code>`
+            const displayDesc = displayTitle || skillName || command
+            if (displayDesc) return `⚡ <b>Skill</b>: <code>${escapeHtml(displayDesc)}</code>`
             return `⚡ <b>Skill</b>`
         }
         default: {
+            // For generic tool names, displayTitle might be the actual descriptive name
+            if (isGenericToolName(name) && displayTitle) {
+                return `🔧 <b>${escapeHtml(displayTitle)}</b>`
+            }
             if (isEmptyInput) return `🔧 <b>${escapeHtml(name)}</b>`
             const inputStr = JSON.stringify(input, null, 2)
             return `🔧 <b>${escapeHtml(name)}</b>\n<pre>${escapeHtml(inputStr)}</pre>`
@@ -221,4 +255,8 @@ export class ToolMessageTracker {
         this.messages.clear()
         return pending
     }
+}
+
+function isGenericToolName(toolName: string | undefined): boolean {
+    return !toolName || toolName === 'tool' || toolName === 'tool_call'
 }
