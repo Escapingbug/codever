@@ -24,7 +24,7 @@ Provider Layer      — AcpProvider base → OpencodeProvider / CodebuddyProvide
   - ❌ 错误示范：用户要求写入全局记忆，发现没有全局记忆机制后，不告知用户，直接写入本地文件当作"差不多"。
   - ❌ 错误示范：子代理超时被中断，不告知用户，默默换用其他工具继续推进任务。
   - ✅ 正确做法：先报告错误（"我没有全局记忆的写入能力"），再提出替代方案让用户选择（"我可以写入项目级 AGENTS.md，是否可以？"）。
-- **Every change MUST be made in a git worktree.** Create a worktree on a feature branch before modifying any file. Never edit directly on `bridge` or `master`.
+- **Every change MUST be made in a git worktree.** Create a worktree on a feature branch before modifying any file. Never edit directly on `bridge`; direct edits to `master` are allowed only with explicit user approval.
 - **Never merge without user approval.** After completing and testing changes in a worktree, present the diff and wait for explicit user confirmation before merging (cherry-pick, merge, or rebase) into the target branch.
 - **Clean up after merge.** Once a worktree's changes are merged and confirmed, remove the worktree and delete the feature branch.
 
