@@ -19,22 +19,68 @@ import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput } fr
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
 import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 import { resolve, dirname } from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /**
- * Resolve the path to the codever MCP stdio server entry point.
- * In development, this is relative to the source. In production (tsup bundle),
- * it's relative to the dist directory.
+ * Resolve the command used to launch the codever MCP stdio server.
+ *
+ * Built code runs from dist and can launch dist/mcp/stdio.js directly. Source
+ * runs under tsx, so the MCP server must also be launched through tsx.
  */
-function getCodeverMcpServerPath(): string {
+interface CodeverMcpServerCommand {
+    command: string
+    args: string[]
+}
+
+interface CodeverMcpResolutionOptions {
+    moduleUrl?: string
+    cwd?: string
+    nodePath?: string
+    pathExists?: (path: string) => boolean
+}
+
+export function resolveCodeverMcpServerCommand(options: CodeverMcpResolutionOptions = {}): CodeverMcpServerCommand {
+    const moduleUrl = options.moduleUrl ?? import.meta.url
+    const cwd = options.cwd ?? process.cwd()
+    const nodePath = options.nodePath ?? process.execPath
+    const pathExists = options.pathExists ?? existsSync
+    const moduleDir = getModuleDir(moduleUrl)
+
+    const builtCandidates = [
+        ...(moduleDir ? [resolve(moduleDir, 'mcp', 'stdio.js')] : []),
+        resolve(cwd, 'dist', 'mcp', 'stdio.js'),
+    ]
+
+    for (const entry of builtCandidates) {
+        if (pathExists(entry)) {
+            return { command: nodePath, args: [entry] }
+        }
+    }
+
+    const sourceCandidates = [
+        ...(moduleDir ? [resolve(moduleDir, '..', '..', 'mcp', 'stdio.ts')] : []),
+        resolve(cwd, 'src', 'mcp', 'stdio.ts'),
+    ]
+
+    for (const entry of sourceCandidates) {
+        if (!pathExists(entry)) continue
+        const projectRoot = resolve(dirname(entry), '..', '..')
+        const tsxCli = resolve(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+        if (pathExists(tsxCli)) {
+            return { command: nodePath, args: [tsxCli, entry] }
+        }
+        return { command: 'tsx', args: [entry] }
+    }
+
+    return { command: nodePath, args: [builtCandidates[0] ?? resolve(cwd, 'dist', 'mcp', 'stdio.js')] }
+}
+
+function getModuleDir(moduleUrl: string): string | null {
     try {
-        const __filename = fileURLToPath(import.meta.url)
-        const __dirname = dirname(__filename)
-        // dist/daemon.js → dist/mcp/stdio.js
-        return resolve(__dirname, 'mcp', 'stdio.js')
+        return dirname(fileURLToPath(moduleUrl))
     } catch {
-        // Fallback: assume cwd
-        return resolve(process.cwd(), 'dist', 'mcp', 'stdio.js')
+        return null
     }
 }
 
@@ -119,14 +165,13 @@ function buildCodeverMcpBaseConfig(): Array<{
     args: string[]
     env: Array<{ name: string; value: string }>
 }> {
-    const mcpServerPath = getCodeverMcpServerPath()
-    const nodePath = process.execPath
+    const mcpServer = resolveCodeverMcpServerCommand()
 
     return [{
         type: 'stdio' as const,
         name: 'codever',
-        command: nodePath,
-        args: [mcpServerPath],
+        command: mcpServer.command,
+        args: mcpServer.args,
         env: [],
     }]
 }
@@ -138,14 +183,13 @@ function buildCodeverMcpFullConfig(sessionId: string): Array<{
     args: string[]
     env: Array<{ name: string; value: string }>
 }> {
-    const mcpServerPath = getCodeverMcpServerPath()
-    const nodePath = process.execPath
+    const mcpServer = resolveCodeverMcpServerCommand()
 
     return [{
         type: 'stdio' as const,
         name: 'codever',
-        command: nodePath,
-        args: [mcpServerPath],
+        command: mcpServer.command,
+        args: mcpServer.args,
         env: [
             { name: 'CODEVER_CONVERSATION_ID', value: sessionId },
         ],
