@@ -39,6 +39,7 @@ export interface AgentQueryConfig {
     model?: string
     permissionHandler?: AgentPermissionHandler
     providerSettings?: Record<string, unknown>
+    debugLog?: (line: string) => void
 }
 
 export interface ModelEntry {

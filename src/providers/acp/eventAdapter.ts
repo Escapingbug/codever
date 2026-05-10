@@ -30,6 +30,13 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     'loaded skill': 'Skill',
 }
 
+export type AcpDebugLog = (line: string) => void
+
+const ACP_DEBUG_MAX_STRING_LENGTH = 48
+const ACP_DEBUG_MAX_ARRAY_ITEMS = 20
+const ACP_DEBUG_MAX_OBJECT_KEYS = 30
+const ACP_DEBUG_MAX_DEPTH = 6
+
 function normalizeToolName(title: string): string {
     return TOOL_NAME_ALIASES[title.toLowerCase()] || title
 }
@@ -103,8 +110,9 @@ export async function* adaptAcpSessionUpdates(
     }
 }
 
-export function mapSessionUpdate(update: SessionUpdate): AgentEvent[] {
+export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog): AgentEvent[] {
     const events: AgentEvent[] = []
+    logAcpDebugUpdate(update, debugLog)
 
     switch (update.sessionUpdate) {
         case 'agent_message_chunk': {
@@ -263,6 +271,62 @@ export function mapSessionUpdate(update: SessionUpdate): AgentEvent[] {
     }
 
     return events
+}
+
+function logAcpDebugUpdate(update: SessionUpdate, debugLog?: AcpDebugLog): void {
+    if (!debugLog || shouldSkipAcpDebugUpdate(update)) return
+    debugLog(`[ACP-DEBUG] ${safeStringifyForAcpDebug(update)}`)
+}
+
+function shouldSkipAcpDebugUpdate(update: SessionUpdate): boolean {
+    if (update.sessionUpdate === 'user_message_chunk') return true
+    if (update.sessionUpdate === 'agent_thought_chunk') return true
+
+    if (update.sessionUpdate === 'agent_message_chunk') {
+        const chunk = update as ContentChunk & { sessionUpdate: 'agent_message_chunk' }
+        return chunk.content?.type === 'text'
+    }
+
+    return false
+}
+
+function safeStringifyForAcpDebug(value: unknown): string {
+    try {
+        return JSON.stringify(truncateForAcpDebug(value, 0, new WeakSet<object>()))
+    } catch {
+        return JSON.stringify({ error: 'failed_to_stringify_acp_update', sessionUpdate: (value as { sessionUpdate?: unknown })?.sessionUpdate })
+    }
+}
+
+function truncateForAcpDebug(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+    if (typeof value === 'string') {
+        if (value.length <= ACP_DEBUG_MAX_STRING_LENGTH) return value
+        return `${value.slice(0, ACP_DEBUG_MAX_STRING_LENGTH)}…(${value.length} chars)`
+    }
+
+    if (value === null || typeof value !== 'object') return value
+
+    if (seen.has(value)) return '[Circular]'
+    if (depth >= ACP_DEBUG_MAX_DEPTH) return '[MaxDepth]'
+    seen.add(value)
+
+    if (Array.isArray(value)) {
+        const items = value.slice(0, ACP_DEBUG_MAX_ARRAY_ITEMS).map(item => truncateForAcpDebug(item, depth + 1, seen))
+        if (value.length > ACP_DEBUG_MAX_ARRAY_ITEMS) {
+            items.push(`…(${value.length - ACP_DEBUG_MAX_ARRAY_ITEMS} more items)`)
+        }
+        return items
+    }
+
+    const out: Record<string, unknown> = {}
+    const entries = Object.entries(value as Record<string, unknown>)
+    for (const [key, item] of entries.slice(0, ACP_DEBUG_MAX_OBJECT_KEYS)) {
+        out[key] = truncateForAcpDebug(item, depth + 1, seen)
+    }
+    if (entries.length > ACP_DEBUG_MAX_OBJECT_KEYS) {
+        out.__truncatedKeys = entries.length - ACP_DEBUG_MAX_OBJECT_KEYS
+    }
+    return out
 }
 
 function mapToolCallStatus(status: string | undefined | null): 'pending' | 'running' | undefined {

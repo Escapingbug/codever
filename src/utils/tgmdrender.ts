@@ -6,32 +6,38 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 // Resolve the Python script path.
 // In development, import.meta.url points to src/utils/tgmdrender.ts
 // In production (tsup bundle), it points to dist/daemon.js
 // We try multiple candidate paths and use the first one that exists.
 function findTgmdrenderScript(): string {
-    // Strategy 1: relative to process.cwd() (daemon runs from project root)
-    const cwdCandidate = resolve(process.cwd(), 'scripts/tgmdrender.py')
-    if (existsSync(cwdCandidate)) return cwdCandidate
+    const moduleDir = dirname(fileURLToPath(import.meta.url))
+    const candidates = [
+        process.env.CODEVER_TGMDRENDER_PY,
+        // Development: src/utils/tgmdrender.ts -> scripts/tgmdrender.py
+        resolve(moduleDir, '../../scripts/tgmdrender.py'),
+        // Bundled CLI/daemon: dist/*.js -> scripts/tgmdrender.py
+        resolve(moduleDir, '../scripts/tgmdrender.py'),
+        resolve(process.cwd(), 'scripts/tgmdrender.py'),
+    ].filter((candidate): candidate is string => Boolean(candidate))
 
-    // Strategy 2: relative to this file (works in dev, not in bundle)
-    try {
-        const { dirname } = require('node:path')
-        const { fileURLToPath } = require('node:url')
-        const __dirname = dirname(fileURLToPath(import.meta.url))
-        const fileCandidate = resolve(__dirname, '../../scripts/tgmdrender.py')
-        if (existsSync(fileCandidate)) return fileCandidate
-    } catch {}
+    const found = candidates.find(candidate => existsSync(candidate))
+    if (found) return found
 
-    // Fallback: assume cwd
-    return cwdCandidate
+    return candidates[0] ?? resolve(process.cwd(), 'scripts/tgmdrender.py')
 }
 
 const TGMDRENDER_PY = findTgmdrenderScript()
+
+function ensureTgmdrenderScript(): void {
+    if (!existsSync(TGMDRENDER_PY)) {
+        throw new Error(`tgmdrender.py not found at ${TGMDRENDER_PY}`)
+    }
+}
 
 /** A single Telegram MessageEntity as returned by tgmdrender */
 export interface TgEntity {
@@ -96,6 +102,7 @@ interface SpawnResult {
 }
 
 function spawnSyncChecked(args: string[], input: string, timeoutMs: number): SpawnResult {
+    ensureTgmdrenderScript()
     const result = spawnSync('python', [TGMDRENDER_PY, ...args], {
         input,
         timeout: timeoutMs,
@@ -111,6 +118,7 @@ function spawnSyncChecked(args: string[], input: string, timeoutMs: number): Spa
 }
 
 function spawnAsync(args: string[], input: string, timeoutMs: number): Promise<SpawnResult> {
+    ensureTgmdrenderScript()
     return new Promise((resolve, reject) => {
         const child = spawn('python', [TGMDRENDER_PY, ...args], {
             stdio: ['pipe', 'pipe', 'pipe'],
@@ -173,6 +181,7 @@ export async function tgmdSplit(markdown: string, maxUtf16: number = 4000): Prom
  * Uses tgmdrender table subcommand.
  */
 export async function tgmdTableImage(markdown: string, theme: string = 'github-dark'): Promise<Buffer> {
+    ensureTgmdrenderScript()
     return new Promise((resolve, reject) => {
         const child = spawn('python', [TGMDRENDER_PY, 'table', '--theme', theme], {
             stdio: ['pipe', 'pipe', 'pipe'],

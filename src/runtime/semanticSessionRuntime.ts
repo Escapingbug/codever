@@ -136,6 +136,7 @@ export class SemanticSessionRuntime {
             model: this.config.model ?? undefined,
             permissionHandler: this.createPermissionHandler(),
             providerSettings: this.config.providerSettings ?? {},
+            debugLog: (line) => this.log(line),
         })
         this.currentHandle = handle
 

@@ -15,7 +15,7 @@ import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, ModelEntry } fr
 import type { AgentEvent } from '@/providers/types'
 import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import { AcpClientManager, type AcpClientManagerConfig } from './AcpClientManager'
-import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput } from './eventAdapter'
+import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput, type AcpDebugLog } from './eventAdapter'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
 import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 import { resolve, dirname } from 'node:path'
@@ -92,8 +92,8 @@ interface ToolCallSnapshot {
     locations?: Array<{ path: string; line?: number }>
 }
 
-function mapSessionUpdateWithToolState(update: SessionUpdate, toolCalls: Map<string, ToolCallSnapshot>): AgentEvent[] {
-    return normalizeToolEvents(mapSessionUpdate(update), toolCalls)
+function mapSessionUpdateWithToolState(update: SessionUpdate, toolCalls: Map<string, ToolCallSnapshot>, debugLog?: AcpDebugLog): AgentEvent[] {
+    return normalizeToolEvents(mapSessionUpdate(update, debugLog), toolCalls)
 }
 
 function normalizeToolEvents(events: AgentEvent[], toolCalls: Map<string, ToolCallSnapshot>): AgentEvent[] {
@@ -595,7 +595,7 @@ export class AcpProvider implements AgentProvider {
                         try {
                             const notification = await clientManager.waitForSessionUpdate(sessionId!)
                             if (events.done) break
-                            const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls)
+                            const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls, config.debugLog)
                             for (const event of agentEvents) {
                                 if (events.done) break
                                 const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
@@ -634,7 +634,7 @@ export class AcpProvider implements AgentProvider {
                     while (remaining) {
                         const updateType = (remaining.update as any)?.sessionUpdate ?? '?'
                         console.error(`[acp] dequeueSessionUpdate: updateType=${updateType}`)
-                        const agentEvents = mapSessionUpdateWithToolState(remaining.update, toolCalls)
+                        const agentEvents = mapSessionUpdateWithToolState(remaining.update, toolCalls, config.debugLog)
                         for (const event of agentEvents) {
                             if (events.done) break
                             const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
