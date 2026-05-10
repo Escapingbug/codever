@@ -46,6 +46,7 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
                     toolName: event.toolName,
                     category: categorizeTool(event.toolName, event.toolKind),
                     input: event.input,
+                    ...(event.displayTitle ? { displayTitle: event.displayTitle } : {}),
                 }]
 
             case 'tool_result':
@@ -58,6 +59,8 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
                     category: categorizeTool(event.toolName),
                     output: event.output,
                     isError: event.isError,
+                    ...(event.displayTitle ? { displayTitle: event.displayTitle } : {}),
+                    ...(event.content ? { content: event.content } : {}),
                 }]
 
             case 'result':

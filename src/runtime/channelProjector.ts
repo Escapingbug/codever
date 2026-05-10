@@ -19,6 +19,11 @@ export interface ChannelProjectorOptions {
 interface ProjectedToolState {
     toolName: string
     input?: unknown
+    output?: unknown
+    isError?: boolean
+    displayTitle?: string
+    category?: 'read' | 'edit' | 'write' | 'execute' | 'search' | 'agent' | 'unknown'
+    content?: Array<{ type: 'content'; contentType: string; text?: string } | { type: 'diff'; path?: string; oldText?: string; newText?: string } | { type: 'terminal'; terminalId?: string }>
 }
 
 export class ChannelProjector {
@@ -87,7 +92,7 @@ export class ChannelProjector {
                     ...this.flushText(),
                     {
                         message: {
-                            text: `<b>${escapeHtml(event.command)}</b>\n<pre>${escapeHtml(formatUnknown(event.output))}</pre>`,
+                            text: formatCommandResult(event.command, event.output),
                             format: 'html',
                         },
                         isToolEvent: false,
@@ -167,9 +172,37 @@ export class ChannelProjector {
 
     private projectTool(event: Extract<ConversationEvent, { kind: 'tool' }>, options: ChannelProjectorOptions): ProjectedMessage {
         const existing = this.toolStates.get(event.toolCallId)
-        const toolName = isGenericToolName(event.toolName) && existing?.toolName ? existing.toolName : event.toolName
+
+        // Patch merge: preserve canonical toolName from initial event
+        // Only use event.toolName if it's a known canonical name, otherwise keep existing
+        let toolName: string
+        if (existing?.toolName && !isGenericToolName(existing.toolName)) {
+            toolName = existing.toolName
+        } else if (event.toolName && !isGenericToolName(event.toolName)) {
+            toolName = event.toolName
+        } else {
+            toolName = existing?.toolName || event.toolName || 'tool_call'
+        }
+
+        // Merge input: prefer current event's input, fall back to existing
         const input = event.input !== undefined ? event.input : existing?.input
-        this.toolStates.set(event.toolCallId, { toolName, input })
+
+        // Merge output/error so terminal patches can enrich an existing started event.
+        const output = event.output !== undefined ? event.output : existing?.output
+        const isError = event.isError ?? existing?.isError
+
+        // Merge displayTitle: prefer the latest descriptive title/path.
+        const displayTitle = event.displayTitle ?? existing?.displayTitle
+
+        // Merge category
+        const category = event.category ?? existing?.category
+
+        // Merge content blocks
+        const content = event.content ?? existing?.content
+
+        // Save merged state
+        this.toolStates.set(event.toolCallId, { toolName, input, output, isError, displayTitle, category, content })
+
         const status = event.phase === 'failed'
             ? 'interrupted'
             : event.phase === 'completed'
@@ -177,17 +210,30 @@ export class ChannelProjector {
                 : event.phase === 'updated'
                     ? 'running'
                     : 'pending'
+
         const includeOutput = shouldIncludeToolOutput(event, options.verboseLevel ?? 1)
+
+        // Build effective tool name for display
+        // Use toolName for canonical tools, displayTitle for path-like titles
+        // If toolName is generic (tool_call/tool), use displayTitle if available
+        let effectiveToolName = toolName
+        if (isGenericToolName(toolName) && displayTitle) {
+            effectiveToolName = displayTitle
+        }
+
         return {
             message: {
                 text: formatToolBubble({
-                    toolName,
+                    toolName: effectiveToolName,
                     input,
                     status,
                     output: includeOutput
-                        ? typeof event.output === 'string' ? event.output : event.output === undefined ? undefined : formatUnknown(event.output)
+                        ? typeof output === 'string' ? output : output === undefined ? undefined : formatUnknown(output)
                         : undefined,
-                    isError: event.isError,
+                    isError,
+                    displayTitle,
+                    category,
+                    content,
                 }),
                 format: 'html',
             },
@@ -216,4 +262,102 @@ function formatUnknown(value: unknown): string {
     } catch {
         return String(value)
     }
+}
+
+function formatCommandResult(command: string, output: unknown): string {
+    const commandLower = command.toLowerCase()
+
+    // available_commands_update: show as a list of commands
+    if (commandLower.includes('available_commands') || commandLower.includes('commands_update')) {
+        const commands = Array.isArray(output) ? output : []
+        if (commands.length === 0) {
+            return '💡 Provider commands updated (0 available). Use /help to see them.'
+        }
+        const lines = commands.map((cmd: any) => {
+            const name = cmd.name || cmd.command || 'unknown'
+            const desc = cmd.description || ''
+            const hint = cmd.inputHint || cmd.input?.hint || ''
+            const prefix = String(name).startsWith('/') ? '' : '/'
+            return `• <code>${prefix}${escapeHtml(String(name))}</code>${desc ? ` - ${escapeHtml(String(desc))}` : ''}${hint ? ` <i>(${escapeHtml(String(hint))})</i>` : ''}`
+        })
+        return `💡 Provider commands updated (${commands.length} available). Use /help to see them.\n${lines.join('\n')}`
+    }
+
+    // plan: show plan content
+    if (commandLower === 'plan') {
+        const planText = extractPlanContent(output)
+        if (planText) {
+            return `<b>📋 Plan</b>\n${escapeHtml(planText)}`
+        }
+        return '📋 <b>Exited plan mode</b>'
+    }
+
+    // usage_update: show token/cost info
+    if (commandLower.includes('usage')) {
+        const usage = asRecord(output)
+        if (usage) {
+            const parts: string[] = ['<b>📊 Usage</b>']
+            const inputTokens = usage.inputTokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.prompt_tokens
+            const outputTokens = usage.outputTokens ?? usage.output_tokens ?? usage.completionTokens ?? usage.completion_tokens
+            const totalTokens = usage.totalTokens ?? usage.total_tokens
+            const cost = usage.costUSD ?? usage.costUsd ?? usage.cost_usd ?? usage.totalCost ?? usage.total_cost
+            if (inputTokens !== undefined || outputTokens !== undefined) {
+                parts.push(`Tokens: ${inputTokens ?? 0} in / ${outputTokens ?? 0} out`)
+            }
+            if (totalTokens !== undefined) {
+                parts.push(`Total: ${totalTokens}`)
+            }
+            if (cost !== undefined) {
+                parts.push(`Cost: $${cost}`)
+            }
+            if (parts.length === 1) parts.push('Updated')
+            return parts.join('\n')
+        }
+    }
+
+    // session_info_update: show session info
+    if (commandLower.includes('session_info')) {
+        const info = asRecord(output)
+        if (info) {
+            const parts: string[] = ['<b>ℹ️ Session Info</b>']
+            if (info.model) parts.push(`Model: <code>${escapeHtml(String(info.model))}</code>`)
+            if (info.cwd) parts.push(`CWD: <code>${escapeHtml(String(info.cwd))}</code>`)
+            if (info.sessionId) parts.push(`Session: <code>${escapeHtml(String(info.sessionId))}</code>`)
+            return parts.join('\n')
+        }
+    }
+
+    // config_option_update: show config changes
+    if (commandLower.includes('config_option')) {
+        const config = asRecord(output)
+        if (config) {
+            const parts: string[] = ['<b>⚙️ Config Update</b>']
+            for (const [key, value] of Object.entries(config)) {
+                parts.push(`• ${escapeHtml(key)}: <code>${escapeHtml(String(value))}</code>`)
+            }
+            return parts.join('\n')
+        }
+    }
+
+    // Default: fallback to JSON dump with proper escaping
+    return `<b>${escapeHtml(command)}</b>\n<pre>${escapeHtml(formatUnknown(output))}</pre>`
+}
+
+function extractPlanContent(output: unknown): string | null {
+    if (typeof output === 'string') return output
+    const record = asRecord(output)
+    if (!record) return null
+
+    // Try common field names for plan content
+    const content = record.content || record.text || record.description || record.plan
+    if (typeof content === 'string') return content
+
+    // If output has options (decision request), don't try to extract plan
+    if (record.options || record.choices) return null
+
+    return null
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' ? value as Record<string, unknown> : null
 }

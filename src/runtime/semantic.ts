@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@/providers/types'
+import type { AgentEvent, ToolResultContentBlock } from '@/providers/types'
 
 export type SessionInputSource = 'channel' | 'scheduler' | 'mcp' | 'system'
 
@@ -80,6 +80,11 @@ export type ConversationEvent =
         input?: unknown
         output?: unknown
         isError?: boolean
+        /** Display title for the tool call (e.g. file path, descriptive title).
+         *  Separate from canonical toolName to avoid confusing path-like titles with tool names. */
+        displayTitle?: string
+        /** Structured content blocks from ACP (text, diff, terminal) */
+        content?: Array<ToolResultContentBlock>
     }
     | {
         kind: 'decision_request'
