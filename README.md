@@ -5,9 +5,9 @@ ACP ↔ Channel Bridge. Connect ACP-compatible coding agents to Telegram (and fu
 ## Features
 
 - **Remote TUI**: Full local TUI experience over Telegram — text, tool calls, permissions, everything
-- **ACP Protocol**: Works with any ACP-compatible agent (opencode, codebuddy)
+- **ACP Protocol**: Works with ACP-compatible agents (opencode, codebuddy, Cursor agent)
 - **Permission handling**: Approve/deny agent tool use via Telegram inline keyboards
-- **Multi-provider**: Switch between opencode, codebuddy per session
+- **Multi-provider**: Switch between opencode, codebuddy, and agent per session
 - **Session management**: Resume past sessions, list history, switch providers
 - **MCP tools**: Agents can schedule reminders, manage sessions, and interact with codever
 - **No backend server**: Runs entirely on your machine using Telegram long polling
@@ -16,7 +16,7 @@ ACP ↔ Channel Bridge. Connect ACP-compatible coding agents to Telegram (and fu
 
 - Node.js >= 20
 - pnpm
-- At least one ACP-compatible agent (opencode or codebuddy) in PATH
+- At least one ACP-compatible agent (opencode, codebuddy, or Cursor agent) in PATH
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 
 ## Installation
@@ -95,7 +95,7 @@ This starts the codever daemon in the background. The Telegram bot begins pollin
 | `/archive` | Archive the group session |
 | `/resume <id>` | Resume a specific session |
 | `/session` | List available sessions |
-| `/provider <name>` | Switch provider (opencode, codebuddy) |
+| `/provider <name>` | Switch provider (opencode, codebuddy, agent) |
 | `/config` | Show current configuration |
 | `/verbose <level>` | Set output verbosity |
 | `/restart` | Restart the daemon |
@@ -115,18 +115,22 @@ codever config show               Show current configuration
 
 ## Architecture
 
-Codever is an ACP ↔ Channel Bridge with structure-aware output processing:
+Codever is an ACP ↔ Channel Bridge built around a semantic runtime:
 
 ```
-Channel Layer       — Telegram / Discord / CLI (replaceable, implements ChannelPort)
-Bridge Layer        — SessionBridge (wiring) + SessionManager (lifecycle) + ChannelPort interface
-Core Layer          — CoreSession state machine + EventBus + Scheduler (~600 LOC)
-Middleware Layer    — Structure-aware Pipeline + Formatting + Timeout
-MCP Layer           — MCP server exposed to agent via ACP mcpServers param
-Provider Layer      — AcpProvider base → OpencodeProvider / CodebuddyProvider
+Telegram handlers   → route commands, callbacks, and topic messages
+SessionManager      → owns topic/session lookup and persisted group state
+TopicSession        → wires one Telegram topic to one runtime session
+Semantic Runtime    → runs turns, cancellation, commands, and finalization
+Provider Adapter    → normalizes ACP/provider events into ConversationEvent
+Channel Projector   → converts ConversationEvent into ChannelMessage
+Delivery Outbox     → serializes Telegram send/edit operations
+TelegramPort        → implements ChannelPort for Telegram API details
+MCP Layer           → exposes codever resources and notify tools to agents
+Provider Layer      → ACP providers: opencode, codebuddy, agent
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full design document.
+See [docs/architecture.md](docs/architecture.md) for the full current design.
 
 ## Development
 

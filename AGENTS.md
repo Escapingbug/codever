@@ -1,22 +1,31 @@
 <!-- architecture:start -->
-# Architecture & Implementation Plan
+# Architecture & Implementation Notes
 
 Full design doc: `docs/architecture.md`
 
 ## Project Purpose
 
-Codever is an **ACP ↔ Channel Bridge**. It connects ACP-compatible coding agents to messaging channels (currently Telegram), faithfully replicating the local TUI experience remotely. On top of this bridge, codever exposes itself as an MCP server to agents, enabling proactive messaging, self-awareness, and management.
+Codever is an **ACP to Channel bridge**. It connects ACP-compatible coding agents to messaging channels, currently Telegram, and exposes Codever-specific MCP tools/resources back to the running agent.
 
-## Architecture Layers
+## Current Architecture
 
+The active runtime shape is:
+
+```text
+Telegram update
+  -> Telegram handlers
+  -> SessionManager
+  -> TopicSession
+  -> SemanticSessionRuntime
+  -> AgentProvider / ACP
+  -> ProviderSemanticAdapter
+  -> ConversationEvent
+  -> ChannelProjector
+  -> DeliveryOutbox
+  -> TelegramPort
 ```
-Channel Layer       — Telegram / Discord / CLI (replaceable, implements ChannelPort)
-Bridge Layer        — SessionBridge (wiring) + SessionManager (lifecycle) + ChannelPort interface
-Core Layer          — CoreSession state machine + EventBus + Scheduler (~600 LOC)
-Middleware Layer    — Structure-aware Pipeline + Formatting + Timeout (dedup/content-limit inlined)
-MCP Layer           — MCP server exposed to agent via ACP mcpServers param
-Provider Layer      — AcpProvider base → OpencodeProvider / CodebuddyProvider
-```
+
+This is a **Telegram Topic Session Gateway with a Semantic Runtime**. Older names such as `CoreSession`, `SessionBridge`, and "Pipeline as the main runtime" describe a previous migration target, not the active architecture.
 
 ## Project Principles
 
@@ -30,120 +39,77 @@ Provider Layer      — AcpProvider base → OpencodeProvider / CodebuddyProvide
 
 ## Key Invariants
 
-- **Core never imports Channel, MCP, or Provider** — only interfaces and types
-- **ChannelPort is the only channel abstraction** — Telegram/Discord/CLI each implement it
-- **Pipeline flushes are structure-aware** — never split mid-table, mid-code-block, mid-list
-- **Session state machine is the sole authority** for query lifecycle: `idle → querying → canceling → idle`
-- **Provider switch = session recreation** — destroy old session, create new with new provider
-- **Scheduler triggers via processInput()** — same path as user messages, no special state
-- **MCP tools are the only way agents interact with codever** — no special protocols
+- **One Telegram topic maps to one active `TopicSession`.**
+- **`SemanticSessionRuntime` is the execution core** for query, cancel, command, and finalize behavior.
+- **Provider events are normalized before rendering**: `AgentEvent -> ConversationEvent -> ChannelMessage`.
+- **`DeliveryOutbox` is the only send/edit reliability layer** for channel delivery.
+- **`TelegramPort` owns Telegram API details** including send, edit, table rendering, chat actions, and decision UI.
+- **`SessionManager` owns session lookup and persisted group/topic state.**
+- **Scheduled and MCP-injected messages use the same runtime path as user messages.**
+- **`QueryLoop` is compatibility/session metadata, not the primary runtime loop.**
 
-## Implementation Phases
+## Component Map
 
-```
-P0-P3 ✅ → P4 (Dead Code Cleanup) → P5 (Middleware Simplification) → P6 (Bridge Refactoring) → P7 (MCP + Scheduler)
-```
-
-### P0-P3: Original Architecture — ✅ DONE
-
-CoreSession, middleware pipeline, transport decoupling completed. See git history for details.
-
-### P4: Dead Code Cleanup (Zero Risk)
-
-Delete ~2,100 lines of dead code:
-- `src/loop.ts` — zero callers
-- `src/providers/telegramLauncher.ts` — only called by loop.ts
-- `src/session/Session.ts` — old Session class, never instantiated in active paths
-- `src/claude/utils/permissionHandler.ts` — duplicate of permissionUI.ts
-- `src/providers/claude/` — deprecated ClaudeProvider (doesn't use ACP)
-- `src/claude/sdk/` (query/stream/types) — only used by ClaudeProvider
-- `src/claude/claudeSessions.ts` — only used by ClaudeProvider
-- `src/providers/codebuddy/eventAdapter.ts` — dead old-SDK adapter
-- `src/telegram/keyboard.ts` — duplicate of transport/telegram/keyboard.ts
-- `src/telegram/formatter.ts` — zero callers
-
-Move shared utils: `claude/sdk/utils.ts` → `utils/nodePath.ts`, `claude/utils/generateHookSettings.ts` → `utils/hookSettings.ts`, `claude/utils/startHookServer.ts` → `utils/hookServer.ts`
-
-Fix bugs: `/status` uses wrong session map, `getCwdForChat()` queries old Session, daemon hook server uses old lookup.
-
-### P5: Middleware Simplification
-
-- Delete `permission.ts` middleware (redundant with TelegramPermissionHandler)
-- Inline dedup into pipeline (Set<string>)
-- Move `splitHtmlChunks` to `utils/formatting.ts`, inline content-limit into pipeline
-- Add `structureDetector.ts` for markdown-aware flush (tables, code blocks, lists)
-- Implement tool call progressive display (brief buffer + ChannelPort.edit)
-
-### P6: Bridge Refactoring
-
-- Extract `ChannelPort` interface
-- Create `sessionBridge.ts` replacing `coreSessionLauncher.ts`
-- Create `TelegramPort` implementing `ChannelPort`
-- Move `coreSessionRunners` into `SessionManager`
-- Fix provider switch (destroy + recreate instead of name change)
-- Merge `src/telegram/` into `src/channel/telegram/`
-
-### P7: MCP Server + Scheduler
-
-- Implement MCP server (stdio transport) with tools: schedule_reminder, list_sessions, switch_session, etc.
-- Implement `Scheduler` with config persistence
-- Wire `mcpServers` in `AcpProvider.startQuery()`
-
-## File Map (Target State)
-
-```
+```text
 src/
-  core/                              # Channel-agnostic, provider-agnostic
-    session.ts                       # CoreSession state machine
-    eventBus.ts                      # DefaultEventBus
-    types.ts                         # SessionEvent types
-    scheduler.ts                     # Timed task scheduling
+  daemon.ts                         # composition root
+  config.ts                         # persistent config and legacy migration
 
-  bridge/                            # Wires core + provider + channel
-    sessionBridge.ts                 # CoreSession + Provider + ChannelPort + Pipeline wiring
-    channelPort.ts                   # ChannelPort interface + types
-    sessionManager.ts                # Session lifecycle + persistence
+  bridge/
+    channelPort.ts                  # ChannelPort and TopicSession interfaces
+    sessionManager.ts               # session registry and persisted group/topic state
+    topicSession.ts                 # topic -> SemanticSessionRuntime bridge
 
-  channel/                           # Channel implementations
-    telegram/
-      telegramPort.ts                # ChannelPort implementation
-      renderer.ts                    # Telegram message sending
-      permissionUI.ts                # Permission inline keyboard
-      keyboard.ts                    # Keyboard builders
-      agentFormatter.ts              # AgentEvent → HTML/Markdown
-      ConversationModel.ts           # Tool call state tracking
-      pairing.ts                     # User pairing
-      handlers/                      # Command/callback handlers
-      bot.ts                         # Bot factory
+  runtime/
+    semantic.ts                     # SessionInput and ConversationEvent model
+    semanticSessionRuntime.ts       # active execution runtime
+    providerAdapter.ts              # AgentEvent -> ConversationEvent
+    channelProjector.ts             # ConversationEvent -> ChannelMessage
+    deliveryOutbox.ts               # serialized send/edit delivery
+    sessionActor.ts                 # legacy/experimental actor, not active main path
 
-  mcp/                               # MCP server (agent → codever tools)
-    server.ts                        # MCP server entry point
-    tools/                           # Tool implementations
+  channel/telegram/
+    bot.ts                          # bot factory
+    telegramPort.ts                 # ChannelPort implementation
+    pairing.ts                      # user pairing
+    toolBubble.ts                   # tool bubble formatting
+    agentFormatter.ts               # legacy formatter helpers
 
-  middleware/                         # Output processing
-    pipeline.ts                      # Structure-aware buffering + flush + dedup + content-limit
-    structureDetector.ts             # Markdown structure detection
-    formatting.ts                    # AgentEvent → Markdown/HTML
-    timeout.ts                       # Heartbeat + timeout detection
-    types.ts                         # Middleware interface
+  transport/telegram/
+    handlers/                       # active Telegram command/callback/message handlers
+    keyboard.ts                     # inline keyboard builders
+    permissionUI.ts                 # older permission helper
+    renderer.ts                     # markdown/html Telegram renderer
 
-  providers/                          # ACP protocol layer
-    provider.ts                      # AgentProvider interface
-    types.ts                         # AgentEvent types
-    registry.ts                      # Provider registry
-    acp/                             # AcpProvider + AcpClientManager + eventAdapter
-    opencode/                        # OpencodeProvider
-    codebuddy/                       # CodebuddyProvider
+  providers/
+    provider.ts                     # AgentProvider interface
+    types.ts                        # AgentEvent model
+    registry.ts                     # provider catalog and factories
+    acp/                            # shared ACP provider implementation
+    opencode/                       # opencode provider
+    codebuddy/                      # codebuddy provider
+    agent/                          # Cursor agent provider
 
-  utils/
-    formatting.ts                    # escapeHtml + splitHtmlChunks
-    nodePath.ts                      # resolveNodePath
-    hookSettings.ts                  # generateHookSettingsFile
-    hookServer.ts                    # startHookServer
-    tgmdrender.ts                    # Python tgmdrender wrapper
-    ...
+  mcp/
+    stdio.ts                        # active MCP stdio entry
+    resources.ts                    # codever context resources/tools
+    tools/                          # notify/session tools
 
-  config.ts
-  daemon.ts                          # Composition root
+  core/
+    queryLoop.ts                    # compatibility session state
+    scheduler.ts                    # timed tasks
+    eventBus.ts                     # compatibility events
 ```
+
+## Current Cleanup Direction
+
+This project is in an architectural convergence phase. The goal is not to invent a new architecture, but to make the current semantic runtime architecture the only architecture:
+
+1. Remove unused `MiddlewarePipeline` wiring from the active Telegram path.
+2. Shrink or rename `QueryLoop` into session metadata.
+3. Merge `transport/telegram` into `channel/telegram`.
+4. Delete or intentionally wire `runtime/sessionActor.ts`.
+5. Consolidate MCP server entry registration.
+6. Rewrite architecture tests around `SemanticSessionRuntime` boundaries.
+
 <!-- architecture:end -->
