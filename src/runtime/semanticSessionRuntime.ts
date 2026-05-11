@@ -39,6 +39,7 @@ export class SemanticSessionRuntime {
     private abortController: AbortController | null = null
     private currentHandle: AgentQueryHandle | null = null
     private toolMessageIds = new Map<string, string | number>()
+    private startingMessageId: string | number | null = null
     private lastToolName: string | null = null
     private turnStartedAt = 0
     private recentTables: string[] = []
@@ -431,7 +432,8 @@ export class SemanticSessionRuntime {
         }
 
         if ('init' in this.config.provider && typeof (this.config.provider as any).init === 'function') {
-            await this.send({ text: '⏳ Agent is starting up, please wait...', format: 'html' })
+            const startRecord = await this.outbox.send({ text: '⏳ Agent is starting up, please wait...', format: 'html' })
+            this.startingMessageId = startRecord.messageId ?? null
             try {
                 await (this.config.provider as any).init()
             } catch (error) {
@@ -451,11 +453,14 @@ export class SemanticSessionRuntime {
     }
 
     private notifyStatus(state: SessionStatus['state']): void {
+        const editMessageId = this.startingMessageId
+        this.startingMessageId = null
         this.config.channelPort.notifyStatus({
             state,
             model: this.config.model ?? undefined,
             cwd: this.config.cwd,
             provider: this.config.providerName,
+            ...(editMessageId != null ? { editMessageId } : {}),
         })
     }
 

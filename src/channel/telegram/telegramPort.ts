@@ -138,12 +138,24 @@ export class TelegramPort implements ChannelPort {
             details.push(`Model: <code>${this.escapeHtml(status.model)}</code>`)
         }
 
-        this.bot.api.sendMessage(this.chatId, details.join('\n'), {
-            parse_mode: 'HTML',
+        const text = details.join('\n')
+        const options = {
+            parse_mode: 'HTML' as const,
             ...buildMessageThreadParams(this.threadId),
-        }).catch((e) => {
-            console.error('[TelegramPort] Failed to send status notification:', e instanceof Error ? e.message : e)
-        })
+        }
+
+        if (status.editMessageId != null) {
+            this.bot.api.editMessageText(this.chatId, Number(status.editMessageId), text, options).catch((e) => {
+                console.error('[TelegramPort] Failed to edit status notification, falling back to send:', e instanceof Error ? e.message : e)
+                this.bot.api.sendMessage(this.chatId, text, options).catch((e2) => {
+                    console.error('[TelegramPort] Failed to send status notification:', e2 instanceof Error ? e2.message : e2)
+                })
+            })
+        } else {
+            this.bot.api.sendMessage(this.chatId, text, options).catch((e) => {
+                console.error('[TelegramPort] Failed to send status notification:', e instanceof Error ? e.message : e)
+            })
+        }
     }
 
     sendChatAction(action: string): void {
