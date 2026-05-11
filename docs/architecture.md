@@ -172,6 +172,14 @@ This layer absorbs provider-specific quirks, including:
 - replayed history from ACP `loadSession`;
 - provider command/config updates.
 
+ACP extension methods keep the same ownership boundary. The shared ACP client manager only exposes generic `extMethod` and `extNotification` hooks; it must not encode provider-specific method names. Provider-specific extensions are registered by the concrete provider. For Cursor's `agent acp` provider, `src/providers/agent/cursorExtensions.ts` owns all `cursor/*` parsing and maps it to existing Codever surfaces:
+
+- `cursor/create_plan` uses the runtime decision handler for plan approval and renders Cursor todos through `TodoWrite`.
+- `cursor/ask_question` uses the runtime decision handler and returns Cursor's selected option response shape.
+- `cursor/update_todos`, `cursor/task`, and `cursor/generate_image` are notifications rendered as existing tool/text events.
+
+If another ACP provider adds extension methods, implement its mapping under that provider directory rather than adding provider-specific cases to `runtime/providerAdapter.ts`, `ChannelProjector`, or the shared ACP client.
+
 ### 4.8 `ChannelProjector`
 
 `ChannelProjector` converts semantic events into `ChannelMessage` values.

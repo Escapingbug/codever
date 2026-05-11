@@ -37,6 +37,11 @@ export interface AcpClientManagerOptions {
     permissionHandler?: AgentPermissionHandler
 }
 
+export interface AcpExtensionHandler {
+    extMethod?(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>>
+    extNotification?(method: string, params: Record<string, unknown>): Promise<void>
+}
+
 const CANCEL_WAIT_MS = 2_500
 const STDIN_CLOSE_GRACE_MS = 500
 const SIGTERM_GRACE_MS = 1_500
@@ -66,6 +71,7 @@ export class AcpClientManager {
     private historicalSeqBoundaries = new Map<string, number>()
 
     private permissionHandler: AgentPermissionHandler | null = null
+    private extensionHandler: AcpExtensionHandler | null = null
     private permissionResolvers = new Map<string, {
         resolve: (response: RequestPermissionResponse) => void
     }>()
@@ -97,6 +103,10 @@ export class AcpClientManager {
 
     setPermissionHandler(handler: AgentPermissionHandler | null): void {
         this.permissionHandler = handler
+    }
+
+    setExtensionHandler(handler: AcpExtensionHandler | null): void {
+        this.extensionHandler = handler
     }
 
     getStderrError(): string | null {
@@ -389,6 +399,7 @@ export class AcpClientManager {
         this.activePrompt = null
         this.cancellingSessionIds.clear()
         this.permissionResolvers.clear()
+        this.extensionHandler = null
         this.sessionUpdateSeqs.clear()
         this.historicalSeqBoundaries.clear()
         this.childProcess = null
@@ -427,6 +438,7 @@ export class AcpClientManager {
         this.sessionUpdateSeqs.clear()
         this.historicalSeqBoundaries.clear()
         this.permissionResolvers.clear()
+        this.extensionHandler = null
     }
 
     private sessionUpdateChain = Promise.resolve()
@@ -660,6 +672,22 @@ export class AcpClientManager {
 
             writeTextFile: async (_params: WriteTextFileRequest): Promise<WriteTextFileResponse> => {
                 throw new Error('writeTextFile not supported')
+            },
+
+            extMethod: async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+                if (!this.extensionHandler?.extMethod) {
+                    console.error(`[acp] Unhandled extension method: ${method}`)
+                    return {}
+                }
+                return this.extensionHandler.extMethod(method, params)
+            },
+
+            extNotification: async (method: string, params: Record<string, unknown>): Promise<void> => {
+                if (!this.extensionHandler?.extNotification) {
+                    console.error(`[acp] Unhandled extension notification: ${method}`)
+                    return
+                }
+                await this.extensionHandler.extNotification(method, params)
             },
         }
     }

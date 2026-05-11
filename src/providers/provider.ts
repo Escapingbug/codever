@@ -1,4 +1,5 @@
 import type { AgentEvent } from './types'
+import type { DecisionRequest, DecisionResponse } from '@/bridge/channelPort'
 
 export class ProviderNotReadyError extends Error {
     constructor(providerName: string, reason: string) {
@@ -25,6 +26,10 @@ export interface AgentPermissionHandler {
     reset(): void
 }
 
+export interface AgentDecisionHandler {
+    requestDecision(request: DecisionRequest): Promise<DecisionResponse>
+}
+
 export interface AgentQueryHandle {
     events: AsyncIterable<AgentEvent>
     interrupt(): Promise<void>
@@ -38,6 +43,7 @@ export interface AgentQueryConfig {
     signal: AbortSignal
     model?: string
     permissionHandler?: AgentPermissionHandler
+    decisionHandler?: AgentDecisionHandler
     providerSettings?: Record<string, unknown>
     debugLog?: (line: string) => void
 }

@@ -10,7 +10,11 @@
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
 import { AcpProvider } from '@/providers/acp'
-import type { ModelEntry } from '@/providers/provider'
+import type { AgentQueryConfig, ModelEntry } from '@/providers/provider'
+import type { AgentEvent } from '@/providers/types'
+import type { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
+import type { AcpExtensionHandler } from '@/providers/acp/AcpClientManager'
+import { createCursorAcpExtensionHandler } from './cursorExtensions'
 
 const AGENT_ACP_COMMAND = 'agent'
 const AGENT_ACP_ARGS = ['acp']
@@ -39,6 +43,10 @@ export class AgentProvider extends AcpProvider {
             console.error(`[agent] Failed to list models: ${msg}`)
             return []
         }
+    }
+
+    protected override createExtensionHandler(events: PushableAsyncIterable<AgentEvent>, config: AgentQueryConfig): AcpExtensionHandler | null {
+        return createCursorAcpExtensionHandler(events, config)
     }
 }
 

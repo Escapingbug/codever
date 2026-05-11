@@ -107,4 +107,6 @@ Preserve the semantic runtime architecture. New behavior should fit one of the e
 5. Send/edit reliability belongs in `DeliveryOutbox`.
 6. Telegram API details belong in `TelegramPort` and `channel/telegram/handlers`.
 
+Provider-specific ACP extension methods must stay inside the owning provider. The shared ACP client may expose generic `extMethod`/`extNotification` hooks, but Cursor-specific `cursor/*` behavior belongs in `src/providers/agent/cursorExtensions.ts`, not in `runtime/providerAdapter.ts` or channel rendering code.
+
 <!-- architecture:end -->

@@ -14,7 +14,7 @@
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, ModelEntry } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
-import { AcpClientManager, type AcpClientManagerConfig } from './AcpClientManager'
+import { AcpClientManager, type AcpClientManagerConfig, type AcpExtensionHandler } from './AcpClientManager'
 import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput, type AcpDebugLog } from './eventAdapter'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
 import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
@@ -324,10 +324,9 @@ export class AcpProvider implements AgentProvider {
         const events = new PushableAsyncIterable<AgentEvent>()
         const clientManager = this.clientManager
 
-        // Set permission handler on the client manager
-        if (config.permissionHandler) {
-            clientManager.setPermissionHandler(config.permissionHandler)
-        }
+        // Set per-turn handlers on the client manager.
+        clientManager.setPermissionHandler(config.permissionHandler ?? null)
+        clientManager.setExtensionHandler(this.createExtensionHandler(events, config))
 
         // Fire-and-forget the prompt sequence
         const runQuery = async () => {
@@ -690,6 +689,10 @@ export class AcpProvider implements AgentProvider {
         }
 
         return handle
+    }
+
+    protected createExtensionHandler(_events: PushableAsyncIterable<AgentEvent>, _config: AgentQueryConfig): AcpExtensionHandler | null {
+        return null
     }
 
     getAvailableModels(): ModelEntry[] {

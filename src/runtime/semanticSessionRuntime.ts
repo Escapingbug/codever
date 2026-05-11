@@ -140,6 +140,9 @@ export class SemanticSessionRuntime {
             signal: this.abortController.signal,
             model: this.config.model ?? undefined,
             permissionHandler: this.createPermissionHandler(),
+            decisionHandler: {
+                requestDecision: (request) => this.config.channelPort.requestDecision(request),
+            },
             providerSettings: this.config.providerSettings ?? {},
             debugLog: (line) => this.log(line),
         })
