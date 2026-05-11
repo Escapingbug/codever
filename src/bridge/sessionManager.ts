@@ -144,6 +144,11 @@ export class SessionManager {
     setGroupSettings(chatId: number, settings: Partial<GroupSettings>): void {
         const existing = this.groupSettings.get(chatId) || {}
         const merged = { ...existing, ...settings }
+        for (const [key, value] of Object.entries(settings)) {
+            if (value === undefined) {
+                delete (merged as Record<string, unknown>)[key]
+            }
+        }
         this.groupSettings.set(chatId, merged)
         config.saveGroupState(chatId, { settings: merged })
     }
@@ -236,7 +241,6 @@ export class SessionManager {
             providerName: newProviderName,
             groupChatId: chatId,
             messageThreadId,
-            model: settings?.model,
             verboseLevel: settings?.verboseLevel,
             timeoutSeconds: settings?.timeoutSeconds,
             providerSettings: settings?.permissionMode ? { permissionMode: settings.permissionMode } : {},

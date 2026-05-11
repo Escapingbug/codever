@@ -44,6 +44,9 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         providerSessionId: sessionRecord.conversationId,
         providerSettings: sessionRecord.providerSettings,
         onLog: glog,
+        onModelChanged: (model) => {
+            sessionRecord.setModel(model)
+        },
         onProviderSessionId: (sessionId) => {
             sessionRecord.setConversationId(sessionId)
             if (sessionRecord.groupChatId !== null) {
@@ -54,6 +57,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         onProviderChanged: (providerName, nextProvider) => {
             sessionRecord.setProvider(nextProvider)
             sessionRecord.setProviderName(providerName)
+            sessionRecord.setModel(null)
             sessionRecord.setConversationId(null)
         },
         onAvailableCommands: (commands) => {

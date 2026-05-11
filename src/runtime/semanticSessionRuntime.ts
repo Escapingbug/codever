@@ -26,6 +26,7 @@ export interface SemanticSessionRuntimeConfig {
     onLog?: (message: string) => void
     onProviderSessionId?: (sessionId: string) => void
     onProviderChanged?: (providerName: string, provider: AgentProvider) => void
+    onModelChanged?: (model: string | null) => void
     onAvailableCommands?: (commands: ProviderCommand[]) => void
 }
 
@@ -134,11 +135,12 @@ export class SemanticSessionRuntime {
         })
 
         this.abortController = new AbortController()
+        const activeModel = this.getActiveModel()
         const handle = this.config.provider.startQuery(prompt, {
             cwd: this.config.cwd,
             sessionId: this.config.providerSessionId ?? undefined,
             signal: this.abortController.signal,
-            model: this.config.model ?? undefined,
+            ...(activeModel ? { model: activeModel } : {}),
             permissionHandler: this.createPermissionHandler(),
             decisionHandler: {
                 requestDecision: (request) => this.config.channelPort.requestDecision(request),
@@ -257,6 +259,15 @@ export class SemanticSessionRuntime {
         return value === 0 || value === 1 || value === 2 ? value : 1
     }
 
+    private getActiveModel(): string | undefined {
+        const model = this.config.model ?? undefined
+        if (!model) return undefined
+        if (typeof this.config.provider.getAvailableModels !== 'function') return model
+        const availableModels = this.config.provider.getAvailableModels()
+        if (availableModels.length === 0) return model
+        return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
+    }
+
     private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false): Promise<void> {
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
             const record = await this.outbox.edit(this.toolMessageIds.get(toolUseId), message, true)
@@ -287,6 +298,7 @@ export class SemanticSessionRuntime {
         switch (name) {
             case 'model':
                 this.config.model = args || null
+                this.config.onModelChanged?.(this.config.model)
                 this.recordCommand('model', { model: this.config.model })
                 return
             case 'timeout': {
@@ -320,9 +332,11 @@ export class SemanticSessionRuntime {
                 this.config.provider = provider
                 this.config.providerName = providerName
                 this.config.providerSessionId = null
+                this.config.model = null
                 this.adapter = createProviderSemanticAdapter(providerName)
                 this.config.onProviderChanged?.(providerName, provider)
-                this.recordCommand('provider', { providerName: this.config.providerName })
+                this.config.onModelChanged?.(null)
+                this.recordCommand('provider', { providerName: this.config.providerName, model: this.config.model })
                 return
             }
             case 'resume':
@@ -458,9 +472,10 @@ export class SemanticSessionRuntime {
     private notifyStatus(state: SessionStatus['state']): void {
         const editMessageId = this.startingMessageId
         this.startingMessageId = null
+        const activeModel = this.getActiveModel()
         this.config.channelPort.notifyStatus({
             state,
-            model: this.config.model ?? undefined,
+            ...(activeModel ? { model: activeModel } : {}),
             cwd: this.config.cwd,
             provider: this.config.providerName,
             ...(editMessageId != null ? { editMessageId } : {}),

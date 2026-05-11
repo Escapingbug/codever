@@ -59,4 +59,13 @@ describe('config persistence', () => {
         expect(config.getTopicState('-300:42')).toEqual({ queryInProgress: false })
         expect(config.getGroupState(-300)).toEqual({ cwd: '/repo', settings: { model: 'sonnet' } })
     })
+
+    it('replaces group settings when saving settings state', async () => {
+        const { config } = await loadConfig()
+
+        config.saveGroupState(-400, { cwd: '/repo', settings: { model: 'opencode-model', providerName: 'opencode' } })
+        config.saveGroupState(-400, { settings: { providerName: 'agent' } })
+
+        expect(config.getGroupState(-400)).toEqual({ cwd: '/repo', settings: { providerName: 'agent' } })
+    })
 })

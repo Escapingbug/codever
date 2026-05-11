@@ -132,6 +132,32 @@ describe('SessionManager: switchProvider', () => {
             expect(sm.getSession(oldSession.id)).toBeUndefined()
         })
 
+        it('does not carry a previous provider model into the new provider session', async () => {
+            const provider1 = createMockProvider('provider-1')
+            const provider2 = createMockProvider('provider-2')
+            registerProvider(provider1)
+            registerProvider(provider2)
+
+            const sm = new SessionManager()
+            sm.setGroupCwd(-100123, '/project/path')
+            sm.setGroupSettings(-100123, { model: 'provider-1-model' })
+
+            const oldSession = createTopicSessionRecord({
+                cwd: '/project/path',
+                providerName: 'provider-1',
+                groupChatId: -100123,
+                messageThreadId: 42,
+                model: 'provider-1-model',
+            })
+            oldSession.setProvider(provider1)
+            sm.registerSession(oldSession, -100123, 42)
+
+            const newSession = await sm.switchProvider(-100123, 42, 'provider-2')
+
+            expect(newSession?.providerName).toBe('provider-2')
+            expect(newSession?.model).toBeNull()
+        })
+
         it('returns null when no session exists for the topicKey', async () => {
             const result = await new SessionManager().switchProvider(-999, undefined, 'provider')
             expect(result).toBeNull()

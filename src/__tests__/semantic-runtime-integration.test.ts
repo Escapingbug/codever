@@ -438,6 +438,58 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.sent.map(m => m.text)).not.toContain('Command handling is not implemented: provider')
     })
 
+    it('clears the selected model when switching providers', async () => {
+        const provider = createProvider([], {
+            getAvailableModels: vi.fn(() => [{ id: 'opencode-model', name: 'opencode-model' }]),
+        })
+        const nextProvider = createProvider([], {
+            name: 'agent',
+            getAvailableModels: vi.fn(() => [{ id: 'cursor-model', name: 'cursor-model' }]),
+        })
+        registerProvider(nextProvider, () => nextProvider)
+        const channel = createChannel()
+        const onModelChanged = vi.fn()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'opencode',
+            model: 'opencode-model',
+            channelPort: channel,
+            onModelChanged,
+        })
+
+        await runtime.dispatch({ kind: 'command', name: 'provider', args: 'agent', source: 'channel' })
+        await runtime.dispatch({ kind: 'user_message', text: 'after switch', source: 'channel' })
+
+        expect(onModelChanged).toHaveBeenCalledWith(null)
+        expect(nextProvider.startQuery).toHaveBeenCalledWith('after switch', expect.not.objectContaining({
+            model: expect.any(String),
+        }))
+    })
+
+    it('does not pass a persisted model that is unavailable for the active provider', async () => {
+        const provider = createProvider([{ kind: 'result', status: 'success' }], {
+            getAvailableModels: vi.fn(() => [{ id: 'cursor-model', name: 'cursor-model' }]),
+        })
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'agent',
+            model: 'opencode-model',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'start cursor', source: 'channel' })
+
+        expect(provider.startQuery).toHaveBeenCalledWith('start cursor', expect.not.objectContaining({
+            model: 'opencode-model',
+        }))
+        expect(channel.statuses[0]).not.toHaveProperty('model')
+    })
+
     it('uses resumed provider session id on the next turn and updates it from session_init', async () => {
         const provider = createProvider([
             { kind: 'session_init', sessionId: 'new-session-id' },

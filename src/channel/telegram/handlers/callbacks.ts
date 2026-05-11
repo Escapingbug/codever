@@ -418,7 +418,7 @@ async function handleProviderCallback(c: Context, data: string, sessionManager: 
         await c.answerCallbackQuery(`Default provider set to ${providerName}`)
         try { await c.editMessageText(`✅ Default provider set to <b>${providerName}</b>`, { parse_mode: 'HTML' }) } catch {}
     } else if (isGenericTopic(messageThreadId)) {
-        sessionManager.setGroupSettings(chatId, { providerName })
+        sessionManager.setGroupSettings(chatId, { providerName, model: undefined })
         await c.answerCallbackQuery(`Provider for new sessions set to ${providerName}`)
         try { await c.editMessageText(`✅ Provider for new sessions set to <b>${providerName}</b>.`, { parse_mode: 'HTML' }) } catch {}
     } else {

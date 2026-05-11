@@ -37,7 +37,7 @@ export interface SessionRecord {
     setProvider(provider: AgentProvider): void
     setProviderName(name: string): void
     setConversationId(sessionId: string | null): void
-    setModel(model: string): void
+    setModel(model: string | null): void
     setVerboseLevel(level: 0 | 1 | 2): void
     setTimeoutSeconds(seconds: number): void
     setTimeoutExtended(extended: boolean): void
@@ -97,7 +97,7 @@ export class TopicSessionRecord implements SessionRecord {
         this.log(`[SessionRecord] setConversationId: ${prev?.slice(0, 8) ?? 'null'} -> ${sessionId?.slice(0, 8) ?? 'null'} (record=${this.id.slice(0, 8)})`)
     }
 
-    setModel(model: string): void {
+    setModel(model: string | null): void {
         this._model = model
     }
 

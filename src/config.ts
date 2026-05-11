@@ -171,12 +171,20 @@ export const config = {
         const all = getStore().get('groupState')
         const key = chatId.toString()
         const existing = all[key] || { cwd: '' }
+        const nextSettings = partial.settings !== undefined
+            ? { ...partial.settings }
+            : existing.settings
+        if (nextSettings) {
+            for (const [settingKey, value] of Object.entries(nextSettings)) {
+                if (value === undefined) {
+                    delete (nextSettings as Record<string, unknown>)[settingKey]
+                }
+            }
+        }
         all[key] = {
             ...existing,
             ...partial,
-            settings: partial.settings !== undefined
-                ? { ...existing.settings, ...partial.settings }
-                : existing.settings
+            settings: nextSettings
         }
         getStore().set('groupState', all)
     },
