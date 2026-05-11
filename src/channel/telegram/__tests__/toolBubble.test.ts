@@ -113,6 +113,33 @@ describe('toolBubble — Read/Edit/Write path support', () => {
         }
     })
 
+    it('Read supports diff content path when input is missing', () => {
+        const state: ToolBubbleState = {
+            toolName: 'Read',
+            input: undefined,
+            status: 'completed',
+            content: [{ type: 'diff', path: '/src/from-content.ts', newText: 'content' }],
+        }
+
+        const result = formatToolBubble(state)
+        expect(result).toContain('Read')
+        expect(result).toContain('/src/from-content.ts')
+    })
+
+    it('shows diff content paths for generic tools', () => {
+        const state: ToolBubbleState = {
+            toolName: 'updateTodos',
+            input: undefined,
+            status: 'completed',
+            content: [{ type: 'diff', path: '/tests/test_verification.py', newText: 'content' }],
+        }
+
+        const result = formatToolBubble(state)
+        expect(result).toContain('updateTodos')
+        expect(result).toContain('/tests/test_verification.py')
+        expect(result).not.toContain('<pre>{')
+    })
+
     it('Edit supports file_path, filePath, and path', () => {
         const inputs = [
             { file_path: '/src/a.ts' },

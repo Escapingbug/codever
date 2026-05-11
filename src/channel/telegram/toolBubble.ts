@@ -59,7 +59,14 @@ export function formatToolBubble(state: ToolBubbleState): string {
 
     // If displayTitle exists and toolName is canonical, show "ToolName: displayTitle"
     // If displayTitle exists and toolName is generic, show displayTitle as the header
-    parts.push(renderToolHeader(name, input, state.displayTitle))
+    const header = renderToolHeader(name, input, state.displayTitle, state.content)
+    parts.push(header)
+
+    for (const path of getContentFilePaths(state.content)) {
+        if (!header.includes(escapeHtml(path))) {
+            parts.push(`📄 <code>${escapeHtml(path)}</code>`)
+        }
+    }
 
     if (isRunning) {
         parts.push('⏳')
@@ -73,12 +80,17 @@ export function formatToolBubble(state: ToolBubbleState): string {
     return parts.join('\n')
 }
 
-function renderToolHeader(name: string, input: Record<string, unknown> | undefined, displayTitle?: string): string {
+function renderToolHeader(
+    name: string,
+    input: Record<string, unknown> | undefined,
+    displayTitle?: string,
+    content?: ToolBubbleState['content'],
+): string {
     const isEmptyInput = !input || (typeof input === 'object' && Object.keys(input).length === 0)
 
     // Helper to extract file path from various field names
     const getFilePath = (): string => {
-        return String((input as any)?.file_path || (input as any)?.filePath || (input as any)?.path || '')
+        return String((input as any)?.file_path || (input as any)?.filePath || (input as any)?.path || getContentFilePaths(content)[0] || '')
     }
 
     switch (name) {
@@ -172,6 +184,21 @@ function renderToolHeader(name: string, input: Record<string, unknown> | undefin
             return `🔧 <b>${escapeHtml(name)}</b>\n<pre>${escapeHtml(inputStr)}</pre>`
         }
     }
+}
+
+function getContentFilePaths(content: ToolBubbleState['content']): string[] {
+    if (!content?.length) return []
+    const paths: string[] = []
+    const seen = new Set<string>()
+
+    for (const item of content) {
+        if (item.type !== 'diff' || !item.path) continue
+        if (seen.has(item.path)) continue
+        seen.add(item.path)
+        paths.push(item.path)
+    }
+
+    return paths
 }
 
 function renderToolResultInline(name: string, output: string, isError: boolean): string | null {

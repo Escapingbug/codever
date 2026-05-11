@@ -269,6 +269,43 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('src/runtime/channelProjector.ts')
         })
 
+        it('should render Cursor ACP file path from completed content diff', async () => {
+            const readCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-read-content-path',
+                title: 'Read',
+                kind: 'read',
+                status: 'pending',
+            }
+            const readUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-read-content-path',
+                status: 'completed',
+                content: [{
+                    type: 'diff',
+                    path: 'src/runtime/channelProjector.ts',
+                    newText: 'file content',
+                }],
+            }
+
+            await processAcpUpdate(readCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(readUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Read')
+            expect(message).toContain('src/runtime/channelProjector.ts')
+            expect(message).not.toContain('<pre>{')
+        })
+
         it('should render Cursor ACP terminal command when rawInput arrives on completed update', async () => {
             const terminalCall = {
                 sessionUpdate: 'tool_call',
