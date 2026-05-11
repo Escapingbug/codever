@@ -235,6 +235,40 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('src/providers/acp/eventAdapter.ts')
         })
 
+        it('should render Cursor ACP file parameters when locations arrive in a later update', async () => {
+            const readCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-read-late-location',
+                title: 'Read',
+                kind: 'read',
+                status: 'pending',
+                rawInput: {},
+            }
+            const readUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-read-late-location',
+                title: null,
+                status: 'in_progress',
+                locations: [{ path: 'src/runtime/channelProjector.ts' }],
+            }
+
+            await processAcpUpdate(readCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(readUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Read')
+            expect(message).toContain('src/runtime/channelProjector.ts')
+        })
+
         it('should render Cursor ACP terminal command when rawInput arrives on completed update', async () => {
             const terminalCall = {
                 sessionUpdate: 'tool_call',
@@ -268,6 +302,74 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             const message = outbox.edits[outbox.edits.length - 1].message.text
             expect(message).toContain('npm run typecheck')
             expect(message).not.toContain('<b>Terminal</b>')
+        })
+
+        it('should render Cursor ACP terminal string command when rawInput arrives in a later update', async () => {
+            const terminalCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-terminal-string',
+                title: 'Terminal',
+                kind: 'execute',
+                status: 'pending',
+                rawInput: {},
+            }
+            const terminalUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-terminal-string',
+                title: null,
+                status: 'in_progress',
+                rawInput: 'npm test',
+            }
+
+            await processAcpUpdate(terminalCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(terminalUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('npm test')
+            expect(message).not.toContain('<b>Terminal</b>')
+        })
+
+        it('should render Cursor ACP grep query when provider uses query field in a later update', async () => {
+            const grepCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-grep-query',
+                title: 'Grep',
+                kind: 'search',
+                status: 'pending',
+                rawInput: {},
+            }
+            const grepUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-grep-query',
+                title: null,
+                status: 'in_progress',
+                rawInput: { query: 'normalizeToolInput' },
+            }
+
+            await processAcpUpdate(grepCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(grepUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Grep')
+            expect(message).toContain('normalizeToolInput')
         })
     })
 

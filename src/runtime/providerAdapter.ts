@@ -116,7 +116,17 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
 }
 
 export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
+    private toolCalls = new Map<string, AcpToolSnapshot>()
+
     toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[] {
+        if (event.kind === 'tool_use') {
+            return super.toConversationEvents(this.normalizeToolUse(event), context)
+        }
+
+        if (event.kind === 'tool_result') {
+            return super.toConversationEvents(this.normalizeToolResult(event), context)
+        }
+
         if (event.kind !== 'raw') {
             return super.toConversationEvents(event, context)
         }
@@ -179,6 +189,56 @@ export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
             id: `${context.turnId}:acp:${sessionUpdate}:${meta?.seq ?? randomUUID()}`,
         }
     }
+
+    override reset(): void {
+        super.reset()
+        this.toolCalls.clear()
+    }
+
+    private normalizeToolUse(event: AgentToolUseEvent): AgentToolUseEvent {
+        const toolUseId = event.toolUseId
+        if (!toolUseId) return event
+
+        const existing = this.toolCalls.get(toolUseId)
+        const toolName = existing && isMissingToolName(event.toolName) ? existing.toolName : event.toolName
+        const locations = event.locations ?? existing?.locations
+        const rawInput = event.rawInput ?? existing?.rawInput
+        const normalizedInput = normalizeToolInput(toolName, event.input, rawInput, locations)
+        const input = isUsefulInput(normalizedInput) ? normalizedInput : existing?.input ?? event.input
+        const normalized: AgentToolUseEvent = {
+            ...event,
+            toolName,
+            input,
+            ...(rawInput !== undefined ? { rawInput } : {}),
+            ...(event.toolKind === undefined && existing?.toolKind !== undefined ? { toolKind: existing.toolKind } : {}),
+            ...(locations !== undefined ? { locations } : {}),
+        }
+
+        this.toolCalls.set(toolUseId, {
+            toolName: normalized.toolName,
+            input: normalized.input,
+            rawInput: normalized.rawInput,
+            toolKind: normalized.toolKind,
+            locations: normalized.locations,
+        })
+        return normalized
+    }
+
+    private normalizeToolResult(event: Extract<AgentEvent, { kind: 'tool_result' }>): Extract<AgentEvent, { kind: 'tool_result' }> {
+        const toolUseId = event.toolUseId
+        if (!toolUseId) return event
+        const existing = this.toolCalls.get(toolUseId)
+        if (!existing?.toolName || event.toolName) return event
+        return { ...event, toolName: existing.toolName }
+    }
+}
+
+interface AcpToolSnapshot {
+    toolName: string
+    input: unknown
+    rawInput?: string
+    toolKind?: string
+    locations?: Array<{ path: string; line?: number }>
 }
 
 function stableEventId(event: AgentEvent, context: ProviderAdapterContext, seq: number): string {
@@ -192,6 +252,66 @@ function stableEventId(event: AgentEvent, context: ProviderAdapterContext, seq: 
         return `${context.turnId}:result`
     }
     return `${context.turnId}:${event.kind}:${seq}:${randomUUID()}`
+}
+
+function isMissingToolName(toolName: string | undefined): boolean {
+    return !toolName || toolName === 'tool' || toolName === 'tool_call'
+}
+
+function normalizeToolInput(
+    toolName: string | undefined,
+    input: unknown,
+    rawInput: unknown,
+    locations: Array<{ path: string; line?: number }> | undefined,
+): unknown {
+    const source = isUsefulInput(input) ? input : parseMaybeJson(rawInput)
+    const record = asRecord(source)
+    const normalizedName = toolName?.toLowerCase()
+
+    if (normalizedName === 'bash' || normalizedName === 'terminal' || normalizedName === 'shell') {
+        const command = pickInputString(record, ['command', 'cmd', 'script'])
+            ?? (typeof source === 'string' ? source : undefined)
+        return command ? { ...(record ?? {}), command } : source
+    }
+
+    if (normalizedName === 'read' || normalizedName === 'edit' || normalizedName === 'write') {
+        const filePath = pickInputString(record, ['file_path', 'filePath', 'path', 'target_file', 'targetFile'])
+            ?? (typeof source === 'string' ? source : undefined)
+            ?? locations?.[0]?.path
+        return filePath ? { ...(record ?? {}), file_path: filePath } : source
+    }
+
+    if (normalizedName === 'grep' || normalizedName === 'glob') {
+        const pattern = pickInputString(record, ['pattern', 'query', 'regex', 'glob'])
+            ?? (typeof source === 'string' ? source : undefined)
+        return pattern ? { ...(record ?? {}), pattern } : source
+    }
+
+    return source
+}
+
+function parseMaybeJson(value: unknown): unknown {
+    if (typeof value !== 'string') return value
+    try {
+        return JSON.parse(value)
+    } catch {
+        return value
+    }
+}
+
+function isUsefulInput(value: unknown): boolean {
+    if (value === undefined || value === null) return false
+    if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length === 0) return false
+    return true
+}
+
+function pickInputString(record: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+    if (!record) return undefined
+    for (const key of keys) {
+        const value = record[key]
+        if (typeof value === 'string' && value.trim()) return value
+    }
+    return undefined
 }
 
 type ToolCategory = NonNullable<Extract<ConversationEvent, { kind: 'tool' }>['category']>
