@@ -440,6 +440,9 @@ function extractToolOutput(toolUpdate: AcpToolCallUpdate): string {
 
         if (typeof toolUpdate.rawOutput === 'object') {
             const raw = toolUpdate.rawOutput as Record<string, unknown>
+            const statsOutput = formatSearchStatsOutput(raw)
+            if (statsOutput) return statsOutput
+
             const mainOutput = unwrapToolOutput(raw)
 
             // 如果主输出有效且不是 JSON stringify 的结果，直接返回
@@ -479,6 +482,20 @@ function extractToolOutput(toolUpdate: AcpToolCallUpdate): string {
     }
 
     return ''
+}
+
+function formatSearchStatsOutput(raw: Record<string, unknown>): string | undefined {
+    const totalMatches = raw.totalMatches
+    if (typeof totalMatches === 'number') {
+        return `${totalMatches} match${totalMatches === 1 ? '' : 'es'}${raw.truncated === true ? ' (truncated)' : ''}`
+    }
+
+    const totalFiles = raw.totalFiles
+    if (typeof totalFiles === 'number') {
+        return `${totalFiles} file${totalFiles === 1 ? '' : 's'}${raw.truncated === true ? ' (truncated)' : ''}`
+    }
+
+    return undefined
 }
 
 function extractExitPlanModePlan(toolUpdate: AcpToolCallUpdate, fallbackOutput: string): string | undefined {

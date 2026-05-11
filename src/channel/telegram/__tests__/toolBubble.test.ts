@@ -177,6 +177,31 @@ describe('toolBubble — Read/Edit/Write path support', () => {
     })
 })
 
+describe('toolBubble — search result summaries', () => {
+    it('renders preformatted Grep match summaries without recounting lines', () => {
+        const result = formatToolBubble({
+            toolName: 'Grep',
+            input: {},
+            status: 'completed',
+            output: '0 matches',
+        })
+
+        expect(result).toContain('0 matches')
+        expect(result).not.toContain('1 match')
+    })
+
+    it('renders preformatted Find file summaries through search tools', () => {
+        const result = formatToolBubble({
+            toolName: 'Grep',
+            input: {},
+            status: 'completed',
+            output: '2 files',
+        })
+
+        expect(result).toContain('2 files')
+    })
+})
+
 describe('toolBubble — ExitPlanMode shows full plan', () => {
     it('shows full plan content when plan/content is provided', () => {
         const planContent = '1. Analyze the codebase\n2. Implement feature X\n3. Write tests\n4. Update documentation'

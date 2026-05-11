@@ -408,6 +408,73 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('Grep')
             expect(message).toContain('normalizeToolInput')
         })
+
+        it('should render Cursor ACP search result totals from rawOutput', async () => {
+            const grepCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-grep-total',
+                title: 'grep',
+                kind: 'search',
+                status: 'pending',
+                rawInput: {},
+            }
+            const grepUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-grep-total',
+                status: 'completed',
+                rawOutput: { totalMatches: 0, truncated: false },
+            }
+
+            await processAcpUpdate(grepCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(grepUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Grep')
+            expect(message).toContain('0 matches')
+            expect(message).not.toContain('1 match')
+        })
+
+        it('should render Cursor ACP find result totals from rawOutput', async () => {
+            const findCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-find-total',
+                title: 'Find',
+                kind: 'search',
+                status: 'pending',
+                rawInput: {},
+            }
+            const findUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-find-total',
+                status: 'completed',
+                rawOutput: { totalFiles: 2, truncated: true },
+            }
+
+            await processAcpUpdate(findCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(findUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Grep')
+            expect(message).toContain('2 files (truncated)')
+        })
     })
 
     describe('Scenario B: Commands/plan not JSON dump', () => {

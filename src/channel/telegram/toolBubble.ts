@@ -211,6 +211,9 @@ function renderToolResultInline(name: string, output: string, isError: boolean):
 
     if (name === 'Glob' || name === 'Grep') {
         if (!sanitizedOutput.trim()) return null
+        if (/^\d+ (matches|match|files|file)( \(truncated\))?$/.test(sanitizedOutput.trim())) {
+            return `${isError ? '❌' : '✅'} ${escapeHtml(sanitizedOutput.trim())}`
+        }
         const lines = sanitizedOutput.trim().split('\n').filter(Boolean)
         return `${isError ? '❌' : '✅'} ${lines.length} match${lines.length !== 1 ? 'es' : ''}`
     }

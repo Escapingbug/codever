@@ -244,7 +244,13 @@ function isGenericToolName(toolName: string | undefined): boolean {
 function shouldIncludeToolOutput(event: Extract<ConversationEvent, { kind: 'tool' }>, verboseLevel: 0 | 1 | 2): boolean {
     if (event.phase !== 'completed' && event.phase !== 'failed') return false
     if (event.isError) return true
+    if (event.category === 'search' && isSearchStatsOutput(event.output)) return true
     return verboseLevel >= 2
+}
+
+function isSearchStatsOutput(output: unknown): boolean {
+    if (typeof output !== 'string') return false
+    return /^\d+ (matches|match|files|file)( \(truncated\))?$/.test(output.trim())
 }
 
 function formatUnknown(value: unknown): string {
