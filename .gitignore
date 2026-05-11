@@ -14,3 +14,4 @@ test_*.py
 filter-sessions.js
 nul
 test-path.cjs
+.worktrees/

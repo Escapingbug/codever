@@ -212,6 +212,63 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             // Should not JSON dump
             expect(editedMessage).not.toContain('<pre>{')
         })
+
+        it('should render Cursor ACP file tool parameters from locations when rawInput is absent', async () => {
+            const readCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-read',
+                title: 'Read',
+                kind: 'read',
+                status: 'pending',
+                locations: [{ path: 'src/providers/acp/eventAdapter.ts' }],
+            }
+
+            await processAcpUpdate(readCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.sends.length).toBe(1)
+            const message = outbox.sends[0].message.text
+            expect(message).toContain('Read')
+            expect(message).toContain('src/providers/acp/eventAdapter.ts')
+        })
+
+        it('should render Cursor ACP terminal command when rawInput arrives on completed update', async () => {
+            const terminalCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-terminal',
+                title: 'Terminal',
+                kind: 'execute',
+                status: 'pending',
+            }
+            const terminalDone = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-terminal',
+                title: 'Terminal',
+                kind: 'execute',
+                status: 'completed',
+                rawInput: { command: 'npm run typecheck' },
+                rawOutput: 'ok',
+            }
+
+            await processAcpUpdate(terminalCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(terminalDone, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBeGreaterThan(0)
+            const message = outbox.edits[outbox.edits.length - 1].message.text
+            expect(message).toContain('npm run typecheck')
+            expect(message).not.toContain('<b>Terminal</b>')
+        })
     })
 
     describe('Scenario B: Commands/plan not JSON dump', () => {

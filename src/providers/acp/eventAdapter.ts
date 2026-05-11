@@ -24,6 +24,10 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     write: 'Write',
     'write file': 'Write',
     write_file: 'Write',
+    terminal: 'Bash',
+    shell: 'Bash',
+    command: 'Bash',
+    run_command: 'Bash',
     glob: 'Glob',
     grep: 'Grep',
     agent: 'Agent',
@@ -205,22 +209,25 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
 
             // Determine canonical toolName and displayTitle
             // rawTitle might be the real tool name OR a file path / descriptive title
+            const inferredToolName = inferToolNameFromKind(toolCall.kind)
             const isKnown = isKnownToolName(rawTitle)
-            const toolName = isKnown ? normalizeToolName(rawTitle) : 'tool_call'
+            const toolName = isKnown ? normalizeToolName(rawTitle) : inferredToolName ?? 'tool_call'
             // IMPORTANT: Do NOT use generic 'tool_call'/'tool' as displayTitle
             const isGenericTitle = !rawTitle || rawTitle === 'tool_call' || rawTitle === 'tool'
             const displayTitle = isKnown ? undefined : (isGenericTitle ? undefined : rawTitle)
+            const locations = mapLocations(toolCall.locations)
+            const input = normalizeToolInput(toolName, toolCall.rawInput, locations)
 
             events.push({
                 kind: 'tool_use',
                 toolName,
                 toolUseId: toolCall.toolCallId,
-                input: parseRawInput(toolCall.rawInput),
+                input,
                 status: mapToolCallStatus(toolCall.status),
                 ...(toolCall.rawInput != null ? { rawInput: typeof toolCall.rawInput === 'string' ? toolCall.rawInput : JSON.stringify(toolCall.rawInput) } : {}),
                 isInputComplete: statusIndicatesComplete(toolCall.status),
                 ...(toolCall.kind ? { toolKind: toolCall.kind } : {}),
-                locations: mapLocations(toolCall.locations),
+                locations,
                 ...(displayTitle ? { displayTitle } : {}),
             })
             break
@@ -238,6 +245,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
             }
 
             const isTerminal = toolUpdate.status === 'completed' || toolUpdate.status === 'failed'
+            const inferredToolName = inferToolNameFromKind(toolUpdate.kind ?? undefined)
             const isKnown = isKnownToolName(rawTitle)
 
             if (isTerminal) {
@@ -250,6 +258,23 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                     ? extractExitPlanModePlan(toolUpdate, output)
                     : undefined
                 const displayTitle = exitPlanContent ?? (isKnown ? undefined : (rawTitle || undefined))
+                const locations = mapLocations(toolUpdate.locations ?? undefined)
+                const input = normalizeToolInput(toolName, toolUpdate.rawInput, locations)
+
+                if (input !== undefined || locations !== undefined || toolUpdate.kind) {
+                    events.push({
+                        kind: 'tool_use',
+                        toolName: toolName ?? inferredToolName ?? 'tool_call',
+                        toolUseId: toolUpdate.toolCallId,
+                        input,
+                        status: 'running',
+                        ...(toolUpdate.rawInput != null ? { rawInput: typeof toolUpdate.rawInput === 'string' ? toolUpdate.rawInput : JSON.stringify(toolUpdate.rawInput) } : {}),
+                        isInputComplete: true,
+                        ...(toolUpdate.kind ? { toolKind: toolUpdate.kind } : {}),
+                        locations,
+                        ...(displayTitle ? { displayTitle } : {}),
+                    })
+                }
 
                 events.push({
                     kind: 'tool_result',
@@ -266,20 +291,22 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 // Only use as canonical toolName if it's a known tool name.
                 // Otherwise use 'tool_call' as generic and store title as displayTitle.
                 // IMPORTANT: Do NOT use generic 'tool_call'/'tool' as displayTitle - it's not descriptive.
-                const toolName = isKnown ? normalizeToolName(rawTitle) : 'tool_call'
+                const toolName = isKnown ? normalizeToolName(rawTitle) : inferredToolName ?? 'tool_call'
                 const isGenericTitle = !rawTitle || rawTitle === 'tool_call' || rawTitle === 'tool'
                 const displayTitle = isKnown ? undefined : (isGenericTitle ? undefined : rawTitle)
+                const locations = mapLocations(toolUpdate.locations ?? undefined)
+                const input = normalizeToolInput(toolName, toolUpdate.rawInput, locations)
 
                 events.push({
                     kind: 'tool_use',
                     toolName,
                     toolUseId: toolUpdate.toolCallId,
-                    input: toolUpdate.rawInput != null ? parseRawInput(toolUpdate.rawInput) : undefined,
+                    input,
                     status: mapToolCallStatus(toolUpdate.status ?? undefined),
                     ...(toolUpdate.rawInput != null ? { rawInput: typeof toolUpdate.rawInput === 'string' ? toolUpdate.rawInput : JSON.stringify(toolUpdate.rawInput) } : {}),
                     isInputComplete: statusIndicatesComplete(toolUpdate.status),
                     ...(toolUpdate.kind ? { toolKind: toolUpdate.kind } : {}),
-                    locations: mapLocations(toolUpdate.locations ?? undefined),
+                    locations,
                     ...(displayTitle ? { displayTitle } : {}),
                 })
             }
@@ -494,6 +521,66 @@ function extractPlanString(value: unknown): string | undefined {
         if (extracted) return extracted
     }
 
+    return undefined
+}
+
+function inferToolNameFromKind(kind: unknown): string | undefined {
+    if (typeof kind !== 'string') return undefined
+    switch (kind) {
+        case 'read':
+            return 'Read'
+        case 'edit':
+            return 'Edit'
+        case 'execute':
+            return 'Bash'
+        case 'search':
+            return 'Grep'
+        case 'fetch':
+            return 'WebFetch'
+        default:
+            return undefined
+    }
+}
+
+function normalizeToolInput(
+    toolName: string | undefined,
+    rawInput: unknown,
+    locations: Array<{ path: string; line?: number }> | undefined,
+): unknown {
+    const parsed = rawInput != null ? parseRawInput(rawInput) : undefined
+    const normalizedName = toolName ? normalizeToolName(toolName) : undefined
+    const record = asInputRecord(parsed)
+
+    if (normalizedName === 'Bash') {
+        const command = pickStringFromRecord(record, ['command', 'cmd', 'script'])
+            ?? (typeof parsed === 'string' ? parsed : undefined)
+        if (command) return { ...(record ?? {}), command }
+        return parsed
+    }
+
+    if (normalizedName === 'Read' || normalizedName === 'Edit' || normalizedName === 'Write') {
+        const filePath = pickStringFromRecord(record, ['file_path', 'filePath', 'path', 'target_file', 'targetFile'])
+            ?? (typeof parsed === 'string' ? parsed : undefined)
+            ?? locations?.[0]?.path
+        if (filePath) return { ...(record ?? {}), file_path: filePath }
+        return parsed
+    }
+
+    return parsed
+}
+
+function asInputRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined
+}
+
+function pickStringFromRecord(record: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+    if (!record) return undefined
+    for (const key of keys) {
+        const value = record[key]
+        if (typeof value === 'string' && value.trim()) return value
+    }
     return undefined
 }
 
