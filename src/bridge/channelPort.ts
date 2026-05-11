@@ -35,6 +35,8 @@ export interface SessionStatus {
     model?: string
     cwd: string
     provider: string
+    /** If set, edit this existing message instead of sending a new one */
+    editMessageId?: string | number
 }
 
 export interface ChannelSendResult {
