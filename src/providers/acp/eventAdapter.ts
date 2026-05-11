@@ -244,14 +244,17 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 // For terminal events (completed/failed), do NOT blindly derive canonical toolName from title.
                 // Only set toolName if the title is a known/canonical tool name.
                 // Otherwise omit toolName and set displayTitle so the projector can merge with prior state.
-                const output = extractToolOutput(toolUpdate)
                 const toolName = isKnown ? normalizeToolName(rawTitle) : undefined
-                const displayTitle = isKnown ? undefined : (rawTitle || undefined)
+                const output = extractToolOutput(toolUpdate)
+                const exitPlanContent = toolName === 'ExitPlanMode'
+                    ? extractExitPlanModePlan(toolUpdate, output)
+                    : undefined
+                const displayTitle = exitPlanContent ?? (isKnown ? undefined : (rawTitle || undefined))
 
                 events.push({
                     kind: 'tool_result',
                     toolUseId: toolUpdate.toolCallId,
-                    output,
+                    output: exitPlanContent ?? output,
                     isError: statusIndicatesError(toolUpdate.status),
                     ...(toolName ? { toolName } : {}),
                     ...(displayTitle ? { displayTitle } : {}),
@@ -449,6 +452,49 @@ function extractToolOutput(toolUpdate: AcpToolCallUpdate): string {
     }
 
     return ''
+}
+
+function extractExitPlanModePlan(toolUpdate: AcpToolCallUpdate, fallbackOutput: string): string | undefined {
+    return extractPlanString(toolUpdate.rawOutput)
+        ?? extractPlanString(toolUpdate.rawInput)
+        ?? extractPlanFromContentBlocks(toolUpdate.content ?? undefined)
+        ?? (fallbackOutput.trim() && !looksLikeJsonStringify(fallbackOutput) ? fallbackOutput.trim() : undefined)
+}
+
+function extractPlanFromContentBlocks(content: AcpToolCallContent[] | undefined | null): string | undefined {
+    const text = content
+        ?.flatMap((item) => {
+            if (item.type !== 'content') return []
+            const c = item as { content: ContentBlock; type: 'content' }
+            if (c.content.type !== 'text') return []
+            const textContent = c.content as TextContent & { type: 'text' }
+            return textContent.text?.trim() ? [textContent.text.trim()] : []
+        })
+        .join('\n')
+
+    return text || undefined
+}
+
+function extractPlanString(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+        const trimmed = value.trim()
+        if (!trimmed) return undefined
+        try {
+            return extractPlanString(JSON.parse(trimmed))
+        } catch {
+            return trimmed
+        }
+    }
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+
+    const record = value as Record<string, unknown>
+    for (const key of ['plan', 'content', 'text', 'description', 'output', 'result', 'message']) {
+        const extracted = extractPlanString(record[key])
+        if (extracted) return extracted
+    }
+
+    return undefined
 }
 
 export function parseRawInput(rawInput: unknown): unknown {

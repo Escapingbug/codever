@@ -98,6 +98,33 @@ describe('ChannelProjector — patch merge', () => {
         const message = result[0]?.message.text || ''
         expect(message).toContain('Edit')
     })
+
+    it('renders normalized ExitPlanMode plan content from completed displayTitle', () => {
+        const started = makeToolEvent({
+            toolCallId: 'c4',
+            phase: 'started',
+            toolName: 'ExitPlanMode',
+            input: {},
+            meta: makeMeta('c4'),
+        })
+        const completed = makeToolEvent({
+            toolCallId: 'c4',
+            phase: 'completed',
+            toolName: 'tool_call',
+            displayTitle: '1. Inspect current flow\n2. Show the plan in Telegram',
+            output: JSON.stringify({ plan: 'this raw provider shape should not be parsed by the projector' }),
+            meta: makeMeta('c4'),
+        })
+
+        projector.project(started)
+        const result = projector.project(completed)
+        const message = result[0]?.message.text || ''
+
+        expect(message).toContain('Plan')
+        expect(message).toContain('Inspect current flow')
+        expect(message).toContain('Show the plan in Telegram')
+        expect(message).not.toContain('Exited plan mode')
+    })
 })
 
 describe('ChannelProjector — command_result friendly rendering', () => {

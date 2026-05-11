@@ -288,6 +288,43 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('Implementation Plan')
             expect(message).toContain('Please approve this plan')
         })
+
+        it('should render ExitPlanMode plan content from Cursor-style completed output', async () => {
+            const started = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-exit-plan',
+                title: 'ExitPlanMode',
+                rawInput: JSON.stringify({}),
+                status: 'pending',
+            }
+            const completed = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-exit-plan',
+                title: 'ExitPlanMode',
+                status: 'completed',
+                rawOutput: JSON.stringify({
+                    plan: '1. Trace Cursor provider events\n2. Include the concrete plan in the exit message',
+                }),
+            }
+
+            await processAcpUpdate(started, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(completed, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Plan')
+            expect(message).toContain('Trace Cursor provider events')
+            expect(message).toContain('Include the concrete plan')
+            expect(message).not.toContain('Exited plan mode')
+        })
     })
 
     describe('Scenario C: TodoWrite update preserves Tasks display', () => {
