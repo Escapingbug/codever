@@ -409,7 +409,7 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('normalizeToolInput')
         })
 
-        it('should render Cursor ACP Web Search title as WebSearch instead of Grep', async () => {
+        it('should render Cursor ACP search kind using the provider title', async () => {
             const webSearchCall = {
                 sessionUpdate: 'tool_call',
                 toolCallId: 'call-cursor-web-search',
@@ -448,7 +448,7 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
 
             expect(outbox.edits.length).toBe(2)
             const message = outbox.edits[1].message.text
-            expect(message).toContain('Search')
+            expect(message).toContain('Web Search')
             expect(message).not.toContain('Grep')
         })
 
@@ -515,7 +515,8 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
 
             expect(outbox.edits.length).toBe(1)
             const message = outbox.edits[0].message.text
-            expect(message).toContain('Grep')
+            expect(message).toContain('Find')
+            expect(message).not.toContain('Grep')
             expect(message).toContain('2 files (truncated)')
         })
     })

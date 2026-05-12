@@ -33,7 +33,6 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     agent: 'Agent',
     websearch: 'WebSearch',
     web_search: 'WebSearch',
-    'web search': 'WebSearch',
     webfetch: 'WebFetch',
     web_fetch: 'WebFetch',
     todowrite: 'TodoWrite',

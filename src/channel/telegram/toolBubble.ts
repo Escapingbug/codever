@@ -30,7 +30,6 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     agent: 'Agent',
     websearch: 'WebSearch',
     web_search: 'WebSearch',
-    'web search': 'WebSearch',
     webfetch: 'WebFetch',
     web_fetch: 'WebFetch',
     todowrite: 'TodoWrite',
@@ -124,6 +123,7 @@ function renderToolHeader(
             return `🔍 <b>Glob</b>: <code>${escapeHtml(String((input as any)?.pattern || ''))}</code>`
         }
         case 'Grep': {
+            if (displayTitle) return `🔍 <b>${escapeHtml(displayTitle)}</b>`
             if (isEmptyInput) return '🔍 <b>Grep</b>'
             return `🔍 <b>Grep</b>: <code>${escapeHtml(String((input as any)?.pattern || ''))}</code>`
         }
