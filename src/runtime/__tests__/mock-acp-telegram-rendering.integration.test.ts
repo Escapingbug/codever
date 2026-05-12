@@ -409,22 +409,25 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('normalizeToolInput')
         })
 
-        it('should render Cursor ACP web search query as WebSearch instead of Grep', async () => {
+        it('should render Cursor ACP Web Search title as WebSearch instead of Grep', async () => {
             const webSearchCall = {
                 sessionUpdate: 'tool_call',
                 toolCallId: 'call-cursor-web-search',
-                title: null,
+                title: 'Web Search',
                 kind: 'search',
                 status: 'pending',
                 rawInput: {},
             }
-            const webSearchUpdate = {
+            const webSearchProgress = {
                 sessionUpdate: 'tool_call_update',
                 toolCallId: 'call-cursor-web-search',
-                title: null,
-                kind: 'search',
                 status: 'in_progress',
-                rawInput: { query: 'site:www.bing.com Bing' },
+            }
+            const webSearchCompleted = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-web-search',
+                status: 'completed',
+                rawOutput: { referenceCount: 1 },
             }
 
             await processAcpUpdate(webSearchCall, {
@@ -432,16 +435,20 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
                 turnId,
                 provider: 'agent',
             })
-            await processAcpUpdate(webSearchUpdate, {
+            await processAcpUpdate(webSearchProgress, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(webSearchCompleted, {
                 sessionId: 'sess-1',
                 turnId,
                 provider: 'agent',
             })
 
-            expect(outbox.edits.length).toBe(1)
-            const message = outbox.edits[0].message.text
+            expect(outbox.edits.length).toBe(2)
+            const message = outbox.edits[1].message.text
             expect(message).toContain('Search')
-            expect(message).toContain('site:www.bing.com Bing')
             expect(message).not.toContain('Grep')
         })
 

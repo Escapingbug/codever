@@ -33,6 +33,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     agent: 'Agent',
     websearch: 'WebSearch',
     web_search: 'WebSearch',
+    'web search': 'WebSearch',
     webfetch: 'WebFetch',
     web_fetch: 'WebFetch',
     todowrite: 'TodoWrite',
@@ -209,7 +210,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
 
             // Determine canonical toolName and displayTitle
             // rawTitle might be the real tool name OR a file path / descriptive title
-            const inferredToolName = inferToolNameFromKind(toolCall.kind, toolCall.rawInput)
+            const inferredToolName = inferToolNameFromKind(toolCall.kind)
             const isKnown = isKnownToolName(rawTitle)
             const toolName = isKnown ? normalizeToolName(rawTitle) : inferredToolName ?? 'tool_call'
             // IMPORTANT: Do NOT use generic 'tool_call'/'tool' as displayTitle
@@ -245,7 +246,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
             }
 
             const isTerminal = toolUpdate.status === 'completed' || toolUpdate.status === 'failed'
-            const inferredToolName = inferToolNameFromKind(toolUpdate.kind ?? undefined, toolUpdate.rawInput)
+            const inferredToolName = inferToolNameFromKind(toolUpdate.kind ?? undefined)
             const isKnown = isKnownToolName(rawTitle)
 
             if (isTerminal) {
@@ -541,7 +542,7 @@ function extractPlanString(value: unknown): string | undefined {
     return undefined
 }
 
-function inferToolNameFromKind(kind: unknown, rawInput?: unknown): string | undefined {
+function inferToolNameFromKind(kind: unknown): string | undefined {
     if (typeof kind !== 'string') return undefined
     switch (kind) {
         case 'read':
@@ -551,23 +552,12 @@ function inferToolNameFromKind(kind: unknown, rawInput?: unknown): string | unde
         case 'execute':
             return 'Bash'
         case 'search':
-            return isLikelyWebSearchInput(rawInput) ? 'WebSearch' : 'Grep'
+            return 'Grep'
         case 'fetch':
             return 'WebFetch'
         default:
             return undefined
     }
-}
-
-function isLikelyWebSearchInput(rawInput: unknown): boolean {
-    const parsed = parseRawInput(rawInput)
-    const record = asInputRecord(parsed)
-    const query = pickStringFromRecord(record, ['query', 'url', 'domain'])
-        ?? (typeof parsed === 'string' ? parsed : undefined)
-    if (!query) return false
-
-    return /(^|\s)(https?:\/\/|www\.)/i.test(query)
-        || /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b/i.test(query)
 }
 
 function normalizeToolInput(
