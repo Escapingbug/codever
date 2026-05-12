@@ -15,6 +15,7 @@ import type { AgentEvent } from '@/providers/types'
 import type { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import type { AcpExtensionHandler } from '@/providers/acp/AcpClientManager'
 import { createCursorAcpExtensionHandler } from './cursorExtensions'
+import { createCursorPermissionHandler } from './cursorPermissions'
 
 const AGENT_ACP_COMMAND = 'agent'
 const AGENT_ACP_ARGS = ['acp']
@@ -27,6 +28,13 @@ export class AgentProvider extends AcpProvider {
             name: 'agent',
             command: AGENT_ACP_COMMAND,
             args: AGENT_ACP_ARGS,
+        })
+    }
+
+    override startQuery(prompt: string, config: AgentQueryConfig) {
+        return super.startQuery(prompt, {
+            ...config,
+            permissionHandler: createCursorPermissionHandler(config.permissionHandler, config.cwd),
         })
     }
 
