@@ -409,6 +409,42 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).toContain('normalizeToolInput')
         })
 
+        it('should render Cursor ACP web search query as WebSearch instead of Grep', async () => {
+            const webSearchCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-cursor-web-search',
+                title: null,
+                kind: 'search',
+                status: 'pending',
+                rawInput: {},
+            }
+            const webSearchUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-cursor-web-search',
+                title: null,
+                kind: 'search',
+                status: 'in_progress',
+                rawInput: { query: 'site:www.bing.com Bing' },
+            }
+
+            await processAcpUpdate(webSearchCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+            await processAcpUpdate(webSearchUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'agent',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Search')
+            expect(message).toContain('site:www.bing.com Bing')
+            expect(message).not.toContain('Grep')
+        })
+
         it('should render Cursor ACP search result totals from rawOutput', async () => {
             const grepCall = {
                 sessionUpdate: 'tool_call',

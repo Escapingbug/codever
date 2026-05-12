@@ -168,7 +168,9 @@ export class ChannelProjector {
         // Patch merge: preserve canonical toolName from initial event
         // Only use event.toolName if it's a known canonical name, otherwise keep existing
         let toolName: string
-        if (existing?.toolName && !isGenericToolName(existing.toolName)) {
+        if (canReplaceToolName(existing?.toolName, event.toolName, event.meta.provider)) {
+            toolName = event.toolName
+        } else if (existing?.toolName && !isGenericToolName(existing.toolName)) {
             toolName = existing.toolName
         } else if (event.toolName && !isGenericToolName(event.toolName)) {
             toolName = event.toolName
@@ -239,6 +241,12 @@ export class ChannelProjector {
 
 function isGenericToolName(toolName: string | undefined): boolean {
     return !toolName || toolName === 'tool' || toolName === 'tool_call'
+}
+
+function canReplaceToolName(existingToolName: string | undefined, nextToolName: string | undefined, provider: string): nextToolName is string {
+    return provider === 'agent'
+        && existingToolName === 'Grep'
+        && nextToolName === 'WebSearch'
 }
 
 function shouldIncludeToolOutput(event: Extract<ConversationEvent, { kind: 'tool' }>, verboseLevel: 0 | 1 | 2): boolean {
