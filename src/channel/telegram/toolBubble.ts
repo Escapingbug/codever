@@ -62,7 +62,7 @@ export function formatToolBubble(state: ToolBubbleState): string {
     const header = renderToolHeader(name, input, state.displayTitle, state.content)
     parts.push(header)
 
-    const contentText = renderContentText(state.content)
+    const contentText = renderContentText(name, state.content)
     if (contentText) {
         parts.push(contentText)
     }
@@ -192,15 +192,34 @@ function renderToolHeader(
     }
 }
 
-function renderContentText(content: ToolBubbleState['content']): string | null {
+function renderContentText(toolName: string, content: ToolBubbleState['content']): string | null {
+    if (toolName === 'TodoWrite') return null
+
     const text = content
-        ?.flatMap((item) => item.type === 'content' && item.text?.trim() ? [item.text.trim()] : [])
+        ?.flatMap((item) => {
+            if (item.type !== 'content' || !item.text?.trim()) return []
+            const text = item.text.trim()
+            return looksLikeJson(text) ? [] : [text]
+        })
         .join('\n')
         .trim()
 
     if (!text) return null
     const truncated = text.length > 1200 ? `${text.slice(0, 1200)}...` : text
     return escapeHtml(truncated)
+}
+
+function looksLikeJson(text: string): boolean {
+    const trimmed = text.trim()
+    if (!((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']')))) {
+        return false
+    }
+    try {
+        JSON.parse(trimmed)
+        return true
+    } catch {
+        return false
+    }
 }
 
 function getContentFilePaths(content: ToolBubbleState['content']): string[] {

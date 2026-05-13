@@ -99,7 +99,7 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
 
-    it('registers file:// references and reads them only after an explicit file command', async () => {
+    it('does not register file:// references from ordinary assistant text', async () => {
         const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-'))
         try {
             const planPath = join(tempDir, 'plan.md')
@@ -120,8 +120,44 @@ describe('Semantic runtime integration chain', () => {
 
             await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
 
+            expect(channel.sent.map(message => message.text).join('\n')).toContain(planUri)
+            expect(channel.sent.map(message => message.text).join('\n')).not.toContain('/file_')
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
+    it('registers file:// references from tool update content and reads them only after an explicit file command', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-'))
+        try {
+            const planPath = join(tempDir, 'plan.md')
+            writeFileSync(planPath, '# Plan\n\nRead this on demand.', 'utf8')
+            const planUri = pathToFileURL(planPath).href
+            const provider = createProvider([
+                {
+                    kind: 'tool_use',
+                    toolName: 'tool_call',
+                    toolUseId: 'create-plan',
+                    input: {},
+                    status: 'running',
+                    displayTitle: 'Create Plan',
+                    content: [{ type: 'content', contentType: 'text', text: `Plan file: ${planUri}` }],
+                },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
+
             const promptMessage = channel.sent.find(message => message.text.includes('/file_'))
-            expect(promptMessage?.text).toContain('Plan saved to')
+            expect(promptMessage?.text).toContain('Plan file:')
             const id = promptMessage?.text.match(/\/file_([A-Za-z0-9_-]+)/)?.[1]
             expect(id).toBeTruthy()
             expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Read this on demand.')
@@ -129,6 +165,52 @@ describe('Semantic runtime integration chain', () => {
             await runtime.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
 
             expect(channel.sent.at(-1)?.text).toContain('Read this on demand.')
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
+    it('strips markdown backticks from registered file:// references before reading files', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-backtick-'))
+        try {
+            const firstPath = join(tempDir, 'toolBubble.ts')
+            const secondPath = join(tempDir, 'semanticSessionRuntime.ts')
+            writeFileSync(firstPath, 'tool bubble content', 'utf8')
+            writeFileSync(secondPath, 'runtime content', 'utf8')
+            const firstUri = pathToFileURL(firstPath).href
+            const secondUri = pathToFileURL(secondPath).href
+            const provider = createProvider([
+                {
+                    kind: 'tool_use',
+                    toolName: 'tool_call',
+                    toolUseId: 'write-files',
+                    input: {},
+                    status: 'running',
+                    displayTitle: 'Write Files',
+                    content: [{ type: 'content', contentType: 'text', text: `Wrote files: \`${firstUri}\`, \`${secondUri}\`` }],
+                },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'write files', source: 'channel' })
+
+            const promptMessage = channel.sent.find(message => message.text.includes('/file_f1') && message.text.includes('/file_f2'))
+            expect(promptMessage?.text).toContain(firstUri)
+            expect(promptMessage?.text).toContain(secondUri)
+
+            await runtime.dispatch({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
+            expect(channel.sent.at(-1)?.text).toContain('tool bubble content')
+
+            await runtime.dispatch({ kind: 'command', name: 'file', args: 'f2', source: 'channel' })
+            expect(channel.sent.at(-1)?.text).toContain('runtime content')
         } finally {
             rmSync(tempDir, { recursive: true, force: true })
         }

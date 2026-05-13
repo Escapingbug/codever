@@ -725,6 +725,51 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(editedMessage).toContain('Tasks')
             expect(editedMessage).not.toContain('🔧')
         })
+
+        it('should not append opencode TodoWrite JSON content after the rendered Tasks UI', async () => {
+            const todoCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-todo-content-json',
+                title: 'TodoWrite',
+                rawInput: JSON.stringify({
+                    todos: [{ content: 'Investigate ACP file reference rendering', status: 'in_progress' }],
+                }),
+                status: 'pending',
+            }
+            const todoUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-todo-content-json',
+                title: 'TodoWrite',
+                status: 'in_progress',
+                content: [{
+                    type: 'content',
+                    content: {
+                        type: 'text',
+                        text: JSON.stringify({
+                            todos: [{ content: 'Investigate ACP file reference rendering', status: 'in_progress' }],
+                        }),
+                    },
+                }],
+            }
+
+            await processAcpUpdate(todoCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+            await processAcpUpdate(todoUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            const editedMessage = outbox.edits[0].message.text
+
+            expect(editedMessage).toContain('Tasks')
+            expect(editedMessage).toContain('Investigate ACP file reference rendering')
+            expect(editedMessage).not.toContain('&quot;todos&quot;')
+            expect(editedMessage).not.toContain('{&quot;')
+        })
     })
 
     describe('Additional: usage_update rendered friendly', () => {

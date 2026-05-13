@@ -17,7 +17,7 @@ import { escapeHtml } from '@/utils/formatting'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
 
-const FILE_REFERENCE_PATTERN = /file:\/\/[^\s<>"')]+/g
+const FILE_REFERENCE_PATTERN = /file:\/\/[^\s<>"'`()\[\],]+/g
 const MAX_FILE_REFERENCES = 20
 const MAX_READ_FILE_BYTES = 128 * 1024
 
@@ -268,8 +268,9 @@ export class SemanticSessionRuntime {
 
         const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
         for (const projected of messages) {
-            this.captureTables(projected.message)
-            await this.deliver(projected.message, projected.toolUseId, projected.isToolEvent)
+            const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
+            this.captureTables(message)
+            await this.deliver(message, projected.toolUseId, projected.isToolEvent)
         }
     }
 
@@ -288,7 +289,6 @@ export class SemanticSessionRuntime {
     }
 
     private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false): Promise<void> {
-        message = this.withFileReferenceHints(message)
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
             const record = await this.outbox.edit(this.toolMessageIds.get(toolUseId), message, true)
             if (record.messageId !== undefined) {
@@ -402,8 +402,8 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private withFileReferenceHints(message: ChannelMessage): ChannelMessage {
-        const refs = this.registerFileReferences(message.text)
+    private withFileReferenceHints(message: ChannelMessage, event?: ConversationEvent): ChannelMessage {
+        const refs = this.registerFileReferencesFromEvent(event)
         if (refs.length === 0) return message
 
         const hint = this.formatFileReferenceHint(refs, message.format)
@@ -413,6 +413,15 @@ export class SemanticSessionRuntime {
             text: `${message.text}${hint}`,
             ...(replyMarkup ? { replyMarkup } : {}),
         }
+    }
+
+    private registerFileReferencesFromEvent(event: ConversationEvent | undefined): FileReference[] {
+        if (event?.kind !== 'tool' || !event.content?.length) return []
+        const text = event.content
+            .flatMap((item) => item.type === 'content' && item.text ? [item.text] : [])
+            .join('\n')
+
+        return this.registerFileReferences(text)
     }
 
     private registerFileReferences(text: string): FileReference[] {
@@ -429,7 +438,7 @@ export class SemanticSessionRuntime {
     }
 
     private trimFileUri(uri: string): string {
-        return uri.replace(/[.,;:!?]+$/g, '')
+        return uri.replace(/[.,;:!?`]+$/g, '')
     }
 
     private registerFileReference(uri: string): FileReference | null {
