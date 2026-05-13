@@ -174,6 +174,17 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'progress', source: 'channel' })
     })
 
+    it('/file should dispatch a runtime file read command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCommand('file', createContext('f1'))
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
+    })
+
     it('/config timeout should dispatch runtime timeout config command', async () => {
         const bot = createBot()
         const session = createSession('idle')
@@ -248,6 +259,17 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'provider', args: 'mock-acp', source: 'channel' })
         expect(sessionManager.setGroupSettings).not.toHaveBeenCalled()
         expect(session.sessionRecord.setProviderName).not.toHaveBeenCalled()
+    })
+
+    it('file callback should dispatch a runtime file read command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCallback('file:f1')
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
     })
 
     it('decision callback resolves a pending TelegramPort request', async () => {

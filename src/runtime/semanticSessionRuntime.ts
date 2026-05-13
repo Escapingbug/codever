@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
+import { access, readFile, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
 import type { ConversationEvent, SessionInput } from './semantic'
@@ -8,8 +13,19 @@ import { DeliveryOutbox } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { ProviderCommand } from '@/providers/types'
+import { escapeHtml } from '@/utils/formatting'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
+
+const FILE_REFERENCE_PATTERN = /file:\/\/[^\s<>"')]+/g
+const MAX_FILE_REFERENCES = 20
+const MAX_READ_FILE_BYTES = 128 * 1024
+
+interface FileReference {
+    id: string
+    uri: string
+    path: string
+}
 
 export interface SemanticSessionRuntimeConfig {
     sessionId: string
@@ -46,6 +62,9 @@ export class SemanticSessionRuntime {
     private recentTables: string[] = []
     private availableCommands: ProviderCommand[] = []
     private lastConfigOptions: Array<Record<string, unknown>> = []
+    private fileReferences = new Map<string, FileReference>()
+    private fileReferenceIdsByUri = new Map<string, string>()
+    private nextFileReferenceNumber = 1
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
@@ -269,6 +288,7 @@ export class SemanticSessionRuntime {
     }
 
     private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false): Promise<void> {
+        message = this.withFileReferenceHints(message)
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
             const record = await this.outbox.edit(this.toolMessageIds.get(toolUseId), message, true)
             if (record.messageId !== undefined) {
@@ -374,9 +394,163 @@ export class SemanticSessionRuntime {
                 this.recordCommand('tables', { tables })
                 return
             }
+            case 'file':
+                await this.handleFileCommand(args)
+                return
             default:
                 this.recordCommand(name, { args })
         }
+    }
+
+    private withFileReferenceHints(message: ChannelMessage): ChannelMessage {
+        const refs = this.registerFileReferences(message.text)
+        if (refs.length === 0) return message
+
+        const hint = this.formatFileReferenceHint(refs, message.format)
+        const replyMarkup = this.withFileReferenceButtons(message.replyMarkup, refs)
+        return {
+            ...message,
+            text: `${message.text}${hint}`,
+            ...(replyMarkup ? { replyMarkup } : {}),
+        }
+    }
+
+    private registerFileReferences(text: string): FileReference[] {
+        const refs: FileReference[] = []
+        const seenInMessage = new Set<string>()
+        for (const match of text.matchAll(FILE_REFERENCE_PATTERN)) {
+            const uri = this.trimFileUri(match[0])
+            if (!uri || seenInMessage.has(uri)) continue
+            seenInMessage.add(uri)
+            const ref = this.registerFileReference(uri)
+            if (ref) refs.push(ref)
+        }
+        return refs
+    }
+
+    private trimFileUri(uri: string): string {
+        return uri.replace(/[.,;:!?]+$/g, '')
+    }
+
+    private registerFileReference(uri: string): FileReference | null {
+        const existingId = this.fileReferenceIdsByUri.get(uri)
+        if (existingId) return this.fileReferences.get(existingId) ?? null
+
+        let path: string
+        try {
+            path = fileURLToPath(uri)
+        } catch {
+            return null
+        }
+
+        const id = `f${this.nextFileReferenceNumber++}`
+        const ref = { id, uri, path }
+        this.fileReferences.set(id, ref)
+        this.fileReferenceIdsByUri.set(uri, id)
+
+        if (this.fileReferences.size > MAX_FILE_REFERENCES) {
+            const oldestId = this.fileReferences.keys().next().value
+            if (oldestId) {
+                const oldest = this.fileReferences.get(oldestId)
+                this.fileReferences.delete(oldestId)
+                if (oldest) this.fileReferenceIdsByUri.delete(oldest.uri)
+            }
+        }
+
+        return ref
+    }
+
+    private formatFileReferenceHint(refs: FileReference[], format: ChannelMessage['format']): string {
+        const lines = refs.map(ref => {
+            if (format === 'html') {
+                return `File reference <code>${escapeHtml(ref.id)}</code>: use <code>/file_${escapeHtml(ref.id)}</code> or <code>/file ${escapeHtml(ref.id)}</code> to read it.`
+            }
+            return `File reference ${ref.id}: use /file_${ref.id} or /file ${ref.id} to read it.`
+        })
+        return `\n\n${lines.join('\n')}`
+    }
+
+    private withFileReferenceButtons(replyMarkup: unknown, refs: FileReference[]): unknown {
+        if (refs.length === 0) return replyMarkup
+        const buttons = refs.slice(0, 3).map(ref => ({
+            text: `Read ${ref.id}`,
+            callback_data: `file:${ref.id}`,
+        }))
+
+        const existing = replyMarkup && typeof replyMarkup === 'object'
+            ? replyMarkup as { inline_keyboard?: unknown }
+            : undefined
+        if (Array.isArray(existing?.inline_keyboard)) {
+            return {
+                ...existing,
+                inline_keyboard: [...existing.inline_keyboard, buttons],
+            }
+        }
+        return { inline_keyboard: [buttons] }
+    }
+
+    private async handleFileCommand(idArg: string | undefined): Promise<void> {
+        const id = idArg?.trim()
+        if (!id) {
+            await this.send({ text: 'Usage: <code>/file f1</code> or <code>/file_f1</code>', format: 'html' })
+            return
+        }
+
+        const ref = this.fileReferences.get(id)
+        if (!ref) {
+            await this.send({ text: `Unknown file reference: <code>${escapeHtml(id)}</code>`, format: 'html' })
+            return
+        }
+
+        try {
+            const { path, content } = await this.readRegisteredFile(ref)
+            await this.send({
+                text: `<b>File <code>${escapeHtml(id)}</code></b>: <code>${escapeHtml(path)}</code>\n<pre>${escapeHtml(content)}</pre>`,
+                format: 'html',
+            })
+            this.recordCommand('file', { id, path })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            await this.send({ text: `Cannot read <code>${escapeHtml(id)}</code>: ${escapeHtml(message)}`, format: 'html' })
+            this.recordCommand('file', { id, error: message })
+        }
+    }
+
+    private async readRegisteredFile(ref: FileReference): Promise<{ path: string; content: string }> {
+        const resolvedPath = await realpath(ref.path)
+        if (!await this.isAllowedFilePath(resolvedPath)) {
+            throw new Error('file is outside allowed directories')
+        }
+
+        const info = await stat(resolvedPath)
+        if (!info.isFile()) {
+            throw new Error('path is not a regular file')
+        }
+        if (info.size > MAX_READ_FILE_BYTES) {
+            throw new Error(`file is too large (${info.size} bytes, limit ${MAX_READ_FILE_BYTES})`)
+        }
+
+        return {
+            path: resolvedPath,
+            content: await readFile(resolvedPath, 'utf8'),
+        }
+    }
+
+    private async isAllowedFilePath(path: string): Promise<boolean> {
+        const candidates = [
+            this.config.cwd,
+            resolve(homedir(), '.cursor'),
+        ]
+
+        for (const candidate of candidates) {
+            try {
+                await access(candidate, fsConstants.R_OK)
+                const base = await realpath(candidate)
+                if (isPathInside(path, base)) return true
+            } catch {}
+        }
+
+        return false
     }
 
     private async handleProgressCommand(): Promise<void> {
@@ -497,6 +671,16 @@ export class SemanticSessionRuntime {
     private log(message: string): void {
         this.config.onLog?.(message)
     }
+}
+
+function isPathInside(path: string, base: string): boolean {
+    const normalizedPath = normalizePathForCompare(path)
+    const normalizedBase = normalizePathForCompare(base)
+    return normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}${sep}`)
+}
+
+function normalizePathForCompare(path: string): string {
+    return process.platform === 'win32' ? path.toLowerCase() : path
 }
 
 function formatUnknown(value: unknown): string {

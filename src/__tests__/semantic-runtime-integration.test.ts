@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
@@ -93,6 +97,41 @@ describe('Semantic runtime integration chain', () => {
         expect(sessionRecord.conversationId).toBe('provider-session')
         expect(channel.sent.map(m => m.text)).toEqual(['integrated response'])
         expect(channel.statuses.map(s => s.state)).toEqual(['querying', 'idle'])
+    })
+
+    it('registers file:// references and reads them only after an explicit file command', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-'))
+        try {
+            const planPath = join(tempDir, 'plan.md')
+            writeFileSync(planPath, '# Plan\n\nRead this on demand.', 'utf8')
+            const planUri = pathToFileURL(planPath).href
+            const provider = createProvider([
+                { kind: 'text', text: `Plan saved to ${planUri}` },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
+
+            const promptMessage = channel.sent.find(message => message.text.includes('/file_'))
+            expect(promptMessage?.text).toContain('Plan saved to')
+            const id = promptMessage?.text.match(/\/file_([A-Za-z0-9_-]+)/)?.[1]
+            expect(id).toBeTruthy()
+            expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Read this on demand.')
+
+            await runtime.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
+
+            expect(channel.sent.at(-1)?.text).toContain('Read this on demand.')
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
     })
 
     it('sends a Telegram start acknowledgement with provider, cwd, and selected model through TopicSession', async () => {

@@ -156,6 +156,20 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         await topicSession.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
     })
 
+    bot.command('file', async (c: Context) => {
+        if (!c.chat || c.chat.type === 'private') return
+        const messageThreadId = c.message?.message_thread_id
+        const topicKey = makeTopicKey(c.chat.id, messageThreadId)
+        const topicSession = topicSessions.get(topicKey)
+        if (!topicSession) {
+            await c.reply('No active session.')
+            return
+        }
+
+        const id = (c as any).match?.trim()
+        await topicSession.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
+    })
+
     bot.command(['new', 'reset'], async (c: Context) => {
         if (!c.chat || c.chat.type === 'private') return
         const messageThreadId = c.message?.message_thread_id

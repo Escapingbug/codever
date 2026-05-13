@@ -62,6 +62,11 @@ export function formatToolBubble(state: ToolBubbleState): string {
     const header = renderToolHeader(name, input, state.displayTitle, state.content)
     parts.push(header)
 
+    const contentText = renderContentText(state.content)
+    if (contentText) {
+        parts.push(contentText)
+    }
+
     for (const path of getContentFilePaths(state.content)) {
         if (!header.includes(escapeHtml(path))) {
             parts.push(`📄 <code>${escapeHtml(path)}</code>`)
@@ -185,6 +190,17 @@ function renderToolHeader(
             return `🔧 <b>${escapeHtml(name)}</b>\n<pre>${escapeHtml(inputStr)}</pre>`
         }
     }
+}
+
+function renderContentText(content: ToolBubbleState['content']): string | null {
+    const text = content
+        ?.flatMap((item) => item.type === 'content' && item.text?.trim() ? [item.text.trim()] : [])
+        .join('\n')
+        .trim()
+
+    if (!text) return null
+    const truncated = text.length > 1200 ? `${text.slice(0, 1200)}...` : text
+    return escapeHtml(truncated)
 }
 
 function getContentFilePaths(content: ToolBubbleState['content']): string[] {

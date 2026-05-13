@@ -23,6 +23,8 @@ export interface AgentToolUseEvent {
     /** Display title for the tool call (e.g. file path, descriptive title).
      *  Separate from canonical toolName to avoid confusing path-like titles with tool names. */
     displayTitle?: string
+    /** Structured content blocks from progressive ACP tool updates */
+    content?: Array<ToolResultContentBlock>
 }
 
 export interface AgentToolResultEvent {

@@ -35,6 +35,11 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
             return
         }
 
+        if (data.startsWith('file:')) {
+            await handleFileCallback(c, data, topicSessions)
+            return
+        }
+
         if (data.startsWith('model:')) {
             await handleModelCallback(c, data, sessionManager, topicSessions)
             return
@@ -108,6 +113,25 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
 
         await c.answerCallbackQuery()
     })
+}
+
+async function handleFileCallback(c: Context, data: string, topicSessions: Map<string, TopicSession>): Promise<void> {
+    const id = data.slice('file:'.length)
+    const chatId = c.callbackQuery?.message?.chat.id
+    const messageThreadId = c.callbackQuery?.message?.message_thread_id
+    if (!id || !chatId) {
+        await c.answerCallbackQuery('Invalid file reference')
+        return
+    }
+
+    const topicSession = topicSessions.get(makeTopicKey(chatId, messageThreadId))
+    if (!topicSession) {
+        await c.answerCallbackQuery('No active session')
+        return
+    }
+
+    await topicSession.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
+    await c.answerCallbackQuery('Reading file')
 }
 
 async function handleDecisionCallback(c: Context, data: string, topicSessions: Map<string, TopicSession>): Promise<void> {

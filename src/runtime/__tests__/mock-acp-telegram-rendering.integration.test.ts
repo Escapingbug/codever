@@ -943,4 +943,47 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(outbox.sends.length).toBeGreaterThan(0)
         })
     })
+
+    describe('File reference tool updates', () => {
+        it('renders non-terminal ACP tool content that announces a saved plan file', async () => {
+            const started = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-create-plan',
+                kind: 'other',
+                title: 'Create Plan',
+                rawInput: { _toolName: 'createPlan' },
+                status: 'pending',
+            }
+            const saved = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-create-plan',
+                kind: 'other',
+                status: 'in_progress',
+                content: [
+                    {
+                        type: 'content',
+                        content: {
+                            type: 'text',
+                            text: 'Plan saved to file:///C:/Users/anciety/.cursor/plans/example.plan.md',
+                        },
+                    },
+                ],
+            }
+
+            await processAcpUpdate(started, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+            await processAcpUpdate(saved, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            const lastEdit = outbox.edits.at(-1)?.message.text ?? ''
+            expect(lastEdit).toContain('Plan saved to file')
+            expect(lastEdit).toContain('file:///C:/Users/anciety/.cursor/plans/example.plan.md')
+        })
+    })
 })

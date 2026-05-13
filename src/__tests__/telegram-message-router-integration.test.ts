@@ -181,6 +181,18 @@ describe('Telegram message router integration', () => {
         expect(existing.receiveInput).toHaveBeenCalledWith({ text: 'second message', username: 'alice' })
     })
 
+    it('routes /file_<id> messages to the runtime file command instead of the agent prompt', async () => {
+        const bot = createBot()
+        const existing = createTopicSession()
+        const topicSessions = new Map<string, any>([['-100:10', existing]])
+        registerMessageRouter(bot, { sessionManager: createSessionManager(), topicSessions, bot: bot as any })
+
+        await bot.emitMessage(createMessageContext('/file_f1'))
+
+        expect(existing.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
+        expect(existing.receiveInput).not.toHaveBeenCalled()
+    })
+
     it('keeps different Telegram topics isolated in the same group', async () => {
         const bot = createBot()
         const topicSessions = new Map<string, any>()

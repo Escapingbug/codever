@@ -47,6 +47,7 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
                     category: categorizeTool(event.toolName, event.toolKind),
                     input: event.input,
                     ...(event.displayTitle ? { displayTitle: event.displayTitle } : {}),
+                    ...(event.content ? { content: event.content } : {}),
                 }]
 
             case 'tool_result':

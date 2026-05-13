@@ -86,6 +86,15 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
 
         const groupChatId = chat.id
         let topicSession = topicSessions.get(topicKey)
+        const fileCommandMatch = c.message!.text!.match(/^\/file_([A-Za-z0-9_-]+)(?:@\w+)?(?:\s|$)/)
+        if (fileCommandMatch) {
+            if (!topicSession) {
+                await c.reply('No active session.')
+                return
+            }
+            await topicSession.dispatch({ kind: 'command', name: 'file', args: fileCommandMatch[1], source: 'channel' })
+            return
+        }
 
         if (!topicSession) {
             if (sessionManager.isGroupArchived(topicKey)) {

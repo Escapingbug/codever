@@ -261,7 +261,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 const locations = mapLocations(toolUpdate.locations ?? undefined)
                 const input = normalizeToolInput(toolName, toolUpdate.rawInput, locations)
 
-                if (input !== undefined || locations !== undefined || toolUpdate.kind) {
+                if ((input !== undefined || locations !== undefined || toolUpdate.kind) && (toolName || inferredToolName)) {
                     events.push({
                         kind: 'tool_use',
                         toolName: toolName ?? inferredToolName ?? 'tool_call',
@@ -308,6 +308,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                     ...(toolUpdate.kind ? { toolKind: toolUpdate.kind } : {}),
                     locations,
                     ...(displayTitle ? { displayTitle } : {}),
+                    content: mapContentBlocks(toolUpdate.content ?? undefined),
                 })
             }
             break
