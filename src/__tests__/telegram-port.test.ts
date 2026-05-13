@@ -114,6 +114,21 @@ describe('TelegramPort', () => {
 
             expect(apiCalls[0].method).toBe('editMessageText')
         })
+
+        it('preserves inline keyboard markup when editing a message', async () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+            const replyMarkup = {
+                inline_keyboard: [[{ text: 'Read f1', callback_data: 'file:f1' }]],
+            }
+
+            await port.edit!(1, { text: 'updated', format: 'html', replyMarkup })
+
+            expect(apiCalls[0].method).toBe('editMessageText')
+            expect(apiCalls[0].args[3]).toEqual(expect.objectContaining({
+                reply_markup: replyMarkup,
+            }))
+        })
     })
 
     describe('notifyStatus', () => {

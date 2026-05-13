@@ -403,7 +403,7 @@ export class SemanticSessionRuntime {
     }
 
     private withFileReferenceHints(message: ChannelMessage, event?: ConversationEvent): ChannelMessage {
-        const refs = this.registerFileReferencesFromEvent(event)
+        const refs = this.registerFileReferencesFromEvent(event, message.text)
         if (refs.length === 0) return message
 
         const hint = this.formatFileReferenceHint(refs, message.format)
@@ -415,11 +415,12 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private registerFileReferencesFromEvent(event: ConversationEvent | undefined): FileReference[] {
-        if (event?.kind !== 'tool' || !event.content?.length) return []
-        const text = event.content
+    private registerFileReferencesFromEvent(event: ConversationEvent | undefined, projectedText: string): FileReference[] {
+        if (event?.kind !== 'tool') return []
+        const contentText = (event.content ?? [])
             .flatMap((item) => item.type === 'content' && item.text ? [item.text] : [])
             .join('\n')
+        const text = `${contentText}\n${projectedText}`
 
         return this.registerFileReferences(text)
     }

@@ -46,7 +46,7 @@ export class TelegramPort implements ChannelPort {
     }
 
     async edit(messageId: string | number, message: ChannelMessage): Promise<void> {
-        const { text, format } = message
+        const { text, format, replyMarkup } = message
 
         try {
             if (format === 'markdown') {
@@ -60,6 +60,7 @@ export class TelegramPort implements ChannelPort {
                             segment.text,
                             {
                                 entities: segment.entities as any,
+                                reply_markup: replyMarkup as any,
                                 ...buildMessageThreadParams(this.threadId),
                             },
                         )
@@ -74,6 +75,7 @@ export class TelegramPort implements ChannelPort {
                     text,
                     {
                         parse_mode: 'HTML',
+                        reply_markup: replyMarkup as any,
                         ...buildMessageThreadParams(this.threadId),
                     },
                 )
@@ -83,6 +85,7 @@ export class TelegramPort implements ChannelPort {
                     Number(messageId),
                     text,
                     {
+                        reply_markup: replyMarkup as any,
                         ...buildMessageThreadParams(this.threadId),
                     },
                 )

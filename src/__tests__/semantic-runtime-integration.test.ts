@@ -170,6 +170,56 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('keeps file reference hints when a later tool completion edit reuses merged content', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-edit-'))
+        try {
+            const planPath = join(tempDir, 'plan.md')
+            writeFileSync(planPath, '# Plan\n\nRead this after edit.', 'utf8')
+            const planUri = pathToFileURL(planPath).href
+            const provider = createProvider([
+                {
+                    kind: 'tool_use',
+                    toolName: 'tool_call',
+                    toolUseId: 'create-plan',
+                    input: { _toolName: 'createPlan' },
+                    status: 'running',
+                    displayTitle: 'Create Plan',
+                    content: [{ type: 'content', contentType: 'text', text: `Plan saved to ${planUri}` }],
+                },
+                {
+                    kind: 'tool_result',
+                    toolUseId: 'create-plan',
+                    output: '',
+                    isError: false,
+                },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
+
+            const finalToolMessage = [...channel.sent].reverse().find((message) => message.text.startsWith('EDIT:'))
+            expect(finalToolMessage?.text).toContain('Plan saved to')
+            expect(finalToolMessage?.text).toContain('/file_f1')
+            expect(finalToolMessage?.replyMarkup).toEqual(expect.objectContaining({
+                inline_keyboard: expect.any(Array),
+            }))
+
+            await runtime.dispatch({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
+
+            expect(channel.sent.at(-1)?.text).toContain('Read this after edit.')
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
     it('strips markdown backticks from registered file:// references before reading files', async () => {
         const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-backtick-'))
         try {
