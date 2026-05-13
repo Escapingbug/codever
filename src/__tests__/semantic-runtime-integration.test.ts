@@ -165,6 +165,7 @@ describe('Semantic runtime integration chain', () => {
             await runtime.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
 
             expect(channel.sent.at(-1)?.text).toContain('Read this on demand.')
+            expect(channel.sent.at(-1)?.format).toBe('markdown')
         } finally {
             rmSync(tempDir, { recursive: true, force: true })
         }

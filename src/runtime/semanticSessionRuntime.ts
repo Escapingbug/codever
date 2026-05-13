@@ -514,15 +514,26 @@ export class SemanticSessionRuntime {
 
         try {
             const { path, content } = await this.readRegisteredFile(ref)
-            await this.send({
-                text: `<b>File <code>${escapeHtml(id)}</code></b>: <code>${escapeHtml(path)}</code>\n<pre>${escapeHtml(content)}</pre>`,
-                format: 'html',
-            })
+            await this.send(this.formatFileReadMessage(id, path, content))
             this.recordCommand('file', { id, path })
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             await this.send({ text: `Cannot read <code>${escapeHtml(id)}</code>: ${escapeHtml(message)}`, format: 'html' })
             this.recordCommand('file', { id, error: message })
+        }
+    }
+
+    private formatFileReadMessage(id: string, path: string, content: string): ChannelMessage {
+        if (isMarkdownPath(path)) {
+            return {
+                text: `File ${id}: ${path}\n\n${content}`,
+                format: 'markdown',
+            }
+        }
+
+        return {
+            text: `<b>File <code>${escapeHtml(id)}</code></b>: <code>${escapeHtml(path)}</code>\n<pre>${escapeHtml(content)}</pre>`,
+            format: 'html',
         }
     }
 
@@ -691,6 +702,11 @@ function isPathInside(path: string, base: string): boolean {
 
 function normalizePathForCompare(path: string): string {
     return process.platform === 'win32' ? path.toLowerCase() : path
+}
+
+function isMarkdownPath(path: string): boolean {
+    const lower = path.toLowerCase()
+    return lower.endsWith('.md') || lower.endsWith('.markdown')
 }
 
 function formatUnknown(value: unknown): string {
