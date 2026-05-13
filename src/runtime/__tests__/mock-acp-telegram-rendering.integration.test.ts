@@ -306,6 +306,46 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).not.toContain('<pre>{')
         })
 
+        it('should not render Read tool content text in normal verbosity', async () => {
+            const readCall = {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-read-content-text',
+                title: 'Read',
+                rawInput: JSON.stringify({ filePath: 'src/secret.ts' }),
+                status: 'pending',
+            }
+            const readUpdate = {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-read-content-text',
+                title: 'Read',
+                status: 'completed',
+                content: [{
+                    type: 'content',
+                    content: {
+                        type: 'text',
+                        text: 'const secret = "this file body should not render at normal verbosity"',
+                    },
+                }],
+            }
+
+            await processAcpUpdate(readCall, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+            await processAcpUpdate(readUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            expect(outbox.edits.length).toBe(1)
+            const message = outbox.edits[0].message.text
+            expect(message).toContain('Read')
+            expect(message).toContain('src/secret.ts')
+            expect(message).not.toContain('this file body should not render')
+        })
+
         it('should render Cursor ACP terminal command when rawInput arrives on completed update', async () => {
             const terminalCall = {
                 sessionUpdate: 'tool_call',

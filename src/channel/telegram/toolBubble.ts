@@ -193,7 +193,7 @@ function renderToolHeader(
 }
 
 function renderContentText(toolName: string, content: ToolBubbleState['content']): string | null {
-    if (toolName === 'TodoWrite') return null
+    if (SUPPRESS_RESULT_TOOLS.has(toolName)) return null
 
     const text = content
         ?.flatMap((item) => {
