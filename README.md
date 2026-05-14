@@ -1,133 +1,239 @@
 # codever
 
-ACP ↔ Channel Bridge. Connect ACP-compatible coding agents to Telegram (and future channels), faithfully replicating the local TUI experience remotely. Agents can also interact with codever itself via MCP tools for proactive messaging, self-awareness, and management.
+Codever is an ACP-to-Telegram bridge for running coding agents from chat. It runs on your machine, starts ACP-compatible agent subprocesses, and projects the agent conversation into Telegram with tool output, permission prompts, session controls, and Codever MCP context.
+
+The current implementation is a Telegram topic session gateway: each Telegram forum topic can own an independent agent session, while the daemon, config, provider processes, and project files stay local.
 
 ## Features
 
-- **Remote TUI**: Full local TUI experience over Telegram — text, tool calls, permissions, everything
-- **ACP Protocol**: Works with ACP-compatible agents (opencode, codebuddy, Cursor agent)
-- **Permission handling**: Approve/deny agent tool use via Telegram inline keyboards
-- **Multi-provider**: Switch between opencode, codebuddy, and agent per session
-- **Session management**: Resume past sessions, list history, switch providers
-- **MCP tools**: Agents can schedule reminders, manage sessions, and interact with codever
-- **No backend server**: Runs entirely on your machine using Telegram long polling
+- **Telegram remote agent UI**: send prompts from Telegram and receive assistant text, tool progress, errors, and final status.
+- **ACP providers**: supports `opencode acp`, `codebuddy acp`, and Cursor CLI's `agent acp`.
+- **Topic-based sessions**: each Telegram topic can map to a separate project/session; the general topic is reserved for control commands.
+- **Permission handling**: provider permission requests are shown as Telegram inline buttons.
+- **Session controls**: interrupt, reset, archive, list, and resume sessions from Telegram.
+- **Provider/model controls**: choose provider, model, permission mode, verbosity, and timeout per group/session.
+- **Codever MCP surface**: agents can read Codever environment resources and use tools such as reminders and proactive messages.
+- **Local-only runtime**: no hosted backend; the daemon uses Telegram long polling and stores state under your home directory.
 
-## Prerequisites
+## Requirements
 
-- Node.js >= 20
-- pnpm
-- At least one ACP-compatible agent (opencode, codebuddy, or Cursor agent) in PATH
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- Node.js 20 or newer.
+- pnpm.
+- A Telegram bot token from [@BotFather](https://t.me/BotFather).
+- At least one supported provider command available in `PATH`:
+  - `opencode` with `opencode acp`;
+  - `codebuddy` with `codebuddy acp`;
+  - `agent` with `agent acp` for Cursor CLI Agent.
 
 ## Installation
 
+Codever is currently used from source.
+
 ```bash
-# Clone the repo
 git clone git@github.com:Escapingbug/codever.git
 cd codever
-
-# Install dependencies
 pnpm install
-
-# Build
 pnpm build
+```
 
-# Link globally (optional)
+To make the `codever` and `codever-mcp` commands available globally from this checkout:
+
+```bash
 pnpm link --global
+```
+
+For development without a global link, use:
+
+```bash
+pnpm dev -- <command>
+```
+
+For example:
+
+```bash
+pnpm dev -- status
 ```
 
 ## Setup
 
 ### 1. Create a Telegram Bot
 
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Run `/newbot` and follow the prompts
-3. Copy the bot token
+1. Open Telegram and message [@BotFather](https://t.me/BotFather).
+2. Run `/newbot` and follow the prompts.
+3. Copy the bot token.
+4. If you want to use forum topics as separate sessions, create or use a Telegram supergroup with topics enabled.
 
-### 2. Configure the Bot Token
+### 2. Configure Codever
 
 ```bash
 codever config set-bot-token <your-bot-token>
 ```
 
-### 3. Pair Your Telegram Account
-
-1. Open a DM with your bot on Telegram
-2. Send `/pair` — the bot will reply with a pairing code
-3. Run the following in your terminal:
+Optional, for the test observer bot:
 
 ```bash
-codever pair <code>
+codever config set-test-bot-token <your-test-bot-token>
 ```
 
-### 4. Verify Setup
-
-```bash
-codever status
-```
-
-## Usage
-
-### Start the Daemon
+### 3. Start the Daemon
 
 ```bash
 codever start
 ```
 
-This starts the codever daemon in the background. The Telegram bot begins polling for messages.
+The daemon starts in the background, initializes available providers, starts the local MCP/daemon API plumbing, and begins Telegram long polling.
+
+Check status and logs with:
+
+```bash
+codever status
+codever logs
+codever logs -f
+```
+
+### 4. Pair Your Telegram Account
+
+1. Open a DM with your bot.
+2. Send `/start`.
+3. The bot replies with a short code.
+4. Run the pairing command locally:
+
+```bash
+codever pair <code>
+```
+
+After pairing, add the bot to a Telegram group. Send prompts from a topic to interact with an agent.
+
+## Usage
 
 ### Basic Workflow
 
-1. Create a Telegram group and add your bot
-2. Set the working directory: `/cwd /path/to/your/project`
-3. Send a message — the coding agent will respond in the group
-4. Use `/stop` to cancel, `/new` to reset, `/model` to switch models
+1. Add the bot to a Telegram group.
+2. Create or open a forum topic for the task.
+3. Set the project directory in that group/topic:
 
-### Commands
+```text
+/cwd /path/to/project
+```
+
+4. Send a normal Telegram message. Codever starts or resumes the topic's agent session.
+5. Use inline buttons for permission prompts when the provider asks for tool approval.
+
+If you send a non-command message in the general topic, Codever asks you to use a real topic. The general topic is intended for control commands such as `/help` and `/provider`.
+
+### Telegram DM Commands
 
 | Command | Description |
 |---------|-------------|
-| `/cwd <path>` | Set working directory |
-| `/model <name>` | Switch model |
-| `/mode <mode>` | Switch permission mode (approve-all, approve-reads, deny-all) |
-| `/stop` | Cancel current query |
-| `/new` | Reset session and start fresh |
-| `/archive` | Archive the group session |
-| `/resume <id>` | Resume a specific session |
-| `/session` | List available sessions |
-| `/provider <name>` | Switch provider (opencode, codebuddy, agent) |
-| `/config` | Show current configuration |
-| `/verbose <level>` | Set output verbosity |
-| `/restart` | Restart the daemon |
+| `/start` | Pair this Telegram account or show pairing status. |
+| `/status` | Show active sessions. |
+| `/provider` | Set the default provider for new sessions. |
+| `/restart` | Restart the daemon. |
+| `/help` | Show DM help. |
+
+### Telegram Group Commands
+
+| Command | Description |
+|---------|-------------|
+| `/cwd <path>` | Set the working directory. `~` is expanded; missing paths can be created through a confirmation button. |
+| `/provider` | Choose the provider. In the general topic it changes new-session defaults; inside a topic it targets that session. |
+| `/model [name]` | Choose or set the provider model. |
+| `/mode` | Choose permission mode. Provider modes are shown with Codever modes such as `approve-reads`, `approve-all`, and `deny-all`. |
+| `/verbose [0|1|2]` | Set output verbosity: quiet, normal, or verbose. |
+| `/timeout [seconds]` | Set query timeout from 10 to 600 seconds. |
+| `/config` | Show session/group config. `/config timeout=120` updates timeout. |
+| `/stop` | Interrupt the current query while preserving the session. |
+| `/progress` | Ask the active provider/session for progress, when supported. |
+| `/file [id]` | Request file details from the active provider/session, when supported. |
+| `/new` or `/reset` | Clear the current topic conversation and start fresh. |
+| `/session`, `/sessions`, `/session_list` | List resumable sessions for the current provider/project. |
+| `/resume [id]` | Resume a listed session. Without an id, shows the session list. |
+| `/tables` | Return raw markdown for tables that were rendered as Telegram images since your last message. |
+| `/archive` | Stop and archive the current topic session. |
+| `/restart` | Restart the daemon. |
+| `/help` | Show group help and provider-specific commands when available. |
+
+### Provider Notes
+
+Codever registers three provider names:
+
+| Provider | Command | Notes |
+|----------|---------|-------|
+| `opencode` | `opencode acp` | Default provider unless changed in config. Also uses `opencode models` and `opencode session list --format json` for model/session lists. |
+| `codebuddy` | `codebuddy acp` | ACP-based Codebuddy integration. |
+| `agent` | `agent acp` | Cursor CLI Agent integration. Uses `agent models` for model discovery and maps Cursor ACP extensions such as plans, questions, todos, tasks, and images into Codever events. |
+
+Providers are initialized when the daemon starts. A provider that is missing or misconfigured is marked not ready, but other providers can still be used.
+
+### MCP Tools And Resources
+
+Codever automatically exposes a local MCP server named `codever` to ACP sessions. Agents can inspect:
+
+- `codever://environment`
+- `codever://rendering`
+- `codever://commands`
+- `codever://channel`
+
+The MCP tool surface includes:
+
+- `get_codever_context`
+- `schedule_reminder`
+- `cancel_reminder`
+- `send_message`
+
+Session-scoped tools such as reminders and proactive messages require an established Codever conversation id. Some providers only make these available after the first completed turn.
 
 ## CLI Reference
 
+```text
+codever start                         Start the daemon
+codever stop                          Stop the daemon
+codever restart                       Restart the daemon
+codever status                        Show daemon and config status
+codever logs [-f]                     Show daemon logs
+codever logs --groups                 List group log directories
+codever logs --group <chatId>         Show logs for a specific group
+codever pair <code>                   Complete Telegram pairing
+codever testbot [--log-dir <dir>]     Start the test listener bot
+codever config set-bot-token <token>  Configure Telegram bot token
+codever config set-test-bot-token <t> Configure test bot token
+codever config show                   Show stored configuration summary
 ```
-codever start                     Start the daemon
-codever stop                      Stop the daemon
-codever restart                   Restart the daemon
-codever status                    Show daemon status
-codever logs                      Show daemon logs
-codever pair <code>               Complete Telegram pairing
-codever config set-bot-token <t>  Set Telegram bot token
-codever config show               Show current configuration
+
+## Configuration And Data
+
+Runtime state is stored under:
+
+```text
+~/.config/codever
 ```
+
+Important files and directories include:
+
+| Path | Description |
+|------|-------------|
+| `daemon.pid` | Background daemon PID. |
+| `daemon.api.port` | Local API port used by MCP subprocesses. |
+| `logs/daemon/global.log` | Global daemon log. |
+| `logs/daemon/groups/` | Per-group session logs. |
+
+The config store tracks values such as bot tokens, paired Telegram users, group settings, topic state, default provider, and scheduled tasks.
 
 ## Architecture
 
-Codever is an ACP ↔ Channel Bridge built around a semantic runtime:
+Codever is built around a semantic runtime:
 
-```
-Telegram handlers   → route commands, callbacks, and topic messages
-SessionManager      → owns topic/session lookup and persisted group state
-TopicSession        → wires one Telegram topic to one runtime session
-Semantic Runtime    → runs turns, cancellation, commands, and finalization
-Provider Adapter    → normalizes ACP/provider events into ConversationEvent
-Channel Projector   → converts ConversationEvent into ChannelMessage
-Delivery Outbox     → serializes Telegram send/edit operations
-TelegramPort        → implements ChannelPort for Telegram API details
-MCP Layer           → exposes codever resources and notify tools to agents
-Provider Layer      → ACP providers: opencode, codebuddy, agent
+```text
+Telegram handlers   -> route commands, callbacks, and topic messages
+SessionManager      -> owns topic/session lookup and persisted group state
+TopicSession        -> wires one Telegram topic to one runtime session
+Semantic Runtime    -> runs turns, cancellation, commands, and finalization
+Provider Adapter    -> normalizes ACP/provider events into ConversationEvent
+Channel Projector   -> converts ConversationEvent into ChannelMessage
+Delivery Outbox     -> serializes Telegram send/edit operations
+TelegramPort        -> implements ChannelPort for Telegram API details
+MCP Layer           -> exposes Codever resources and tools to agents
+Provider Layer      -> ACP providers: opencode, codebuddy, agent
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full current design.
@@ -135,31 +241,23 @@ See [docs/architecture.md](docs/architecture.md) for the full current design.
 ## Development
 
 ```bash
-# Type check
 pnpm typecheck
-
-# Build
 pnpm build
-
-# Run tests
 pnpm test
-
-# Run from source (no build needed)
-pnpm dev
+pnpm test:unit
+pnpm test:e2e
 ```
 
-Set `DEBUG=1` for verbose logging:
+Run from source:
 
 ```bash
-DEBUG=1 codever start
+pnpm dev -- <command>
 ```
 
-## Configuration
+Examples:
 
-Config is stored at `~/.config/codever-nodejs/` (managed by the `conf` package).
-
-| Key | Description |
-|-----|-------------|
-| `botToken` | Telegram bot token |
-| `pairedUsers` | Authorized Telegram user IDs and their DM chat IDs |
-| `pairedChats` | Authorized group chat IDs |
+```bash
+pnpm dev -- start
+pnpm dev -- status
+pnpm dev -- logs -f
+```
