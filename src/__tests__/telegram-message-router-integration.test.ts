@@ -181,6 +181,33 @@ describe('Telegram message router integration', () => {
         expect(existing.receiveInput).toHaveBeenCalledWith({ text: 'second message', username: 'alice' })
     })
 
+    it('does not create a session from a plain message in the general topic', async () => {
+        const bot = createBot()
+        const sessionManager = createSessionManager()
+        registerMessageRouter(bot, { sessionManager, topicSessions: new Map(), bot: bot as any })
+        const ctx = createMessageContext('plain general message')
+        ;(ctx.message as { message_thread_id?: number }).message_thread_id = undefined
+
+        await bot.emitMessage(ctx)
+
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('Please create or use a topic'))
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
+        expect(sessionManager.tryAcquireCreationLock).not.toHaveBeenCalled()
+    })
+
+    it('does not forward a plain general-topic message to an existing main session', async () => {
+        const bot = createBot()
+        const existing = createTopicSession()
+        const topicSessions = new Map<string, any>([['-100:main', existing]])
+        registerMessageRouter(bot, { sessionManager: createSessionManager(), topicSessions, bot: bot as any })
+        const ctx = createMessageContext('plain general message', 1)
+
+        await bot.emitMessage(ctx)
+
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('Please create or use a topic'))
+        expect(existing.receiveInput).not.toHaveBeenCalled()
+    })
+
     it('routes /file_<id> messages to the runtime file command instead of the agent prompt', async () => {
         const bot = createBot()
         const existing = createTopicSession()

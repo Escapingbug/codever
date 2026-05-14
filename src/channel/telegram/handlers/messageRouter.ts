@@ -1,6 +1,6 @@
 import type { Context } from 'grammy'
 import type { SessionManager } from '@/bridge/sessionManager'
-import { makeTopicKey } from '@/bridge/sessionManager'
+import { isGenericTopic, makeTopicKey } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { pairing } from '@/channel/telegram/pairing'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
@@ -81,6 +81,14 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
 
         if (!pairing.isAuthorized(userId)) {
             glog(chat.id, `[msg:in] User ${userId} not authorized, ignoring`)
+            return
+        }
+
+        if (isGenericTopic(messageThreadId)) {
+            const text = c.message!.text!.trim()
+            if (!text.startsWith('/')) {
+                await c.reply('Please create or use a topic to start a Codever session. The general topic only supports control commands like /help and /provider.')
+            }
             return
         }
 
