@@ -91,6 +91,7 @@ describe('toolBubble — displayTitle support', () => {
 
         const result = formatToolBubble(state)
         expect(result).toContain('Plan')
+        expect(result).toContain('Plan content here')
     })
 })
 

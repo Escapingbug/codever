@@ -76,17 +76,18 @@ describe('opencode Skill metadata rendering - full integration', () => {
         expect(toolEvent.output).toBe('name: loca\ndir: /tmp/loca')
 
         // Step 3: ChannelProjector.project (channelProjector.ts) with verboseLevel 2
-        // verboseLevel 2 is needed to include tool output in the rendered HTML
+        // Verbose mode still shows the tool bubble, but not the concrete tool output.
         const projected2 = projector.project(toolEvent, { verboseLevel: 2 })
         expect(projected2).toHaveLength(1)
 
         const html2 = projected2[0].message.text
 
         // ============================================
-        // Assertions: metadata rendered as key-value
+        // Assertions: metadata is not rendered as concrete tool output
         // ============================================
-        expect(html2).toContain('name: loca')
-        expect(html2).toContain('dir: /tmp/loca')
+        expect(html2).toContain('Skill')
+        expect(html2).not.toContain('name: loca')
+        expect(html2).not.toContain('dir: /tmp/loca')
 
         // Should NOT contain raw JSON wrappers
         expect(html2).not.toContain('"metadata"')
@@ -94,9 +95,8 @@ describe('opencode Skill metadata rendering - full integration', () => {
         expect(html2).not.toContain('"output":[]')
         expect(html2).not.toContain('{"output"')
 
-        // Verify the output is rendered as formatted text, not JSON
-        expect(html2).toMatch(/name: loca/)
-        expect(html2).toMatch(/dir: \/tmp\/loca/)
+        // Verify the output is summarized by the tool bubble only.
+        expect(html2).toContain('Loaded skill: loca')
     })
 
     it('handles Skill tool with empty metadata gracefully', () => {

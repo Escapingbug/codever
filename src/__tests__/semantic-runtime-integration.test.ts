@@ -157,10 +157,11 @@ describe('Semantic runtime integration chain', () => {
             await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
 
             const promptMessage = channel.sent.find(message => message.text.includes('/file_'))
-            expect(promptMessage?.text).toContain('Plan file:')
+            expect(promptMessage?.text).toContain('File reference')
             const id = promptMessage?.text.match(/\/file_([A-Za-z0-9_-]+)/)?.[1]
             expect(id).toBeTruthy()
             expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Read this on demand.')
+            expect(channel.sent.map(message => message.text).join('\n')).not.toContain(planUri)
 
             await runtime.dispatch({ kind: 'command', name: 'file', args: id, source: 'channel' })
 
@@ -207,8 +208,9 @@ describe('Semantic runtime integration chain', () => {
             await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
 
             const finalToolMessage = [...channel.sent].reverse().find((message) => message.text.startsWith('EDIT:'))
-            expect(finalToolMessage?.text).toContain('Plan saved to')
             expect(finalToolMessage?.text).toContain('/file_f1')
+            expect(finalToolMessage?.text).not.toContain('Plan saved to')
+            expect(finalToolMessage?.text).not.toContain(planUri)
             expect(finalToolMessage?.replyMarkup).toEqual(expect.objectContaining({
                 inline_keyboard: expect.any(Array),
             }))
@@ -254,8 +256,9 @@ describe('Semantic runtime integration chain', () => {
             await runtime.dispatch({ kind: 'user_message', text: 'write files', source: 'channel' })
 
             const promptMessage = channel.sent.find(message => message.text.includes('/file_f1') && message.text.includes('/file_f2'))
-            expect(promptMessage?.text).toContain(firstUri)
-            expect(promptMessage?.text).toContain(secondUri)
+            expect(promptMessage?.text).toContain('File reference')
+            expect(promptMessage?.text).not.toContain(firstUri)
+            expect(promptMessage?.text).not.toContain(secondUri)
 
             await runtime.dispatch({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
             expect(channel.sent.at(-1)?.text).toContain('tool bubble content')

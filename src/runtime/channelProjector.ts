@@ -17,6 +17,7 @@ export interface ChannelProjectorOptions {
 
 interface ProjectedToolState {
     toolName: string
+    phase: 'started' | 'updated' | 'completed' | 'failed'
     input?: unknown
     output?: unknown
     isError?: boolean
@@ -28,6 +29,9 @@ interface ProjectedToolState {
 export class ChannelProjector {
     private textBuffer = ''
     private toolStates = new Map<string, ProjectedToolState>()
+    private normalToolGroupKey: string | null = null
+    private normalToolGroupIndex = 0
+    private normalToolGroupToolIds: string[] = []
 
     project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {
@@ -36,10 +40,7 @@ export class ChannelProjector {
                 return []
 
             case 'tool':
-                return [
-                    ...this.flushText(),
-                    this.projectTool(event, options),
-                ]
+                return this.projectToolByVerbosity(event, options)
 
             case 'decision_request':
                 return [
@@ -117,18 +118,86 @@ export class ChannelProjector {
     reset(): void {
         this.textBuffer = ''
         this.toolStates.clear()
+        this.normalToolGroupKey = null
+        this.normalToolGroupIndex = 0
+        this.normalToolGroupToolIds = []
     }
 
     private flushText(semanticEvent?: ConversationEvent): ProjectedMessage[] {
         const text = this.textBuffer
         this.textBuffer = ''
         if (!text.trim()) return []
+        this.closeNormalToolGroup()
         return [{
             message: { text, format: 'markdown' },
             isToolEvent: false,
             isTerminal: semanticEvent?.kind === 'turn_finished',
             semanticEvent,
         }]
+    }
+
+    private projectToolByVerbosity(event: Extract<ConversationEvent, { kind: 'tool' }>, options: ChannelProjectorOptions): ProjectedMessage[] {
+        const verboseLevel = options.verboseLevel ?? 1
+        const messages = this.flushText()
+        if (verboseLevel === 0) {
+            const state = this.mergeToolState(event)
+            if (isExitPlanModeTool(state) && hasExitPlanContent(state)) {
+                messages.push({
+                    message: {
+                        text: this.formatToolState(state),
+                        format: 'html',
+                    },
+                    toolUseId: event.toolCallId,
+                    isToolEvent: true,
+                    isTerminal: event.phase === 'completed' || event.phase === 'failed',
+                    semanticEvent: withMergedToolContent(event, state),
+                })
+            }
+            return messages
+        }
+
+        if (verboseLevel === 1) {
+            messages.push(this.projectNormalToolGroup(event))
+            return messages
+        }
+
+        messages.push(this.projectVerboseTool(event))
+        return messages
+    }
+
+    private projectNormalToolGroup(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {
+        const groupKey = this.ensureNormalToolGroup()
+        const state = this.mergeToolState(event)
+        if (!this.normalToolGroupToolIds.includes(event.toolCallId)) {
+            this.normalToolGroupToolIds.push(event.toolCallId)
+        }
+
+        const text = this.normalToolGroupToolIds
+            .map(toolCallId => this.toolStates.get(toolCallId))
+            .filter((state): state is ProjectedToolState => state !== undefined)
+            .map(state => this.formatToolState(state))
+            .join('\n\n')
+
+        return {
+            message: { text, format: 'html' },
+            toolUseId: groupKey,
+            isToolEvent: true,
+            isTerminal: event.phase === 'completed' || event.phase === 'failed',
+            semanticEvent: withMergedToolContent(event, state),
+        }
+    }
+
+    private ensureNormalToolGroup(): string {
+        if (!this.normalToolGroupKey) {
+            this.normalToolGroupKey = `normal-tool-group:${++this.normalToolGroupIndex}`
+            this.normalToolGroupToolIds = []
+        }
+        return this.normalToolGroupKey
+    }
+
+    private closeNormalToolGroup(): void {
+        this.normalToolGroupKey = null
+        this.normalToolGroupToolIds = []
     }
 
     private projectTurnFinished(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): ProjectedMessage[] {
@@ -162,7 +231,21 @@ export class ChannelProjector {
         }
     }
 
-    private projectTool(event: Extract<ConversationEvent, { kind: 'tool' }>, options: ChannelProjectorOptions): ProjectedMessage {
+    private projectVerboseTool(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {
+        const state = this.mergeToolState(event)
+        return {
+            message: {
+                text: this.formatToolState(state),
+                format: 'html',
+            },
+            toolUseId: event.toolCallId,
+            isToolEvent: true,
+            isTerminal: event.phase === 'completed' || event.phase === 'failed',
+            semanticEvent: withMergedToolContent(event, state),
+        }
+    }
+
+    private mergeToolState(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedToolState {
         const existing = this.toolStates.get(event.toolCallId)
 
         // Patch merge: preserve canonical toolName from initial event
@@ -193,47 +276,38 @@ export class ChannelProjector {
         const content = event.content ?? existing?.content
 
         // Save merged state
-        this.toolStates.set(event.toolCallId, { toolName, input, output, isError, displayTitle, category, content })
+        const state = { toolName, phase: event.phase, input, output, isError, displayTitle, category, content }
+        this.toolStates.set(event.toolCallId, state)
+        return state
+    }
 
-        const status = event.phase === 'failed'
+    private formatToolState(state: ProjectedToolState): string {
+        const status = state.phase === 'failed'
             ? 'interrupted'
-            : event.phase === 'completed'
+            : state.phase === 'completed'
                 ? 'completed'
-                : event.phase === 'updated'
+                : state.phase === 'updated'
                     ? 'running'
                     : 'pending'
-
-        const includeOutput = shouldIncludeToolOutput(event, options.verboseLevel ?? 1)
 
         // Build effective tool name for display
         // Use toolName for canonical tools, displayTitle for path-like titles
         // If toolName is generic (tool_call/tool), use displayTitle if available
-        let effectiveToolName = toolName
-        if (isGenericToolName(toolName) && displayTitle) {
-            effectiveToolName = displayTitle
+        let effectiveToolName = state.toolName
+        if (isGenericToolName(state.toolName) && state.displayTitle) {
+            effectiveToolName = state.displayTitle
         }
 
-        return {
-            message: {
-                text: formatToolBubble({
-                    toolName: effectiveToolName,
-                    input,
-                    status,
-                    output: includeOutput
-                        ? typeof output === 'string' ? output : output === undefined ? undefined : formatUnknown(output)
-                        : undefined,
-                    isError,
-                    displayTitle,
-                    category,
-                    content,
-                }),
-                format: 'html',
-            },
-            toolUseId: event.toolCallId,
-            isToolEvent: true,
-            isTerminal: event.phase === 'completed' || event.phase === 'failed',
-            semanticEvent: event,
-        }
+        return formatToolBubble({
+            toolName: effectiveToolName,
+            input: state.input,
+            status,
+            output: allowedToolOutput(state),
+            isError: state.isError,
+            displayTitle: state.displayTitle,
+            category: state.category,
+            content: state.content,
+        })
     }
 }
 
@@ -241,16 +315,31 @@ function isGenericToolName(toolName: string | undefined): boolean {
     return !toolName || toolName === 'tool' || toolName === 'tool_call'
 }
 
-function shouldIncludeToolOutput(event: Extract<ConversationEvent, { kind: 'tool' }>, verboseLevel: 0 | 1 | 2): boolean {
-    if (event.phase !== 'completed' && event.phase !== 'failed') return false
-    if (event.isError) return true
-    if (event.category === 'search' && isSearchStatsOutput(event.output)) return true
-    return verboseLevel >= 2
+function withMergedToolContent(
+    event: Extract<ConversationEvent, { kind: 'tool' }>,
+    state: ProjectedToolState,
+): Extract<ConversationEvent, { kind: 'tool' }> {
+    return state.content && state.content !== event.content ? { ...event, content: state.content } : event
 }
 
-function isSearchStatsOutput(output: unknown): boolean {
-    if (typeof output !== 'string') return false
-    return /^\d+ (matches|match|files|file)( \(truncated\))?$/.test(output.trim())
+function allowedToolOutput(state: ProjectedToolState): string | undefined {
+    if (isExitPlanModeTool(state) && typeof state.output === 'string') return state.output
+    if (state.category !== 'search' || typeof state.output !== 'string') return undefined
+    const output = state.output.trim()
+    return /^\d+ (matches|match|files|file)( \(truncated\))?$/.test(output) ? output : undefined
+}
+
+function isExitPlanModeTool(state: ProjectedToolState): boolean {
+    return state.toolName === 'ExitPlanMode' || state.toolName === 'exit_plan_mode'
+}
+
+function hasExitPlanContent(state: ProjectedToolState): boolean {
+    if (!isExitPlanModeTool(state)) return false
+    if (typeof state.output === 'string' && state.output.trim()) return true
+    if (typeof state.displayTitle === 'string' && state.displayTitle.trim()) return true
+    const input = state.input as Record<string, unknown> | undefined
+    return typeof input?.plan === 'string' && input.plan.trim().length > 0
+        || typeof input?.content === 'string' && input.content.trim().length > 0
 }
 
 function formatUnknown(value: unknown): string {

@@ -1,4 +1,4 @@
-import { escapeHtml, sanitizeXmlLikeTags } from '@/utils/formatting'
+import { escapeHtml } from '@/utils/formatting'
 
 export interface ToolBubbleState {
     toolName: string
@@ -44,28 +44,18 @@ function normalizeToolName(name: string): string {
     return TOOL_NAME_ALIASES[name.toLowerCase()] || name
 }
 
-const SUPPRESS_RESULT_TOOLS = new Set([
-    'TodoWrite', 'Write', 'Edit', 'Read', 'WebSearch', 'WebFetch', 'ExitPlanMode', 'Task',
-])
-
 export function formatToolBubble(state: ToolBubbleState): string {
     const name = normalizeToolName(state.toolName)
     const input = state.input as Record<string, unknown> | undefined
     const isRunning = state.status === 'pending' || state.status === 'running'
     const isInterrupted = state.status === 'interrupted'
-    const suppressResult = SUPPRESS_RESULT_TOOLS.has(name)
 
     const parts: string[] = []
 
     // If displayTitle exists and toolName is canonical, show "ToolName: displayTitle"
     // If displayTitle exists and toolName is generic, show displayTitle as the header
-    const header = renderToolHeader(name, input, state.displayTitle, state.content)
+    const header = renderToolHeader(name, input, state.displayTitle, state.content, state.output)
     parts.push(header)
-
-    const contentText = renderContentText(name, state.content)
-    if (contentText) {
-        parts.push(contentText)
-    }
 
     for (const path of getContentFilePaths(state.content)) {
         if (!header.includes(escapeHtml(path))) {
@@ -77,8 +67,8 @@ export function formatToolBubble(state: ToolBubbleState): string {
         parts.push('⏳')
     } else if (isInterrupted) {
         parts.push('⏹️')
-    } else if (!suppressResult && state.status === 'completed') {
-        const resultPart = renderToolResultInline(name, state.output || '', state.isError ?? false)
+    } else if (state.status === 'completed') {
+        const resultPart = renderSafeToolSummary(name, state.output || '', state.isError ?? false)
         if (resultPart) parts.push(resultPart)
     }
 
@@ -90,6 +80,7 @@ function renderToolHeader(
     input: Record<string, unknown> | undefined,
     displayTitle?: string,
     content?: ToolBubbleState['content'],
+    output?: string,
 ): string {
     const isEmptyInput = !input || (typeof input === 'object' && Object.keys(input).length === 0)
 
@@ -156,11 +147,8 @@ function renderToolHeader(
             return `📋 <b>Tasks</b>\n${lines.join('\n')}`
         }
         case 'ExitPlanMode': {
-            // Show full plan content if available (HTML escaped)
-            const planContent = (input as any)?.plan as string | undefined
-                || (input as any)?.content as string | undefined
-                || displayTitle
-            if (planContent && typeof planContent === 'string' && planContent.trim()) {
+            const planContent = getExitPlanContent(input, displayTitle, content, output)
+            if (planContent) {
                 return `📋 <b>Plan</b>\n<pre>${escapeHtml(planContent)}</pre>`
             }
             return '📋 <b>Exited plan mode</b>'
@@ -186,40 +174,27 @@ function renderToolHeader(
                 return `🔧 <b>${escapeHtml(displayTitle)}</b>`
             }
             if (isEmptyInput) return `🔧 <b>${escapeHtml(name)}</b>`
-            const inputStr = JSON.stringify(input, null, 2)
-            return `🔧 <b>${escapeHtml(name)}</b>\n<pre>${escapeHtml(inputStr)}</pre>`
+            return `🔧 <b>${escapeHtml(name)}</b>`
         }
     }
 }
 
-function renderContentText(toolName: string, content: ToolBubbleState['content']): string | null {
-    if (SUPPRESS_RESULT_TOOLS.has(toolName)) return null
-
-    const text = content
-        ?.flatMap((item) => {
-            if (item.type !== 'content' || !item.text?.trim()) return []
-            const text = item.text.trim()
-            return looksLikeJson(text) ? [] : [text]
-        })
-        .join('\n')
-        .trim()
-
-    if (!text) return null
-    const truncated = text.length > 1200 ? `${text.slice(0, 1200)}...` : text
-    return escapeHtml(truncated)
+function getExitPlanContent(
+    input: Record<string, unknown> | undefined,
+    displayTitle: string | undefined,
+    content: ToolBubbleState['content'],
+    output: string | undefined,
+): string | null {
+    const planContent = input?.plan ?? input?.content ?? displayTitle ?? output ?? getContentText(content)
+    return typeof planContent === 'string' && planContent.trim() ? planContent.trim() : null
 }
 
-function looksLikeJson(text: string): boolean {
-    const trimmed = text.trim()
-    if (!((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']')))) {
-        return false
-    }
-    try {
-        JSON.parse(trimmed)
-        return true
-    } catch {
-        return false
-    }
+function getContentText(content: ToolBubbleState['content']): string | undefined {
+    const text = content
+        ?.flatMap(item => item.type === 'content' && item.text?.trim() ? [item.text.trim()] : [])
+        .join('\n')
+        .trim()
+    return text || undefined
 }
 
 function getContentFilePaths(content: ToolBubbleState['content']): string[] {
@@ -237,48 +212,15 @@ function getContentFilePaths(content: ToolBubbleState['content']): string[] {
     return paths
 }
 
-function renderToolResultInline(name: string, output: string, isError: boolean): string | null {
-    const sanitizedOutput = sanitizeXmlLikeTags(output)
-
-    if (name === 'Bash') {
-        if (!sanitizedOutput.trim()) return isError ? '❌ <i>(no output)</i>' : null
-        return `${isError ? '❌' : ''}<pre>${escapeHtml(sanitizedOutput)}</pre>`
-    }
-
+function renderSafeToolSummary(name: string, output: string, isError: boolean): string | null {
     if (name === 'Glob' || name === 'Grep') {
-        if (!sanitizedOutput.trim()) return null
-        if (/^\d+ (matches|match|files|file)( \(truncated\))?$/.test(sanitizedOutput.trim())) {
-            return `${isError ? '❌' : '✅'} ${escapeHtml(sanitizedOutput.trim())}`
+        const summary = output.trim()
+        if (/^\d+ (matches|match|files|file)( \(truncated\))?$/.test(summary)) {
+            return `${isError ? '❌' : '✅'} ${escapeHtml(summary)}`
         }
-        const lines = sanitizedOutput.trim().split('\n').filter(Boolean)
-        return `${isError ? '❌' : '✅'} ${lines.length} match${lines.length !== 1 ? 'es' : ''}`
     }
 
-    if (name === 'Agent') {
-        if (!sanitizedOutput.trim()) return null
-        try {
-            const parsed = JSON.parse(sanitizedOutput)
-            if (typeof parsed === 'object' && parsed !== null) {
-                const taskResult = parsed.task_result as string | undefined
-                if (taskResult && taskResult.trim()) {
-                    return escapeHtml(sanitizeXmlLikeTags(taskResult.trim()))
-                }
-                const result = parsed.result as string | undefined
-                if (result && result.trim()) {
-                    return escapeHtml(sanitizeXmlLikeTags(result.trim()))
-                }
-                const message = parsed.message as string | undefined
-                if (message && message.trim()) {
-                    return escapeHtml(sanitizeXmlLikeTags(message.trim()))
-                }
-                return `<pre>${escapeHtml(JSON.stringify(parsed, null, 2))}</pre>`
-            }
-        } catch {}
-        return escapeHtml(sanitizedOutput)
-    }
-
-    if (!sanitizedOutput.trim()) return null
-    return `${isError ? '❌' : '✅'} <code>${escapeHtml(sanitizedOutput)}</code>`
+    return isError ? '❌' : null
 }
 
 export class ToolMessageTracker {

@@ -1030,7 +1030,7 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
     })
 
     describe('File reference tool updates', () => {
-        it('renders non-terminal ACP tool content that announces a saved plan file', async () => {
+        it('does not render non-terminal ACP tool content that announces a saved plan file', async () => {
             const started = {
                 sessionUpdate: 'tool_call',
                 toolCallId: 'call-create-plan',
@@ -1067,8 +1067,9 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             })
 
             const lastEdit = outbox.edits.at(-1)?.message.text ?? ''
-            expect(lastEdit).toContain('Plan saved to file')
-            expect(lastEdit).toContain('file:///C:/Users/anciety/.cursor/plans/example.plan.md')
+            expect(lastEdit).toContain('Create Plan')
+            expect(lastEdit).not.toContain('Plan saved to file')
+            expect(lastEdit).not.toContain('file:///C:/Users/anciety/.cursor/plans/example.plan.md')
         })
     })
 })

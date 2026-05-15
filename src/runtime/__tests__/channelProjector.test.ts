@@ -123,7 +123,7 @@ describe('ChannelProjector — patch merge', () => {
         expect(message).toContain('Plan')
         expect(message).toContain('Inspect current flow')
         expect(message).toContain('Show the plan in Telegram')
-        expect(message).not.toContain('Exited plan mode')
+        expect(message).not.toContain('raw provider shape')
     })
 })
 
