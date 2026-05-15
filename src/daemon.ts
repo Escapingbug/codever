@@ -165,6 +165,8 @@ async function main() {
                         path: req.path,
                         ...(req.caption ? { caption: req.caption } : {}),
                         ...(req.filename ? { filename: req.filename } : {}),
+                        ...(req.type ? { type: req.type } : {}),
+                        ...(req.language ? { language: req.language } : {}),
                     }),
                     source: 'mcp',
                 })

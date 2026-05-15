@@ -60,22 +60,24 @@ describe('Daemon API integration boundary', () => {
         expect(onSend).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', message: 'wake up' })
     })
 
-    it('POST /api/send-file validates and forwards immediate session file attachments', async () => {
+    it('POST /api/send-file validates and forwards immediate session file render requests', async () => {
         const res = await fetch(url('/api/send-file'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 sessionId: 'topic:-100:10',
-                path: '/repo/report.txt',
+                path: '/repo/report.md',
                 caption: 'latest report',
+                type: 'markdown',
             }),
         })
 
         expect(res.status).toBe(200)
         expect(onSendFile).toHaveBeenCalledWith({
             sessionId: 'topic:-100:10',
-            path: '/repo/report.txt',
+            path: '/repo/report.md',
             caption: 'latest report',
+            type: 'markdown',
         })
     })
 

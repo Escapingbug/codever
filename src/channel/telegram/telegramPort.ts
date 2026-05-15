@@ -199,15 +199,15 @@ export class TelegramPort implements ChannelPort {
         for (let i = 0; i < (message.attachments ?? []).length; i++) {
             const attachment = message.attachments![i]
             const filename = attachment.filename || basename(attachment.path)
-            const msg = await this.bot.api.sendDocument(
-                this.chatId,
-                new InputFile(attachment.path, filename),
-                {
-                    ...(i === 0 && caption ? captionOptions : {}),
-                    reply_markup: i === 0 ? message.replyMarkup as any : undefined,
-                    ...buildMessageThreadParams(this.threadId),
-                },
-            )
+            const options = {
+                ...(i === 0 && caption ? captionOptions : {}),
+                reply_markup: i === 0 ? message.replyMarkup as any : undefined,
+                ...buildMessageThreadParams(this.threadId),
+            }
+            const inputFile = new InputFile(attachment.path, filename)
+            const msg = attachment.type === 'photo'
+                ? await this.bot.api.sendPhoto(this.chatId, inputFile, options)
+                : await this.bot.api.sendDocument(this.chatId, inputFile, options)
             if (firstMessageId === undefined) firstMessageId = msg.message_id
         }
 

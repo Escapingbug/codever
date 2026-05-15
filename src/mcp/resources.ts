@@ -141,7 +141,7 @@ The user has access to these commands in the Telegram chat. You cannot invoke th
 - **Message length**: ~4096 UTF-16 characters per message. Long outputs are automatically split.
 - **No real-time streaming** — output is sent in chunks as you produce it, but not character-by-character
 - **Limited markdown** — Telegram supports a subset of markdown. Complex markdown (nested lists, definition lists) may not render perfectly
-- **File attachments** — use the \`send_file\` MCP tool to send a readable local file from the session working directory or another allowed Codever directory
+- **File delivery and rendering** — use the \`send_file\` MCP tool to send a readable local file. Set \`type\` to \`document\`/\`file\` for raw attachments, \`markdown\` to render markdown, \`code\` to render a fenced code block, or \`image\` to send a Telegram photo
 - **Rate limits** — Telegram has rate limits on message sending. Very rapid output may be slightly delayed
 
 ## Tips for Better Output
@@ -213,7 +213,7 @@ Call \`get_codever_context\` with one of these topics to learn more:
 - Tables are auto-converted to PNG images. Add \`<!-- raw -->\` before a table to send as text instead.
 - User commands: /cwd, /stop, /new, /archive, /tables, /config, /restart
 - Messages are split at ~4096 chars at structure-safe boundaries.
-- Use send_file for local file attachments when the user needs the actual file.
+- Use send_file with type=document/file for raw attachments, type=markdown for rendered markdown, type=code for fenced code, or type=image for photo delivery.
 `
 
             return {

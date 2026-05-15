@@ -537,13 +537,36 @@ export class SemanticSessionRuntime {
         }
 
         try {
+            const renderType = normalizeSendFileType(request.type)
+            if (renderType === 'markdown') {
+                const { path, filename, content } = await this.readSendableTextFile(request.path, request.filename)
+                await this.send({
+                    text: withOptionalCaption(content, request.caption ?? filename),
+                    format: 'markdown',
+                })
+                this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType })
+                return
+            }
+
+            if (renderType === 'code') {
+                const { path, filename, content } = await this.readSendableTextFile(request.path, request.filename)
+                const language = request.language ?? inferCodeLanguage(filename)
+                await this.send({
+                    text: withOptionalCaption(formatCodeBlock(content, language), request.caption ?? filename),
+                    format: 'markdown',
+                })
+                this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType, language })
+                return
+            }
+
             const { path, filename } = await this.resolveSendableFile(request.path, request.filename)
+            const attachmentType = renderType === 'image' ? 'photo' : 'document'
             await this.send({
                 text: request.caption ?? filename,
                 format: 'plain',
-                attachments: [{ type: 'document', path, filename }],
+                attachments: [{ type: attachmentType, path, filename }],
             })
-            this.recordCommand('send_file', { path, filename, caption: request.caption })
+            this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType })
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             this.recordCommand('send_file', { path: request.path, error: message })
@@ -585,7 +608,7 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async resolveSendableFile(path: string, filename?: string): Promise<{ path: string; filename: string }> {
+    private async resolveSendableFile(path: string, filename?: string, maxBytes = MAX_SEND_FILE_BYTES): Promise<{ path: string; filename: string }> {
         const resolvedPath = await realpath(path)
         if (!await this.isAllowedFilePath(resolvedPath)) {
             throw new Error('file is outside allowed directories')
@@ -595,13 +618,21 @@ export class SemanticSessionRuntime {
         if (!info.isFile()) {
             throw new Error('path is not a regular file')
         }
-        if (info.size > MAX_SEND_FILE_BYTES) {
-            throw new Error(`file is too large (${info.size} bytes, limit ${MAX_SEND_FILE_BYTES})`)
+        if (info.size > maxBytes) {
+            throw new Error(`file is too large (${info.size} bytes, limit ${maxBytes})`)
         }
 
         return {
             path: resolvedPath,
             filename: filename?.trim() || basename(resolvedPath),
+        }
+    }
+
+    private async readSendableTextFile(path: string, filename?: string): Promise<{ path: string; filename: string; content: string }> {
+        const file = await this.resolveSendableFile(path, filename, MAX_READ_FILE_BYTES)
+        return {
+            ...file,
+            content: await readFile(file.path, 'utf8'),
         }
     }
 
@@ -757,7 +788,9 @@ function isMarkdownPath(path: string): boolean {
     return lower.endsWith('.md') || lower.endsWith('.markdown')
 }
 
-function parseSendFileArgs(args: string | undefined): { path: string; caption?: string; filename?: string } | null {
+type SendFileType = 'document' | 'file' | 'markdown' | 'code' | 'image'
+
+function parseSendFileArgs(args: string | undefined): { path: string; caption?: string; filename?: string; type?: string; language?: string } | null {
     const trimmed = args?.trim()
     if (!trimmed) return null
     try {
@@ -772,10 +805,74 @@ function parseSendFileArgs(args: string | undefined): { path: string; caption?: 
         const filename = typeof record.filename === 'string' && record.filename.trim()
             ? record.filename
             : undefined
-        return { path, caption, filename }
+        const type = typeof record.type === 'string' && record.type.trim()
+            ? record.type
+            : undefined
+        const language = typeof record.language === 'string' && record.language.trim()
+            ? record.language
+            : undefined
+        return { path, caption, filename, type, language }
     } catch {
         return { path: trimmed }
     }
+}
+
+function normalizeSendFileType(type: string | undefined): SendFileType {
+    const normalized = type?.trim().toLowerCase()
+    if (normalized === 'file') return 'document'
+    if (normalized === 'markdown' || normalized === 'code' || normalized === 'image' || normalized === 'document') {
+        return normalized
+    }
+    return 'document'
+}
+
+function withOptionalCaption(content: string, caption: string | undefined): string {
+    return caption?.trim() ? `${caption.trim()}\n\n${content}` : content
+}
+
+function formatCodeBlock(content: string, language: string | undefined): string {
+    const fence = content.includes('```') ? '````' : '```'
+    const suffix = content.endsWith('\n') ? '' : '\n'
+    return `${fence}${language ?? ''}\n${content}${suffix}${fence}`
+}
+
+function inferCodeLanguage(filename: string): string | undefined {
+    const extension = filename.toLowerCase().split('.').pop()
+    if (!extension || extension === filename.toLowerCase()) return undefined
+    const aliases: Record<string, string> = {
+        js: 'javascript',
+        jsx: 'jsx',
+        ts: 'ts',
+        tsx: 'tsx',
+        py: 'python',
+        rb: 'ruby',
+        rs: 'rust',
+        go: 'go',
+        java: 'java',
+        kt: 'kotlin',
+        c: 'c',
+        h: 'c',
+        cpp: 'cpp',
+        cc: 'cpp',
+        cxx: 'cpp',
+        cs: 'csharp',
+        php: 'php',
+        swift: 'swift',
+        sh: 'bash',
+        bash: 'bash',
+        ps1: 'powershell',
+        json: 'json',
+        yaml: 'yaml',
+        yml: 'yaml',
+        toml: 'toml',
+        xml: 'xml',
+        html: 'html',
+        css: 'css',
+        sql: 'sql',
+        md: 'markdown',
+        markdown: 'markdown',
+    }
+    return aliases[extension] ?? extension
 }
 
 function formatUnknown(value: unknown): string {

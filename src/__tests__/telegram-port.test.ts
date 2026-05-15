@@ -20,6 +20,14 @@ function createMockBot(): { bot: Bot; apiCalls: { method: string; args: unknown[
             apiCalls.push({ method: 'sendChatAction', args })
             return true
         }),
+        sendDocument: vi.fn().mockImplementation(async (...args: unknown[]) => {
+            apiCalls.push({ method: 'sendDocument', args })
+            return { message_id: 2 }
+        }),
+        sendPhoto: vi.fn().mockImplementation(async (...args: unknown[]) => {
+            apiCalls.push({ method: 'sendPhoto', args })
+            return { message_id: 3 }
+        }),
     }
 
     const bot = {
@@ -102,6 +110,24 @@ describe('TelegramPort', () => {
             for (const text of sentTexts) {
                 expect(count(text, '<code>')).toBe(count(text, '</code>'))
             }
+        })
+
+        it('sends photo attachments as Telegram photos', async () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+
+            await port.send({
+                text: 'plot',
+                format: 'plain',
+                attachments: [{ type: 'photo', path: '/repo/plot.png', filename: 'plot.png' }],
+            })
+
+            expect(bot.api.sendPhoto).toHaveBeenCalled()
+            expect(apiCalls[0].method).toBe('sendPhoto')
+            expect(apiCalls[0].args[2]).toEqual(expect.objectContaining({
+                caption: 'plot',
+                message_thread_id: 42,
+            }))
         })
     })
 

@@ -182,6 +182,8 @@ The MCP tool surface includes:
 - `send_message`
 - `send_file`
 
+`send_file` can send raw file attachments with `type=document`/`file`, render local markdown with `type=markdown`, render source files as fenced code blocks with `type=code`, or send images as Telegram photos with `type=image`.
+
 Session-scoped tools such as reminders and proactive messages require an established Codever conversation id. Some providers only make these available after the first completed turn.
 
 ## CLI Reference

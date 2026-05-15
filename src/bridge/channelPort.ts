@@ -9,7 +9,7 @@ import type { SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 
 export interface ChannelAttachment {
-    type: 'document'
+    type: 'document' | 'photo'
     path: string
     filename?: string
 }

@@ -87,10 +87,10 @@ describe('MCP active surface registration', () => {
             body: JSON.stringify({ sessionId: 'provider-session-1', message: 'now' }),
         }))
 
-        await tools.get('send_file')!({ path: '/repo/report.txt', caption: 'report' })
+        await tools.get('send_file')!({ path: '/repo/report.md', caption: 'report', type: 'markdown' })
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ sessionId: 'provider-session-1', path: '/repo/report.txt', caption: 'report' }),
+            body: JSON.stringify({ sessionId: 'provider-session-1', path: '/repo/report.md', caption: 'report', type: 'markdown' }),
         }))
     })
 

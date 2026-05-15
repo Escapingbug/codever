@@ -901,6 +901,105 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('renders MCP send_file markdown files as markdown channel messages', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-md-'))
+        try {
+            const reportPath = join(tempDir, 'report.md')
+            writeFileSync(reportPath, '# Report\n\n| Status | Value |\n|---|---|\n| Build | Passed |', 'utf8')
+            const provider = createProvider([])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({
+                kind: 'command',
+                name: 'send_file',
+                args: JSON.stringify({ path: reportPath, caption: 'latest report', type: 'markdown' }),
+                source: 'mcp',
+            })
+
+            expect(channel.sent).toHaveLength(1)
+            expect(channel.sent[0]).toMatchObject({
+                text: 'latest report\n\n# Report\n\n| Status | Value |\n|---|---|\n| Build | Passed |',
+                format: 'markdown',
+            })
+            expect(channel.sent[0].attachments).toBeUndefined()
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
+    it('renders MCP send_file code files as fenced markdown code blocks', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-code-'))
+        try {
+            const sourcePath = join(tempDir, 'hello.ts')
+            writeFileSync(sourcePath, 'export const hello = "world"\n', 'utf8')
+            const provider = createProvider([])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({
+                kind: 'command',
+                name: 'send_file',
+                args: JSON.stringify({ path: sourcePath, caption: 'source', type: 'code' }),
+                source: 'mcp',
+            })
+
+            expect(channel.sent).toHaveLength(1)
+            expect(channel.sent[0]).toMatchObject({
+                text: 'source\n\n```ts\nexport const hello = "world"\n```',
+                format: 'markdown',
+            })
+            expect(channel.sent[0].attachments).toBeUndefined()
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
+    it('sends MCP send_file image files as image attachments', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-image-'))
+        try {
+            const imagePath = join(tempDir, 'plot.png')
+            writeFileSync(imagePath, Buffer.from([137, 80, 78, 71]), 'binary')
+            const provider = createProvider([])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({
+                kind: 'command',
+                name: 'send_file',
+                args: JSON.stringify({ path: imagePath, caption: 'latest plot', type: 'image' }),
+                source: 'mcp',
+            })
+
+            expect(channel.sent).toHaveLength(1)
+            expect(channel.sent[0]).toMatchObject({
+                text: 'latest plot',
+                format: 'plain',
+                attachments: [{ type: 'photo', path: imagePath, filename: 'plot.png' }],
+            })
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
     it('handles provider available command updates as semantic command results', async () => {
         const provider = createProvider([
             {

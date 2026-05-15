@@ -48,6 +48,10 @@ export interface SendFileRequest {
     caption?: string
     /** Optional display filename */
     filename?: string
+    /** Optional render/delivery type */
+    type?: 'document' | 'file' | 'markdown' | 'code' | 'image'
+    /** Optional language tag for code rendering */
+    language?: string
 }
 
 export interface DaemonApiHandlers {

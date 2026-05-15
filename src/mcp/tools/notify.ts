@@ -198,8 +198,10 @@ export function createSendMessageHandler() {
     }
 }
 
+type SendFileType = 'document' | 'file' | 'markdown' | 'code' | 'image'
+
 export function createSendFileHandler() {
-    return async (args: { path: string; caption?: string; filename?: string }) => {
+    return async (args: { path: string; caption?: string; filename?: string; type?: SendFileType; language?: string }) => {
         const apiPort = getDaemonApiPort()
         if (!apiPort) {
             return {
@@ -221,6 +223,8 @@ export function createSendFileHandler() {
             path: args.path,
             ...(args.caption ? { caption: args.caption } : {}),
             ...(args.filename ? { filename: args.filename } : {}),
+            ...(args.type ? { type: args.type } : {}),
+            ...(args.language ? { language: args.language } : {}),
         }
 
         try {
@@ -290,6 +294,8 @@ export function registerNotifyTools(server: any): void {
             path: z.string().describe('Local file path to send as an attachment'),
             caption: z.string().optional().describe('Optional caption to send with the file'),
             filename: z.string().optional().describe('Optional display filename for the attachment'),
+            type: z.enum(['document', 'file', 'markdown', 'code', 'image']).optional().describe('How to send the file: document/file sends the raw file, markdown renders markdown text, code renders a fenced code block, image sends as a Telegram photo'),
+            language: z.string().optional().describe('Optional language tag for code rendering'),
         },
         createSendFileHandler(),
     )

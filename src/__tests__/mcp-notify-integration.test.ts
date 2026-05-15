@@ -63,18 +63,19 @@ describe('MCP notify tool integration with daemon API', () => {
         }))
     })
 
-    it('send_file posts a session-scoped file attachment request to daemon API', async () => {
+    it('send_file posts a session-scoped file request with rendering type to daemon API', async () => {
         const handler = createSendFileHandler()
 
-        const result = await handler({ path: '/repo/report.txt', caption: 'latest report' })
+        const result = await handler({ path: '/repo/report.md', caption: 'latest report', type: 'markdown' })
 
         expect(result.isError).toBeUndefined()
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({
                 sessionId: 'topic:-100:10',
-                path: '/repo/report.txt',
+                path: '/repo/report.md',
                 caption: 'latest report',
+                type: 'markdown',
             }),
         }))
     })
