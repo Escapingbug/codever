@@ -11,7 +11,7 @@ import { createBot } from './channel/telegram/bot'
 import { SessionManager, makeTopicKey } from './bridge/sessionManager'
 import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
-import { startDaemonApi, type ScheduleRequest, type SendRequest } from './daemon/api'
+import { startDaemonApi, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
 
@@ -147,6 +147,30 @@ async function main() {
                 console.log(`[daemon] Sent message to session ${req.sessionId.slice(0, 8)}: "${req.message.slice(0, 50)}"`)
             } else {
                 console.warn(`[daemon] Send: no topic session found for ${req.sessionId.slice(0, 8)}`)
+            }
+        },
+        onSendFile: (req: SendFileRequest) => {
+            let topicSession = sessionManager.getTopicSessionByConversationId(req.sessionId)
+            if (!topicSession) {
+                const sessionRecord = sessionManager.getSession(req.sessionId)
+                if (sessionRecord) {
+                    topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
+                }
+            }
+            if (topicSession) {
+                void topicSession.dispatch({
+                    kind: 'command',
+                    name: 'send_file',
+                    args: JSON.stringify({
+                        path: req.path,
+                        ...(req.caption ? { caption: req.caption } : {}),
+                        ...(req.filename ? { filename: req.filename } : {}),
+                    }),
+                    source: 'mcp',
+                })
+                console.log(`[daemon] Sent file to session ${req.sessionId.slice(0, 8)}: "${req.path}"`)
+            } else {
+                console.warn(`[daemon] Send file: no topic session found for ${req.sessionId.slice(0, 8)}`)
             }
         },
     })

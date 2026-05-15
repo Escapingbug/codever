@@ -180,6 +180,7 @@ The MCP tool surface includes:
 - `schedule_reminder`
 - `cancel_reminder`
 - `send_message`
+- `send_file`
 
 Session-scoped tools such as reminders and proactive messages require an established Codever conversation id. Some providers only make these available after the first completed turn.
 

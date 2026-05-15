@@ -70,6 +70,7 @@ describe('MCP active surface registration', () => {
         expect(tools.has('schedule_reminder')).toBe(true)
         expect(tools.has('cancel_reminder')).toBe(true)
         expect(tools.has('send_message')).toBe(true)
+        expect(tools.has('send_file')).toBe(true)
         expect(tools.has('list_sessions')).toBe(false)
 
         const context = await tools.get('get_codever_context')!({ topic: 'channel' })
@@ -84,6 +85,12 @@ describe('MCP active surface registration', () => {
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ sessionId: 'provider-session-1', message: 'now' }),
+        }))
+
+        await tools.get('send_file')!({ path: '/repo/report.txt', caption: 'report' })
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1', path: '/repo/report.txt', caption: 'report' }),
         }))
     })
 

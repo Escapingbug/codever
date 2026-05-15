@@ -1,5 +1,5 @@
 /**
- * MCP Notify Tools — schedule_reminder, cancel_reminder, send_message
+ * MCP Notify Tools — schedule_reminder, cancel_reminder, send_message, send_file
  * 
  * These tools allow the agent to proactively schedule reminders and
  * send messages. They communicate with the daemon process via HTTP
@@ -198,6 +198,59 @@ export function createSendMessageHandler() {
     }
 }
 
+export function createSendFileHandler() {
+    return async (args: { path: string; caption?: string; filename?: string }) => {
+        const apiPort = getDaemonApiPort()
+        if (!apiPort) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Daemon API not available.' }],
+            }
+        }
+
+        const conversationId = process.env.CODEVER_CONVERSATION_ID
+        if (!conversationId) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Session identity not available yet. Send_file requires a session context that is established after the first turn. Please retry on the next message — it will be available then.' }],
+            }
+        }
+
+        const requestBody = {
+            sessionId: conversationId,
+            path: args.path,
+            ...(args.caption ? { caption: args.caption } : {}),
+            ...(args.filename ? { filename: args.filename } : {}),
+        }
+
+        try {
+            const res = await fetch(`http://127.0.0.1:${apiPort}/api/send-file`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody),
+            })
+
+            if (!res.ok) {
+                const err = await res.text()
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Send file failed: ${err}` }],
+                }
+            }
+
+            return {
+                content: [{ type: 'text' as const, text: `File sent: "${args.path}"` }],
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: `Failed to connect to daemon: ${msg}` }],
+            }
+        }
+    }
+}
+
 /** Register all notify tools on an MCP server */
 export function registerNotifyTools(server: any): void {
     server.tool(
@@ -228,5 +281,16 @@ export function registerNotifyTools(server: any): void {
             message: z.string().describe('The message to send'),
         },
         createSendMessageHandler(),
+    )
+
+    server.tool(
+        'send_file',
+        'Send an immediate file attachment to the user via the channel. The path must be readable and inside the session working directory or an allowed Codever directory.',
+        {
+            path: z.string().describe('Local file path to send as an attachment'),
+            caption: z.string().optional().describe('Optional caption to send with the file'),
+            filename: z.string().optional().describe('Optional display filename for the attachment'),
+        },
+        createSendFileHandler(),
     )
 }

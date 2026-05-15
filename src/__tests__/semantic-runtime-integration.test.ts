@@ -864,6 +864,43 @@ describe('Semantic runtime integration chain', () => {
         expect(provider.startQuery).not.toHaveBeenCalled()
     })
 
+    it('supports MCP send_file as an immediate channel file attachment with journal visibility', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-'))
+        try {
+            const reportPath = join(tempDir, 'report.txt')
+            writeFileSync(reportPath, 'build passed', 'utf8')
+            const provider = createProvider([])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({
+                kind: 'command',
+                name: 'send_file',
+                args: JSON.stringify({ path: reportPath, caption: 'latest report' }),
+                source: 'mcp',
+            })
+
+            expect(channel.sent).toHaveLength(1)
+            expect(channel.sent[0]).toMatchObject({
+                text: 'latest report',
+                format: 'plain',
+                attachments: [{ type: 'document', path: reportPath, filename: 'report.txt' }],
+            })
+            expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+                expect.objectContaining({ kind: 'command_result', command: 'send_file' }),
+            ]))
+            expect(provider.startQuery).not.toHaveBeenCalled()
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
     it('handles provider available command updates as semantic command results', async () => {
         const provider = createProvider([
             {

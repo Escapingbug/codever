@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { access, readFile, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { resolve, sep } from 'node:path'
+import { basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
@@ -20,6 +20,7 @@ export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizi
 const FILE_REFERENCE_PATTERN = /file:\/\/[^\s<>"'`()\[\],]+/g
 const MAX_FILE_REFERENCES = 20
 const MAX_READ_FILE_BYTES = 128 * 1024
+const MAX_SEND_FILE_BYTES = 50 * 1024 * 1024
 
 interface FileReference {
     id: string
@@ -385,6 +386,9 @@ export class SemanticSessionRuntime {
                 this.recordCommand('send_message', { message: args ?? '' })
                 await this.send({ text: args ?? '', format: 'html' })
                 return
+            case 'send_file':
+                await this.handleSendFileCommand(args)
+                return
             case 'progress':
                 await this.handleProgressCommand()
                 return
@@ -523,6 +527,30 @@ export class SemanticSessionRuntime {
         }
     }
 
+    private async handleSendFileCommand(args: string | undefined): Promise<void> {
+        const request = parseSendFileArgs(args)
+        if (!request?.path) {
+            const error = 'missing required file path'
+            this.recordCommand('send_file', { error })
+            await this.send({ text: `Cannot send file: ${escapeHtml(error)}`, format: 'html' })
+            return
+        }
+
+        try {
+            const { path, filename } = await this.resolveSendableFile(request.path, request.filename)
+            await this.send({
+                text: request.caption ?? filename,
+                format: 'plain',
+                attachments: [{ type: 'document', path, filename }],
+            })
+            this.recordCommand('send_file', { path, filename, caption: request.caption })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            this.recordCommand('send_file', { path: request.path, error: message })
+            await this.send({ text: `Cannot send file: ${escapeHtml(message)}`, format: 'html' })
+        }
+    }
+
     private formatFileReadMessage(id: string, path: string, content: string): ChannelMessage {
         if (isMarkdownPath(path)) {
             return {
@@ -554,6 +582,26 @@ export class SemanticSessionRuntime {
         return {
             path: resolvedPath,
             content: await readFile(resolvedPath, 'utf8'),
+        }
+    }
+
+    private async resolveSendableFile(path: string, filename?: string): Promise<{ path: string; filename: string }> {
+        const resolvedPath = await realpath(path)
+        if (!await this.isAllowedFilePath(resolvedPath)) {
+            throw new Error('file is outside allowed directories')
+        }
+
+        const info = await stat(resolvedPath)
+        if (!info.isFile()) {
+            throw new Error('path is not a regular file')
+        }
+        if (info.size > MAX_SEND_FILE_BYTES) {
+            throw new Error(`file is too large (${info.size} bytes, limit ${MAX_SEND_FILE_BYTES})`)
+        }
+
+        return {
+            path: resolvedPath,
+            filename: filename?.trim() || basename(resolvedPath),
         }
     }
 
@@ -707,6 +755,27 @@ function normalizePathForCompare(path: string): string {
 function isMarkdownPath(path: string): boolean {
     const lower = path.toLowerCase()
     return lower.endsWith('.md') || lower.endsWith('.markdown')
+}
+
+function parseSendFileArgs(args: string | undefined): { path: string; caption?: string; filename?: string } | null {
+    const trimmed = args?.trim()
+    if (!trimmed) return null
+    try {
+        const parsed = JSON.parse(trimmed)
+        if (!parsed || typeof parsed !== 'object') return null
+        const record = parsed as Record<string, unknown>
+        const path = typeof record.path === 'string' ? record.path.trim() : ''
+        if (!path) return null
+        const caption = typeof record.caption === 'string' && record.caption.trim()
+            ? record.caption
+            : undefined
+        const filename = typeof record.filename === 'string' && record.filename.trim()
+            ? record.filename
+            : undefined
+        return { path, caption, filename }
+    } catch {
+        return { path: trimmed }
+    }
 }
 
 function formatUnknown(value: unknown): string {

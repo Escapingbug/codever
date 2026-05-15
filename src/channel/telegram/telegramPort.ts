@@ -8,6 +8,7 @@ import type { ChannelPort, ChannelMessage, ChannelSendResult, DecisionRequest, D
 import { tgmdConvert, tgmdTableImage } from '@/utils/tgmdrender'
 import { splitHtmlChunks } from '@/utils/formatting'
 import { InputFile } from 'grammy'
+import { basename } from 'node:path'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
 import { completePendingDecision, registerPendingDecision } from './decisionRegistry'
 
@@ -34,6 +35,10 @@ export class TelegramPort implements ChannelPort {
 
     async send(message: ChannelMessage): Promise<ChannelSendResult> {
         const { text, format, replyMarkup } = message
+
+        if (message.attachments?.length) {
+            return await this.sendAttachments(message)
+        }
 
         switch (format) {
             case 'markdown':
@@ -185,6 +190,49 @@ export class TelegramPort implements ChannelPort {
     }
 
     // --- Private helpers ---
+
+    private async sendAttachments(message: ChannelMessage): Promise<ChannelSendResult> {
+        let firstMessageId: number | undefined
+        const caption = message.text.trim()
+        const captionOptions = await this.captionOptions(message)
+
+        for (let i = 0; i < (message.attachments ?? []).length; i++) {
+            const attachment = message.attachments![i]
+            const filename = attachment.filename || basename(attachment.path)
+            const msg = await this.bot.api.sendDocument(
+                this.chatId,
+                new InputFile(attachment.path, filename),
+                {
+                    ...(i === 0 && caption ? captionOptions : {}),
+                    reply_markup: i === 0 ? message.replyMarkup as any : undefined,
+                    ...buildMessageThreadParams(this.threadId),
+                },
+            )
+            if (firstMessageId === undefined) firstMessageId = msg.message_id
+        }
+
+        return { messageId: firstMessageId }
+    }
+
+    private async captionOptions(message: ChannelMessage): Promise<Record<string, unknown>> {
+        if (!message.text.trim()) return {}
+        if (message.format === 'html') {
+            return { caption: message.text, parse_mode: 'HTML' }
+        }
+        if (message.format === 'plain') {
+            return { caption: message.text }
+        }
+
+        const converted = await tgmdConvert(message.text)
+        const firstText = converted.find(segment => segment.kind === 'text' && segment.text !== undefined)
+        if (firstText?.kind === 'text') {
+            return {
+                caption: firstText.text?.replace(/<!--\s*raw\s*-->\s*\n?/g, ''),
+                entities: firstText.entities as any,
+            }
+        }
+        return { caption: message.text }
+    }
 
     private async sendMarkdown(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
         try {

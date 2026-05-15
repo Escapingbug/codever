@@ -8,10 +8,17 @@ import type { SessionState } from '@/core/types'
 import type { SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 
+export interface ChannelAttachment {
+    type: 'document'
+    path: string
+    filename?: string
+}
+
 export interface ChannelMessage {
     text: string
     format: 'markdown' | 'html' | 'plain'
     replyMarkup?: unknown
+    attachments?: ChannelAttachment[]
 }
 
 export interface DecisionOption {

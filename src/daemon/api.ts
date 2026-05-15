@@ -9,6 +9,7 @@
  *   POST /api/schedule   — Register a scheduled reminder
  *   POST /api/cancel     — Cancel a scheduled reminder
  *   POST /api/send       — Immediately inject a message into a session
+ *   POST /api/send-file  — Immediately send a file attachment to a session
  *   GET  /api/sessions   — List sessions (for providerSessionId lookup)
  */
 
@@ -38,10 +39,22 @@ export interface SendRequest {
     message: string
 }
 
+export interface SendFileRequest {
+    /** providerSessionId or coreSessionId to target */
+    sessionId: string
+    /** Local file path to send */
+    path: string
+    /** Optional caption to send with the file */
+    caption?: string
+    /** Optional display filename */
+    filename?: string
+}
+
 export interface DaemonApiHandlers {
     onSchedule: (req: ScheduleRequest) => { taskId: string }
     onCancel: (req: CancelRequest) => void
     onSend: (req: SendRequest) => void
+    onSendFile: (req: SendFileRequest) => void
 }
 
 export interface DaemonApi {
@@ -102,6 +115,18 @@ export async function startDaemonApi(handlers: DaemonApiHandlers): Promise<Daemo
                         return
                     }
                     handlers.onSend(data)
+                    sendJson(200, { ok: true })
+                    return
+                }
+
+                if (req.method === 'POST' && req.url === '/api/send-file') {
+                    const body = await readBody()
+                    const data = JSON.parse(body) as SendFileRequest
+                    if (!data.sessionId || !data.path) {
+                        sendJson(400, { error: 'Missing required fields: sessionId, path' })
+                        return
+                    }
+                    handlers.onSendFile(data)
                     sendJson(200, { ok: true })
                     return
                 }

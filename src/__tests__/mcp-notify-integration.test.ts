@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     createCancelReminderHandler,
     createScheduleReminderHandler,
+    createSendFileHandler,
     createSendMessageHandler,
 } from '@/mcp/tools/notify'
 
@@ -59,6 +60,22 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ sessionId: 'topic:-100:10', message: 'ping user now' }),
+        }))
+    })
+
+    it('send_file posts a session-scoped file attachment request to daemon API', async () => {
+        const handler = createSendFileHandler()
+
+        const result = await handler({ path: '/repo/report.txt', caption: 'latest report' })
+
+        expect(result.isError).toBeUndefined()
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({
+                sessionId: 'topic:-100:10',
+                path: '/repo/report.txt',
+                caption: 'latest report',
+            }),
         }))
     })
 

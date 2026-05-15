@@ -6,11 +6,12 @@ describe('Daemon API integration boundary', () => {
     const onSchedule = vi.fn()
     const onCancel = vi.fn()
     const onSend = vi.fn()
+    const onSendFile = vi.fn()
 
     beforeEach(async () => {
         vi.clearAllMocks()
         onSchedule.mockReturnValue({ taskId: 'task-1' })
-        api = await startDaemonApi({ onSchedule, onCancel, onSend })
+        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile })
     })
 
     afterEach(() => {
@@ -57,6 +58,25 @@ describe('Daemon API integration boundary', () => {
 
         expect(res.status).toBe(200)
         expect(onSend).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', message: 'wake up' })
+    })
+
+    it('POST /api/send-file validates and forwards immediate session file attachments', async () => {
+        const res = await fetch(url('/api/send-file'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sessionId: 'topic:-100:10',
+                path: '/repo/report.txt',
+                caption: 'latest report',
+            }),
+        })
+
+        expect(res.status).toBe(200)
+        expect(onSendFile).toHaveBeenCalledWith({
+            sessionId: 'topic:-100:10',
+            path: '/repo/report.txt',
+            caption: 'latest report',
+        })
     })
 
     it('POST /api/cancel validates and forwards cancel requests', async () => {
