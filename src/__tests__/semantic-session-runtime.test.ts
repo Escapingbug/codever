@@ -105,7 +105,7 @@ describe('SemanticSessionRuntime', () => {
         expect(operations.map(op => op.kind)).toEqual(['send', 'edit'])
     })
 
-    it('aggregates normal tool updates between assistant text messages into one editable message', async () => {
+    it('replaces the normal tool message between assistant text messages instead of appending history', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
         const operations: DeliveryOperation[] = []
@@ -138,9 +138,9 @@ describe('SemanticSessionRuntime', () => {
         expect(operations[5].message.text).toBe('Done')
 
         const finalToolMessage = operations[4].message.text
-        expect(finalToolMessage).toContain('npm test')
         expect(finalToolMessage).toContain('Read')
         expect(finalToolMessage).toContain('/repo/src/app.ts')
+        expect(finalToolMessage).not.toContain('npm test')
         expect(finalToolMessage).not.toContain('passed')
         expect(finalToolMessage).not.toContain('const secret')
     })

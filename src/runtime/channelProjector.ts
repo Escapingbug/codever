@@ -31,7 +31,6 @@ export class ChannelProjector {
     private toolStates = new Map<string, ProjectedToolState>()
     private normalToolGroupKey: string | null = null
     private normalToolGroupIndex = 0
-    private normalToolGroupToolIds: string[] = []
 
     project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {
@@ -120,7 +119,6 @@ export class ChannelProjector {
         this.toolStates.clear()
         this.normalToolGroupKey = null
         this.normalToolGroupIndex = 0
-        this.normalToolGroupToolIds = []
     }
 
     private flushText(semanticEvent?: ConversationEvent): ProjectedMessage[] {
@@ -168,18 +166,9 @@ export class ChannelProjector {
     private projectNormalToolGroup(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {
         const groupKey = this.ensureNormalToolGroup()
         const state = this.mergeToolState(event)
-        if (!this.normalToolGroupToolIds.includes(event.toolCallId)) {
-            this.normalToolGroupToolIds.push(event.toolCallId)
-        }
-
-        const text = this.normalToolGroupToolIds
-            .map(toolCallId => this.toolStates.get(toolCallId))
-            .filter((state): state is ProjectedToolState => state !== undefined)
-            .map(state => this.formatToolState(state))
-            .join('\n\n')
 
         return {
-            message: { text, format: 'html' },
+            message: { text: this.formatToolState(state), format: 'html' },
             toolUseId: groupKey,
             isToolEvent: true,
             isTerminal: event.phase === 'completed' || event.phase === 'failed',
@@ -190,14 +179,12 @@ export class ChannelProjector {
     private ensureNormalToolGroup(): string {
         if (!this.normalToolGroupKey) {
             this.normalToolGroupKey = `normal-tool-group:${++this.normalToolGroupIndex}`
-            this.normalToolGroupToolIds = []
         }
         return this.normalToolGroupKey
     }
 
     private closeNormalToolGroup(): void {
         this.normalToolGroupKey = null
-        this.normalToolGroupToolIds = []
     }
 
     private projectTurnFinished(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): ProjectedMessage[] {
