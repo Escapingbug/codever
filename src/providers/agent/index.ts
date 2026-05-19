@@ -10,7 +10,7 @@
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
 import { AcpProvider } from '@/providers/acp'
-import type { AgentQueryConfig, ModelEntry } from '@/providers/provider'
+import type { AgentQueryConfig, AgentQueryInput, ModelEntry } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import type { AcpExtensionHandler } from '@/providers/acp/AcpClientManager'
@@ -31,7 +31,7 @@ export class AgentProvider extends AcpProvider {
         })
     }
 
-    override startQuery(prompt: string, config: AgentQueryConfig) {
+    override startQuery(prompt: AgentQueryInput, config: AgentQueryConfig) {
         return super.startQuery(prompt, {
             ...config,
             permissionHandler: createCursorPermissionHandler(config.permissionHandler, config.cwd),

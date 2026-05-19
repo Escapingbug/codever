@@ -6,7 +6,8 @@ import { basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
-import type { ConversationEvent, SessionInput } from './semantic'
+import type { ConversationEvent, RichFilePart, RichUserInput, SessionInput } from './semantic'
+import { normalizeUserInput } from './semantic'
 import { ConversationJournal } from './semantic'
 import { ChannelProjector } from './channelProjector'
 import { DeliveryOutbox } from './deliveryOutbox'
@@ -119,7 +120,7 @@ export class SemanticSessionRuntime {
 
         switch (input.kind) {
             case 'user_message':
-                await this.runTurn(input.text)
+                await this.runTurn(input.richInput ?? input.text)
                 break
             case 'scheduled_message':
                 await this.runTurn(input.text)
@@ -136,7 +137,7 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async runTurn(prompt: string): Promise<void> {
+    private async runTurn(prompt: string | RichUserInput): Promise<void> {
         if (!this.config.provider.isReady()) {
             await this.handleProviderNotReady()
             if (!this.config.provider.isReady()) return
@@ -156,7 +157,7 @@ export class SemanticSessionRuntime {
 
         this.abortController = new AbortController()
         const activeModel = this.getActiveModel()
-        const handle = this.config.provider.startQuery(prompt, {
+        const handle = this.config.provider.startQuery(this.prepareProviderInput(prompt), {
             cwd: this.config.cwd,
             sessionId: this.config.providerSessionId ?? undefined,
             signal: this.abortController.signal,
@@ -220,6 +221,21 @@ export class SemanticSessionRuntime {
         this.state = 'canceling'
         await this.currentHandle?.interrupt()
         this.abortController?.abort()
+    }
+
+    private prepareProviderInput(input: string | RichUserInput): string | RichUserInput {
+        if (typeof input === 'string') return input
+
+        const normalized = normalizeUserInput(input)
+        const fileParts = normalized.parts.filter((part): part is RichFilePart => part.type === 'file')
+        if (fileParts.length === 0) return normalized
+
+        return {
+            parts: [
+                { type: 'text', text: formatUploadedFileReferenceText(fileParts) },
+                ...normalized.parts.filter(part => part.type !== 'file'),
+            ],
+        }
     }
 
     private isStopping(): boolean {
@@ -781,6 +797,16 @@ function isPathInside(path: string, base: string): boolean {
 
 function normalizePathForCompare(path: string): string {
     return process.platform === 'win32' ? path.toLowerCase() : path
+}
+
+function formatUploadedFileReferenceText(files: RichFilePart[]): string {
+    const lines = [
+        'The user uploaded the following file(s), cached locally by Codever:',
+        ...files.map(file => `- ${file.filename}: ${file.path} (${file.mimeType}, ${file.sizeBytes} bytes)`),
+        '',
+        'Use these local paths if you need to inspect the uploaded file(s).',
+    ]
+    return lines.join('\n')
 }
 
 function isMarkdownPath(path: string): boolean {

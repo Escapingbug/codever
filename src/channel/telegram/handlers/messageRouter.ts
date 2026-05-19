@@ -9,6 +9,8 @@ import type { TopicSession } from '@/bridge/channelPort'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { Bot } from 'grammy'
 import type { GroupLogger } from '@/utils/groupLogger'
+import { buildRichInputFromTelegramMessage } from '@/channel/telegram/uploadInput'
+import type { RichUserInput } from '@/runtime/semantic'
 
 export interface MessageRouterContext {
     sessionManager: SessionManager
@@ -66,7 +68,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         )
     })
 
-    bot.on('message:text', async (c: Context) => {
+    async function handleUserMessage(c: Context): Promise<void> {
         const chat = c.chat
         if (!chat || (chat.type !== 'group' && chat.type !== 'supergroup')) return
 
@@ -77,7 +79,8 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         const userId = c.from!.id
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(chat.id, messageThreadId)
-        glog(chat.id, `[msg:in] userId=${userId} text="${c.message!.text!.slice(0, 80)}"`)
+        const messageText = getMessageText(c)
+        glog(chat.id, `[msg:in] userId=${userId} text="${messageText.slice(0, 80)}"`)
 
         if (!pairing.isAuthorized(userId)) {
             glog(chat.id, `[msg:in] User ${userId} not authorized, ignoring`)
@@ -85,7 +88,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         }
 
         if (isGenericTopic(messageThreadId)) {
-            const text = c.message!.text!.trim()
+            const text = messageText.trim()
             if (!text.startsWith('/')) {
                 await c.reply('Please create or use a topic to start a Codever session. The general topic only supports control commands like /help and /provider.')
             }
@@ -94,7 +97,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
 
         const groupChatId = chat.id
         let topicSession = topicSessions.get(topicKey)
-        const fileCommandMatch = c.message!.text!.match(/^\/file_([A-Za-z0-9_-]+)(?:@\w+)?(?:\s|$)/)
+        const fileCommandMatch = messageText.match(/^\/file_([A-Za-z0-9_-]+)(?:@\w+)?(?:\s|$)/)
         if (fileCommandMatch) {
             if (!topicSession) {
                 await c.reply('No active session.')
@@ -200,12 +203,54 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         }
 
         if (topicSession) {
+            let richInput: RichUserInput | undefined
+            if (hasUpload(c)) {
+                const botToken = config.getBotToken()
+                if (!botToken) {
+                    await c.reply('Bot token is not configured, cannot download Telegram upload.')
+                    return
+                }
+                try {
+                    const built = await buildRichInputFromTelegramMessage({
+                        api: c.api,
+                        botToken,
+                        topicKey,
+                        message: c.message as any,
+                    })
+                    richInput = built.richInput
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error)
+                    await c.reply(`Cannot process upload: ${message}`)
+                    return
+                }
+            }
             topicSession.receiveInput({
-                text: c.message!.text!,
+                text: messageText,
                 username: c.from?.username || c.from?.first_name,
+                ...(richInput ? { richInput } : {}),
             })
         }
 
         await botInstance.api.sendChatAction(groupChatId, 'typing').catch(e => console.warn('[messageRouter] sendChatAction failed:', e instanceof Error ? e.message : e))
-    })
+    }
+
+    bot.on('message:text', handleUserMessage)
+    bot.on('message:photo', handleUserMessage)
+    bot.on('message:document', handleUserMessage)
+    bot.on('message:audio', handleUserMessage)
+    bot.on('message:voice', handleUserMessage)
+}
+
+function getMessageText(c: Context): string {
+    const message = c.message as any
+    return typeof message?.text === 'string'
+        ? message.text
+        : typeof message?.caption === 'string'
+            ? message.caption
+            : ''
+}
+
+function hasUpload(c: Context): boolean {
+    const message = c.message as any
+    return Boolean(message?.photo?.length || message?.document || message?.audio || message?.voice)
 }

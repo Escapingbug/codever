@@ -5,6 +5,7 @@
 import type { AgentProvider } from '@/providers/provider'
 import type { SessionState } from '@/core/types'
 import type { ChannelPort, TopicSession } from './channelPort'
+import type { RichUserInput } from '@/runtime/semantic'
 import { config } from '@/config'
 import { makeTopicKey } from '@/bridge/sessionManager'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
@@ -65,10 +66,11 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         },
     })
 
-    function receiveInput(input: { text: string; username?: string }): void {
+    function receiveInput(input: { text: string; username?: string; richInput?: RichUserInput }): void {
         void runtime.dispatch({
             kind: 'user_message',
             text: input.text,
+            ...(input.richInput ? { richInput: input.richInput } : {}),
             source: 'channel',
             user: { username: input.username, displayName: input.username },
         }).catch((e) => {

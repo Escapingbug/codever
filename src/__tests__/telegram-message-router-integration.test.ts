@@ -9,6 +9,16 @@ const mocks = vi.hoisted(() => ({
     getDefaultProvider: vi.fn(() => 'mock-acp'),
     getTopicState: vi.fn((): any => undefined),
     clearTopicQueryInProgress: vi.fn(),
+    getBotToken: vi.fn(() => 'token'),
+    buildRichInputFromTelegramMessage: vi.fn(async () => ({
+        text: 'caption',
+        richInput: {
+            parts: [
+                { type: 'text', text: 'caption' },
+                { type: 'image', mimeType: 'image/jpeg', data: 'AQID', source: 'telegram:photo-1', filename: 'photo.jpg', sizeBytes: 3 },
+            ],
+        },
+    })),
 }))
 
 vi.mock('@/channel/telegram/pairing', () => ({
@@ -20,6 +30,7 @@ vi.mock('@/config', () => ({
         getDefaultProvider: mocks.getDefaultProvider,
         getTopicState: mocks.getTopicState,
         clearTopicQueryInProgress: mocks.clearTopicQueryInProgress,
+        getBotToken: mocks.getBotToken,
     },
 }))
 
@@ -31,6 +42,10 @@ vi.mock('@/providers/registry', () => ({
 vi.mock('@/bridge/topicSession', () => ({
     createTopicSessionRecord: mocks.createTopicSessionRecord,
     createTopicSession: mocks.createTopicSession,
+}))
+
+vi.mock('@/channel/telegram/uploadInput', () => ({
+    buildRichInputFromTelegramMessage: mocks.buildRichInputFromTelegramMessage,
 }))
 
 vi.mock('@/channel/telegram/telegramPort', () => ({
@@ -56,6 +71,11 @@ function createBot() {
         async emitMessage(ctx: any) {
             const handler = handlers.get('message:text')
             if (!handler) throw new Error('message:text handler was not registered')
+            await handler(ctx)
+        },
+        async emitPhoto(ctx: any) {
+            const handler = handlers.get('message:photo')
+            if (!handler) throw new Error('message:photo handler was not registered')
             await handler(ctx)
         },
         async emitMyChatMember(ctx: any) {
@@ -131,15 +151,27 @@ function createMessageContext(text = 'hello codever', threadId = 10) {
     }
 }
 
+function createPhotoContext(caption = 'caption', threadId = 10) {
+    const ctx = createMessageContext(caption, threadId)
+    ctx.message = {
+        caption,
+        message_thread_id: threadId,
+        photo: [{ file_id: 'photo-1', file_size: 3 }],
+    } as any
+    return ctx
+}
+
 describe('Telegram message router integration', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.getDefaultProvider.mockReturnValue('mock-acp')
         mocks.getTopicState.mockReturnValue(undefined)
+        mocks.getBotToken.mockReturnValue('token')
         mocks.getProvider.mockImplementation(() => ({ name: 'mock-provider' }))
         mocks.createProviderInstance.mockImplementation(() => ({ name: 'mock-provider' }))
         mocks.createTopicSessionRecord.mockImplementation(createSessionRecord)
         mocks.createTopicSession.mockImplementation(() => createTopicSession())
+        mocks.buildRichInputFromTelegramMessage.mockClear()
     })
 
     it('creates a topic session on the first authorized group message and forwards user input', async () => {
@@ -179,6 +211,30 @@ describe('Telegram message router integration', () => {
 
         expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
         expect(existing.receiveInput).toHaveBeenCalledWith({ text: 'second message', username: 'alice' })
+    })
+
+    it('forwards photo uploads as rich user input', async () => {
+        const bot = createBot()
+        const existing = createTopicSession()
+        const topicSessions = new Map<string, any>([['-100:10', existing]])
+        registerMessageRouter(bot, { sessionManager: createSessionManager(), topicSessions, bot: bot as any })
+
+        await bot.emitPhoto(createPhotoContext('caption'))
+
+        expect(mocks.buildRichInputFromTelegramMessage).toHaveBeenCalledWith(expect.objectContaining({
+            botToken: 'token',
+            topicKey: '-100:10',
+        }))
+        expect(existing.receiveInput).toHaveBeenCalledWith({
+            text: 'caption',
+            username: 'alice',
+            richInput: {
+                parts: [
+                    { type: 'text', text: 'caption' },
+                    { type: 'image', mimeType: 'image/jpeg', data: 'AQID', source: 'telegram:photo-1', filename: 'photo.jpg', sizeBytes: 3 },
+                ],
+            },
+        })
     })
 
     it('does not create a session from a plain message in the general topic', async () => {

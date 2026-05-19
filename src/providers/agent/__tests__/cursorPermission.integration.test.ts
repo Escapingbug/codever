@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import type { ChannelMessage, ChannelPort, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
 import type { AgentEvent } from '@/providers/types'
-import type { AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
+import type { AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 
 vi.mock('@/providers/acp', () => {
     class MockAcpProvider {
@@ -15,7 +15,7 @@ vi.mock('@/providers/acp', () => {
             this.name = options.name
         }
 
-        startQuery(_prompt: string, config: AgentQueryConfig): AgentQueryHandle {
+        startQuery(_prompt: AgentQueryInput, config: AgentQueryConfig): AgentQueryHandle {
             return {
                 events: (async function* () {
                     const result = await config.permissionHandler!.handleToolCall(

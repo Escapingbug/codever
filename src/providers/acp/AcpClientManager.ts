@@ -96,6 +96,16 @@ export class AcpClientManager {
         return this.initResponse
     }
 
+    get promptCapabilities(): { image?: boolean; audio?: boolean } {
+        const response = this.initResponse as unknown as Record<string, unknown> | null
+        const agentCapabilities = response?.agentCapabilities as Record<string, unknown> | undefined
+        const promptCapabilities = (agentCapabilities?.promptCapabilities ?? response?.promptCapabilities) as Record<string, unknown> | undefined
+        return {
+            image: promptCapabilities?.image === true,
+            audio: promptCapabilities?.audio === true,
+        }
+    }
+
     /** Whether the agent supports session/resume (unstable) */
     get supportsResumeSession(): boolean {
         return this.initResponse?.agentCapabilities?.sessionCapabilities?.resume != null

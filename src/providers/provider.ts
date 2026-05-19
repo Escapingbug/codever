@@ -1,5 +1,6 @@
 import type { AgentEvent } from './types'
 import type { DecisionRequest, DecisionResponse } from '@/bridge/channelPort'
+import type { RichUserInput } from '@/runtime/semantic'
 
 export class ProviderNotReadyError extends Error {
     constructor(providerName: string, reason: string) {
@@ -48,6 +49,8 @@ export interface AgentQueryConfig {
     debugLog?: (line: string) => void
 }
 
+export type AgentQueryInput = string | RichUserInput
+
 export interface ModelEntry {
     id: string
     name: string
@@ -65,7 +68,7 @@ export interface SessionEntry {
 export interface AgentProvider {
     readonly name: string
 
-    startQuery(prompt: string, config: AgentQueryConfig): AgentQueryHandle
+    startQuery(prompt: AgentQueryInput, config: AgentQueryConfig): AgentQueryHandle
 
     isReady(): boolean
     getInitError(): string | null

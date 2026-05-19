@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
-import type { AgentProvider, AgentQueryConfig, AgentQueryHandle } from '@/providers/provider'
+import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { ChannelMessage, ChannelPort, SessionStatus } from '@/bridge/channelPort'
 
@@ -13,7 +13,7 @@ interface DeliveryOperation {
 function createProvider(events: AgentEvent[]): AgentProvider {
     return {
         name: 'test-acp',
-        startQuery: vi.fn((_prompt: string, _config: AgentQueryConfig): AgentQueryHandle => ({
+        startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
             events: (async function* () {
                 for (const event of events) yield event
             })(),
@@ -228,5 +228,48 @@ describe('SemanticSessionRuntime', () => {
             expect(rendered).not.toContain('diff --git')
             expect(rendered).not.toContain('token = "secret"')
         }
+    })
+
+    it('injects cached file upload paths before the user prompt', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const provider = createProvider([
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-uploads',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel(sent, statuses),
+        })
+
+        await runtime.dispatch({
+            kind: 'user_message',
+            text: 'please inspect it',
+            source: 'channel',
+            richInput: {
+                parts: [
+                    {
+                        type: 'file',
+                        path: 'C:/Users/me/.config/codever/uploads/report.pdf',
+                        filename: 'report.pdf',
+                        mimeType: 'application/pdf',
+                        sizeBytes: 1234,
+                    },
+                    { type: 'text', text: 'please inspect it' },
+                ],
+            },
+        })
+
+        expect(provider.startQuery).toHaveBeenCalledWith({
+            parts: [
+                {
+                    type: 'text',
+                    text: expect.stringContaining('report.pdf: C:/Users/me/.config/codever/uploads/report.pdf (application/pdf, 1234 bytes)'),
+                },
+                { type: 'text', text: 'please inspect it' },
+            ],
+        }, expect.objectContaining({ cwd: '/repo' }))
     })
 })

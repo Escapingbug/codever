@@ -5,7 +5,7 @@
  */
 
 import type { SessionState } from '@/core/types'
-import type { SessionInput } from '@/runtime/semantic'
+import type { RichUserInput, SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 
 export interface ChannelAttachment {
@@ -74,7 +74,7 @@ export interface ChannelPort {
  */
 export interface TopicSession {
     /** Push a user message into the session */
-    receiveInput(input: { text: string; username?: string }): void
+    receiveInput(input: { text: string; username?: string; richInput?: RichUserInput }): void
 
     /** Push a semantic input into the session runtime */
     dispatch(input: SessionInput): Promise<void>

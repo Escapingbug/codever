@@ -11,8 +11,10 @@
  * callback and are forwarded to the PushableAsyncIterable for consumption.
  */
 
-import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, ModelEntry } from '@/providers/provider'
+import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput, ModelEntry } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
+import type { RichMediaPart, RichUserInput } from '@/runtime/semantic'
+import { normalizeUserInput } from '@/runtime/semantic'
 import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import { AcpClientManager, type AcpClientManagerConfig, type AcpExtensionHandler } from './AcpClientManager'
 import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput, type AcpDebugLog } from './eventAdapter'
@@ -223,6 +225,61 @@ export function extractOutputFromContent(content: Array<unknown>): string | null
 
 export { mapSessionUpdate as mapUpdateToEvents }
 
+export interface AcpPromptCapabilities {
+    image?: boolean
+    audio?: boolean
+}
+
+export async function buildAcpPrompt(input: AgentQueryInput, capabilities: AcpPromptCapabilities = {}): Promise<AcpContentBlock[]> {
+    const richInput = normalizeUserInput(input)
+    const blocks: Array<Record<string, unknown>> = []
+    const fileReferences: string[] = []
+
+    for (const part of richInput.parts) {
+        if (part.type === 'text') {
+            if (part.text.length > 0) blocks.push({ type: 'text', text: part.text })
+            continue
+        }
+
+        if (part.type === 'file') {
+            fileReferences.push(`- ${part.filename}: ${part.path} (${part.mimeType}, ${part.sizeBytes} bytes)`)
+            continue
+        }
+
+        if (capabilities[part.type]) {
+            blocks.push(formatMediaContentBlock(part))
+        } else {
+            blocks.push({
+                type: 'text',
+                text: `The user uploaded ${part.type} ${part.filename ?? 'input'} (${part.mimeType}${part.sizeBytes !== undefined ? `, ${part.sizeBytes} bytes` : ''}), but this ACP agent does not advertise ${part.type} prompt support.`,
+            })
+        }
+    }
+
+    if (fileReferences.length > 0) {
+        blocks.unshift({
+            type: 'text',
+            text: [
+                'The user uploaded the following file(s), cached locally by Codever:',
+                ...fileReferences,
+                '',
+                'Use these local paths if you need to inspect the uploaded file(s).',
+            ].join('\n'),
+        })
+    }
+
+    return blocks as AcpContentBlock[]
+}
+
+function formatMediaContentBlock(part: RichMediaPart): Record<string, unknown> {
+    return {
+        type: part.type,
+        mimeType: part.mimeType,
+        data: part.data,
+        ...(part.source ? { source: part.source } : {}),
+    }
+}
+
 export interface AcpProviderConfig {
     name: string
     command: string
@@ -320,7 +377,7 @@ export class AcpProvider implements AgentProvider {
         }
     }
 
-    startQuery(prompt: string, config: AgentQueryConfig): AgentQueryHandle {
+    startQuery(prompt: AgentQueryInput, config: AgentQueryConfig): AgentQueryHandle {
         const events = new PushableAsyncIterable<AgentEvent>()
         const clientManager = this.clientManager
 
@@ -618,7 +675,7 @@ export class AcpProvider implements AgentProvider {
                 // 5. Send the prompt (blocks until turn completes)
                 const promptResponse = await clientManager.prompt({
                     sessionId: sessionId!,
-                    prompt: [{ type: 'text', text: prompt } as AcpContentBlock],
+                    prompt: await buildAcpPrompt(prompt, clientManager.promptCapabilities),
                 })
                 console.error(`[acp:${this.name}] Prompt returned: stopReason=${promptResponse.stopReason}, sessionId=${sessionId}`)
 

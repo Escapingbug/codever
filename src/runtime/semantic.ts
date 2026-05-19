@@ -2,6 +2,43 @@ import type { AgentEvent, ToolResultContentBlock } from '@/providers/types'
 
 export type SessionInputSource = 'channel' | 'scheduler' | 'mcp' | 'system'
 
+export interface RichTextPart {
+    type: 'text'
+    text: string
+}
+
+export interface RichMediaPart {
+    type: 'image' | 'audio'
+    mimeType: string
+    data: string
+    source?: string
+    filename?: string
+    sizeBytes?: number
+}
+
+export interface RichFilePart {
+    type: 'file'
+    path: string
+    filename: string
+    mimeType: string
+    sizeBytes: number
+    source?: string
+}
+
+export type RichUserInputPart = RichTextPart | RichMediaPart | RichFilePart
+
+export interface RichUserInput {
+    parts: RichUserInputPart[]
+}
+
+export function textUserInput(text: string): RichUserInput {
+    return text.trim().length > 0 ? { parts: [{ type: 'text', text }] } : { parts: [] }
+}
+
+export function normalizeUserInput(input: string | RichUserInput): RichUserInput {
+    return typeof input === 'string' ? textUserInput(input) : input
+}
+
 export interface SemanticMeta {
     id: string
     sessionId: string
@@ -23,6 +60,7 @@ export type SessionInput =
     | {
         kind: 'user_message'
         text: string
+        richInput?: RichUserInput
         source: SessionInputSource
         user?: UserRef
     }
