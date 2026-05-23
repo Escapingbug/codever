@@ -1,4 +1,5 @@
 import { Bot } from 'grammy'
+import { HttpsProxyAgent } from 'https-proxy-agent'
 import { config } from '@/config'
 import { pairing } from '@/channel/telegram/pairing'
 import type { SessionManager } from '@/bridge/sessionManager'
@@ -21,7 +22,18 @@ export function createBot(options: CreateBotOptions): Bot {
     const token = config.getBotToken()
     if (!token) throw new Error('Bot token not configured. Run: codever config set-bot-token <token>')
 
-    const bot = new Bot(token)
+    const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY
+    const bot = proxyUrl
+        ? new Bot(token, {
+            client: {
+                apiRoot: 'https://api.telegram.org',
+                buildUrl: (root, token, method) => `${root}/bot${token}/${method}`,
+                baseFetchConfig: {
+                    agent: new HttpsProxyAgent(proxyUrl),
+                },
+            },
+        })
+        : new Bot(token)
     const topicSessions = sessionManager.getTopicSessionsMap()
 
     // Register all handlers
