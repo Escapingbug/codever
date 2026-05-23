@@ -91,6 +91,13 @@ codever logs
 codever logs -f
 ```
 
+> **Bot Privacy Mode**: Telegram bots default to privacy mode, which means they only receive commands (messages starting with `/`) and messages that mention or reply to the bot. To allow Codever to see all messages in a group, you must either:
+>
+> 1. **Disable privacy mode** via [@BotFather](https://t.me/BotFather): send `/setprivacy`, select your bot, and choose **Disable**. Then **remove the bot from the group and re-add it** — the setting only takes effect for groups the bot joins after the change.
+> 2. **Make the bot a group admin** — admin bots always receive all messages regardless of privacy mode. This is the recommended approach.
+>
+> If the bot is in a group but not responding to normal messages (only commands work), it is almost certainly a privacy mode issue.
+
 ### 4. Pair Your Telegram Account
 
 1. Open a DM with your bot.
