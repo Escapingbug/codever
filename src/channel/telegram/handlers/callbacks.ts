@@ -194,6 +194,12 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     try { await c.editMessageText(`✅ Model set to <b>${displayName}</b>`, { parse_mode: 'HTML' }) } catch {}
 }
 
+function getModelSelectionProvider(chatId: number, messageThreadId: number | undefined, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>) {
+    const topicSession = topicSessions.get(makeTopicKey(chatId, messageThreadId))
+    const providerName = topicSession?.sessionRecord?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+    return getProvider(providerName) ?? getDefaultProvider()
+}
+
 async function handleModelListCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
     const page = parseInt(data.split(':')[1], 10)
     if (!c.callbackQuery) return
@@ -201,9 +207,7 @@ async function handleModelListCallback(c: Context, data: string, sessionManager:
     const messageThreadId = c.callbackQuery.message?.message_thread_id
     if (!chatId) return
 
-    const groupSettings = sessionManager.getGroupSettings(chatId)
-    const providerName = groupSettings?.providerName || config.getDefaultProvider()
-    const provider = getProvider(providerName) ?? getDefaultProvider()
+    const provider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
     const models = provider.getAvailableModels()
     const totalPages = Math.ceil(models.length / 10)
     const header = `Select a model (page ${page + 1}/${totalPages}):`
@@ -223,9 +227,7 @@ async function handleModelProviderCallback(c: Context, data: string, sessionMana
     const messageThreadId = c.callbackQuery.message?.message_thread_id
     if (!chatId) return
 
-    const groupSettings = sessionManager.getGroupSettings(chatId)
-    const providerName = groupSettings?.providerName || config.getDefaultProvider()
-    const agentProvider = getProvider(providerName) ?? getDefaultProvider()
+    const agentProvider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
     const models = agentProvider.getAvailableModels()
 
     if (provider === 'back') {
@@ -250,11 +252,10 @@ async function handleModelProviderListCallback(c: Context, data: string, session
     const page = parseInt(data.split(':')[1], 10)
     if (!c.callbackQuery) return
     const chatId = c.callbackQuery.message?.chat.id
+    const messageThreadId = c.callbackQuery.message?.message_thread_id
     if (!chatId) return
 
-    const groupSettings = sessionManager.getGroupSettings(chatId)
-    const providerName = groupSettings?.providerName || config.getDefaultProvider()
-    const agentProvider = getProvider(providerName) ?? getDefaultProvider()
+    const agentProvider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
     const models = agentProvider.getAvailableModels()
     try {
         await c.editMessageText('Select a provider:', {
@@ -274,9 +275,7 @@ async function handleModelProviderPageCallback(c: Context, data: string, session
     const messageThreadId = c.callbackQuery.message?.message_thread_id
     if (!chatId) return
 
-    const groupSettings = sessionManager.getGroupSettings(chatId)
-    const providerName = groupSettings?.providerName || config.getDefaultProvider()
-    const agentProvider = getProvider(providerName) ?? getDefaultProvider()
+    const agentProvider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
     const models = agentProvider.getAvailableModels()
     try {
         await c.editMessageText(`Select a model from <b>${provider}</b>:`, {
