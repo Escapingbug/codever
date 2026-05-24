@@ -119,6 +119,8 @@ function createSessionManager() {
         releaseCreationLock: vi.fn(),
         getGroupSettings: vi.fn(() => ({ providerName: 'mock-acp' })),
         setGroupSettings: vi.fn(),
+        getTopicSettings: vi.fn(() => undefined),
+        setTopicSettings: vi.fn(),
         getSessionByGroup: vi.fn(() => undefined),
     } as any
 }
@@ -261,6 +263,28 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.sessionRecord.setProviderName).not.toHaveBeenCalled()
     })
 
+    it('provider callback in a new non-generic topic stores provider for the future session', async () => {
+        const bot = createBot()
+        const sessionManager = createSessionManager()
+        registerCallbackHandlers(bot, { sessionManager, topicSessions: new Map() })
+
+        await bot.runCallback('provider:mock-acp')
+
+        expect(sessionManager.setTopicSettings).toHaveBeenCalledWith(-100, 10, { providerName: 'mock-acp', model: undefined })
+        expect(sessionManager.setGroupSettings).not.toHaveBeenCalled()
+    })
+
+    it('model callback in a new non-generic topic stores model for the future session', async () => {
+        const bot = createBot()
+        const sessionManager = createSessionManager()
+        registerCallbackHandlers(bot, { sessionManager, topicSessions: new Map() })
+
+        await bot.runCallback('model:sonnet')
+
+        expect(sessionManager.setTopicSettings).toHaveBeenCalledWith(-100, 10, { model: 'sonnet' })
+        expect(sessionManager.setGroupSettings).not.toHaveBeenCalled()
+    })
+
     it('file callback should dispatch a runtime file read command', async () => {
         const bot = createBot()
         const session = createSession('idle')
@@ -315,7 +339,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         })
 
         expect(session.dispatch).not.toHaveBeenCalled()
-        expect(sessionManager.setGroupSettings).toHaveBeenCalledWith(-100, { providerName: 'mock-acp' })
+        expect(sessionManager.setGroupSettings).toHaveBeenCalledWith(-100, { providerName: 'mock-acp', model: undefined })
     })
 
     it('mode callback should dispatch runtime permission mode command', async () => {

@@ -10,6 +10,7 @@ export interface GroupState {
         permissionMode?: string
         verboseLevel?: 0 | 1 | 2
         providerName?: string
+        timeoutSeconds?: number
     }
 }
 
@@ -17,6 +18,13 @@ export interface GroupState {
 export interface TopicState {
     conversationId?: string
     queryInProgress?: boolean
+    settings?: {
+        model?: string
+        permissionMode?: string
+        verboseLevel?: 0 | 1 | 2
+        providerName?: string
+        timeoutSeconds?: number
+    }
 }
 
 interface CodeverStore {

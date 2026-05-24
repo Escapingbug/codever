@@ -157,6 +157,22 @@ export class SessionManager {
         return this.groupSettings.get(chatId)
     }
 
+    setTopicSettings(chatId: number, messageThreadId: number | undefined, settings: Partial<GroupSettings>): void {
+        const topicKey = makeTopicKey(chatId, messageThreadId)
+        const existing = config.getTopicState(topicKey)?.settings ?? {}
+        const merged = { ...existing, ...settings }
+        for (const [key, value] of Object.entries(settings)) {
+            if (value === undefined) {
+                delete (merged as Record<string, unknown>)[key]
+            }
+        }
+        config.saveTopicState(topicKey, { settings: merged })
+    }
+
+    getTopicSettings(chatId: number, messageThreadId: number | undefined): GroupSettings | undefined {
+        return config.getTopicState(makeTopicKey(chatId, messageThreadId))?.settings
+    }
+
     removeSession(id: string): void {
         const session = this.sessions.get(id)
         if (!session) return

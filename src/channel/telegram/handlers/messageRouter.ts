@@ -134,9 +134,11 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                 }
             } else {
                 const groupSettings = sessionManager.getGroupSettings(groupChatId)
-                const configuredProviderName = groupSettings?.providerName || config.getDefaultProvider()
-                const providerName = getProvider(configuredProviderName) ? configuredProviderName : config.getDefaultProvider()
                 const topicState = config.getTopicState(topicKey)
+                const topicSettings = topicState?.settings
+                const configuredProviderName = topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+                const providerName = getProvider(configuredProviderName) ? configuredProviderName : config.getDefaultProvider()
+                const permissionMode = topicSettings?.permissionMode ?? groupSettings?.permissionMode
 
                 let conversationId = topicState?.conversationId
                 if (topicState?.queryInProgress) {
@@ -154,10 +156,10 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                     providerName,
                     groupChatId,
                     messageThreadId,
-                    model: groupSettings?.model,
-                    verboseLevel: groupSettings?.verboseLevel,
-                    timeoutSeconds: groupSettings?.timeoutSeconds,
-                    providerSettings: { ...groupSettings?.permissionMode ? { permissionMode: groupSettings.permissionMode } : {} },
+                    model: topicSettings?.model ?? groupSettings?.model,
+                    verboseLevel: topicSettings?.verboseLevel ?? groupSettings?.verboseLevel,
+                    timeoutSeconds: topicSettings?.timeoutSeconds ?? groupSettings?.timeoutSeconds,
+                    providerSettings: permissionMode ? { permissionMode } : {},
                     conversationId,
                 })
 

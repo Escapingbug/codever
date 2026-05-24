@@ -53,10 +53,17 @@ describe('config persistence', () => {
         const { config } = await loadConfig()
 
         config.saveGroupState(-300, { cwd: '/repo', settings: { model: 'sonnet' } })
-        config.saveTopicState('-300:42', { conversationId: 'topic-conversation', queryInProgress: true })
+        config.saveTopicState('-300:42', {
+            conversationId: 'topic-conversation',
+            queryInProgress: true,
+            settings: { providerName: 'opencode', model: 'opencode-model' },
+        })
         config.clearTopicConversation('-300:42')
 
-        expect(config.getTopicState('-300:42')).toEqual({ queryInProgress: false })
+        expect(config.getTopicState('-300:42')).toEqual({
+            queryInProgress: false,
+            settings: { providerName: 'opencode', model: 'opencode-model' },
+        })
         expect(config.getGroupState(-300)).toEqual({ cwd: '/repo', settings: { model: 'sonnet' } })
     })
 

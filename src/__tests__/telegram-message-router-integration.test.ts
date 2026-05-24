@@ -201,6 +201,32 @@ describe('Telegram message router integration', () => {
         expect(bot.api.sendChatAction).toHaveBeenCalledWith(-100, 'typing')
     })
 
+    it('uses topic settings when creating the first session in a new topic', async () => {
+        mocks.getTopicState.mockReturnValue({
+            settings: {
+                providerName: 'topic-provider',
+                model: 'topic-model',
+                permissionMode: 'approve-all',
+                timeoutSeconds: 90,
+            },
+        })
+        const bot = createBot()
+        const topicSessions = new Map<string, any>()
+        const sessionManager = createSessionManager({
+            registerTopicSession: vi.fn((topicKey: string, session: any) => topicSessions.set(topicKey, session)),
+        })
+        registerMessageRouter(bot, { sessionManager, topicSessions, bot: bot as any })
+
+        await bot.emitMessage(createMessageContext('start with topic settings'))
+
+        expect(mocks.createTopicSessionRecord).toHaveBeenCalledWith(expect.objectContaining({
+            providerName: 'topic-provider',
+            model: 'topic-model',
+            timeoutSeconds: 90,
+            providerSettings: { permissionMode: 'approve-all' },
+        }))
+    })
+
     it('reuses an existing topic session for later messages in the same topic', async () => {
         const bot = createBot()
         const existing = createTopicSession()

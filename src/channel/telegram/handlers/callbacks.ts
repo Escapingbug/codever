@@ -181,12 +181,20 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
     const sessionRecord = topicSession?.sessionRecord
+    const genericTopic = isGenericTopic(messageThreadId)
 
     if (sessionRecord) {
         await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
     }
-    sessionManager.setGroupSettings(chatId, { model })
-    const providerName = sessionRecord?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+    if (genericTopic || sessionRecord) {
+        sessionManager.setGroupSettings(chatId, { model })
+    } else {
+        sessionManager.setTopicSettings(chatId, messageThreadId, { model })
+    }
+    const topicSettings = sessionManager.getTopicSettings(chatId, messageThreadId)
+    const providerName = genericTopic
+        ? sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+        : sessionRecord?.providerName || topicSettings?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
     const provider = getProvider(providerName) ?? getDefaultProvider()
     const modelEntry = provider.getAvailableModels().find(m => m.id === model)
     const displayName = modelEntry?.name || model
@@ -196,7 +204,9 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
 
 function getModelSelectionProvider(chatId: number, messageThreadId: number | undefined, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>) {
     const topicSession = topicSessions.get(makeTopicKey(chatId, messageThreadId))
-    const providerName = topicSession?.sessionRecord?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+    const providerName = isGenericTopic(messageThreadId)
+        ? sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
+        : topicSession?.sessionRecord?.providerName || sessionManager.getTopicSettings(chatId, messageThreadId)?.providerName || sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
     return getProvider(providerName) ?? getDefaultProvider()
 }
 
@@ -448,8 +458,10 @@ async function handleProviderCallback(c: Context, data: string, sessionManager: 
         const topicKey = makeTopicKey(chatId, messageThreadId)
         const topicSession = topicSessions.get(topicKey)
         if (!topicSession) {
-            await c.answerCallbackQuery('No active session in this topic')
-            try { await c.editMessageText('⚠️ No active session in this topic. Send a message first, then switch provider.', { parse_mode: 'HTML' }) } catch {}
+            sessionManager.setTopicSettings(chatId, messageThreadId, { providerName, model: undefined })
+            config.clearTopicConversation(topicKey)
+            await c.answerCallbackQuery(`Provider for this topic set to ${providerName}`)
+            try { await c.editMessageText(`✅ Provider for this topic set to <b>${providerName}</b>. It will be used when the session starts.`, { parse_mode: 'HTML' }) } catch {}
             return
         }
         await topicSession.dispatch({ kind: 'command', name: 'provider', args: providerName, source: 'channel' })

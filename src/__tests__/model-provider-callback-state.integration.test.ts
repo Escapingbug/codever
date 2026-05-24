@@ -90,7 +90,7 @@ function createCallbackContext(data: string) {
             },
         },
         answerCallbackQuery: vi.fn(async () => {}),
-        editMessageText: vi.fn(async () => {}),
+        editMessageText: vi.fn(async (_text: string, _options?: any) => {}),
     }
 }
 
@@ -98,6 +98,8 @@ function createSessionManager() {
     return {
         getGroupSettings: vi.fn(() => ({ providerName: 'agent' })),
         setGroupSettings: vi.fn(),
+        getTopicSettings: vi.fn(() => undefined),
+        setTopicSettings: vi.fn(),
     } as any
 }
 
@@ -155,11 +157,11 @@ describe('model provider callback state integration', () => {
         expect(providerButtons).not.toContain('cursor (1)')
 
         const callbackCtx = await bot.runCallback('mprov:codebuddy')
-        const detailMarkup = callbackCtx.editMessageText.mock.calls[0][1].reply_markup
+        const detailMarkup = callbackCtx.editMessageText.mock.calls[0]![1]!.reply_markup
         expect(flattenButtonTexts(detailMarkup)).toContain('claude-sonnet-4.6')
 
         const backCtx = await bot.runCallback('mprov:back')
-        const backMarkup = backCtx.editMessageText.mock.calls[0][1].reply_markup
+        const backMarkup = backCtx.editMessageText.mock.calls[0]![1]!.reply_markup
         expect(flattenButtonTexts(backMarkup)).toContain('codebuddy (1)')
         expect(flattenButtonTexts(backMarkup)).not.toContain('cursor (1)')
     })

@@ -31,7 +31,11 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const topicSession = topicSessions.get(topicKey)
         const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
-        const providerName = sessionRecord?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const topicSettings = sessionManager.getTopicSettings(c.chat.id, messageThreadId)
+        const genericTopic = isGenericTopic(messageThreadId)
+        const providerName = genericTopic
+            ? groupSettings?.providerName || config.getDefaultProvider()
+            : sessionRecord?.providerName || topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
         const provider = getProvider(providerName) ?? getDefaultProvider()
         const args = String((c as any).match ?? '').trim()
 
@@ -47,12 +51,18 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             if (topicSession) {
                 await topicSession.dispatch({ kind: 'command', name: 'model', args: found.id, source: 'channel' })
             }
-            sessionManager.setGroupSettings(c.chat.id, { model: found.id })
+            if (genericTopic || topicSession) {
+                sessionManager.setGroupSettings(c.chat.id, { model: found.id })
+            } else {
+                sessionManager.setTopicSettings(c.chat.id, messageThreadId, { model: found.id })
+            }
             await c.reply(`✅ Model set to: <b>${found.id}</b>`, { parse_mode: 'HTML' })
             return
         }
 
-        const current = sessionRecord?.model || groupSettings?.model || 'default'
+        const current = genericTopic
+            ? groupSettings?.model || 'default'
+            : sessionRecord?.model || topicSettings?.model || groupSettings?.model || 'default'
         const models = provider.getAvailableModels()
         if (models.length === 0) {
             await c.reply(`Current model: <b>${current}</b>\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
@@ -123,11 +133,12 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const topicSession = topicSessions.get(topicKey)
         const sessionRecord = topicSession?.sessionRecord
         const groupSettings = sessionManager.getGroupSettings(c.chat.id)
+        const topicSettings = sessionManager.getTopicSettings(c.chat.id, messageThreadId)
         const genericTopic = isGenericTopic(messageThreadId)
         const current = genericTopic
             ? groupSettings?.providerName || config.getDefaultProvider()
-            : sessionRecord?.providerName || groupSettings?.providerName || config.getDefaultProvider()
-        const target = genericTopic ? 'new sessions' : 'this session'
+            : sessionRecord?.providerName || topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const target = genericTopic ? 'new sessions' : topicSession ? 'this session' : 'this topic'
         const providers = listProviders()
         await c.reply(`Current provider: <b>${current}</b>\nSelect provider for ${target}:`, {
             parse_mode: 'HTML',
