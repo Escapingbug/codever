@@ -158,6 +158,10 @@ export class AcpClientManager {
                 shell: isWindows,
             })
 
+            this.childProcess.on('error', (err: Error) => {
+                console.error(`[acp-agent] Child process error: ${err.message}`)
+            })
+
             this.childProcess.stderr?.on('data', (data: Buffer) => {
                 const text = data.toString('utf-8').trim()
                 if (text) {

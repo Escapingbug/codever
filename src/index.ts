@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util'
 import { spawn, execSync } from 'node:child_process'
+import { HttpsProxyAgent } from 'https-proxy-agent'
 import { existsSync, readFileSync, unlinkSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -250,7 +251,10 @@ async function main() {
         // Notify the Telegram DM
         try {
             const { Bot } = await import('grammy')
-            const bot = new Bot(botToken)
+            const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY
+            const bot = proxyUrl
+                ? new Bot(botToken, { client: { baseFetchConfig: { agent: new HttpsProxyAgent(proxyUrl) } } })
+                : new Bot(botToken)
             await bot.api.sendMessage(
                 result.chatId,
                 '<b>Paired!</b>\n\nTo start a session, create a group and add me.\nUse /cwd &lt;path&gt; in the group to set the working directory, then send a message.',

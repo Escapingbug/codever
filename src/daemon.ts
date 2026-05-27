@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { ProxyAgent, setGlobalDispatcher } from 'undici'
 import { config, getDaemonPidPath, getDaemonBaseDir } from './config'
 import { registerProvider, listProviders, getProvider } from './providers/registry'
 
@@ -24,6 +25,16 @@ function parseOptionalNumber(value: string | undefined): number | undefined {
 }
 
 async function main() {
+    const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY
+    if (proxyUrl) {
+        try {
+            setGlobalDispatcher(new ProxyAgent(proxyUrl))
+            console.log(`[daemon] Using proxy: ${proxyUrl}`)
+        } catch (e) {
+            console.error(`[daemon] Failed to set proxy: ${e instanceof Error ? e.message : e}`)
+        }
+    }
+
     ensureDaemonPath()
 
     const baseDir = getDaemonBaseDir()
