@@ -8,7 +8,7 @@ import { AgentProvider } from './providers/agent'
 import { CodebuddyProvider } from './providers/codebuddy'
 import { OpencodeProvider } from './providers/opencode'
 import { createBot } from './channel/telegram/bot'
-import { SessionManager, makeTopicKey } from './bridge/sessionManager'
+import { SessionManager, buildMessageThreadParams, makeTopicKey } from './bridge/sessionManager'
 import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
 import { startDaemonApi, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
@@ -16,6 +16,12 @@ import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
 
 let logger: GroupLogger
+
+function parseOptionalNumber(value: string | undefined): number | undefined {
+    if (!value) return undefined
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+}
 
 async function main() {
     ensureDaemonPath()
@@ -189,8 +195,8 @@ async function main() {
         process.exit(1)
     }
 
-    let restartFn: ((chatId?: number) => Promise<void>) | undefined
-    const bot = createBot({ sessionManager, processCwd: process.cwd(), logger, restart: async (chatId?: number) => { await restartFn!(chatId) } })
+    let restartFn: ((chatId?: number, messageThreadId?: number) => Promise<void>) | undefined
+    const bot = createBot({ sessionManager, processCwd: process.cwd(), logger, restart: async (chatId?: number, messageThreadId?: number) => { await restartFn!(chatId, messageThreadId) } })
 
     const botPolling = bot.start({
         onStart: () => {
@@ -205,10 +211,14 @@ async function main() {
     // If this daemon was spawned by a restart, notify the user immediately.
     const restartChatId = process.env.CODEVER_RESTART_CHAT_ID
     if (restartChatId) {
+        const restartMessageThreadId = parseOptionalNumber(process.env.CODEVER_RESTART_MESSAGE_THREAD_ID)
         delete process.env.CODEVER_RESTART_CHAT_ID
+        delete process.env.CODEVER_RESTART_MESSAGE_THREAD_ID
         const sendRestartNotification = async (attempt = 0): Promise<void> => {
             try {
-                await bot.api.sendMessage(restartChatId, '✅ Daemon restarted successfully.')
+                await bot.api.sendMessage(restartChatId, '✅ Daemon restarted successfully.', {
+                    ...buildMessageThreadParams(restartMessageThreadId),
+                })
                 console.log('[daemon] Restart notification sent')
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e)
@@ -228,60 +238,111 @@ async function main() {
     writeFileSync(pidPath, process.pid.toString())
     console.log(`[daemon] PID ${process.pid} written to ${pidPath}`)
 
-    const cleanup = async () => {
-        console.log('[daemon] Shutting down...')
-        try { await bot.stop() } catch {}
-
-        // Persist and stop all scheduled tasks
-        persistTasks()
-        scheduler.stopAll()
-
-        daemonApi.stop()
-
-        for (const topicSession of Array.from(sessionManager.getTopicSessionsMap().values())) {
-            try { await topicSession.destroy() } catch (e) {
-                console.error(`[daemon] Failed to destroy topic session: ${e instanceof Error ? e.message : e}`)
-            }
+    const sendRestartProgress = async (
+        target: { chatId?: number; messageThreadId?: number } | undefined,
+        message: string,
+    ): Promise<void> => {
+        if (!target?.chatId) return
+        try {
+            await Promise.race([
+                bot.api.sendMessage(target.chatId, message, {
+                    ...buildMessageThreadParams(target.messageThreadId),
+                }),
+                new Promise(resolve => setTimeout(resolve, 2_000)),
+            ])
+        } catch (e) {
+            console.warn(`[daemon] Failed to send restart progress: ${e instanceof Error ? e.message : String(e)}`)
         }
-
-        // NOTE: We intentionally do NOT clear conversationId for mid-query sessions.
-        // The agent (opencode/codebuddy) persists session data to disk (e.g. SQLite).
-        // resumeSession can safely restore a session even after an interrupted query —
-        // the agent discards the incomplete turn and continues from the last completed state.
-        // Clearing conversationId would make recovery impossible, turning a recoverable
-        // session into a lost one (agent sees it as a brand-new conversation).
-
-        // Clear any stale queryInProgress flags for idle sessions.
-        // These can remain if the process was previously killed (SIGKILL) before
-        // the query.completed event could clear them. On next startup they would
-        // prevent session resumption, so we clean them up on graceful shutdown.
-        for (const sessionRecord of sessionManager.listActiveSessions()) {
-            if (sessionRecord.groupChatId !== null) {
-                const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
-                const topicState = config.getTopicState(topicKey)
-                if (topicState?.queryInProgress) {
-                    console.error(`[daemon] Clearing stale queryInProgress for idle session ${sessionRecord.id.slice(0, 8)} topicKey=${topicKey}`)
-                    config.clearTopicQueryInProgress(topicKey)
-                }
-            }
-        }
-
-        // Clean up API port file
-        try { unlinkSync(apiPortFile) } catch {}
-        try { unlinkSync(pidPath) } catch {}
-        logger.close()
-        console.log('[daemon] Cleanup complete')
     }
 
-    const restart = async (chatId?: number) => {
+    const cleanup = async (restartTarget?: { chatId?: number; messageThreadId?: number }) => {
+        console.log('[daemon] Shutting down...')
+        const cleanupStartedAt = Date.now()
+        let heartbeat: ReturnType<typeof setInterval> | undefined
+
+        const elapsedSeconds = () => Math.max(1, Math.round((Date.now() - cleanupStartedAt) / 1000))
+        const setStage = async (stage: string): Promise<void> => {
+            if (heartbeat) clearInterval(heartbeat)
+            console.log(`[daemon] Cleanup stage: ${stage}`)
+            await sendRestartProgress(restartTarget, `🔄 Restarting daemon: cleanup stage "${stage}".`)
+            heartbeat = setInterval(() => {
+                void sendRestartProgress(
+                    restartTarget,
+                    `⏳ Still cleaning up: "${stage}" (${elapsedSeconds()}s elapsed).`,
+                )
+            }, 10_000)
+        }
+
+        try {
+            await setStage('stopping Telegram polling')
+            try { await bot.stop() } catch {}
+
+            // Persist and stop all scheduled tasks
+            await setStage('persisting and stopping scheduled tasks')
+            persistTasks()
+            scheduler.stopAll()
+
+            await setStage('stopping daemon API')
+            daemonApi.stop()
+
+            const topicSessions = Array.from(sessionManager.getTopicSessionsMap().values())
+            if (topicSessions.length > 0) {
+                await setStage(`destroying ${topicSessions.length} active topic session(s)`)
+            }
+            for (const [index, topicSession] of topicSessions.entries()) {
+                const record = topicSession.sessionRecord
+                await setStage(`destroying topic session ${index + 1}/${topicSessions.length} (${record.providerName}, ${record.id.slice(0, 8)})`)
+                try { await topicSession.destroy() } catch (e) {
+                    console.error(`[daemon] Failed to destroy topic session: ${e instanceof Error ? e.message : e}`)
+                }
+            }
+
+            // NOTE: We intentionally do NOT clear conversationId for mid-query sessions.
+            // The agent (opencode/codebuddy) persists session data to disk (e.g. SQLite).
+            // resumeSession can safely restore a session even after an interrupted query —
+            // the agent discards the incomplete turn and continues from the last completed state.
+            // Clearing conversationId would make recovery impossible, turning a recoverable
+            // session into a lost one (agent sees it as a brand-new conversation).
+
+            // Clear any stale queryInProgress flags for idle sessions.
+            // These can remain if the process was previously killed (SIGKILL) before
+            // the query.completed event could clear them. On next startup they would
+            // prevent session resumption, so we clean them up on graceful shutdown.
+            await setStage('clearing stale query flags')
+            for (const sessionRecord of sessionManager.listActiveSessions()) {
+                if (sessionRecord.groupChatId !== null) {
+                    const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
+                    const topicState = config.getTopicState(topicKey)
+                    if (topicState?.queryInProgress) {
+                        console.error(`[daemon] Clearing stale queryInProgress for idle session ${sessionRecord.id.slice(0, 8)} topicKey=${topicKey}`)
+                        config.clearTopicQueryInProgress(topicKey)
+                    }
+                }
+            }
+
+            await setStage('removing runtime files')
+            try { unlinkSync(apiPortFile) } catch {}
+            try { unlinkSync(pidPath) } catch {}
+            await sendRestartProgress(restartTarget, `✅ Cleanup complete after ${elapsedSeconds()}s. Starting new daemon...`)
+            logger.close()
+            console.log('[daemon] Cleanup complete')
+        } finally {
+            if (heartbeat) clearInterval(heartbeat)
+        }
+    }
+
+    const restart = async (chatId?: number, messageThreadId?: number) => {
         console.log('[daemon] Restarting...')
-        await cleanup()
+        await cleanup({ chatId, messageThreadId })
 
         const nodePath = process.env.CODEVER_NODE_PATH || resolveNodePath()
         const daemonScript = process.argv[1]
         const env = { ...process.env }
         if (chatId) {
             env.CODEVER_RESTART_CHAT_ID = chatId.toString()
+        }
+        if (messageThreadId) {
+            env.CODEVER_RESTART_MESSAGE_THREAD_ID = messageThreadId.toString()
         }
         console.log(`[daemon] Spawning new daemon: ${nodePath} ${daemonScript}`)
 

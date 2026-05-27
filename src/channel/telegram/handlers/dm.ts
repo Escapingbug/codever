@@ -6,7 +6,7 @@ import { providerKeyboard } from '@/channel/telegram/keyboard'
 import { escapeHtml } from '@/utils/formatting'
 import { listProviders } from '@/providers/registry'
 
-export function registerDmHandlers(bot: any, sessionManager: SessionManager, restart?: (chatId?: number) => Promise<void>): void {
+export function registerDmHandlers(bot: any, sessionManager: SessionManager, restart?: (chatId?: number, messageThreadId?: number) => Promise<void>): void {
     bot.command('start', async (ctx: Context, next: () => Promise<void>) => {
         if (ctx.chat?.type !== 'private') return next()
         const userId = ctx.from!.id

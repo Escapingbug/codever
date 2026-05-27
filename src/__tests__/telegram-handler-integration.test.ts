@@ -176,6 +176,16 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'progress', source: 'channel' })
     })
 
+    it('/restart passes the topic thread to daemon restart progress reporting', async () => {
+        const bot = createBot()
+        const restart = vi.fn(async () => {})
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map(), restart })
+
+        await bot.runCommand('restart', createContext())
+
+        expect(restart).toHaveBeenCalledWith(-100, 10)
+    })
+
     it('/file should dispatch a runtime file read command', async () => {
         const bot = createBot()
         const session = createSession('idle')

@@ -13,7 +13,7 @@ export interface CreateBotOptions {
     sessionManager: SessionManager
     processCwd: string
     logger?: GroupLogger
-    restart?: (chatId?: number) => Promise<void>
+    restart?: (chatId?: number, messageThreadId?: number) => Promise<void>
 }
 
 export function createBot(options: CreateBotOptions): Bot {
