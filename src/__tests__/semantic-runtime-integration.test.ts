@@ -453,6 +453,100 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('handles /new immediately during an active provider turn and restarts the provider', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const interrupt = vi.fn(async () => {
+            release()
+        })
+        const destroy = vi.fn(async () => {})
+        const provider = createProvider([], {
+            destroy,
+            startQuery: vi.fn((prompt: string, config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    yield { kind: 'session_init', sessionId: `${prompt}-session` } as AgentEvent
+                    if (prompt === 'first') await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt,
+                onActivity: undefined,
+                setPermissionMode: undefined,
+            })),
+        })
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: createChannel(),
+            providerSessionId: 'old-provider-session',
+        })
+
+        const running = runtime.dispatch({ kind: 'user_message', text: 'first', source: 'channel' })
+        await delay(10)
+
+        await runtime.dispatch({ kind: 'command', name: 'new', source: 'channel' })
+        await running
+        await runtime.dispatch({ kind: 'user_message', text: 'fresh', source: 'channel' })
+
+        expect(interrupt).toHaveBeenCalled()
+        expect(destroy).toHaveBeenCalled()
+        expect(provider.startQuery).toHaveBeenLastCalledWith('fresh', expect.objectContaining({
+            sessionId: undefined,
+        }))
+        expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'command_result', command: 'new' }),
+        ]))
+    })
+
+    it('does not abort the next queued provider turn when cancelling the current turn', async () => {
+        let releaseFirst!: () => void
+        const firstHold = new Promise<void>(resolve => {
+            releaseFirst = resolve
+        })
+        let secondSignalAborted = false
+        const interrupt = vi.fn(async () => {
+            releaseFirst()
+            await delay(20)
+        })
+        const provider = createProvider([], {
+            startQuery: vi.fn((prompt: string, config: AgentQueryConfig): AgentQueryHandle => {
+                if (prompt === 'second') {
+                    config.signal.addEventListener('abort', () => {
+                        secondSignalAborted = true
+                    })
+                }
+                return {
+                    events: (async function* () {
+                        if (prompt === 'first') await firstHold
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt,
+                }
+            }),
+        })
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: createChannel(),
+        })
+
+        const first = runtime.dispatch({ kind: 'user_message', text: 'first', source: 'channel' })
+        await delay(10)
+        const second = runtime.dispatch({ kind: 'user_message', text: 'second', source: 'channel' })
+        await delay(10)
+        await runtime.dispatch({ kind: 'cancel', reason: 'user', source: 'channel' })
+        await first
+        await second
+
+        expect(provider.startQuery).toHaveBeenCalledTimes(2)
+        expect(secondSignalAborted).toBe(false)
+    })
+
     it('notifies the channel immediately when user input arrives during an active turn', async () => {
         let release!: () => void
         const hold = new Promise<void>(resolve => {

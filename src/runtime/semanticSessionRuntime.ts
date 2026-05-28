@@ -89,6 +89,10 @@ export class SemanticSessionRuntime {
             return this.cancel()
         }
 
+        if (input.kind === 'command' && input.name === 'new' && this.isActiveTurnState()) {
+            return this.resetActiveConversation()
+        }
+
         if (input.kind === 'command' && input.name === 'progress') {
             return this.handleProgressCommand()
         }
@@ -218,9 +222,38 @@ export class SemanticSessionRuntime {
 
     private async cancel(): Promise<void> {
         if (this.state !== 'querying') return
+        const handle = this.currentHandle
+        const abortController = this.abortController
         this.state = 'canceling'
-        await this.currentHandle?.interrupt()
-        this.abortController?.abort()
+        const interrupting = handle?.interrupt()
+        abortController?.abort()
+        await interrupting
+    }
+
+    private async resetActiveConversation(): Promise<void> {
+        const handle = this.currentHandle
+        const abortController = this.abortController
+        this.config.providerSessionId = null
+        this.config.provider.clearSessionId?.()
+        this.recordCommand('new', { reset: true })
+
+        this.state = 'canceling'
+        const interrupting = handle?.interrupt()
+        abortController?.abort()
+        await interrupting
+
+        // A /new during an active turn is a recovery action. If the provider
+        // ignored cancel, restart its subprocess so the next turn is not
+        // blocked behind the stuck ACP request.
+        try {
+            await this.config.provider.destroy?.()
+        } catch (error) {
+            this.log(`[session] Provider destroy during /new failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+    }
+
+    private isActiveTurnState(): boolean {
+        return this.state === 'querying' || this.state === 'canceling' || this.state === 'finalizing'
     }
 
     private prepareProviderInput(input: string | RichUserInput): string | RichUserInput {

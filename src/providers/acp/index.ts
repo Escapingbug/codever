@@ -729,20 +729,30 @@ export class AcpProvider implements AgentProvider {
 
         void runQuery()
 
+        let interruptPromise: Promise<void> | null = null
+        const interrupt = async () => {
+            interruptPromise ??= (async () => {
+                try {
+                    await this.forceCancelActivePrompt()
+                } finally {
+                    events.end()
+                }
+            })()
+            return interruptPromise
+        }
+
         // Handle abort signal
         if (config.signal) {
             this.activeAbortSignal = config.signal
             const onAbort = () => {
-                this.forceCancelActivePrompt()
+                void interrupt()
             }
             config.signal.addEventListener('abort', onAbort, { once: true })
         }
 
         const handle: AgentQueryHandle = {
             events,
-            interrupt: async () => {
-                await this.forceCancelActivePrompt()
-            },
+            interrupt,
         }
 
         return handle
@@ -770,7 +780,8 @@ export class AcpProvider implements AgentProvider {
      * 1. Send session/cancel and wait up to 2.5s for prompt to return
      * 2. If agent doesn't respond, log a warning but DO NOT kill the subprocess.
      *    cancel() must never kill the subprocess — only destroy() does.
-     * 3. End the event stream so the consumer loop breaks out
+     * The caller owns ending the event stream so the consumer loop can break
+     * even when the agent does not acknowledge cancel.
      */
     private async forceCancelActivePrompt(): Promise<void> {
         const clientManager = this.clientManager
