@@ -80,11 +80,13 @@ export class ChannelProjector {
                 if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option')) {
                     return []
                 }
+                const commandText = formatCommandResult(event.command, event.output)
+                if (!commandText) return this.flushText()
                 return [
                     ...this.flushText(),
                     {
                         message: {
-                            text: formatCommandResult(event.command, event.output),
+                            text: commandText,
                             format: 'html',
                         },
                         isToolEvent: false,
@@ -338,7 +340,7 @@ function formatUnknown(value: unknown): string {
     }
 }
 
-function formatCommandResult(command: string, output: unknown): string {
+function formatCommandResult(command: string, output: unknown): string | null {
     const commandLower = command.toLowerCase()
 
     // available_commands_update: show as a list of commands
@@ -359,11 +361,14 @@ function formatCommandResult(command: string, output: unknown): string {
 
     // plan: show plan content
     if (commandLower === 'plan') {
+        const entriesText = formatPlanEntries(output)
+        if (entriesText) return entriesText
+
         const planText = extractPlanContent(output)
         if (planText) {
             return `<b>📋 Plan</b>\n${escapeHtml(planText)}`
         }
-        return '📋 <b>Exited plan mode</b>'
+        return null
     }
 
     // usage_update: show token/cost info
@@ -451,6 +456,36 @@ function extractPlanContent(output: unknown): string | null {
     if (record.options || record.choices) return null
 
     return null
+}
+
+function formatPlanEntries(output: unknown): string | null {
+    const record = asRecord(output)
+    const entries = Array.isArray(record?.entries) ? record.entries : undefined
+    if (!entries) return null
+
+    const lines = entries.flatMap((entry) => {
+        const item = asRecord(entry)
+        const content = typeof item?.content === 'string' ? item.content.trim() : ''
+        if (!content) return []
+        return `${planEntryStatusIcon(item?.status)} ${escapeHtml(content)}`
+    })
+
+    if (lines.length === 0) return null
+    return `<b>📋 Tasks</b>\n${lines.join('\n')}`
+}
+
+function planEntryStatusIcon(status: unknown): string {
+    switch (status) {
+        case 'completed':
+            return '✅'
+        case 'in_progress':
+            return '🔄'
+        case 'cancelled':
+            return '⏹️'
+        case 'pending':
+        default:
+            return '⬜'
+    }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

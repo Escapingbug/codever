@@ -612,6 +612,31 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
             expect(message).not.toContain('"sessionUpdate"')
         })
 
+        it('should render opencode plan entries as tasks instead of exit plan mode', async () => {
+            const planUpdate = {
+                sessionUpdate: 'plan',
+                entries: [
+                    { content: 'Inspect ACP plan events', priority: 'medium', status: 'in_progress' },
+                    { content: 'Fix entries rendering', priority: 'medium', status: 'pending' },
+                    { content: 'Verify regression', priority: 'medium', status: 'completed' },
+                ],
+            }
+
+            const results = await processAcpUpdate(planUpdate, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'opencode',
+            })
+
+            expect(results.length).toBe(1)
+            const message = results[0].text
+            expect(message).toContain('Tasks')
+            expect(message).toContain('Inspect ACP plan events')
+            expect(message).toContain('Fix entries rendering')
+            expect(message).toContain('Verify regression')
+            expect(message).not.toContain('Exited plan mode')
+        })
+
         it('should render plan with decision options as decision_request', async () => {
             // ACP plan update with options (decision request)
             const planUpdate = {

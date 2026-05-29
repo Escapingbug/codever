@@ -185,6 +185,38 @@ describe('ChannelProjector — command_result friendly rendering', () => {
         expect(message).toContain('Do this')
     })
 
+    it('renders opencode plan entries as a task list', () => {
+        const event: Extract<ConversationEvent, { kind: 'command_result' }> = {
+            kind: 'command_result',
+            command: 'plan',
+            output: {
+                entries: [
+                    { content: 'Inspect ACP plan events', priority: 'medium', status: 'in_progress' },
+                    { content: 'Fix entries rendering', priority: 'medium', status: 'pending' },
+                    { content: 'Verify regression', priority: 'medium', status: 'completed' },
+                ],
+            },
+            meta: {
+                id: 'cmd-plan-entries',
+                sessionId: 'sess-1',
+                turnId: 'turn-1',
+                provider: 'opencode',
+                seq: 3,
+                timestamp: Date.now(),
+                sourcePhase: 'live',
+            },
+        }
+
+        const result = projector.project(event)
+        const message = result[0]?.message.text || ''
+
+        expect(message).toContain('Tasks')
+        expect(message).toContain('Inspect ACP plan events')
+        expect(message).toContain('Fix entries rendering')
+        expect(message).toContain('Verify regression')
+        expect(message).not.toContain('Exited plan mode')
+    })
+
     it('renders usage_update with token/cost info', () => {
         const event: Extract<ConversationEvent, { kind: 'command_result' }> = {
             kind: 'command_result',
