@@ -206,8 +206,8 @@ async function main() {
         process.exit(1)
     }
 
-    let restartFn: ((chatId?: number, messageThreadId?: number) => Promise<void>) | undefined
-    const bot = createBot({ sessionManager, processCwd: process.cwd(), logger, restart: async (chatId?: number, messageThreadId?: number) => { await restartFn!(chatId, messageThreadId) } })
+    let restartFn: ((chatId?: number, messageThreadId?: number, progressMessageId?: number) => Promise<void>) | undefined
+    const bot = createBot({ sessionManager, processCwd: process.cwd(), logger, restart: async (chatId?: number, messageThreadId?: number, progressMessageId?: number) => { await restartFn!(chatId, messageThreadId, progressMessageId) } })
 
     const botPolling = bot.start({
         onStart: () => {
@@ -223,13 +223,19 @@ async function main() {
     const restartChatId = process.env.CODEVER_RESTART_CHAT_ID
     if (restartChatId) {
         const restartMessageThreadId = parseOptionalNumber(process.env.CODEVER_RESTART_MESSAGE_THREAD_ID)
+        const restartMessageId = parseOptionalNumber(process.env.CODEVER_RESTART_MESSAGE_ID)
         delete process.env.CODEVER_RESTART_CHAT_ID
         delete process.env.CODEVER_RESTART_MESSAGE_THREAD_ID
+        delete process.env.CODEVER_RESTART_MESSAGE_ID
         const sendRestartNotification = async (attempt = 0): Promise<void> => {
             try {
-                await bot.api.sendMessage(restartChatId, '✅ Daemon restarted successfully.', {
-                    ...buildMessageThreadParams(restartMessageThreadId),
-                })
+                if (restartMessageId) {
+                    await bot.api.editMessageText(restartChatId, restartMessageId, '✅ Daemon restarted successfully.')
+                } else {
+                    await bot.api.sendMessage(restartChatId, '✅ Daemon restarted successfully.', {
+                        ...buildMessageThreadParams(restartMessageThreadId),
+                    })
+                }
                 console.log('[daemon] Restart notification sent')
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e)
@@ -250,14 +256,24 @@ async function main() {
     console.log(`[daemon] PID ${process.pid} written to ${pidPath}`)
 
     const sendRestartProgress = async (
-        target: { chatId?: number; messageThreadId?: number } | undefined,
+        target: { chatId?: number; messageThreadId?: number; progressMessageId?: number } | undefined,
         message: string,
     ): Promise<void> => {
         if (!target?.chatId) return
+        const force = message.startsWith('✅')
+        const now = Date.now()
+        if (!force && now - lastRestartProgressAt < 1_500) return
+        lastRestartProgressAt = now
         try {
-            await Promise.race([
-                bot.api.sendMessage(target.chatId, message, {
+            const delivery = target.progressMessageId
+                ? bot.api.editMessageText(target.chatId, target.progressMessageId, message)
+                : bot.api.sendMessage(target.chatId, message, {
                     ...buildMessageThreadParams(target.messageThreadId),
+                })
+            await Promise.race([
+                delivery.catch((e) => {
+                    const msg = e instanceof Error ? e.message : String(e)
+                    if (!msg.includes('message is not modified')) throw e
                 }),
                 new Promise(resolve => setTimeout(resolve, 2_000)),
             ])
@@ -266,7 +282,9 @@ async function main() {
         }
     }
 
-    const cleanup = async (restartTarget?: { chatId?: number; messageThreadId?: number }) => {
+    let lastRestartProgressAt = 0
+
+    const cleanup = async (restartTarget?: { chatId?: number; messageThreadId?: number; progressMessageId?: number }) => {
         console.log('[daemon] Shutting down...')
         const cleanupStartedAt = Date.now()
         let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -342,9 +360,9 @@ async function main() {
         }
     }
 
-    const restart = async (chatId?: number, messageThreadId?: number) => {
+    const restart = async (chatId?: number, messageThreadId?: number, progressMessageId?: number) => {
         console.log('[daemon] Restarting...')
-        await cleanup({ chatId, messageThreadId })
+        await cleanup({ chatId, messageThreadId, progressMessageId })
 
         const nodePath = process.env.CODEVER_NODE_PATH || resolveNodePath()
         const daemonScript = process.argv[1]
@@ -354,6 +372,9 @@ async function main() {
         }
         if (messageThreadId) {
             env.CODEVER_RESTART_MESSAGE_THREAD_ID = messageThreadId.toString()
+        }
+        if (progressMessageId) {
+            env.CODEVER_RESTART_MESSAGE_ID = progressMessageId.toString()
         }
         console.log(`[daemon] Spawning new daemon: ${nodePath} ${daemonScript}`)
 

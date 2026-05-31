@@ -39,7 +39,7 @@ setInterval(() => {
 export interface GroupCommandContext {
     sessionManager: SessionManager
     topicSessions: Map<string, TopicSession>
-    restart?: (chatId?: number, messageThreadId?: number) => Promise<void>
+    restart?: (chatId?: number, messageThreadId?: number, progressMessageId?: number) => Promise<void>
 }
 
 function formatElapsed(seconds: number): string {
@@ -261,11 +261,11 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         // (with a timeout so we don't hang if the network is slow).
         // The restart function will kill the process, so we must ensure
         // the reply is sent before that happens.
-        await Promise.race([
-            c.reply('🔄 Restarting daemon...').catch(() => {}),
-            new Promise(resolve => setTimeout(resolve, 2000))
+        const sent = await Promise.race([
+            c.reply('🔄 Restarting daemon...').catch(() => undefined),
+            new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 2000))
         ])
-        restart(chatId, c.message?.message_thread_id).catch((e) => {
+        restart(chatId, c.message?.message_thread_id, sent?.message_id).catch((e) => {
             console.error('[/restart] restart() failed:', e instanceof Error ? e.message : e)
         })
     })

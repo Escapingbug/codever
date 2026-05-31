@@ -6,7 +6,7 @@ import { providerKeyboard } from '@/channel/telegram/keyboard'
 import { escapeHtml } from '@/utils/formatting'
 import { listProviders } from '@/providers/registry'
 
-export function registerDmHandlers(bot: any, sessionManager: SessionManager, restart?: (chatId?: number, messageThreadId?: number) => Promise<void>): void {
+export function registerDmHandlers(bot: any, sessionManager: SessionManager, restart?: (chatId?: number, messageThreadId?: number, progressMessageId?: number) => Promise<void>): void {
     bot.command('start', async (ctx: Context, next: () => Promise<void>) => {
         if (ctx.chat?.type !== 'private') return next()
         const userId = ctx.from!.id
@@ -68,11 +68,11 @@ export function registerDmHandlers(bot: any, sessionManager: SessionManager, res
         // (with a timeout so we don't hang if the network is slow).
         // The restart function will kill the process, so we must ensure
         // the reply is sent before that happens.
-        await Promise.race([
-            ctx.reply('🔄 Restarting daemon...').catch(() => {}),
-            new Promise(resolve => setTimeout(resolve, 2000))
+        const sent = await Promise.race([
+            ctx.reply('🔄 Restarting daemon...').catch(() => undefined),
+            new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 2000))
         ])
-        restart(chatId).catch((e) => {
+        restart(chatId, undefined, sent?.message_id).catch((e) => {
             console.error('[/restart] restart() failed:', e instanceof Error ? e.message : e)
         })
     })

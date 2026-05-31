@@ -58,6 +58,7 @@ function createContext(match = '') {
         replies,
         reply: vi.fn(async (text: string, options?: unknown) => {
             replies.push({ text, options })
+            return { message_id: 123 }
         }),
     }
 }
@@ -176,14 +177,14 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'progress', source: 'channel' })
     })
 
-    it('/restart passes the topic thread to daemon restart progress reporting', async () => {
+    it('/restart passes the topic thread and initial message to daemon restart progress reporting', async () => {
         const bot = createBot()
         const restart = vi.fn(async () => {})
         registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map(), restart })
 
         await bot.runCommand('restart', createContext())
 
-        expect(restart).toHaveBeenCalledWith(-100, 10)
+        expect(restart).toHaveBeenCalledWith(-100, 10, 123)
     })
 
     it('/file should dispatch a runtime file read command', async () => {
