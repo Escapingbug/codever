@@ -13,6 +13,32 @@ import { createSessionRecord, type SessionRecord, type SessionRecordOptions } fr
 
 // --- Session metadata factory ---
 
+const TOPIC_PROVIDER_DESTROY_TIMEOUT_MS = 10_000
+
+async function waitForShutdownStep(
+    promise: Promise<unknown>,
+    timeoutMs: number,
+    onTimeoutOrError: (message: string) => void,
+): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+        await Promise.race([
+            promise,
+            new Promise((resolve) => {
+                timeout = setTimeout(() => resolve('timeout'), timeoutMs)
+            }),
+        ]).then((result) => {
+            if (result === 'timeout') {
+                onTimeoutOrError(`timed out after ${timeoutMs}ms`)
+            }
+        })
+    } catch (e) {
+        onTimeoutOrError(e instanceof Error ? e.message : String(e))
+    } finally {
+        if (timeout) clearTimeout(timeout)
+    }
+}
+
 export type CreateSessionRecordOptions = SessionRecordOptions
 
 export function createTopicSessionRecord(options: CreateSessionRecordOptions): SessionRecord {
@@ -80,7 +106,13 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
 
     async function destroy(): Promise<void> {
         await runtime.destroy()
-        await provider.destroy?.()
+        if (provider.destroy) {
+            await waitForShutdownStep(
+                provider.destroy(),
+                TOPIC_PROVIDER_DESTROY_TIMEOUT_MS,
+                (message) => glog(`[TopicSession] provider destroy did not finish cleanly: ${message}`),
+            )
+        }
         await sessionRecord.destroy()
     }
 

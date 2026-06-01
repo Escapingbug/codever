@@ -22,11 +22,38 @@ const FILE_REFERENCE_PATTERN = /file:\/\/[^\s<>"'`()\[\],]+/g
 const MAX_FILE_REFERENCES = 20
 const MAX_READ_FILE_BYTES = 128 * 1024
 const MAX_SEND_FILE_BYTES = 50 * 1024 * 1024
+const DEFAULT_DESTROY_TIMEOUT_MS = 10_000
+const DESTROY_INTERRUPT_TIMEOUT_MS = 2_500
+const DESTROY_OUTBOX_DRAIN_TIMEOUT_MS = 3_000
 
 interface FileReference {
     id: string
     uri: string
     path: string
+}
+
+async function waitForShutdownStep(
+    promise: Promise<unknown>,
+    timeoutMs: number,
+    onTimeoutOrError: (message: string) => void,
+): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+        await Promise.race([
+            promise,
+            new Promise((resolve) => {
+                timeout = setTimeout(() => resolve('timeout'), timeoutMs)
+            }),
+        ]).then((result) => {
+            if (result === 'timeout') {
+                onTimeoutOrError(`timed out after ${timeoutMs}ms`)
+            }
+        })
+    } catch (e) {
+        onTimeoutOrError(e instanceof Error ? e.message : String(e))
+    } finally {
+        if (timeout) clearTimeout(timeout)
+    }
 }
 
 export interface SemanticSessionRuntimeConfig {
@@ -46,6 +73,7 @@ export interface SemanticSessionRuntimeConfig {
     onProviderChanged?: (providerName: string, provider: AgentProvider) => void
     onModelChanged?: (model: string | null) => void
     onAvailableCommands?: (commands: ProviderCommand[]) => void
+    destroyTimeoutMs?: number
 }
 
 export class SemanticSessionRuntime {
@@ -106,13 +134,25 @@ export class SemanticSessionRuntime {
     }
 
     async destroy(): Promise<void> {
-        await this.mailbox
-        if (this.currentHandle) {
-            try { await this.currentHandle.interrupt() } catch {}
-        }
-        this.abortController?.abort()
         this.state = 'dead'
-        await this.outbox.drain()
+        this.abortController?.abort()
+        if (this.currentHandle) {
+            await waitForShutdownStep(
+                this.currentHandle.interrupt(),
+                DESTROY_INTERRUPT_TIMEOUT_MS,
+                (message) => this.log(`[destroy] interrupt timeout/error: ${message}`),
+            )
+        }
+        await waitForShutdownStep(
+            this.mailbox,
+            this.config.destroyTimeoutMs ?? DEFAULT_DESTROY_TIMEOUT_MS,
+            (message) => this.log(`[destroy] mailbox timeout/error: ${message}`),
+        )
+        await waitForShutdownStep(
+            this.outbox.drain(),
+            DESTROY_OUTBOX_DRAIN_TIMEOUT_MS,
+            (message) => this.log(`[destroy] outbox drain timeout/error: ${message}`),
+        )
     }
 
     getState(): SemanticRuntimeState {

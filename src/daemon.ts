@@ -18,10 +18,32 @@ import { GroupLogger } from './utils/groupLogger'
 
 let logger: GroupLogger
 
+const TOPIC_SESSION_DESTROY_TIMEOUT_MS = 15_000
+
 function parseOptionalNumber(value: string | undefined): number | undefined {
     if (!value) return undefined
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : undefined
+}
+
+async function waitForShutdownStep(
+    promise: Promise<unknown>,
+    timeoutMs: number,
+): Promise<{ timedOut: boolean; error?: unknown }> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+        const result = await Promise.race([
+            promise.then(() => 'done' as const),
+            new Promise<'timeout'>(resolve => {
+                timeout = setTimeout(() => resolve('timeout'), timeoutMs)
+            }),
+        ])
+        return { timedOut: result === 'timeout' }
+    } catch (e) {
+        return { timedOut: false, error: e }
+    } finally {
+        if (timeout) clearTimeout(timeout)
+    }
 }
 
 async function main() {
@@ -321,7 +343,11 @@ async function main() {
             for (const [index, topicSession] of topicSessions.entries()) {
                 const record = topicSession.sessionRecord
                 await setStage(`destroying topic session ${index + 1}/${topicSessions.length} (${record.providerName}, ${record.id.slice(0, 8)})`)
-                try { await topicSession.destroy() } catch (e) {
+                const result = await waitForShutdownStep(topicSession.destroy(), TOPIC_SESSION_DESTROY_TIMEOUT_MS)
+                if (result.timedOut) {
+                    console.error(`[daemon] Timed out destroying topic session ${record.id.slice(0, 8)} after ${TOPIC_SESSION_DESTROY_TIMEOUT_MS}ms; continuing cleanup`)
+                } else if (result.error) {
+                    const e = result.error
                     console.error(`[daemon] Failed to destroy topic session: ${e instanceof Error ? e.message : e}`)
                 }
             }

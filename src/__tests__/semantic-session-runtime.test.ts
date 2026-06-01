@@ -44,7 +44,55 @@ function createChannel(sent: ChannelMessage[], statuses: SessionStatus[], operat
     }
 }
 
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 describe('SemanticSessionRuntime', () => {
+    it('interrupts an active turn before waiting for mailbox during destroy', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const interrupt = vi.fn(async () => {})
+        const provider: AgentProvider = {
+            name: 'test-acp',
+            startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    yield { kind: 'session_init', sessionId: 'provider-session-1' } as AgentEvent
+                    await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt,
+            })),
+            isReady: vi.fn(() => true),
+            getInitError: vi.fn(() => null),
+            getAvailableModels: vi.fn(() => []),
+            getAvailablePermissionModes: vi.fn(() => []),
+        }
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel([], []),
+            destroyTimeoutMs: 20,
+        })
+
+        const running = runtime.dispatch({ kind: 'user_message', text: 'long task', source: 'channel' })
+        await delay(10)
+
+        const started = Date.now()
+        await runtime.destroy()
+
+        expect(Date.now() - started).toBeLessThan(200)
+        expect(interrupt).toHaveBeenCalled()
+        expect(runtime.getState()).toBe('dead')
+
+        release()
+        await running
+    })
+
     it('runs a user message through provider semantics, journal, projector, and outbox', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
