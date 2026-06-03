@@ -18,10 +18,12 @@ export interface DeliveryOutboxConfig {
     onFailure?: (record: DeliveryRecord) => void
     maxRateLimitRetries?: number
     maxRateLimitDelayMs?: number
+    deliveryTimeoutMs?: number
 }
 
 const DEFAULT_RATE_LIMIT_RETRIES = 3
 const DEFAULT_MAX_RATE_LIMIT_DELAY_MS = 60_000
+const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000
 
 export class DeliveryOutbox {
     private chain: Promise<void> = Promise.resolve()
@@ -146,10 +148,11 @@ export class DeliveryOutbox {
     private async withRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {
         const maxRetries = this.config.maxRateLimitRetries ?? DEFAULT_RATE_LIMIT_RETRIES
         const maxDelayMs = this.config.maxRateLimitDelayMs ?? DEFAULT_MAX_RATE_LIMIT_DELAY_MS
+        const timeoutMs = this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS
 
         for (let attempt = 0; ; attempt++) {
             try {
-                return await operation()
+                return await withTimeout(operation(), timeoutMs)
             } catch (error) {
                 const retryAfterMs = getRetryAfterMs(error)
                 if (retryAfterMs === null || attempt >= maxRetries) {
@@ -158,6 +161,13 @@ export class DeliveryOutbox {
                 await delay(Math.min(retryAfterMs, maxDelayMs))
             }
         }
+    }
+}
+
+class DeliveryTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`Delivery operation timed out after ${timeoutMs}ms`)
+        this.name = 'DeliveryTimeoutError'
     }
 }
 
@@ -188,4 +198,17 @@ function getNestedRetryAfter(error: unknown): unknown {
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new DeliveryTimeoutError(timeoutMs)), timeoutMs)
+    })
+
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timeout) clearTimeout(timeout)
+    })
 }

@@ -73,4 +73,38 @@ describe('DeliveryOutbox', () => {
             vi.useRealTimers()
         }
     })
+
+    it('times out a stuck delivery and continues later sends', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            let calls = 0
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.send).mockImplementation(async (message: ChannelMessage) => {
+                calls += 1
+                if (calls === 1) {
+                    return await new Promise(() => {})
+                }
+                sent.push(message.text)
+                return { messageId: calls }
+            })
+            const failures: string[] = []
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                deliveryTimeoutMs: 100,
+                onFailure: (record) => failures.push(record.error instanceof Error ? record.error.message : String(record.error)),
+            })
+
+            const stuck = outbox.send({ text: 'stuck', format: 'plain' })
+            const next = outbox.send({ text: 'next', format: 'plain' })
+
+            await vi.advanceTimersByTimeAsync(100)
+            await expect(stuck).resolves.toMatchObject({ status: 'failed' })
+            await expect(next).resolves.toMatchObject({ status: 'sent' })
+            expect(sent).toEqual(['next'])
+            expect(failures[0]).toContain('timed out')
+        } finally {
+            vi.useRealTimers()
+        }
+    })
 })
