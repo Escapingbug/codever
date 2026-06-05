@@ -13,6 +13,7 @@ import { SessionManager, buildMessageThreadParams, makeTopicKey } from './bridge
 import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
 import { startDaemonApi, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
+import { routeSendMessageToTopicSession } from './daemon/sendRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
 
@@ -182,7 +183,7 @@ async function main() {
                 }
             }
             if (topicSession) {
-                topicSession.receiveInput({ text: req.message, username: 'system' })
+                routeSendMessageToTopicSession(topicSession, req)
                 console.log(`[daemon] Sent message to session ${req.sessionId.slice(0, 8)}: "${req.message.slice(0, 50)}"`)
             } else {
                 console.warn(`[daemon] Send: no topic session found for ${req.sessionId.slice(0, 8)}`)

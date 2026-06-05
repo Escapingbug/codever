@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { makeTopicKey, SessionManager } from '@/bridge/sessionManager'
 import type { TopicSession } from '@/bridge/channelPort'
+import { routeSendMessageToTopicSession } from '@/daemon/sendRouting'
 
 function createTopicSession(id: string, conversationId?: string | null): TopicSession {
     return {
@@ -47,6 +48,23 @@ describe('SessionManager integration boundaries', () => {
 
         expect(manager.getTopicSessionBySessionId('query-1')).toBe(session)
         expect(manager.getTopicSessionBySessionId('query-2')).toBeUndefined()
+    })
+
+    it('routes daemon send_message as an MCP command instead of user input', () => {
+        const session = createTopicSession('query-1', 'provider-session-1')
+
+        routeSendMessageToTopicSession(session, {
+            sessionId: 'provider-session-1',
+            message: 'build finished',
+        })
+
+        expect(session.receiveInput).not.toHaveBeenCalled()
+        expect(session.dispatch).toHaveBeenCalledWith({
+            kind: 'command',
+            name: 'send_message',
+            args: 'build finished',
+            source: 'mcp',
+        })
     })
 
     it('removes topic-session lookup entries when a runtime is archived or dies', () => {
