@@ -126,6 +126,83 @@ describe('SemanticSessionRuntime', () => {
         expect(statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
 
+    it('flushes assistant text after a quiet period before the turn finishes', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: ChannelMessage[] = []
+            const statuses: SessionStatus[] = []
+            let release!: () => void
+            const hold = new Promise<void>(resolve => {
+                release = resolve
+            })
+            const provider: AgentProvider = {
+                name: 'test-acp',
+                startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                    events: (async function* () {
+                        yield { kind: 'text', text: 'partial answer' } as AgentEvent
+                        await hold
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt: vi.fn(),
+                })),
+                isReady: vi.fn(() => true),
+                getInitError: vi.fn(() => null),
+                getAvailableModels: vi.fn(() => []),
+                getAvailablePermissionModes: vi.fn(() => []),
+            }
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: createChannel(sent, statuses),
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(2_000)
+
+            expect(sent.map(m => m.text)).toContain('partial answer')
+
+            release()
+            await running
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('flushes stale assistant text before starting the next provider turn', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const provider = createProvider([
+            { kind: 'text', text: 'new response' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel(sent, statuses),
+        })
+        ;(runtime as any).projector.project({
+            kind: 'assistant_text_delta',
+            text: 'stale tail',
+            meta: {
+                id: 'late-1',
+                sessionId: 'session-1',
+                turnId: 'previous-turn',
+                provider: 'test-acp',
+                seq: 1,
+                timestamp: Date.now(),
+                sourcePhase: 'tailDrain',
+            },
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'next', source: 'channel' })
+
+        expect(sent.map(m => m.text)).toEqual(['stale tail', 'new response'])
+    })
+
     it('projects verbose tool updates as one message per tool without raw output', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []

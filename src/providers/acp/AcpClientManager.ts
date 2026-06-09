@@ -377,6 +377,45 @@ export class AcpClientManager {
         return count
     }
 
+    async drainSessionUpdatesUntilIdle(sessionId: string, options: { idleMs: number; maxMs: number }): Promise<number> {
+        const startedAt = Date.now()
+        let drained = 0
+
+        while (Date.now() - startedAt < options.maxMs) {
+            await this.waitForSessionUpdateProcessing()
+
+            let drainedQueued = false
+            let queued = this.dequeueSessionUpdate(sessionId)
+            while (queued) {
+                drained += 1
+                drainedQueued = true
+                queued = this.dequeueSessionUpdate(sessionId)
+            }
+            if (drainedQueued) continue
+
+            const remainingMs = options.maxMs - (Date.now() - startedAt)
+            const waitMs = Math.min(options.idleMs, remainingMs)
+            if (waitMs <= 0) break
+
+            const waitAbort = new AbortController()
+            const timer = setTimeout(() => waitAbort.abort(), waitMs)
+            try {
+                await this.waitForSessionUpdate(sessionId, { signal: waitAbort.signal })
+                drained += 1
+            } catch {
+                break
+            } finally {
+                clearTimeout(timer)
+            }
+        }
+
+        return drained
+    }
+
+    async waitForSessionUpdateProcessing(): Promise<void> {
+        await this.sessionUpdateChain
+    }
+
     async waitForSessionUpdate(sessionId: string, options: { signal?: AbortSignal } = {}): Promise<SessionNotification> {
         const queue = this.sessionUpdates.get(sessionId)
         if (queue && queue.length > 0) {
@@ -604,36 +643,8 @@ export class AcpClientManager {
     private createClientHandler(): Client {
         return {
             sessionUpdate: async (params: SessionNotification): Promise<void> => {
-                const sessionId = params.sessionId
-
-                // Assign sequence number to track update ordering
-                const seq = (this.sessionUpdateSeqs.get(sessionId) ?? 0) + 1
-                this.sessionUpdateSeqs.set(sessionId, seq)
-
-                // Discard historical updates (arrived before drain boundary was set)
-                const boundary = this.historicalSeqBoundaries.get(sessionId) ?? -1
-                if (seq <= boundary) {
-                    const updateType = (params.update as any)?.sessionUpdate ?? '?'
-                    console.error(`[acp] Discarded historical update: seq=${seq} <= boundary=${boundary} updateType=${updateType}`)
-                    return
-                }
-
-                const updateType = (params.update as any)?.sessionUpdate ?? '?'
-                const updateId = (params as any)?.id ?? (params.update as any)?.toolCallId ?? ''
-                const waiters = this.sessionWaiters.get(sessionId)
-                if (waiters && waiters.length > 0) {
-                    const waiter = waiters.shift()!
-                    console.error(`[acp] Session update → waiter: sessionId=${sessionId?.slice(0,8)} updateType=${updateType} seq=${seq} waitersRemaining=${waiters.length}`)
-                    waiter.resolve(params)
-                } else {
-                    let queue = this.sessionUpdates.get(sessionId)
-                    if (!queue) {
-                        queue = []
-                        this.sessionUpdates.set(sessionId, queue)
-                    }
-                    queue.push(params)
-                    console.error(`[acp] Session update → queue: sessionId=${sessionId?.slice(0,8)} updateType=${updateType} seq=${seq} queueLen=${queue.length}`)
-                }
+                this.sessionUpdateChain = this.sessionUpdateChain.then(() => this.handleSessionUpdate(params))
+                await this.sessionUpdateChain
             },
 
             requestPermission: async (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
@@ -735,6 +746,39 @@ export class AcpClientManager {
                 await this.extensionHandler.extNotification(method, params)
             },
         }
+    }
+
+    private async handleSessionUpdate(params: SessionNotification): Promise<void> {
+        const sessionId = params.sessionId
+
+        // Assign sequence number to track update ordering
+        const seq = (this.sessionUpdateSeqs.get(sessionId) ?? 0) + 1
+        this.sessionUpdateSeqs.set(sessionId, seq)
+
+        // Discard historical updates (arrived before drain boundary was set)
+        const boundary = this.historicalSeqBoundaries.get(sessionId) ?? -1
+        if (seq <= boundary) {
+            const updateType = (params.update as any)?.sessionUpdate ?? '?'
+            console.error(`[acp] Discarded historical update: seq=${seq} <= boundary=${boundary} updateType=${updateType}`)
+            return
+        }
+
+        const updateType = (params.update as any)?.sessionUpdate ?? '?'
+        const waiters = this.sessionWaiters.get(sessionId)
+        if (waiters && waiters.length > 0) {
+            const waiter = waiters.shift()!
+            console.error(`[acp] Session update → waiter: sessionId=${sessionId?.slice(0,8)} updateType=${updateType} seq=${seq} waitersRemaining=${waiters.length}`)
+            waiter.resolve(params)
+            return
+        }
+
+        let queue = this.sessionUpdates.get(sessionId)
+        if (!queue) {
+            queue = []
+            this.sessionUpdates.set(sessionId, queue)
+        }
+        queue.push(params)
+        console.error(`[acp] Session update → queue: sessionId=${sessionId?.slice(0,8)} updateType=${updateType} seq=${seq} queueLen=${queue.length}`)
     }
 
     private requireConnection(): ClientSideConnection {

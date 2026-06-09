@@ -5,7 +5,7 @@
 
 import type { Bot } from 'grammy'
 import type { ChannelPort, ChannelMessage, ChannelSendResult, DecisionRequest, DecisionResponse, SessionStatus } from '@/bridge/channelPort'
-import { tgmdConvert, tgmdTableImage } from '@/utils/tgmdrender'
+import { tgmdConvert, tgmdSplit, tgmdTableImage } from '@/utils/tgmdrender'
 import { splitHtmlChunks } from '@/utils/formatting'
 import { InputFile } from 'grammy'
 import { basename } from 'node:path'
@@ -13,6 +13,7 @@ import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/
 import { completePendingDecision, registerPendingDecision } from './decisionRegistry'
 
 const MAX_MESSAGE_LENGTH = 4000
+const TABLE_IMAGE_SEND_TIMEOUT_MS = 10_000
 
 export interface TableRecord {
     /** Raw markdown of the table */
@@ -236,9 +237,9 @@ export class TelegramPort implements ChannelPort {
     }
 
     private async sendMarkdown(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
-        let converted: Awaited<ReturnType<typeof tgmdConvert>>
+        let converted: Awaited<ReturnType<typeof tgmdSplit>>
         try {
-            converted = await tgmdConvert(text)
+            converted = await tgmdSplit(text, MAX_MESSAGE_LENGTH)
         } catch (e) {
             // Fallback to plain text only when markdown conversion itself fails.
             console.error('[TelegramPort] Markdown conversion failed, falling back to plain:', e instanceof Error ? e.message : e)
@@ -256,10 +257,18 @@ export class TelegramPort implements ChannelPort {
                 this.tableHistory.push({ markdown: segment.markdown, timestamp: Date.now() })
                 // Render table as PNG image
                 try {
-                    const imgBuffer = await tgmdTableImage(segment.markdown)
-                    const msg = await this.bot.api.sendPhoto(this.chatId, new InputFile(imgBuffer, 'table.png'), {
-                        ...buildMessageThreadParams(this.threadId),
-                    })
+                    const imgBuffer = await withTimeout(
+                        tgmdTableImage(segment.markdown),
+                        TABLE_IMAGE_SEND_TIMEOUT_MS,
+                        'table image rendering',
+                    )
+                    const msg = await withTimeout(
+                        this.bot.api.sendPhoto(this.chatId, new InputFile(imgBuffer, 'table.png'), {
+                            ...buildMessageThreadParams(this.threadId),
+                        }),
+                        TABLE_IMAGE_SEND_TIMEOUT_MS,
+                        'table image upload',
+                    )
                     if (firstMessageId === undefined) firstMessageId = msg.message_id
                 } catch (e) {
                     // Fallback: send table as plain text
@@ -347,4 +356,21 @@ export class TelegramPort implements ChannelPort {
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
     }
+}
+
+class TelegramPortTimeoutError extends Error {
+    constructor(operation: string, timeoutMs: number) {
+        super(`${operation} timed out after ${timeoutMs}ms`)
+        this.name = 'TelegramPortTimeoutError'
+    }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new TelegramPortTimeoutError(operation, timeoutMs)), timeoutMs)
+    })
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer)
+    })
 }

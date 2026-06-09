@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url'
 
 const ACP_TAIL_DRAIN_IDLE_MS = 100
 const ACP_TAIL_DRAIN_MAX_MS = 1_000
+const ACP_HISTORY_DRAIN_IDLE_MS = 150
+const ACP_HISTORY_DRAIN_MAX_MS = 3_000
 
 /**
  * Resolve the command used to launch the codever MCP stdio server.
@@ -646,8 +648,11 @@ export class AcpProvider implements AgentProvider {
                 // sequence number boundary in AcpClientManager — no need for promptSent flag.
 
                 if (needsHistoryDrain) {
-                    const drained = clientManager.drainSessionUpdates(sessionId!)
-                    console.error(`[acp] Drained ${drained} historical updates from resumed session (loadSession path)`)
+                    const drained = await clientManager.drainSessionUpdatesUntilIdle(sessionId!, {
+                        idleMs: ACP_HISTORY_DRAIN_IDLE_MS,
+                        maxMs: ACP_HISTORY_DRAIN_MAX_MS,
+                    })
+                    console.error(`[acp] Drained ${drained} historical updates from resumed session (loadSession path, idle=${ACP_HISTORY_DRAIN_IDLE_MS}ms)`)
                 }
 
                 const toolCalls = new Map<string, ToolCallSnapshot>()
@@ -690,21 +695,29 @@ export class AcpProvider implements AgentProvider {
                 })
                 console.error(`[acp:${this.name}] Prompt returned: stopReason=${promptResponse.stopReason}, sessionId=${sessionId}`)
 
+                const updateProcessingWaitStartedAt = Date.now()
+                console.error(`[acp:${this.name}] Waiting for session/update processing before final drain: sessionId=${sessionId}`)
+                await clientManager.waitForSessionUpdateProcessing()
+                console.error(`[acp:${this.name}] Session/update processing settled before final drain: sessionId=${sessionId} waitMs=${Date.now() - updateProcessingWaitStartedAt}`)
+
                 // Stop the live consumer before the final drain. Without aborting
                 // its pending waiter, late notifications can be delivered to a
                 // stale waiter after this turn has already ended.
                 updateConsumerAbort.abort()
                 await updatePromise.catch(() => {})
+                console.error(`[acp:${this.name}] Live update consumer stopped; starting tail drain: sessionId=${sessionId}`)
 
                 // 5b. Drain any remaining queued session updates, including tail
                 //     updates that arrive just after the prompt response.
                 if (!events.done) {
                     const tailDrainStartedAt = Date.now()
+                    let tailDrainedUpdates = 0
                     while (!events.done && Date.now() - tailDrainStartedAt < ACP_TAIL_DRAIN_MAX_MS) {
                         let drainedAny = false
                         let remaining = clientManager.dequeueSessionUpdate(sessionId!)
                         while (remaining) {
                             drainedAny = true
+                            tailDrainedUpdates += 1
                             const updateType = (remaining.update as any)?.sessionUpdate ?? '?'
                             console.error(`[acp] tailDrain dequeueSessionUpdate: updateType=${updateType}`)
                             pushSessionUpdateEvents(remaining, 'tailDrain')
@@ -723,6 +736,7 @@ export class AcpProvider implements AgentProvider {
                             clearTimeout(timer)
                         }
                     }
+                    console.error(`[acp:${this.name}] Tail drain completed: sessionId=${sessionId} drainedUpdates=${tailDrainedUpdates} durationMs=${Date.now() - tailDrainStartedAt}`)
                 }
 
                 // 6. Push final result event based on stopReason

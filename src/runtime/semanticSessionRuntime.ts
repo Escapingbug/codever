@@ -26,6 +26,7 @@ const DEFAULT_DESTROY_TIMEOUT_MS = 10_000
 const DESTROY_INTERRUPT_TIMEOUT_MS = 2_500
 const DESTROY_OUTBOX_DRAIN_TIMEOUT_MS = 3_000
 const FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS = 5_000
+const ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS = 1_500
 
 export interface RuntimeProgress {
     state: SemanticRuntimeState
@@ -103,6 +104,9 @@ export class SemanticSessionRuntime {
     private fileReferences = new Map<string, FileReference>()
     private fileReferenceIdsByUri = new Map<string, string>()
     private nextFileReferenceNumber = 1
+    private textFlushTimer: ReturnType<typeof setTimeout> | null = null
+    private textFlushChain: Promise<void> = Promise.resolve()
+    private textFlushGeneration = 0
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
@@ -158,6 +162,11 @@ export class SemanticSessionRuntime {
             (message) => this.log(`[destroy] mailbox timeout/error: ${message}`),
         )
         await waitForShutdownStep(
+            this.flushBufferedAssistantText('destroy'),
+            DESTROY_OUTBOX_DRAIN_TIMEOUT_MS,
+            (message) => this.log(`[destroy] text flush timeout/error: ${message}`),
+        )
+        await waitForShutdownStep(
             this.outbox.drain(),
             DESTROY_OUTBOX_DRAIN_TIMEOUT_MS,
             (message) => this.log(`[destroy] outbox drain timeout/error: ${message}`),
@@ -205,6 +214,7 @@ export class SemanticSessionRuntime {
             if (!this.config.provider.isReady()) return
         }
 
+        await this.flushBufferedAssistantText('pre-turn')
         const turnId = randomUUID()
         this.state = 'querying'
         this.turnStartedAt = Date.now()
@@ -336,9 +346,7 @@ export class SemanticSessionRuntime {
     private async finalize(): Promise<void> {
         if (this.state === 'dead') return
         this.state = 'finalizing'
-        for (const projected of this.projector.flush()) {
-            await this.deliver(projected.message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
-        }
+        await this.flushBufferedAssistantText('finalize')
         await this.outbox.drain({ timeoutMs: FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS })
         this.state = 'idle'
         this.notifyStatus('idle')
@@ -349,6 +357,10 @@ export class SemanticSessionRuntime {
     }
 
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
+        if (event.kind !== 'assistant_text_delta') {
+            this.cancelScheduledTextFlush()
+        }
+
         // Record available_commands_update and config_option_update to session state
         if (event.kind === 'command_result') {
             const commandLower = event.command.toLowerCase()
@@ -375,11 +387,48 @@ export class SemanticSessionRuntime {
         }
 
         const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
+        if (event.kind === 'assistant_text_delta') {
+            this.scheduleAssistantTextFlush()
+        }
         for (const projected of messages) {
             const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
             this.captureTables(message)
             await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
         }
+    }
+
+    private scheduleAssistantTextFlush(): void {
+        this.cancelScheduledTextFlush()
+        const generation = this.textFlushGeneration
+        this.textFlushTimer = setTimeout(() => {
+            if (generation !== this.textFlushGeneration) return
+            void this.flushBufferedAssistantText('debounce', generation)
+        }, ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS)
+    }
+
+    private cancelScheduledTextFlush(): void {
+        if (this.textFlushTimer) {
+            clearTimeout(this.textFlushTimer)
+            this.textFlushTimer = null
+        }
+        this.textFlushGeneration += 1
+    }
+
+    private async flushBufferedAssistantText(reason: string, generation = this.textFlushGeneration): Promise<void> {
+        if (generation !== this.textFlushGeneration) return this.textFlushChain
+        this.cancelScheduledTextFlush()
+        this.textFlushChain = this.textFlushChain.then(async () => {
+            const projectedMessages = this.projector.flush()
+            if (projectedMessages.length > 0 && reason !== 'finalize') {
+                this.log(`[session] Flushing buffered assistant text: reason=${reason} messages=${projectedMessages.length}`)
+            }
+            for (const projected of projectedMessages) {
+                const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
+                this.captureTables(message)
+                await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
+            }
+        })
+        return this.textFlushChain
     }
 
     private getVerboseLevel(): 0 | 1 | 2 {

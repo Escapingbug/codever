@@ -4,11 +4,13 @@ import { clearPendingDecisionsForTests, completePendingDecision } from '@/channe
 
 const renderMocks = vi.hoisted(() => ({
     tgmdConvert: vi.fn(),
+    tgmdSplit: vi.fn(),
     tgmdTableImage: vi.fn(),
 }))
 
 vi.mock('@/utils/tgmdrender', () => ({
     tgmdConvert: renderMocks.tgmdConvert,
+    tgmdSplit: renderMocks.tgmdSplit,
     tgmdTableImage: renderMocks.tgmdTableImage,
 }))
 
@@ -35,6 +37,7 @@ describe('TelegramPort integration', () => {
         vi.setSystemTime(new Date('2026-05-09T12:00:00Z'))
         vi.clearAllMocks()
         renderMocks.tgmdConvert.mockResolvedValue([{ kind: 'text', text: 'rendered text', entities: [] }])
+        renderMocks.tgmdSplit.mockResolvedValue([{ kind: 'text', text: 'rendered text', entities: [] }])
         renderMocks.tgmdTableImage.mockResolvedValue(Buffer.from('png'))
     })
 
@@ -76,7 +79,7 @@ describe('TelegramPort integration', () => {
     })
 
     it('tracks rendered markdown tables so /tables can return raw table markdown', async () => {
-        renderMocks.tgmdConvert.mockResolvedValue([
+        renderMocks.tgmdSplit.mockResolvedValue([
             { kind: 'text', text: 'before table', entities: [] },
             { kind: 'table', markdown: '| A |\n|---|\n| 1 |' },
         ])
@@ -91,8 +94,42 @@ describe('TelegramPort integration', () => {
         ])
     })
 
+    it('splits long markdown output before sending to Telegram', async () => {
+        renderMocks.tgmdSplit.mockResolvedValue([
+            { kind: 'text', text: 'A'.repeat(3900), entities: [] },
+            { kind: 'text', text: 'B'.repeat(3900), entities: [] },
+        ])
+        const bot = createBot()
+        const port = new TelegramPort(bot, -100, 10)
+
+        await port.send({ text: `${'A'.repeat(3900)}${'B'.repeat(3900)}`, format: 'markdown' })
+
+        expect(renderMocks.tgmdSplit).toHaveBeenCalledWith(expect.any(String), 4000)
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(2)
+        expect(bot.api.sendMessage.mock.calls[0][1]).toBe('A'.repeat(3900))
+        expect(bot.api.sendMessage.mock.calls[1][1]).toBe('B'.repeat(3900))
+    })
+
+    it('continues sending markdown text after table image fallback', async () => {
+        renderMocks.tgmdSplit.mockResolvedValue([
+            { kind: 'text', text: 'before table', entities: [] },
+            { kind: 'table', markdown: '| A |\n|---|\n| 1 |' },
+            { kind: 'text', text: 'after table', entities: [] },
+        ])
+        renderMocks.tgmdTableImage.mockRejectedValue(new Error('render failed'))
+        const bot = createBot()
+        const port = new TelegramPort(bot, -100, 10)
+
+        await port.send({ text: 'before\n| A |\n|---|\n| 1 |\nafter', format: 'markdown' })
+
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(3)
+        expect(bot.api.sendMessage.mock.calls[0][1]).toBe('before table')
+        expect(bot.api.sendMessage.mock.calls[1][1]).toBe('| A |\n|---|\n| 1 |')
+        expect(bot.api.sendMessage.mock.calls[2][1]).toBe('after table')
+    })
+
     it('clears old table history when a new user-message boundary begins', async () => {
-        renderMocks.tgmdConvert.mockResolvedValue([
+        renderMocks.tgmdSplit.mockResolvedValue([
             { kind: 'table', markdown: '| Old |\n|---|\n| 1 |' },
         ])
         const port = new TelegramPort(createBot(), -100, 10)
