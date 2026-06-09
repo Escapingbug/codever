@@ -107,4 +107,54 @@ describe('DeliveryOutbox', () => {
             vi.useRealTimers()
         }
     })
+
+    it('does not let a rate-limited progressive edit block control sends', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.edit!).mockRejectedValueOnce(new Error("Call to 'editMessageText' failed! (429: Too Many Requests: retry after 40)"))
+            const outbox = new DeliveryOutbox({ channelPort: channel })
+
+            void outbox.edit(1, { text: 'streaming update', format: 'html' }, false, {
+                lane: 'progressive-edit',
+                coalesceKey: 'tool:1',
+            })
+            const control = outbox.send({ text: 'progress now', format: 'html' }, undefined, { lane: 'control' })
+
+            await expect(control).resolves.toMatchObject({ status: 'sent' })
+            expect(sent).toContain('progress now')
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('coalesces pending progressive edits to the latest message', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            const channel = createChannelPort(sent)
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                progressiveEditDebounceMs: 100,
+            })
+
+            void outbox.edit(1, { text: 'old update', format: 'html' }, false, {
+                lane: 'progressive-edit',
+                coalesceKey: 'tool:1',
+            })
+            void outbox.edit(1, { text: 'latest update', format: 'html' }, false, {
+                lane: 'progressive-edit',
+                coalesceKey: 'tool:1',
+            })
+
+            await vi.advanceTimersByTimeAsync(100)
+            await outbox.drain()
+
+            expect(sent).toEqual(['edit:latest update'])
+            expect(outbox.list().map(record => record.status)).toEqual(['skipped', 'edited'])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
 })

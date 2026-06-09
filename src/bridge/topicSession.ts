@@ -136,7 +136,19 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
             return channelPort
         },
         getProgress() {
-            return null
+            const progress = runtime.getProgress()
+            return {
+                state: progress.state === 'querying' || progress.state === 'finalizing'
+                    ? 'querying'
+                    : progress.state === 'canceling'
+                        ? 'canceling'
+                        : progress.state === 'dead'
+                            ? 'dead'
+                            : 'idle',
+                elapsedSeconds: progress.elapsedSeconds,
+                lastToolName: progress.lastToolName,
+                outbox: progress.outbox,
+            }
         },
     }
 }

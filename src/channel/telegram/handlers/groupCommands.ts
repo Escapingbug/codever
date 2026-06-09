@@ -52,6 +52,35 @@ function formatElapsed(seconds: number): string {
     return `${h}h ${rm}m ${s}s`
 }
 
+type ProgressSnapshot = NonNullable<ReturnType<TopicSession['getProgress']>>
+
+function formatProgressSnapshot(progress: ProgressSnapshot): string {
+    const lines = progress.state === 'querying'
+        ? [`🔄 Task in progress: ${formatElapsed(progress.elapsedSeconds)} elapsed`]
+        : [`State: <code>${escapeHtml(progress.state)}</code>`]
+
+    if (progress.lastToolName) {
+        lines.push(`Current tool: <code>${escapeHtml(progress.lastToolName)}</code>`)
+    }
+
+    const outbox = progress.outbox
+    if (outbox) {
+        const pending = outbox.pendingControl + outbox.pendingNormal + outbox.pendingProgressiveEdits
+        if (pending > 0) {
+            lines.push(`Delivery queue: <code>${pending}</code> pending`)
+        }
+        if (outbox.progressiveEditBlockedUntil && outbox.progressiveEditBlockedUntil > Date.now()) {
+            const seconds = Math.ceil((outbox.progressiveEditBlockedUntil - Date.now()) / 1000)
+            lines.push(`Telegram edit backoff: <code>${seconds}s</code>`)
+        }
+        if (outbox.lastRateLimitError) {
+            lines.push(`Last rate limit: <code>${escapeHtml(outbox.lastRateLimitError)}</code>`)
+        }
+    }
+
+    return lines.join('\n')
+}
+
 export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void {
     const { sessionManager, topicSessions, restart } = ctx
 
@@ -153,7 +182,15 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
             await c.reply('✅ No active task')
             return
         }
-        await topicSession.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
+        const progress = topicSession.getProgress()
+        if (!progress || progress.state === 'idle') {
+            await c.reply('✅ No active task')
+            return
+        }
+
+        await c.reply(formatProgressSnapshot(progress), { parse_mode: 'HTML' }).catch((e) => {
+            console.error('[/progress] Failed to send direct progress reply:', e instanceof Error ? e.message : e)
+        })
     })
 
     bot.command('file', async (c: Context) => {

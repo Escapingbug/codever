@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
+import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { ChannelMessage, ChannelPort, SessionStatus } from '@/bridge/channelPort'
@@ -153,6 +154,38 @@ describe('SemanticSessionRuntime', () => {
         expect(operations.map(op => op.kind)).toEqual(['send', 'edit'])
     })
 
+    it('continues consuming provider events when a progressive edit is rate-limited', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const operations: DeliveryOperation[] = []
+        const channel = createChannel(sent, statuses, operations)
+        vi.mocked(channel.edit!).mockRejectedValueOnce(new Error("Call to 'editMessageText' failed! (429: Too Many Requests: retry after 40)"))
+        const provider = createProvider([
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running' },
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test -- --watch' }, status: 'running' },
+            { kind: 'text', text: 'still consumed' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+            providerSettings: { verboseLevel: 2 },
+            outbox: new DeliveryOutbox({
+                channelPort: channel,
+                progressiveEditDebounceMs: 0,
+            }),
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
+
+        expect(sent.map(message => message.text).join('\n')).toContain('still consumed')
+        expect(runtime.getState()).toBe('idle')
+        expect(runtime.getProgress().outbox.lastRateLimitError).toContain('Too Many Requests')
+    })
+
     it('replaces the normal tool message between assistant text messages instead of appending history', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
@@ -177,15 +210,14 @@ describe('SemanticSessionRuntime', () => {
 
         await runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
 
-        expect(operations.map(op => op.kind)).toEqual(['send', 'send', 'edit', 'edit', 'edit', 'send'])
+        expect(operations.map(op => op.kind)).toEqual(['send', 'send', 'edit', 'edit', 'send'])
         expect(operations[0].message.text).toBe('First answer\n')
         expect(operations[1].message.text).toContain('npm test')
         expect(operations[2].messageId).toBe(operations[1].messageId)
         expect(operations[3].messageId).toBe(operations[1].messageId)
-        expect(operations[4].messageId).toBe(operations[1].messageId)
-        expect(operations[5].message.text).toBe('Done')
+        expect(operations[4].message.text).toBe('Done')
 
-        const finalToolMessage = operations[4].message.text
+        const finalToolMessage = operations[3].message.text
         expect(finalToolMessage).toContain('Read')
         expect(finalToolMessage).toContain('/repo/src/app.ts')
         expect(finalToolMessage).not.toContain('npm test')

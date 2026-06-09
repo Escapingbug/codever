@@ -10,7 +10,7 @@ import type { ConversationEvent, RichFilePart, RichUserInput, SessionInput } fro
 import { normalizeUserInput } from './semantic'
 import { ConversationJournal } from './semantic'
 import { ChannelProjector } from './channelProjector'
-import { DeliveryOutbox } from './deliveryOutbox'
+import { DeliveryOutbox, type DeliveryOutboxState, type DeliveryOptions } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { ProviderCommand } from '@/providers/types'
@@ -25,6 +25,14 @@ const MAX_SEND_FILE_BYTES = 50 * 1024 * 1024
 const DEFAULT_DESTROY_TIMEOUT_MS = 10_000
 const DESTROY_INTERRUPT_TIMEOUT_MS = 2_500
 const DESTROY_OUTBOX_DRAIN_TIMEOUT_MS = 3_000
+const FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS = 5_000
+
+export interface RuntimeProgress {
+    state: SemanticRuntimeState
+    elapsedSeconds: number
+    lastToolName: string | null
+    outbox: DeliveryOutboxState
+}
 
 interface FileReference {
     id: string
@@ -101,6 +109,7 @@ export class SemanticSessionRuntime {
         this.projector = config.projector ?? new ChannelProjector()
         this.outbox = config.outbox ?? new DeliveryOutbox({
             channelPort: config.channelPort,
+            onLog: (message) => this.log(message),
             onFailure: (record) => {
                 this.log(`[delivery] ${record.kind} failed: ${record.error instanceof Error ? record.error.message : record.error}`)
                 this.recordCommand(record.kind === 'edit' ? 'delivery_edit_failed' : 'delivery_failed', {
@@ -157,6 +166,15 @@ export class SemanticSessionRuntime {
 
     getState(): SemanticRuntimeState {
         return this.state
+    }
+
+    getProgress(): RuntimeProgress {
+        return {
+            state: this.state,
+            elapsedSeconds: this.turnStartedAt ? Math.floor((Date.now() - this.turnStartedAt) / 1000) : 0,
+            lastToolName: this.lastToolName,
+            outbox: this.outbox.getState(),
+        }
     }
 
     private async handleInput(input: SessionInput): Promise<void> {
@@ -319,9 +337,9 @@ export class SemanticSessionRuntime {
         if (this.state === 'dead') return
         this.state = 'finalizing'
         for (const projected of this.projector.flush()) {
-            await this.deliver(projected.message, projected.toolUseId, projected.isToolEvent)
+            await this.deliver(projected.message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
         }
-        await this.outbox.drain()
+        await this.outbox.drain({ timeoutMs: FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS })
         this.state = 'idle'
         this.notifyStatus('idle')
     }
@@ -360,7 +378,7 @@ export class SemanticSessionRuntime {
         for (const projected of messages) {
             const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
             this.captureTables(message)
-            await this.deliver(message, projected.toolUseId, projected.isToolEvent)
+            await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
         }
     }
 
@@ -378,9 +396,23 @@ export class SemanticSessionRuntime {
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 
-    private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false): Promise<void> {
+    private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false, isTerminal = false): Promise<void> {
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
-            const record = await this.outbox.edit(this.toolMessageIds.get(toolUseId), message, true)
+            const delivery = this.outbox.edit(this.toolMessageIds.get(toolUseId), message, isTerminal, {
+                lane: 'progressive-edit',
+                coalesceKey: toolUseId,
+                terminal: isTerminal,
+            })
+            if (!isTerminal) {
+                void delivery.then((record) => {
+                    if (record.messageId !== undefined) {
+                        this.toolMessageIds.set(toolUseId, record.messageId)
+                    }
+                })
+                return
+            }
+
+            const record = await delivery
             if (record.messageId !== undefined) {
                 this.toolMessageIds.set(toolUseId, record.messageId)
             }
@@ -396,9 +428,9 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async send(message: ChannelMessage): Promise<void> {
+    private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<void> {
         this.captureTables(message)
-        await this.outbox.send(message)
+        await this.outbox.send(message, undefined, options)
     }
 
     private async handleCommand(input: Extract<SessionInput, { kind: 'command' }>): Promise<void> {
@@ -743,14 +775,14 @@ export class SemanticSessionRuntime {
     }
 
     private async handleProgressCommand(): Promise<void> {
-        const elapsedSeconds = this.turnStartedAt ? Math.floor((Date.now() - this.turnStartedAt) / 1000) : 0
-        this.recordCommand('progress', { state: this.state, elapsedSeconds, lastToolName: this.lastToolName })
+        const progress = this.getProgress()
+        this.recordCommand('progress', progress)
         await this.send({
             text: this.state === 'querying'
-                ? `🔄 Task in progress: ${elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`
+                ? `🔄 Task in progress: ${progress.elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`
                 : '✅ No active task',
             format: 'html',
-        })
+        }, { lane: 'control' })
     }
 
     private createPermissionHandler(): AgentPermissionHandler {

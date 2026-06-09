@@ -106,7 +106,7 @@ function createSession(state: TopicSession['state'] = 'querying'): TopicSession 
             bus: { emit: vi.fn() },
         } as any,
         channelPort: {} as any,
-        getProgress: vi.fn(() => ({ elapsedSeconds: 12, lastToolName: 'Bash' })),
+        getProgress: vi.fn(() => ({ state, elapsedSeconds: 12, lastToolName: 'Bash' })),
     }
 }
 
@@ -166,15 +166,18 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.sessionRecord.destroy).not.toHaveBeenCalled()
     })
 
-    it('/progress should dispatch a runtime progress command instead of reading metadata timeout state', async () => {
+    it('/progress should reply directly from runtime progress without entering the output queue', async () => {
         const bot = createBot()
         const session = createSession('querying')
         const topicSessions = new Map([['-100:10', session]])
         registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext()
 
-        await bot.runCommand('progress', createContext())
+        await bot.runCommand('progress', ctx)
 
-        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'progress', source: 'channel' })
+        expect(session.dispatch).not.toHaveBeenCalled()
+        expect(ctx.replies[0].text).toContain('Task in progress')
+        expect(ctx.replies[0].text).toContain('Bash')
     })
 
     it('/restart passes the topic thread and initial message to daemon restart progress reporting', async () => {

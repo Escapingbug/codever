@@ -92,5 +92,17 @@ export interface TopicSession {
     readonly channelPort: ChannelPort
 
     /** Get current query progress info, or null if no query is running */
-    getProgress(): { elapsedSeconds: number; lastToolName: string | null } | null
+    getProgress(): {
+        state: SessionState
+        elapsedSeconds: number
+        lastToolName: string | null
+        outbox?: {
+            pendingControl: number
+            pendingNormal: number
+            pendingProgressiveEdits: number
+            progressiveEditBlockedUntil?: number
+            lastRateLimitError?: string
+            lastFailure?: string
+        }
+    } | null
 }
