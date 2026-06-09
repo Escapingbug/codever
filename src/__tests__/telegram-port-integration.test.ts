@@ -104,6 +104,33 @@ describe('TelegramPort integration', () => {
         expect(port.getRecentTables()).toEqual([])
     })
 
+    it('ignores Telegram not-modified edit errors', async () => {
+        const bot = createBot()
+        bot.api.editMessageText.mockRejectedValue(new Error("Call to 'editMessageText' failed! (400: Bad Request: message is not modified)"))
+        const port = new TelegramPort(bot, -100, 10)
+
+        await expect(port.edit(123, { text: 'same text', format: 'html' })).resolves.toBeUndefined()
+    })
+
+    it('propagates retryable Telegram edit errors to the delivery outbox', async () => {
+        const retryAfter = new Error("Call to 'editMessageText' failed! (429: Too Many Requests: retry after 42)")
+        const bot = createBot()
+        bot.api.editMessageText.mockRejectedValue(retryAfter)
+        const port = new TelegramPort(bot, -100, 10)
+
+        await expect(port.edit(123, { text: 'updated text', format: 'html' })).rejects.toBe(retryAfter)
+    })
+
+    it('does not treat Telegram send failures as markdown conversion failures', async () => {
+        const retryAfter = new Error("Call to 'sendMessage' failed! (429: Too Many Requests: retry after 42)")
+        const bot = createBot()
+        bot.api.sendMessage.mockRejectedValue(retryAfter)
+        const port = new TelegramPort(bot, -100, 10)
+
+        await expect(port.send({ text: '**hello**', format: 'markdown' })).rejects.toBe(retryAfter)
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
     it('decision callback data should be routable back to the semantic runtime', async () => {
         const bot = createBot()
         const port = new TelegramPort(bot, -100, 10)

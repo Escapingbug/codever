@@ -102,6 +102,7 @@ export class TelegramPort implements ChannelPort {
                 return
             }
             console.error('[TelegramPort] edit failed:', errMsg)
+            throw e
         }
     }
 
@@ -235,57 +236,59 @@ export class TelegramPort implements ChannelPort {
     }
 
     private async sendMarkdown(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
+        let converted: Awaited<ReturnType<typeof tgmdConvert>>
         try {
-            const converted = await tgmdConvert(text)
-            let isFirst = true
-            let firstMessageId: number | undefined
-            for (const segment of converted) {
-                const markup = isFirst ? replyMarkup : undefined
-                isFirst = false
-
-                if (segment.kind === 'table' && segment.markdown) {
-                    // Track the table for /tables command
-                    this.tableHistory.push({ markdown: segment.markdown, timestamp: Date.now() })
-                    // Render table as PNG image
-                    try {
-                        const imgBuffer = await tgmdTableImage(segment.markdown)
-                        const msg = await this.bot.api.sendPhoto(this.chatId, new InputFile(imgBuffer, 'table.png'), {
-                            ...buildMessageThreadParams(this.threadId),
-                        })
-                        if (firstMessageId === undefined) firstMessageId = msg.message_id
-                    } catch (e) {
-                        // Fallback: send table as plain text
-                        console.error('[TelegramPort] Table image failed, sending as text:', e instanceof Error ? e.message : e)
-                        const result = await this.sendPlain(segment.markdown)
-                        if (firstMessageId === undefined && result.messageId !== undefined) {
-                            firstMessageId = result.messageId as number
-                        }
-                    }
-                } else if (segment.kind === 'text' && segment.text !== undefined) {
-                    // Strip <!-- raw --> markers from text — they serve as rendering
-                    // hints (preventing table image conversion) but should not
-                    // appear in the final message.
-                    const cleanedText = segment.text.replace(/<!--\s*raw\s*-->\s*\n?/g, '')
-                    // Adjust entity offsets: removing <!-- raw --> shifts positions
-                    // For simplicity, if markers were present, strip entities
-                    // (entity offsets would be wrong after text modification)
-                    const hadMarker = segment.text !== cleanedText
-                    const entities = hadMarker ? undefined : segment.entities
-
-                    const msg = await this.bot.api.sendMessage(this.chatId, cleanedText, {
-                        entities: entities as any,
-                        reply_markup: markup as any,
-                        ...buildMessageThreadParams(this.threadId),
-                    })
-                    if (firstMessageId === undefined) firstMessageId = msg.message_id
-                }
-            }
-            return { messageId: firstMessageId }
+            converted = await tgmdConvert(text)
         } catch (e) {
-            // Fallback to plain text if markdown conversion fails
+            // Fallback to plain text only when markdown conversion itself fails.
             console.error('[TelegramPort] Markdown conversion failed, falling back to plain:', e instanceof Error ? e.message : e)
             return await this.sendPlain(text, replyMarkup)
         }
+
+        let isFirst = true
+        let firstMessageId: number | undefined
+        for (const segment of converted) {
+            const markup = isFirst ? replyMarkup : undefined
+            isFirst = false
+
+            if (segment.kind === 'table' && segment.markdown) {
+                // Track the table for /tables command
+                this.tableHistory.push({ markdown: segment.markdown, timestamp: Date.now() })
+                // Render table as PNG image
+                try {
+                    const imgBuffer = await tgmdTableImage(segment.markdown)
+                    const msg = await this.bot.api.sendPhoto(this.chatId, new InputFile(imgBuffer, 'table.png'), {
+                        ...buildMessageThreadParams(this.threadId),
+                    })
+                    if (firstMessageId === undefined) firstMessageId = msg.message_id
+                } catch (e) {
+                    // Fallback: send table as plain text
+                    console.error('[TelegramPort] Table image failed, sending as text:', e instanceof Error ? e.message : e)
+                    const result = await this.sendPlain(segment.markdown)
+                    if (firstMessageId === undefined && result.messageId !== undefined) {
+                        firstMessageId = result.messageId as number
+                    }
+                }
+            } else if (segment.kind === 'text' && segment.text !== undefined) {
+                // Strip <!-- raw --> markers from text — they serve as rendering
+                // hints (preventing table image conversion) but should not
+                // appear in the final message.
+                const cleanedText = segment.text.replace(/<!--\s*raw\s*-->\s*\n?/g, '')
+                // Adjust entity offsets: removing <!-- raw --> shifts positions
+                // For simplicity, if markers were present, strip entities
+                // (entity offsets would be wrong after text modification)
+                const hadMarker = segment.text !== cleanedText
+                const entities = hadMarker ? undefined : segment.entities
+
+                const msg = await this.bot.api.sendMessage(this.chatId, cleanedText, {
+                    entities: entities as any,
+                    reply_markup: markup as any,
+                    ...buildMessageThreadParams(this.threadId),
+                })
+                if (firstMessageId === undefined) firstMessageId = msg.message_id
+            }
+        }
+        return { messageId: firstMessageId }
     }
 
     private async sendHtml(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
