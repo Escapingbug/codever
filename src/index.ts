@@ -1,101 +1,37 @@
 import { parseArgs } from 'node:util'
-import { spawn, execSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { HttpsProxyAgent } from 'https-proxy-agent'
-import { existsSync, readFileSync, unlinkSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config, getDaemonPidPath, getDaemonLogPath, getDaemonBaseDir } from './config'
+import { config, getDaemonLogPath, getDaemonBaseDir } from './config'
 import { pairing } from './channel/telegram/pairing'
 import { resolveNodePath } from './utils/nodePath'
+import { isDaemonRunning, startDaemon, stopDaemon } from './daemon/process'
+import {
+    DEFAULT_WATCHDOG_INTERVAL_MS,
+    DEFAULT_WATCHDOG_MAX_RESTARTS,
+    DEFAULT_WATCHDOG_RESTART_WINDOW_MS,
+    installWindowsWatchdogTask,
+    runWatchdogLoop,
+    runWatchdogOnce,
+    uninstallWindowsWatchdogTask,
+} from './daemon/watchdog'
 
-function isDaemonRunning(): { running: boolean; pid?: number } {
-    const pidPath = getDaemonPidPath()
-    if (!existsSync(pidPath)) return { running: false }
-
-    const pid = parseInt(readFileSync(pidPath, 'utf8').trim(), 10)
-    if (isNaN(pid)) return { running: false }
-
-    try {
-        process.kill(pid, 0) // test if process exists
-        return { running: true, pid }
-    } catch {
-        // Stale PID file — clean up
-        try { unlinkSync(pidPath) } catch {}
-        return { running: false }
-    }
+function parsePositiveInt(value: unknown, fallback: number): number {
+    if (typeof value !== 'string') return fallback
+    const parsed = Number.parseInt(value, 10)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-async function stopDaemon() {
-    const status = isDaemonRunning()
-    if (!status.running || !status.pid) {
-        console.log('Daemon is not running.')
-        return
-    }
-
-    console.log(`Stopping daemon (PID ${status.pid})...`)
-    process.kill(status.pid, 'SIGTERM')
-
-    for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 500))
-        if (!isDaemonRunning().running) {
-            console.log('Daemon stopped.')
-            return
-        }
-    }
-
-    console.log('Daemon did not stop in time, sending SIGKILL...')
-    try { process.kill(status.pid, 'SIGKILL') } catch {}
-    try { unlinkSync(getDaemonPidPath()) } catch {}
-    console.log('Daemon killed.')
+function quoteCommandArg(value: string): string {
+    return `"${value.replace(/"/g, '\\"')}"`
 }
 
-async function startDaemon() {
-    const status = isDaemonRunning()
-    if (status.running) {
-        console.log(`Daemon already running (PID ${status.pid})`)
-        return
-    }
-
-    // Resolve provider CLI paths (best-effort, not all providers require CLI)
+function buildWatchdogOnceCommand(): string {
     const nodePath = resolveNodePath()
-    const envExtra: Record<string, string> = {
-        CODEVER_NODE_PATH: nodePath,
-    }
-
-    // Try to find claude CLI (optional)
-    try {
-        const claudePath = execSync(
-            process.platform === 'win32' ? 'where claude' : 'which claude',
-            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-        ).trim().split('\n')[0].trim()
-        if (claudePath) envExtra.CODEVER_CLAUDE_PATH = claudePath
-    } catch {
-        // Claude CLI not found — not fatal, other providers may be available
-    }
-
-    const botToken = config.getBotToken()
-    if (!botToken) {
-        console.error('Bot token not configured. Run: codever config set-bot-token <token>')
-        process.exit(1)
-    }
-
-    const daemonScript = fileURLToPath(new URL('./daemon.js', import.meta.url))
-
-    const child = spawn(nodePath, [daemonScript], {
-        detached: true,
-        stdio: 'ignore',
-        env: {
-            ...process.env,
-            ...envExtra,
-        }
-    })
-
-    child.unref()
-    console.log(`Daemon started (PID ${child.pid})`)
-    if (envExtra.CODEVER_CLAUDE_PATH) console.log(`  Claude: ${envExtra.CODEVER_CLAUDE_PATH}`)
-    console.log(`  Node: ${nodePath}`)
-    console.log(`  Default provider: ${config.getDefaultProvider()}`)
-    console.log(`  Logs: ${getDaemonLogPath()}`)
+    const binPath = fileURLToPath(new URL('../bin/codever.js', import.meta.url))
+    return `${quoteCommandArg(nodePath)} ${quoteCommandArg(binPath)} watchdog --once`
 }
 
 async function main() {
@@ -108,6 +44,10 @@ async function main() {
             'log-dir': { type: 'string' },
             groups: { type: 'boolean', default: false },
             group: { type: 'string' },
+            once: { type: 'boolean', default: false },
+            interval: { type: 'string' },
+            'max-restarts': { type: 'string' },
+            'restart-window': { type: 'string' },
         },
         allowPositionals: true,
         strict: false
@@ -131,6 +71,45 @@ async function main() {
     // --- codever stop ---
     if (command === 'stop') {
         await stopDaemon()
+        return
+    }
+
+    // --- codever watchdog [--once] | watchdog install | watchdog uninstall ---
+    if (command === 'watchdog') {
+        const subcommand = positionals[1]
+        if (subcommand === 'install') {
+            const taskCommand = buildWatchdogOnceCommand()
+            installWindowsWatchdogTask(taskCommand)
+            console.log(`Watchdog scheduled task installed: ${taskCommand}`)
+            return
+        }
+        if (subcommand === 'uninstall') {
+            uninstallWindowsWatchdogTask()
+            console.log('Watchdog scheduled task removed.')
+            return
+        }
+
+        const maxRestarts = parsePositiveInt(values['max-restarts'], DEFAULT_WATCHDOG_MAX_RESTARTS)
+        const restartWindowMs = parsePositiveInt(values['restart-window'], DEFAULT_WATCHDOG_RESTART_WINDOW_MS)
+        const intervalMs = parsePositiveInt(values.interval, DEFAULT_WATCHDOG_INTERVAL_MS)
+        const deps = {
+            isDaemonRunning,
+            startDaemon,
+            now: () => Date.now(),
+            log: (message: string) => console.log(`[watchdog] ${message}`),
+            warn: (message: string) => console.warn(`[watchdog] ${message}`),
+        }
+
+        if (values.once) {
+            await runWatchdogOnce(deps, { restartTimestamps: [] }, { maxRestarts, restartWindowMs })
+            return
+        }
+
+        const controller = new AbortController()
+        const stop = () => controller.abort()
+        process.once('SIGINT', stop)
+        process.once('SIGTERM', stop)
+        await runWatchdogLoop(deps, { intervalMs, maxRestarts, restartWindowMs, signal: controller.signal })
         return
     }
 
@@ -324,6 +303,10 @@ Usage:
   codever start                     Start the daemon
   codever stop                      Stop the daemon
   codever restart                   Restart the daemon (stop + start)
+  codever watchdog                  Keep daemon running in foreground
+  codever watchdog --once           Start daemon if it is not running, then exit
+  codever watchdog install          Install Windows scheduled watchdog task
+  codever watchdog uninstall        Remove Windows scheduled watchdog task
   codever status                    Show daemon and config status
   codever logs [-f]                 Show daemon logs (follow with -f)
   codever logs --groups             List all group log directories
