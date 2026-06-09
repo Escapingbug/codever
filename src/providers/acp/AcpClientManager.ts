@@ -54,6 +54,11 @@ interface ActivePrompt {
     reject: (error: unknown) => void
 }
 
+interface SessionUpdateWaiter {
+    resolve: (update: SessionNotification) => void
+    reject: (error: unknown) => void
+}
+
 export class AcpClientManager {
     private config: AcpClientManagerConfig
     private childProcess: ChildProcess | null = null
@@ -63,7 +68,7 @@ export class AcpClientManager {
     private _closing = false
 
     private sessionUpdates = new Map<string, SessionNotification[]>()
-    private sessionWaiters = new Map<string, Array<{ resolve: (update: SessionNotification) => void; reject: (error: unknown) => void }>>()
+    private sessionWaiters = new Map<string, SessionUpdateWaiter[]>()
 
     /** Sequence numbers for session updates, used to distinguish historical vs new updates */
     private sessionUpdateSeqs = new Map<string, number>()
@@ -372,10 +377,14 @@ export class AcpClientManager {
         return count
     }
 
-    async waitForSessionUpdate(sessionId: string): Promise<SessionNotification> {
+    async waitForSessionUpdate(sessionId: string, options: { signal?: AbortSignal } = {}): Promise<SessionNotification> {
         const queue = this.sessionUpdates.get(sessionId)
         if (queue && queue.length > 0) {
             return queue.shift()!
+        }
+
+        if (options.signal?.aborted) {
+            throw new Error('Session update wait aborted')
         }
 
         return new Promise<SessionNotification>((resolve, reject) => {
@@ -384,7 +393,29 @@ export class AcpClientManager {
                 waiters = []
                 this.sessionWaiters.set(sessionId, waiters)
             }
-            waiters.push({ resolve, reject })
+            const cleanup = () => {
+                options.signal?.removeEventListener('abort', onAbort)
+            }
+            const waiter: SessionUpdateWaiter = {
+                resolve: (update) => {
+                    cleanup()
+                    resolve(update)
+                },
+                reject: (error) => {
+                    cleanup()
+                    reject(error)
+                },
+            }
+            const onAbort = () => {
+                const currentWaiters = this.sessionWaiters.get(sessionId)
+                if (currentWaiters) {
+                    const index = currentWaiters.indexOf(waiter)
+                    if (index >= 0) currentWaiters.splice(index, 1)
+                }
+                waiter.reject(new Error('Session update wait aborted'))
+            }
+            options.signal?.addEventListener('abort', onAbort, { once: true })
+            waiters.push(waiter)
         })
     }
 

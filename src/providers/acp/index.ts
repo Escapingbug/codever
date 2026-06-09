@@ -24,6 +24,9 @@ import { resolve, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+const ACP_TAIL_DRAIN_IDLE_MS = 100
+const ACP_TAIL_DRAIN_MAX_MS = 1_000
+
 /**
  * Resolve the command used to launch the codever MCP stdio server.
  *
@@ -391,6 +394,8 @@ export class AcpProvider implements AgentProvider {
             // capture errors from the current turn.
             clientManager.clearStderrBuffer()
 
+            let updateConsumerAbort: AbortController | null = null
+
             try {
                 let sessionId = config.sessionId
 
@@ -646,19 +651,25 @@ export class AcpProvider implements AgentProvider {
                 }
 
                 const toolCalls = new Map<string, ToolCallSnapshot>()
+                const consumerAbort = new AbortController()
+                updateConsumerAbort = consumerAbort
+                const pushSessionUpdateEvents = (notification: SessionNotification, source: 'updateConsumer' | 'tailDrain'): void => {
+                    const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls, config.debugLog)
+                    for (const event of agentEvents) {
+                        if (events.done) break
+                        const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
+                        console.error(`[acp] ${source} → events.push: ${eventSummary}`)
+                        events.push(event)
+                    }
+                }
                 const updateConsumer = async () => {
-                    while (!events.done) {
+                    while (!events.done && !consumerAbort.signal.aborted) {
                         try {
-                            const notification = await clientManager.waitForSessionUpdate(sessionId!)
+                            const notification = await clientManager.waitForSessionUpdate(sessionId!, { signal: consumerAbort.signal })
                             if (events.done) break
-                            const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls, config.debugLog)
-                            for (const event of agentEvents) {
-                                if (events.done) break
-                                const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
-                                console.error(`[acp] updateConsumer → events.push: ${eventSummary}`)
-                                events.push(event)
-                            }
+                            pushSessionUpdateEvents(notification, 'updateConsumer')
                         } catch (e) {
+                            if (consumerAbort.signal.aborted) break
                             const msg = e instanceof Error ? e.message : String(e)
                             console.error(`[acp:${this.name}] updateConsumer error: ${msg}`)
                             if (!events.done) {
@@ -679,25 +690,38 @@ export class AcpProvider implements AgentProvider {
                 })
                 console.error(`[acp:${this.name}] Prompt returned: stopReason=${promptResponse.stopReason}, sessionId=${sessionId}`)
 
+                // Stop the live consumer before the final drain. Without aborting
+                // its pending waiter, late notifications can be delivered to a
+                // stale waiter after this turn has already ended.
+                updateConsumerAbort.abort()
+                await updatePromise.catch(() => {})
 
-
-                // 5b. Drain any remaining queued session updates that arrived
-                //     before or concurrently with the prompt response. The update
-                //     consumer may not have processed them yet because it awaits
-                //     waitForSessionUpdate() which yields one at a time.
+                // 5b. Drain any remaining queued session updates, including tail
+                //     updates that arrive just after the prompt response.
                 if (!events.done) {
-                    let remaining = clientManager.dequeueSessionUpdate(sessionId!)
-                    while (remaining) {
-                        const updateType = (remaining.update as any)?.sessionUpdate ?? '?'
-                        console.error(`[acp] dequeueSessionUpdate: updateType=${updateType}`)
-                        const agentEvents = mapSessionUpdateWithToolState(remaining.update, toolCalls, config.debugLog)
-                        for (const event of agentEvents) {
-                            if (events.done) break
-                            const eventSummary = event.kind === 'text' ? `text(${(event.text ?? '').length}ch)` : event.kind === 'tool_use' ? `tool_use(${event.toolName} id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind === 'tool_result' ? `tool_result(id=${(event.toolUseId ?? '').slice(0,8)})` : event.kind
-                            console.error(`[acp] dequeueSessionUpdate → events.push: ${eventSummary}`)
-                            events.push(event)
+                    const tailDrainStartedAt = Date.now()
+                    while (!events.done && Date.now() - tailDrainStartedAt < ACP_TAIL_DRAIN_MAX_MS) {
+                        let drainedAny = false
+                        let remaining = clientManager.dequeueSessionUpdate(sessionId!)
+                        while (remaining) {
+                            drainedAny = true
+                            const updateType = (remaining.update as any)?.sessionUpdate ?? '?'
+                            console.error(`[acp] tailDrain dequeueSessionUpdate: updateType=${updateType}`)
+                            pushSessionUpdateEvents(remaining, 'tailDrain')
+                            remaining = clientManager.dequeueSessionUpdate(sessionId!)
                         }
-                        remaining = clientManager.dequeueSessionUpdate(sessionId!)
+                        if (drainedAny) continue
+
+                        const waitAbort = new AbortController()
+                        const timer = setTimeout(() => waitAbort.abort(), ACP_TAIL_DRAIN_IDLE_MS)
+                        try {
+                            const notification = await clientManager.waitForSessionUpdate(sessionId!, { signal: waitAbort.signal })
+                            pushSessionUpdateEvents(notification, 'tailDrain')
+                        } catch {
+                            break
+                        } finally {
+                            clearTimeout(timer)
+                        }
                     }
                 }
 
@@ -718,6 +742,7 @@ export class AcpProvider implements AgentProvider {
                     events.end()
                 }
             } catch (e) {
+                updateConsumerAbort?.abort()
                 const msg = e instanceof Error ? e.message : String(e)
                 console.error(`[acp:${this.name}] Query failed: ${msg}`)
                 if (!events.done) {
