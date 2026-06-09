@@ -1,5 +1,6 @@
 import { spawn, execSync } from 'node:child_process'
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config, getDaemonLogPath, getDaemonPidPath } from '@/config'
 import { resolveNodePath } from '@/utils/nodePath'
@@ -59,6 +60,7 @@ export async function startDaemon(): Promise<void> {
     const nodePath = resolveNodePath()
     const envExtra: Record<string, string> = {
         CODEVER_NODE_PATH: nodePath,
+        CODEVER_DISABLE_STDIO_MIRROR: '1',
     }
 
     try {
@@ -77,15 +79,21 @@ export async function startDaemon(): Promise<void> {
         process.exit(1)
     }
 
-    const daemonScript = fileURLToPath(new URL('../daemon.js', import.meta.url))
+    const daemonScript = fileURLToPath(new URL('./daemon.js', import.meta.url))
+    const logPath = getDaemonLogPath()
+    mkdirSync(dirname(logPath), { recursive: true })
+    const stdoutFd = openSync(logPath, 'a')
+    const stderrFd = openSync(logPath, 'a')
     const child = spawn(nodePath, [daemonScript], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', stdoutFd, stderrFd],
         env: {
             ...process.env,
             ...envExtra,
         },
     })
+    closeSync(stdoutFd)
+    closeSync(stderrFd)
 
     child.unref()
     console.log(`Daemon started (PID ${child.pid})`)

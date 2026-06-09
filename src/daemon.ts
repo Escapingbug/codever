@@ -16,6 +16,7 @@ import { startDaemonApi, type ScheduleRequest, type SendFileRequest, type SendRe
 import { routeSendMessageToTopicSession } from './daemon/sendRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
+import { createSafeStreamMirror } from './utils/safeStreamMirror'
 
 let logger: GroupLogger
 
@@ -63,19 +64,20 @@ async function main() {
     const baseDir = getDaemonBaseDir()
     logger = new GroupLogger(baseDir, 'daemon')
 
-    const origStdout = process.stdout.write.bind(process.stdout)
-    const origStderr = process.stderr.write.bind(process.stderr)
+    const mirrorStdio = process.env.CODEVER_DISABLE_STDIO_MIRROR !== '1'
+    const stdoutMirror = mirrorStdio ? createSafeStreamMirror(process.stdout.write.bind(process.stdout)) : null
+    const stderrMirror = mirrorStdio ? createSafeStreamMirror(process.stderr.write.bind(process.stderr)) : null
 
     process.stdout.write = (chunk: any, ...args: any[]) => {
         const str = typeof chunk === 'string' ? chunk : chunk.toString()
         logger.global(str.trimEnd())
-        origStdout(chunk, ...args)
+        stdoutMirror?.write(chunk, ...args)
         return true
     }
     process.stderr.write = (chunk: any, ...args: any[]) => {
         const str = typeof chunk === 'string' ? chunk : chunk.toString()
         logger.global(str.trimEnd())
-        origStderr(chunk, ...args)
+        stderrMirror?.write(chunk, ...args)
         return true
     }
 
@@ -444,11 +446,26 @@ main().catch((e) => {
 })
 
 process.on('uncaughtException', (e) => {
-    console.error('[daemon] UNCAUGHT EXCEPTION:', e)
+    if (logger) {
+        logger.global(`[daemon] UNCAUGHT EXCEPTION: ${formatErrorForLog(e)}`)
+    } else {
+        process.stderr.write(`[daemon] UNCAUGHT EXCEPTION: ${formatErrorForLog(e)}\n`)
+    }
 })
 
 process.on('unhandledRejection', (reason) => {
-    console.error('[daemon] UNHANDLED REJECTION:', reason)
+    if (logger) {
+        logger.global(`[daemon] UNHANDLED REJECTION: ${formatErrorForLog(reason)}`)
+    } else {
+        process.stderr.write(`[daemon] UNHANDLED REJECTION: ${formatErrorForLog(reason)}\n`)
+    }
 })
+
+function formatErrorForLog(error: unknown): string {
+    if (error instanceof Error) {
+        return error.stack ?? `${error.name}: ${error.message}`
+    }
+    return String(error)
+}
 
 export { logger }
