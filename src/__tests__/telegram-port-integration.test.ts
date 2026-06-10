@@ -168,6 +168,31 @@ describe('TelegramPort integration', () => {
         expect(bot.api.sendMessage).toHaveBeenCalledTimes(1)
     })
 
+    it('retries markdown sends with path code entities when Telegram rejects a path-like URL', async () => {
+        renderMocks.tgmdSplit.mockResolvedValue([{
+            kind: 'text',
+            text: 'See D:/personal/facere/CLAUDE.md:1 for details.',
+            entities: [],
+        }])
+        const invalidUrl = new Error("Call to 'sendMessage' failed! (400: Bad Request: entity URL 'D:/personal/facere/CLAUDE.md:1' is invalid: Wrong port number specified in the URL)")
+        const bot = createBot()
+        bot.api.sendMessage
+            .mockRejectedValueOnce(invalidUrl)
+            .mockResolvedValueOnce({ message_id: 9 })
+        const port = new TelegramPort(bot, -100, 10)
+
+        await expect(port.send({ text: 'See D:/personal/facere/CLAUDE.md:1 for details.', format: 'markdown' })).resolves.toEqual({ messageId: 9 })
+
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(2)
+        expect(bot.api.sendMessage.mock.calls[1][1]).toBe('See D:/personal/facere/CLAUDE.md:1 for details.')
+        expect(bot.api.sendMessage.mock.calls[1][2]).toMatchObject({
+            entities: [
+                { type: 'code', offset: 4, length: 'D:/personal/facere/CLAUDE.md:1'.length },
+            ],
+            message_thread_id: 10,
+        })
+    })
+
     it('decision callback data should be routable back to the semantic runtime', async () => {
         const bot = createBot()
         const port = new TelegramPort(bot, -100, 10)

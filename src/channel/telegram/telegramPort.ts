@@ -14,6 +14,8 @@ import { completePendingDecision, registerPendingDecision } from './decisionRegi
 
 const MAX_MESSAGE_LENGTH = 4000
 const TABLE_IMAGE_SEND_TIMEOUT_MS = 10_000
+const INVALID_ENTITY_URL_PATTERN = /entity URL .* is invalid|Wrong port number specified in the URL/i
+const PATH_LIKE_TOKEN_PATTERN = /\b[A-Za-z]:[\\/][^\s<>"'`()\[\]{}]+|(?<![\w:./\\-])(?:\.{1,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+){0,2}\b|(?<![\w:./\\-])[\w.-]+\.[A-Za-z0-9]{1,10}:\d+(?::\d+)?\b/g
 
 export interface TableRecord {
     /** Raw markdown of the table */
@@ -289,15 +291,37 @@ export class TelegramPort implements ChannelPort {
                 const hadMarker = segment.text !== cleanedText
                 const entities = hadMarker ? undefined : segment.entities
 
-                const msg = await this.bot.api.sendMessage(this.chatId, cleanedText, {
-                    entities: entities as any,
-                    reply_markup: markup as any,
-                    ...buildMessageThreadParams(this.threadId),
-                })
+                const msg = await this.sendMarkdownTextSegment(cleanedText, entities, markup)
                 if (firstMessageId === undefined) firstMessageId = msg.message_id
             }
         }
         return { messageId: firstMessageId }
+    }
+
+    private async sendMarkdownTextSegment(
+        text: string,
+        entities: unknown,
+        replyMarkup?: unknown,
+    ): Promise<{ message_id: number }> {
+        try {
+            return await this.bot.api.sendMessage(this.chatId, text, {
+                entities: entities as any,
+                reply_markup: replyMarkup as any,
+                ...buildMessageThreadParams(this.threadId),
+            })
+        } catch (error) {
+            if (!isInvalidEntityUrlError(error)) throw error
+
+            const protectedEntities = createPathCodeEntities(text)
+            if (protectedEntities.length === 0) throw error
+
+            console.error('[TelegramPort] Markdown send failed on path-like URL entity; retrying with path code entities:', error instanceof Error ? error.message : error)
+            return await this.bot.api.sendMessage(this.chatId, text, {
+                entities: protectedEntities as any,
+                reply_markup: replyMarkup as any,
+                ...buildMessageThreadParams(this.threadId),
+            })
+        }
     }
 
     private async sendHtml(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
@@ -373,4 +397,45 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: strin
     return Promise.race([promise, timeout]).finally(() => {
         if (timer) clearTimeout(timer)
     })
+}
+
+function isInvalidEntityUrlError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return INVALID_ENTITY_URL_PATTERN.test(message)
+}
+
+function createPathCodeEntities(text: string): Array<{ type: 'code'; offset: number; length: number }> {
+    const entities: Array<{ type: 'code'; offset: number; length: number }> = []
+    for (const match of text.matchAll(PATH_LIKE_TOKEN_PATTERN)) {
+        const raw = match[0]
+        const index = match.index
+        if (index === undefined) continue
+
+        const token = trimPathToken(raw)
+        if (!token) continue
+
+        const start = index + raw.indexOf(token)
+        const end = start + token.length
+        if (entities.some(entity => rangesOverlap(start, end, entity.offset, entity.offset + entity.length))) {
+            continue
+        }
+        entities.push({
+            type: 'code',
+            offset: utf16Length(text.slice(0, start)),
+            length: utf16Length(token),
+        })
+    }
+    return entities
+}
+
+function trimPathToken(token: string): string {
+    return token.replace(/[.,;:!?]+$/g, '')
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
+    return startA < endB && startB < endA
+}
+
+function utf16Length(text: string): number {
+    return text.length
 }
