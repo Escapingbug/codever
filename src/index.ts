@@ -12,10 +12,10 @@ import {
     DEFAULT_WATCHDOG_INTERVAL_MS,
     DEFAULT_WATCHDOG_MAX_RESTARTS,
     DEFAULT_WATCHDOG_RESTART_WINDOW_MS,
-    installWindowsWatchdogTask,
+    installWatchdogTask,
     runWatchdogLoop,
     runWatchdogOnce,
-    uninstallWindowsWatchdogTask,
+    uninstallWatchdogTask,
 } from './daemon/watchdog'
 
 function parsePositiveInt(value: unknown, fallback: number): number {
@@ -79,12 +79,12 @@ async function main() {
         const subcommand = positionals[1]
         if (subcommand === 'install') {
             const taskCommand = buildWatchdogOnceCommand()
-            installWindowsWatchdogTask(taskCommand)
+            installWatchdogTask(taskCommand)
             console.log(`Watchdog scheduled task installed: ${taskCommand}`)
             return
         }
         if (subcommand === 'uninstall') {
-            uninstallWindowsWatchdogTask()
+            uninstallWatchdogTask()
             console.log('Watchdog scheduled task removed.')
             return
         }

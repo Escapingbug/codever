@@ -6,6 +6,7 @@ import { config, getDaemonPidPath, getDaemonBaseDir } from './config'
 import { registerProvider, listProviders, getProvider } from './providers/registry'
 
 import { AgentProvider } from './providers/agent'
+import { CodexProvider } from './providers/codex'
 import { CodebuddyProvider } from './providers/codebuddy'
 import { OpencodeProvider } from './providers/opencode'
 import { createBot } from './channel/telegram/bot'
@@ -90,9 +91,11 @@ async function main() {
     const opencodeProvider = new OpencodeProvider()
     const codebuddyProvider = new CodebuddyProvider()
     const agentProvider = new AgentProvider()
+    const codexProvider = new CodexProvider()
     registerProvider(opencodeProvider, () => new OpencodeProvider())
     registerProvider(codebuddyProvider, () => new CodebuddyProvider())
     registerProvider(agentProvider, () => new AgentProvider())
+    registerProvider(codexProvider, () => new CodexProvider())
 
     const initProviders = async () => {
         for (const name of listProviders()) {

@@ -441,7 +441,7 @@ export class SemanticSessionRuntime {
         if (!model) return undefined
         if (typeof this.config.provider.getAvailableModels !== 'function') return model
         const availableModels = this.config.provider.getAvailableModels()
-        if (availableModels.length === 0) return model
+        if (availableModels.length === 0) return undefined
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 

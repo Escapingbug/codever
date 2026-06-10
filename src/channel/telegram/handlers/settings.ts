@@ -60,10 +60,11 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             return
         }
 
-        const current = genericTopic
+        const configuredCurrent = genericTopic
             ? groupSettings?.model || 'default'
             : sessionRecord?.model || topicSettings?.model || groupSettings?.model || 'default'
         const models = provider.getAvailableModels()
+        const current = isSelectableModel(configuredCurrent, models) ? configuredCurrent : 'default'
         if (models.length === 0) {
             await c.reply(`Current model: <b>${current}</b>\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
                 parse_mode: 'HTML',
@@ -209,6 +210,13 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         }
         await performResume(c, c.chat.id, sessionId, messageThreadId, sessionManager, topicSessions)
     })
+}
+
+function isSelectableModel(model: string, models: Array<{ id: string; name: string }>): boolean {
+    if (model === 'default') return true
+    if (models.length === 0) return false
+    const normalized = model.toLowerCase()
+    return models.some(entry => entry.id.toLowerCase() === normalized || entry.name.toLowerCase() === normalized)
 }
 
 export function getCwdForChat(chatId: number, sessionManager: SessionManager): string | undefined {

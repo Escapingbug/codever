@@ -126,6 +126,27 @@ describe('SemanticSessionRuntime', () => {
         expect(statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
 
+    it('does not pass a stale model when the active provider has no model catalog', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const provider = createProvider([
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'codex',
+            channelPort: createChannel(sent, statuses),
+            model: 'lmstudio/hy3-preview-ioa',
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+
+        expect(provider.startQuery).toHaveBeenCalledWith('hi', expect.not.objectContaining({ model: 'lmstudio/hy3-preview-ioa' }))
+        expect(statuses.find(status => status.state === 'querying')).not.toHaveProperty('model')
+    })
+
     it('flushes assistant text after a quiet period before the turn finishes', async () => {
         vi.useFakeTimers()
         try {

@@ -5,13 +5,17 @@ import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
 import type { TopicSession } from '@/bridge/channelPort'
 import { clearPendingDecisionsForTests, registerPendingDecision } from '@/channel/telegram/decisionRegistry'
 
+const { providerModels } = vi.hoisted(() => ({
+    providerModels: [{ id: 'sonnet', name: 'Sonnet' }],
+}))
+
 vi.mock('@/channel/telegram/pairing', () => ({
     pairing: { isAuthorized: vi.fn(() => true) },
 }))
 
 vi.mock('@/providers/registry', () => {
     const provider = {
-        getAvailableModels: vi.fn(() => [{ id: 'sonnet', name: 'Sonnet' }]),
+        getAvailableModels: vi.fn(() => providerModels),
         getAvailablePermissionModes: vi.fn(() => ['default']),
         isReady: vi.fn(() => true),
         listSessions: vi.fn(async () => [{ sessionId: 'abcdef123456', title: 'old chat', updated: Date.now() }]),
@@ -129,6 +133,7 @@ function createSessionManager() {
 describe('Telegram handler integration with semantic runtime dispatch', () => {
     afterEach(() => {
         clearPendingDecisionsForTests()
+        providerModels.splice(0, providerModels.length, { id: 'sonnet', name: 'Sonnet' })
     })
 
     it('/stop dispatches a semantic cancel input', async () => {
@@ -261,6 +266,20 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCallback('model:sonnet')
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'sonnet', source: 'channel' })
+    })
+
+    it('/model does not show a stale model when the provider has no model catalog', async () => {
+        providerModels.splice(0, providerModels.length)
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerSettingsHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext()
+
+        await bot.runCommand('model', ctx)
+
+        expect(ctx.replies[0].text).toContain('Current model: <b>default</b>')
+        expect(ctx.replies[0].text).toContain('No models are available for provider <b>mock-acp</b>')
     })
 
     it('provider callback should dispatch runtime provider switch command', async () => {
