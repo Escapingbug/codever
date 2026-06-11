@@ -10,7 +10,7 @@ import type { ConversationEvent, RichFilePart, RichUserInput, SessionInput } fro
 import { normalizeUserInput } from './semantic'
 import { ConversationJournal } from './semantic'
 import { ChannelProjector } from './channelProjector'
-import { DeliveryOutbox, type DeliveryOutboxState, type DeliveryOptions } from './deliveryOutbox'
+import { DeliveryOutbox, type DeliveryOutboxState, type DeliveryOptions, type DeliveryRecord } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { ProviderCommand } from '@/providers/types'
@@ -27,6 +27,7 @@ const DESTROY_INTERRUPT_TIMEOUT_MS = 2_500
 const DESTROY_OUTBOX_DRAIN_TIMEOUT_MS = 3_000
 const FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS = 5_000
 const ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS = 1_500
+const TERMINAL_TOOL_EDIT_GRACE_MS = ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS + 500
 
 export interface RuntimeProgress {
     state: SemanticRuntimeState
@@ -452,22 +453,17 @@ export class SemanticSessionRuntime {
                 coalesceKey: toolUseId,
                 terminal: isTerminal,
             })
-            if (!isTerminal) {
-                void delivery.then((record) => {
-                    if (record.messageId !== undefined) {
-                        this.toolMessageIds.set(toolUseId, record.messageId)
-                    }
-                })
+            const record = isTerminal ? await waitForDeliveryRecord(delivery, TERMINAL_TOOL_EDIT_GRACE_MS) : undefined
+            if (record?.messageId !== undefined) {
+                this.toolMessageIds.set(toolUseId, record.messageId)
                 return
             }
 
-            const record = await delivery
-            if (record.messageId !== undefined) {
-                this.toolMessageIds.set(toolUseId, record.messageId)
-            }
-            if (record.status === 'sent' && record.messageId !== undefined) {
-                this.toolMessageIds.set(toolUseId, record.messageId)
-            }
+            void delivery.then((record) => {
+                if (record.messageId !== undefined) {
+                    this.toolMessageIds.set(toolUseId, record.messageId)
+                }
+            })
             return
         }
 
@@ -1008,6 +1004,18 @@ function normalizeSendFileType(type: string | undefined): SendFileType {
 
 function withOptionalCaption(content: string, caption: string | undefined): string {
     return caption?.trim() ? `${caption.trim()}\n\n${content}` : content
+}
+
+function waitForDeliveryRecord(delivery: Promise<DeliveryRecord>, timeoutMs: number): Promise<DeliveryRecord | undefined> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([
+        delivery,
+        new Promise<undefined>((resolve) => {
+            timeout = setTimeout(() => resolve(undefined), timeoutMs)
+        }),
+    ]).finally(() => {
+        if (timeout) clearTimeout(timeout)
+    })
 }
 
 function formatCodeBlock(content: string, language: string | undefined): string {

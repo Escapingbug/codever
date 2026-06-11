@@ -284,6 +284,52 @@ describe('SemanticSessionRuntime', () => {
         expect(runtime.getProgress().outbox.lastRateLimitError).toContain('Too Many Requests')
     })
 
+    it('continues consuming provider text when a terminal progressive edit is rate-limited', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: ChannelMessage[] = []
+            const statuses: SessionStatus[] = []
+            const operations: DeliveryOperation[] = []
+            const channel = createChannel(sent, statuses, operations)
+            vi.mocked(channel.edit!).mockRejectedValueOnce(new Error("Call to 'editMessageText' failed! (429: Too Many Requests: retry after 40)"))
+            const provider = createProvider([
+                { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running' },
+                { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: 'passed', isError: false },
+                { kind: 'text', text: 'after terminal edit' },
+                { kind: 'result', status: 'success' },
+            ])
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+                providerSettings: { verboseLevel: 2 },
+                outbox: new DeliveryOutbox({
+                    channelPort: channel,
+                    progressiveEditDebounceMs: 0,
+                }),
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
+
+            await vi.advanceTimersByTimeAsync(2_000)
+            await vi.waitFor(() => {
+                expect(sent.map(message => message.text).join('\n')).toContain('after terminal edit')
+            })
+            expect(runtime.getProgress().outbox.lastRateLimitError).toContain('Too Many Requests')
+
+            await vi.advanceTimersByTimeAsync(5_000)
+            await running
+            expect(runtime.getState()).toBe('idle')
+
+            await vi.advanceTimersByTimeAsync(40_000)
+            await vi.runOnlyPendingTimersAsync()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('replaces the normal tool message between assistant text messages instead of appending history', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
