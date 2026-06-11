@@ -28,6 +28,7 @@ const ACP_TAIL_DRAIN_IDLE_MS = 100
 const ACP_TAIL_DRAIN_MAX_MS = 1_000
 const ACP_HISTORY_DRAIN_IDLE_MS = 150
 const ACP_HISTORY_DRAIN_MAX_MS = 3_000
+const MAX_AGENT_ERROR_SUMMARY_LENGTH = 1_500
 
 /**
  * Resolve the command used to launch the codever MCP stdio server.
@@ -99,6 +100,28 @@ interface ToolCallSnapshot {
     locations?: Array<{ path: string; line?: number }>
 }
 
+export function formatAgentQueryError(error: unknown, context: { provider: string; phase: string; sessionId?: string | null }): string {
+    const lines: string[] = [
+        `Provider: ${context.provider}`,
+        `Phase: ${context.phase}`,
+    ]
+    if (context.sessionId) {
+        lines.push(`Session: ${context.sessionId.slice(0, 12)}`)
+    }
+
+    if (error instanceof Error) {
+        lines.push(`Error: ${error.name}: ${error.message}`)
+        appendErrorFields(lines, error)
+        appendCause(lines, error.cause)
+        appendStackPreview(lines, error.stack)
+    } else {
+        lines.push(`Error: ${formatUnknownError(error)}`)
+        appendErrorFields(lines, error)
+    }
+
+    return truncateErrorSummary(lines.join('\n'))
+}
+
 function mapSessionUpdateWithToolState(update: SessionUpdate, toolCalls: Map<string, ToolCallSnapshot>, debugLog?: AcpDebugLog): AgentEvent[] {
     return normalizeToolEvents(mapSessionUpdate(update, debugLog), toolCalls)
 }
@@ -140,6 +163,63 @@ function normalizeToolEvents(events: AgentEvent[], toolCalls: Map<string, ToolCa
 
         return event
     })
+}
+
+function appendErrorFields(lines: string[], error: unknown): void {
+    if (!error || typeof error !== 'object') return
+    const record = error as Record<string, unknown>
+    for (const key of ['code', 'status', 'statusCode', 'requestId', 'request_id', 'type']) {
+        const value = record[key]
+        if (value !== undefined && value !== null && value !== '') {
+            lines.push(`${key}: ${String(value)}`)
+        }
+    }
+
+    const response = record.response
+    if (response && typeof response === 'object') {
+        const responseRecord = response as Record<string, unknown>
+        const status = responseRecord.status ?? responseRecord.statusCode
+        const statusText = responseRecord.statusText
+        if (status !== undefined || statusText !== undefined) {
+            lines.push(`response: ${[status, statusText].filter(Boolean).join(' ')}`)
+        }
+    }
+}
+
+function appendCause(lines: string[], cause: unknown): void {
+    if (!cause) return
+    if (cause instanceof Error) {
+        lines.push(`Cause: ${cause.name}: ${cause.message}`)
+        appendErrorFields(lines, cause)
+        return
+    }
+    lines.push(`Cause: ${formatUnknownError(cause)}`)
+}
+
+function appendStackPreview(lines: string[], stack: string | undefined): void {
+    if (!stack) return
+    const stackLines = stack
+        .split(/\r?\n/)
+        .slice(1, 5)
+        .map(line => line.trim())
+        .filter(Boolean)
+    if (stackLines.length > 0) {
+        lines.push(`Stack:\n${stackLines.join('\n')}`)
+    }
+}
+
+function formatUnknownError(error: unknown): string {
+    if (typeof error === 'string') return error
+    try {
+        return JSON.stringify(error)
+    } catch {
+        return String(error)
+    }
+}
+
+function truncateErrorSummary(summary: string): string {
+    if (summary.length <= MAX_AGENT_ERROR_SUMMARY_LENGTH) return summary
+    return `${summary.slice(0, MAX_AGENT_ERROR_SUMMARY_LENGTH - 20)}\n... <truncated>`
 }
 
 function isMissingToolName(toolName: string | undefined): boolean {
@@ -750,17 +830,17 @@ export class AcpProvider implements AgentProvider {
                         // a successful stop reason — override to error so the
                         // user actually sees what went wrong.
                         resultEvent.status = 'error'
-                        resultEvent.summary = stderrError.substring(0, 200)
+                        resultEvent.summary = truncateErrorSummary(stderrError)
                     }
                     events.push(resultEvent)
                     events.end()
                 }
             } catch (e) {
                 updateConsumerAbort?.abort()
-                const msg = e instanceof Error ? e.message : String(e)
-                console.error(`[acp:${this.name}] Query failed: ${msg}`)
+                const summary = formatAgentQueryError(e, { provider: this.name, phase: 'query', sessionId })
+                console.error(`[acp:${this.name}] Query failed: ${summary}`)
                 if (!events.done) {
-                    events.push({ kind: 'result', status: 'error', summary: msg.substring(0, 200) })
+                    events.push({ kind: 'result', status: 'error', summary })
                     events.end()
                 }
             }

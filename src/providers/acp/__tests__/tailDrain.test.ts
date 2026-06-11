@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AcpProvider } from '@/providers/acp'
+import { AcpProvider, formatAgentQueryError } from '@/providers/acp'
 import type { AgentEvent } from '@/providers/types'
 
 interface FakeSessionNotification {
@@ -214,5 +214,28 @@ describe('AcpProvider tail drain', () => {
             expect.objectContaining({ kind: 'text', text: 'old history from loadSession' }),
         ]))
         expect(clientManager.pendingWaiterCount).toBe(0)
+    })
+})
+
+describe('formatAgentQueryError', () => {
+    it('adds provider and request context when the upstream message is generic', () => {
+        const error = Object.assign(new Error('Internal error'), {
+            name: 'RequestError',
+            code: 'internal_error',
+            requestId: 'req_123',
+        })
+
+        const summary = formatAgentQueryError(error, {
+            provider: 'codex',
+            phase: 'query',
+            sessionId: '019eb5bc-df44-73a3-8c5c-1c89efcb3d62',
+        })
+
+        expect(summary).toContain('Provider: codex')
+        expect(summary).toContain('Phase: query')
+        expect(summary).toContain('Session: 019eb5bc-df')
+        expect(summary).toContain('Error: RequestError: Internal error')
+        expect(summary).toContain('code: internal_error')
+        expect(summary).toContain('requestId: req_123')
     })
 })
