@@ -111,6 +111,7 @@ function createSession(state: TopicSession['state'] = 'querying'): TopicSession 
         } as any,
         channelPort: {} as any,
         getProgress: vi.fn(() => ({ state, elapsedSeconds: 12, lastToolName: 'Bash' })),
+        getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
     }
 }
 

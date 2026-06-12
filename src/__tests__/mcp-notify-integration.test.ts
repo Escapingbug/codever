@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     createCancelReminderHandler,
+    createGetDeliveryStatusHandler,
     createScheduleReminderHandler,
     createSendFileHandler,
     createSendMessageHandler,
@@ -20,9 +21,13 @@ describe('MCP notify tool integration with daemon API', () => {
         existsSync.mockReturnValue(true)
         readFileSync.mockReturnValue('3737')
         process.env.CODEVER_CONVERSATION_ID = 'topic:-100:10'
-        vi.stubGlobal('fetch', vi.fn(async () => ({
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
             ok: true,
-            json: async () => ({ taskId: 'task-1' }),
+            json: async () => {
+                if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
+                if (url.endsWith('/api/delivery-status')) return { deliveries: [{ id: 'delivery-1', kind: 'send', status: 'pending', createdAt: 1, textChars: 6 }] }
+                return { taskId: 'task-1' }
+            },
             text: async () => '',
         })))
     })
@@ -69,6 +74,8 @@ describe('MCP notify tool integration with daemon API', () => {
         const result = await handler({ path: '/repo/report.md', caption: 'latest report', type: 'markdown' })
 
         expect(result.isError).toBeUndefined()
+        expect(result.content[0].text).toContain('File delivery queued')
+        expect(result.content[0].text).toContain('delivery-1')
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({
@@ -77,6 +84,19 @@ describe('MCP notify tool integration with daemon API', () => {
                 caption: 'latest report',
                 type: 'markdown',
             }),
+        }))
+    })
+
+    it('get_delivery_status posts a session-scoped delivery status request to daemon API', async () => {
+        const handler = createGetDeliveryStatusHandler()
+
+        const result = await handler({ deliveryId: 'delivery-1' })
+
+        expect(result.isError).toBeUndefined()
+        expect(result.content[0].text).toContain('delivery-1: pending')
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/delivery-status', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
         }))
     })
 

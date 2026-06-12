@@ -54,11 +54,33 @@ export interface SendFileRequest {
     language?: string
 }
 
+export interface DeliveryStatusRequest {
+    /** providerSessionId or coreSessionId to target */
+    sessionId: string
+    /** Optional delivery id returned by send_file */
+    deliveryId?: string
+}
+
+export interface DeliveryStatusResponse {
+    deliveries: Array<{
+        id: string
+        kind: 'send' | 'edit'
+        status: string
+        messageId?: string | number
+        createdAt: number
+        completedAt?: number
+        error?: string
+        textChars: number
+        attachments?: Array<{ type: string; path: string; filename?: string }>
+    }>
+}
+
 export interface DaemonApiHandlers {
     onSchedule: (req: ScheduleRequest) => { taskId: string }
     onCancel: (req: CancelRequest) => void
     onSend: (req: SendRequest) => void
-    onSendFile: (req: SendFileRequest) => void
+    onSendFile: (req: SendFileRequest) => void | Promise<unknown>
+    onDeliveryStatus: (req: DeliveryStatusRequest) => DeliveryStatusResponse
 }
 
 export interface DaemonApi {
@@ -130,8 +152,19 @@ export async function startDaemonApi(handlers: DaemonApiHandlers): Promise<Daemo
                         sendJson(400, { error: 'Missing required fields: sessionId, path' })
                         return
                     }
-                    handlers.onSendFile(data)
-                    sendJson(200, { ok: true })
+                    const result = await handlers.onSendFile(data)
+                    sendJson(200, { ok: true, result })
+                    return
+                }
+
+                if (req.method === 'POST' && req.url === '/api/delivery-status') {
+                    const body = await readBody()
+                    const data = JSON.parse(body) as DeliveryStatusRequest
+                    if (!data.sessionId) {
+                        sendJson(400, { error: 'Missing required field: sessionId' })
+                        return
+                    }
+                    sendJson(200, handlers.onDeliveryStatus(data))
                     return
                 }
 

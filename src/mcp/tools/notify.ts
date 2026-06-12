@@ -200,6 +200,18 @@ export function createSendMessageHandler() {
 
 type SendFileType = 'document' | 'file' | 'markdown' | 'code' | 'image'
 
+interface SendFileApiResponse {
+    ok: boolean
+    result?: {
+        status?: string
+        deliveryId?: string
+        path?: string
+        filename?: string
+        type?: string
+        message?: string
+    }
+}
+
 export function createSendFileHandler() {
     return async (args: { path: string; caption?: string; filename?: string; type?: SendFileType; language?: string }) => {
         const apiPort = getDaemonApiPort()
@@ -242,8 +254,103 @@ export function createSendFileHandler() {
                 }
             }
 
+            const data = await res.json() as SendFileApiResponse
+            const result = data.result
+            if (result?.status === 'queued' && result.deliveryId) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: `File delivery queued: "${args.path}" (delivery ID: ${result.deliveryId}). The upload may still be in progress; call get_delivery_status with this delivery ID to check whether it is pending, sent, or failed.`,
+                    }],
+                }
+            }
+
+            if (result?.status === 'failed') {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Send file failed: ${result.message ?? 'unknown error'}` }],
+                }
+            }
+
             return {
-                content: [{ type: 'text' as const, text: `File sent: "${args.path}"` }],
+                content: [{ type: 'text' as const, text: `File delivered: "${args.path}"` }],
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: `Failed to connect to daemon: ${msg}` }],
+            }
+        }
+    }
+}
+
+export function createGetDeliveryStatusHandler() {
+    return async (args: { deliveryId?: string }) => {
+        const apiPort = getDaemonApiPort()
+        if (!apiPort) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Daemon API not available.' }],
+            }
+        }
+
+        const conversationId = process.env.CODEVER_CONVERSATION_ID
+        if (!conversationId) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Session identity not available yet. Get_delivery_status requires a session context that is established after the first turn. Please retry on the next message.' }],
+            }
+        }
+
+        try {
+            const res = await fetch(`http://127.0.0.1:${apiPort}/api/delivery-status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: conversationId,
+                    ...(args.deliveryId ? { deliveryId: args.deliveryId } : {}),
+                }),
+            })
+
+            if (!res.ok) {
+                const err = await res.text()
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Delivery status failed: ${err}` }],
+                }
+            }
+
+            const data = await res.json() as {
+                deliveries?: Array<{
+                    id: string
+                    kind: string
+                    status: string
+                    messageId?: string | number
+                    createdAt: number
+                    completedAt?: number
+                    error?: string
+                    textChars: number
+                    attachments?: Array<{ type: string; path: string; filename?: string }>
+                }>
+            }
+            const deliveries = data.deliveries ?? []
+            if (deliveries.length === 0) {
+                return {
+                    content: [{ type: 'text' as const, text: args.deliveryId ? `No delivery found for ${args.deliveryId}.` : 'No deliveries found for this session.' }],
+                }
+            }
+
+            const lines = deliveries.map(delivery => {
+                const attachment = delivery.attachments?.[0]
+                const target = attachment?.filename ?? attachment?.path ?? `${delivery.textChars} text chars`
+                const completed = delivery.completedAt ? ` completed=${new Date(delivery.completedAt).toISOString()}` : ''
+                const messageId = delivery.messageId !== undefined ? ` messageId=${delivery.messageId}` : ''
+                const error = delivery.error ? ` error=${delivery.error}` : ''
+                return `${delivery.id}: ${delivery.status} ${target}${messageId}${completed}${error}`
+            })
+            return {
+                content: [{ type: 'text' as const, text: `Delivery status:\n${lines.join('\n')}` }],
             }
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
@@ -298,5 +405,14 @@ export function registerNotifyTools(server: any): void {
             language: z.string().optional().describe('Optional language tag for code rendering'),
         },
         createSendFileHandler(),
+    )
+
+    server.tool(
+        'get_delivery_status',
+        'Check asynchronous channel delivery status for files or messages queued by Codever. Pass deliveryId from send_file to inspect a specific upload.',
+        {
+            deliveryId: z.string().optional().describe('Optional delivery ID returned by send_file. If omitted, recent deliveries for the session are listed.'),
+        },
+        createGetDeliveryStatusHandler(),
     )
 }

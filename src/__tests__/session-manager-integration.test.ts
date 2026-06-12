@@ -17,6 +17,7 @@ function createTopicSession(id: string, conversationId?: string | null): TopicSe
         } as any,
         channelPort: {} as any,
         getProgress: vi.fn(() => null),
+        getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
     }
 }
 

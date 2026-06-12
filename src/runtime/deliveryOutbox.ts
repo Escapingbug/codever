@@ -25,6 +25,7 @@ export interface DeliveryOutboxConfig {
     maxRateLimitRetries?: number
     maxRateLimitDelayMs?: number
     deliveryTimeoutMs?: number
+    attachmentDeliveryTimeoutMs?: number
     progressiveEditDebounceMs?: number
 }
 
@@ -46,6 +47,7 @@ export interface DeliveryOutboxState {
 const DEFAULT_RATE_LIMIT_RETRIES = 3
 const DEFAULT_MAX_RATE_LIMIT_DELAY_MS = 60_000
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000
+const DEFAULT_ATTACHMENT_DELIVERY_TIMEOUT_MS = 10 * 60_000
 
 export class DeliveryOutbox {
     private controlChain: Promise<void> = Promise.resolve()
@@ -63,12 +65,16 @@ export class DeliveryOutbox {
     constructor(private config: DeliveryOutboxConfig) {}
 
     send(message: ChannelMessage, onSent?: (result: ChannelSendResult) => void, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
+        return this.queueSend(message, onSent, options).completion
+    }
+
+    queueSend(message: ChannelMessage, onSent?: (result: ChannelSendResult) => void, options: DeliveryOptions = {}): { record: DeliveryRecord; completion: Promise<DeliveryRecord> } {
         const lane = options.lane ?? 'normal'
         const record = this.createRecord('send', message, { ...options, lane })
-        return this.enqueueReliable(lane, record, async () => {
+        const completion = this.enqueueReliable(lane, record, async () => {
             try {
                 this.logAttachmentSend(record)
-                const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
+                const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                 record.status = 'sent'
                 record.messageId = result.messageId
                 onSent?.(result)
@@ -80,6 +86,7 @@ export class DeliveryOutbox {
                 record.completedAt = Date.now()
             }
         })
+        return { record, completion }
     }
 
     edit(messageId: string | number | undefined, message: ChannelMessage, fallbackToSend = true, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
@@ -109,7 +116,7 @@ export class DeliveryOutbox {
                 record.error = error
                 this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    await this.withRateLimitRetry(() => this.config.channelPort.send(message))
+                    await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                 }
             } finally {
                 record.completedAt = Date.now()
@@ -130,7 +137,7 @@ export class DeliveryOutbox {
                     return
                 }
                 try {
-                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
+                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                     record.status = 'sent'
                     record.messageId = result.messageId
                 } catch (error) {
@@ -152,7 +159,7 @@ export class DeliveryOutbox {
                 record.error = error
                 this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
+                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                     record.status = 'sent'
                     record.messageId = result.messageId
                 }
@@ -319,7 +326,7 @@ export class DeliveryOutbox {
             this.config.onFailure?.(task.record)
             if (task.fallbackToSend) {
                 try {
-                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(task.message))
+                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(task.message), this.timeoutForMessage(task.message))
                     task.record.status = 'sent'
                     task.record.messageId = result.messageId
                 } catch (sendError) {
@@ -351,10 +358,16 @@ export class DeliveryOutbox {
         this.log(`[delivery] sending attachment message id=${record.id} lane=${record.lane ?? 'normal'} attachments=[${summary}] textChars=${record.message.text.length}`)
     }
 
-    private async withRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {
+    private timeoutForMessage(message: ChannelMessage): number {
+        if (message.attachments?.length) {
+            return this.config.attachmentDeliveryTimeoutMs ?? DEFAULT_ATTACHMENT_DELIVERY_TIMEOUT_MS
+        }
+        return this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS
+    }
+
+    private async withRateLimitRetry<T>(operation: () => Promise<T>, timeoutMs = this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS): Promise<T> {
         const maxRetries = this.config.maxRateLimitRetries ?? DEFAULT_RATE_LIMIT_RETRIES
         const maxDelayMs = this.config.maxRateLimitDelayMs ?? DEFAULT_MAX_RATE_LIMIT_DELAY_MS
-        const timeoutMs = this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS
 
         for (let attempt = 0; ; attempt++) {
             try {

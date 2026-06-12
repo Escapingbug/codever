@@ -7,11 +7,14 @@ describe('Daemon API integration boundary', () => {
     const onCancel = vi.fn()
     const onSend = vi.fn()
     const onSendFile = vi.fn()
+    const onDeliveryStatus = vi.fn()
 
     beforeEach(async () => {
         vi.clearAllMocks()
         onSchedule.mockReturnValue({ taskId: 'task-1' })
-        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile })
+        onSendFile.mockResolvedValue({ status: 'queued', deliveryId: 'delivery-1' })
+        onDeliveryStatus.mockReturnValue({ deliveries: [] })
+        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile, onDeliveryStatus })
     })
 
     afterEach(() => {
@@ -73,12 +76,45 @@ describe('Daemon API integration boundary', () => {
         })
 
         expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({ ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } })
         expect(onSendFile).toHaveBeenCalledWith({
             sessionId: 'topic:-100:10',
             path: '/repo/report.md',
             caption: 'latest report',
             type: 'markdown',
         })
+    })
+
+    it('POST /api/delivery-status validates and forwards delivery status requests', async () => {
+        onDeliveryStatus.mockReturnValueOnce({
+            deliveries: [{
+                id: 'delivery-1',
+                kind: 'send',
+                status: 'pending',
+                createdAt: 1,
+                textChars: 12,
+                attachments: [{ type: 'document', path: '/repo/report.md', filename: 'report.md' }],
+            }],
+        })
+
+        const res = await fetch(url('/api/delivery-status'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
+        })
+
+        expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({
+            deliveries: [{
+                id: 'delivery-1',
+                kind: 'send',
+                status: 'pending',
+                createdAt: 1,
+                textChars: 12,
+                attachments: [{ type: 'document', path: '/repo/report.md', filename: 'report.md' }],
+            }],
+        })
+        expect(onDeliveryStatus).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' })
     })
 
     it('POST /api/cancel validates and forwards cancel requests', async () => {

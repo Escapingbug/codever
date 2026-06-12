@@ -13,7 +13,7 @@ import { createBot } from './channel/telegram/bot'
 import { SessionManager, buildMessageThreadParams, makeTopicKey } from './bridge/sessionManager'
 import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
-import { startDaemonApi, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
+import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
 import { routeSendMessageToTopicSession } from './daemon/sendRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
@@ -157,6 +157,44 @@ async function main() {
 
     // --- Daemon Internal API: IPC bridge for MCP subprocess ---
 
+    const findTopicSessionForApiSession = (sessionId: string) => {
+        let topicSession = sessionManager.getTopicSessionByConversationId(sessionId)
+        if (!topicSession) {
+            const sessionRecord = sessionManager.getSession(sessionId)
+            if (sessionRecord) {
+                topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
+            }
+        }
+        return topicSession
+    }
+
+    const formatDeliveryStatus = (req: DeliveryStatusRequest): DeliveryStatusResponse => {
+        const topicSession = findTopicSessionForApiSession(req.sessionId)
+        if (!topicSession) {
+            throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
+        }
+        const status = topicSession.getDeliveryStatus(req.deliveryId)
+        return {
+            deliveries: status.deliveries.map(record => ({
+                id: record.id,
+                kind: record.kind,
+                status: record.status,
+                ...(record.messageId !== undefined ? { messageId: record.messageId } : {}),
+                createdAt: record.createdAt,
+                ...(record.completedAt !== undefined ? { completedAt: record.completedAt } : {}),
+                ...(record.error ? { error: record.error instanceof Error ? record.error.message : String(record.error) } : {}),
+                textChars: record.message.text.length,
+                ...(record.message.attachments ? {
+                    attachments: record.message.attachments.map(attachment => ({
+                        type: attachment.type,
+                        path: attachment.path,
+                        ...(attachment.filename ? { filename: attachment.filename } : {}),
+                    })),
+                } : {}),
+            })),
+        }
+    }
+
     const daemonApi = await startDaemonApi({
         onSchedule: (req: ScheduleRequest) => {
             // Store topicKey as sessionId for scheduled tasks
@@ -180,13 +218,7 @@ async function main() {
         },
         onSend: (req: SendRequest) => {
             // Find the topic session
-            let topicSession = sessionManager.getTopicSessionByConversationId(req.sessionId)
-            if (!topicSession) {
-                const sessionRecord = sessionManager.getSession(req.sessionId)
-                if (sessionRecord) {
-                    topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
-                }
-            }
+            const topicSession = findTopicSessionForApiSession(req.sessionId)
             if (topicSession) {
                 routeSendMessageToTopicSession(topicSession, req)
                 console.log(`[daemon] Sent message to session ${req.sessionId.slice(0, 8)}: "${req.message.slice(0, 50)}"`)
@@ -194,31 +226,28 @@ async function main() {
                 console.warn(`[daemon] Send: no topic session found for ${req.sessionId.slice(0, 8)}`)
             }
         },
-        onSendFile: (req: SendFileRequest) => {
-            let topicSession = sessionManager.getTopicSessionByConversationId(req.sessionId)
+        onSendFile: async (req: SendFileRequest) => {
+            const topicSession = findTopicSessionForApiSession(req.sessionId)
             if (!topicSession) {
-                const sessionRecord = sessionManager.getSession(req.sessionId)
-                if (sessionRecord) {
-                    topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
-                }
+                throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
             }
-            if (topicSession) {
-                void topicSession.dispatch({
-                    kind: 'command',
-                    name: 'send_file',
-                    args: JSON.stringify({
-                        path: req.path,
-                        ...(req.caption ? { caption: req.caption } : {}),
-                        ...(req.filename ? { filename: req.filename } : {}),
-                        ...(req.type ? { type: req.type } : {}),
-                        ...(req.language ? { language: req.language } : {}),
-                    }),
-                    source: 'mcp',
-                })
-                console.log(`[daemon] Sent file to session ${req.sessionId.slice(0, 8)}: "${req.path}"`)
-            } else {
-                console.warn(`[daemon] Send file: no topic session found for ${req.sessionId.slice(0, 8)}`)
-            }
+            const result = await topicSession.dispatch({
+                kind: 'command',
+                name: 'send_file',
+                args: JSON.stringify({
+                    path: req.path,
+                    ...(req.caption ? { caption: req.caption } : {}),
+                    ...(req.filename ? { filename: req.filename } : {}),
+                    ...(req.type ? { type: req.type } : {}),
+                    ...(req.language ? { language: req.language } : {}),
+                }),
+                source: 'mcp',
+            })
+            console.log(`[daemon] Queued file for session ${req.sessionId.slice(0, 8)}: "${req.path}"`)
+            return result
+        },
+        onDeliveryStatus: (req: DeliveryStatusRequest) => {
+            return formatDeliveryStatus(req)
         },
     })
 

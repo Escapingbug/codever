@@ -37,6 +37,15 @@ export interface RuntimeProgress {
     outbox: DeliveryOutboxState
 }
 
+export interface SendFileCommandResult {
+    status: 'queued' | 'sent' | 'failed'
+    deliveryId?: string
+    path?: string
+    filename?: string
+    type?: string
+    message?: string
+}
+
 interface FileReference {
     id: string
     uri: string
@@ -128,7 +137,7 @@ export class SemanticSessionRuntime {
         })
     }
 
-    dispatch(input: SessionInput): Promise<void> {
+    dispatch(input: SessionInput): Promise<unknown> {
         if (input.kind === 'cancel') {
             return this.cancel()
         }
@@ -145,8 +154,9 @@ export class SemanticSessionRuntime {
             void this.send({ text: '📨 Agent is working. Your message has been queued and will be processed when the current task completes.', format: 'html' })
         }
 
-        this.mailbox = this.mailbox.then(() => this.handleInput(input))
-        return this.mailbox
+        const run = this.mailbox.then(() => this.handleInput(input))
+        this.mailbox = run.then(() => undefined, () => undefined)
+        return run
     }
 
     async destroy(): Promise<void> {
@@ -189,25 +199,30 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async handleInput(input: SessionInput): Promise<void> {
+    getDeliveryStatus(deliveryId?: string): { deliveries: DeliveryRecord[] } {
+        const deliveries = this.outbox.list()
+            .filter(record => !deliveryId || record.id === deliveryId)
+        return { deliveries }
+    }
+
+    private async handleInput(input: SessionInput): Promise<unknown> {
         if (this.state === 'dead') return
 
         switch (input.kind) {
             case 'user_message':
                 await this.runTurn(input.richInput ?? input.text)
-                break
+                return
             case 'scheduled_message':
                 await this.runTurn(input.text)
-                break
+                return
             case 'cancel':
                 await this.cancel()
-                break
+                return
             case 'command':
-                await this.handleCommand(input)
-                break
+                return await this.handleCommand(input)
             case 'decision_response':
                 this.recordCommand('decision_response', { decisionId: input.decisionId, value: input.value, source: input.source })
-                break
+                return
         }
     }
 
@@ -479,12 +494,12 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<void> {
+    private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
         this.captureTables(message)
-        await this.outbox.send(message, undefined, options)
+        return await this.outbox.send(message, undefined, options)
     }
 
-    private async handleCommand(input: Extract<SessionInput, { kind: 'command' }>): Promise<void> {
+    private async handleCommand(input: Extract<SessionInput, { kind: 'command' }>): Promise<unknown> {
         const name = input.name
         const args = input.args?.trim()
 
@@ -559,8 +574,7 @@ export class SemanticSessionRuntime {
                 await this.send({ text: args ?? '', format: 'html' })
                 return
             case 'send_file':
-                await this.handleSendFileCommand(args)
-                return
+                return await this.handleSendFileCommand(args)
             case 'progress':
                 await this.handleProgressCommand()
                 return
@@ -699,13 +713,13 @@ export class SemanticSessionRuntime {
         }
     }
 
-    private async handleSendFileCommand(args: string | undefined): Promise<void> {
+    private async handleSendFileCommand(args: string | undefined): Promise<SendFileCommandResult> {
         const request = parseSendFileArgs(args)
         if (!request?.path) {
             const error = 'missing required file path'
             this.recordCommand('send_file', { error })
             await this.send({ text: `Cannot send file: ${escapeHtml(error)}`, format: 'html' })
-            return
+            return { status: 'failed', message: error }
         }
 
         try {
@@ -717,7 +731,7 @@ export class SemanticSessionRuntime {
                     format: 'markdown',
                 })
                 this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType })
-                return
+                return { status: 'sent', path, filename, type: renderType }
             }
 
             if (renderType === 'code') {
@@ -728,21 +742,23 @@ export class SemanticSessionRuntime {
                     format: 'markdown',
                 })
                 this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType, language })
-                return
+                return { status: 'sent', path, filename, type: renderType }
             }
 
             const { path, filename } = await this.resolveSendableFile(request.path, request.filename)
             const attachmentType = renderType === 'image' ? 'photo' : 'document'
-            await this.send({
+            const { record } = this.outbox.queueSend({
                 text: request.caption ?? filename,
                 format: 'plain',
                 attachments: [{ type: attachmentType, path, filename }],
             })
-            this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType })
+            this.recordCommand('send_file', { path, filename, caption: request.caption, type: renderType, deliveryId: record.id, status: record.status })
+            return { status: 'queued', deliveryId: record.id, path, filename, type: renderType }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             this.recordCommand('send_file', { path: request.path, error: message })
             await this.send({ text: `Cannot send file: ${escapeHtml(message)}`, format: 'html' })
+            return { status: 'failed', path: request.path, message }
         }
     }
 

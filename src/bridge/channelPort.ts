@@ -7,6 +7,7 @@
 import type { SessionState } from '@/core/types'
 import type { RichUserInput, SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
+import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -77,7 +78,7 @@ export interface TopicSession {
     receiveInput(input: { text: string; username?: string; richInput?: RichUserInput }): void
 
     /** Push a semantic input into the session runtime */
-    dispatch(input: SessionInput): Promise<void>
+    dispatch(input: SessionInput): Promise<unknown>
 
     /** Destroy the session and clean up resources */
     destroy(): Promise<void>
@@ -105,4 +106,9 @@ export interface TopicSession {
             lastFailure?: string
         }
     } | null
+
+    /** Inspect queued channel deliveries for async MCP operations */
+    getDeliveryStatus(deliveryId?: string): {
+        deliveries: DeliveryRecord[]
+    }
 }
