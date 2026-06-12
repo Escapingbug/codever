@@ -998,6 +998,64 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('routes codever MCP send_file through the runtime when the MCP subprocess lacks session identity', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-identity-'))
+        try {
+            const apkPath = join(tempDir, 'app-release.apk')
+            writeFileSync(apkPath, 'apk bytes', 'utf8')
+            const provider = createProvider([
+                {
+                    kind: 'tool_use',
+                    toolUseId: 'send-file-1',
+                    toolName: 'tool_call',
+                    input: {
+                        server: 'codever',
+                        tool: 'send_file',
+                        arguments: {
+                            path: apkPath,
+                            filename: 'falapk-release.apk',
+                            type: 'document',
+                            caption: 'Release APK',
+                        },
+                    },
+                    status: 'running',
+                },
+                {
+                    kind: 'tool_result',
+                    toolUseId: 'send-file-1',
+                    output: 'Session identity not available yet. Send_file requires a session context.',
+                    isError: true,
+                },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = createChannel()
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'topic-session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'codex',
+                providerSessionId: '019eb9c2-03bb-7b31-8e10-a1f254d2eb50',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'send apk', source: 'channel' })
+
+            expect(channel.sent).toEqual([
+                expect.objectContaining({
+                    text: 'Release APK',
+                    format: 'plain',
+                    attachments: [{ type: 'document', path: apkPath, filename: 'falapk-release.apk' }],
+                }),
+            ])
+            expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Session identity not available yet')
+            expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+                expect.objectContaining({ kind: 'command_result', command: 'send_file' }),
+            ]))
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
     it('renders MCP send_file markdown files as markdown channel messages', async () => {
         const tempDir = mkdtempSync(join(tmpdir(), 'codever-send-file-md-'))
         try {
