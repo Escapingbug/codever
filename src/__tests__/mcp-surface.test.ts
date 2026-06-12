@@ -47,9 +47,13 @@ describe('MCP active surface registration', () => {
         existsSync.mockReturnValue(true)
         readFileSync.mockReturnValue('3737')
         process.env.CODEVER_CONVERSATION_ID = 'provider-session-1'
-        vi.stubGlobal('fetch', vi.fn(async () => ({
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
             ok: true,
-            json: async () => ({ taskId: 'task-1' }),
+            json: async () => {
+                if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
+                if (url.endsWith('/api/delivery-status')) return { deliveries: [] }
+                return { taskId: 'task-1' }
+            },
             text: async () => '',
         })))
     })
@@ -71,6 +75,7 @@ describe('MCP active surface registration', () => {
         expect(tools.has('cancel_reminder')).toBe(true)
         expect(tools.has('send_message')).toBe(true)
         expect(tools.has('send_file')).toBe(true)
+        expect(tools.has('get_delivery_status')).toBe(true)
         expect(tools.has('list_sessions')).toBe(false)
 
         const context = await tools.get('get_codever_context')!({ topic: 'channel' })
@@ -91,6 +96,12 @@ describe('MCP active surface registration', () => {
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ sessionId: 'provider-session-1', path: '/repo/report.md', caption: 'report', type: 'markdown' }),
+        }))
+
+        await tools.get('get_delivery_status')!({ deliveryId: 'delivery-1' })
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/delivery-status', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1', deliveryId: 'delivery-1' }),
         }))
     })
 

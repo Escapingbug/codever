@@ -108,6 +108,38 @@ describe('DeliveryOutbox', () => {
         }
     })
 
+    it('uses the attachment delivery timeout for queued file uploads', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.send).mockImplementation(async () => await new Promise(() => {}))
+            const failures: string[] = []
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                deliveryTimeoutMs: 100,
+                attachmentDeliveryTimeoutMs: 500,
+                onFailure: (record) => failures.push(record.error instanceof Error ? record.error.message : String(record.error)),
+            })
+
+            const { record, completion } = outbox.queueSend({
+                text: 'large.apk',
+                format: 'plain',
+                attachments: [{ type: 'document', path: '/repo/large.apk', filename: 'large.apk' }],
+            })
+
+            expect(record.status).toBe('pending')
+            await vi.advanceTimersByTimeAsync(100)
+            expect(record.status).toBe('pending')
+
+            await vi.advanceTimersByTimeAsync(400)
+            await expect(completion).resolves.toMatchObject({ status: 'failed' })
+            expect(failures[0]).toContain('500ms')
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('does not let a rate-limited progressive edit block control sends', async () => {
         vi.useFakeTimers()
         try {

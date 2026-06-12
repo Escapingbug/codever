@@ -134,6 +134,7 @@ function createTopicSession(): TopicSession {
         } as any,
         channelPort: {} as any,
         getProgress: vi.fn(() => null),
+        getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
     }
 }
 

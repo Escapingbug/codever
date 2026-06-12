@@ -150,5 +150,8 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
                 outbox: progress.outbox,
             }
         },
+        getDeliveryStatus(deliveryId?: string) {
+            return runtime.getDeliveryStatus(deliveryId)
+        },
     }
 }
