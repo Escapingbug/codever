@@ -477,10 +477,9 @@ export class AcpProvider implements AgentProvider {
             clientManager.clearStderrBuffer()
 
             let updateConsumerAbort: AbortController | null = null
+            let sessionId = config.sessionId
 
             try {
-                let sessionId = config.sessionId
-
                 let isResumingSession = false
                 /** Whether the session was resumed via loadSession (which replays history).
                  *  resumeSession does NOT replay history, so drain logic is not needed. */

@@ -6,6 +6,7 @@ import { basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
+import type { AgentEvent } from '@/providers/types'
 import type { ConversationEvent, RichFilePart, RichUserInput, SessionInput } from './semantic'
 import { normalizeUserInput } from './semantic'
 import { ConversationJournal } from './semantic'
@@ -102,6 +103,7 @@ export class SemanticSessionRuntime {
     private recentTables: string[] = []
     private availableCommands: ProviderCommand[] = []
     private lastConfigOptions: Array<Record<string, unknown>> = []
+    private pendingCodeverSendFileCalls = new Map<string, string>()
     private fileReferences = new Map<string, FileReference>()
     private fileReferenceIdsByUri = new Map<string, string>()
     private nextFileReferenceNumber = 1
@@ -220,6 +222,7 @@ export class SemanticSessionRuntime {
         this.state = 'querying'
         this.turnStartedAt = Date.now()
         this.lastToolName = null
+        this.pendingCodeverSendFileCalls.clear()
         this.projector.reset()
         this.toolMessageIds.clear()
         this.notifyStatus('querying')
@@ -258,6 +261,9 @@ export class SemanticSessionRuntime {
                 }
                 if (providerEvent.kind === 'tool_use') {
                     this.lastToolName = providerEvent.toolName
+                }
+                if (await this.handleCodeverSendFileIdentityFallback(providerEvent)) {
+                    continue
                 }
                 const semanticEvents = this.adapter.toConversationEvents(providerEvent, {
                     sessionId: this.config.sessionId,
@@ -740,6 +746,29 @@ export class SemanticSessionRuntime {
         }
     }
 
+    private async handleCodeverSendFileIdentityFallback(event: AgentEvent): Promise<boolean> {
+        if (event.kind === 'tool_use') {
+            const request = extractCodeverSendFileRequest(event.input)
+            if (!request || !event.toolUseId) return false
+            this.pendingCodeverSendFileCalls.set(event.toolUseId, JSON.stringify(request))
+            return true
+        }
+
+        if (event.kind !== 'tool_result' || !event.toolUseId) return false
+
+        const args = this.pendingCodeverSendFileCalls.get(event.toolUseId)
+        if (!args) return false
+        this.pendingCodeverSendFileCalls.delete(event.toolUseId)
+
+        if (event.isError && isSessionIdentityUnavailableOutput(event.output)) {
+            this.log(`[session] MCP send_file lacked session identity; routing through runtime session id=${this.config.sessionId.slice(0, 8)}`)
+            await this.handleSendFileCommand(args)
+            return true
+        }
+
+        return false
+    }
+
     private formatFileReadMessage(id: string, path: string, content: string): ChannelMessage {
         if (isMarkdownPath(path)) {
             return {
@@ -1000,6 +1029,39 @@ function normalizeSendFileType(type: string | undefined): SendFileType {
         return normalized
     }
     return 'document'
+}
+
+function extractCodeverSendFileRequest(input: unknown): { path: string; caption?: string; filename?: string; type?: string; language?: string } | null {
+    const record = asRecord(input)
+    if (!record) return null
+
+    const server = typeof record.server === 'string' ? record.server.trim().toLowerCase() : ''
+    const tool = typeof record.tool === 'string' ? record.tool.trim().toLowerCase() : ''
+    if (server !== 'codever' || tool !== 'send_file') return null
+
+    const args = asRecord(record.arguments)
+    if (!args) return null
+
+    const path = typeof args.path === 'string' ? args.path.trim() : ''
+    if (!path) return null
+
+    return {
+        path,
+        ...(typeof args.caption === 'string' && args.caption.trim() ? { caption: args.caption } : {}),
+        ...(typeof args.filename === 'string' && args.filename.trim() ? { filename: args.filename } : {}),
+        ...(typeof args.type === 'string' && args.type.trim() ? { type: args.type } : {}),
+        ...(typeof args.language === 'string' && args.language.trim() ? { language: args.language } : {}),
+    }
+}
+
+function isSessionIdentityUnavailableOutput(output: string): boolean {
+    return output.toLowerCase().includes('session identity not available yet')
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null
 }
 
 function withOptionalCaption(content: string, caption: string | undefined): string {
