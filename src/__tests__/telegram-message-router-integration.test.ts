@@ -239,24 +239,43 @@ describe('Telegram message router integration', () => {
         expect(existing.receiveInput).toHaveBeenCalledWith({ text: 'second message', username: 'alice' })
     })
 
-    it('forwards photo uploads as rich user input', async () => {
+    it('stages photo uploads without creating or dispatching a session', async () => {
+        const bot = createBot()
+        const topicSessions = new Map<string, any>()
+        const sessionManager = createSessionManager()
+        registerMessageRouter(bot, { sessionManager, topicSessions, bot: bot as any })
+        const ctx = createPhotoContext('')
+
+        await bot.emitPhoto(ctx)
+
+        expect(mocks.buildRichInputFromTelegramMessage).toHaveBeenCalledWith(expect.objectContaining({
+            botToken: 'token',
+            topicKey: '-100:10',
+        }))
+        expect(ctx.reply).toHaveBeenCalledWith('Attachment received. Send a text message to use it in the next prompt.')
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
+        expect(sessionManager.tryAcquireCreationLock).not.toHaveBeenCalled()
+    })
+
+    it('attaches staged photo uploads to the next text prompt', async () => {
         const bot = createBot()
         const existing = createTopicSession()
         const topicSessions = new Map<string, any>([['-100:10', existing]])
         registerMessageRouter(bot, { sessionManager: createSessionManager(), topicSessions, bot: bot as any })
 
         await bot.emitPhoto(createPhotoContext('caption'))
+        await bot.emitMessage(createMessageContext('please inspect this image'))
 
         expect(mocks.buildRichInputFromTelegramMessage).toHaveBeenCalledWith(expect.objectContaining({
             botToken: 'token',
             topicKey: '-100:10',
         }))
         expect(existing.receiveInput).toHaveBeenCalledWith({
-            text: 'caption',
+            text: 'please inspect this image',
             username: 'alice',
             richInput: {
                 parts: [
-                    { type: 'text', text: 'caption' },
+                    { type: 'text', text: 'please inspect this image' },
                     { type: 'image', mimeType: 'image/jpeg', data: 'AQID', source: 'telegram:photo-1', filename: 'photo.jpg', sizeBytes: 3 },
                 ],
             },

@@ -21,6 +21,7 @@ export interface MessageRouterContext {
 
 export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void {
     const { sessionManager, topicSessions, bot: botInstance, logger } = ctx
+    const pendingUploadsByTopic = new Map<string, RichUserInput['parts']>()
 
     function glog(chatId: number | null, line: string): void {
         if (logger) logger.group(chatId!, line)
@@ -79,7 +80,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         const userId = c.from!.id
         const messageThreadId = c.message?.message_thread_id
         const topicKey = makeTopicKey(chat.id, messageThreadId)
-        const messageText = getMessageText(c)
+        const messageText = getTextMessageText(c)
         glog(chat.id, `[msg:in] userId=${userId} text="${messageText.slice(0, 80)}"`)
 
         if (!pairing.isAuthorized(userId)) {
@@ -97,6 +98,12 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
 
         const groupChatId = chat.id
         let topicSession = topicSessions.get(topicKey)
+
+        if (hasUpload(c)) {
+            await stageUpload(c, topicKey, pendingUploadsByTopic)
+            return
+        }
+
         const fileCommandMatch = messageText.match(/^\/file_([A-Za-z0-9_-]+)(?:@\w+)?(?:\s|$)/)
         if (fileCommandMatch) {
             if (!topicSession) {
@@ -210,27 +217,11 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         }
 
         if (topicSession) {
-            let richInput: RichUserInput | undefined
-            if (hasUpload(c)) {
-                const botToken = config.getBotToken()
-                if (!botToken) {
-                    await c.reply('Bot token is not configured, cannot download Telegram upload.')
-                    return
-                }
-                try {
-                    const built = await buildRichInputFromTelegramMessage({
-                        api: c.api,
-                        botToken,
-                        topicKey,
-                        message: c.message as any,
-                    })
-                    richInput = built.richInput
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    await c.reply(`Cannot process upload: ${message}`)
-                    return
-                }
-            }
+            const stagedUploads = pendingUploadsByTopic.get(topicKey) ?? []
+            pendingUploadsByTopic.delete(topicKey)
+            const richInput: RichUserInput | undefined = stagedUploads.length > 0
+                ? { parts: [{ type: 'text', text: messageText }, ...stagedUploads] }
+                : undefined
             topicSession.receiveInput({
                 text: messageText,
                 username: c.from?.username || c.from?.first_name,
@@ -248,13 +239,38 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
     bot.on('message:voice', handleUserMessage)
 }
 
-function getMessageText(c: Context): string {
+async function stageUpload(
+    c: Context,
+    topicKey: string,
+    pendingUploadsByTopic: Map<string, RichUserInput['parts']>,
+): Promise<void> {
+    const botToken = config.getBotToken()
+    if (!botToken) {
+        await c.reply('Bot token is not configured, cannot download Telegram upload.')
+        return
+    }
+
+    try {
+        const built = await buildRichInputFromTelegramMessage({
+            api: c.api,
+            botToken,
+            topicKey,
+            message: c.message as any,
+        })
+        const uploadParts = built.richInput.parts.filter(part => part.type !== 'text')
+        if (uploadParts.length === 0) return
+        const existing = pendingUploadsByTopic.get(topicKey) ?? []
+        pendingUploadsByTopic.set(topicKey, [...existing, ...uploadParts])
+        await c.reply('Attachment received. Send a text message to use it in the next prompt.')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await c.reply(`Cannot process upload: ${message}`)
+    }
+}
+
+function getTextMessageText(c: Context): string {
     const message = c.message as any
-    return typeof message?.text === 'string'
-        ? message.text
-        : typeof message?.caption === 'string'
-            ? message.caption
-            : ''
+    return typeof message?.text === 'string' ? message.text : ''
 }
 
 function hasUpload(c: Context): boolean {
