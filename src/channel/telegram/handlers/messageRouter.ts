@@ -175,7 +175,12 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                     await c.reply(`❌ Provider "${providerName}" is not available.`)
                     return
                 }
-                const channelPort = new TelegramPort(botInstance, groupChatId, messageThreadId)
+                const channelPort = new TelegramPort(
+                    botInstance,
+                    groupChatId,
+                    messageThreadId,
+                    (line) => glog(groupChatId, line),
+                )
 
                 sessionRecord.onLog = (msg) => glog(groupChatId, msg)
 

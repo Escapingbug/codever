@@ -129,6 +129,23 @@ describe('TelegramPort', () => {
                 message_thread_id: 42,
             }))
         })
+
+        it('logs attachment delivery details', async () => {
+            const { bot } = createMockBot()
+            const logs: string[] = []
+            const port = new TelegramPort(bot, -100123, 42, (line) => logs.push(line))
+
+            await port.send({
+                text: 'data',
+                format: 'plain',
+                attachments: [{ type: 'document', path: '/repo/out.json', filename: 'out.json' }],
+            })
+
+            expect(logs).toEqual([
+                expect.stringContaining('sending attachment index=1/1 type=document path=/repo/out.json filename=out.json captionChars=4'),
+                expect.stringContaining('sent attachment index=1/1 type=document messageId='),
+            ])
+        })
     })
 
     describe('edit', () => {

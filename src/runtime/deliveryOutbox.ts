@@ -67,6 +67,7 @@ export class DeliveryOutbox {
         const record = this.createRecord('send', message, { ...options, lane })
         return this.enqueueReliable(lane, record, async () => {
             try {
+                this.logAttachmentSend(record)
                 const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message))
                 record.status = 'sent'
                 record.messageId = result.messageId
@@ -339,6 +340,15 @@ export class DeliveryOutbox {
 
     private log(message: string): void {
         this.config.onLog?.(message)
+    }
+
+    private logAttachmentSend(record: DeliveryRecord): void {
+        const attachments = record.message.attachments
+        if (!attachments?.length) return
+        const summary = attachments
+            .map((attachment, index) => `${index + 1}:${attachment.type}:${attachment.filename ?? attachment.path}`)
+            .join(', ')
+        this.log(`[delivery] sending attachment message id=${record.id} lane=${record.lane ?? 'normal'} attachments=[${summary}] textChars=${record.message.text.length}`)
     }
 
     private async withRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {

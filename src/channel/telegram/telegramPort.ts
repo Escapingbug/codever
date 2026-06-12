@@ -34,6 +34,7 @@ export class TelegramPort implements ChannelPort {
         private bot: Bot,
         private chatId: number,
         private threadId?: number,
+        private onLog?: (message: string) => void,
     ) {}
 
     async send(message: ChannelMessage): Promise<ChannelSendResult> {
@@ -203,6 +204,7 @@ export class TelegramPort implements ChannelPort {
         for (let i = 0; i < (message.attachments ?? []).length; i++) {
             const attachment = message.attachments![i]
             const filename = attachment.filename || basename(attachment.path)
+            this.log(`[telegram] sending attachment index=${i + 1}/${message.attachments!.length} type=${attachment.type} path=${attachment.path} filename=${filename} captionChars=${caption.length}`)
             const options = {
                 ...(i === 0 && caption ? captionOptions : {}),
                 reply_markup: i === 0 ? message.replyMarkup as any : undefined,
@@ -213,6 +215,7 @@ export class TelegramPort implements ChannelPort {
                 ? await this.bot.api.sendPhoto(this.chatId, inputFile, options)
                 : await this.bot.api.sendDocument(this.chatId, inputFile, options)
             if (firstMessageId === undefined) firstMessageId = msg.message_id
+            this.log(`[telegram] sent attachment index=${i + 1}/${message.attachments!.length} type=${attachment.type} messageId=${msg.message_id} filename=${filename}`)
         }
 
         return { messageId: firstMessageId }
@@ -379,6 +382,10 @@ export class TelegramPort implements ChannelPort {
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
+    }
+
+    private log(message: string): void {
+        this.onLog?.(message)
     }
 }
 
