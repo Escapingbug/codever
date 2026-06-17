@@ -246,6 +246,30 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.sessionRecord.setModel).not.toHaveBeenCalled()
     })
 
+    it('/model explicit selection replies with the default reasoning effort when supported', async () => {
+        providerModels.splice(0, providerModels.length, {
+            id: 'gpt-5.5',
+            name: 'GPT-5.5',
+            defaultReasoningLevel: 'medium',
+            supportedReasoningLevels: [
+                { effort: 'low' },
+                { effort: 'medium' },
+                { effort: 'high' },
+            ],
+        })
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerSettingsHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext('gpt-5.5')
+
+        await bot.runCommand('model', ctx)
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'gpt-5.5', source: 'channel' })
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'reasoningEffort', args: 'medium', source: 'channel' })
+        expect(ctx.replies[0].text).toContain('Reasoning effort: <b>medium</b>')
+    })
+
     it('/resume should dispatch runtime resume command after resolving the provider session id', async () => {
         const bot = createBot()
         const session = createSession('idle')
@@ -331,6 +355,29 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         expect(ctx.replies[0].text).toContain('Current model: <b>default</b>')
         expect(ctx.replies[0].text).toContain('No models are available for provider <b>mock-acp</b>')
+    })
+
+    it('/model shows the current reasoning effort when it is configured', async () => {
+        providerModels.splice(0, providerModels.length, {
+            id: 'old-model',
+            name: 'Old Model',
+            defaultReasoningLevel: 'medium',
+            supportedReasoningLevels: [
+                { effort: 'medium' },
+                { effort: 'high' },
+            ],
+        })
+        const bot = createBot()
+        const session = createSession('idle')
+        session.sessionRecord.providerSettings.reasoningEffort = 'high'
+        const topicSessions = new Map([['-100:10', session]])
+        registerSettingsHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext()
+
+        await bot.runCommand('model', ctx)
+
+        expect(ctx.replies[0].text).toContain('Current model: <b>old-model</b>')
+        expect(ctx.replies[0].text).toContain('Reasoning effort: <b>high</b>')
     })
 
     it('provider callback should dispatch runtime provider switch command', async () => {
