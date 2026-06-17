@@ -60,7 +60,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             } else {
                 sessionManager.setTopicSettings(c.chat.id, messageThreadId, { model: found.id, reasoningEffort })
             }
-            await c.reply(`✅ Model set to: <b>${found.id}</b>`, { parse_mode: 'HTML' })
+            await c.reply(formatModelStatus(`Model set to: <b>${escapeHtml(found.id)}</b>`, reasoningEffort), { parse_mode: 'HTML' })
             return
         }
 
@@ -69,13 +69,14 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             : sessionRecord?.model || topicSettings?.model || groupSettings?.model || 'default'
         const models = provider.getAvailableModels()
         const current = isSelectableModel(configuredCurrent, models) ? configuredCurrent : 'default'
+        const currentReasoningEffort = getConfiguredReasoningEffort(genericTopic, sessionRecord, topicSettings, groupSettings)
         if (models.length === 0) {
-            await c.reply(`Current model: <b>${current}</b>\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
+            await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
                 parse_mode: 'HTML',
             })
             return
         }
-        await c.reply(`Current model: <b>${current}</b>\nSelect a provider:`, {
+        await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a provider:`, {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models)
         })
@@ -230,6 +231,26 @@ export function getDefaultReasoningEffort(model: { defaultReasoningLevel?: strin
         return model.defaultReasoningLevel
     }
     return levels[0]?.effort
+}
+
+function getConfiguredReasoningEffort(
+    genericTopic: boolean,
+    sessionRecord: TopicSession['sessionRecord'] | undefined,
+    topicSettings: { reasoningEffort?: string } | undefined,
+    groupSettings: { reasoningEffort?: string } | undefined,
+): string | undefined {
+    if (genericTopic) return groupSettings?.reasoningEffort
+    const sessionReasoningEffort = sessionRecord?.providerSettings?.reasoningEffort
+    if (typeof sessionReasoningEffort === 'string' && sessionReasoningEffort.trim()) {
+        return sessionReasoningEffort
+    }
+    return topicSettings?.reasoningEffort ?? groupSettings?.reasoningEffort
+}
+
+function formatModelStatus(firstLine: string, reasoningEffort: string | undefined): string {
+    return reasoningEffort
+        ? `${firstLine}\nReasoning effort: <b>${escapeHtml(reasoningEffort)}</b>`
+        : firstLine
 }
 
 export function getCwdForChat(chatId: number, sessionManager: SessionManager): string | undefined {
