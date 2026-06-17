@@ -21,6 +21,8 @@ interface CodexModelCatalog {
         display_name?: unknown
         name?: unknown
         visibility?: unknown
+        default_reasoning_level?: unknown
+        supported_reasoning_levels?: unknown
     }>
 }
 
@@ -80,8 +82,38 @@ export function parseCodexModels(stdout: string): ModelEntry[] {
             : typeof model.name === 'string'
                 ? model.name.trim()
                 : id
-        entries.push({ id, name: name || id, provider: CODEX_MODEL_PROVIDER })
+        entries.push({
+            id,
+            name: name || id,
+            provider: CODEX_MODEL_PROVIDER,
+            ...parseReasoningMetadata(model),
+        })
     }
 
     return entries
+}
+
+function parseReasoningMetadata(model: { default_reasoning_level?: unknown; supported_reasoning_levels?: unknown }): Pick<ModelEntry, 'defaultReasoningLevel' | 'supportedReasoningLevels'> {
+    const defaultReasoningLevel = typeof model.default_reasoning_level === 'string'
+        ? model.default_reasoning_level.trim()
+        : ''
+    const supported = Array.isArray(model.supported_reasoning_levels)
+        ? model.supported_reasoning_levels
+            .map((entry) => {
+                if (!entry || typeof entry !== 'object') return null
+                const record = entry as Record<string, unknown>
+                const effort = typeof record.effort === 'string' ? record.effort.trim() : ''
+                if (!effort) return null
+                const description = typeof record.description === 'string' && record.description.trim()
+                    ? record.description.trim()
+                    : undefined
+                return { effort, ...(description ? { description } : {}) }
+            })
+            .filter((entry): entry is { effort: string; description?: string } => entry !== null)
+        : []
+
+    return {
+        ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+        ...(supported.length > 0 ? { supportedReasoningLevels: supported } : {}),
+    }
 }

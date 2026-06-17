@@ -509,6 +509,10 @@ export class SemanticSessionRuntime {
                 this.config.onModelChanged?.(this.config.model)
                 this.recordCommand('model', { model: this.config.model })
                 return
+            case 'reasoningEffort':
+                this.config.providerSettings = { ...(this.config.providerSettings ?? {}), reasoningEffort: args || undefined }
+                this.recordCommand('reasoningEffort', { reasoningEffort: args || null })
+                return
             case 'timeout': {
                 const timeoutSeconds = Number.parseInt(args ?? '', 10)
                 this.config.providerSettings = { ...(this.config.providerSettings ?? {}), timeoutSeconds }

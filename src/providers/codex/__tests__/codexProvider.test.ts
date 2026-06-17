@@ -51,7 +51,16 @@ describe('CodexProvider', () => {
             error: undefined,
             stdout: JSON.stringify({
                 models: [
-                    { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list' },
+                    {
+                        slug: 'gpt-5.5',
+                        display_name: 'GPT-5.5',
+                        visibility: 'list',
+                        default_reasoning_level: 'medium',
+                        supported_reasoning_levels: [
+                            { effort: 'low', description: 'Fast' },
+                            { effort: 'medium', description: 'Balanced' },
+                        ],
+                    },
                     { slug: 'gpt-hidden', display_name: 'Hidden', visibility: 'hidden' },
                 ],
             }),
@@ -59,7 +68,16 @@ describe('CodexProvider', () => {
         })
 
         expect(new CodexProvider().getAvailableModels()).toEqual([
-            { id: 'gpt-5.5', name: 'GPT-5.5', provider: 'openai' },
+            {
+                id: 'gpt-5.5',
+                name: 'GPT-5.5',
+                provider: 'openai',
+                defaultReasoningLevel: 'medium',
+                supportedReasoningLevels: [
+                    { effort: 'low', description: 'Fast' },
+                    { effort: 'medium', description: 'Balanced' },
+                ],
+            },
         ])
         expect(spawnSyncMock).toHaveBeenCalled()
     })
@@ -70,12 +88,29 @@ describe('parseCodexModels', () => {
         expect(parseCodexModels(JSON.stringify({
             models: [
                 { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list' },
-                { slug: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
+                {
+                    slug: 'gpt-5.3-codex',
+                    name: 'GPT-5.3 Codex',
+                    default_reasoning_level: 'high',
+                    supported_reasoning_levels: [
+                        { effort: 'medium' },
+                        { effort: 'high', description: 'Deep' },
+                    ],
+                },
                 { slug: 'internal', display_name: 'Internal', visibility: 'hidden' },
             ],
         }))).toEqual([
             { id: 'gpt-5.5', name: 'GPT-5.5', provider: 'openai' },
-            { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', provider: 'openai' },
+            {
+                id: 'gpt-5.3-codex',
+                name: 'GPT-5.3 Codex',
+                provider: 'openai',
+                defaultReasoningLevel: 'high',
+                supportedReasoningLevels: [
+                    { effort: 'medium' },
+                    { effort: 'high', description: 'Deep' },
+                ],
+            },
         ])
     })
 })

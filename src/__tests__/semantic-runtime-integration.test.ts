@@ -1460,4 +1460,26 @@ describe('Semantic runtime integration chain', () => {
             expect.objectContaining({ kind: 'command_result', command: 'verbose' }),
         ]))
     })
+
+    it('applies reasoning effort as runtime provider settings for subsequent provider turns', async () => {
+        const provider = createProvider([{ kind: 'result', status: 'success' }])
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'codex',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })
+        await runtime.dispatch({ kind: 'user_message', text: 'reason deeply', source: 'channel' })
+
+        expect(provider.startQuery).toHaveBeenCalledWith('reason deeply', expect.objectContaining({
+            providerSettings: expect.objectContaining({ reasoningEffort: 'high' }),
+        }))
+        expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'command_result', command: 'reasoningEffort' }),
+        ]))
+    })
 })

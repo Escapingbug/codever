@@ -8,6 +8,7 @@ export interface GroupState {
     settings?: {
         model?: string
         permissionMode?: string
+        reasoningEffort?: string
         verboseLevel?: 0 | 1 | 2
         providerName?: string
         timeoutSeconds?: number
@@ -21,6 +22,7 @@ export interface TopicState {
     settings?: {
         model?: string
         permissionMode?: string
+        reasoningEffort?: string
         verboseLevel?: 0 | 1 | 2
         providerName?: string
         timeoutSeconds?: number

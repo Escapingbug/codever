@@ -146,6 +146,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                 const configuredProviderName = topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
                 const providerName = getProvider(configuredProviderName) ? configuredProviderName : config.getDefaultProvider()
                 const permissionMode = topicSettings?.permissionMode ?? groupSettings?.permissionMode
+                const reasoningEffort = topicSettings?.reasoningEffort ?? groupSettings?.reasoningEffort
 
                 let conversationId = topicState?.conversationId
                 if (topicState?.queryInProgress) {
@@ -166,7 +167,10 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
                     model: topicSettings?.model ?? groupSettings?.model,
                     verboseLevel: topicSettings?.verboseLevel ?? groupSettings?.verboseLevel,
                     timeoutSeconds: topicSettings?.timeoutSeconds ?? groupSettings?.timeoutSeconds,
-                    providerSettings: permissionMode ? { permissionMode } : {},
+                    providerSettings: {
+                        ...(permissionMode ? { permissionMode } : {}),
+                        ...(reasoningEffort ? { reasoningEffort } : {}),
+                    },
                     conversationId,
                 })
 
