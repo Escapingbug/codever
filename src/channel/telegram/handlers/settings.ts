@@ -51,10 +51,14 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             if (topicSession) {
                 await topicSession.dispatch({ kind: 'command', name: 'model', args: found.id, source: 'channel' })
             }
+            const reasoningEffort = getDefaultReasoningEffort(found)
+            if (topicSession) {
+                await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', args: reasoningEffort, source: 'channel' })
+            }
             if (genericTopic || topicSession) {
-                sessionManager.setGroupSettings(c.chat.id, { model: found.id })
+                sessionManager.setGroupSettings(c.chat.id, { model: found.id, reasoningEffort })
             } else {
-                sessionManager.setTopicSettings(c.chat.id, messageThreadId, { model: found.id })
+                sessionManager.setTopicSettings(c.chat.id, messageThreadId, { model: found.id, reasoningEffort })
             }
             await c.reply(`✅ Model set to: <b>${found.id}</b>`, { parse_mode: 'HTML' })
             return
@@ -217,6 +221,15 @@ function isSelectableModel(model: string, models: Array<{ id: string; name: stri
     if (models.length === 0) return false
     const normalized = model.toLowerCase()
     return models.some(entry => entry.id.toLowerCase() === normalized || entry.name.toLowerCase() === normalized)
+}
+
+export function getDefaultReasoningEffort(model: { defaultReasoningLevel?: string; supportedReasoningLevels?: Array<{ effort: string }> }): string | undefined {
+    const levels = model.supportedReasoningLevels ?? []
+    if (levels.length === 0) return undefined
+    if (model.defaultReasoningLevel && levels.some(level => level.effort === model.defaultReasoningLevel)) {
+        return model.defaultReasoningLevel
+    }
+    return levels[0]?.effort
 }
 
 export function getCwdForChat(chatId: number, sessionManager: SessionManager): string | undefined {

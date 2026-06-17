@@ -54,6 +54,7 @@ export function buildChatActionThreadParams(threadId?: number): Record<string, n
 export interface GroupSettings {
     model?: string
     permissionMode?: string
+    reasoningEffort?: string
     verboseLevel?: 0 | 1 | 2
     providerName?: string
     timeoutSeconds?: number
@@ -259,7 +260,10 @@ export class SessionManager {
             messageThreadId,
             verboseLevel: settings?.verboseLevel,
             timeoutSeconds: settings?.timeoutSeconds,
-            providerSettings: settings?.permissionMode ? { permissionMode: settings.permissionMode } : {},
+            providerSettings: {
+                ...(settings?.permissionMode ? { permissionMode: settings.permissionMode } : {}),
+                ...(settings?.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+            },
             bus,
         })
         newSession.setProvider(provider)

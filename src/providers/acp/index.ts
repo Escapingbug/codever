@@ -395,6 +395,25 @@ export class AcpProvider implements AgentProvider {
         this.clientManager = new AcpClientManager(managerConfig)
     }
 
+    private async applyProviderConfigOptions(sessionId: string, config: AgentQueryConfig): Promise<void> {
+        const reasoningEffort = typeof config.providerSettings?.reasoningEffort === 'string'
+            ? config.providerSettings.reasoningEffort.trim()
+            : ''
+        if (!reasoningEffort) return
+
+        try {
+            await this.clientManager.setSessionConfigOption({
+                sessionId,
+                configId: 'reasoning_effort',
+                value: reasoningEffort,
+            })
+            console.error(`[acp:${this.name}] Set reasoning effort to ${reasoningEffort}`)
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            console.error(`[acp:${this.name}] Failed to set reasoning effort: ${msg}`)
+        }
+    }
+
     async init(): Promise<void> {
         if (this.initialized) return
         if (this.initPromise) return this.initPromise
@@ -589,6 +608,7 @@ export class AcpProvider implements AgentProvider {
                             console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
                         }
                     }
+                    await this.applyProviderConfigOptions(sessionId!, config)
                 } else {
                     // Attempt to resume or load an existing session (conversationId from
                     // a previous gateway run). If the agent can't find the session (e.g.
@@ -707,6 +727,7 @@ export class AcpProvider implements AgentProvider {
                             console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
                         }
                     }
+                    await this.applyProviderConfigOptions(sessionId!, config)
                 }
 
                 // 2. Push session_init event

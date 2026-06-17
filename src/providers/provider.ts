@@ -55,6 +55,11 @@ export interface ModelEntry {
     id: string
     name: string
     provider?: string
+    defaultReasoningLevel?: string
+    supportedReasoningLevels?: Array<{
+        effort: string
+        description?: string
+    }>
 }
 
 export interface SessionEntry {

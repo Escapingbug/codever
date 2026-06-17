@@ -161,6 +161,19 @@ export function modelProviderDetailKeyboard(
     return kb
 }
 
+export function reasoningEffortKeyboard(model: ModelEntry): InlineKeyboard {
+    const kb = new InlineKeyboard()
+    const levels = model.supportedReasoningLevels ?? []
+    const encodedModel = encodeURIComponent(model.id)
+
+    for (const level of levels) {
+        const label = level.effort === model.defaultReasoningLevel ? `${level.effort} (default)` : level.effort
+        kb.text(label, `meffort:${encodedModel}:${encodeURIComponent(level.effort)}`).row()
+    }
+
+    return kb
+}
+
 export function timeoutKeyboard(sessionId: string): InlineKeyboard {
     return new InlineKeyboard()
         .text('⏳ Continue waiting', `timeout:continue:${sessionId}`)

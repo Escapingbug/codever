@@ -4,9 +4,10 @@ import { registerSettingsHandlers } from '@/channel/telegram/handlers/settings'
 import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
 import type { TopicSession } from '@/bridge/channelPort'
 import { clearPendingDecisionsForTests, registerPendingDecision } from '@/channel/telegram/decisionRegistry'
+import type { ModelEntry } from '@/providers/provider'
 
 const { providerModels } = vi.hoisted(() => ({
-    providerModels: [{ id: 'sonnet', name: 'Sonnet' }],
+    providerModels: [{ id: 'sonnet', name: 'Sonnet' }] as ModelEntry[],
 }))
 
 vi.mock('@/channel/telegram/pairing', () => ({
@@ -267,6 +268,55 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCallback('model:sonnet')
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'sonnet', source: 'channel' })
+    })
+
+    it('model callback asks for reasoning effort when the selected model supports it', async () => {
+        providerModels.splice(0, providerModels.length, {
+            id: 'gpt-5.5',
+            name: 'GPT-5.5',
+            defaultReasoningLevel: 'medium',
+            supportedReasoningLevels: [
+                { effort: 'low' },
+                { effort: 'medium' },
+                { effort: 'high' },
+            ],
+        })
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createCallbackContext('model:gpt-5.5')
+
+        await bot.runCallback('model:gpt-5.5', ctx)
+
+        expect(session.dispatch).not.toHaveBeenCalled()
+        expect(ctx.editMessageText).toHaveBeenCalledWith(expect.stringContaining('Select reasoning effort'), expect.objectContaining({
+            reply_markup: expect.any(Object),
+        }))
+    })
+
+    it('reasoning effort callback stores model and effort for the active session', async () => {
+        providerModels.splice(0, providerModels.length, {
+            id: 'gpt-5.5',
+            name: 'GPT-5.5',
+            defaultReasoningLevel: 'medium',
+            supportedReasoningLevels: [
+                { effort: 'low' },
+                { effort: 'medium' },
+                { effort: 'high' },
+            ],
+        })
+        const bot = createBot()
+        const session = createSession('idle')
+        const sessionManager = createSessionManager()
+        const topicSessions = new Map([['-100:10', session]])
+        registerCallbackHandlers(bot, { sessionManager, topicSessions })
+
+        await bot.runCallback('meffort:gpt-5.5:high')
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'gpt-5.5', source: 'channel' })
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })
+        expect(sessionManager.setGroupSettings).toHaveBeenCalledWith(-100, { model: 'gpt-5.5', reasoningEffort: 'high' })
     })
 
     it('/model does not show a stale model when the provider has no model catalog', async () => {

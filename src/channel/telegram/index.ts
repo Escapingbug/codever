@@ -5,6 +5,7 @@ export {
     modelKeyboard,
     modelProviderKeyboard,
     modelProviderDetailKeyboard,
+    reasoningEffortKeyboard,
     timeoutKeyboard,
     providerKeyboard,
     resumeSessionKeyboard,

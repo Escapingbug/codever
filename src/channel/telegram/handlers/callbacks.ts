@@ -7,6 +7,7 @@ import {
     modelKeyboard,
     modelProviderKeyboard,
     modelProviderDetailKeyboard,
+    reasoningEffortKeyboard,
     resumeSessionKeyboard,
     timeoutKeyboard,
 } from '@/channel/telegram/keyboard'
@@ -42,6 +43,11 @@ export function registerCallbackHandlers(bot: any, ctx: CallbackHandlerContext):
 
         if (data.startsWith('model:')) {
             await handleModelCallback(c, data, sessionManager, topicSessions)
+            return
+        }
+
+        if (data.startsWith('meffort:')) {
+            await handleReasoningEffortCallback(c, data, sessionManager, topicSessions)
             return
         }
 
@@ -170,12 +176,24 @@ async function handleDecisionCallback(c: Context, data: string, topicSessions: M
 }
 
 async function handleModelCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
-    const model = data.split(':')[1]
+    const model = data.slice('model:'.length)
     if (!c.callbackQuery) return
     const chatId = c.callbackQuery.message?.chat.id
     const messageThreadId = c.callbackQuery.message?.message_thread_id
     if (!chatId) {
         await c.answerCallbackQuery('Error')
+        return
+    }
+    const selectionProvider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
+    const selectedModelEntry = selectionProvider.getAvailableModels().find(m => m.id === model)
+    if (selectedModelEntry?.supportedReasoningLevels?.length) {
+        try {
+            await c.editMessageText(`Select reasoning effort for <b>${escapeHtml(selectedModelEntry.name)}</b>:`, {
+                parse_mode: 'HTML',
+                reply_markup: reasoningEffortKeyboard(selectedModelEntry),
+            })
+        } catch {}
+        await c.answerCallbackQuery()
         return
     }
     const topicKey = makeTopicKey(chatId, messageThreadId)
@@ -185,11 +203,12 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
 
     if (sessionRecord) {
         await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
+        await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', source: 'channel' })
     }
     if (genericTopic || sessionRecord) {
-        sessionManager.setGroupSettings(chatId, { model })
+        sessionManager.setGroupSettings(chatId, { model, reasoningEffort: undefined })
     } else {
-        sessionManager.setTopicSettings(chatId, messageThreadId, { model })
+        sessionManager.setTopicSettings(chatId, messageThreadId, { model, reasoningEffort: undefined })
     }
     const topicSettings = sessionManager.getTopicSettings(chatId, messageThreadId)
     const providerName = genericTopic
@@ -200,6 +219,46 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     const displayName = modelEntry?.name || model
     await c.answerCallbackQuery(`Model set to ${displayName}`)
     try { await c.editMessageText(`✅ Model set to <b>${displayName}</b>`, { parse_mode: 'HTML' }) } catch {}
+}
+
+async function handleReasoningEffortCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
+    if (!c.callbackQuery) return
+    const chatId = c.callbackQuery.message?.chat.id
+    const messageThreadId = c.callbackQuery.message?.message_thread_id
+    if (!chatId) {
+        await c.answerCallbackQuery('Error')
+        return
+    }
+
+    const parts = data.split(':')
+    const model = decodeURIComponent(parts[1] ?? '')
+    const reasoningEffort = decodeURIComponent(parts[2] ?? '')
+    const provider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
+    const modelEntry = provider.getAvailableModels().find(m => m.id === model)
+    const validEffort = modelEntry?.supportedReasoningLevels?.some(level => level.effort === reasoningEffort) ?? false
+    if (!model || !reasoningEffort || !validEffort) {
+        await c.answerCallbackQuery('Invalid reasoning effort')
+        return
+    }
+
+    const topicKey = makeTopicKey(chatId, messageThreadId)
+    const topicSession = topicSessions.get(topicKey)
+    const sessionRecord = topicSession?.sessionRecord
+    const genericTopic = isGenericTopic(messageThreadId)
+
+    if (sessionRecord) {
+        await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
+        await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', args: reasoningEffort, source: 'channel' })
+    }
+    if (genericTopic || sessionRecord) {
+        sessionManager.setGroupSettings(chatId, { model, reasoningEffort })
+    } else {
+        sessionManager.setTopicSettings(chatId, messageThreadId, { model, reasoningEffort })
+    }
+
+    const displayName = modelEntry?.name || model
+    await c.answerCallbackQuery(`Model set to ${displayName}`)
+    try { await c.editMessageText(`Model set to <b>${displayName}</b>\nReasoning effort: <b>${reasoningEffort}</b>`, { parse_mode: 'HTML' }) } catch {}
 }
 
 function getModelSelectionProvider(chatId: number, messageThreadId: number | undefined, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>) {
