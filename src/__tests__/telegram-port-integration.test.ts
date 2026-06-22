@@ -168,6 +168,29 @@ describe('TelegramPort integration', () => {
         expect(bot.api.sendMessage).toHaveBeenCalledTimes(1)
     })
 
+    it('falls back to plain text when Telegram rejects markdown entities', async () => {
+        renderMocks.tgmdSplit.mockResolvedValue([{
+            kind: 'text',
+            text: 'rendered **text**',
+            entities: [{ type: 'bold', offset: 9, length: 4 }],
+        }])
+        const entityError = new Error("Call to 'sendMessage' failed! (400: Bad Request: entities are not valid)")
+        const bot = createBot()
+        bot.api.sendMessage
+            .mockRejectedValueOnce(entityError)
+            .mockResolvedValueOnce({ message_id: 11 })
+        const port = new TelegramPort(bot, -100, 10)
+
+        await expect(port.send({ text: '**text**', format: 'markdown' })).resolves.toEqual({ messageId: 11 })
+
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(2)
+        expect(bot.api.sendMessage.mock.calls[1][1]).toBe('rendered **text**')
+        expect(bot.api.sendMessage.mock.calls[1][2]).toMatchObject({
+            message_thread_id: 10,
+        })
+        expect(bot.api.sendMessage.mock.calls[1][2]).not.toHaveProperty('entities')
+    })
+
     it('retries markdown sends with path code entities when Telegram rejects a path-like URL', async () => {
         renderMocks.tgmdSplit.mockResolvedValue([{
             kind: 'text',
