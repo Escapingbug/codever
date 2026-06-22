@@ -52,6 +52,11 @@ interface FileReference {
     path: string
 }
 
+interface TurnDeliveryState {
+    hadAssistantText: boolean
+    deliveryFailures: DeliveryRecord[]
+}
+
 async function waitForShutdownStep(
     promise: Promise<unknown>,
     timeoutMs: number,
@@ -119,6 +124,8 @@ export class SemanticSessionRuntime {
     private textFlushTimer: ReturnType<typeof setTimeout> | null = null
     private textFlushChain: Promise<void> = Promise.resolve()
     private textFlushGeneration = 0
+    private currentTurnDelivery: TurnDeliveryState | null = null
+    private recordedDeliveryFailureIds = new Set<string>()
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
@@ -128,11 +135,7 @@ export class SemanticSessionRuntime {
             onLog: (message) => this.log(message),
             onFailure: (record) => {
                 this.log(`[delivery] ${record.kind} failed: ${record.error instanceof Error ? record.error.message : record.error}`)
-                this.recordCommand(record.kind === 'edit' ? 'delivery_edit_failed' : 'delivery_failed', {
-                    message: record.error instanceof Error ? record.error.message : String(record.error),
-                    deliveryId: record.id,
-                    text: record.message.text,
-                })
+                this.recordDeliveryFailure(record)
             },
         })
     }
@@ -240,6 +243,10 @@ export class SemanticSessionRuntime {
         this.pendingCodeverSendFileCalls.clear()
         this.projector.reset()
         this.toolMessageIds.clear()
+        this.currentTurnDelivery = {
+            hadAssistantText: false,
+            deliveryFailures: [],
+        }
         this.notifyStatus('querying')
         this.record({
             kind: 'turn_started',
@@ -370,6 +377,8 @@ export class SemanticSessionRuntime {
         this.state = 'finalizing'
         await this.flushBufferedAssistantText('finalize')
         await this.outbox.drain({ timeoutMs: FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS })
+        await this.notifyTurnDeliveryIssue()
+        this.currentTurnDelivery = null
         this.state = 'idle'
         this.notifyStatus('idle')
     }
@@ -381,6 +390,10 @@ export class SemanticSessionRuntime {
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
         if (event.kind !== 'assistant_text_delta') {
             this.cancelScheduledTextFlush()
+        }
+
+        if (event.kind === 'assistant_text_delta' && event.text.trim()) {
+            if (this.currentTurnDelivery) this.currentTurnDelivery.hadAssistantText = true
         }
 
         // Record available_commands_update and config_option_update to session state
@@ -475,12 +488,14 @@ export class SemanticSessionRuntime {
                 terminal: isTerminal,
             })
             const record = isTerminal ? await waitForDeliveryRecord(delivery, TERMINAL_TOOL_EDIT_GRACE_MS) : undefined
+            if (record) this.noteDeliveryRecord(record)
             if (record?.messageId !== undefined) {
                 this.toolMessageIds.set(toolUseId, record.messageId)
                 return
             }
 
             void delivery.then((record) => {
+                this.noteDeliveryRecord(record)
                 if (record.messageId !== undefined) {
                     this.toolMessageIds.set(toolUseId, record.messageId)
                 }
@@ -489,6 +504,7 @@ export class SemanticSessionRuntime {
         }
 
         const record = await this.outbox.send(message)
+        this.noteDeliveryRecord(record)
         if (isToolEvent && toolUseId && record.messageId !== undefined) {
             this.toolMessageIds.set(toolUseId, record.messageId)
         }
@@ -497,6 +513,49 @@ export class SemanticSessionRuntime {
     private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
         this.captureTables(message)
         return await this.outbox.send(message, undefined, options)
+    }
+
+    private noteDeliveryRecord(record: DeliveryRecord): void {
+        if (record.status === 'failed') {
+            this.recordDeliveryFailure(record)
+            return
+        }
+    }
+
+    private recordDeliveryFailure(record: DeliveryRecord): void {
+        if (this.recordedDeliveryFailureIds.has(record.id)) return
+        this.recordedDeliveryFailureIds.add(record.id)
+        this.currentTurnDelivery?.deliveryFailures.push(record)
+        this.recordCommand(record.kind === 'edit' ? 'delivery_edit_failed' : 'delivery_failed', {
+            message: record.error instanceof Error ? record.error.message : String(record.error),
+            deliveryId: record.id,
+            text: record.message.text,
+        })
+    }
+
+    private async notifyTurnDeliveryIssue(): Promise<void> {
+        const state = this.currentTurnDelivery
+        if (!state) return
+
+        const failedReply = state.deliveryFailures.find(record => record.kind === 'send')
+        if (failedReply && state.hadAssistantText) {
+            await this.outbox.send({
+                text: this.formatDeliveryFailureNotice(failedReply),
+                format: 'html',
+            }, undefined, { lane: 'control' })
+            return
+        }
+    }
+
+    private formatDeliveryFailureNotice(record: DeliveryRecord): string {
+        const error = record.error instanceof Error ? record.error.message : String(record.error)
+        return [
+            '<b>Delivery warning</b>',
+            'Codever received the agent reply, but Telegram delivery failed before it could be shown.',
+            `Delivery: <code>${escapeHtml(record.id)}</code>`,
+            `<pre>${escapeHtml(truncateForNotice(error))}</pre>`,
+            'Use <code>/progress</code> or <code>get_delivery_status</code> for the current delivery state.',
+        ].join('\n')
     }
 
     private async handleCommand(input: Extract<SessionInput, { kind: 'command' }>): Promise<unknown> {
@@ -872,11 +931,27 @@ export class SemanticSessionRuntime {
         const progress = this.getProgress()
         this.recordCommand('progress', progress)
         await this.send({
-            text: this.state === 'querying'
-                ? `🔄 Task in progress: ${progress.elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`
-                : '✅ No active task',
+            text: this.formatProgressDetails(progress),
             format: 'html',
         }, { lane: 'control' })
+    }
+
+    private formatProgressDetails(progress: RuntimeProgress): string {
+        const lines = this.state === 'querying'
+            ? [`🔄 Task in progress: ${progress.elapsedSeconds}s elapsed${this.lastToolName ? `\nCurrent tool: ${this.lastToolName}` : ''}`]
+            : ['✅ No active task']
+
+        if (progress.outbox.pendingControl || progress.outbox.pendingNormal || progress.outbox.pendingProgressiveEdits) {
+            lines.push(`Outbox pending: control=${progress.outbox.pendingControl}, normal=${progress.outbox.pendingNormal}, edits=${progress.outbox.pendingProgressiveEdits}`)
+        }
+        if (progress.outbox.lastRateLimitError) {
+            lines.push(`Last rate limit: <pre>${escapeHtml(truncateForNotice(progress.outbox.lastRateLimitError))}</pre>`)
+        }
+        if (progress.outbox.lastFailure) {
+            lines.push(`Last delivery failure: <pre>${escapeHtml(truncateForNotice(progress.outbox.lastFailure))}</pre>`)
+        }
+
+        return lines.join('\n')
     }
 
     private createPermissionHandler(): AgentPermissionHandler {
@@ -1098,6 +1173,11 @@ function waitForDeliveryRecord(delivery: Promise<DeliveryRecord>, timeoutMs: num
     ]).finally(() => {
         if (timeout) clearTimeout(timeout)
     })
+}
+
+function truncateForNotice(value: string, maxLength = 700): string {
+    if (value.length <= maxLength) return value
+    return `${value.slice(0, maxLength)}...`
 }
 
 function formatCodeBlock(content: string, language: string | undefined): string {

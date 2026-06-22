@@ -313,18 +313,36 @@ export class TelegramPort implements ChannelPort {
                 ...buildMessageThreadParams(this.threadId),
             })
         } catch (error) {
-            if (!isInvalidEntityUrlError(error)) throw error
+            if (isInvalidEntityUrlError(error)) {
+                const protectedEntities = createPathCodeEntities(text)
+                if (protectedEntities.length > 0) {
+                    try {
+                        console.error('[TelegramPort] Markdown send failed on path-like URL entity; retrying with path code entities:', error instanceof Error ? error.message : error)
+                        return await this.bot.api.sendMessage(this.chatId, text, {
+                            entities: protectedEntities as any,
+                            reply_markup: replyMarkup as any,
+                            ...buildMessageThreadParams(this.threadId),
+                        })
+                    } catch (retryError) {
+                        if (!shouldFallbackMarkdownSendToPlain(retryError)) throw retryError
+                        console.error('[TelegramPort] Markdown path-entity retry failed; falling back to plain text:', retryError instanceof Error ? retryError.message : retryError)
+                        return await this.sendPlainTextSegment(text, replyMarkup)
+                    }
+                }
+            }
 
-            const protectedEntities = createPathCodeEntities(text)
-            if (protectedEntities.length === 0) throw error
+            if (!shouldFallbackMarkdownSendToPlain(error)) throw error
 
-            console.error('[TelegramPort] Markdown send failed on path-like URL entity; retrying with path code entities:', error instanceof Error ? error.message : error)
-            return await this.bot.api.sendMessage(this.chatId, text, {
-                entities: protectedEntities as any,
-                reply_markup: replyMarkup as any,
-                ...buildMessageThreadParams(this.threadId),
-            })
+            console.error('[TelegramPort] Markdown send failed; falling back to plain text:', error instanceof Error ? error.message : error)
+            return await this.sendPlainTextSegment(text, replyMarkup)
         }
+    }
+
+    private async sendPlainTextSegment(text: string, replyMarkup?: unknown): Promise<{ message_id: number }> {
+        return await this.bot.api.sendMessage(this.chatId, text, {
+            reply_markup: replyMarkup as any,
+            ...buildMessageThreadParams(this.threadId),
+        })
     }
 
     private async sendHtml(text: string, replyMarkup?: unknown): Promise<ChannelSendResult> {
@@ -409,6 +427,12 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: strin
 function isInvalidEntityUrlError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error)
     return INVALID_ENTITY_URL_PATTERN.test(message)
+}
+
+function shouldFallbackMarkdownSendToPlain(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/429|Too Many Requests|retry after/i.test(message)) return false
+    return /400:\s*Bad Request|can't parse entities|entities are not valid|entity .* is invalid/i.test(message)
 }
 
 function createPathCodeEntities(text: string): Array<{ type: 'code'; offset: number; length: number }> {
