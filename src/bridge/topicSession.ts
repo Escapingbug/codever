@@ -153,5 +153,8 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         getDeliveryStatus(deliveryId?: string) {
             return runtime.getDeliveryStatus(deliveryId)
         },
+        retryDelivery(deliveryId: string) {
+            return runtime.retryDelivery(deliveryId)
+        },
     }
 }

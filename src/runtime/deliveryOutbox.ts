@@ -15,6 +15,9 @@ export interface DeliveryRecord {
     lane?: DeliveryLane
     coalesceKey?: string
     terminal?: boolean
+    retryOf?: string
+    resolvedBy?: string
+    resolvedAt?: number
     skippedReason?: string
 }
 
@@ -24,6 +27,8 @@ export interface DeliveryOutboxConfig {
     onLog?: (message: string) => void
     maxRateLimitRetries?: number
     maxRateLimitDelayMs?: number
+    maxNetworkRetries?: number
+    networkRetryBaseDelayMs?: number
     deliveryTimeoutMs?: number
     attachmentDeliveryTimeoutMs?: number
     progressiveEditDebounceMs?: number
@@ -33,6 +38,7 @@ export interface DeliveryOptions {
     lane?: DeliveryLane
     coalesceKey?: string
     terminal?: boolean
+    retryOf?: string
 }
 
 export interface DeliveryOutboxState {
@@ -46,6 +52,8 @@ export interface DeliveryOutboxState {
 
 const DEFAULT_RATE_LIMIT_RETRIES = 3
 const DEFAULT_MAX_RATE_LIMIT_DELAY_MS = 60_000
+const DEFAULT_NETWORK_RETRIES = 2
+const DEFAULT_NETWORK_RETRY_BASE_DELAY_MS = 1_000
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000
 const DEFAULT_ATTACHMENT_DELIVERY_TIMEOUT_MS = 10 * 60_000
 
@@ -71,12 +79,17 @@ export class DeliveryOutbox {
     queueSend(message: ChannelMessage, onSent?: (result: ChannelSendResult) => void, options: DeliveryOptions = {}): { record: DeliveryRecord; completion: Promise<DeliveryRecord> } {
         const lane = options.lane ?? 'normal'
         const record = this.createRecord('send', message, { ...options, lane })
+        const original = options.retryOf ? this.find(options.retryOf) : undefined
         const completion = this.enqueueReliable(lane, record, async () => {
             try {
                 this.logAttachmentSend(record)
                 const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                 record.status = 'sent'
                 record.messageId = result.messageId
+                if (original?.status === 'failed') {
+                    original.resolvedBy = record.id
+                    original.resolvedAt = Date.now()
+                }
                 onSent?.(result)
             } catch (error) {
                 record.status = 'failed'
@@ -87,6 +100,15 @@ export class DeliveryOutbox {
             }
         })
         return { record, completion }
+    }
+
+    retry(deliveryId: string, options: DeliveryOptions = {}): Promise<DeliveryRecord | undefined> {
+        const original = this.find(deliveryId)
+        if (!original) return Promise.resolve(undefined)
+        return this.send(original.message, undefined, {
+            lane: options.lane ?? (original.lane === 'control' ? 'control' : 'normal'),
+            retryOf: original.id,
+        })
     }
 
     edit(messageId: string | number | undefined, message: ChannelMessage, fallbackToSend = true, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
@@ -190,14 +212,19 @@ export class DeliveryOutbox {
         return [...this.records]
     }
 
+    find(deliveryId: string): DeliveryRecord | undefined {
+        return this.records.find(record => record.id === deliveryId)
+    }
+
     getState(): DeliveryOutboxState {
+        const lastUnresolvedFailure = this.getLastUnresolvedFailure()
         return {
             pendingControl: this.pendingControl,
             pendingNormal: this.pendingNormal,
             pendingProgressiveEdits: this.progressiveEdits.size,
             ...(this.progressiveEditBlockedUntil > Date.now() ? { progressiveEditBlockedUntil: this.progressiveEditBlockedUntil } : {}),
             ...(this.lastRateLimitError ? { lastRateLimitError: this.lastRateLimitError } : {}),
-            ...(this.lastFailure ? { lastFailure: this.lastFailure } : {}),
+            ...(lastUnresolvedFailure ? { lastFailure: this.formatFailureSummary(lastUnresolvedFailure) } : {}),
         }
     }
 
@@ -211,9 +238,21 @@ export class DeliveryOutbox {
             ...(options.lane ? { lane: options.lane } : {}),
             ...(options.coalesceKey ? { coalesceKey: options.coalesceKey } : {}),
             ...(options.terminal !== undefined ? { terminal: options.terminal } : {}),
+            ...(options.retryOf ? { retryOf: options.retryOf } : {}),
         }
         this.records.push(record)
         return record
+    }
+
+    private getLastUnresolvedFailure(): DeliveryRecord | undefined {
+        return [...this.records]
+            .reverse()
+            .find(record => record.status === 'failed' && !record.resolvedBy)
+    }
+
+    private formatFailureSummary(record: DeliveryRecord): string {
+        const error = record.error instanceof Error ? record.error.message : String(record.error)
+        return `${record.id}: ${error}`
     }
 
     private enqueueReliable(lane: DeliveryLane, record: DeliveryRecord, operation: () => Promise<void>): Promise<DeliveryRecord> {
@@ -368,6 +407,9 @@ export class DeliveryOutbox {
     private async withRateLimitRetry<T>(operation: () => Promise<T>, timeoutMs = this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS): Promise<T> {
         const maxRetries = this.config.maxRateLimitRetries ?? DEFAULT_RATE_LIMIT_RETRIES
         const maxDelayMs = this.config.maxRateLimitDelayMs ?? DEFAULT_MAX_RATE_LIMIT_DELAY_MS
+        const maxNetworkRetries = this.config.maxNetworkRetries ?? DEFAULT_NETWORK_RETRIES
+        const networkRetryBaseDelayMs = this.config.networkRetryBaseDelayMs ?? DEFAULT_NETWORK_RETRY_BASE_DELAY_MS
+        let networkAttempts = 0
 
         for (let attempt = 0; ; attempt++) {
             try {
@@ -375,6 +417,11 @@ export class DeliveryOutbox {
             } catch (error) {
                 const retryAfterMs = getRetryAfterMs(error)
                 if (retryAfterMs === null || attempt >= maxRetries) {
+                    if (retryAfterMs === null && isRetryableNetworkError(error) && networkAttempts < maxNetworkRetries) {
+                        networkAttempts += 1
+                        await delay(networkRetryBaseDelayMs * networkAttempts)
+                        continue
+                    }
                     this.lastFailure = error instanceof Error ? error.message : String(error)
                     throw error
                 }
@@ -425,6 +472,17 @@ function getNestedRetryAfter(error: unknown): unknown {
         return record.retry_after
     }
     return undefined
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/Network request for .* failed|fetch failed|socket hang up/i.test(message)) return true
+    if (/\b(ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|UND_ERR_[A-Z_]+)\b/i.test(message)) return true
+
+    if (error && typeof error === 'object' && 'cause' in error) {
+        return isRetryableNetworkError((error as { cause?: unknown }).cause)
+    }
+    return false
 }
 
 function delay(ms: number): Promise<void> {

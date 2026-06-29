@@ -177,9 +177,55 @@ describe('SemanticSessionRuntime', () => {
         const rendered = sent.map(message => message.text).join('\n')
         expect(rendered).toContain('Delivery warning')
         expect(rendered).toContain('telegram rejected markdown entities')
+        expect(rendered).toContain('/delivery delivery-1')
+        expect(runtime.getDeliveryStatus('delivery-1').deliveries[0].message.text).toBe('final answer')
 
         await runtime.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
         expect(sent.at(-1)?.text).toContain('Last delivery failure')
+    })
+
+    it('can retrieve and retry a failed assistant delivery', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const channel = createChannel(sent, statuses)
+        let attempts = 0
+        channel.send = vi.fn(async (message) => {
+            attempts += 1
+            if (attempts === 1) {
+                throw new Error('telegram network failed')
+            }
+            sent.push(message)
+            return { messageId: attempts }
+        })
+        const provider = createProvider([
+            { kind: 'text', text: 'recoverable final answer' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+
+        expect(runtime.getDeliveryStatus('delivery-1').deliveries[0]).toMatchObject({
+            status: 'failed',
+            message: { text: 'recoverable final answer' },
+        })
+
+        await runtime.dispatch({ kind: 'command', name: 'delivery', args: 'delivery-1', source: 'channel' })
+        expect(sent.at(-2)?.text).toContain('Delivery details')
+        expect(sent.at(-1)?.text).toBe('recoverable final answer')
+
+        const retryResult = await runtime.dispatch({ kind: 'command', name: 'retry_delivery', args: 'delivery-1', source: 'channel' })
+        expect(retryResult).toMatchObject({ status: 'sent', retryOf: 'delivery-1' })
+        expect(runtime.getDeliveryStatus('delivery-1').deliveries[0].resolvedBy).toBeDefined()
+
+        await runtime.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
+        expect(sent.at(-1)?.text).not.toContain('Last delivery failure')
     })
 
     it('flushes assistant text after a quiet period before the turn finishes', async () => {

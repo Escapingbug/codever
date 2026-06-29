@@ -59,6 +59,23 @@ export interface DeliveryStatusRequest {
     sessionId: string
     /** Optional delivery id returned by send_file */
     deliveryId?: string
+    /** Include retained message text in the response */
+    includeText?: boolean
+}
+
+export interface RetryDeliveryRequest {
+    /** providerSessionId or coreSessionId to target */
+    sessionId: string
+    /** Delivery id to retry */
+    deliveryId: string
+}
+
+export interface RetryDeliveryResponse {
+    status: 'sent' | 'failed' | 'not_found'
+    deliveryId?: string
+    retryOf?: string
+    messageId?: string | number
+    message?: string
 }
 
 export interface DeliveryStatusResponse {
@@ -71,6 +88,11 @@ export interface DeliveryStatusResponse {
         completedAt?: number
         error?: string
         textChars: number
+        text?: string
+        format?: string
+        retryOf?: string
+        resolvedBy?: string
+        resolvedAt?: number
         attachments?: Array<{ type: string; path: string; filename?: string }>
     }>
 }
@@ -81,6 +103,7 @@ export interface DaemonApiHandlers {
     onSend: (req: SendRequest) => void
     onSendFile: (req: SendFileRequest) => void | Promise<unknown>
     onDeliveryStatus: (req: DeliveryStatusRequest) => DeliveryStatusResponse
+    onRetryDelivery: (req: RetryDeliveryRequest) => Promise<RetryDeliveryResponse>
 }
 
 export interface DaemonApi {
@@ -165,6 +188,18 @@ export async function startDaemonApi(handlers: DaemonApiHandlers): Promise<Daemo
                         return
                     }
                     sendJson(200, handlers.onDeliveryStatus(data))
+                    return
+                }
+
+                if (req.method === 'POST' && req.url === '/api/retry-delivery') {
+                    const body = await readBody()
+                    const data = JSON.parse(body) as RetryDeliveryRequest
+                    if (!data.sessionId || !data.deliveryId) {
+                        sendJson(400, { error: 'Missing required fields: sessionId, deliveryId' })
+                        return
+                    }
+                    const result = await handlers.onRetryDelivery(data)
+                    sendJson(200, result)
                     return
                 }
 

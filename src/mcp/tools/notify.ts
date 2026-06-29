@@ -286,7 +286,7 @@ export function createSendFileHandler() {
 }
 
 export function createGetDeliveryStatusHandler() {
-    return async (args: { deliveryId?: string }) => {
+    return async (args: { deliveryId?: string; includeText?: boolean }) => {
         const apiPort = getDaemonApiPort()
         if (!apiPort) {
             return {
@@ -310,6 +310,7 @@ export function createGetDeliveryStatusHandler() {
                 body: JSON.stringify({
                     sessionId: conversationId,
                     ...(args.deliveryId ? { deliveryId: args.deliveryId } : {}),
+                    ...(args.includeText ? { includeText: true } : {}),
                 }),
             })
 
@@ -331,6 +332,11 @@ export function createGetDeliveryStatusHandler() {
                     completedAt?: number
                     error?: string
                     textChars: number
+                    text?: string
+                    format?: string
+                    retryOf?: string
+                    resolvedBy?: string
+                    resolvedAt?: number
                     attachments?: Array<{ type: string; path: string; filename?: string }>
                 }>
             }
@@ -347,10 +353,85 @@ export function createGetDeliveryStatusHandler() {
                 const completed = delivery.completedAt ? ` completed=${new Date(delivery.completedAt).toISOString()}` : ''
                 const messageId = delivery.messageId !== undefined ? ` messageId=${delivery.messageId}` : ''
                 const error = delivery.error ? ` error=${delivery.error}` : ''
-                return `${delivery.id}: ${delivery.status} ${target}${messageId}${completed}${error}`
+                const retryOf = delivery.retryOf ? ` retryOf=${delivery.retryOf}` : ''
+                const resolvedBy = delivery.resolvedBy ? ` resolvedBy=${delivery.resolvedBy}` : ''
+                const resolvedAt = delivery.resolvedAt ? ` resolvedAt=${new Date(delivery.resolvedAt).toISOString()}` : ''
+                const header = `${delivery.id}: ${delivery.status} ${target}${messageId}${completed}${retryOf}${resolvedBy}${resolvedAt}${error}`
+                if (!args.includeText || delivery.text === undefined) return header
+                return `${header}\nformat=${delivery.format ?? 'unknown'}\ntext:\n${delivery.text}`
             })
             return {
                 content: [{ type: 'text' as const, text: `Delivery status:\n${lines.join('\n')}` }],
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: `Failed to connect to daemon: ${msg}` }],
+            }
+        }
+    }
+}
+
+export function createRetryDeliveryHandler() {
+    return async (args: { deliveryId: string }) => {
+        const apiPort = getDaemonApiPort()
+        if (!apiPort) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Daemon API not available.' }],
+            }
+        }
+
+        const conversationId = process.env.CODEVER_CONVERSATION_ID
+        if (!conversationId) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Session identity not available yet. Retry_delivery requires a session context that is established after the first turn. Please retry on the next message.' }],
+            }
+        }
+
+        try {
+            const res = await fetch(`http://127.0.0.1:${apiPort}/api/retry-delivery`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: conversationId,
+                    deliveryId: args.deliveryId,
+                }),
+            })
+
+            if (!res.ok) {
+                const err = await res.text()
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Retry delivery failed: ${err}` }],
+                }
+            }
+
+            const result = await res.json() as {
+                status: 'sent' | 'failed' | 'not_found'
+                deliveryId?: string
+                retryOf?: string
+                messageId?: string | number
+                message?: string
+            }
+            if (result.status === 'not_found') {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: result.message ?? `No delivery found for ${args.deliveryId}.` }],
+                }
+            }
+            if (result.status === 'failed') {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Delivery retry failed for ${result.retryOf ?? args.deliveryId}: ${result.message ?? 'unknown error'}` }],
+                }
+            }
+
+            const messageId = result.messageId !== undefined ? ` messageId=${result.messageId}` : ''
+            return {
+                content: [{ type: 'text' as const, text: `Delivery resent: ${result.retryOf ?? args.deliveryId} -> ${result.deliveryId ?? 'unknown'}${messageId}` }],
             }
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
@@ -409,10 +490,20 @@ export function registerNotifyTools(server: any): void {
 
     server.tool(
         'get_delivery_status',
-        'Check asynchronous channel delivery status for files or messages queued by Codever. Pass deliveryId from send_file to inspect a specific upload.',
+        'Check asynchronous channel delivery status for files or messages queued by Codever. Pass deliveryId to inspect a specific delivery; set includeText to recover retained message text.',
         {
             deliveryId: z.string().optional().describe('Optional delivery ID returned by send_file. If omitted, recent deliveries for the session are listed.'),
+            includeText: z.boolean().optional().describe('Include retained message text in the response. Use for failed deliveries whose Telegram message was not shown.'),
         },
         createGetDeliveryStatusHandler(),
+    )
+
+    server.tool(
+        'retry_delivery',
+        'Retry a retained channel delivery by ID.',
+        {
+            deliveryId: z.string().describe('Delivery ID to retry, such as delivery-123.'),
+        },
+        createRetryDeliveryHandler(),
     )
 }

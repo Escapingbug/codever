@@ -8,13 +8,15 @@ describe('Daemon API integration boundary', () => {
     const onSend = vi.fn()
     const onSendFile = vi.fn()
     const onDeliveryStatus = vi.fn()
+    const onRetryDelivery = vi.fn()
 
     beforeEach(async () => {
         vi.clearAllMocks()
         onSchedule.mockReturnValue({ taskId: 'task-1' })
         onSendFile.mockResolvedValue({ status: 'queued', deliveryId: 'delivery-1' })
         onDeliveryStatus.mockReturnValue({ deliveries: [] })
-        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile, onDeliveryStatus })
+        onRetryDelivery.mockResolvedValue({ status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' })
+        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile, onDeliveryStatus, onRetryDelivery })
     })
 
     afterEach(() => {
@@ -93,6 +95,8 @@ describe('Daemon API integration boundary', () => {
                 status: 'pending',
                 createdAt: 1,
                 textChars: 12,
+                text: 'hello world!',
+                format: 'plain',
                 attachments: [{ type: 'document', path: '/repo/report.md', filename: 'report.md' }],
             }],
         })
@@ -100,7 +104,7 @@ describe('Daemon API integration boundary', () => {
         const res = await fetch(url('/api/delivery-status'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
+            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true }),
         })
 
         expect(res.status).toBe(200)
@@ -111,10 +115,24 @@ describe('Daemon API integration boundary', () => {
                 status: 'pending',
                 createdAt: 1,
                 textChars: 12,
+                text: 'hello world!',
+                format: 'plain',
                 attachments: [{ type: 'document', path: '/repo/report.md', filename: 'report.md' }],
             }],
         })
-        expect(onDeliveryStatus).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' })
+        expect(onDeliveryStatus).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true })
+    })
+
+    it('POST /api/retry-delivery validates and forwards retry requests', async () => {
+        const res = await fetch(url('/api/retry-delivery'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
+        })
+
+        expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({ status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' })
+        expect(onRetryDelivery).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' })
     })
 
     it('POST /api/cancel validates and forwards cancel requests', async () => {

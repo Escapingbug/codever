@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     createCancelReminderHandler,
     createGetDeliveryStatusHandler,
+    createRetryDeliveryHandler,
     createScheduleReminderHandler,
     createSendFileHandler,
     createSendMessageHandler,
@@ -25,7 +26,8 @@ describe('MCP notify tool integration with daemon API', () => {
             ok: true,
             json: async () => {
                 if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
-                if (url.endsWith('/api/delivery-status')) return { deliveries: [{ id: 'delivery-1', kind: 'send', status: 'pending', createdAt: 1, textChars: 6 }] }
+                if (url.endsWith('/api/delivery-status')) return { deliveries: [{ id: 'delivery-1', kind: 'send', status: 'pending', createdAt: 1, textChars: 6, text: 'answer', format: 'plain' }] }
+                if (url.endsWith('/api/retry-delivery')) return { status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1', messageId: 42 }
                 return { taskId: 'task-1' }
             },
             text: async () => '',
@@ -90,11 +92,25 @@ describe('MCP notify tool integration with daemon API', () => {
     it('get_delivery_status posts a session-scoped delivery status request to daemon API', async () => {
         const handler = createGetDeliveryStatusHandler()
 
-        const result = await handler({ deliveryId: 'delivery-1' })
+        const result = await handler({ deliveryId: 'delivery-1', includeText: true })
 
         expect(result.isError).toBeUndefined()
         expect(result.content[0].text).toContain('delivery-1: pending')
+        expect(result.content[0].text).toContain('text:\nanswer')
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/delivery-status', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true }),
+        }))
+    })
+
+    it('retry_delivery posts a session-scoped retry request to daemon API', async () => {
+        const handler = createRetryDeliveryHandler()
+
+        const result = await handler({ deliveryId: 'delivery-1' })
+
+        expect(result.isError).toBeUndefined()
+        expect(result.content[0].text).toContain('Delivery resent')
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/retry-delivery', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
         }))

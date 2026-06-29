@@ -113,6 +113,7 @@ function createSession(state: TopicSession['state'] = 'querying'): TopicSession 
         channelPort: {} as any,
         getProgress: vi.fn(() => ({ state, elapsedSeconds: 12, lastToolName: 'Bash' })),
         getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
+        retryDelivery: vi.fn(async () => ({ status: 'not_found' as const })),
     }
 }
 

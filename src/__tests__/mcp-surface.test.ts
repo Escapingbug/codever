@@ -52,6 +52,7 @@ describe('MCP active surface registration', () => {
             json: async () => {
                 if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
                 if (url.endsWith('/api/delivery-status')) return { deliveries: [] }
+                if (url.endsWith('/api/retry-delivery')) return { status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' }
                 return { taskId: 'task-1' }
             },
             text: async () => '',
@@ -76,6 +77,7 @@ describe('MCP active surface registration', () => {
         expect(tools.has('send_message')).toBe(true)
         expect(tools.has('send_file')).toBe(true)
         expect(tools.has('get_delivery_status')).toBe(true)
+        expect(tools.has('retry_delivery')).toBe(true)
         expect(tools.has('list_sessions')).toBe(false)
 
         const context = await tools.get('get_codever_context')!({ topic: 'channel' })
@@ -100,6 +102,12 @@ describe('MCP active surface registration', () => {
 
         await tools.get('get_delivery_status')!({ deliveryId: 'delivery-1' })
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/delivery-status', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1', deliveryId: 'delivery-1' }),
+        }))
+
+        await tools.get('retry_delivery')!({ deliveryId: 'delivery-1' })
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/retry-delivery', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ sessionId: 'provider-session-1', deliveryId: 'delivery-1' }),
         }))
