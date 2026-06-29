@@ -15,6 +15,7 @@ import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
 import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type RetryDeliveryRequest, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
 import { routeSendMessageToTopicSession } from './daemon/sendRouting'
+import { findTopicSessionForApiSession, getTopicKeyForTopicSession, resolveTopicSessionForApiSession } from './daemon/sessionRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
 import { createSafeStreamMirror } from './utils/safeStreamMirror'
@@ -132,19 +133,32 @@ async function main() {
     }
 
     const scheduler = new Scheduler({
+        onTasksChanged: (tasks) => {
+            config.saveScheduledTasks(tasks)
+        },
         onTrigger: (task) => {
             console.log(`[daemon] Scheduler trigger: task=${task.id.slice(0, 8)} topicKey=${task.topicKey} message="${task.message.slice(0, 50)}"`)
 
-            // Look up the TopicSession by topicKey
-            const topicSession = sessionManager.getTopicSession(task.topicKey)
+            const topicSession = findTopicSessionForApiSession(sessionManager, task.topicKey)
             if (!topicSession) {
                 console.warn(`[daemon] Scheduler: no topic session found for topicKey=${task.topicKey}, skipping`)
-                persistTasks()
                 return
             }
 
-            topicSession.receiveInput({ text: task.message, username: 'reminder' })
-            persistTasks()
+            const resolvedTopicKey = getTopicKeyForTopicSession(topicSession)
+            if (resolvedTopicKey !== task.topicKey) {
+                console.warn(`[daemon] Scheduler: resolved legacy task target ${task.topicKey} to topicKey=${resolvedTopicKey}`)
+                task.topicKey = resolvedTopicKey
+            }
+
+            void topicSession.dispatch({
+                kind: 'scheduled_message',
+                text: task.message,
+                ...(task.context ? { context: task.context } : {}),
+                source: 'scheduler',
+            }).catch((e) => {
+                console.warn(`[daemon] Scheduler dispatch failed for task=${task.id.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`)
+            })
         },
     })
 
@@ -157,22 +171,8 @@ async function main() {
 
     // --- Daemon Internal API: IPC bridge for MCP subprocess ---
 
-    const findTopicSessionForApiSession = (sessionId: string) => {
-        let topicSession = sessionManager.getTopicSessionByConversationId(sessionId)
-        if (!topicSession) {
-            const sessionRecord = sessionManager.getSession(sessionId)
-            if (sessionRecord) {
-                topicSession = sessionManager.getTopicSessionBySessionId(sessionRecord.id)
-            }
-        }
-        return topicSession
-    }
-
     const formatDeliveryStatus = (req: DeliveryStatusRequest): DeliveryStatusResponse => {
-        const topicSession = findTopicSessionForApiSession(req.sessionId)
-        if (!topicSession) {
-            throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
-        }
+        const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
         const status = topicSession.getDeliveryStatus(req.deliveryId)
         return {
             deliveries: status.deliveries.map(record => ({
@@ -201,8 +201,8 @@ async function main() {
 
     const daemonApi = await startDaemonApi({
         onSchedule: (req: ScheduleRequest) => {
-            // Store topicKey as sessionId for scheduled tasks
-            const topicKey = req.sessionId
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
+            const topicKey = getTopicKeyForTopicSession(topicSession)
 
             const task = scheduler.schedule({
                 topicKey: topicKey,
@@ -221,20 +221,12 @@ async function main() {
             console.log(`[daemon] Cancelled task ${req.taskId.slice(0, 8)}`)
         },
         onSend: (req: SendRequest) => {
-            // Find the topic session
-            const topicSession = findTopicSessionForApiSession(req.sessionId)
-            if (topicSession) {
-                routeSendMessageToTopicSession(topicSession, req)
-                console.log(`[daemon] Sent message to session ${req.sessionId.slice(0, 8)}: "${req.message.slice(0, 50)}"`)
-            } else {
-                console.warn(`[daemon] Send: no topic session found for ${req.sessionId.slice(0, 8)}`)
-            }
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
+            routeSendMessageToTopicSession(topicSession, req)
+            console.log(`[daemon] Sent message to session ${req.sessionId.slice(0, 8)}: "${req.message.slice(0, 50)}"`)
         },
         onSendFile: async (req: SendFileRequest) => {
-            const topicSession = findTopicSessionForApiSession(req.sessionId)
-            if (!topicSession) {
-                throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
-            }
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
             const result = await topicSession.dispatch({
                 kind: 'command',
                 name: 'send_file',
@@ -254,10 +246,7 @@ async function main() {
             return formatDeliveryStatus(req)
         },
         onRetryDelivery: async (req: RetryDeliveryRequest) => {
-            const topicSession = findTopicSessionForApiSession(req.sessionId)
-            if (!topicSession) {
-                throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
-            }
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
             return await topicSession.retryDelivery(req.deliveryId)
         },
     })

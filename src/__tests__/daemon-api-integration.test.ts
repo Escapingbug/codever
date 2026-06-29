@@ -35,7 +35,7 @@ describe('Daemon API integration boundary', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                sessionId: 'topic:-100:10',
+                sessionId: '-100:10',
                 triggerAt: 1_800_000_000_000,
                 message: 'check progress',
                 context: 'test',
@@ -46,7 +46,7 @@ describe('Daemon API integration boundary', () => {
         expect(res.status).toBe(200)
         await expect(res.json()).resolves.toEqual({ taskId: 'task-1' })
         expect(onSchedule).toHaveBeenCalledWith({
-            sessionId: 'topic:-100:10',
+            sessionId: '-100:10',
             triggerAt: 1_800_000_000_000,
             message: 'check progress',
             context: 'test',
@@ -58,11 +58,11 @@ describe('Daemon API integration boundary', () => {
         const res = await fetch(url('/api/send'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: 'topic:-100:10', message: 'wake up' }),
+            body: JSON.stringify({ sessionId: '-100:10', message: 'wake up' }),
         })
 
         expect(res.status).toBe(200)
-        expect(onSend).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', message: 'wake up' })
+        expect(onSend).toHaveBeenCalledWith({ sessionId: '-100:10', message: 'wake up' })
     })
 
     it('POST /api/send-file validates and forwards immediate session file render requests', async () => {
@@ -70,7 +70,7 @@ describe('Daemon API integration boundary', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                sessionId: 'topic:-100:10',
+                sessionId: '-100:10',
                 path: '/repo/report.md',
                 caption: 'latest report',
                 type: 'markdown',
@@ -80,7 +80,7 @@ describe('Daemon API integration boundary', () => {
         expect(res.status).toBe(200)
         await expect(res.json()).resolves.toEqual({ ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } })
         expect(onSendFile).toHaveBeenCalledWith({
-            sessionId: 'topic:-100:10',
+            sessionId: '-100:10',
             path: '/repo/report.md',
             caption: 'latest report',
             type: 'markdown',
@@ -104,7 +104,7 @@ describe('Daemon API integration boundary', () => {
         const res = await fetch(url('/api/delivery-status'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true }),
+            body: JSON.stringify({ sessionId: '-100:10', deliveryId: 'delivery-1', includeText: true }),
         })
 
         expect(res.status).toBe(200)
@@ -120,19 +120,19 @@ describe('Daemon API integration boundary', () => {
                 attachments: [{ type: 'document', path: '/repo/report.md', filename: 'report.md' }],
             }],
         })
-        expect(onDeliveryStatus).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true })
+        expect(onDeliveryStatus).toHaveBeenCalledWith({ sessionId: '-100:10', deliveryId: 'delivery-1', includeText: true })
     })
 
     it('POST /api/retry-delivery validates and forwards retry requests', async () => {
         const res = await fetch(url('/api/retry-delivery'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
+            body: JSON.stringify({ sessionId: '-100:10', deliveryId: 'delivery-1' }),
         })
 
         expect(res.status).toBe(200)
         await expect(res.json()).resolves.toEqual({ status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' })
-        expect(onRetryDelivery).toHaveBeenCalledWith({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' })
+        expect(onRetryDelivery).toHaveBeenCalledWith({ sessionId: '-100:10', deliveryId: 'delivery-1' })
     })
 
     it('POST /api/cancel validates and forwards cancel requests', async () => {
@@ -150,7 +150,7 @@ describe('Daemon API integration boundary', () => {
         const res = await fetch(url('/api/schedule'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: 'topic:-100:10', message: 'missing trigger' }),
+            body: JSON.stringify({ sessionId: '-100:10', message: 'missing trigger' }),
         })
 
         expect(res.status).toBe(400)

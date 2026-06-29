@@ -24,14 +24,17 @@ export interface ScheduledTask {
 
 export interface SchedulerConfig {
     onTrigger: (task: ScheduledTask) => void
+    onTasksChanged?: (tasks: ScheduledTask[]) => void
 }
 
 export class Scheduler {
     private tasks = new Map<string, { task: ScheduledTask; timer: ReturnType<typeof setTimeout> }>()
     private onTrigger: (task: ScheduledTask) => void
+    private onTasksChanged?: (tasks: ScheduledTask[]) => void
 
     constructor(config: SchedulerConfig) {
         this.onTrigger = config.onTrigger
+        this.onTasksChanged = config.onTasksChanged
     }
 
     /**
@@ -50,6 +53,7 @@ export class Scheduler {
         }, delay)
 
         this.tasks.set(task.id, { task, timer })
+        this.notifyTasksChanged()
         return task
     }
 
@@ -62,6 +66,7 @@ export class Scheduler {
 
         clearTimeout(entry.timer)
         this.tasks.delete(taskId)
+        this.notifyTasksChanged()
         return true
     }
 
@@ -117,7 +122,13 @@ export class Scheduler {
 
         const task = entry.task
         this.tasks.delete(taskId)
-        this.onTrigger(task)
+
+        let triggerError: unknown
+        try {
+            this.onTrigger(task)
+        } catch (e) {
+            triggerError = e
+        }
 
         // Re-schedule if recurring
         if (task.recurringMs) {
@@ -128,6 +139,14 @@ export class Scheduler {
                 context: task.context,
                 recurringMs: task.recurringMs,
             })
+        } else {
+            this.notifyTasksChanged()
         }
+
+        if (triggerError) throw triggerError
+    }
+
+    private notifyTasksChanged(): void {
+        this.onTasksChanged?.(this.saveTasks())
     }
 }

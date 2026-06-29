@@ -21,7 +21,7 @@ describe('MCP notify tool integration with daemon API', () => {
     beforeEach(() => {
         existsSync.mockReturnValue(true)
         readFileSync.mockReturnValue('3737')
-        process.env.CODEVER_CONVERSATION_ID = 'topic:-100:10'
+        process.env.CODEVER_CONVERSATION_ID = 'provider-session-1'
         vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
             ok: true,
             json: async () => {
@@ -51,7 +51,7 @@ describe('MCP notify tool integration with daemon API', () => {
             body: expect.any(String),
         }))
         expect(JSON.parse((fetch as any).mock.calls[0][1].body)).toMatchObject({
-            sessionId: 'topic:-100:10',
+            sessionId: 'provider-session-1',
             message: 'standup',
             context: 'test',
             recurringMs: 2_000,
@@ -66,7 +66,7 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(result.isError).toBeUndefined()
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send', expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ sessionId: 'topic:-100:10', message: 'ping user now' }),
+            body: JSON.stringify({ sessionId: 'provider-session-1', message: 'ping user now' }),
         }))
     })
 
@@ -81,7 +81,7 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/send-file', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({
-                sessionId: 'topic:-100:10',
+                sessionId: 'provider-session-1',
                 path: '/repo/report.md',
                 caption: 'latest report',
                 type: 'markdown',
@@ -99,7 +99,7 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(result.content[0].text).toContain('text:\nanswer')
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/delivery-status', expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1', includeText: true }),
+            body: JSON.stringify({ sessionId: 'provider-session-1', deliveryId: 'delivery-1', includeText: true }),
         }))
     })
 
@@ -112,7 +112,7 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(result.content[0].text).toContain('Delivery resent')
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/retry-delivery', expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ sessionId: 'topic:-100:10', deliveryId: 'delivery-1' }),
+            body: JSON.stringify({ sessionId: 'provider-session-1', deliveryId: 'delivery-1' }),
         }))
     })
 
