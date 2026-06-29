@@ -16,7 +16,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http'
 
 export interface ScheduleRequest {
-    /** providerSessionId or coreSessionId to target */
+    /** topicKey, providerSessionId, or coreSessionId to target */
     sessionId: string
     /** Epoch ms when the reminder should fire */
     triggerAt: number
@@ -33,14 +33,14 @@ export interface CancelRequest {
 }
 
 export interface SendRequest {
-    /** providerSessionId or coreSessionId to target */
+    /** topicKey, providerSessionId, or coreSessionId to target */
     sessionId: string
     /** Message text to inject */
     message: string
 }
 
 export interface SendFileRequest {
-    /** providerSessionId or coreSessionId to target */
+    /** topicKey, providerSessionId, or coreSessionId to target */
     sessionId: string
     /** Local file path to send */
     path: string
@@ -55,7 +55,7 @@ export interface SendFileRequest {
 }
 
 export interface DeliveryStatusRequest {
-    /** providerSessionId or coreSessionId to target */
+    /** topicKey, providerSessionId, or coreSessionId to target */
     sessionId: string
     /** Optional delivery id returned by send_file */
     deliveryId?: string
@@ -64,7 +64,7 @@ export interface DeliveryStatusRequest {
 }
 
 export interface RetryDeliveryRequest {
-    /** providerSessionId or coreSessionId to target */
+    /** topicKey, providerSessionId, or coreSessionId to target */
     sessionId: string
     /** Delivery id to retry */
     deliveryId: string

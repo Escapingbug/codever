@@ -39,13 +39,6 @@ function getDaemonApiPort(): number | null {
     }
 }
 
-/** Resolve sessionId: accept either a topicKey or conversationId */
-async function resolveSessionId(apiPort: number, sessionId: string): Promise<string | null> {
-    // Try as-is first (might be a topicKey)
-    // The daemon API handler will resolve conversationId → topicKey
-    return sessionId
-}
-
 export function createScheduleReminderHandler() {
     return async (args: { delayMs: number; message: string; context?: string; recurringMs?: number }) => {
         const apiPort = getDaemonApiPort()

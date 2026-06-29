@@ -255,6 +255,86 @@ describe('Scheduler', () => {
             vi.advanceTimersByTime(0)
             expect(triggeredTasks.length).toBe(1)
         })
+
+        it('notifies persistence after one-shot tasks are removed', () => {
+            const changes: ScheduledTask[][] = []
+            const persistentScheduler = new Scheduler({
+                onTrigger: (t) => triggeredTasks.push({ taskId: t.id, message: t.message, topicKey: t.topicKey }),
+                onTasksChanged: (tasks) => changes.push(tasks),
+            })
+
+            try {
+                persistentScheduler.schedule({
+                    topicKey: '12345:main',
+                    triggerAt: Date.now() + 5000,
+                    message: 'Persisted one-shot',
+                })
+
+                vi.advanceTimersByTime(5000)
+
+                expect(triggeredTasks.length).toBe(1)
+                expect(changes[changes.length - 1]).toEqual([])
+            } finally {
+                persistentScheduler.stopAll()
+            }
+        })
+
+        it('notifies persistence after recurring tasks are re-scheduled', () => {
+            const changes: ScheduledTask[][] = []
+            const persistentScheduler = new Scheduler({
+                onTrigger: (t) => triggeredTasks.push({ taskId: t.id, message: t.message, topicKey: t.topicKey }),
+                onTasksChanged: (tasks) => changes.push(tasks),
+            })
+
+            try {
+                const original = persistentScheduler.schedule({
+                    topicKey: '12345:main',
+                    triggerAt: Date.now() + 5000,
+                    message: 'Persisted recurring',
+                    recurringMs: 10000,
+                })
+
+                vi.advanceTimersByTime(5000)
+
+                const latest = changes[changes.length - 1]
+                expect(triggeredTasks.length).toBe(1)
+                expect(latest.length).toBe(1)
+                expect(latest[0].id).not.toBe(original.id)
+                expect(latest[0].topicKey).toBe('12345:main')
+                expect(latest[0].recurringMs).toBe(10000)
+            } finally {
+                persistentScheduler.stopAll()
+            }
+        })
+
+        it('persists recurring task target updates made during trigger handling', () => {
+            const changes: ScheduledTask[][] = []
+            const persistentScheduler = new Scheduler({
+                onTrigger: (task) => {
+                    task.topicKey = '-100:10'
+                    triggeredTasks.push({ taskId: task.id, message: task.message, topicKey: task.topicKey })
+                },
+                onTasksChanged: (tasks) => changes.push(tasks),
+            })
+
+            try {
+                persistentScheduler.schedule({
+                    topicKey: 'provider-session-1',
+                    triggerAt: Date.now() + 5000,
+                    message: 'Migrate recurring',
+                    recurringMs: 10000,
+                })
+
+                vi.advanceTimersByTime(5000)
+
+                const latest = changes[changes.length - 1]
+                expect(triggeredTasks[0].topicKey).toBe('-100:10')
+                expect(latest.length).toBe(1)
+                expect(latest[0].topicKey).toBe('-100:10')
+            } finally {
+                persistentScheduler.stopAll()
+            }
+        })
     })
 
     describe('recurring', () => {
