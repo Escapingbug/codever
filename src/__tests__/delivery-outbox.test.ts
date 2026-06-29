@@ -74,6 +74,61 @@ describe('DeliveryOutbox', () => {
         }
     })
 
+    it('short-retries transient network send failures', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.send)
+                .mockRejectedValueOnce(new Error("Network request for 'sendMessage' failed!"))
+                .mockImplementation(async (message: ChannelMessage) => {
+                    sent.push(message.text)
+                    return { messageId: sent.length }
+                })
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                networkRetryBaseDelayMs: 10,
+            })
+
+            const delivery = outbox.send({ text: 'network recovered', format: 'plain' })
+            await vi.advanceTimersByTimeAsync(10)
+            const record = await delivery
+
+            expect(record.status).toBe('sent')
+            expect(channel.send).toHaveBeenCalledTimes(2)
+            expect(sent).toEqual(['network recovered'])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('retains failed delivery text and marks it resolved after a successful retry', async () => {
+        const sent: string[] = []
+        const channel = createChannelPort(sent)
+        vi.mocked(channel.send)
+            .mockRejectedValueOnce(new Error("Network request for 'sendMessage' failed!"))
+            .mockImplementation(async (message: ChannelMessage) => {
+                sent.push(message.text)
+                return { messageId: sent.length }
+            })
+        const outbox = new DeliveryOutbox({
+            channelPort: channel,
+            maxNetworkRetries: 0,
+        })
+
+        const failed = await outbox.send({ text: 'lost answer body', format: 'markdown' })
+        expect(failed.status).toBe('failed')
+        expect(outbox.find(failed.id)?.message.text).toBe('lost answer body')
+        expect(outbox.getState().lastFailure).toContain(failed.id)
+
+        const retry = await outbox.retry(failed.id)
+
+        expect(retry).toMatchObject({ status: 'sent', retryOf: failed.id })
+        expect(outbox.find(failed.id)?.resolvedBy).toBe(retry?.id)
+        expect(outbox.getState().lastFailure).toBeUndefined()
+        expect(sent).toEqual(['lost answer body'])
+    })
+
     it('times out a stuck delivery and continues later sends', async () => {
         vi.useFakeTimers()
         try {

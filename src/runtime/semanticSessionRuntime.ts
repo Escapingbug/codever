@@ -46,6 +46,14 @@ export interface SendFileCommandResult {
     message?: string
 }
 
+export interface RetryDeliveryCommandResult {
+    status: 'sent' | 'failed' | 'not_found'
+    deliveryId?: string
+    retryOf?: string
+    messageId?: string | number
+    message?: string
+}
+
 interface FileReference {
     id: string
     uri: string
@@ -206,6 +214,15 @@ export class SemanticSessionRuntime {
         const deliveries = this.outbox.list()
             .filter(record => !deliveryId || record.id === deliveryId)
         return { deliveries }
+    }
+
+    async retryDelivery(deliveryId: string): Promise<RetryDeliveryCommandResult> {
+        const record = await this.outbox.retry(deliveryId)
+        if (!record) {
+            return { status: 'not_found', deliveryId, message: `No delivery found for ${deliveryId}.` }
+        }
+        this.noteDeliveryRecord(record)
+        return this.formatRetryDeliveryResult(record)
     }
 
     private async handleInput(input: SessionInput): Promise<unknown> {
@@ -554,7 +571,8 @@ export class SemanticSessionRuntime {
             'Codever received the agent reply, but Telegram delivery failed before it could be shown.',
             `Delivery: <code>${escapeHtml(record.id)}</code>`,
             `<pre>${escapeHtml(truncateForNotice(error))}</pre>`,
-            'Use <code>/progress</code> or <code>get_delivery_status</code> for the current delivery state.',
+            `The reply is retained in Codever. Use <code>/delivery ${escapeHtml(record.id)}</code> to read it or <code>/retry_delivery ${escapeHtml(record.id)}</code> to resend it.`,
+            'MCP: call <code>get_delivery_status</code> with <code>includeText</code> or use <code>retry_delivery</code>.',
         ].join('\n')
     }
 
@@ -641,6 +659,11 @@ export class SemanticSessionRuntime {
             case 'progress':
                 await this.handleProgressCommand()
                 return
+            case 'delivery':
+                await this.handleDeliveryCommand(args)
+                return
+            case 'retry_delivery':
+                return await this.handleRetryDeliveryCommand(args)
             case 'tables': {
                 const channelTables = this.getChannelTables()
                 const tables = channelTables.length > 0 ? channelTables : this.recentTables
@@ -949,8 +972,138 @@ export class SemanticSessionRuntime {
         }
         if (progress.outbox.lastFailure) {
             lines.push(`Last delivery failure: <pre>${escapeHtml(truncateForNotice(progress.outbox.lastFailure))}</pre>`)
+            lines.push('Use <code>/delivery &lt;id&gt;</code> to read retained text or <code>/retry_delivery &lt;id&gt;</code> to resend it.')
         }
 
+        return lines.join('\n')
+    }
+
+    private async handleDeliveryCommand(args: string | undefined): Promise<void> {
+        const deliveryId = args?.split(/\s+/)[0]
+        const deliveries = this.getDeliveryStatus(deliveryId).deliveries
+
+        if (deliveries.length === 0) {
+            this.recordCommand('delivery', { deliveryId, error: 'not_found' })
+            await this.send({
+                text: deliveryId ? `No delivery found for <code>${escapeHtml(deliveryId)}</code>.` : 'No deliveries found for this session.',
+                format: 'html',
+            }, { lane: 'control' })
+            return
+        }
+
+        if (!deliveryId) {
+            this.recordCommand('delivery', { count: deliveries.length })
+            await this.send({
+                text: this.formatDeliveryList(deliveries),
+                format: 'html',
+            }, { lane: 'control' })
+            return
+        }
+
+        const record = deliveries[0]
+        this.recordCommand('delivery', { deliveryId, status: record.status, textChars: record.message.text.length })
+        await this.send({
+            text: this.formatDeliveryDetails(record),
+            format: 'html',
+        }, { lane: 'control' })
+
+        if (record.message.text.length > 0) {
+            await this.send({
+                text: record.message.text,
+                format: 'plain',
+            }, { lane: 'control' })
+        }
+    }
+
+    private async handleRetryDeliveryCommand(args: string | undefined): Promise<RetryDeliveryCommandResult> {
+        const deliveryId = args?.split(/\s+/)[0]
+        if (!deliveryId) {
+            const message = 'Missing delivery ID. Usage: <code>/retry_delivery delivery-123</code>'
+            this.recordCommand('retry_delivery', { error: 'missing_delivery_id' })
+            await this.send({ text: message, format: 'html' }, { lane: 'control' })
+            return { status: 'failed', message: 'missing delivery ID' }
+        }
+
+        const result = await this.retryDelivery(deliveryId)
+        this.recordCommand('retry_delivery', result)
+        await this.send({
+            text: this.formatRetryDeliveryNotice(result),
+            format: 'html',
+        }, { lane: 'control' })
+        return result
+    }
+
+    private formatRetryDeliveryResult(record: DeliveryRecord): RetryDeliveryCommandResult {
+        const message = record.error instanceof Error ? record.error.message : record.error ? String(record.error) : undefined
+        return {
+            status: record.status === 'sent' ? 'sent' : 'failed',
+            deliveryId: record.id,
+            ...(record.retryOf ? { retryOf: record.retryOf } : {}),
+            ...(record.messageId !== undefined ? { messageId: record.messageId } : {}),
+            ...(message ? { message } : {}),
+        }
+    }
+
+    private formatRetryDeliveryNotice(result: RetryDeliveryCommandResult): string {
+        if (result.status === 'not_found') {
+            return `No delivery found for <code>${escapeHtml(result.deliveryId ?? '')}</code>.`
+        }
+        if (result.status === 'sent') {
+            return [
+                '<b>Delivery resent</b>',
+                result.retryOf ? `Original: <code>${escapeHtml(result.retryOf)}</code>` : undefined,
+                result.deliveryId ? `Retry: <code>${escapeHtml(result.deliveryId)}</code>` : undefined,
+                result.messageId !== undefined ? `Telegram message: <code>${escapeHtml(String(result.messageId))}</code>` : undefined,
+            ].filter(Boolean).join('\n')
+        }
+        return [
+            '<b>Delivery retry failed</b>',
+            result.retryOf ? `Original: <code>${escapeHtml(result.retryOf)}</code>` : undefined,
+            result.deliveryId ? `Retry: <code>${escapeHtml(result.deliveryId)}</code>` : undefined,
+            result.message ? `<pre>${escapeHtml(truncateForNotice(result.message))}</pre>` : undefined,
+        ].filter(Boolean).join('\n')
+    }
+
+    private formatDeliveryList(deliveries: DeliveryRecord[]): string {
+        const recent = deliveries.slice(-10).reverse()
+        const lines = recent.map(record => {
+            const status = escapeHtml(record.status)
+            const retryOf = record.retryOf ? ` retryOf=${record.retryOf}` : ''
+            const resolved = record.resolvedBy ? ` resolvedBy=${record.resolvedBy}` : ''
+            const error = record.error instanceof Error ? record.error.message : record.error ? String(record.error) : ''
+            const summary = `<code>${escapeHtml(record.id)}</code>: ${status} ${record.message.text.length} chars${escapeHtml(retryOf)}${escapeHtml(resolved)}`
+            return error ? `${summary} <pre>${escapeHtml(truncateForNotice(error))}</pre>` : summary
+        })
+        return [
+            '<b>Recent deliveries</b>',
+            ...lines,
+            'Use <code>/delivery &lt;id&gt;</code> to read retained text or <code>/retry_delivery &lt;id&gt;</code> to resend.',
+        ].join('\n')
+    }
+
+    private formatDeliveryDetails(record: DeliveryRecord): string {
+        const lines = [
+            '<b>Delivery details</b>',
+            `ID: <code>${escapeHtml(record.id)}</code>`,
+            `Kind: <code>${escapeHtml(record.kind)}</code>`,
+            `Status: <code>${escapeHtml(record.status)}</code>`,
+            `Format: <code>${escapeHtml(record.message.format)}</code>`,
+            `Text chars: <code>${record.message.text.length}</code>`,
+        ]
+        if (record.retryOf) lines.push(`Retry of: <code>${escapeHtml(record.retryOf)}</code>`)
+        if (record.resolvedBy) lines.push(`Resolved by: <code>${escapeHtml(record.resolvedBy)}</code>`)
+        if (record.messageId !== undefined) lines.push(`Telegram message: <code>${escapeHtml(String(record.messageId))}</code>`)
+        if (record.message.attachments?.length) {
+            lines.push(`Attachments: <code>${record.message.attachments.length}</code>`)
+        }
+        if (record.error) {
+            const error = record.error instanceof Error ? record.error.message : String(record.error)
+            lines.push(`Error: <pre>${escapeHtml(truncateForNotice(error))}</pre>`)
+        }
+        if (record.status === 'failed' && !record.resolvedBy) {
+            lines.push(`Use <code>/retry_delivery ${escapeHtml(record.id)}</code> to resend.`)
+        }
+        lines.push('Retained text follows as plain text.')
         return lines.join('\n')
     }
 

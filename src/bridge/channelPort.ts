@@ -8,6 +8,7 @@ import type { SessionState } from '@/core/types'
 import type { RichUserInput, SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
+import type { RetryDeliveryCommandResult } from '@/runtime/semanticSessionRuntime'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -111,4 +112,7 @@ export interface TopicSession {
     getDeliveryStatus(deliveryId?: string): {
         deliveries: DeliveryRecord[]
     }
+
+    /** Retry a retained channel delivery by ID */
+    retryDelivery(deliveryId: string): Promise<RetryDeliveryCommandResult>
 }

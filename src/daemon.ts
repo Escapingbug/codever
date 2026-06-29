@@ -13,7 +13,7 @@ import { createBot } from './channel/telegram/bot'
 import { SessionManager, buildMessageThreadParams, makeTopicKey } from './bridge/sessionManager'
 import { createTopicSession } from './bridge/topicSession'
 import { Scheduler } from './core/scheduler'
-import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
+import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type RetryDeliveryRequest, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
 import { routeSendMessageToTopicSession } from './daemon/sendRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
@@ -184,6 +184,10 @@ async function main() {
                 ...(record.completedAt !== undefined ? { completedAt: record.completedAt } : {}),
                 ...(record.error ? { error: record.error instanceof Error ? record.error.message : String(record.error) } : {}),
                 textChars: record.message.text.length,
+                ...(req.includeText ? { text: record.message.text, format: record.message.format } : {}),
+                ...(record.retryOf ? { retryOf: record.retryOf } : {}),
+                ...(record.resolvedBy ? { resolvedBy: record.resolvedBy } : {}),
+                ...(record.resolvedAt !== undefined ? { resolvedAt: record.resolvedAt } : {}),
                 ...(record.message.attachments ? {
                     attachments: record.message.attachments.map(attachment => ({
                         type: attachment.type,
@@ -248,6 +252,13 @@ async function main() {
         },
         onDeliveryStatus: (req: DeliveryStatusRequest) => {
             return formatDeliveryStatus(req)
+        },
+        onRetryDelivery: async (req: RetryDeliveryRequest) => {
+            const topicSession = findTopicSessionForApiSession(req.sessionId)
+            if (!topicSession) {
+                throw new Error(`No topic session found for ${req.sessionId.slice(0, 8)}`)
+            }
+            return await topicSession.retryDelivery(req.deliveryId)
         },
     })
 
