@@ -53,6 +53,8 @@ describe('MCP active surface registration', () => {
                 if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
                 if (url.endsWith('/api/delivery-status')) return { deliveries: [] }
                 if (url.endsWith('/api/retry-delivery')) return { status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' }
+                if (url.endsWith('/api/reminders')) return { reminders: [] }
+                if (url.endsWith('/api/cancel')) return { ok: true, cancelledCount: 1, taskIds: ['task-1'] }
                 return { taskId: 'task-1' }
             },
             text: async () => '',
@@ -73,6 +75,7 @@ describe('MCP active surface registration', () => {
         expect(resources.has('Codever Environment')).toBe(true)
         expect(tools.has('get_codever_context')).toBe(true)
         expect(tools.has('schedule_reminder')).toBe(true)
+        expect(tools.has('list_reminders')).toBe(true)
         expect(tools.has('cancel_reminder')).toBe(true)
         expect(tools.has('send_message')).toBe(true)
         expect(tools.has('send_file')).toBe(true)
@@ -86,6 +89,12 @@ describe('MCP active surface registration', () => {
         await tools.get('schedule_reminder')!({ delayMs: 1000, message: 'later' })
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/schedule', expect.objectContaining({
             method: 'POST',
+        }))
+
+        await tools.get('list_reminders')!({})
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/reminders', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1' }),
         }))
 
         await tools.get('send_message')!({ message: 'now' })

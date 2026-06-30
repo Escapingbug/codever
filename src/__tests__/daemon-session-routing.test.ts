@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { TopicSession } from '@/bridge/channelPort'
 import { SessionManager } from '@/bridge/sessionManager'
-import { findTopicSessionForApiSession, getTopicKeyForTopicSession, resolveTopicSessionForApiSession } from '@/daemon/sessionRouting'
+import { findTopicSessionForApiSession, getTopicKeyForTopicSession, isScheduledTaskForTopicSession, resolveTopicSessionForApiSession } from '@/daemon/sessionRouting'
 
 function createTopicSession(id: string, conversationId?: string | null, threadId: number | null = 10): TopicSession {
     return {
@@ -52,6 +52,38 @@ describe('daemon session routing', () => {
         const topicSession = createTopicSession('core-session-1', 'provider-session-1', 1)
 
         expect(getTopicKeyForTopicSession(topicSession)).toBe('-100:main')
+    })
+
+    it('matches scheduled tasks stored with topic key, provider conversation id, or core session id', () => {
+        const topicSession = createTopicSession('core-session-1', 'provider-session-1')
+
+        expect(isScheduledTaskForTopicSession({
+            id: 'task-1',
+            topicKey: '-100:10',
+            triggerAt: Date.now(),
+            message: 'topic task',
+        }, topicSession)).toBe(true)
+
+        expect(isScheduledTaskForTopicSession({
+            id: 'task-2',
+            topicKey: 'provider-session-1',
+            triggerAt: Date.now(),
+            message: 'legacy provider task',
+        }, topicSession)).toBe(true)
+
+        expect(isScheduledTaskForTopicSession({
+            id: 'task-3',
+            topicKey: 'core-session-1',
+            triggerAt: Date.now(),
+            message: 'core session task',
+        }, topicSession)).toBe(true)
+
+        expect(isScheduledTaskForTopicSession({
+            id: 'task-4',
+            topicKey: 'other-session',
+            triggerAt: Date.now(),
+            message: 'other task',
+        }, topicSession)).toBe(false)
     })
 
     it('throws a visible error when an API target cannot be resolved', () => {

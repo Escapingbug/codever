@@ -12,10 +12,10 @@ import { OpencodeProvider } from './providers/opencode'
 import { createBot } from './channel/telegram/bot'
 import { SessionManager, buildMessageThreadParams, makeTopicKey } from './bridge/sessionManager'
 import { createTopicSession } from './bridge/topicSession'
-import { Scheduler } from './core/scheduler'
-import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type RetryDeliveryRequest, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
+import { Scheduler, type ScheduledTask } from './core/scheduler'
+import { startDaemonApi, type DeliveryStatusRequest, type DeliveryStatusResponse, type ListRemindersRequest, type ListRemindersResponse, type ReminderInfo, type RetryDeliveryRequest, type ScheduleRequest, type SendFileRequest, type SendRequest } from './daemon/api'
 import { routeSendMessageToTopicSession } from './daemon/sendRouting'
-import { findTopicSessionForApiSession, getTopicKeyForTopicSession, resolveTopicSessionForApiSession } from './daemon/sessionRouting'
+import { findTopicSessionForApiSession, getTopicKeyForTopicSession, isScheduledTaskForTopicSession, resolveTopicSessionForApiSession } from './daemon/sessionRouting'
 import { ensureDaemonPath, resolveNodePath } from './utils/nodePath'
 import { GroupLogger } from './utils/groupLogger'
 import { createSafeStreamMirror } from './utils/safeStreamMirror'
@@ -199,6 +199,14 @@ async function main() {
         }
     }
 
+    const formatReminder = (task: ScheduledTask): ReminderInfo => ({
+        taskId: task.id,
+        triggerAt: task.triggerAt,
+        message: task.message,
+        ...(task.context ? { context: task.context } : {}),
+        ...(task.recurringMs ? { recurringMs: task.recurringMs } : {}),
+    })
+
     const daemonApi = await startDaemonApi({
         onSchedule: (req: ScheduleRequest) => {
             const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
@@ -216,9 +224,42 @@ async function main() {
             return { taskId: task.id }
         },
         onCancel: (req) => {
-            scheduler.cancel(req.taskId)
+            if (req.taskId) {
+                const cancelled = scheduler.cancel(req.taskId)
+                persistTasks()
+                if (cancelled) {
+                    console.log(`[daemon] Cancelled task ${req.taskId.slice(0, 8)}`)
+                } else {
+                    console.warn(`[daemon] Cancel requested for unknown task ${req.taskId.slice(0, 8)}`)
+                }
+                return {
+                    ok: cancelled,
+                    cancelledCount: cancelled ? 1 : 0,
+                    taskIds: cancelled ? [req.taskId] : [],
+                }
+            }
+
+            if (!req.sessionId || !req.all) {
+                throw new Error('Missing cancel target')
+            }
+
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
+            const cancelledTasks = scheduler.cancelWhere(task => isScheduledTaskForTopicSession(task, topicSession))
             persistTasks()
-            console.log(`[daemon] Cancelled task ${req.taskId.slice(0, 8)}`)
+            console.log(`[daemon] Cancelled ${cancelledTasks.length} reminder(s) for session ${req.sessionId.slice(0, 8)}`)
+            return {
+                ok: true,
+                cancelledCount: cancelledTasks.length,
+                taskIds: cancelledTasks.map(task => task.id),
+            }
+        },
+        onListReminders: (req: ListRemindersRequest): ListRemindersResponse => {
+            const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)
+            const reminders = scheduler
+                .listPending()
+                .filter(task => isScheduledTaskForTopicSession(task, topicSession))
+                .map(formatReminder)
+            return { reminders }
         },
         onSend: (req: SendRequest) => {
             const topicSession = resolveTopicSessionForApiSession(sessionManager, req.sessionId)

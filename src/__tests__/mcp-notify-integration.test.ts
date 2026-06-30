@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     createCancelReminderHandler,
     createGetDeliveryStatusHandler,
+    createListRemindersHandler,
     createRetryDeliveryHandler,
     createScheduleReminderHandler,
     createSendFileHandler,
@@ -28,6 +29,8 @@ describe('MCP notify tool integration with daemon API', () => {
                 if (url.endsWith('/api/send-file')) return { ok: true, result: { status: 'queued', deliveryId: 'delivery-1' } }
                 if (url.endsWith('/api/delivery-status')) return { deliveries: [{ id: 'delivery-1', kind: 'send', status: 'pending', createdAt: 1, textChars: 6, text: 'answer', format: 'plain' }] }
                 if (url.endsWith('/api/retry-delivery')) return { status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1', messageId: 42 }
+                if (url.endsWith('/api/reminders')) return { reminders: [{ taskId: 'task-1', triggerAt: 1_800_000_000_000, message: 'standup', context: 'test', recurringMs: 2_000 }] }
+                if (url.endsWith('/api/cancel')) return { ok: true, cancelledCount: 1, taskIds: ['task-1'] }
                 return { taskId: 'task-1' }
             },
             text: async () => '',
@@ -116,6 +119,20 @@ describe('MCP notify tool integration with daemon API', () => {
         }))
     })
 
+    it('list_reminders posts a session-scoped reminder list request to daemon API', async () => {
+        const handler = createListRemindersHandler()
+
+        const result = await handler()
+
+        expect(result.isError).toBeUndefined()
+        expect(result.content[0].text).toContain('task-1')
+        expect(result.content[0].text).toContain('standup')
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/reminders', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1' }),
+        }))
+    })
+
     it('cancel_reminder posts a cancel request without requiring session identity', async () => {
         delete process.env.CODEVER_CONVERSATION_ID
         const handler = createCancelReminderHandler()
@@ -126,6 +143,19 @@ describe('MCP notify tool integration with daemon API', () => {
         expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/cancel', expect.objectContaining({
             method: 'POST',
             body: JSON.stringify({ taskId: 'task-1' }),
+        }))
+    })
+
+    it('cancel_reminder can cancel all reminders for the current session', async () => {
+        const handler = createCancelReminderHandler()
+
+        const result = await handler({ all: true })
+
+        expect(result.isError).toBeUndefined()
+        expect(result.content[0].text).toContain('Cancelled 1 reminder')
+        expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:3737/api/cancel', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ sessionId: 'provider-session-1', all: true }),
         }))
     })
 
