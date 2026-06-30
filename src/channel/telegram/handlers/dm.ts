@@ -93,6 +93,7 @@ export function registerDmHandlers(bot: any, sessionManager: SessionManager, res
                 '<b>codever — Group commands:</b>\n\n' +
                 '<b>Session:</b>\n' +
                 '/stop — Interrupt current query\n' +
+                '/cancel - Cancel the latest queued message\n' +
                 '/new — Start a new session\n' +
                 '/resume — List and resume past sessions\n' +
                 '/archive — Stop session, deactivate group\n' +

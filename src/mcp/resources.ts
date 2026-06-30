@@ -108,6 +108,7 @@ The user has access to these commands in the Telegram chat. You cannot invoke th
 |---------|-------------|
 | \`/cwd &lt;path&gt;\` | Set working directory for the session |
 | \`/stop\` | Interrupt the current query |
+| \`/cancel\` | Cancel the latest queued user message before it starts |
 | \`/new\` or \`/reset\` | Reset session (start fresh conversation) |
 | \`/archive\` | Archive the current session |
 | \`/tables\` | View raw markdown of tables rendered as images in this session |
@@ -117,6 +118,7 @@ The user has access to these commands in the Telegram chat. You cannot invoke th
 ## Notes
 
 - \`/stop\` interrupts your current work — the user will see whatever output you have produced so far
+- \`/cancel\` only discards a queued user message; it does not interrupt the current work
 - \`/new\` resets the conversation — your next interaction starts from scratch
 - \`/tables\` lets the user retrieve the original markdown of tables that were rendered as images
 `,
@@ -205,13 +207,13 @@ Call \`get_codever_context\` with one of these topics to learn more:
 
 - **environment** — General overview of the Codever bridge environment
 - **rendering** — How your output is rendered (table images, \`<!-- raw -->\` marker, formatting)
-- **commands** — Commands available to the user (/stop, /new, /tables, etc.)
+- **commands** — Commands available to the user (/stop, /cancel, /new, /tables, etc.)
 - **channel** — Telegram channel constraints and capabilities
 
 ## Quick Reference
 
 - Tables are auto-converted to PNG images. Add \`<!-- raw -->\` before a table to send as text instead.
-- User commands: /cwd, /stop, /new, /archive, /tables, /config, /restart
+- User commands: /cwd, /stop, /cancel, /new, /archive, /tables, /config, /restart
 - Messages are split at ~4096 chars at structure-safe boundaries.
 - Use send_file with type=document/file for raw attachments, type=markdown for rendered markdown, type=code for fenced code, or type=image for photo delivery.
 `

@@ -54,6 +54,26 @@ function formatElapsed(seconds: number): string {
 
 type ProgressSnapshot = NonNullable<ReturnType<TopicSession['getProgress']>>
 
+interface CancelQueuedResult {
+    status: 'cancelled' | 'empty'
+    cancelledCount: number
+    remainingQueued: number
+}
+
+function isCancelQueuedResult(value: unknown): value is CancelQueuedResult {
+    if (!value || typeof value !== 'object') return false
+    const record = value as Partial<CancelQueuedResult>
+    return (record.status === 'cancelled' || record.status === 'empty')
+        && typeof record.cancelledCount === 'number'
+        && typeof record.remainingQueued === 'number'
+}
+
+function formatCancelQueuedReply(result: CancelQueuedResult): string {
+    if (result.status !== 'cancelled') return 'No queued message to cancel.'
+    if (result.remainingQueued === 0) return 'Queued message cancelled.'
+    return `Queued message cancelled. ${result.remainingQueued} queued message(s) remain.`
+}
+
 function formatProgressSnapshot(progress: ProgressSnapshot): string {
     const lines = progress.state === 'querying'
         ? [`🔄 Task in progress: ${formatElapsed(progress.elapsedSeconds)} elapsed`]
@@ -170,6 +190,27 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
             return
         }
         await c.reply('No active query to interrupt.')
+    })
+
+    bot.command('cancel', async (c: Context) => {
+        if (!c.chat || c.chat.type === 'private') return
+        const messageThreadId = c.message?.message_thread_id
+        const topicKey = makeTopicKey(c.chat.id, messageThreadId)
+
+        const topicSession = topicSessions.get(topicKey)
+        if (!topicSession) {
+            await c.reply('No queued message to cancel.')
+            return
+        }
+
+        try {
+            const result = await topicSession.dispatch({ kind: 'command', name: 'cancel_queued', source: 'channel' })
+            await c.reply(isCancelQueuedResult(result) ? formatCancelQueuedReply(result) : 'No queued message to cancel.')
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            console.error(`[/cancel] Failed to cancel queued message: ${message}`)
+            await c.reply(`Cancel failed: <code>${escapeHtml(message)}</code>`, { parse_mode: 'HTML' })
+        }
     })
 
     bot.command('progress', async (c: Context) => {

@@ -54,6 +54,12 @@ export interface RetryDeliveryCommandResult {
     message?: string
 }
 
+export interface CancelQueuedMessageCommandResult {
+    status: 'cancelled' | 'empty'
+    cancelledCount: number
+    remainingQueued: number
+}
+
 interface FileReference {
     id: string
     uri: string
@@ -63,6 +69,11 @@ interface FileReference {
 interface TurnDeliveryState {
     hadAssistantText: boolean
     deliveryFailures: DeliveryRecord[]
+}
+
+interface QueuedUserInput {
+    id: string
+    cancelled: boolean
 }
 
 async function waitForShutdownStep(
@@ -134,6 +145,7 @@ export class SemanticSessionRuntime {
     private textFlushGeneration = 0
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
+    private queuedUserInputs: QueuedUserInput[] = []
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
@@ -153,6 +165,10 @@ export class SemanticSessionRuntime {
             return this.cancel()
         }
 
+        if (input.kind === 'command' && input.name === 'cancel_queued') {
+            return Promise.resolve(this.cancelQueuedUserInput())
+        }
+
         if (input.kind === 'command' && input.name === 'new' && this.isActiveTurnState()) {
             return this.resetActiveConversation()
         }
@@ -161,11 +177,21 @@ export class SemanticSessionRuntime {
             return this.handleProgressCommand()
         }
 
-        if ((input.kind === 'user_message' || input.kind === 'scheduled_message') && (this.state === 'querying' || this.state === 'finalizing')) {
-            void this.send({ text: '📨 Agent is working. Your message has been queued and will be processed when the current task completes.', format: 'html' })
+        let queuedUserInput: QueuedUserInput | null = null
+        if (this.isQueuedChannelUserInput(input)) {
+            queuedUserInput = this.trackQueuedUserInput()
+            void this.send({ text: 'Agent is working. Your message has been queued. Send /cancel to discard the latest queued message before it starts.', format: 'html' })
+        } else if (input.kind === 'scheduled_message' && (this.state === 'querying' || this.state === 'finalizing')) {
+            void this.send({ text: 'Agent is working. The scheduled message has been queued and will be processed when the current task completes.', format: 'html' })
         }
 
-        const run = this.mailbox.then(() => this.handleInput(input))
+        const run = this.mailbox.then(() => {
+            if (queuedUserInput) {
+                this.untrackQueuedUserInput(queuedUserInput.id)
+                if (queuedUserInput.cancelled) return
+            }
+            return this.handleInput(input)
+        })
         this.mailbox = run.then(() => undefined, () => undefined)
         return run
     }
@@ -342,6 +368,50 @@ export class SemanticSessionRuntime {
         const interrupting = handle?.interrupt()
         abortController?.abort()
         await interrupting
+    }
+
+    private cancelQueuedUserInput(): CancelQueuedMessageCommandResult {
+        for (let index = this.queuedUserInputs.length - 1; index >= 0; index--) {
+            const entry = this.queuedUserInputs[index]
+            if (entry.cancelled) continue
+            entry.cancelled = true
+            this.queuedUserInputs.splice(index, 1)
+            const result: CancelQueuedMessageCommandResult = {
+                status: 'cancelled',
+                cancelledCount: 1,
+                remainingQueued: this.queuedUserInputs.length,
+            }
+            this.recordCommand('cancel_queued', result)
+            return result
+        }
+
+        const result: CancelQueuedMessageCommandResult = {
+            status: 'empty',
+            cancelledCount: 0,
+            remainingQueued: 0,
+        }
+        this.recordCommand('cancel_queued', result)
+        return result
+    }
+
+    private isQueuedChannelUserInput(input: SessionInput): input is Extract<SessionInput, { kind: 'user_message' }> {
+        return input.kind === 'user_message'
+            && input.source === 'channel'
+            && (this.state === 'querying' || this.state === 'finalizing')
+    }
+
+    private trackQueuedUserInput(): QueuedUserInput {
+        const entry: QueuedUserInput = {
+            id: randomUUID(),
+            cancelled: false,
+        }
+        this.queuedUserInputs.push(entry)
+        return entry
+    }
+
+    private untrackQueuedUserInput(id: string): void {
+        const index = this.queuedUserInputs.findIndex(entry => entry.id === id)
+        if (index >= 0) this.queuedUserInputs.splice(index, 1)
     }
 
     private async resetActiveConversation(): Promise<void> {

@@ -150,6 +150,21 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'cancel', reason: 'user', source: 'channel' })
     })
 
+    it('/cancel dispatches queued-message cancellation without interrupting the active query', async () => {
+        const bot = createBot()
+        const session = createSession('querying')
+        session.dispatch = vi.fn(async () => ({ status: 'cancelled', cancelledCount: 1, remainingQueued: 0 })) as any
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext()
+
+        await bot.runCommand('cancel', ctx)
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'cancel_queued', source: 'channel' })
+        expect(session.dispatch).not.toHaveBeenCalledWith({ kind: 'cancel', reason: 'user', source: 'channel' })
+        expect(ctx.replies[0].text).toContain('Queued message cancelled')
+    })
+
     it('/cwd reactivates an archived topic before the next message creates a session', async () => {
         const bot = createBot()
         const sessionManager = createSessionManager()

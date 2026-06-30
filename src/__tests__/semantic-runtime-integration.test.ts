@@ -585,6 +585,48 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('cancels the latest queued user input before it starts', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const provider = createProvider([], {
+            startQuery: vi.fn((prompt: string): AgentQueryHandle => ({
+                events: (async function* () {
+                    if (prompt === 'first') await hold
+                    yield { kind: 'text', text: `done:${prompt}` } as AgentEvent
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        })
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: channel,
+        })
+
+        const first = runtime.dispatch({ kind: 'user_message', text: 'first', source: 'channel' })
+        await delay(10)
+        const second = runtime.dispatch({ kind: 'user_message', text: 'second', source: 'channel' })
+        await delay(10)
+
+        const result = await runtime.dispatch({ kind: 'command', name: 'cancel_queued', source: 'channel' })
+        release()
+        await Promise.all([first, second])
+
+        expect(result).toEqual({ status: 'cancelled', cancelledCount: 1, remainingQueued: 0 })
+        expect(provider.startQuery).toHaveBeenCalledTimes(1)
+        expect(provider.startQuery).toHaveBeenCalledWith('first', expect.any(Object))
+        expect(channel.sent.some(m => m.text.includes('/cancel'))).toBe(true)
+        expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'command_result', command: 'cancel_queued' }),
+        ]))
+    })
+
     it('passes decision responses back through the runtime instead of emitting placeholder channel text', async () => {
         const provider = createProvider([
             {
