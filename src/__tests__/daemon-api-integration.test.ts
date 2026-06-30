@@ -5,6 +5,7 @@ describe('Daemon API integration boundary', () => {
     let api: DaemonApi | undefined
     const onSchedule = vi.fn()
     const onCancel = vi.fn()
+    const onListReminders = vi.fn()
     const onSend = vi.fn()
     const onSendFile = vi.fn()
     const onDeliveryStatus = vi.fn()
@@ -13,10 +14,12 @@ describe('Daemon API integration boundary', () => {
     beforeEach(async () => {
         vi.clearAllMocks()
         onSchedule.mockReturnValue({ taskId: 'task-1' })
+        onCancel.mockReturnValue({ ok: true, cancelledCount: 1, taskIds: ['task-1'] })
+        onListReminders.mockReturnValue({ reminders: [] })
         onSendFile.mockResolvedValue({ status: 'queued', deliveryId: 'delivery-1' })
         onDeliveryStatus.mockReturnValue({ deliveries: [] })
         onRetryDelivery.mockResolvedValue({ status: 'sent', deliveryId: 'delivery-2', retryOf: 'delivery-1' })
-        api = await startDaemonApi({ onSchedule, onCancel, onSend, onSendFile, onDeliveryStatus, onRetryDelivery })
+        api = await startDaemonApi({ onSchedule, onCancel, onListReminders, onSend, onSendFile, onDeliveryStatus, onRetryDelivery })
     })
 
     afterEach(() => {
@@ -143,7 +146,50 @@ describe('Daemon API integration boundary', () => {
         })
 
         expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({ ok: true, cancelledCount: 1, taskIds: ['task-1'] })
         expect(onCancel).toHaveBeenCalledWith({ taskId: 'task-1' })
+    })
+
+    it('POST /api/cancel validates and forwards session-wide cancel requests', async () => {
+        const res = await fetch(url('/api/cancel'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: '-100:10', all: true }),
+        })
+
+        expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({ ok: true, cancelledCount: 1, taskIds: ['task-1'] })
+        expect(onCancel).toHaveBeenCalledWith({ sessionId: '-100:10', all: true })
+    })
+
+    it('POST /api/reminders validates and forwards session reminder list requests', async () => {
+        onListReminders.mockReturnValueOnce({
+            reminders: [{
+                taskId: 'task-1',
+                triggerAt: 1_800_000_000_000,
+                message: 'check progress',
+                context: 'test',
+                recurringMs: 60_000,
+            }],
+        })
+
+        const res = await fetch(url('/api/reminders'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: '-100:10' }),
+        })
+
+        expect(res.status).toBe(200)
+        await expect(res.json()).resolves.toEqual({
+            reminders: [{
+                taskId: 'task-1',
+                triggerAt: 1_800_000_000_000,
+                message: 'check progress',
+                context: 'test',
+                recurringMs: 60_000,
+            }],
+        })
+        expect(onListReminders).toHaveBeenCalledWith({ sessionId: '-100:10' })
     })
 
     it('rejects incomplete schedule requests without calling handlers', async () => {

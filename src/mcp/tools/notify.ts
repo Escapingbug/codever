@@ -39,6 +39,24 @@ function getDaemonApiPort(): number | null {
     }
 }
 
+interface ReminderApiInfo {
+    taskId: string
+    triggerAt: number
+    message: string
+    context?: string
+    recurringMs?: number
+}
+
+interface ListRemindersApiResponse {
+    reminders?: ReminderApiInfo[]
+}
+
+interface CancelReminderApiResponse {
+    ok?: boolean
+    cancelledCount?: number
+    taskIds?: string[]
+}
+
 export function createScheduleReminderHandler() {
     return async (args: { delayMs: number; message: string; context?: string; recurringMs?: number }) => {
         const apiPort = getDaemonApiPort()
@@ -107,8 +125,16 @@ export function createScheduleReminderHandler() {
     }
 }
 
-export function createCancelReminderHandler() {
-    return async (args: { taskId: string }) => {
+function formatReminderLine(reminder: ReminderApiInfo): string {
+    const repeat = reminder.recurringMs
+        ? `repeats every ${reminder.recurringMs}ms`
+        : 'one-shot'
+    const context = reminder.context ? ` context="${reminder.context}"` : ''
+    return `${reminder.taskId}: next=${new Date(reminder.triggerAt).toISOString()} ${repeat}${context} message="${reminder.message}"`
+}
+
+export function createListRemindersHandler() {
+    return async (_args: Record<string, never> = {}) => {
         const apiPort = getDaemonApiPort()
         if (!apiPort) {
             return {
@@ -117,11 +143,87 @@ export function createCancelReminderHandler() {
             }
         }
 
+        const conversationId = process.env.CODEVER_CONVERSATION_ID
+        if (!conversationId) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Session identity not available yet. List_reminders requires a session context that is established after the first turn. Please retry on the next message.' }],
+            }
+        }
+
+        try {
+            const res = await fetch(`http://127.0.0.1:${apiPort}/api/reminders`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: conversationId }),
+            })
+
+            if (!res.ok) {
+                const err = await res.text()
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `List reminders failed: ${err}` }],
+                }
+            }
+
+            const data = await res.json() as ListRemindersApiResponse
+            const reminders = data.reminders ?? []
+            if (reminders.length === 0) {
+                return {
+                    content: [{ type: 'text' as const, text: 'No pending reminders for this session.' }],
+                }
+            }
+
+            return {
+                content: [{ type: 'text' as const, text: `Pending reminders:\n${reminders.map(formatReminderLine).join('\n')}` }],
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: `Failed to connect to daemon: ${msg}` }],
+            }
+        }
+    }
+}
+
+export function createCancelReminderHandler() {
+    return async (args: { taskId?: string; all?: boolean }) => {
+        const apiPort = getDaemonApiPort()
+        if (!apiPort) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Daemon API not available.' }],
+            }
+        }
+
+        if (!args.taskId && !args.all) {
+            return {
+                isError: true,
+                content: [{ type: 'text' as const, text: 'Cancel_reminder requires taskId, or all=true to cancel all pending reminders for this session. Use list_reminders to discover task IDs.' }],
+            }
+        }
+
+        const requestBody: { taskId?: string; sessionId?: string; all?: boolean } = {}
+        if (args.taskId) {
+            requestBody.taskId = args.taskId
+        } else {
+            const conversationId = process.env.CODEVER_CONVERSATION_ID
+            if (!conversationId) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: 'Session identity not available yet. Cancelling all reminders requires a session context that is established after the first turn. Please retry on the next message.' }],
+                }
+            }
+            requestBody.sessionId = conversationId
+            requestBody.all = true
+        }
+
         try {
             const res = await fetch(`http://127.0.0.1:${apiPort}/api/cancel`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ taskId: args.taskId }),
+                body: JSON.stringify(requestBody),
             })
 
             if (!res.ok) {
@@ -129,6 +231,22 @@ export function createCancelReminderHandler() {
                 return {
                     isError: true,
                     content: [{ type: 'text' as const, text: `Cancel failed: ${err}` }],
+                }
+            }
+
+            const data = await res.json() as CancelReminderApiResponse
+            const cancelledCount = data.cancelledCount ?? (data.ok === false ? 0 : 1)
+            if (cancelledCount === 0) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: args.taskId ? `No pending reminder found for ${args.taskId}.` : 'No pending reminders found for this session.' }],
+                }
+            }
+
+            if (args.all) {
+                const ids = data.taskIds?.length ? ` (${data.taskIds.join(', ')})` : ''
+                return {
+                    content: [{ type: 'text' as const, text: `Cancelled ${cancelledCount} reminder(s) for this session${ids}.` }],
                 }
             }
 
@@ -451,10 +569,18 @@ export function registerNotifyTools(server: any): void {
     )
 
     server.tool(
+        'list_reminders',
+        'List pending reminders for the current Codever session, including task IDs that can be passed to cancel_reminder.',
+        {},
+        createListRemindersHandler(),
+    )
+
+    server.tool(
         'cancel_reminder',
-        'Cancel a previously scheduled reminder by its task ID.',
+        'Cancel a previously scheduled reminder by task ID, or cancel all pending reminders for the current session with all=true.',
         {
-            taskId: z.string().describe('The task ID returned by schedule_reminder'),
+            taskId: z.string().optional().describe('The task ID returned by schedule_reminder or list_reminders'),
+            all: z.boolean().optional().describe('If true and taskId is omitted, cancel all pending reminders for this session'),
         },
         createCancelReminderHandler(),
     )

@@ -29,7 +29,34 @@ export interface ScheduleRequest {
 }
 
 export interface CancelRequest {
+    taskId?: string
+    /** topicKey, providerSessionId, or coreSessionId to target when cancelling all */
+    sessionId?: string
+    /** Cancel all pending reminders for the sessionId target */
+    all?: boolean
+}
+
+export interface CancelResponse {
+    ok: boolean
+    cancelledCount: number
+    taskIds: string[]
+}
+
+export interface ReminderInfo {
     taskId: string
+    triggerAt: number
+    message: string
+    context?: string
+    recurringMs?: number
+}
+
+export interface ListRemindersRequest {
+    /** topicKey, providerSessionId, or coreSessionId to target */
+    sessionId: string
+}
+
+export interface ListRemindersResponse {
+    reminders: ReminderInfo[]
 }
 
 export interface SendRequest {
@@ -99,7 +126,8 @@ export interface DeliveryStatusResponse {
 
 export interface DaemonApiHandlers {
     onSchedule: (req: ScheduleRequest) => { taskId: string }
-    onCancel: (req: CancelRequest) => void
+    onCancel: (req: CancelRequest) => CancelResponse
+    onListReminders: (req: ListRemindersRequest) => ListRemindersResponse
     onSend: (req: SendRequest) => void
     onSendFile: (req: SendFileRequest) => void | Promise<unknown>
     onDeliveryStatus: (req: DeliveryStatusRequest) => DeliveryStatusResponse
@@ -147,12 +175,23 @@ export async function startDaemonApi(handlers: DaemonApiHandlers): Promise<Daemo
                 if (req.method === 'POST' && req.url === '/api/cancel') {
                     const body = await readBody()
                     const data = JSON.parse(body) as CancelRequest
-                    if (!data.taskId) {
-                        sendJson(400, { error: 'Missing required field: taskId' })
+                    if (!data.taskId && !(data.sessionId && data.all)) {
+                        sendJson(400, { error: 'Missing cancel target: provide taskId, or sessionId with all=true' })
                         return
                     }
-                    handlers.onCancel(data)
-                    sendJson(200, { ok: true })
+                    const result = handlers.onCancel(data)
+                    sendJson(200, result)
+                    return
+                }
+
+                if (req.method === 'POST' && req.url === '/api/reminders') {
+                    const body = await readBody()
+                    const data = JSON.parse(body) as ListRemindersRequest
+                    if (!data.sessionId) {
+                        sendJson(400, { error: 'Missing required field: sessionId' })
+                        return
+                    }
+                    sendJson(200, handlers.onListReminders(data))
                     return
                 }
 

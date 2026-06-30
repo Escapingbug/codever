@@ -27,6 +27,8 @@ export interface SchedulerConfig {
     onTasksChanged?: (tasks: ScheduledTask[]) => void
 }
 
+type ScheduleInput = Omit<ScheduledTask, 'id'> & { id?: string }
+
 export class Scheduler {
     private tasks = new Map<string, { task: ScheduledTask; timer: ReturnType<typeof setTimeout> }>()
     private onTrigger: (task: ScheduledTask) => void
@@ -40,10 +42,11 @@ export class Scheduler {
     /**
      * Schedule a task. One-shot by default; set recurringMs for repeating.
      */
-    schedule(input: Omit<ScheduledTask, 'id'>): ScheduledTask {
+    schedule(input: ScheduleInput): ScheduledTask {
+        const { id, ...taskInput } = input
         const task: ScheduledTask = {
-            id: randomUUID(),
-            ...input,
+            id: id ?? randomUUID(),
+            ...taskInput,
         }
 
         const delay = Math.max(0, task.triggerAt - Date.now())
@@ -68,6 +71,24 @@ export class Scheduler {
         this.tasks.delete(taskId)
         this.notifyTasksChanged()
         return true
+    }
+
+    /**
+     * Cancel all tasks matching a predicate.
+     */
+    cancelWhere(predicate: (task: ScheduledTask) => boolean): ScheduledTask[] {
+        const cancelled: ScheduledTask[] = []
+        for (const [taskId, entry] of this.tasks.entries()) {
+            if (!predicate(entry.task)) continue
+            clearTimeout(entry.timer)
+            this.tasks.delete(taskId)
+            cancelled.push({ ...entry.task })
+        }
+
+        if (cancelled.length > 0) {
+            this.notifyTasksChanged()
+        }
+        return cancelled
     }
 
     /**
@@ -133,6 +154,7 @@ export class Scheduler {
         // Re-schedule if recurring
         if (task.recurringMs) {
             this.schedule({
+                id: task.id,
                 topicKey: task.topicKey,
                 triggerAt: Date.now() + task.recurringMs,
                 message: task.message,

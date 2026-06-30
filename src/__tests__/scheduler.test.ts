@@ -127,6 +127,25 @@ describe('Scheduler', () => {
 
             expect(scheduler.cancel(task.id)).toBe(true)
         })
+
+        it('cancels tasks matching a predicate', () => {
+            scheduler.schedule({
+                topicKey: '12345:main',
+                triggerAt: Date.now() + 5000,
+                message: 'Cancel me',
+            })
+            scheduler.schedule({
+                topicKey: '67890:42',
+                triggerAt: Date.now() + 5000,
+                message: 'Keep me',
+            })
+
+            const cancelled = scheduler.cancelWhere(task => task.topicKey === '12345:main')
+
+            expect(cancelled.map(task => task.message)).toEqual(['Cancel me'])
+            vi.advanceTimersByTime(5000)
+            expect(triggeredTasks.map(task => task.message)).toEqual(['Keep me'])
+        })
     })
 
     describe('list', () => {
@@ -299,7 +318,7 @@ describe('Scheduler', () => {
                 const latest = changes[changes.length - 1]
                 expect(triggeredTasks.length).toBe(1)
                 expect(latest.length).toBe(1)
-                expect(latest[0].id).not.toBe(original.id)
+                expect(latest[0].id).toBe(original.id)
                 expect(latest[0].topicKey).toBe('12345:main')
                 expect(latest[0].recurringMs).toBe(10000)
             } finally {
@@ -388,6 +407,21 @@ describe('Scheduler', () => {
 
             vi.advanceTimersByTime(50000)
             expect(triggeredTasks.length).toBe(0)
+        })
+
+        it('keeps the same task id after each recurring trigger', () => {
+            const task = scheduler.schedule({
+                topicKey: '12345:main',
+                triggerAt: Date.now() + 5000,
+                message: 'Recurring',
+                recurringMs: 10000,
+            })
+
+            vi.advanceTimersByTime(5000)
+            expect(scheduler.listPending()[0].id).toBe(task.id)
+
+            vi.advanceTimersByTime(10000)
+            expect(scheduler.listPending()[0].id).toBe(task.id)
         })
 
         it('recurring task persistence includes recurringMs', () => {
