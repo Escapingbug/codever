@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { LongInputBuffer, type LongInputScope, type LongInputStats } from '@/channel/telegram/longInputBuffer'
 
 /**
  * Pending cwd-create requests stored in memory.
@@ -40,6 +41,7 @@ export interface GroupCommandContext {
     sessionManager: SessionManager
     topicSessions: Map<string, TopicSession>
     restart?: (chatId?: number, messageThreadId?: number, progressMessageId?: number) => Promise<void>
+    longInputBuffer?: LongInputBuffer
 }
 
 function formatElapsed(seconds: number): string {
@@ -102,7 +104,48 @@ function formatProgressSnapshot(progress: ProgressSnapshot): string {
 }
 
 export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void {
-    const { sessionManager, topicSessions, restart } = ctx
+    const { sessionManager, topicSessions, restart, longInputBuffer } = ctx
+
+    if (longInputBuffer) {
+        bot.on('message:text', async (c: Context, next: () => Promise<void>) => {
+            const chat = c.chat
+            const from = c.from
+            const text = c.message?.text ?? ''
+            if (!chat || chat.type === 'private' || !from) return next()
+            if (!pairing.isAuthorized(from.id)) return next()
+
+            const command = getTelegramCommandName(text)
+            if (command === 'paste' || command === 'done' || command === 'paste_cancel') {
+                return next()
+            }
+
+            const topicKey = makeTopicKey(chat.id, c.message?.message_thread_id)
+            const scope: LongInputScope = { topicKey, userId: from.id }
+            if (!longInputBuffer.hasActive(scope)) return next()
+
+            const result = longInputBuffer.append(scope, text, { messageId: c.message?.message_id })
+            if (result.status === 'appended') {
+                if (result.stats.partCount === 1 || result.stats.partCount % 10 === 0) {
+                    await c.reply(`Long input chunk collected (${formatLongInputStats(result.stats)}). Send /done to submit or /paste_cancel to discard.`)
+                }
+                return
+            }
+            if (result.status === 'expired') {
+                await c.reply('Long input draft expired. Send /paste to start again.')
+                return
+            }
+            if (result.status === 'too_large') {
+                await c.reply(`Long input limit exceeded (${formatCharCount(result.attemptedChars)} > ${formatCharCount(result.maxChars)}). Send /done to submit the collected text or /paste_cancel to discard.`)
+                return
+            }
+            if (result.status === 'too_many_parts') {
+                await c.reply(`Long input has too many chunks (${result.stats.partCount}/${result.maxParts}). Send /done to submit the collected text or /paste_cancel to discard.`)
+                return
+            }
+
+            return next()
+        })
+    }
 
     bot.command('cwd', async (c: Context) => {
         if (!c.chat || c.chat.type === 'private') {
@@ -407,4 +450,18 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
             }
         }
     })
+}
+
+function getTelegramCommandName(text: string): string | null {
+    const match = text.match(/^\/([A-Za-z0-9_]+)(?:@\w+)?(?:\s|$)/)
+    return match?.[1]?.toLowerCase() ?? null
+}
+
+function formatLongInputStats(stats: LongInputStats): string {
+    return `${stats.partCount} chunk(s), ${formatCharCount(stats.totalChars)}`
+}
+
+function formatCharCount(chars: number): string {
+    if (chars < 1024) return `${chars} chars`
+    return `${Math.round(chars / 1024)}K chars`
 }

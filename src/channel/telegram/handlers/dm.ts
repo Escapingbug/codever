@@ -94,6 +94,9 @@ export function registerDmHandlers(bot: any, sessionManager: SessionManager, res
                 '<b>Session:</b>\n' +
                 '/stop — Interrupt current query\n' +
                 '/cancel - Cancel the latest queued message\n' +
+                '/paste - Start long input collection\n' +
+                '/done - Submit collected long input\n' +
+                '/paste_cancel - Discard collected long input\n' +
                 '/new — Start a new session\n' +
                 '/resume — List and resume past sessions\n' +
                 '/archive — Stop session, deactivate group\n' +

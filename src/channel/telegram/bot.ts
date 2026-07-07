@@ -9,6 +9,7 @@ import { registerSettingsHandlers } from '@/channel/telegram/handlers/settings'
 import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
 import { registerMessageRouter } from '@/channel/telegram/handlers/messageRouter'
 import type { GroupLogger } from '@/utils/groupLogger'
+import { LongInputBuffer } from '@/channel/telegram/longInputBuffer'
 
 export interface CreateBotOptions {
     sessionManager: SessionManager
@@ -35,13 +36,14 @@ export function createBot(options: CreateBotOptions): Bot {
         })
         : new Bot(token)
     const topicSessions = sessionManager.getTopicSessionsMap()
+    const longInputBuffer = new LongInputBuffer()
 
     // Register all handlers
     registerDmHandlers(bot, sessionManager, options.restart)
-    registerGroupHandlers(bot, { sessionManager, topicSessions, restart: options.restart })
+    registerGroupHandlers(bot, { sessionManager, topicSessions, restart: options.restart, longInputBuffer })
     registerSettingsHandlers(bot, { sessionManager, topicSessions })
     registerCallbackHandlers(bot, { sessionManager, topicSessions })
-    registerMessageRouter(bot, { sessionManager, topicSessions, bot, logger })
+    registerMessageRouter(bot, { sessionManager, topicSessions, bot, logger, longInputBuffer })
 
     // Error handling
     bot.catch((err) => {

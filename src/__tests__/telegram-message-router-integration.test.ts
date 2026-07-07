@@ -68,6 +68,14 @@ function createBot() {
         on(name: string, handler: (ctx: any) => Promise<void>) {
             handlers.set(name, handler)
         },
+        command(name: string, handler: (ctx: any) => Promise<void>) {
+            handlers.set(`command:${name}`, handler)
+        },
+        async emitCommand(name: string, ctx: any) {
+            const handler = handlers.get(`command:${name}`)
+            if (!handler) throw new Error(`${name} command handler was not registered`)
+            await handler(ctx)
+        },
         async emitMessage(ctx: any) {
             const handler = handlers.get('message:text')
             if (!handler) throw new Error('message:text handler was not registered')
@@ -196,6 +204,30 @@ describe('Telegram message router integration', () => {
         expect(sessionManager.registerTopicSession).toHaveBeenCalledWith('-100:10', expect.any(Object))
         expect(topicSessions.get('-100:10').receiveInput).toHaveBeenCalledWith({
             text: 'please inspect tests',
+            username: 'alice',
+        })
+        expect(bot.api.sendChatAction).toHaveBeenCalledWith(-100, 'typing')
+    })
+
+    it('collects long input chunks and submits them as one prompt on /done', async () => {
+        const bot = createBot()
+        const topicSessions = new Map<string, any>()
+        const sessionManager = createSessionManager({
+            registerTopicSession: vi.fn((topicKey: string, session: any) => topicSessions.set(topicKey, session)),
+        })
+        registerMessageRouter(bot, { sessionManager, topicSessions, bot: bot as any })
+
+        const pasteCtx = createMessageContext('/paste')
+        await bot.emitCommand('paste', pasteCtx)
+        await bot.emitMessage(createMessageContext('first chunk '))
+        await bot.emitMessage(createMessageContext('second chunk'))
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
+
+        await bot.emitCommand('done', createMessageContext('/done'))
+
+        expect(mocks.createTopicSessionRecord).toHaveBeenCalledTimes(1)
+        expect(topicSessions.get('-100:10').receiveInput).toHaveBeenCalledWith({
+            text: 'first chunk second chunk',
             username: 'alice',
         })
         expect(bot.api.sendChatAction).toHaveBeenCalledWith(-100, 'typing')

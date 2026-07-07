@@ -563,7 +563,10 @@ export class SemanticSessionRuntime {
         if (!model) return undefined
         if (typeof this.config.provider.getAvailableModels !== 'function') return model
         const availableModels = this.config.provider.getAvailableModels()
-        if (availableModels.length === 0) return undefined
+        if (availableModels.length === 0) {
+            const providerPrefix = model.includes('/') ? model.split('/', 1)[0] : undefined
+            return providerPrefix && providerPrefix !== this.config.providerName ? undefined : model
+        }
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 

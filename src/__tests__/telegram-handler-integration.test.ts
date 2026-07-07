@@ -5,6 +5,7 @@ import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
 import type { TopicSession } from '@/bridge/channelPort'
 import { clearPendingDecisionsForTests, registerPendingDecision } from '@/channel/telegram/decisionRegistry'
 import type { ModelEntry } from '@/providers/provider'
+import { LongInputBuffer } from '@/channel/telegram/longInputBuffer'
 
 const { providerModels } = vi.hoisted(() => ({
     providerModels: [{ id: 'sonnet', name: 'Sonnet' }] as ModelEntry[],
@@ -30,20 +31,27 @@ vi.mock('@/providers/registry', () => {
 
 function createBot() {
     const commands = new Map<string, (ctx: any) => Promise<void>>()
-    const handlers = new Map<string, (ctx: any) => Promise<void>>()
+    const handlers = new Map<string, (ctx: any, next?: () => Promise<void>) => Promise<void>>()
     return {
         command(name: string | string[], handler: (ctx: any) => Promise<void>) {
             for (const n of Array.isArray(name) ? name : [name]) {
                 commands.set(n, handler)
             }
         },
-        on(name: string, handler: (ctx: any) => Promise<void>) {
+        on(name: string, handler: (ctx: any, next?: () => Promise<void>) => Promise<void>) {
             handlers.set(name, handler)
         },
         async runCommand(name: string, ctx: any) {
             const handler = commands.get(name)
             if (!handler) throw new Error(`No command registered: ${name}`)
             await handler(ctx)
+        },
+        async runText(ctx: any) {
+            const handler = handlers.get('message:text')
+            if (!handler) throw new Error('No message:text handler registered')
+            let nextCalled = false
+            await handler(ctx, async () => { nextCalled = true })
+            return { nextCalled }
         },
         async runCallback(data: string, ctxOverrides: Partial<any> = {}) {
             const handler = handlers.get('callback_query:data')
@@ -163,6 +171,28 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'cancel_queued', source: 'channel' })
         expect(session.dispatch).not.toHaveBeenCalledWith({ kind: 'cancel', reason: 'user', source: 'channel' })
         expect(ctx.replies[0].text).toContain('Queued message cancelled')
+    })
+
+    it('collects command-looking text while long input mode is active', async () => {
+        const bot = createBot()
+        const longInputBuffer = new LongInputBuffer()
+        const scope = { topicKey: '-100:10', userId: 1 }
+        longInputBuffer.begin(scope)
+        registerGroupHandlers(bot, {
+            sessionManager: createSessionManager(),
+            topicSessions: new Map(),
+            longInputBuffer,
+        })
+        const ctx = createContext()
+        ctx.message.text = '/new'
+
+        const result = await bot.runText(ctx)
+
+        expect(result.nextCalled).toBe(false)
+        expect(longInputBuffer.read(scope)).toEqual(expect.objectContaining({
+            status: 'ready',
+            text: '/new',
+        }))
     })
 
     it('/cwd reactivates an archived topic before the next message creates a session', async () => {
