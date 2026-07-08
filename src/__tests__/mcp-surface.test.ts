@@ -122,6 +122,24 @@ describe('MCP active surface registration', () => {
         }))
     })
 
+    it('registers only context tools when session identity is unavailable', () => {
+        delete process.env.CODEVER_CONVERSATION_ID
+        const { server, tools, resources } = createServerRecorder()
+
+        registerCodeverMcpSurface(server)
+
+        expect(resources.has('Codever Environment')).toBe(true)
+        expect(tools.has('get_codever_context')).toBe(true)
+        expect(tools.has('schedule_reminder')).toBe(false)
+        expect(tools.has('list_reminders')).toBe(false)
+        expect(tools.has('cancel_reminder')).toBe(false)
+        expect(tools.has('send_message')).toBe(false)
+        expect(tools.has('send_file')).toBe(false)
+        expect(tools.has('get_delivery_status')).toBe(false)
+        expect(tools.has('retry_delivery')).toBe(false)
+        expect(tools.has('list_sessions')).toBe(false)
+    })
+
     it('adds session tools only when daemon session context is supplied', () => {
         const { server, tools } = createServerRecorder()
         const provider = createProvider()
