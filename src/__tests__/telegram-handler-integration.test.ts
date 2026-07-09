@@ -326,7 +326,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('resume', createContext('abcdef12'))
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'resume', args: expect.any(String), source: 'channel' })
-        expect(session.sessionRecord.setConversationId).not.toHaveBeenCalled()
+        expect(session.sessionRecord.setConversationId).toHaveBeenCalledWith(expect.any(String))
     })
 
     it('model callback should dispatch runtime model command', async () => {

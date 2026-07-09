@@ -78,7 +78,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
             sessionRecord.setConversationId(sessionId)
             if (sessionRecord.groupChatId !== null) {
                 const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
-                config.saveTopicState(topicKey, { conversationId: sessionId })
+                config.saveTopicState(topicKey, { conversationId: sessionId, providerName: sessionRecord.providerName })
             }
         },
         onProviderChanged: (providerName, nextProvider) => {
@@ -86,6 +86,10 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
             sessionRecord.setProviderName(providerName)
             sessionRecord.setModel(null)
             sessionRecord.setConversationId(null)
+            if (sessionRecord.groupChatId !== null) {
+                const topicKey = makeTopicKey(sessionRecord.groupChatId, sessionRecord.messageThreadId ?? undefined)
+                config.clearTopicConversation(topicKey)
+            }
         },
         onAvailableCommands: (commands) => {
             sessionRecord.availableCommands = commands

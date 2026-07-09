@@ -270,10 +270,17 @@ export async function performResume(
     const shortId = sessionId.slice(0, 8)
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
+    const topicSettings = sessionManager.getTopicSettings(chatId, messageThreadId)
+    const groupSettings = sessionManager.getGroupSettings(chatId)
+    const providerName = topicSession?.sessionRecord.providerName
+        || topicSettings?.providerName
+        || groupSettings?.providerName
+        || config.getDefaultProvider()
     if (topicSession) {
         await topicSession.dispatch({ kind: 'command', name: 'resume', args: sessionId, source: 'channel' })
+        topicSession.sessionRecord.setConversationId(sessionId)
     }
-    config.saveTopicState(topicKey, { conversationId: sessionId })
+    config.saveTopicState(topicKey, { conversationId: sessionId, providerName })
     await ctx.reply(`🔄 Resuming session <code>${shortId}</code>. Send a message to continue.`, { parse_mode: 'HTML' })
 }
 

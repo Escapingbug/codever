@@ -55,6 +55,7 @@ describe('config persistence', () => {
         config.saveGroupState(-300, { cwd: '/repo', settings: { model: 'sonnet' } })
         config.saveTopicState('-300:42', {
             conversationId: 'topic-conversation',
+            providerName: 'codex',
             queryInProgress: true,
             settings: { providerName: 'opencode', model: 'opencode-model' },
         })
