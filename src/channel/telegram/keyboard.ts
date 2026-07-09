@@ -182,10 +182,11 @@ export function timeoutKeyboard(sessionId: string): InlineKeyboard {
 
 export function providerKeyboard(providers: string[], current?: string): InlineKeyboard {
     const kb = new InlineKeyboard()
-    for (const p of providers) {
+    providers.forEach((p, index) => {
         const label = p === current ? `✅ ${p}` : p
         kb.text(label, `provider:${p}`)
-    }
+        if (index < providers.length - 1) kb.row()
+    })
     return kb
 }
 
