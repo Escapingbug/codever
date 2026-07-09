@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { AgentProvider, parseAgentModels } from '@/providers/agent'
-import { modelKeyboard, modelProviderDetailKeyboard, modelProviderKeyboard } from '@/channel/telegram/keyboard'
+import { modelKeyboard, modelProviderDetailKeyboard, modelProviderKeyboard, providerKeyboard } from '@/channel/telegram/keyboard'
 import type { ModelEntry } from '@/providers/provider'
 
 const { spawnSyncMock } = vi.hoisted(() => ({
@@ -33,6 +33,10 @@ function flattenButtonTexts(keyboard: unknown): string[] {
 function flattenButtonCallbacks(keyboard: unknown): string[] {
     const rows = (keyboard as { inline_keyboard?: Array<Array<{ callback_data?: string }>> }).inline_keyboard ?? []
     return rows.flat().map(button => button.callback_data).filter((value): value is string => Boolean(value))
+}
+
+function buttonRows(keyboard: unknown): Array<Array<{ text: string; callback_data?: string }>> {
+    return (keyboard as { inline_keyboard?: Array<Array<{ text: string; callback_data?: string }>> }).inline_keyboard ?? []
 }
 
 describe('AgentProvider model discovery integration', () => {
@@ -90,6 +94,15 @@ describe('AgentProvider model discovery integration', () => {
     it('does not show unsupported hard-coded model fallbacks when discovery returns no models', () => {
         expect(flattenButtonTexts(modelKeyboard([]))).toEqual([])
         expect(flattenButtonTexts(modelProviderKeyboard([]))).toEqual([])
+    })
+
+    it('renders Codever provider profiles one per row so long names remain distinguishable', () => {
+        const rows = buttonRows(providerKeyboard(['opencode', 'opencode-ark', 'opencode-ark-long-profile'], 'opencode-ark'))
+
+        expect(rows).toHaveLength(3)
+        expect(rows.every(row => row.length === 1)).toBe(true)
+        expect(rows[1][0].text).toContain('opencode-ark')
+        expect(rows[1][0].callback_data).toBe('provider:opencode-ark')
     })
 
     it('groups Cursor Agent models under one provider and paginates the model list', () => {
