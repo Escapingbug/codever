@@ -59,6 +59,7 @@ describe('provider profiles', () => {
                     id: 'opencode-fast',
                     type: 'opencode',
                     env: { OPENCODE_CONFIG: 'C:\\Users\\me\\.config\\opencode\\fast.json' },
+                    modelProviders: ['ark'],
                 },
             ],
         }))
@@ -71,6 +72,7 @@ describe('provider profiles', () => {
                 id: 'opencode-fast',
                 type: 'opencode',
                 env: { OPENCODE_CONFIG: 'C:\\Users\\me\\.config\\opencode\\fast.json' },
+                modelProviders: ['ark'],
             },
         ]))
     })
@@ -95,6 +97,7 @@ describe('provider profiles', () => {
                         id: 'opencode-fast',
                         type: 'opencode',
                         env: { OPENCODE_CONFIG: 'C:\\opencode-fast.json' },
+                        modelProviders: ['ark'],
                     },
                 ],
             }))
@@ -129,6 +132,39 @@ describe('provider profiles', () => {
         expect(spawnSyncMock).toHaveBeenCalledWith('opencode', ['models'], expect.objectContaining({
             env: expect.objectContaining({ OPENCODE_CONFIG: 'C:\\opencode-fast.json' }),
         }))
+    })
+
+    it('filters opencode models to configured model providers', () => {
+        spawnSyncMock.mockReturnValue({
+            status: 0,
+            error: undefined,
+            stdout: [
+                'opencode/big-pickle',
+                'ark/doubao-seed-2-0-code-preview-260215',
+                'ark/deepseek-v4-pro-260425',
+                'openai/gpt-5',
+            ].join('\n'),
+            stderr: '',
+        })
+
+        const provider = new OpencodeProvider({
+            name: 'opencode-ark',
+            env: { OPENCODE_CONFIG: 'C:\\ark.json' },
+            modelProviders: ['ark'],
+        })
+
+        expect(provider.getAvailableModels()).toEqual([
+            {
+                id: 'ark/doubao-seed-2-0-code-preview-260215',
+                name: 'doubao-seed-2-0-code-preview-260215',
+                provider: 'ark',
+            },
+            {
+                id: 'ark/deepseek-v4-pro-260425',
+                name: 'deepseek-v4-pro-260425',
+                provider: 'ark',
+            },
+        ])
     })
 
     it('uses provider type metadata when selecting the runtime adapter', async () => {

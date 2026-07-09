@@ -18,6 +18,7 @@ export interface ProviderProfile {
     args?: string[]
     env?: Record<string, string>
     cwd?: string
+    modelProviders?: string[]
     modelsCommand?: string
     modelsArgs?: string[]
 }
@@ -137,6 +138,7 @@ export function createProviderFromProfile(profile: ProviderProfile): AgentProvid
                 args: profile.args,
                 env: profile.env,
                 cwd: profile.cwd,
+                modelProviders: profile.modelProviders,
             })
         case 'codebuddy':
             return new CodebuddyProvider({
@@ -200,6 +202,7 @@ function parseProviderProfile(entry: unknown, source: string): ProviderProfile {
         ...readOptionalStringArrayField(record, 'args', source),
         ...readOptionalStringRecordField(record, 'env', source),
         ...readOptionalStringField(record, 'cwd', source),
+        ...readOptionalStringArrayField(record, 'modelProviders', source),
         ...readOptionalStringField(record, 'modelsCommand', source),
         ...readOptionalStringArrayField(record, 'modelsArgs', source),
     }
