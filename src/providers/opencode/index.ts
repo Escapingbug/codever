@@ -25,6 +25,7 @@ export interface OpencodeProviderOptions {
     args?: string[]
     env?: Record<string, string>
     cwd?: string
+    modelProviders?: string[]
 }
 
 function mergeProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
@@ -67,6 +68,7 @@ export class OpencodeProvider extends AcpProvider {
     private readonly command: string
     private readonly env?: Record<string, string>
     private readonly processCwd?: string
+    private readonly modelProviders: Set<string>
 
     constructor(options: OpencodeProviderOptions = {}) {
         const command = options.command ?? OPENCODE_ACP_COMMAND
@@ -81,6 +83,7 @@ export class OpencodeProvider extends AcpProvider {
         this.command = command
         this.env = options.env
         this.processCwd = options.cwd
+        this.modelProviders = new Set((options.modelProviders ?? []).map(provider => provider.toLowerCase()))
     }
 
     async listSessions(cwd: string): Promise<SessionEntry[]> {
@@ -150,7 +153,7 @@ export class OpencodeProvider extends AcpProvider {
                 const parts = id.split('/')
                 const name = parts.length > 1 ? parts.slice(1).join('/') : id
                 return { id, name, provider: parts[0] }
-            })
+            }).filter(model => this.modelProviders.size === 0 || this.modelProviders.has((model.provider ?? '').toLowerCase()))
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             console.error(`[opencode] Failed to list models: ${msg}`)

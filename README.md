@@ -182,6 +182,7 @@ You can add provider profiles in `~/.config/codever/providers.json`. A profile `
     {
       "id": "opencode-fast",
       "type": "opencode",
+      "modelProviders": ["ark"],
       "env": {
         "OPENCODE_CONFIG": "C:\\Users\\me\\.config\\opencode\\fast.json"
       }
