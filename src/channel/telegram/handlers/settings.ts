@@ -76,7 +76,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             })
             return
         }
-        await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a provider:`, {
+        await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a model provider:`, {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models)
         })

@@ -162,15 +162,35 @@ If you send a non-command message in the general topic, Codever asks you to use 
 
 ### Provider Notes
 
-Codever registers three provider names:
+Codever registers built-in provider profiles:
 
 | Provider | Command | Notes |
 |----------|---------|-------|
 | `opencode` | `opencode acp` | Default provider unless changed in config. Also uses `opencode models` and `opencode session list --format json` for model/session lists. |
 | `codebuddy` | `codebuddy acp` | ACP-based Codebuddy integration. |
 | `agent` | `agent acp` | Cursor CLI Agent integration. Uses `agent models` for model discovery and maps Cursor ACP extensions such as plans, questions, todos, tasks, and images into Codever events. |
+| `codex` | `npx -y @zed-industries/codex-acp` | ACP adapter for OpenAI Codex. Uses `codex debug models` for model discovery. |
 
 Providers are initialized when the daemon starts. A provider that is missing or misconfigured is marked not ready, but other providers can still be used.
+
+You can add provider profiles in `~/.config/codever/providers.json`. A profile `id` is the name shown by `/provider`; `type` selects the provider implementation and model handling strategy. This lets one provider type have multiple configurations:
+
+```json
+{
+  "defaultProvider": "opencode-fast",
+  "providers": [
+    {
+      "id": "opencode-fast",
+      "type": "opencode",
+      "env": {
+        "OPENCODE_CONFIG": "C:\\Users\\me\\.config\\opencode\\fast.json"
+      }
+    }
+  ]
+}
+```
+
+Model ids remain provider-owned strings. Codever lists models through the selected profile and passes the selected model back to that provider type; for OpenCode profiles, `opencode models`, session listing, and ACP startup all receive the profile environment.
 
 ### MCP Tools And Resources
 
@@ -207,7 +227,7 @@ codever pair <code>                   Complete Telegram pairing
 codever testbot [--log-dir <dir>]     Start the test listener bot
 codever config set-bot-token <token>  Configure Telegram bot token
 codever config set-test-bot-token <t> Configure test bot token
-codever config show                   Show stored configuration summary
+codever config show                   Show stored configuration summary and provider profiles
 ```
 
 ## Configuration And Data
@@ -224,6 +244,7 @@ Important files and directories include:
 |------|-------------|
 | `daemon.pid` | Background daemon PID. |
 | `daemon.api.port` | Local API port used by MCP subprocesses. |
+| `providers.json` | Optional provider profile definitions. |
 | `logs/daemon/global.log` | Global daemon log. |
 | `logs/daemon/groups/` | Per-group session logs. |
 

@@ -370,6 +370,7 @@ export interface AcpProviderConfig {
     command: string
     args: string[]
     env?: Record<string, string>
+    cwd?: string
 }
 
 export class AcpProvider implements AgentProvider {
@@ -391,6 +392,7 @@ export class AcpProvider implements AgentProvider {
             command: config.command,
             args: config.args,
             env: config.env,
+            cwd: config.cwd,
         }
         this.clientManager = new AcpClientManager(managerConfig)
     }

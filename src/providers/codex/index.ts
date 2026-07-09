@@ -15,6 +15,16 @@ const CODEX_MODELS_COMMAND = 'codex'
 const CODEX_MODELS_ARGS = ['debug', 'models']
 const CODEX_MODEL_PROVIDER = 'openai'
 
+export interface CodexProviderOptions {
+    name?: string
+    command?: string
+    args?: string[]
+    env?: Record<string, string>
+    cwd?: string
+    modelsCommand?: string
+    modelsArgs?: string[]
+}
+
 interface CodexModelCatalog {
     models?: Array<{
         slug?: unknown
@@ -27,17 +37,28 @@ interface CodexModelCatalog {
 }
 
 export class CodexProvider extends AcpProvider {
-    constructor() {
+    private readonly modelsCommand: string
+    private readonly modelsArgs: string[]
+    private readonly env?: Record<string, string>
+    private readonly cwd?: string
+
+    constructor(options: CodexProviderOptions = {}) {
         super({
-            name: 'codex',
-            command: CODEX_ACP_COMMAND,
-            args: CODEX_ACP_ARGS,
+            name: options.name ?? 'codex',
+            command: options.command ?? CODEX_ACP_COMMAND,
+            args: options.args ?? CODEX_ACP_ARGS,
+            ...(options.env ? { env: options.env } : {}),
+            ...(options.cwd ? { cwd: options.cwd } : {}),
         })
+        this.modelsCommand = options.modelsCommand ?? CODEX_MODELS_COMMAND
+        this.modelsArgs = options.modelsArgs ?? CODEX_MODELS_ARGS
+        this.env = options.env
+        this.cwd = options.cwd
     }
 
     getAvailableModels(): ModelEntry[] {
         try {
-            const output = spawnCodexModels()
+            const output = spawnCodexModels(this.modelsCommand, this.modelsArgs, this.env, this.cwd)
             if (output.error || output.status !== 0) {
                 console.error(`[codex] Failed to list models: ${output.error?.message || `exit code ${output.status}`}`)
                 return []
@@ -51,18 +72,24 @@ export class CodexProvider extends AcpProvider {
     }
 }
 
-function spawnCodexModels() {
+function mergeProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+    return env ? { ...process.env, ...env } : process.env
+}
+
+function spawnCodexModels(command: string, args: string[], env?: Record<string, string>, cwd?: string) {
     const options: SpawnSyncOptionsWithStringEncoding = {
         encoding: 'utf-8',
         timeout: 10_000,
         windowsHide: true,
+        env: mergeProcessEnv(env),
+        ...(cwd ? { cwd } : {}),
     }
 
     if (process.platform !== 'win32') {
-        return spawnSync(CODEX_MODELS_COMMAND, CODEX_MODELS_ARGS, options)
+        return spawnSync(command, args, options)
     }
 
-    return spawnSync(`${CODEX_MODELS_COMMAND} ${CODEX_MODELS_ARGS.join(' ')}`, {
+    return spawnSync(`${command} ${args.join(' ')}`, {
         ...options,
         shell: true,
     })

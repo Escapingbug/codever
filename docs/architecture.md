@@ -260,6 +260,7 @@ src/
     provider.ts                     # AgentProvider interface
     types.ts                        # AgentEvent model
     registry.ts                     # provider catalog and per-session factories
+    configured.ts                   # provider profile config loading and registration
     acp/                            # shared ACP implementation
     opencode/                       # opencode provider
     codebuddy/                      # codebuddy provider
@@ -322,4 +323,3 @@ Anything outside this chain should either be a utility or a test helper.
 - Scheduled and MCP-injected messages use the same runtime path as user messages.
 - Telegram-specific behavior does not leak into provider adapters.
 - Persistence is topic-level for session state; group state stores shared settings such as cwd/provider/model defaults.
-

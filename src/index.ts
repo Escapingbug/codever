@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config, getDaemonLogPath, getDaemonBaseDir } from './config'
 import { pairing } from './channel/telegram/pairing'
+import { loadProviderProfiles } from './providers/configured'
 import { resolveNodePath } from './utils/nodePath'
 import { isDaemonRunning, startDaemon, stopDaemon } from './daemon/process'
 import {
@@ -289,6 +290,15 @@ async function main() {
             console.log('Test bot token:', testToken ? `${testToken.slice(0, 10)}...` : '(not set)')
             const chats = pairing.listPairedChats()
             console.log('Paired chats:', chats.length === 0 ? '(none)' : chats.map(c => c.chatId).join(', '))
+            try {
+                const providerProfiles = loadProviderProfiles()
+                const profileSummary = providerProfiles.providers.map(profile => `${profile.id}:${profile.type}`).join(', ')
+                console.log('Provider profiles:', profileSummary)
+                console.log('Provider profile config:', providerProfiles.exists ? providerProfiles.path : `${providerProfiles.path} (not found, using built-ins)`)
+                console.log('Default provider:', providerProfiles.defaultProvider ?? config.getDefaultProvider())
+            } catch (e) {
+                console.log('Provider profiles: invalid config -', e instanceof Error ? e.message : String(e))
+            }
             return
         }
         console.error('Usage: codever config [set-bot-token <token> | set-test-bot-token <token> | show]')
