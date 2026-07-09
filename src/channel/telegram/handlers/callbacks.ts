@@ -301,7 +301,7 @@ async function handleModelProviderCallback(c: Context, data: string, sessionMana
 
     if (provider === 'back') {
         try {
-            await c.editMessageText('Select a provider:', {
+            await c.editMessageText('Select a model provider:', {
                 parse_mode: 'HTML',
                 reply_markup: modelProviderKeyboard(models)
             })
@@ -327,7 +327,7 @@ async function handleModelProviderListCallback(c: Context, data: string, session
     const agentProvider = getModelSelectionProvider(chatId, messageThreadId, sessionManager, topicSessions)
     const models = agentProvider.getAvailableModels()
     try {
-        await c.editMessageText('Select a provider:', {
+        await c.editMessageText('Select a model provider:', {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models, Number.isNaN(page) ? 0 : page)
         })

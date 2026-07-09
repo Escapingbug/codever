@@ -85,6 +85,14 @@ export interface AgentProvider {
     reinit?(): Promise<void>
 
     getAvailableModels(): ModelEntry[]
+    /**
+     * Validate or normalize a model selected for this provider.
+     *
+     * The runtime treats model ids as provider-owned opaque strings. Providers
+     * with custom model semantics can return the value to pass through, return a
+     * normalized id, or return undefined to suppress a stale incompatible model.
+     */
+    resolveModel?(model: string): string | undefined
     getAvailablePermissionModes(): string[]
 
     /** List available sessions for a given cwd */

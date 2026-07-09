@@ -13,7 +13,7 @@ import { ConversationJournal } from './semantic'
 import { ChannelProjector } from './channelProjector'
 import { DeliveryOutbox, type DeliveryOutboxState, type DeliveryOptions, type DeliveryRecord } from './deliveryOutbox'
 import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './providerAdapter'
-import { createProviderInstance, getProvider } from '@/providers/registry'
+import { createProviderInstance, getProvider, getProviderType } from '@/providers/registry'
 import type { ProviderCommand } from '@/providers/types'
 import { escapeHtml } from '@/utils/formatting'
 
@@ -148,7 +148,7 @@ export class SemanticSessionRuntime {
     private queuedUserInputs: QueuedUserInput[] = []
 
     constructor(private config: SemanticSessionRuntimeConfig) {
-        this.adapter = config.adapter ?? createProviderSemanticAdapter(config.providerName)
+        this.adapter = config.adapter ?? createProviderSemanticAdapter(getProviderType(config.providerName) ?? config.providerName)
         this.projector = config.projector ?? new ChannelProjector()
         this.outbox = config.outbox ?? new DeliveryOutbox({
             channelPort: config.channelPort,
@@ -561,6 +561,7 @@ export class SemanticSessionRuntime {
     private getActiveModel(): string | undefined {
         const model = this.config.model ?? undefined
         if (!model) return undefined
+        if (this.config.provider.resolveModel) return this.config.provider.resolveModel(model)
         if (typeof this.config.provider.getAvailableModels !== 'function') return model
         const availableModels = this.config.provider.getAvailableModels()
         if (availableModels.length === 0) {
@@ -695,7 +696,7 @@ export class SemanticSessionRuntime {
                 this.config.providerName = providerName
                 this.config.providerSessionId = null
                 this.config.model = null
-                this.adapter = createProviderSemanticAdapter(providerName)
+                this.adapter = createProviderSemanticAdapter(getProviderType(providerName) ?? providerName)
                 this.config.onProviderChanged?.(providerName, provider)
                 this.config.onModelChanged?.(null)
                 this.recordCommand('provider', { providerName: this.config.providerName, model: this.config.model })

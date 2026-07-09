@@ -13,49 +13,83 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { AcpProvider, type AcpProviderConfig } from '@/providers/acp'
+import { AcpProvider } from '@/providers/acp'
 import type { ModelEntry, SessionEntry } from '@/providers/provider'
 
 const OPENCODE_ACP_COMMAND = 'opencode'
 const OPENCODE_ACP_ARGS = ['acp']
 
-function spawnJson(args: string[], timeoutMs = 10_000, cwd?: string): Promise<string> {
+export interface OpencodeProviderOptions {
+    name?: string
+    command?: string
+    args?: string[]
+    env?: Record<string, string>
+    cwd?: string
+}
+
+function mergeProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+    return env ? { ...process.env, ...env } : process.env
+}
+
+function spawnJson(command: string, args: string[], options: { timeoutMs?: number; cwd?: string; env?: Record<string, string> } = {}): Promise<string> {
+    const timeoutMs = options.timeoutMs ?? 10_000
     return new Promise((resolve, reject) => {
-        const child = spawn('opencode', args, {
+        const child = spawn(command, args, {
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
-            ...(cwd ? { cwd } : {}),
+            env: mergeProcessEnv(options.env),
+            ...(options.cwd ? { cwd: options.cwd } : {}),
         })
         const chunks: Buffer[] = []
+        let timer: ReturnType<typeof setTimeout> | undefined
         child.stdout.on('data', (d: Buffer) => chunks.push(d))
         child.stderr.on('data', () => {})
         child.on('close', (code) => {
+            if (timer) clearTimeout(timer)
             if (code === 0) {
                 resolve(Buffer.concat(chunks).toString('utf-8'))
             } else {
-                reject(new Error(`opencode ${args.join(' ')} exited with code ${code}`))
+                reject(new Error(`${command} ${args.join(' ')} exited with code ${code}`))
             }
         })
-        child.on('error', reject)
-        setTimeout(() => {
+        child.on('error', (error) => {
+            if (timer) clearTimeout(timer)
+            reject(error)
+        })
+        timer = setTimeout(() => {
             child.kill()
-            reject(new Error(`opencode ${args.join(' ')} timed out after ${timeoutMs}ms`))
+            reject(new Error(`${command} ${args.join(' ')} timed out after ${timeoutMs}ms`))
         }, timeoutMs).unref()
     })
 }
 
 export class OpencodeProvider extends AcpProvider {
-    constructor() {
+    private readonly command: string
+    private readonly env?: Record<string, string>
+    private readonly processCwd?: string
+
+    constructor(options: OpencodeProviderOptions = {}) {
+        const command = options.command ?? OPENCODE_ACP_COMMAND
+        const args = options.args ?? OPENCODE_ACP_ARGS
         super({
-            name: 'opencode',
-            command: OPENCODE_ACP_COMMAND,
-            args: OPENCODE_ACP_ARGS,
+            name: options.name ?? 'opencode',
+            command,
+            args,
+            ...(options.env ? { env: options.env } : {}),
+            ...(options.cwd ? { cwd: options.cwd } : {}),
         })
+        this.command = command
+        this.env = options.env
+        this.processCwd = options.cwd
     }
 
     async listSessions(cwd: string): Promise<SessionEntry[]> {
         try {
-            const output = await spawnJson(['session', 'list', '--format', 'json'], 10_000, cwd)
+            const output = await spawnJson(this.command, ['session', 'list', '--format', 'json'], {
+                timeoutMs: 10_000,
+                cwd,
+                env: this.env,
+            })
             const allSessions = JSON.parse(output) as Array<{
                 id: string
                 title: string
@@ -82,7 +116,11 @@ export class OpencodeProvider extends AcpProvider {
     async getSessionFirstMessage(sessionId: string): Promise<string> {
         try {
             const sql = `SELECT p.data FROM part p JOIN message m ON p.message_id = m.id WHERE m.session_id = '${sessionId}' AND json_extract(m.data, '$.role') = 'user' AND json_extract(p.data, '$.type') = 'text' ORDER BY p.time_created ASC LIMIT 1`
-            const output = await spawnJson(['db', sql, '--format', 'json'], 10_000)
+            const output = await spawnJson(this.command, ['db', sql, '--format', 'json'], {
+                timeoutMs: 10_000,
+                cwd: this.processCwd,
+                env: this.env,
+            })
             const rows = JSON.parse(output) as Array<{ data: string }>
             if (rows.length === 0) return ''
             const part = JSON.parse(rows[0].data) as { type: string; text: string }
@@ -95,10 +133,12 @@ export class OpencodeProvider extends AcpProvider {
 
     getAvailableModels(): ModelEntry[] {
         try {
-            const output = spawnSync('opencode', ['models'], {
+            const output = spawnSync(this.command, ['models'], {
                 encoding: 'utf-8',
                 timeout: 10_000,
                 windowsHide: true,
+                env: mergeProcessEnv(this.env),
+                ...(this.processCwd ? { cwd: this.processCwd } : {}),
             })
             if (output.error || output.status !== 0) {
                 console.error(`[opencode] Failed to list models: ${output.error?.message || `exit code ${output.status}`}`)
@@ -116,5 +156,10 @@ export class OpencodeProvider extends AcpProvider {
             console.error(`[opencode] Failed to list models: ${msg}`)
             return []
         }
+    }
+
+    resolveModel(model: string): string | undefined {
+        const normalized = model.trim()
+        return normalized || undefined
     }
 }

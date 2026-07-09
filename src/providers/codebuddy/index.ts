@@ -14,12 +14,22 @@ import { AcpProvider, type AcpProviderConfig } from '@/providers/acp'
 const CODEBUDDY_ACP_COMMAND = 'codebuddy'
 const CODEBUDDY_ACP_ARGS = ['acp']
 
+export interface CodebuddyProviderOptions {
+    name?: string
+    command?: string
+    args?: string[]
+    env?: Record<string, string>
+    cwd?: string
+}
+
 export class CodebuddyProvider extends AcpProvider {
-    constructor() {
+    constructor(options: CodebuddyProviderOptions = {}) {
         super({
-            name: 'codebuddy',
-            command: CODEBUDDY_ACP_COMMAND,
-            args: CODEBUDDY_ACP_ARGS,
+            name: options.name ?? 'codebuddy',
+            command: options.command ?? CODEBUDDY_ACP_COMMAND,
+            args: options.args ?? CODEBUDDY_ACP_ARGS,
+            ...(options.env ? { env: options.env } : {}),
+            ...(options.cwd ? { cwd: options.cwd } : {}),
         })
     }
 }
