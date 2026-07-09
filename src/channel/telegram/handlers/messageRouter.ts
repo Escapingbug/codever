@@ -304,11 +304,17 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         const groupSettings = sessionManager.getGroupSettings(groupChatId)
         const topicState = config.getTopicState(topicKey)
         const topicSettings = topicState?.settings
-        const configuredProviderName = topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
+        const conversationId = topicState?.conversationId
+        const conversationProviderName = conversationId ? topicState?.providerName : undefined
+        if (conversationProviderName && !getProvider(conversationProviderName)) {
+            sessionManager.releaseCreationLock(topicKey)
+            await c.reply(`Provider "${conversationProviderName}" for the persisted session is not available. Use /reset to start a new session or /provider to choose another provider.`)
+            return undefined
+        }
+        const configuredProviderName = conversationProviderName || topicSettings?.providerName || groupSettings?.providerName || config.getDefaultProvider()
         const providerName = getProvider(configuredProviderName) ? configuredProviderName : config.getDefaultProvider()
         const permissionMode = topicSettings?.permissionMode ?? groupSettings?.permissionMode
         const reasoningEffort = topicSettings?.reasoningEffort ?? groupSettings?.reasoningEffort
-        const conversationId = topicState?.conversationId
 
         if (topicState?.queryInProgress) {
             // Preserve conversationId while clearing stale in-progress state from a killed daemon.
@@ -334,7 +340,7 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
         glog(groupChatId, `[session] Created session record id=${sessionRecord.id.slice(0, 8)} provider=${sessionRecord.providerName}`)
 
         // Provider instances own ACP subprocess state, so sharing one across topics breaks concurrency.
-        const provider = createProviderInstance(providerName) ?? createProviderInstance(config.getDefaultProvider())
+        const provider = createProviderInstance(providerName) ?? (conversationProviderName ? undefined : createProviderInstance(config.getDefaultProvider()))
         if (!provider) {
             sessionManager.removeSession(sessionRecord.id)
             sessionManager.releaseCreationLock(topicKey)

@@ -18,6 +18,7 @@ export interface GroupState {
 /** Per-topic state (isolated per topic within a group) */
 export interface TopicState {
     conversationId?: string
+    providerName?: string
     queryInProgress?: boolean
     settings?: {
         model?: string
@@ -153,6 +154,7 @@ export const config = {
         const all = getStore().get('topicState')
         if (all[topicKey]) {
             delete all[topicKey].conversationId
+            delete all[topicKey].providerName
             all[topicKey].queryInProgress = false
             getStore().set('topicState', all)
         }

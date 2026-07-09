@@ -126,7 +126,10 @@ describe('Architecture stability invariants', () => {
         await topicSession.dispatch({ kind: 'user_message', text: 'hello', source: 'channel' })
 
         expect(record.conversationId).toBe('provider-session-1')
-        expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', { conversationId: 'provider-session-1' })
+        expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', {
+            conversationId: 'provider-session-1',
+            providerName: 'mock-provider',
+        })
     })
 
     it('ChannelProjector remains the projection boundary for semantic events', () => {

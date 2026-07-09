@@ -4,7 +4,7 @@ import { registerMessageRouter } from '@/channel/telegram/handlers/messageRouter
 const mocks = vi.hoisted(() => ({
     createTopicSessionRecord: vi.fn(),
     createTopicSession: vi.fn(),
-    getProvider: vi.fn(() => ({ name: 'mock-provider' })),
+    getProvider: vi.fn((_name?: string): { name: string } | undefined => ({ name: 'mock-provider' })),
     createProviderInstance: vi.fn(() => ({ name: 'mock-provider' })),
     getDefaultProvider: vi.fn(() => 'mock-acp'),
     getTopicState: vi.fn((): any => undefined),
@@ -175,7 +175,7 @@ describe('Telegram message router integration', () => {
         mocks.getDefaultProvider.mockReturnValue('mock-acp')
         mocks.getTopicState.mockReturnValue(undefined)
         mocks.getBotToken.mockReturnValue('token')
-        mocks.getProvider.mockImplementation(() => ({ name: 'mock-provider' }))
+        mocks.getProvider.mockImplementation((_name?: string) => ({ name: 'mock-provider' }))
         mocks.createProviderInstance.mockImplementation(() => ({ name: 'mock-provider' }))
         mocks.createTopicSessionRecord.mockImplementation(createSessionRecord)
         mocks.createTopicSession.mockImplementation(() => createTopicSession())
@@ -414,11 +414,17 @@ describe('Telegram message router integration', () => {
         expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
     })
 
-    it('preserves persisted provider conversation id when creating a session after daemon restart', async () => {
-        mocks.getTopicState.mockReturnValue({ conversationId: 'provider-session-1', queryInProgress: true })
+    it('restores a persisted conversation with its original provider after daemon restart', async () => {
+        mocks.getDefaultProvider.mockReturnValue('opencode')
+        mocks.getTopicState.mockReturnValue({
+            conversationId: 'provider-session-1',
+            providerName: 'codex',
+            queryInProgress: true,
+        })
         const bot = createBot()
         const topicSessions = new Map<string, any>()
         const sessionManager = createSessionManager({
+            getGroupSettings: vi.fn(() => ({ providerName: 'opencode', model: 'opencode-model', timeoutSeconds: 240 })),
             registerTopicSession: vi.fn((topicKey: string, session: any) => topicSessions.set(topicKey, session)),
         })
         registerMessageRouter(bot, { sessionManager, topicSessions, bot: bot as any })
@@ -427,8 +433,30 @@ describe('Telegram message router integration', () => {
 
         expect(mocks.clearTopicQueryInProgress).toHaveBeenCalledWith('-100:10')
         expect(mocks.createTopicSessionRecord).toHaveBeenCalledWith(expect.objectContaining({
+            providerName: 'codex',
             conversationId: 'provider-session-1',
         }))
+        expect(mocks.createProviderInstance).toHaveBeenCalledWith('codex')
+    })
+
+    it('does not attach a persisted conversation id to the default provider when its provider is unavailable', async () => {
+        mocks.getDefaultProvider.mockReturnValue('opencode')
+        mocks.getTopicState.mockReturnValue({
+            conversationId: 'provider-session-1',
+            providerName: 'removed-provider',
+        })
+        mocks.getProvider.mockImplementation((name?: string) => name === 'removed-provider' ? undefined : { name: name ?? 'mock-provider' })
+        const bot = createBot()
+        const sessionManager = createSessionManager()
+        registerMessageRouter(bot, { sessionManager, topicSessions: new Map(), bot: bot as any })
+        const ctx = createMessageContext('resume after provider removal')
+
+        await bot.emitMessage(ctx)
+
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('removed-provider'))
+        expect(mocks.createTopicSessionRecord).not.toHaveBeenCalled()
+        expect(mocks.createProviderInstance).not.toHaveBeenCalled()
+        expect(sessionManager.releaseCreationLock).toHaveBeenCalledWith('-100:10')
     })
 
     it('cleans up session maps when the created runtime reaches dead state', async () => {

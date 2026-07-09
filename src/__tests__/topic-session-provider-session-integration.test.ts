@@ -79,7 +79,10 @@ describe('TopicSession provider session integration', () => {
         await new Promise(resolve => setTimeout(resolve, 20))
 
         expect(sessionRecord.setConversationId).toHaveBeenCalledWith('provider-session-1')
-        expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', { conversationId: 'provider-session-1' })
+        expect(configMocks.saveTopicState).toHaveBeenCalledWith('-100:10', {
+            conversationId: 'provider-session-1',
+            providerName: 'mock-acp',
+        })
         expect(manager.getTopicSessionByConversationId('provider-session-1')).toBe(topicSession)
         expect(channelPort.sent.join('\n')).toContain('hello from provider')
     })
