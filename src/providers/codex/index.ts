@@ -2,7 +2,7 @@
  * CodexProvider — ACP-based OpenAI Codex integration.
  *
  * Codex CLI does not expose a native ACP subcommand, so Codever launches
- * Zed's codex-acp adapter as a stdio ACP agent.
+ * The Agent Client Protocol codex-acp adapter as a stdio ACP agent.
  */
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
@@ -10,7 +10,7 @@ import { AcpProvider } from '@/providers/acp'
 import type { ModelEntry } from '@/providers/provider'
 
 const CODEX_ACP_COMMAND = 'npx'
-const CODEX_ACP_ARGS = ['-y', '@zed-industries/codex-acp']
+const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp']
 const CODEX_MODELS_COMMAND = 'codex'
 const CODEX_MODELS_ARGS = ['debug', 'models']
 const CODEX_MODEL_PROVIDER = 'openai'

@@ -39,7 +39,7 @@ describe('CodexProvider', () => {
             {
                 name: 'codex',
                 command: 'npx',
-                args: ['-y', '@zed-industries/codex-acp'],
+                args: ['-y', '@agentclientprotocol/codex-acp'],
             },
         ])
     })
