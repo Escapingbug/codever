@@ -50,6 +50,42 @@ function delay(ms: number): Promise<void> {
 }
 
 describe('SemanticSessionRuntime', () => {
+    it('applies model settings without waiting for an active turn', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const onModelChanged = vi.fn()
+        const provider: AgentProvider = {
+            ...createProvider([]),
+            startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        }
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel([], []),
+            onModelChanged,
+        })
+
+        const running = runtime.dispatch({ kind: 'user_message', text: 'long task', source: 'channel' })
+        await delay(10)
+
+        await expect(runtime.dispatch({ kind: 'command', name: 'model', args: 'next-model', source: 'channel' })).resolves.toBeUndefined()
+        await expect(runtime.dispatch({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })).resolves.toBeUndefined()
+        expect(onModelChanged).toHaveBeenCalledWith('next-model')
+
+        release()
+        await running
+    })
+
     it('interrupts an active turn before waiting for mailbox during destroy', async () => {
         let release!: () => void
         const hold = new Promise<void>(resolve => {

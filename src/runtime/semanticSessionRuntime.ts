@@ -165,6 +165,13 @@ export class SemanticSessionRuntime {
             return this.cancel()
         }
 
+        // These settings are captured when a turn starts and only affect future
+        // turns. Applying them immediately keeps Telegram callbacks from waiting
+        // behind a long-running query in the session mailbox.
+        if (input.kind === 'command' && (input.name === 'model' || input.name === 'reasoningEffort')) {
+            return this.handleCommand(input)
+        }
+
         if (input.kind === 'command' && input.name === 'cancel_queued') {
             return Promise.resolve(this.cancelQueuedUserInput())
         }
