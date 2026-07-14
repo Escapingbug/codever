@@ -74,6 +74,9 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         onModelChanged: (model) => {
             sessionRecord.setModel(model)
         },
+        onReasoningEffortChanged: (reasoningEffort) => {
+            sessionRecord.setReasoningEffort(reasoningEffort)
+        },
         onProviderSessionId: (sessionId) => {
             sessionRecord.setConversationId(sessionId)
             if (sessionRecord.groupChatId !== null) {

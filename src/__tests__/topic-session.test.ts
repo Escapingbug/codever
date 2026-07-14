@@ -84,6 +84,16 @@ describe('TopicSession', () => {
             expect(topicSession.sessionRecord).toBe(config.sessionRecord)
         })
 
+        it('keeps SessionRecord reasoning effort in sync with runtime commands', async () => {
+            const config = createTestTopicConfig()
+            config.sessionRecord.setReasoningEffort('medium')
+            const topicSession = createTopicSession(config)
+
+            await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })
+
+            expect(config.sessionRecord.providerSettings.reasoningEffort).toBe('high')
+        })
+
         it('receiveInput processes a user message through the session', async () => {
             const provider = createMockProvider([{ kind: 'text', text: 'Hello!' }, { kind: 'result', status: 'success' }])
             const config = createTestTopicConfig({ provider })

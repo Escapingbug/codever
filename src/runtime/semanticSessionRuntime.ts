@@ -116,6 +116,7 @@ export interface SemanticSessionRuntimeConfig {
     onProviderSessionId?: (sessionId: string) => void
     onProviderChanged?: (providerName: string, provider: AgentProvider) => void
     onModelChanged?: (model: string | null) => void
+    onReasoningEffortChanged?: (reasoningEffort: string | null) => void
     onAvailableCommands?: (commands: ProviderCommand[]) => void
     destroyTimeoutMs?: number
 }
@@ -669,6 +670,7 @@ export class SemanticSessionRuntime {
                 return
             case 'reasoningEffort':
                 this.config.providerSettings = { ...(this.config.providerSettings ?? {}), reasoningEffort: args || undefined }
+                this.config.onReasoningEffortChanged?.(args || null)
                 this.recordCommand('reasoningEffort', { reasoningEffort: args || null })
                 return
             case 'timeout': {

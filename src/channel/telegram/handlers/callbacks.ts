@@ -13,7 +13,7 @@ import {
 } from '@/channel/telegram/keyboard'
 import { escapeHtml } from '@/utils/formatting'
 import type { TopicSession } from '@/bridge/channelPort'
-import { getCwdForChat, performResume, sendSessionList } from './settings'
+import { getCwdForChat, performResume, persistModelSettings, sendSessionList } from './settings'
 import { consumePendingCwdPath } from './groupCommands'
 import { mkdirSync } from 'node:fs'
 import { completePendingDecision } from '@/channel/telegram/decisionRegistry'
@@ -205,11 +205,10 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
         await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
         await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', source: 'channel' })
     }
-    if (genericTopic || sessionRecord) {
-        sessionManager.setGroupSettings(chatId, { model, reasoningEffort: undefined })
-    } else {
-        sessionManager.setTopicSettings(chatId, messageThreadId, { model, reasoningEffort: undefined })
-    }
+    persistModelSettings(sessionManager, chatId, messageThreadId, Boolean(sessionRecord), {
+        model,
+        reasoningEffort: undefined,
+    })
     const topicSettings = sessionManager.getTopicSettings(chatId, messageThreadId)
     const providerName = genericTopic
         ? sessionManager.getGroupSettings(chatId)?.providerName || config.getDefaultProvider()
@@ -244,17 +243,12 @@ async function handleReasoningEffortCallback(c: Context, data: string, sessionMa
     const topicKey = makeTopicKey(chatId, messageThreadId)
     const topicSession = topicSessions.get(topicKey)
     const sessionRecord = topicSession?.sessionRecord
-    const genericTopic = isGenericTopic(messageThreadId)
 
     if (sessionRecord) {
         await topicSession.dispatch({ kind: 'command', name: 'model', args: model, source: 'channel' })
         await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', args: reasoningEffort, source: 'channel' })
     }
-    if (genericTopic || sessionRecord) {
-        sessionManager.setGroupSettings(chatId, { model, reasoningEffort })
-    } else {
-        sessionManager.setTopicSettings(chatId, messageThreadId, { model, reasoningEffort })
-    }
+    persistModelSettings(sessionManager, chatId, messageThreadId, Boolean(sessionRecord), { model, reasoningEffort })
 
     const displayName = modelEntry?.name || model
     await c.answerCallbackQuery(`Model set to ${displayName}`)
