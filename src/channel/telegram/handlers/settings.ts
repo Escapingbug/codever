@@ -1,5 +1,5 @@
 import type { Context } from 'grammy'
-import type { SessionManager } from '@/bridge/sessionManager'
+import type { GroupSettings, SessionManager } from '@/bridge/sessionManager'
 import { isGenericTopic, makeTopicKey } from '@/bridge/sessionManager'
 import { config } from '@/config'
 import { getProvider, getDefaultProvider, listProviders } from '@/providers/registry'
@@ -55,11 +55,10 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             if (topicSession) {
                 await topicSession.dispatch({ kind: 'command', name: 'reasoningEffort', args: reasoningEffort, source: 'channel' })
             }
-            if (genericTopic || topicSession) {
-                sessionManager.setGroupSettings(c.chat.id, { model: found.id, reasoningEffort })
-            } else {
-                sessionManager.setTopicSettings(c.chat.id, messageThreadId, { model: found.id, reasoningEffort })
-            }
+            persistModelSettings(sessionManager, c.chat.id, messageThreadId, Boolean(topicSession), {
+                model: found.id,
+                reasoningEffort,
+            })
             await c.reply(formatModelStatus(`Model set to: <b>${escapeHtml(found.id)}</b>`, reasoningEffort), { parse_mode: 'HTML' })
             return
         }
@@ -231,6 +230,26 @@ export function getDefaultReasoningEffort(model: { defaultReasoningLevel?: strin
         return model.defaultReasoningLevel
     }
     return levels[0]?.effort
+}
+
+export function persistModelSettings(
+    sessionManager: SessionManager,
+    chatId: number,
+    messageThreadId: number | undefined,
+    hasActiveSession: boolean,
+    settings: Pick<GroupSettings, 'model' | 'reasoningEffort'>,
+): void {
+    if (isGenericTopic(messageThreadId)) {
+        sessionManager.setGroupSettings(chatId, settings)
+        return
+    }
+
+    sessionManager.setTopicSettings(chatId, messageThreadId, settings)
+    if (hasActiveSession) {
+        // Preserve the existing behavior where an active selection also updates
+        // defaults for future sessions in the group.
+        sessionManager.setGroupSettings(chatId, settings)
+    }
 }
 
 function getConfiguredReasoningEffort(

@@ -38,6 +38,7 @@ export interface SessionRecord {
     setProviderName(name: string): void
     setConversationId(sessionId: string | null): void
     setModel(model: string | null): void
+    setReasoningEffort(reasoningEffort: string | null): void
     setVerboseLevel(level: 0 | 1 | 2): void
     setTimeoutSeconds(seconds: number): void
     setTimeoutExtended(extended: boolean): void
@@ -99,6 +100,14 @@ export class TopicSessionRecord implements SessionRecord {
 
     setModel(model: string | null): void {
         this._model = model
+    }
+
+    setReasoningEffort(reasoningEffort: string | null): void {
+        if (reasoningEffort) {
+            this.providerSettings.reasoningEffort = reasoningEffort
+        } else {
+            delete this.providerSettings.reasoningEffort
+        }
     }
 
     setVerboseLevel(level: 0 | 1 | 2): void {

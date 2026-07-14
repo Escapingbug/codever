@@ -56,6 +56,7 @@ describe('SemanticSessionRuntime', () => {
             release = resolve
         })
         const onModelChanged = vi.fn()
+        const onReasoningEffortChanged = vi.fn()
         const provider: AgentProvider = {
             ...createProvider([]),
             startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
@@ -73,6 +74,7 @@ describe('SemanticSessionRuntime', () => {
             providerName: 'test-acp',
             channelPort: createChannel([], []),
             onModelChanged,
+            onReasoningEffortChanged,
         })
 
         const running = runtime.dispatch({ kind: 'user_message', text: 'long task', source: 'channel' })
@@ -81,6 +83,7 @@ describe('SemanticSessionRuntime', () => {
         await expect(runtime.dispatch({ kind: 'command', name: 'model', args: 'next-model', source: 'channel' })).resolves.toBeUndefined()
         await expect(runtime.dispatch({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })).resolves.toBeUndefined()
         expect(onModelChanged).toHaveBeenCalledWith('next-model')
+        expect(onReasoningEffortChanged).toHaveBeenCalledWith('high')
 
         release()
         await running

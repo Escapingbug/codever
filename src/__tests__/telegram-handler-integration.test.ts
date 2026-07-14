@@ -387,6 +387,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'gpt-5.5', source: 'channel' })
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'reasoningEffort', args: 'high', source: 'channel' })
         expect(sessionManager.setGroupSettings).toHaveBeenCalledWith(-100, { model: 'gpt-5.5', reasoningEffort: 'high' })
+        expect(sessionManager.setTopicSettings).toHaveBeenCalledWith(-100, 10, { model: 'gpt-5.5', reasoningEffort: 'high' })
     })
 
     it('/model does not show a stale model when the provider has no model catalog', async () => {
