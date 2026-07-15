@@ -1,5 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseCodexModels } from '../index'
+
+const tempDirs: string[] = []
+
+afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })))
+})
 
 const { acpProviderConfigs } = vi.hoisted(() => ({
     acpProviderConfigs: [] as Array<{ name: string; command: string; args: string[] }>,
@@ -81,6 +90,48 @@ describe('CodexProvider', () => {
         ])
         expect(spawnSyncMock).toHaveBeenCalled()
     })
+
+    it('lists Codex rollout sessions for the requested cwd', async () => {
+        const { CodexProvider } = await import('../index')
+        const codexHome = await createCodexHome([
+            {
+                id: 'session-for-project',
+                cwd: path.join(tmpdir(), 'project'),
+                message: 'Fix the session listing for Codex',
+                timestamp: '2026-07-15T03:00:00.000Z',
+            },
+            {
+                id: 'session-for-other-project',
+                cwd: path.join(tmpdir(), 'other'),
+                message: 'Unrelated work',
+                timestamp: '2026-07-15T04:00:00.000Z',
+            },
+        ])
+
+        const sessions = await new CodexProvider({ codexHome }).listSessions(path.join(tmpdir(), 'project'))
+
+        expect(sessions).toHaveLength(1)
+        expect(sessions[0]).toMatchObject({
+            sessionId: 'session-for-project',
+            title: 'Fix the session listing for Codex',
+            firstMessage: 'Fix the session listing for Codex',
+            cwd: path.join(tmpdir(), 'project'),
+        })
+    })
+
+    it('returns a session first message and tolerates malformed rollout lines', async () => {
+        const { CodexProvider } = await import('../index')
+        const codexHome = await createCodexHome([{
+            id: 'session-with-message',
+            cwd: path.join(tmpdir(), 'project'),
+            message: 'Hello from Codex',
+            timestamp: '2026-07-15T03:00:00.000Z',
+            malformedLine: true,
+        }])
+
+        await expect(new CodexProvider({ codexHome }).getSessionFirstMessage('session-with-message'))
+            .resolves.toBe('Hello from Codex')
+    })
 })
 
 describe('parseCodexModels', () => {
@@ -114,3 +165,42 @@ describe('parseCodexModels', () => {
         ])
     })
 })
+
+async function createCodexHome(sessions: Array<{
+    id: string
+    cwd: string
+    message: string
+    timestamp: string
+    malformedLine?: boolean
+}>): Promise<string> {
+    const codexHome = await mkdtemp(path.join(tmpdir(), 'codever-codex-'))
+    tempDirs.push(codexHome)
+    const sessionDir = path.join(codexHome, 'sessions', '2026', '07', '15')
+    await mkdir(sessionDir, { recursive: true })
+
+    for (const session of sessions) {
+        const records = [
+            JSON.stringify({
+                timestamp: session.timestamp,
+                type: 'session_meta',
+                payload: { id: session.id, cwd: session.cwd, timestamp: session.timestamp },
+            }),
+            ...(session.malformedLine ? ['not-json'] : []),
+            JSON.stringify({
+                timestamp: session.timestamp,
+                type: 'response_item',
+                payload: {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: session.message }],
+                },
+            }),
+        ]
+        await writeFile(
+            path.join(sessionDir, `rollout-${session.timestamp.replace(/:/g, '-')}-${session.id}.jsonl`),
+            `${records.join('\n')}\n`,
+            'utf-8',
+        )
+    }
+    return codexHome
+}
