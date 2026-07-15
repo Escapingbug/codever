@@ -444,7 +444,7 @@ async function handleResumeListCallback(c: Context, data: string, sessionManager
     if (!c.callbackQuery) return
     const chatId = c.callbackQuery.message?.chat.id
     if (!chatId) return
-    await sendSessionList(c, chatId, page, sessionManager, topicSessions)
+    await sendSessionList(c, chatId, page, sessionManager, topicSessions, 'edit')
     await c.answerCallbackQuery()
 }
 
@@ -464,19 +464,51 @@ async function handleResumeDetailCallback(c: Context, data: string, sessionManag
     const providerName = groupSettings?.providerName || config.getDefaultProvider()
     const provider = getProvider(providerName)
     let firstMessage = '(no first message)'
+    await c.answerCallbackQuery()
     if (provider?.getSessionFirstMessage) {
         try {
             const msg = await provider.getSessionFirstMessage(sessionId)
             if (msg) firstMessage = msg
-        } catch {}
+        } catch (e) {
+            console.error(`[telegram] Failed to load session details for ${sessionId.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`)
+            await c.reply('Unable to load session details. Check the daemon logs for more information.')
+            return
+        }
     } else if (provider?.listSessions) {
         const sessions = await provider.listSessions(cwd)
         const session = sessions.find(s => s.sessionId === sessionId)
         if (session?.firstMessage) firstMessage = session.firstMessage
     }
-    const detailText = `📋 <b>Session Details</b>\n\n<b>Session ID:</b> ${escapeHtml(sessionId)}\n\n<b>First message:</b>\n${escapeHtml(firstMessage)}`
-    await c.reply(detailText, { parse_mode: 'HTML' })
-    await c.answerCallbackQuery()
+    const detailText = buildSessionDetailText(sessionId, firstMessage)
+    try {
+        await c.reply(detailText, { parse_mode: 'HTML' })
+    } catch (e) {
+        console.error(`[telegram] Failed to send session details for ${sessionId.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`)
+        await c.reply('Unable to display session details. Check the daemon logs for more information.')
+    }
+}
+
+const MAX_SESSION_DETAIL_LENGTH = 4000
+
+export function buildSessionDetailText(sessionId: string, firstMessage: string): string {
+    const prefix = `📋 <b>Session Details</b>\n\n<b>Session ID:</b> ${escapeHtml(sessionId)}\n\n<b>First message:</b>\n`
+    return prefix + escapeHtmlWithinLimit(firstMessage, MAX_SESSION_DETAIL_LENGTH - prefix.length)
+}
+
+function escapeHtmlWithinLimit(value: string, maxLength: number): string {
+    const escaped = escapeHtml(value)
+    if (escaped.length <= maxLength) return escaped
+
+    const suffix = '\n… (truncated)'
+    const characters = Array.from(value)
+    let low = 0
+    let high = characters.length
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2)
+        if (escapeHtml(characters.slice(0, middle).join('')).length + suffix.length <= maxLength) low = middle
+        else high = middle - 1
+    }
+    return `${escapeHtml(characters.slice(0, low).join(''))}${suffix}`
 }
 
 async function handleProviderCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {

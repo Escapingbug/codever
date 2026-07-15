@@ -308,11 +308,14 @@ export async function sendSessionList(
     chatId: number,
     page: number,
     sessionManager: SessionManager,
-    topicSessions: Map<string, TopicSession>
+    topicSessions: Map<string, TopicSession>,
+    delivery: 'reply' | 'edit' = 'reply',
 ): Promise<void> {
     const cwd = getCwdForChat(chatId, sessionManager)
     if (!cwd) {
-        await ctx.reply('No working directory set. Use /cwd &lt;path&gt; first.', { parse_mode: 'HTML' })
+        const text = 'No working directory set. Use /cwd &lt;path&gt; first.'
+        if (delivery === 'edit') await ctx.editMessageText(text, { parse_mode: 'HTML' })
+        else await ctx.reply(text, { parse_mode: 'HTML' })
         return
     }
 
@@ -337,7 +340,9 @@ export async function sendSessionList(
     }
 
     if (total === 0) {
-        await ctx.reply(`No sessions found for this project with provider <b>${providerName}</b>.`, { parse_mode: 'HTML' })
+        const text = `No sessions found for this project with provider <b>${providerName}</b>.`
+        if (delivery === 'edit') await ctx.editMessageText(text, { parse_mode: 'HTML' })
+        else await ctx.reply(text, { parse_mode: 'HTML' })
         return
     }
 
@@ -346,8 +351,10 @@ export async function sendSessionList(
 
     const header = `📋 <b>Sessions</b> (${providerName}, ${page + 1}/${totalPages}, ${total} total)\nClick to resume:\n`
     const kb = resumeSessionKeyboard(pageEntries as any, page, totalPages)
-    await ctx.reply(header, {
+    const options = {
         parse_mode: 'HTML',
         reply_markup: kb
-    })
+    } as const
+    if (delivery === 'edit') await ctx.editMessageText(header, options)
+    else await ctx.reply(header, options)
 }

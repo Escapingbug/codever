@@ -21,6 +21,7 @@ vi.mock('@/providers/registry', () => {
         getAvailablePermissionModes: vi.fn(() => ['default']),
         isReady: vi.fn(() => true),
         listSessions: vi.fn(async () => [{ sessionId: 'abcdef123456', title: 'old chat', updated: Date.now() }]),
+        getSessionFirstMessage: vi.fn(async () => '<recommended_plugins>&'.repeat(300)),
     }
     return {
         getProvider: vi.fn(() => provider),
@@ -327,6 +328,36 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'resume', args: expect.any(String), source: 'channel' })
         expect(session.sessionRecord.setConversationId).toHaveBeenCalledWith(expect.any(String))
+    })
+
+    it('session pagination edits the existing list message', async () => {
+        const bot = createBot()
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map() })
+        const editMessageText = vi.fn(async () => {})
+        const reply = vi.fn(async (_text: string) => {})
+
+        await bot.runCallback('crlist:0', { editMessageText, reply })
+
+        expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('Sessions'), expect.objectContaining({
+            parse_mode: 'HTML',
+        }))
+        expect(reply).not.toHaveBeenCalled()
+    })
+
+    it('session details truncate an oversized Codex first message', async () => {
+        const bot = createBot()
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map() })
+        const reply = vi.fn(async (_text: string) => {})
+        const answerCallbackQuery = vi.fn(async () => {})
+
+        await bot.runCallback('crdet:abcdef123456', { reply, answerCallbackQuery })
+
+        expect(answerCallbackQuery).toHaveBeenCalled()
+        expect(reply).toHaveBeenCalledOnce()
+        const detailText = reply.mock.calls[0]![0]
+        expect(detailText).toContain('Session Details')
+        expect(detailText).toContain('(truncated)')
+        expect(detailText.length).toBeLessThanOrEqual(4000)
     })
 
     it('model callback should dispatch runtime model command', async () => {
