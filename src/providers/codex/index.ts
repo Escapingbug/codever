@@ -154,6 +154,7 @@ async function findRolloutFiles(directory: string): Promise<string[]> {
 async function readCodexSession(file: string): Promise<SessionEntry | null> {
     let metadata: CodexSessionMeta | undefined
     let firstMessage = ''
+    let fallbackMessage = ''
     const lines = createInterface({
         input: createReadStream(file, { encoding: 'utf-8' }),
         crlfDelay: Infinity,
@@ -170,8 +171,11 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
 
             if (record.type === 'session_meta' && record.payload) {
                 metadata = record.payload as CodexSessionMeta
-            } else if (!firstMessage) {
-                firstMessage = extractUserMessage(record)
+            } else {
+                const eventMessage = extractUserEventMessage(record)
+                if (eventMessage) firstMessage = eventMessage
+                else if (fallbackMessage) firstMessage = fallbackMessage
+                else fallbackMessage = extractResponseUserMessage(record)
             }
             if (metadata && firstMessage) break
         }
@@ -180,6 +184,7 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
     }
 
     if (!metadata) return null
+    firstMessage ||= fallbackMessage
     const sessionId = stringValue(metadata.id) || stringValue(metadata.session_id)
     const cwd = stringValue(metadata.cwd)
     if (!sessionId || !cwd) return null
@@ -196,7 +201,12 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
     }
 }
 
-function extractUserMessage(record: CodexRolloutLine): string {
+function extractUserEventMessage(record: CodexRolloutLine): string {
+    if (record.type !== 'event_msg' || record.payload?.type !== 'user_message') return ''
+    return stringValue(record.payload.message)
+}
+
+function extractResponseUserMessage(record: CodexRolloutLine): string {
     if (record.type !== 'response_item' || record.payload?.role !== 'user') return ''
     const content = record.payload.content
     if (!Array.isArray(content)) return ''
@@ -206,9 +216,16 @@ function extractUserMessage(record: CodexRolloutLine): string {
             const item = part as Record<string, unknown>
             return item.type === 'input_text' ? stringValue(item.text) : ''
         })
-        .filter(Boolean)
+        .filter(text => text && !isInjectedContext(text))
         .join('\n')
         .trim()
+}
+
+function isInjectedContext(text: string): boolean {
+    const trimmed = text.trimStart()
+    return trimmed.startsWith('<recommended_plugins>')
+        || trimmed.startsWith('# AGENTS.md instructions for ')
+        || trimmed.startsWith('<environment_context>')
 }
 
 function makeSessionTitle(message: string): string {
