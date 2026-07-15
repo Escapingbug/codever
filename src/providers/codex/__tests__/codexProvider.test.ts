@@ -132,6 +132,29 @@ describe('CodexProvider', () => {
         await expect(new CodexProvider({ codexHome }).getSessionFirstMessage('session-with-message'))
             .resolves.toBe('Hello from Codex')
     })
+
+    it('uses the semantic user event instead of injected system context', async () => {
+        const { CodexProvider } = await import('../index')
+        const codexHome = await createCodexHome([{
+            id: 'session-with-context',
+            cwd: path.join(tmpdir(), 'project'),
+            message: 'The actual user prompt',
+            responseMessage: 'Fallback response prompt',
+            timestamp: '2026-07-15T03:00:00.000Z',
+            injectedContext: true,
+            userEvent: true,
+        }])
+
+        const provider = new CodexProvider({ codexHome })
+        const sessions = await provider.listSessions(path.join(tmpdir(), 'project'))
+
+        expect(sessions[0]).toMatchObject({
+            title: 'The actual user prompt',
+            firstMessage: 'The actual user prompt',
+        })
+        await expect(provider.getSessionFirstMessage('session-with-context'))
+            .resolves.toBe('The actual user prompt')
+    })
 })
 
 describe('parseCodexModels', () => {
@@ -172,6 +195,9 @@ async function createCodexHome(sessions: Array<{
     message: string
     timestamp: string
     malformedLine?: boolean
+    injectedContext?: boolean
+    responseMessage?: string
+    userEvent?: boolean
 }>): Promise<string> {
     const codexHome = await mkdtemp(path.join(tmpdir(), 'codever-codex-'))
     tempDirs.push(codexHome)
@@ -186,15 +212,33 @@ async function createCodexHome(sessions: Array<{
                 payload: { id: session.id, cwd: session.cwd, timestamp: session.timestamp },
             }),
             ...(session.malformedLine ? ['not-json'] : []),
+            ...(session.injectedContext ? [JSON.stringify({
+                timestamp: session.timestamp,
+                type: 'response_item',
+                payload: {
+                    type: 'message',
+                    role: 'user',
+                    content: [
+                        { type: 'input_text', text: '<recommended_plugins>catalog</recommended_plugins>' },
+                        { type: 'input_text', text: '# AGENTS.md instructions for D:\\codever' },
+                        { type: 'input_text', text: '<environment_context>context</environment_context>' },
+                    ],
+                },
+            })] : []),
             JSON.stringify({
                 timestamp: session.timestamp,
                 type: 'response_item',
                 payload: {
                     type: 'message',
                     role: 'user',
-                    content: [{ type: 'input_text', text: session.message }],
+                    content: [{ type: 'input_text', text: session.responseMessage ?? session.message }],
                 },
             }),
+            ...(session.userEvent ? [JSON.stringify({
+                timestamp: session.timestamp,
+                type: 'event_msg',
+                payload: { type: 'user_message', message: session.message },
+            })] : []),
         ]
         await writeFile(
             path.join(sessionDir, `rollout-${session.timestamp.replace(/:/g, '-')}-${session.id}.jsonl`),
