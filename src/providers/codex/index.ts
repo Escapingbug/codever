@@ -6,14 +6,20 @@
  */
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
+import { createReadStream } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import path from 'node:path'
+import { createInterface } from 'node:readline'
 import { AcpProvider } from '@/providers/acp'
-import type { ModelEntry } from '@/providers/provider'
+import type { ModelEntry, SessionEntry } from '@/providers/provider'
 
 const CODEX_ACP_COMMAND = 'npx'
 const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp']
 const CODEX_MODELS_COMMAND = 'codex'
 const CODEX_MODELS_ARGS = ['debug', 'models']
 const CODEX_MODEL_PROVIDER = 'openai'
+const SESSION_READ_BATCH_SIZE = 32
 
 export interface CodexProviderOptions {
     name?: string
@@ -23,6 +29,7 @@ export interface CodexProviderOptions {
     cwd?: string
     modelsCommand?: string
     modelsArgs?: string[]
+    codexHome?: string
 }
 
 interface CodexModelCatalog {
@@ -41,6 +48,7 @@ export class CodexProvider extends AcpProvider {
     private readonly modelsArgs: string[]
     private readonly env?: Record<string, string>
     private readonly cwd?: string
+    private readonly codexHome: string
 
     constructor(options: CodexProviderOptions = {}) {
         super({
@@ -54,6 +62,52 @@ export class CodexProvider extends AcpProvider {
         this.modelsArgs = options.modelsArgs ?? CODEX_MODELS_ARGS
         this.env = options.env
         this.cwd = options.cwd
+        this.codexHome = options.codexHome
+            ?? options.env?.CODEX_HOME
+            ?? process.env.CODEX_HOME
+            ?? path.join(homedir(), '.codex')
+    }
+
+    async listSessions(cwd: string): Promise<SessionEntry[]> {
+        try {
+            const sessionsDir = path.join(this.codexHome, 'sessions')
+            const files = await findRolloutFiles(sessionsDir)
+            const sessions: Array<SessionEntry | null> = []
+            for (let start = 0; start < files.length; start += SESSION_READ_BATCH_SIZE) {
+                sessions.push(...await Promise.all(
+                    files.slice(start, start + SESSION_READ_BATCH_SIZE).map(file => readCodexSession(file)),
+                ))
+            }
+            const normalizedCwd = normalizeCwd(cwd)
+
+            return sessions
+                .filter((session): session is SessionEntry => session !== null)
+                .filter(session => !cwd || normalizeCwd(session.cwd ?? '') === normalizedCwd)
+                .sort((a, b) => b.updated - a.updated)
+        } catch (e) {
+            const error = e as NodeJS.ErrnoException
+            if (error?.code !== 'ENOENT') {
+                console.error(`[codex] Failed to list sessions: ${e instanceof Error ? e.message : String(e)}`)
+            }
+            return []
+        }
+    }
+
+    async getSessionFirstMessage(sessionId: string): Promise<string> {
+        try {
+            const files = await findRolloutFiles(path.join(this.codexHome, 'sessions'))
+            for (const file of files) {
+                if (!path.basename(file).includes(sessionId)) continue
+                const session = await readCodexSession(file)
+                if (session?.sessionId === sessionId) return session.firstMessage ?? ''
+            }
+        } catch (e) {
+            const error = e as NodeJS.ErrnoException
+            if (error?.code !== 'ENOENT') {
+                console.error(`[codex] Failed to get first message: ${e instanceof Error ? e.message : String(e)}`)
+            }
+        }
+        return ''
     }
 
     getAvailableModels(): ModelEntry[] {
@@ -70,6 +124,106 @@ export class CodexProvider extends AcpProvider {
             return []
         }
     }
+}
+
+interface CodexSessionMeta {
+    id?: unknown
+    session_id?: unknown
+    cwd?: unknown
+    timestamp?: unknown
+}
+
+interface CodexRolloutLine {
+    type?: unknown
+    timestamp?: unknown
+    payload?: Record<string, unknown>
+}
+
+async function findRolloutFiles(directory: string): Promise<string[]> {
+    const entries = await readdir(directory, { withFileTypes: true })
+    const nested = await Promise.all(entries.map(async (entry) => {
+        const fullPath = path.join(directory, entry.name)
+        if (entry.isDirectory()) return findRolloutFiles(fullPath)
+        return entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')
+            ? [fullPath]
+            : []
+    }))
+    return nested.flat()
+}
+
+async function readCodexSession(file: string): Promise<SessionEntry | null> {
+    let metadata: CodexSessionMeta | undefined
+    let firstMessage = ''
+    const lines = createInterface({
+        input: createReadStream(file, { encoding: 'utf-8' }),
+        crlfDelay: Infinity,
+    })
+
+    try {
+        for await (const line of lines) {
+            let record: CodexRolloutLine
+            try {
+                record = JSON.parse(line) as CodexRolloutLine
+            } catch {
+                continue
+            }
+
+            if (record.type === 'session_meta' && record.payload) {
+                metadata = record.payload as CodexSessionMeta
+            } else if (!firstMessage) {
+                firstMessage = extractUserMessage(record)
+            }
+            if (metadata && firstMessage) break
+        }
+    } finally {
+        lines.close()
+    }
+
+    if (!metadata) return null
+    const sessionId = stringValue(metadata.id) || stringValue(metadata.session_id)
+    const cwd = stringValue(metadata.cwd)
+    if (!sessionId || !cwd) return null
+
+    const fileStat = await stat(file)
+    const metadataTime = Date.parse(stringValue(metadata.timestamp))
+    const updated = Math.max(fileStat.mtimeMs, Number.isFinite(metadataTime) ? metadataTime : 0)
+    return {
+        sessionId,
+        title: makeSessionTitle(firstMessage),
+        updated,
+        cwd,
+        firstMessage,
+    }
+}
+
+function extractUserMessage(record: CodexRolloutLine): string {
+    if (record.type !== 'response_item' || record.payload?.role !== 'user') return ''
+    const content = record.payload.content
+    if (!Array.isArray(content)) return ''
+    return content
+        .map((part) => {
+            if (!part || typeof part !== 'object') return ''
+            const item = part as Record<string, unknown>
+            return item.type === 'input_text' ? stringValue(item.text) : ''
+        })
+        .filter(Boolean)
+        .join('\n')
+        .trim()
+}
+
+function makeSessionTitle(message: string): string {
+    const title = message.replace(/\s+/g, ' ').trim()
+    if (!title) return 'Untitled session'
+    return title.length > 80 ? `${title.slice(0, 77)}...` : title
+}
+
+function normalizeCwd(cwd: string): string {
+    const normalized = path.resolve(cwd).replace(/\\/g, '/')
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function stringValue(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : ''
 }
 
 function mergeProcessEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
