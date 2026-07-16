@@ -59,6 +59,29 @@ export const CodeverSessionSchema = z.object({
     lastEventSeq: NonNegativeIntegerSchema,
 }).strict()
 
+export const ProviderSessionSchema = z.object({
+    provider: z.string().min(1),
+    providerSessionId: z.string().min(1),
+    title: z.string().trim().min(1),
+    updatedAt: IsoDateTimeSchema,
+    cwd: z.string().min(1).optional(),
+    firstMessage: z.string().optional(),
+    codeverSessionId: OpaqueIdSchema.optional(),
+    state: SessionStateSchema.optional(),
+    active: z.boolean(),
+}).strict()
+
+export const ProviderModelSchema = z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    provider: z.string().min(1).optional(),
+    defaultReasoningLevel: z.string().min(1).optional(),
+    supportedReasoningLevels: z.array(z.object({
+        effort: z.string().min(1),
+        description: z.string().optional(),
+    }).strict()).optional(),
+}).strict()
+
 export type GatewayPlatform = z.infer<typeof GatewayPlatformSchema>
 export type GatewayStatus = z.infer<typeof GatewayStatusSchema>
 export type GatewayCapabilities = z.infer<typeof GatewayCapabilitiesSchema>
@@ -66,7 +89,10 @@ export type Gateway = z.infer<typeof GatewaySchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type SessionState = z.infer<typeof SessionStateSchema>
 export type CodeverSession = z.infer<typeof CodeverSessionSchema>
+export type ProviderSession = z.infer<typeof ProviderSessionSchema>
+export type ProviderModel = z.infer<typeof ProviderModelSchema>
 
 export const parseGateway = (value: unknown): Gateway => parseWithSchema(GatewaySchema, value)
 export const parseProject = (value: unknown): Project => parseWithSchema(ProjectSchema, value)
 export const parseCodeverSession = (value: unknown): CodeverSession => parseWithSchema(CodeverSessionSchema, value)
+export const parseProviderSession = (value: unknown): ProviderSession => parseWithSchema(ProviderSessionSchema, value)

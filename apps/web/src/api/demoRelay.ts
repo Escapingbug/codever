@@ -15,6 +15,8 @@ import type {
   MutationReceiptDto,
   Project,
   SessionEventEnvelope,
+  ProviderSessionListDto,
+  PatchSessionConfigDto,
 } from '@codever/protocol'
 
 export const DEMO_RELAY_URL = 'demo://preview'
@@ -197,16 +199,55 @@ export const demoRelay = {
     return structuredClone((events.get(id) ?? []).filter(event => event.seq > after))
   },
   createSession(id: string, input: CreateSessionDto): CodeverSession {
+    if (input.providerSessionId) {
+      const existing = sessions.find(session => session.projectId === id
+        && session.provider === input.provider
+        && session.providerSessionId === input.providerSessionId
+        && session.state !== 'closed')
+      if (existing) return structuredClone(existing)
+    }
     sessionCounter += 1
     const session: CodeverSession = {
       id: `demo-created-${sessionCounter}`, gatewayId, projectId: id, title: input.title ?? 'New preview session',
       state: 'idle', provider: input.provider, ...(input.model && { model: input.model }),
+      ...(input.providerSessionId && { providerSessionId: input.providerSessionId }),
       ...(input.mode && { mode: input.mode }), config: input.config, createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(), lastEventSeq: 0,
     }
     sessions.unshift(session)
     events.set(session.id, [])
     return structuredClone(session)
+  },
+  discoverProviderSessions(id: string, provider: string): ProviderSessionListDto {
+    const native = provider === 'codex'
+      ? [
+          { providerSessionId: 'demo-provider-session', title: 'Review authentication refactor', updatedAt: timestamp, firstMessage: 'Review the authentication refactor and check the tests.' },
+          { providerSessionId: 'codex-native-older', title: 'Relay reconnect investigation', updatedAt: '2026-07-15T08:30:00.000Z', firstMessage: 'Investigate why reconnect sometimes stalls.' },
+        ]
+      : provider === 'cursor'
+        ? [{ providerSessionId: 'demo-cursor-design', title: 'Plan multi-gateway navigation', updatedAt: '2026-07-16T10:15:00.000Z', firstMessage: 'Plan the multi-gateway client navigation.' }]
+        : []
+    return {
+      projectId: id,
+      provider,
+      discoverySupported: provider !== 'opencode',
+      models: provider === 'codex'
+        ? [{ id: 'gpt-5.6', name: 'GPT-5.6', defaultReasoningLevel: 'high', supportedReasoningLevels: [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }] }]
+        : provider === 'cursor' ? [{ id: 'auto', name: 'Auto' }] : [],
+      permissionModes: ['default', 'acceptEdits', 'bypassPermissions'],
+      sessions: native.map(entry => {
+        const bridge = sessions.find(session => session.projectId === id
+          && session.provider === provider
+          && session.providerSessionId === entry.providerSessionId
+          && session.state !== 'closed')
+        return {
+          provider,
+          ...entry,
+          ...(bridge ? { codeverSessionId: bridge.id, state: bridge.state } : {}),
+          active: bridge?.state === 'querying' || bridge?.state === 'canceling',
+        }
+      }),
+    }
   },
   sendMessage(id: string, text: string): MutationReceiptDto {
     const toolCallId = `demo-tool-${Date.now()}`
@@ -223,10 +264,15 @@ export const demoRelay = {
     append(id, { kind: 'session_state', state: 'idle', reason: 'Cancelled in offline preview' })
     return receipt()
   },
-  patchConfig(id: string, config: JsonObject): MutationReceiptDto {
+  patchConfig(id: string, patch: PatchSessionConfigDto): MutationReceiptDto {
+    const config = patch.config
     const session = sessions.find(value => value.id === id)
-    if (session) session.config = { ...session.config, ...config }
-    append(id, { kind: 'settings', model: typeof config.model === 'string' ? config.model : undefined, providerSettings: config })
+    if (session) {
+      session.config = { ...session.config, ...config }
+      if ('model' in patch) session.model = patch.model ?? undefined
+      if ('mode' in patch) session.mode = patch.mode ?? undefined
+    }
+    append(id, { kind: 'settings', model: patch.model ?? session?.model, providerSettings: config })
     return receipt()
   },
   resolveDecision(id: string, decisionId: string, value: JsonValue): MutationReceiptDto {

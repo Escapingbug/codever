@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { CodeverSession, JsonObject, JsonValue, SessionEventEnvelope } from '@codever/protocol'
+import type { CodeverSession, JsonValue, PatchSessionConfigDto, ProviderSessionListDto, SessionEventEnvelope } from '@codever/protocol'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { SessionEventSocket, type SocketConnectionState } from '../api/sessionEventSocket'
@@ -13,11 +13,13 @@ const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId))
 const projectId = computed(() => String(route.params.projectId))
 const sessionId = computed(() => String(route.params.sessionId))
+const provider = computed(() => String(route.params.provider))
 const gateway = computed(() => state.gateways.value.find((item) => item.id === gatewayId.value))
 const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find((item) => item.id === projectId.value))
 // Protocol values are immutable snapshots; shallow refs avoid recursively unwrapping
 // the deeply inferred Zod event union.
 const session = shallowRef<CodeverSession>()
+const providerCapabilities = shallowRef<ProviderSessionListDto>()
 const events = shallowRef<SessionEventEnvelope[]>([])
 const socketState = ref<SocketConnectionState>('closed')
 const loadError = ref('')
@@ -52,6 +54,7 @@ onMounted(() => {
   void state.loadProjects(gatewayId.value)
 })
 watch(sessionId, () => void loadSession(), { immediate: true })
+watch([projectId, provider], () => void loadProviderCapabilities(), { immediate: true })
 onBeforeUnmount(() => eventSocket?.close())
 
 async function loadSession(): Promise<void> {
@@ -79,6 +82,14 @@ async function loadSession(): Promise<void> {
     loadError.value = error instanceof Error ? error.message : 'Could not load the session'
   } finally {
     if (requestedId === sessionId.value) loading.value = false
+  }
+}
+
+async function loadProviderCapabilities(): Promise<void> {
+  try {
+    providerCapabilities.value = await state.api.discoverProviderSessions(projectId.value, provider.value)
+  } catch {
+    providerCapabilities.value = undefined
   }
 }
 
@@ -142,17 +153,16 @@ async function cancel(): Promise<void> {
   }
 }
 
-async function saveControls(config: JsonObject): Promise<void> {
+async function saveControls(patch: PatchSessionConfigDto): Promise<void> {
   if (!canMutate.value || !session.value) return
   savingControls.value = true
   try {
-    await state.api.patchSessionConfig(sessionId.value, config)
+    await state.api.patchSessionConfig(sessionId.value, patch)
     session.value = {
       ...session.value,
-      provider: typeof config.provider === 'string' ? config.provider : session.value.provider,
-      model: typeof config.model === 'string' ? config.model : undefined,
-      mode: typeof config.mode === 'string' ? config.mode : undefined,
-      config: { ...session.value.config, ...config },
+      ...('model' in patch ? { model: patch.model ?? undefined } : {}),
+      ...('mode' in patch ? { mode: patch.mode ?? undefined } : {}),
+      config: { ...session.value.config, ...patch.config },
     }
     state.replaceSession(session.value)
   } catch (error) {
@@ -190,7 +200,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
         <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="session" :status="session.state" :label="session.state" /></div>
       </div>
       <button class="icon-button mobile-controls-button" aria-label="Session controls" @click="showMobileControls = !showMobileControls">⚙</button>
-      <SessionControls v-if="session" :class="{ 'session-controls--mobile-open': showMobileControls }" :session="session" :gateway="gateway" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
+      <SessionControls v-if="session" :class="{ 'session-controls--mobile-open': showMobileControls }" :session="session" :capabilities="providerCapabilities" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
       <button v-if="session?.state === 'querying'" class="button button--danger" :disabled="!canMutate" @click="cancel">Stop</button>
     </header>
 

@@ -165,6 +165,59 @@ describe('relay server', () => {
         }
     })
 
+    it('queries provider-native sessions through the connected Gateway', async () => {
+        const app = await createRelayServer({
+            clientAuthenticator: allowClients,
+            gatewayAuthenticator: allowGateways,
+            createSessionTimeoutMs: 1_000,
+        })
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        try {
+            const connection = await authenticateGateway(address, 'gateway-1')
+            sendHello(connection.socket, 'gateway-1', connection.epoch)
+            connection.socket.send(JSON.stringify(inventoryFrame('gateway-1', connection.epoch)))
+            await nextJson(connection.socket)
+            await eventually(async () => Boolean(await app.relay.repositories.projects.get('project-1')))
+
+            const responsePromise = fetch(`${address}/v1/projects/project-1/providers/test/sessions/discover`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'idempotency-key': 'discover-test-1' },
+                body: '{}',
+            })
+            const command = await nextJson(connection.socket)
+            expect(command).toMatchObject({
+                type: 'command.request',
+                payload: { projectId: 'project-1', command: { kind: 'provider.sessions.list', provider: 'test' } },
+            })
+            connection.socket.send(JSON.stringify(commandFrame(
+                'command.result',
+                'gateway-1',
+                connection.epoch,
+                command.payload.commandId,
+                {
+                    commandId: command.payload.commandId,
+                    completedAt: new Date().toISOString(),
+                    result: {
+                        projectId: 'project-1', provider: 'test', discoverySupported: true,
+                        models: [{ id: 'model-1', name: 'Model 1' }], permissionModes: ['default'],
+                        sessions: [{
+                            provider: 'test', providerSessionId: 'native-1', title: 'Existing task',
+                            updatedAt: new Date().toISOString(), active: false,
+                        }],
+                    },
+                },
+            )))
+
+            const response = await responsePromise
+            expect(response.status).toBe(200)
+            expect(await response.json()).toMatchObject({
+                provider: 'test', models: [{ id: 'model-1' }], sessions: [{ providerSessionId: 'native-1' }],
+            })
+        } finally {
+            await app.close()
+        }
+    })
+
     it('routes session creation to the project gateway without inventing session metadata', async () => {
         const app = await createRelayServer({
             clientAuthenticator: allowClients,

@@ -517,16 +517,16 @@ Desktop layout:
 └───────────────┴───────────────────────┴───────────────────────┴───────────┘
 ```
 
-Mobile layout uses the same routes and components with drill-down navigation:
+Mobile layout uses the same routes and components with Provider-first drill-down navigation:
 
 ```text
-Gateway list -> Project -> Session list -> Conversation -> Event detail
+Gateway list -> Project -> Provider -> Native/active sessions -> Conversation -> Event detail
 ```
 
 Primary route identity:
 
 ```text
-/gateways/:gatewayId/projects/:projectId/sessions/:sessionId
+/gateways/:gatewayId/projects/:projectId/providers/:provider/sessions/:sessionId
 ```
 
 ### 13.2 Gateway Views
@@ -544,8 +544,9 @@ Primary route identity:
 
 - project identity and Gateway location;
 - repository/worktree status where available;
-- sessions sorted by activity;
-- provider/model defaults;
+- currently executing sessions across providers;
+- Provider cards as the primary entry point;
+- provider-native history discovered on the Gateway;
 - scheduled tasks;
 - Telegram/channel bindings;
 - project access policy.
@@ -565,9 +566,22 @@ The timeline renders structured event cards:
 - decisions and permission state;
 - errors, cancellation, timeout, reconnect, and replay markers.
 
-Model/provider/mode/session controls live in persistent UI surfaces, not messages in the conversation timeline.
+Model, reasoning effort, mode, permission, and session controls live in persistent UI surfaces, not messages in the conversation timeline. Provider identity is fixed when a session is attached; changing Provider means selecting a different Provider page or starting a new task.
 
-### 13.5 Multi-Gateway Rules
+### 13.5 Provider-first Session Semantics
+
+The client does not ask the user to create a Codever session and then choose a Provider. The visible flow is:
+
+1. Select a Gateway and Project.
+2. Select a Provider.
+3. Browse that Provider's native sessions and Codever-connected active sessions.
+4. Continue an existing native session or start a new Provider task.
+
+`CodeverSession` remains an internal durable routing, event, decision, and audit handle. When a user opens a provider-native session, Gateway atomically creates or reuses one internal bridge keyed by `(projectId, provider, providerSessionId)`. The client does not expose this bridge as a separate management step.
+
+Provider capability discovery supplies model choices, supported reasoning levels, and permission modes. The UI renders these as native controls. Slash commands remain an optional compatibility and expert surface, not the primary configuration interface.
+
+### 13.6 Multi-Gateway Rules
 
 - Every project and session visibly identifies its Gateway.
 - A composer cannot accidentally switch Gateway while retaining draft attachments.

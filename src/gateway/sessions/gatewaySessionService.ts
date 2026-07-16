@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { CodeverSession, JsonObject } from '@codever/protocol'
+import type { CodeverSession, JsonObject, ProviderSession, ProviderSessionListDto } from '@codever/protocol'
 import type { AgentQueryInput } from '@/providers/provider'
 import type { SessionEventEnvelope } from '@/platform/storage'
 import {
@@ -54,6 +54,14 @@ export class GatewaySessionService {
             const project = await this.options.projects.get(projectId)
             if (project.archivedAt) throw new GatewaySessionServiceError('invalid_argument', `Project is archived: ${projectId}`)
             const provider = requireText(input.provider, 'provider')
+            const providerSessionId = input.providerSessionId?.trim()
+            if (providerSessionId) {
+                const existing = (await this.options.repository.list(projectId)).find(session =>
+                    session.provider === provider
+                    && session.providerSessionId === providerSessionId
+                    && session.state !== 'closed')
+                if (existing) return existing
+            }
             const timestamp = new Date(this.now()).toISOString()
             const session: CodeverSession = {
                 id: input.sessionId?.trim() || this.createId(),
@@ -62,6 +70,7 @@ export class GatewaySessionService {
                 ...(input.title ? { title: input.title.trim() } : {}),
                 state: 'idle',
                 provider,
+                ...(providerSessionId ? { providerSessionId } : {}),
                 ...(input.model ? { model: input.model } : {}),
                 ...(input.mode ? { mode: input.mode } : {}),
                 config: structuredClone(input.config),
@@ -80,6 +89,43 @@ export class GatewaySessionService {
         await this.assertUsable()
         await this.options.projects.get(projectId)
         return this.options.repository.list(projectId)
+    }
+
+    async listProviderSessions(projectId: string, providerName: string): Promise<ProviderSessionListDto> {
+        await this.assertUsable()
+        const project = await this.options.projects.get(projectId)
+        const provider = requireText(providerName, 'provider')
+        const bridges = (await this.options.repository.list(projectId))
+            .filter(session => session.provider === provider && session.state !== 'closed' && session.providerSessionId)
+        const bridgeByProviderId = new Map(bridges.map(session => [session.providerSessionId!, session]))
+        const factory = this.options.providerDiscoveryFactory
+        if (!factory) return { projectId, provider, discoverySupported: false, models: [], permissionModes: [], sessions: [] }
+
+        const discoveryProvider = await factory(provider, project)
+        try {
+            const models = discoveryProvider.getAvailableModels()
+            const permissionModes = discoveryProvider.getAvailablePermissionModes()
+            if (!discoveryProvider.listSessions) {
+                return { projectId, provider, discoverySupported: false, models, permissionModes, sessions: [] }
+            }
+            const discovered = await discoveryProvider.listSessions(project.canonicalRoot)
+            const sessions: ProviderSession[] = discovered.map(entry => {
+                const bridge = bridgeByProviderId.get(entry.sessionId)
+                return {
+                    provider,
+                    providerSessionId: entry.sessionId,
+                    title: entry.title.trim() || entry.firstMessage?.trim() || 'Untitled session',
+                    updatedAt: new Date(normalizeEpoch(entry.updated)).toISOString(),
+                    ...(entry.cwd ? { cwd: entry.cwd } : {}),
+                    ...(entry.firstMessage !== undefined ? { firstMessage: entry.firstMessage } : {}),
+                    ...(bridge ? { codeverSessionId: bridge.id, state: bridge.state } : {}),
+                    active: bridge?.state === 'querying' || bridge?.state === 'canceling',
+                }
+            })
+            return { projectId, provider, discoverySupported: true, models, permissionModes, sessions }
+        } finally {
+            await discoveryProvider.destroy?.().catch(() => undefined)
+        }
     }
 
     async get(sessionId: string): Promise<CodeverSession> {
@@ -393,6 +439,10 @@ function isSendMessageDto(value: unknown): value is SendSessionMessageInput {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null
+}
+
+function normalizeEpoch(value: number): number {
+    return value > 0 && value < 10_000_000_000 ? value * 1_000 : value
 }
 
 function requireText(value: string, field: string): string {

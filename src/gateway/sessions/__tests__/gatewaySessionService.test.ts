@@ -8,6 +8,7 @@ import type {
     AgentQueryHandle,
     AgentQueryInput,
     ModelEntry,
+    SessionEntry,
 } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import { ProjectRegistry } from '@/gateway/projects'
@@ -23,6 +24,37 @@ afterEach(async () => {
 })
 
 describe('GatewaySessionService', () => {
+    it('discovers provider-native sessions and reuses one bridge per native session', async () => {
+        const fixture = await createFixture()
+        const discovery = new DiscoveryProvider()
+        const service = await GatewaySessionService.open({
+            ...fixture.options,
+            providerFactory: () => new MockProvider(() => events({ kind: 'result', status: 'success' })),
+            providerDiscoveryFactory: () => discovery,
+        })
+
+        const catalog = await service.listProviderSessions(fixture.project.id, 'mock')
+        expect(catalog).toMatchObject({
+            provider: 'mock',
+            discoverySupported: true,
+            models: [{ id: 'model-a', name: 'Model A' }],
+            permissionModes: ['default', 'bypassPermissions'],
+            sessions: [{ providerSessionId: 'native-1', title: 'Existing work', active: false }],
+        })
+        expect(discovery.destroyCalls).toBe(1)
+
+        const input = { provider: 'mock', providerSessionId: 'native-1', title: 'Existing work', config: {} }
+        const first = await service.create(fixture.project.id, input)
+        const second = await service.create(fixture.project.id, input)
+        expect(second.id).toBe(first.id)
+        expect(first.providerSessionId).toBe('native-1')
+
+        const connected = await service.listProviderSessions(fixture.project.id, 'mock')
+        expect(connected.sessions[0]).toMatchObject({ codeverSessionId: first.id, state: 'idle' })
+        await service.destroy()
+        await fixture.events.close()
+    })
+
     it('creates sessions without a provider and lazily uses only the project canonical root', async () => {
         const fixture = await createFixture()
         const providers: MockProvider[] = []
@@ -223,6 +255,15 @@ class MockProvider implements AgentProvider {
     getAvailableModels(): ModelEntry[] { return [] }
     getAvailablePermissionModes(): string[] { return [] }
     async destroy(): Promise<void> { this.destroyCalls += 1 }
+}
+
+class DiscoveryProvider extends MockProvider {
+    constructor() { super(() => events()) }
+    override getAvailableModels(): ModelEntry[] { return [{ id: 'model-a', name: 'Model A' }] }
+    override getAvailablePermissionModes(): string[] { return ['default', 'bypassPermissions'] }
+    async listSessions(cwd: string): Promise<SessionEntry[]> {
+        return [{ sessionId: 'native-1', title: 'Existing work', updated: 1_752_662_400_000, cwd, firstMessage: 'Continue this work' }]
+    }
 }
 
 async function createFixture() {

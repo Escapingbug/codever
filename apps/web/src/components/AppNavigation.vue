@@ -39,7 +39,7 @@ watch(projectId, (id) => { if (id) void state.loadSessions(id) }, { immediate: t
           <span>▣</span><span><strong>{{ project.name }}</strong><small>{{ project.repoIdentity ?? project.rootPath }}</small></span>
         </RouterLink>
         <div v-if="project.id === projectId" class="session-links">
-          <RouterLink v-for="session in sessions" :key="session.id" class="session-link" :to="`/gateways/${gatewayId}/projects/${project.id}/sessions/${session.id}`">
+          <RouterLink v-for="session in sessions" :key="session.id" class="session-link" :to="{ name: 'session', params: { gatewayId, projectId: project.id, provider: session.provider, sessionId: session.id } }">
             <StatusDot :status="session.state" /><span><strong>{{ session.title ?? 'Untitled session' }}</strong><small>{{ session.provider }}<template v-if="session.model"> · {{ session.model }}</template></small></span>
           </RouterLink>
           <span v-if="!sessions.length" class="nav-empty">No sessions yet</span>

@@ -1,50 +1,71 @@
 <script setup lang="ts">
-import type { CodeverSession, Gateway, JsonObject } from '@codever/protocol'
-import { reactive, watch } from 'vue'
+import type { CodeverSession, PatchSessionConfigDto, ProviderSessionListDto } from '@codever/protocol'
+import { computed, reactive, watch } from 'vue'
 
 const props = defineProps<{
   session: CodeverSession
-  gateway?: Gateway
+  capabilities?: ProviderSessionListDto
   disabled?: boolean
   saving?: boolean
 }>()
-const emit = defineEmits<{ save: [config: JsonObject] }>()
+const emit = defineEmits<{ save: [patch: PatchSessionConfigDto] }>()
 
-const form = reactive({ provider: '', model: '', mode: '' })
-watch(() => props.session, (session) => {
-  form.provider = session.provider
+const form = reactive({ model: '', mode: '', permissionMode: '', reasoningEffort: '' })
+const models = computed(() => props.capabilities?.models ?? [])
+const reasoningLevels = computed(() => models.value
+  .find(model => model.id === form.model)?.supportedReasoningLevels
+  ?? models.value[0]?.supportedReasoningLevels
+  ?? [])
+
+watch(() => props.session, session => {
   form.model = session.model ?? ''
   form.mode = session.mode ?? ''
+  form.permissionMode = typeof session.config.permissionMode === 'string' ? session.config.permissionMode : ''
+  form.reasoningEffort = typeof session.config.reasoningEffort === 'string' ? session.config.reasoningEffort : ''
 }, { immediate: true })
 
 function save(): void {
   emit('save', {
-    provider: form.provider,
     model: form.model || null,
     mode: form.mode || null,
+    config: {
+      ...props.session.config,
+      permissionMode: form.permissionMode || null,
+      reasoningEffort: form.reasoningEffort || null,
+    },
   })
 }
 </script>
 
 <template>
   <div class="session-controls">
-    <label>
-      <span>Provider</span>
-      <select v-model="form.provider" :disabled="disabled" @change="save">
-        <option v-for="provider in gateway?.capabilities.providers ?? [session.provider]" :key="provider">{{ provider }}</option>
-      </select>
-    </label>
+    <label><span>Provider</span><strong class="control-value">{{ session.provider }}</strong></label>
     <label>
       <span>Model</span>
-      <input v-model="form.model" :disabled="disabled" placeholder="Default model" @change="save" />
+      <select v-if="models.length" v-model="form.model" :disabled="disabled" @change="save">
+        <option value="">Provider default</option>
+        <option v-for="model in models" :key="model.id" :value="model.id">{{ model.name }}</option>
+      </select>
+      <input v-else v-model="form.model" :disabled="disabled" placeholder="Provider default" @change="save" />
+    </label>
+    <label v-if="reasoningLevels.length">
+      <span>Reasoning</span>
+      <select v-model="form.reasoningEffort" :disabled="disabled" @change="save">
+        <option value="">Model default</option>
+        <option v-for="level in reasoningLevels" :key="level.effort" :value="level.effort">{{ level.effort }}</option>
+      </select>
     </label>
     <label>
       <span>Mode</span>
       <select v-model="form.mode" :disabled="disabled" @change="save">
-        <option value="">Default</option>
-        <option value="agent">Agent</option>
-        <option value="ask">Ask</option>
-        <option value="plan">Plan</option>
+        <option value="">Default</option><option value="agent">Agent</option><option value="ask">Ask</option><option value="plan">Plan</option>
+      </select>
+    </label>
+    <label v-if="capabilities?.permissionModes.length">
+      <span>Permissions</span>
+      <select v-model="form.permissionMode" :disabled="disabled" @change="save">
+        <option value="">Provider default</option>
+        <option v-for="permission in capabilities.permissionModes" :key="permission" :value="permission">{{ permission }}</option>
       </select>
     </label>
     <span v-if="saving" class="control-saving">Saving…</span>

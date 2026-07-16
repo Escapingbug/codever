@@ -13,12 +13,21 @@ describe('offline Demo Relay', () => {
     const gateways = await api.listGateways()
     const projects = await api.listProjects(gateways[0]!.id)
     const sessions = await api.listSessions(projects[0]!.id)
+    const providerSessions = await api.discoverProviderSessions(projects[0]!.id, 'codex')
     const history = await api.getSessionEvents(sessions[0]!.id)
 
     expect(login.user.username).toBe('demo')
     expect(gateways.some(gateway => gateway.status === 'online')).toBe(true)
     expect(history.events.some(event => event.event.kind === 'tool')).toBe(true)
     expect(history.events.some(event => event.event.kind === 'decision_request')).toBe(true)
+    expect(providerSessions).toMatchObject({
+      provider: 'codex',
+      discoverySupported: true,
+      models: [{ id: 'gpt-5.6' }],
+      sessions: expect.arrayContaining([
+        expect.objectContaining({ providerSessionId: 'demo-provider-session', codeverSessionId: sessions[0]!.id }),
+      ]),
+    })
     expect(fetcher).not.toHaveBeenCalled()
   })
 

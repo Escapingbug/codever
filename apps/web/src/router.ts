@@ -2,6 +2,7 @@ import { createMemoryHistory, createRouter, createWebHashHistory, type Router } 
 import GatewayListView from './views/GatewayListView.vue'
 import GatewayView from './views/GatewayView.vue'
 import ProjectView from './views/ProjectView.vue'
+import ProviderView from './views/ProviderView.vue'
 import SessionView from './views/SessionView.vue'
 import OnboardingView from './views/OnboardingView.vue'
 import LoginView from './views/LoginView.vue'
@@ -19,8 +20,9 @@ export function createCodeverRouter(session: ClientSession = clientSession): Rou
       { path: '/gateways', name: 'gateways', component: GatewayListView },
       { path: '/gateways/:gatewayId', name: 'gateway', component: GatewayView },
       { path: '/gateways/:gatewayId/projects/:projectId', name: 'project', component: ProjectView },
+      { path: '/gateways/:gatewayId/projects/:projectId/providers/:provider', name: 'provider', component: ProviderView },
       {
-        path: '/gateways/:gatewayId/projects/:projectId/sessions/:sessionId',
+        path: '/gateways/:gatewayId/projects/:projectId/providers/:provider/sessions/:sessionId',
         name: 'session',
         component: SessionView,
       },

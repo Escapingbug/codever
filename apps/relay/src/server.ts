@@ -14,6 +14,7 @@ import {
     parseLoginDto,
     parseLoginResultDto,
     parsePatchSessionConfigDto,
+    parseProviderSessionListDto,
     parseResolveDecisionDto,
     parseSendMessageDto,
     type CommandFailed,
@@ -22,6 +23,7 @@ import {
     type GatewayFrame,
     type GatewayHandshakeFrame,
     type MutationReceiptDto,
+    type JsonValue,
 } from '@codever/protocol'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import type WebSocket from 'ws'
@@ -97,6 +99,7 @@ interface IdParams {
     projectId?: string
     sessionId?: string
     decisionId?: string
+    provider?: string
 }
 
 class HttpError extends Error {
@@ -268,6 +271,26 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         return { projectId, sessions: await repositories.sessions.listByProject(projectId) }
     })
 
+    app.post('/v1/projects/:projectId/providers/:provider/sessions/discover', async (request, reply) => {
+        const { projectId, provider } = request.params as Required<Pick<IdParams, 'projectId' | 'provider'>>
+        const project = await requireProject(repositories, projectId)
+        const identity = await requireClient(request, reply, clientAuthenticator, 'session:list', {
+            gatewayId: project.gatewayId,
+            projectId,
+        })
+        if (!identity) return
+        const receipt = await routeCommand(reply, request, repositories, connections, identity, {
+            gatewayId: project.gatewayId,
+            projectId,
+            sessionId: randomUUID(),
+            command: { kind: 'provider.sessions.list', provider },
+        }, false)
+        const command = await repositories.commands.get(receipt.commandId)
+        if (!command) throw new HttpError(500, 'Provider discovery command was not persisted')
+        const result = await waitForCommandResult(repositories.commands, command, createSessionTimeoutMs)
+        return parseProviderSessionListDto(result)
+    })
+
     app.post('/v1/projects/:projectId/sessions', async (request, reply) => {
         const { projectId } = request.params as Required<Pick<IdParams, 'projectId'>>
         const project = await requireProject(repositories, projectId)
@@ -288,6 +311,7 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
                 ...(body.title && { title: body.title }),
                 ...(body.model && { model: body.model }),
                 ...(body.mode && { mode: body.mode }),
+                ...(body.providerSessionId && { providerSessionId: body.providerSessionId }),
             },
         }, false)
         const command = await repositories.commands.get(receipt.commandId)
@@ -344,7 +368,10 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     app.patch('/v1/sessions/:sessionId/config', async (request, reply) => {
         const body = parseInput(() => parsePatchSessionConfigDto(request.body))
         return routeSessionCommand(request, reply, repositories, connections, clientAuthenticator, 'session:config', {
-            kind: 'session.config.patch', config: body.config,
+            kind: 'session.config.patch',
+            config: body.config,
+            ...('model' in body ? { model: body.model } : {}),
+            ...('mode' in body ? { mode: body.mode } : {}),
         })
     })
 
@@ -550,6 +577,24 @@ async function waitForCreatedSession(
         await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))))
     }
     throw new HttpError(504, 'Timed out waiting for Gateway session inventory')
+}
+
+async function waitForCommandResult(
+    repository: CommandRepository,
+    initialCommand: CommandRecord,
+    timeoutMs: number,
+): Promise<JsonValue | undefined> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+        const command = await repository.get(initialCommand.request.commandId)
+        if (!command) throw new HttpError(500, 'Gateway command disappeared')
+        if (command.status === 'completed') return command.result?.result
+        if (command.status === 'rejected') throw new HttpError(409, command.failure?.error.message ?? 'Gateway command rejected')
+        if (command.status === 'expired') throw new HttpError(504, command.failure?.error.message ?? 'Gateway command expired')
+        if (command.status === 'unknown') throw new HttpError(502, command.failure?.error.message ?? 'Gateway command outcome is unknown')
+        await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))))
+    }
+    throw new HttpError(504, 'Timed out waiting for Gateway provider sessions')
 }
 
 function receipt(record: CommandRecord): MutationReceiptDto {

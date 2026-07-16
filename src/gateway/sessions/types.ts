@@ -30,12 +30,18 @@ export type SessionProviderInitializer = (
     context: SessionProviderContext,
 ) => void | Promise<void>
 
+export type ProviderDiscoveryFactory = (
+    providerName: string,
+    project: Project,
+) => AgentProvider | Promise<AgentProvider>
+
 export interface GatewaySessionServiceOptions {
     gatewayId: string
     projects: import('@/gateway/projects').ProjectRegistry
     eventStore: import('@/platform/storage').ConversationEventStore<import('@/gateway/runtime').GatewayConversationEvent>
     repository: SessionMetadataRepository
     providerFactory: SessionProviderFactory
+    providerDiscoveryFactory?: ProviderDiscoveryFactory
     initializeProvider?: SessionProviderInitializer
     now?: () => number
     createId?: () => string

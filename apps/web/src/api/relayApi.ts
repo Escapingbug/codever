@@ -17,6 +17,8 @@ import type {
   GatewayEnrollmentListDto,
   LoginDto,
   LoginResultDto,
+  ProviderSessionListDto,
+  PatchSessionConfigDto,
 } from '@codever/protocol'
 import {
   parseGatewayListDto,
@@ -31,6 +33,7 @@ import {
   parseGatewayEnrollmentDto,
   parseGatewayEnrollmentListDto,
   parseLoginResultDto,
+  parseProviderSessionListDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
 import { demoRelay, isDemoRelayUrl } from './demoRelay'
@@ -149,6 +152,16 @@ export class RelayApi {
     return parseSessionListDto(data).sessions
   }
 
+  async discoverProviderSessions(projectId: string, provider: string): Promise<ProviderSessionListDto> {
+    if (this.isDemo) return demoRelay.discoverProviderSessions(projectId, provider)
+    const data = await this.mutate(
+      `/v1/projects/${encodeURIComponent(projectId)}/providers/${encodeURIComponent(provider)}/sessions/discover`,
+      'POST',
+      {},
+    )
+    return parseProviderSessionListDto(data)
+  }
+
   async getSession(sessionId: string): Promise<CodeverSession> {
     if (this.isDemo) return demoRelay.getSession(sessionId)
     const data = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}`)
@@ -190,12 +203,12 @@ export class RelayApi {
     return this.mutationReceipt(`/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, 'POST', body)
   }
 
-  patchSessionConfig(sessionId: string, config: JsonObject): Promise<MutationReceiptDto> {
-    if (this.isDemo) return Promise.resolve(demoRelay.patchConfig(sessionId, config))
+  patchSessionConfig(sessionId: string, body: PatchSessionConfigDto): Promise<MutationReceiptDto> {
+    if (this.isDemo) return Promise.resolve(demoRelay.patchConfig(sessionId, body))
     return this.mutationReceipt(
       `/v1/sessions/${encodeURIComponent(sessionId)}/config`,
       'PATCH',
-      { config },
+      body,
     )
   }
 

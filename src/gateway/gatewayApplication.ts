@@ -48,6 +48,11 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
             if (!provider) throw new RelayCommandError(`Unknown provider: ${name}`, 'unknown_provider')
             return provider
         },
+        providerDiscoveryFactory: (name) => {
+            const provider = createProviderInstance(name)
+            if (!provider) throw new RelayCommandError(`Unknown provider: ${name}`, 'unknown_provider')
+            return provider
+        },
     })
 
     let inventoryRevision = 1
@@ -166,14 +171,22 @@ async function handleCommand(sessions: GatewaySessionService, request: CommandRe
                 ...(command.title ? { title: command.title } : {}),
                 ...(command.model ? { model: command.model } : {}),
                 ...(command.mode ? { mode: command.mode } : {}),
+                ...(command.providerSessionId ? { providerSessionId: command.providerSessionId } : {}),
                 idempotencyKey: request.commandId,
             })
+        case 'provider.sessions.list':
+            return sessions.listProviderSessions(request.projectId, command.provider)
         case 'session.message':
             return jsonValue(await sessions.sendMessage(request.sessionId, { text: command.text, idempotencyKey: request.commandId }))
         case 'session.cancel':
             return { cancelled: await sessions.cancel(request.sessionId, command.reason, request.commandId) }
         case 'session.config.patch':
-            return sessions.patchConfig(request.sessionId, command.config, request.commandId)
+            return sessions.patchConfig(request.sessionId, {
+                config: command.config,
+                ...('model' in command ? { model: command.model } : {}),
+                ...('mode' in command ? { mode: command.mode } : {}),
+                idempotencyKey: request.commandId,
+            })
         case 'session.close':
             return sessions.close(request.sessionId, request.commandId)
         case 'decision.respond':

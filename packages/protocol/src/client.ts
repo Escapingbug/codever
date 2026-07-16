@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { IsoDateTimeSchema, JsonObjectSchema, JsonValueSchema, NonNegativeIntegerSchema, OpaqueIdSchema, parseWithSchema } from './common'
 import { CommandTerminalStatusSchema, ProtocolErrorSchema } from './commands'
-import { CodeverSessionSchema, GatewaySchema, ProjectSchema } from './domain'
+import { CodeverSessionSchema, GatewaySchema, ProjectSchema, ProviderModelSchema, ProviderSessionSchema } from './domain'
 import { SessionEventEnvelopeSchema } from './events'
 
 export const GatewayListDtoSchema = z.object({ gateways: z.array(GatewaySchema) }).strict()
@@ -19,6 +19,14 @@ export const EnrolledGatewayDtoSchema = z.object({ gateway: GatewaySchema }).str
 export const ProjectListDtoSchema = z.object({ gatewayId: OpaqueIdSchema, projects: z.array(ProjectSchema) }).strict()
 export const SessionListDtoSchema = z.object({ projectId: OpaqueIdSchema, sessions: z.array(CodeverSessionSchema) }).strict()
 export const SessionDtoSchema = z.object({ session: CodeverSessionSchema }).strict()
+export const ProviderSessionListDtoSchema = z.object({
+    projectId: OpaqueIdSchema,
+    provider: z.string().min(1),
+    discoverySupported: z.boolean(),
+    models: z.array(ProviderModelSchema),
+    permissionModes: z.array(z.string().min(1)),
+    sessions: z.array(ProviderSessionSchema),
+}).strict()
 export const SessionEventsDtoSchema = z.object({
     sessionId: OpaqueIdSchema,
     events: z.array(SessionEventEnvelopeSchema),
@@ -30,6 +38,7 @@ export const CreateSessionDtoSchema = z.object({
     title: z.string().trim().min(1).optional(),
     model: z.string().min(1).optional(),
     mode: z.string().min(1).optional(),
+    providerSessionId: z.string().min(1).optional(),
     config: JsonObjectSchema,
 }).strict()
 
@@ -46,7 +55,11 @@ export const SendMessageDtoSchema = z.object({
     expiresAt: IsoDateTimeSchema.optional(),
 }).strict()
 export const CancelSessionDtoSchema = z.object({ reason: z.string().min(1).optional() }).strict()
-export const PatchSessionConfigDtoSchema = z.object({ config: JsonObjectSchema }).strict()
+export const PatchSessionConfigDtoSchema = z.object({
+    config: JsonObjectSchema,
+    model: z.string().min(1).nullable().optional(),
+    mode: z.string().min(1).nullable().optional(),
+}).strict()
 export const ResolveDecisionDtoSchema = z.object({ value: JsonValueSchema }).strict()
 
 export const MutationReceiptDtoSchema = z.object({
@@ -64,6 +77,7 @@ export type EnrolledGatewayDto = z.infer<typeof EnrolledGatewayDtoSchema>
 export type ProjectListDto = z.infer<typeof ProjectListDtoSchema>
 export type SessionListDto = z.infer<typeof SessionListDtoSchema>
 export type SessionDto = z.infer<typeof SessionDtoSchema>
+export type ProviderSessionListDto = z.infer<typeof ProviderSessionListDtoSchema>
 export type SessionEventsDto = z.infer<typeof SessionEventsDtoSchema>
 export type CreateSessionDto = z.infer<typeof CreateSessionDtoSchema>
 export type CreateProjectDto = z.infer<typeof CreateProjectDtoSchema>
@@ -79,6 +93,7 @@ export const parseEnrolledGatewayDto = (value: unknown): EnrolledGatewayDto => p
 export const parseProjectListDto = (value: unknown): ProjectListDto => parseWithSchema(ProjectListDtoSchema, value)
 export const parseSessionListDto = (value: unknown): SessionListDto => parseWithSchema(SessionListDtoSchema, value)
 export const parseSessionDto = (value: unknown): SessionDto => parseWithSchema(SessionDtoSchema, value)
+export const parseProviderSessionListDto = (value: unknown): ProviderSessionListDto => parseWithSchema(ProviderSessionListDtoSchema, value)
 export const parseSessionEventsDto = (value: unknown): SessionEventsDto => parseWithSchema(SessionEventsDtoSchema, value)
 export const parseCreateSessionDto = (value: unknown): CreateSessionDto => parseWithSchema(CreateSessionDtoSchema, value)
 export const parseCreateProjectDto = (value: unknown): CreateProjectDto => parseWithSchema(CreateProjectDtoSchema, value)

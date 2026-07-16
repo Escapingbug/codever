@@ -153,6 +153,21 @@ describe('GatewaySessionRuntime', () => {
         expect(decisions.map((event) => event.phase)).toEqual(['requested', 'resolved'])
     })
 
+    it('applies permission mode selected by the client UI without a decision prompt', async () => {
+        let permissionResult: unknown
+        const provider = new MockProvider((_prompt, config) => iterable(async function* () {
+            permissionResult = await config.permissionHandler?.handleToolCall('shell', {}, { signal: config.signal })
+            yield { kind: 'result', status: 'success' }
+        }))
+        const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+        const runtime = createRuntime(provider, store, { providerSettings: { permissionMode: 'bypassPermissions' } })
+
+        await runtime.startQuery('run without prompting')
+
+        expect(permissionResult).toEqual({ behavior: 'allow', permanent: true })
+        expect((await store.list('session-1')).events.some(envelope => envelope.event.kind === 'decision')).toBe(false)
+    })
+
     it('records provider failures as explicit error and error-state events', async () => {
         const provider = new MockProvider(() => iterable(async function* () {
             throw new Error('provider exploded')

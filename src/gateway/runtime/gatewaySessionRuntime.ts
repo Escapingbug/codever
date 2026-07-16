@@ -283,6 +283,13 @@ export class GatewaySessionRuntime {
     private createPermissionHandler(turnId: string): AgentPermissionHandler {
         return {
             handleToolCall: async (toolName, input, options) => {
+                const permissionMode = typeof this.providerSettings.permissionMode === 'string'
+                    ? this.providerSettings.permissionMode
+                    : 'default'
+                if (permissionMode === 'bypassPermissions') return { behavior: 'allow', permanent: true }
+                if (permissionMode === 'acceptEdits' && isEditTool(toolName)) {
+                    return { behavior: 'allow', permanent: true }
+                }
                 const request: GatewayDecisionRequest = {
                     type: 'permission',
                     title: `Allow ${toolName}?`,
@@ -405,4 +412,8 @@ function formatUnknown(value: unknown): string {
     } catch {
         return String(value)
     }
+}
+
+function isEditTool(toolName: string): boolean {
+    return /(?:edit|write|apply.?patch|create|delete|move|rename)/i.test(toolName)
 }
