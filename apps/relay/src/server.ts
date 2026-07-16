@@ -6,6 +6,10 @@ import {
     parseCreateSessionDto,
     parseGatewayFrame,
     parseGatewayHandshakeFrame,
+    parseGatewayEnrollmentChallengeRequest,
+    parseGatewayEnrollmentProofDto,
+    parseApproveGatewayEnrollmentDto,
+    parseRejectGatewayEnrollmentDto,
     parseAuthSessionDto,
     parseLoginDto,
     parseLoginResultDto,
@@ -45,6 +49,15 @@ import type {
     SessionRepository,
 } from './repositories'
 import { SessionEventStreams, type SessionEventStreamOptions } from './sessionEventStreams'
+import {
+    BootstrapRequiredError,
+    EnrollmentChallengeStore,
+    EnrollmentConflictError,
+    EnrollmentExpiredError,
+    EnrollmentNotFoundError,
+    EnrollmentRateLimitError,
+    GatewayEnrollmentRepository,
+} from './enrollmentRepository'
 
 export interface RelayRepositories {
     gateways: GatewayRepository
@@ -66,6 +79,9 @@ export interface CreateRelayServerOptions {
     logger?: boolean
     https?: HttpsServerOptions
     accountService?: AccountSessionService
+    enrollmentRepository?: GatewayEnrollmentRepository
+    enrollmentChallengeStore?: EnrollmentChallengeStore
+    enrollmentTtlMs?: number
 }
 
 export interface RelayServer extends FastifyInstance {
@@ -97,6 +113,11 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     const connections = options.connectionRegistry ?? new GatewayConnectionRegistry()
     const eventStreams = new SessionEventStreams(repositories.events, options.eventStreams)
     const createSessionTimeoutMs = options.createSessionTimeoutMs ?? 30_000
+    const enrollmentTtlMs = options.enrollmentTtlMs ?? 10 * 60_000
+    const enrollmentRepository = options.enrollmentRepository
+    const enrollmentChallenges = options.enrollmentChallengeStore ?? (enrollmentRepository
+        ? new EnrollmentChallengeStore(enrollmentRepository, { relayId: options.relayId ?? 'codever-relay' })
+        : undefined)
     if (!Number.isSafeInteger(createSessionTimeoutMs) || createSessionTimeoutMs < 1) {
         throw new Error('createSessionTimeoutMs must be a positive safe integer')
     }
@@ -113,6 +134,86 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     await app.register(websocket, { options: { handleProtocols: selectWebSocketProtocol } })
 
     app.get('/health', async () => ({ status: 'ok' }))
+
+    app.post('/v1/gateway-enrollments/challenge', async (request, reply) => {
+        if (!enrollmentChallenges) throw new HttpError(503, 'Gateway enrollment is not configured')
+        try {
+            const input = parseInput(() => parseGatewayEnrollmentChallengeRequest(request.body))
+            return enrollmentChallenges.issue(input, request.ip)
+        } catch (error) {
+            throw enrollmentHttpError(error)
+        }
+    })
+
+    app.post('/v1/gateway-enrollments/proof', async (request, reply) => {
+        if (!enrollmentChallenges) throw new HttpError(503, 'Gateway enrollment is not configured')
+        try {
+            const proof = parseInput(() => parseGatewayEnrollmentProofDto(request.body))
+            const result = await enrollmentChallenges.prove(proof, enrollmentTtlMs, request.ip)
+            reply.code(result.status === 'approved' ? 200 : 201)
+            return result
+        } catch (error) {
+            throw enrollmentHttpError(error)
+        }
+    })
+
+    app.get('/v1/gateway-enrollments', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:enrollment:list', {})
+        if (!identity) return
+        return { bootstrapComplete: enrollmentRepository.bootstrapComplete, enrollments: await enrollmentRepository.listPending(identity.workspaceId) }
+    })
+
+    app.get('/v1/gateway-enrollments/:code', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:enrollment:list', {})
+        if (!identity) return
+        const value = await enrollmentRepository.getByCode((request.params as { code: string }).code.toUpperCase())
+        if (!value || value.workspaceId !== identity.workspaceId) throw new HttpError(404, 'Pending Gateway enrollment not found')
+        return value
+    })
+
+    app.post('/v1/gateway-enrollments/:code/approve', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:enrollment:approve', {})
+        if (!identity) return
+        const body = parseInput(() => parseApproveGatewayEnrollmentDto(request.body))
+        try {
+            return await enrollmentRepository.approve((request.params as { code: string }).code.toUpperCase(), 'client', { workspaceId: identity.workspaceId, ...body })
+        } catch (error) {
+            throw enrollmentHttpError(error)
+        }
+    })
+
+    app.post('/v1/gateway-enrollments/:code/reject', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:enrollment:reject', {})
+        if (!identity) return
+        const body = parseInput(() => parseRejectGatewayEnrollmentDto(request.body ?? {}))
+        try {
+            return await enrollmentRepository.reject((request.params as { code: string }).code.toUpperCase(), body.reason, identity.workspaceId)
+        } catch (error) {
+            throw enrollmentHttpError(error)
+        }
+    })
+
+    app.get('/v1/enrolled-gateways', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:enrollment:list', {})
+        if (!identity) return
+        return { gateways: await enrollmentRepository.listEnrolled(identity.workspaceId) }
+    })
+
+    app.post('/v1/enrolled-gateways/:gatewayId/revoke', async (request, reply) => {
+        if (!enrollmentRepository) throw new HttpError(503, 'Gateway enrollment is not configured')
+        const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:revoke', {})
+        if (!identity) return
+        try {
+            return await enrollmentRepository.revoke((request.params as { gatewayId: string }).gatewayId, identity.workspaceId)
+        } catch (error) {
+            throw enrollmentHttpError(error)
+        }
+    })
 
     app.post('/v1/auth/login', async (request, reply) => {
         if (!options.accountService) throw new HttpError(503, 'Account authentication is not configured')
@@ -263,6 +364,16 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     })
 
     return app
+}
+
+function enrollmentHttpError(error: unknown): HttpError {
+    if (error instanceof HttpError) return error
+    if (error instanceof EnrollmentNotFoundError) return new HttpError(404, error.message)
+    if (error instanceof EnrollmentExpiredError) return new HttpError(410, error.message)
+    if (error instanceof EnrollmentRateLimitError) return new HttpError(429, error.message || 'Too many enrollment attempts')
+    if (error instanceof EnrollmentConflictError) return new HttpError(409, error.message)
+    if (error instanceof BootstrapRequiredError) return new HttpError(409, error.message)
+    return error instanceof Error ? new HttpError(400, error.message) : new HttpError(400, 'Invalid enrollment request')
 }
 
 async function requireClient(

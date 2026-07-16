@@ -17,7 +17,7 @@ pnpm --filter @codever/relay build
 pnpm --filter @codever/relay start:built
 ```
 
-Set `CODEVER_RELAY_CONFIG` to a JSON file based on `relay.config.example.json`. Relative TLS and enrollment paths are resolved from the config file directory.
+Set `CODEVER_RELAY_CONFIG` to a JSON file based on `relay.config.example.json`. Relative TLS and legacy enrollment paths are resolved from the config file directory.
 
 Relay state is durable by default. `dataDirectory` defaults to `./data` relative to the config file (or the current working directory when no config file is supplied). The Relay atomically persists Gateway/Project/Session metadata and command state, and stores session events in a checksummed append-only log. On restart it restores all repositories and their idempotency indexes. A torn final event-log write is truncated; corruption in any complete record or JSON snapshot stops startup instead of silently discarding data.
 
@@ -38,11 +38,47 @@ TLS certificate and key must be supplied together. They are the Relay HTTPS serv
 `CODEVER_RELAY_REPOSITORY_MODE` accepts `durable` (the default) or `memory`. Memory mode is intentionally explicit and is only suitable for tests or disposable local development; all Relay inventory, commands, and events are lost at process exit.
 The executable prints a warning whenever memory mode is enabled. Programmatic server tests may also inject the in-memory repositories directly.
 
-The durable repository never stores Gateway enrollment keys or Relay TLS credentials. It also rejects private-key-named fields and PEM private-key material in persisted protocol data. Enrollment files contain public keys only and remain separate from `dataDirectory`. Back up the data directory using filesystem snapshots or while the Relay is stopped; do not edit its files manually.
+The durable repository stores dynamic Gateway public keys and pending requests in `gateway-enrollments.json`; it never stores Gateway private keys or Relay TLS credentials. It rejects PEM private-key material. Back up the data directory using filesystem snapshots or while the Relay is stopped; do not edit its files manually.
 
-## Gateway enrollment
+## Gateway dynamic pairing
 
-Copy `enrollment.example.json` to a private deployment configuration location and replace the example entry with each Gateway's enrollment bundle. Only these fields are accepted:
+Every Gateway creates and reuses a local P-256 identity. On `codever start` it proves possession of that private key to the Relay and prints an eight-character pairing code, fingerprint, and expiry. The private key never leaves the Gateway.
+
+The first Gateway must be approved on the Relay host while the Relay process is running:
+
+```powershell
+pnpm --filter @codever/relay enrollment list
+pnpm --filter @codever/relay enrollment approve ABC23456
+```
+
+The command connects to a local-only Unix socket or Windows named pipe and authenticates with a random secret stored mode `0600` in the Relay data directory. It never edits the enrollment database concurrently and there is no public bootstrap approval endpoint. `list`, `approve CODE`, and `reject CODE [reason]` are supported.
+
+The first local approval atomically persists `bootstrapComplete=true`. Removing or revoking every Gateway does not reopen bootstrap. Deliberate recovery requires this exact local confirmation:
+
+```powershell
+pnpm --filter @codever/relay enrollment reset-bootstrap RESET-GATEWAY-BOOTSTRAP
+```
+
+After bootstrap, authenticated `admin` and `gateway_admin` accounts can inspect and approve/reject matching-workspace requests. Approval requires the UI to echo the exact fingerprint, name, and platform shown to the user. `viewer` and `operator` accounts cannot manage enrollment, and a Gateway WebSocket identity is never accepted as client authorization.
+
+Pending codes expire after ten minutes, are single-use, omit ambiguous characters, and enrollment challenge/proof attempts are rate-limited. A waiting Gateway retries enrollment and authentication automatically; after approval it connects and performs normal inventory/event synchronization.
+
+### Enrollment REST API
+
+- `POST /v1/gateway-enrollments/challenge` — public proof-of-possession challenge; accepts `GatewayEnrollmentChallengeRequest`.
+- `POST /v1/gateway-enrollments/proof` — public signed proof; returns `GatewayEnrollmentDto` with pending code or approved status.
+- `GET /v1/gateway-enrollments` — admin list (`GatewayEnrollmentListDto`).
+- `GET /v1/gateway-enrollments/:code` — admin pending detail (`GatewayEnrollmentDto`).
+- `POST /v1/gateway-enrollments/:code/approve` — admin approval with `ApproveGatewayEnrollmentDto`.
+- `POST /v1/gateway-enrollments/:code/reject` — admin rejection with `RejectGatewayEnrollmentDto`.
+- `GET /v1/enrolled-gateways` — admin dynamic key list (`EnrolledGatewayKeyListDto`).
+- `POST /v1/enrolled-gateways/:gatewayId/revoke` — admin revocation (`EnrolledGatewayKeyDto`).
+
+All DTO schemas and parse functions are exported by `@codever/protocol` from `enrollment.ts`.
+
+## Legacy static enrollment
+
+Static config remains supported for migration and disaster recovery. On startup those public keys are imported idempotently into the dynamic store; an enabled trusted static key marks bootstrap complete. Copy `enrollment.example.json` to a private deployment configuration location and replace the example entry. Only these fields are accepted:
 
 - `gatewayId`
 - `fingerprint`
@@ -84,7 +120,7 @@ Bearer tokens are random opaque values. Only SHA-256 token hashes, account IDs, 
 
 REST requests use `Authorization: Bearer <token>`. Browser event WebSockets offer both `codever.events.v1` and `codever.bearer.<token>` in `Sec-WebSocket-Protocol`; the Relay reads the bearer protocol but negotiates only the fixed `codever.events.v1` protocol. The token is never placed in the URL.
 
-`viewer` is read-only. `operator` can also create/configure/cancel/message sessions and answer decisions. `gateway_admin` currently has those same API capabilities, while `admin` allows every client action. All target Gateway resources are checked against the account workspace.
+`viewer` is read-only. `operator` can also create/configure/cancel/message sessions and answer decisions. `gateway_admin` can additionally manage dynamic Gateway enrollment and revocation, while `admin` allows every client action. `viewer` and `operator` cannot approve, reject, or revoke Gateways. All target Gateway resources are checked against the account workspace.
 
 ## Insecure development authentication
 

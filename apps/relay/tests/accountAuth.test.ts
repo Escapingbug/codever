@@ -89,6 +89,23 @@ describe('Relay account authentication', () => {
         await expect(authenticator.authorize(identity!, 'session:read', { gatewayId: 'gateway-1' })).resolves.toBe(true)
         await expect(authenticator.authorize(identity!, 'session:message', { gatewayId: 'gateway-1' })).resolves.toBe(false)
         await expect(authenticator.authorize(identity!, 'session:read', { gatewayId: 'gateway-2' })).resolves.toBe(false)
+        await expect(authenticator.authorize(identity!, 'gateway:enrollment:list', {})).resolves.toBe(false)
+
+        const gatewayAdmin = new BearerAccountAuthenticator({
+            users: [await account('gateway-admin', 'secret', 'workspace-1', ['gateway_admin'])],
+            sessions: AuthSessionRepository.memory(), gateways: repositories.gateways, sessionTtlSeconds: 60, now: () => now,
+        })
+        const adminLogin = await gatewayAdmin.login({ username: 'gateway-admin', password: 'secret' })
+        const adminIdentity = await gatewayAdmin.authenticate(bearerRequest(adminLogin!.accessToken))
+        await expect(gatewayAdmin.authorize(adminIdentity!, 'gateway:enrollment:approve', {})).resolves.toBe(true)
+
+        const operator = new BearerAccountAuthenticator({
+            users: [await account('operator', 'secret', 'workspace-1', ['operator'])],
+            sessions: AuthSessionRepository.memory(), gateways: repositories.gateways, sessionTtlSeconds: 60, now: () => now,
+        })
+        const operatorLogin = await operator.login({ username: 'operator', password: 'secret' })
+        const operatorIdentity = await operator.authenticate(bearerRequest(operatorLogin!.accessToken))
+        await expect(operator.authorize(operatorIdentity!, 'gateway:enrollment:approve', {})).resolves.toBe(false)
 
         viewer.enabled = false
         await expect(authenticator.authenticate(bearerRequest(login!.accessToken))).resolves.toBeNull()

@@ -23,6 +23,10 @@ export interface ClientAuthorizationTarget {
 
 export type ClientAction =
     | 'gateway:list'
+    | 'gateway:enrollment:list'
+    | 'gateway:enrollment:approve'
+    | 'gateway:enrollment:reject'
+    | 'gateway:revoke'
     | 'project:list'
     | 'session:list'
     | 'session:create'

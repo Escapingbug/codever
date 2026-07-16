@@ -3,10 +3,12 @@ import { join } from 'node:path'
 import type { ClientAction, ClientAuthenticator, ClientAuthorizationTarget, ClientIdentity } from './auth'
 import { EcdsaP256GatewayAuthenticator } from './auth'
 import { AuthSessionRepository, BearerAccountAuthenticator } from './accountAuth'
-import { loadRelayConfig, StaticEnrolledGatewayKeyRepository } from './config'
+import { loadRelayConfig } from './config'
 import { createDurableRelayRepositories } from './durableRepositories'
 import { createInMemoryRelayRepositories } from './memoryRepositories'
 import { createRelayServer } from './server'
+import { GatewayEnrollmentRepository } from './enrollmentRepository'
+import { runLocalControlCommand, startLocalControlServer } from './localControl'
 
 class InsecureDevelopmentClientAuthenticator implements ClientAuthenticator {
     constructor(private readonly workspaceId: string) {}
@@ -25,6 +27,11 @@ class InsecureDevelopmentClientAuthenticator implements ClientAuthenticator {
 }
 
 const config = await loadRelayConfig()
+if (process.argv[2] === 'enrollment') {
+    const result = await runLocalControlCommand(config.dataDirectory, process.argv.slice(3))
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+    process.exit(0)
+}
 const repositories = config.repositoryMode === 'memory'
     ? createInMemoryRelayRepositories()
     : await createDurableRelayRepositories(config.dataDirectory)
@@ -39,6 +46,10 @@ const accountAuthenticator = config.insecureDevAuth
 const clientAuthenticator = config.insecureDevAuth
     ? new InsecureDevelopmentClientAuthenticator(config.devWorkspaceId)
     : accountAuthenticator!
+const enrollmentRepository = await GatewayEnrollmentRepository.open({
+    ...(config.repositoryMode === 'durable' && { path: join(config.dataDirectory, 'gateway-enrollments.json') }),
+    initialGateways: config.gateways,
+})
 if (config.insecureDevAuth) {
     process.stderr.write('WARNING: CODEVER_RELAY_INSECURE_DEV_AUTH=true; all client requests are authorized.\n')
 }
@@ -52,14 +63,17 @@ const app = await createRelayServer({
     clientAuthenticator,
     ...(accountAuthenticator && { accountService: accountAuthenticator }),
     gatewayAuthenticator: new EcdsaP256GatewayAuthenticator(
-        new StaticEnrolledGatewayKeyRepository(config.gateways),
+        enrollmentRepository,
     ),
+    enrollmentRepository,
     repositories,
     ...(config.tls && { https: { cert: config.tls.cert, key: config.tls.key } }),
 })
+const localControl = await startLocalControlServer(config.dataDirectory, enrollmentRepository)
 
 const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down Relay')
+    await localControl.close()
     await app.close()
 }
 process.once('SIGINT', () => { void shutdown('SIGINT') })

@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -36,6 +38,7 @@ async function startRelay(overrides: NodeJS.ProcessEnv): Promise<{
     stop: () => Promise<void>
 }> {
     const port = await availablePort()
+    const dataDirectory = await mkdtemp(resolve(tmpdir(), 'codever-relay-entry-'))
     const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
         cwd: relayDirectory,
         env: {
@@ -48,6 +51,7 @@ async function startRelay(overrides: NodeJS.ProcessEnv): Promise<{
             CODEVER_RELAY_GATEWAYS_JSON: undefined,
             CODEVER_RELAY_INSECURE_DEV_AUTH: undefined,
             CODEVER_RELAY_REPOSITORY_MODE: 'memory',
+            CODEVER_RELAY_DATA_DIRECTORY: dataDirectory,
             ...overrides,
         },
         stdio: ['ignore', 'ignore', 'pipe'],
@@ -65,7 +69,10 @@ async function startRelay(overrides: NodeJS.ProcessEnv): Promise<{
     return {
         address,
         stderr: () => stderr,
-        stop: () => stopChild(child),
+        stop: async () => {
+            await stopChild(child)
+            await rm(dataDirectory, { recursive: true, force: true })
+        },
     }
 }
 

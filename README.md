@@ -70,23 +70,24 @@ node dist/index.js project add --path D:\projects\codever --name codever
 node dist/index.js project list
 ```
 
-Export the public enrollment bundle. This command never prints the private key.
-
-```powershell
-node dist/index.js enrollment > gateway-enrollment.json
-```
-
-Copy the public `gatewayId`, fingerprint, and `publicKeySpkiPem` into the Relay enrollment file, then start the Gateway:
+The normal flow is dynamic pairing. Start the Gateway; after proving possession of its local private key it prints a short-lived eight-character code:
 
 ```powershell
 node dist/index.js start
 ```
 
-Gateway configuration and identity default to `~/.config/codever/`. The private key must remain on the Gateway machine. Back it up as a sensitive machine credential; enrollment is secure only while that key and the Relay TLS endpoint remain trusted.
+For the first Gateway, approve the code locally on the Relay host. Later Gateways can be approved by an authenticated `admin` or `gateway_admin` client:
+
+```powershell
+pnpm --filter @codever/relay enrollment list
+pnpm --filter @codever/relay enrollment approve ABC23456
+```
+
+Gateway configuration and identity default to `~/.config/codever/`. The private key must remain on the Gateway machine. Back it up as a sensitive machine credential; enrollment is secure only while that key and the Relay TLS endpoint remain trusted. The old `codever enrollment` public bundle and static Relay enrollment file remain available for migration/disaster recovery.
 
 ## Run Relay
 
-Copy the examples in `apps/relay/`, configure HTTPS certificate/key and public Gateway enrollments, then:
+Copy the examples in `apps/relay/`, configure HTTPS certificate/key and client accounts, then:
 
 ```powershell
 $env:CODEVER_RELAY_CONFIG = 'D:\codever-relay\relay.json'

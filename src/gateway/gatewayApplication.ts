@@ -9,7 +9,7 @@ import {
     type SessionEventEnvelope as WireEventEnvelope,
 } from '@codever/protocol'
 import { initializeGatewayIdentity, type GatewayIdentity } from './identity'
-import { RelayCommandError, RelayLink } from './link'
+import { ensureGatewayEnrollment, RelayCommandError, RelayLink } from './link'
 import { ProjectRegistry } from './projects'
 import { GatewaySessionService, FileSessionMetadataRepository } from './sessions'
 import { FileConversationEventStore } from '@/platform/storage'
@@ -66,6 +66,8 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
         sessions: await metadata.list(),
     })
 
+    const gatewayPlatform = platform()
+    const tls = config.tls ? await loadTls(config.tls) : undefined
     const relay = new RelayLink({
         url: config.relayUrl,
         gatewayId: config.gatewayId,
@@ -73,7 +75,7 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
         hello: {
             workspaceId: config.workspaceId,
             name: config.name,
-            platform: platform(),
+            platform: gatewayPlatform,
             gatewayVersion: '0.1.0',
             supportedProtocolVersions: [PROTOCOL_VERSION],
             capabilities: {
@@ -94,7 +96,7 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
             inventoryRevision,
             sessionStates: Object.fromEntries((await metadata.list()).map((session) => [session.id, session.state])),
         }),
-        ...(config.tls ? { tls: await loadTls(config.tls) } : {}),
+        ...(tls ? { tls } : {}),
         onError: (error) => console.error('[gateway:relay]', error.message),
     })
 
@@ -115,9 +117,32 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
         start() {
             if (started || closed) return
             started = true
-            void relay.start().catch((error: unknown) => {
-                if (!closed) console.error('[gateway:relay]', error instanceof Error ? error.message : error)
-            })
+            void (async () => {
+                while (!closed && relay.state !== 'online') {
+                    try {
+                        const enrollment = await ensureGatewayEnrollment({
+                            relayWebSocketUrl: config.relayUrl,
+                            gatewayId: config.gatewayId,
+                            workspaceId: config.workspaceId,
+                            name: config.name,
+                            platform: gatewayPlatform,
+                            identity,
+                            ...(tls && { tls }),
+                        })
+                        if (enrollment.status === 'pending') {
+                            console.log(`[gateway:enrollment] Pairing code ${enrollment.code}; fingerprint ${enrollment.fingerprint}; expires ${enrollment.expiresAt}`)
+                        }
+                    } catch (error) {
+                        if (!closed) console.error('[gateway:enrollment]', error instanceof Error ? error.message : error)
+                    }
+                    try {
+                        await relay.start()
+                    } catch (error) {
+                        if (!closed) console.error('[gateway:relay]', error instanceof Error ? error.message : error)
+                    }
+                    if (!closed && !relayIsOnline(relay)) await new Promise(resolve => setTimeout(resolve, 30_000))
+                }
+            })()
         },
         async close() {
             if (closed) return
@@ -191,6 +216,10 @@ function platform(): GatewayPlatform {
     if (process.platform === 'darwin') return 'macos'
     if (process.platform === 'linux') return 'linux'
     return 'unknown'
+}
+
+function relayIsOnline(relay: RelayLink): boolean {
+    return relay.state === 'online'
 }
 
 function jsonValue(value: unknown): JsonValue {

@@ -1,4 +1,5 @@
 export { RelayLink } from './relayLink'
+export { ensureGatewayEnrollment, type GatewayEnrollmentClientOptions } from './gatewayEnrollmentClient'
 export {
     RelayCommandError,
     RelayLinkError,

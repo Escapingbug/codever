@@ -205,7 +205,7 @@ export class BearerAccountAuthenticator implements ClientAuthenticator, AccountS
         const user = this.usersById.get(identity.id)
         if (!user?.enabled || user.workspaceId !== identity.workspaceId) return false
         if (!roleAllows(user.roles, action)) return false
-        if (!target.gatewayId) return action === 'gateway:list'
+        if (!target.gatewayId) return action === 'gateway:list' || action.startsWith('gateway:enrollment:') || action === 'gateway:revoke'
         const gateway = await this.options.gateways.get(target.gatewayId)
         return gateway?.workspaceId === user.workspaceId
     }
@@ -286,6 +286,7 @@ export function selectWebSocketProtocol(protocols: Set<string>): string | false 
 
 function roleAllows(roles: AccountRole[], action: ClientAction): boolean {
     if (roles.includes('admin')) return true
+    if (action.startsWith('gateway:enrollment:') || action === 'gateway:revoke') return roles.includes('gateway_admin')
     const reads: ClientAction[] = ['gateway:list', 'project:list', 'session:list', 'session:read', 'event:list']
     if (reads.includes(action)) return roles.some(role => role === 'viewer' || role === 'operator' || role === 'gateway_admin')
     return roles.some(role => role === 'operator' || role === 'gateway_admin')

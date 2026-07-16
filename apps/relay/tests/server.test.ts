@@ -1,4 +1,8 @@
 import type { ClientAuthenticator, GatewayAuthenticator } from '../src/auth'
+import { EcdsaP256GatewayAuthenticator } from '../src/auth'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { serializeGatewayAuthPayload } from '@codever/protocol'
+import { GatewayEnrollmentRepository } from '../src/enrollmentRepository'
 import { createInMemoryRelayRepositories } from '../src/memoryRepositories'
 import { createRelayServer } from '../src/server'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,6 +32,41 @@ afterEach(() => {
 })
 
 describe('relay server', () => {
+    it('exposes proof-only enrollment and admin approval/revocation REST APIs', async () => {
+        const enrollments = await GatewayEnrollmentRepository.open({ code: codeSequence('AAA23456', 'BBB23456') })
+        const app = await createRelayServer({
+            clientAuthenticator: allowClients,
+            gatewayAuthenticator: new EcdsaP256GatewayAuthenticator(enrollments),
+            enrollmentRepository: enrollments,
+            relayId: 'relay-test',
+        })
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        try {
+            const first = testEnrollmentIdentity('gateway-first')
+            const firstPending = await requestEnrollment(address, first)
+            expect(firstPending).toMatchObject({ code: 'AAA23456', status: 'pending' })
+            const premature = await fetch(`${address}/v1/gateway-enrollments/AAA23456/approve`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ fingerprint: first.fingerprint, name: first.name, platform: first.platform }),
+            })
+            expect(premature.status).toBe(409)
+            await enrollments.approve('AAA23456', 'local')
+
+            const second = testEnrollmentIdentity('gateway-second')
+            await requestEnrollment(address, second)
+            const pending = await fetch(`${address}/v1/gateway-enrollments`)
+            expect(await pending.json()).toMatchObject({ bootstrapComplete: true, enrollments: [{ code: 'BBB23456', gatewayId: 'gateway-second' }] })
+            const approved = await fetch(`${address}/v1/gateway-enrollments/BBB23456/approve`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ fingerprint: second.fingerprint, name: second.name, platform: second.platform }),
+            })
+            expect(approved.status).toBe(200)
+            expect(await approved.json()).toMatchObject({ status: 'approved', gatewayId: 'gateway-second' })
+            const revoked = await fetch(`${address}/v1/enrolled-gateways/gateway-second/revoke`, { method: 'POST' })
+            expect(await revoked.json()).toMatchObject({ enabled: false, gatewayId: 'gateway-second' })
+        } finally { await app.close() }
+    })
+
     it('exposes health while denying clients and gateways by default', async () => {
         const app = await createRelayServer()
         const address = await app.listen({ host: '127.0.0.1', port: 0 })
@@ -348,6 +387,28 @@ describe('relay server', () => {
         }
     })
 })
+
+function testEnrollmentIdentity(gatewayId: string) {
+    const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+    const publicKeySpkiPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    const fingerprint = `sha256:${createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('base64url')}`
+    return { gatewayId, workspaceId: 'workspace-1', name: gatewayId, platform: 'linux' as const, algorithm: 'ECDSA-P256-SHA256' as const, fingerprint, publicKeySpkiPem, privateKey }
+}
+
+async function requestEnrollment(address: string, identity: ReturnType<typeof testEnrollmentIdentity>): Promise<Record<string, any>> {
+    const challengeResponse = await fetch(`${address}/v1/gateway-enrollments/challenge`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...identity, privateKey: undefined }),
+    })
+    const challenge = await challengeResponse.json() as any
+    const signature = sign('sha256', serializeGatewayAuthPayload(challenge.challenge, identity.gatewayId, identity.fingerprint), identity.privateKey).toString('base64url')
+    const proof = await fetch(`${address}/v1/gateway-enrollments/proof`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enrollmentId: challenge.enrollmentId, gatewayId: identity.gatewayId, fingerprint: identity.fingerprint, signature }),
+    })
+    return await proof.json() as Record<string, any>
+}
+
+function codeSequence(...codes: string[]): () => string { let index = 0; return () => codes[index++]! }
 
 async function authenticateGateway(address: string, gatewayId: string) {
     const socket = await connect(`${address.replace('http', 'ws')}/v1/gateway/connect`)
