@@ -517,10 +517,10 @@ Desktop layout:
 └───────────────┴───────────────────────┴───────────────────────┴───────────┘
 ```
 
-Mobile layout uses the same routes and components with Provider-first drill-down navigation:
+Mobile layout uses the same routes and components with Project-first session navigation:
 
 ```text
-Gateway list -> Project -> Provider -> Native/active sessions -> Conversation -> Event detail
+Gateway list -> Project / active sessions -> New or continue session -> Conversation -> Event detail
 ```
 
 Primary route identity:
@@ -545,8 +545,8 @@ Primary route identity:
 - project identity and Gateway location;
 - repository/worktree status where available;
 - currently executing sessions across providers;
-- Provider cards as the primary entry point;
-- provider-native history discovered on the Gateway;
+- active sessions across all Providers as the primary entry point;
+- a New Session flow that either starts fresh or browses provider-native history;
 - scheduled tasks;
 - Telegram/channel bindings;
 - project access policy.
@@ -566,16 +566,18 @@ The timeline renders structured event cards:
 - decisions and permission state;
 - errors, cancellation, timeout, reconnect, and replay markers.
 
-Model, reasoning effort, mode, permission, and session controls live in persistent UI surfaces, not messages in the conversation timeline. Provider identity is fixed when a session is attached; changing Provider means selecting a different Provider page or starting a new task.
+Model, reasoning effort, mode, permission, and session controls live in persistent UI surfaces, not messages in the conversation timeline. Provider identity is fixed when a session is attached; changing Provider means starting or continuing a different session from the Project's New Session flow.
 
-### 13.5 Provider-first Session Semantics
+Conversation identity is deliberately limited to User and Agent. User prompts render as distinct, right-aligned input bubbles. Agent output renders as the primary unboxed content flow, without a Codever avatar or speaker name. Codever is the transport and management product, not an additional conversation participant.
+
+### 13.5 Project-first Session Semantics
 
 The client does not ask the user to create a Codever session and then choose a Provider. The visible flow is:
 
 1. Select a Gateway and Project.
-2. Select a Provider.
-3. Browse that Provider's native sessions and Codever-connected active sessions.
-4. Continue an existing native session or start a new Provider task.
+2. See currently active sessions across all Providers.
+3. Select New Session.
+4. Either start a completely new task after choosing a Provider, or choose a Provider and continue one of its native sessions.
 
 `CodeverSession` remains an internal durable routing, event, decision, and audit handle. When a user opens a provider-native session, Gateway atomically creates or reuses one internal bridge keyed by `(projectId, provider, providerSessionId)`. The client does not expose this bridge as a separate management step.
 

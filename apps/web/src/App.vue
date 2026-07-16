@@ -8,7 +8,7 @@ import { clientSession } from './state/clientSession'
 
 const route = useRoute()
 const router = useRouter()
-const depth = computed(() => route.name === 'session' ? 4 : route.name === 'provider' ? 3 : route.name === 'project' ? 2 : 1)
+const depth = computed(() => route.name === 'session' ? 3 : route.name === 'project' ? 2 : 1)
 const showBack = computed(() => depth.value > 1)
 const isPublicEntry = computed(() => route.name === 'onboarding' || route.name === 'login')
 </script>

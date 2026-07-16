@@ -232,7 +232,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
       <footer class="composer-wrap">
         <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
         <div class="composer" :class="{ 'composer--disabled': !canSend }">
-          <textarea v-model="draft" rows="2" :disabled="!canSend" :placeholder="canSend ? 'Message Codever…' : 'Reconnect to send a message'" @keydown="submitOnShortcut" />
+          <textarea v-model="draft" rows="2" :disabled="!canSend" :placeholder="canSend ? 'Message agent…' : 'Reconnect to send a message'" @keydown="submitOnShortcut" />
           <div class="composer-footer"><span><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span><button class="send-button" :disabled="!draft.trim() || !canSend || sending" aria-label="Send message" @click="sendMessage">{{ sending ? '…' : '↑' }}</button></div>
         </div>
       </footer>

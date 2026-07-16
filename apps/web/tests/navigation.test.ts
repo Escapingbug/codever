@@ -4,8 +4,6 @@ import { navigateToParent, parentRoute } from '../src/navigation'
 describe('client navigation', () => {
   it('maps nested business pages to their parent', () => {
     expect(parentRoute('session', { gatewayId: 'gateway-1', projectId: 'project-1', provider: 'codex', sessionId: 'session-1' }))
-      .toEqual({ name: 'provider', params: { gatewayId: 'gateway-1', projectId: 'project-1', provider: 'codex' } })
-    expect(parentRoute('provider', { gatewayId: 'gateway-1', projectId: 'project-1', provider: 'codex' }))
       .toEqual({ name: 'project', params: { gatewayId: 'gateway-1', projectId: 'project-1' } })
     expect(parentRoute('project', { gatewayId: 'gateway-1', projectId: 'project-1' }))
       .toEqual({ name: 'gateway', params: { gatewayId: 'gateway-1' } })

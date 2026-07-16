@@ -9,8 +9,6 @@ export function parentRoute(
 ): RouteLocationRaw | null {
   switch (name) {
     case 'session':
-      return { name: 'provider', params: { gatewayId: params.gatewayId, projectId: params.projectId, provider: params.provider } }
-    case 'provider':
       return { name: 'project', params: { gatewayId: params.gatewayId, projectId: params.projectId } }
     case 'project':
       return { name: 'gateway', params: { gatewayId: params.gatewayId } }

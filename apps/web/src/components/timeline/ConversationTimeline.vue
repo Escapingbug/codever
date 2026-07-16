@@ -25,9 +25,8 @@ const time = (timestamp: string) => new Intl.DateTimeFormat(undefined, {
   <div v-if="entries.length" class="timeline">
     <template v-for="entry in entries" :key="entry.key">
       <article v-if="entry.type === 'assistant'" class="message message--assistant" @click="emit('select', entry.events[0]!)">
-        <div class="message-avatar">C</div>
         <div class="message-body">
-          <div class="message-meta"><strong>Codever</strong><span>{{ time(entry.events[0]!.timestamp) }}</span></div>
+          <div class="message-meta message-meta--agent"><span>Agent · {{ time(entry.events[0]!.timestamp) }}</span></div>
           <div class="assistant-copy">{{ entry.text }}</div>
         </div>
       </article>
@@ -40,7 +39,6 @@ const time = (timestamp: string) => new Intl.DateTimeFormat(undefined, {
           class="message message--user"
           @click="emit('select', entry.envelope)"
         >
-          <div class="message-avatar">You</div>
           <div class="message-body">
             <div class="message-meta"><strong>You</strong><span>{{ time(entry.envelope.timestamp) }}</span></div>
             <div>{{ entry.envelope.event.text }}</div>
@@ -85,6 +83,6 @@ const time = (timestamp: string) => new Intl.DateTimeFormat(undefined, {
   <div v-else class="empty-state empty-state--timeline">
     <span class="empty-orbit">✦</span>
     <h2>Start the conversation</h2>
-    <p>Ask Codever to explore, explain, or change this project.</p>
+    <p>Ask the agent to explore, explain, or change this project.</p>
   </div>
 </template>
