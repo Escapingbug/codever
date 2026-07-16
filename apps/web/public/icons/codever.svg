@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Codever">
+  <rect width="512" height="512" rx="112" fill="#11130f"/>
+  <path d="M370 139c-33-27-72-41-116-41-91 0-160 65-160 158s69 158 160 158c46 0 86-15 119-44l-53-66c-18 15-38 23-62 23-42 0-72-29-72-71s30-71 72-71c23 0 43 7 59 21z" fill="#c4f36a"/>
+  <circle cx="373" cy="368" r="48" fill="#7bb8ff"/>
+</svg>

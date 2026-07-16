@@ -1,0 +1,61 @@
+# Codever Relay
+
+The Relay accepts outbound Gateway WebSocket connections and serves the Web client API. Client authentication is deny-all by default.
+
+## Start
+
+From the repository root:
+
+```powershell
+pnpm --filter @codever/relay start
+```
+
+For a production bundle:
+
+```powershell
+pnpm --filter @codever/relay build
+pnpm --filter @codever/relay start:built
+```
+
+Set `CODEVER_RELAY_CONFIG` to a JSON file based on `relay.config.example.json`. Relative TLS and enrollment paths are resolved from the config file directory.
+
+Relay state is durable by default. `dataDirectory` defaults to `./data` relative to the config file (or the current working directory when no config file is supplied). The Relay atomically persists Gateway/Project/Session metadata and command state, and stores session events in a checksummed append-only log. On restart it restores all repositories and their idempotency indexes. A torn final event-log write is truncated; corruption in any complete record or JSON snapshot stops startup instead of silently discarding data.
+
+Supported environment overrides:
+
+- `CODEVER_RELAY_HOST`, `CODEVER_RELAY_PORT`, `CODEVER_RELAY_ID`, `CODEVER_RELAY_LOGGER`
+- `CODEVER_RELAY_TLS_CERT_FILE`, `CODEVER_RELAY_TLS_KEY_FILE`
+- `CODEVER_RELAY_ENROLLMENT_FILE`
+- `CODEVER_RELAY_DATA_DIRECTORY`, `CODEVER_RELAY_REPOSITORY_MODE`
+- `CODEVER_RELAY_GATEWAYS_JSON` containing an enrollment array or `{ "gateways": [...] }`
+- `CODEVER_RELAY_DEV_WORKSPACE_ID`
+
+TLS certificate and key must be supplied together. They are the Relay HTTPS server credentials, not a Gateway identity.
+
+`CODEVER_RELAY_REPOSITORY_MODE` accepts `durable` (the default) or `memory`. Memory mode is intentionally explicit and is only suitable for tests or disposable local development; all Relay inventory, commands, and events are lost at process exit.
+The executable prints a warning whenever memory mode is enabled. Programmatic server tests may also inject the in-memory repositories directly.
+
+The durable repository never stores Gateway enrollment keys or Relay TLS credentials. It also rejects private-key-named fields and PEM private-key material in persisted protocol data. Enrollment files contain public keys only and remain separate from `dataDirectory`. Back up the data directory using filesystem snapshots or while the Relay is stopped; do not edit its files manually.
+
+## Gateway enrollment
+
+Copy `enrollment.example.json` to a private deployment configuration location and replace the example entry with each Gateway's enrollment bundle. Only these fields are accepted:
+
+- `gatewayId`
+- `fingerprint`
+- `publicKeySpkiPem`
+- `enabled`
+
+The Relay verifies that each key is an EC P-256 public key and that its SHA-256 fingerprint matches. Unknown fields and all private-key fields are rejected. A Gateway identity private key must remain on the Gateway machine and must never be copied to the Relay.
+
+## Client authentication safety
+
+No production client authenticator exists in this entry point yet, so API requests are rejected by default. Local development can explicitly disable this boundary:
+
+```powershell
+$env:CODEVER_RELAY_INSECURE_DEV_AUTH='true'
+$env:CODEVER_RELAY_DEV_WORKSPACE_ID='development'
+pnpm --filter @codever/relay start
+```
+
+Any value other than the exact string `true` leaves deny-all authentication enabled. Never set this flag on an Internet-accessible Relay.

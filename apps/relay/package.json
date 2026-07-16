@@ -1,0 +1,32 @@
+{
+  "name": "@codever/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "build": "tsup src/main.ts --format esm --platform node --out-dir dist --clean",
+    "start:built": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codever/protocol": "workspace:*",
+    "@fastify/websocket": "^11.2.0",
+    "fastify": "^5.6.2"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.4",
+    "ws": "^8.18.3"
+  }
+}

@@ -2,10 +2,10 @@
 
 ## 1. Status
 
-- Status: proposed
+- Status: implementation in progress on `feature/multi-gateway-platform`
 - Scope: product and system architecture
-- Target: evolve Codever from a Telegram-only ACP bridge into a remotely managed, multi-machine agent gateway while retaining Telegram as a channel
-- Compatibility: preserve `SemanticSessionRuntime`, provider adapters, scheduler, MCP integration, and Telegram delivery
+- Target: replace the Telegram-owned runtime with a remotely managed, multi-machine agent gateway
+- Compatibility: this feature branch is a flag-day implementation. It reuses provider normalization where useful but does not require Telegram or the old daemon entrypoint to remain operational.
 
 ## 2. Executive Summary
 
@@ -34,7 +34,7 @@ The local Codever daemon becomes **Codever Gateway**. It remains the trusted exe
 
 **Codever Client** is a single responsive TypeScript UI, distributed first as a Web/PWA application and then wrapped with Tauri 2 for desktop and mobile. It manages multiple Gateways, projects, and sessions. It consumes structured `ConversationEvent` values instead of Telegram-shaped messages.
 
-Telegram remains an auxiliary channel for notifications, lightweight commands, and emergency access. It is no longer the identity or persistence model for a Codever session.
+Telegram is outside the first implementation. It may later return as an optional projection, but it is not a compatibility constraint or the identity/persistence model for a Codever session.
 
 ## 3. Goals
 
@@ -668,9 +668,9 @@ Suggested storage:
 - All subscribers receive the final resolved decision event.
 - Other responses return `already_resolved`.
 
-## 17. Migration from Current Codever
+## 17. Implementation Sequence
 
-The migration should be incremental and keep Telegram functional at every stage.
+Implementation is isolated in a dedicated worktree and feature branch. It may replace old composition roots directly because the currently running Telegram deployment remains on the untouched main branch.
 
 ### Phase 1: Generic session identity
 
@@ -714,7 +714,7 @@ The migration should be incremental and keep Telegram functional at every stage.
 - Add secure device credentials, deep links, notifications, and platform file pickers.
 - Ship desktop first if signing capacity is limited, then Android and iOS.
 
-### Phase 7: Telegram as a Binding
+### Optional Later Phase: Telegram as a Binding
 
 - Let users bind/unbind a Telegram topic from the Codever UI.
 - Add notification policies per binding.

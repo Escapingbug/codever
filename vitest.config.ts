@@ -7,6 +7,8 @@ export default defineConfig({
             ...configDefaults.exclude,
             '.worktrees/**',
             'e2e/**',
+            'apps/**',
+            'packages/**',
         ],
         globals: true,
     },

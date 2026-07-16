@@ -1,0 +1,13 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "relayId": "my-codever-relay",
+  "logger": true,
+  "dataDirectory": "./data",
+  "repositoryMode": "durable",
+  "tls": {
+    "certFile": "./tls/relay.crt",
+    "keyFile": "./tls/relay.key"
+  },
+  "enrollmentFile": "./enrollment.json"
+}

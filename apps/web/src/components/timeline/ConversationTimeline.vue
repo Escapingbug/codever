@@ -1,0 +1,90 @@
+<script setup lang="ts">
+import type { JsonValue, SessionEventEnvelope } from '@codever/protocol'
+import { computed } from 'vue'
+import { buildTimeline, decisionResolution } from '../../timeline/model'
+import DecisionEventCard from './DecisionEventCard.vue'
+import ToolEventCard from './ToolEventCard.vue'
+
+const props = defineProps<{
+  events: SessionEventEnvelope[]
+  mutable: boolean
+  submittingDecisionId?: string
+}>()
+const emit = defineEmits<{
+  resolveDecision: [decisionId: string, value: JsonValue]
+  select: [event: SessionEventEnvelope]
+}>()
+const entries = computed(() => buildTimeline(props.events))
+
+const time = (timestamp: string) => new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit', minute: '2-digit',
+}).format(new Date(timestamp))
+</script>
+
+<template>
+  <div v-if="entries.length" class="timeline">
+    <template v-for="entry in entries" :key="entry.key">
+      <article v-if="entry.type === 'assistant'" class="message message--assistant" @click="emit('select', entry.events[0]!)">
+        <div class="message-avatar">C</div>
+        <div class="message-body">
+          <div class="message-meta"><strong>Codever</strong><span>{{ time(entry.events[0]!.timestamp) }}</span></div>
+          <div class="assistant-copy">{{ entry.text }}</div>
+        </div>
+      </article>
+
+      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" @click="emit('select', entry.events.at(-1)!)" />
+
+      <template v-else>
+        <article
+          v-if="entry.envelope.event.kind === 'user_message'"
+          class="message message--user"
+          @click="emit('select', entry.envelope)"
+        >
+          <div class="message-avatar">You</div>
+          <div class="message-body">
+            <div class="message-meta"><strong>You</strong><span>{{ time(entry.envelope.timestamp) }}</span></div>
+            <div>{{ entry.envelope.event.text }}</div>
+            <small v-if="entry.envelope.event.attachmentIds?.length">{{ entry.envelope.event.attachmentIds.length }} attachment(s)</small>
+          </div>
+        </article>
+
+        <DecisionEventCard
+          v-else-if="entry.envelope.event.kind === 'decision_request'"
+          :request="entry.envelope.event"
+          :resolution="decisionResolution(events, entry.envelope.event.decisionId)"
+          :disabled="!mutable"
+          :submitting="submittingDecisionId === entry.envelope.event.decisionId"
+          @resolve="emit('resolveDecision', entry.envelope.event.decisionId, $event)"
+          @click="emit('select', entry.envelope)"
+        />
+
+        <article
+          v-else-if="entry.envelope.event.kind === 'status'"
+          class="event-card status-event"
+          :class="`status-event--${entry.envelope.event.level}`"
+          @click="emit('select', entry.envelope)"
+        >
+          <span>{{ entry.envelope.event.level === 'error' ? '!' : 'i' }}</span>
+          <p>{{ entry.envelope.event.message }}</p>
+        </article>
+
+        <div
+          v-else-if="entry.envelope.event.kind !== 'decision_resolved'"
+          class="system-event"
+          @click="emit('select', entry.envelope)"
+        >
+          <span />
+          <strong>{{ entry.envelope.event.kind.replaceAll('_', ' ') }}</strong>
+          <small v-if="entry.envelope.event.kind === 'session_state'">{{ entry.envelope.event.state }}</small>
+          <small v-else-if="entry.envelope.event.kind === 'mode_change'">{{ entry.envelope.event.mode }}</small>
+          <small v-else-if="entry.envelope.event.kind === 'turn_finished'">{{ entry.envelope.event.status }}</small>
+        </div>
+      </template>
+    </template>
+  </div>
+  <div v-else class="empty-state empty-state--timeline">
+    <span class="empty-orbit">✦</span>
+    <h2>Start the conversation</h2>
+    <p>Ask Codever to explore, explain, or change this project.</p>
+  </div>
+</template>

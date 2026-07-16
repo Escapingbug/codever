@@ -1,5 +1,5 @@
 import type { AgentEvent } from './types'
-import type { DecisionRequest, DecisionResponse } from '@/bridge/channelPort'
+import type { DecisionRequest, DecisionResponse } from '@/runtime/decision'
 import type { RichUserInput } from '@/runtime/semantic'
 
 export class ProviderNotReadyError extends Error {

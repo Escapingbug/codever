@@ -1,0 +1,10 @@
+{
+  "gateways": [
+    {
+      "gatewayId": "gateway-example",
+      "fingerprint": "sha256:ItBPyNCVKMAd_5__cZLxeWBuzvAK7flAypNQjN4bW90",
+      "publicKeySpkiPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEAcm3ZjWV46qoFwkUEzANYgdC2fOz\nVzu10Pc6IYn2A8o2QNSAIPrGDiuJzNlH94GnjoJfJPj5jqI0UGbe3OKXQg==\n-----END PUBLIC KEY-----\n",
+      "enabled": true
+    }
+  ]
+}

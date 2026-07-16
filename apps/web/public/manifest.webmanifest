@@ -1,0 +1,27 @@
+{
+  "id": "/",
+  "name": "Codever",
+  "short_name": "Codever",
+  "description": "Manage Codever gateways, projects, and ACP sessions.",
+  "start_url": "/gateways",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#11130f",
+  "theme_color": "#11130f",
+  "categories": ["developer", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/codever.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/codever-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,295 +1,122 @@
-# codever
+# Codever multi-Gateway platform
 
-Codever is an ACP-to-Telegram bridge for running coding agents from chat. It runs on your machine, starts ACP-compatible agent subprocesses, and projects the agent conversation into Telegram with tool output, permission prompts, session controls, and Codever MCP context.
+This branch is a flag-day implementation of Codever as a remote ACP agent platform. It is isolated from the running Telegram branch and does not use Telegram as its runtime, session identity, transcript, or UI.
 
-The current implementation is a Telegram topic session gateway: each Telegram forum topic can own an independent agent session, while the daemon, config, provider processes, and project files stay local.
+```text
+Web / PWA / Tauri client
+          |
+      HTTPS + WSS
+          |
+     Codever Relay
+          |
+ outbound signed WSS
+          |
+ Codever Gateway(s)
+          |
+    local ACP agents
+```
 
-## Features
+The Gateway remains the trusted execution boundary on each controlled machine. It owns approved project roots, provider credentials/processes, decisions, and the authoritative event journal. One Relay accepts multiple independently enrolled Gateways and exposes Gateway → Project → Session navigation to a single Vue client shared by browsers, installed PWAs, desktop, Android, and iOS shells.
 
-- **Telegram remote agent UI**: send prompts from Telegram and receive assistant text, tool progress, errors, and final status.
-- **ACP providers**: supports `opencode acp`, `codebuddy acp`, and Cursor CLI's `agent acp`.
-- **Topic-based sessions**: each Telegram topic can map to a separate project/session; the general topic is reserved for control commands.
-- **Permission handling**: provider permission requests are shown as Telegram inline buttons.
-- **Session controls**: interrupt, reset, archive, list, and resume sessions from Telegram.
-- **Provider/model controls**: choose provider, model, permission mode, verbosity, and timeout per group/session.
-- **Codever MCP surface**: agents can read Codever environment resources and use tools such as reminders and proactive messages.
-- **Local-only runtime**: no hosted backend; the daemon uses Telegram long polling and stores state under your home directory.
+## Implemented
+
+- Browser-safe, versioned protocol schemas for inventory, events, commands, authentication, sync, and client DTOs.
+- Per-Gateway P-256 static identity stored locally as a PKCS#8 private key; enrollment exports only the SPKI public key and fingerprint.
+- TLS server validation plus signed Relay challenges bound to the Relay challenge, Gateway ID, and key fingerprint.
+- Explicit local project allowlists with canonical path and traversal/symlink escape checks.
+- Gateway-owned session runtime, decision broker, provider normalization, durable metadata, and append-only event journal.
+- Outbound reconnecting Gateway link with epochs, heartbeats, command idempotency, event ACKs, and cursor replay.
+- Multi-Gateway Relay REST/WSS APIs, enrollment, deny-by-default authorization, event subscriptions, and restart sync.
+- Vue 3 structured timeline for assistant output, tools, decisions, status, session controls, and offline state.
+- One UI distributed as Web, installable PWA, and a minimal Tauri 2 desktop/mobile shell.
+- Real in-process E2E tests covering signed enrollment, session creation, provider execution, REST/WSS history, and Relay backfill from a Gateway journal.
+
+See [the architecture](docs/multi-gateway-client-design.md), [Relay operations](apps/relay/README.md), and [client packaging](apps/web/README.md).
 
 ## Requirements
 
-- Node.js 20 or newer.
-- pnpm.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather).
-- At least one supported provider command available in `PATH`:
-  - `opencode` with `opencode acp`;
-  - `codebuddy` with `codebuddy acp`;
-  - `agent` with `agent acp` for Cursor CLI Agent.
-
-## Installation
-
-Codever is currently used from source.
-
-```bash
-git clone git@github.com:Escapingbug/codever.git
-cd codever
-pnpm install
-pnpm build
-```
-
-To make the `codever` and `codever-mcp` commands available globally from this checkout:
-
-```bash
-pnpm link --global
-```
-
-For development without a global link, use:
-
-```bash
-pnpm dev -- <command>
-```
-
-For example:
-
-```bash
-pnpm dev -- status
-```
-
-## Setup
-
-### 1. Create a Telegram Bot
-
-1. Open Telegram and message [@BotFather](https://t.me/BotFather).
-2. Run `/newbot` and follow the prompts.
-3. Copy the bot token.
-4. If you want to use forum topics as separate sessions, create or use a Telegram supergroup with topics enabled.
-
-### 2. Configure Codever
-
-```bash
-codever config set-bot-token <your-bot-token>
-```
-
-Optional, for the test observer bot:
-
-```bash
-codever config set-test-bot-token <your-test-bot-token>
-```
-
-### 3. Start the Daemon
-
-```bash
-codever start
-```
-
-The daemon starts in the background, initializes available providers, starts the local MCP/daemon API plumbing, and begins Telegram long polling.
-
-Check status and logs with:
-
-```bash
-codever status
-codever logs
-codever logs -f
-```
-
-> **Bot Privacy Mode**: Telegram bots default to privacy mode, which means they only receive commands (messages starting with `/`) and messages that mention or reply to the bot. To allow Codever to see all messages in a group, you must either:
->
-> 1. **Disable privacy mode** via [@BotFather](https://t.me/BotFather): send `/setprivacy`, select your bot, and choose **Disable**. Then **remove the bot from the group and re-add it** — the setting only takes effect for groups the bot joins after the change.
-> 2. **Make the bot a group admin** — admin bots always receive all messages regardless of privacy mode. This is the recommended approach.
->
-> If the bot is in a group but not responding to normal messages (only commands work), it is almost certainly a privacy mode issue.
-
-### 4. Pair Your Telegram Account
-
-1. Open a DM with your bot.
-2. Send `/start`.
-3. The bot replies with a short code.
-4. Run the pairing command locally:
-
-```bash
-codever pair <code>
-```
-
-After pairing, add the bot to a Telegram group. Send prompts from a topic to interact with an agent.
-
-## Usage
-
-### Basic Workflow
-
-1. Add the bot to a Telegram group.
-2. Create or open a forum topic for the task.
-3. Set the project directory in that group/topic:
-
-```text
-/cwd /path/to/project
-```
-
-4. Send a normal Telegram message. Codever starts or resumes the topic's agent session.
-5. Use inline buttons for permission prompts when the provider asks for tool approval.
-
-If you send a non-command message in the general topic, Codever asks you to use a real topic. The general topic is intended for control commands such as `/help` and `/provider`.
-
-### Telegram DM Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Pair this Telegram account or show pairing status. |
-| `/status` | Show active sessions. |
-| `/provider` | Set the default provider for new sessions. |
-| `/restart` | Restart the daemon. |
-| `/help` | Show DM help. |
-
-### Telegram Group Commands
-
-| Command | Description |
-|---------|-------------|
-| `/cwd <path>` | Set the working directory. `~` is expanded; missing paths can be created through a confirmation button. |
-| `/provider` | Choose the provider. In the general topic it changes new-session defaults; inside a topic it targets that session. |
-| `/model [name]` | Choose or set the provider model. |
-| `/mode` | Choose permission mode. Provider modes are shown with Codever modes such as `approve-reads`, `approve-all`, and `deny-all`. |
-| `/verbose [0|1|2]` | Set output verbosity: quiet, normal, or verbose. |
-| `/timeout [seconds]` | Set query timeout from 10 to 600 seconds. |
-| `/config` | Show session/group config. `/config timeout=120` updates timeout. |
-| `/stop` | Interrupt the current query while preserving the session. |
-| `/progress` | Ask the active provider/session for progress, when supported. |
-| `/file [id]` | Request file details from the active provider/session, when supported. |
-| `/new` or `/reset` | Clear the current topic conversation and start fresh. |
-| `/session`, `/sessions`, `/session_list` | List resumable sessions for the current provider/project. |
-| `/resume [id]` | Resume a listed session. Without an id, shows the session list. |
-| `/tables` | Return raw markdown for tables that were rendered as Telegram images since your last message. |
-| `/archive` | Stop and archive the current topic session. |
-| `/restart` | Restart the daemon. |
-| `/help` | Show group help and provider-specific commands when available. |
-
-### Provider Notes
-
-Codever registers built-in provider profiles:
-
-| Provider | Command | Notes |
-|----------|---------|-------|
-| `opencode` | `opencode acp` | Default provider unless changed in config. Also uses `opencode models` and `opencode session list --format json` for model/session lists. |
-| `codebuddy` | `codebuddy acp` | ACP-based Codebuddy integration. |
-| `agent` | `agent acp` | Cursor CLI Agent integration. Uses `agent models` for model discovery and maps Cursor ACP extensions such as plans, questions, todos, tasks, and images into Codever events. |
-| `codex` | `npx -y @agentclientprotocol/codex-acp` | ACP adapter for OpenAI Codex. Uses `codex debug models` for model discovery. |
-
-Providers are initialized when the daemon starts. A provider that is missing or misconfigured is marked not ready, but other providers can still be used.
-
-You can add provider profiles in `~/.config/codever/providers.json`. A profile `id` is the name shown by `/provider`; `type` selects the provider implementation and model handling strategy. This lets one provider type have multiple configurations:
-
-```json
-{
-  "defaultProvider": "opencode-fast",
-  "providers": [
-    {
-      "id": "opencode-fast",
-      "type": "opencode",
-      "modelProviders": ["ark"],
-      "env": {
-        "OPENCODE_CONFIG": "C:\\Users\\me\\.config\\opencode\\fast.json"
-      }
-    }
-  ]
-}
-```
-
-Model ids remain provider-owned strings. Codever lists models through the selected profile and passes the selected model back to that provider type; for OpenCode profiles, `opencode models`, session listing, and ACP startup all receive the profile environment.
-
-### MCP Tools And Resources
-
-Codever automatically exposes a local MCP server named `codever` to ACP sessions. Agents can inspect:
-
-- `codever://environment`
-- `codever://rendering`
-- `codever://commands`
-- `codever://channel`
-
-The MCP tool surface includes:
-
-- `get_codever_context`
-- `schedule_reminder`
-- `cancel_reminder`
-- `send_message`
-- `send_file`
-
-`send_file` can send raw file attachments with `type=document`/`file`, render local markdown with `type=markdown`, render source files as fenced code blocks with `type=code`, or send images as Telegram photos with `type=image`.
-
-Session-scoped tools such as reminders and proactive messages require an established Codever conversation id. Some providers only make these available after the first completed turn.
-
-## CLI Reference
-
-```text
-codever start                         Start the daemon
-codever stop                          Stop the daemon
-codever restart                       Restart the daemon
-codever status                        Show daemon and config status
-codever logs [-f]                     Show daemon logs
-codever logs --groups                 List group log directories
-codever logs --group <chatId>         Show logs for a specific group
-codever pair <code>                   Complete Telegram pairing
-codever testbot [--log-dir <dir>]     Start the test listener bot
-codever config set-bot-token <token>  Configure Telegram bot token
-codever config set-test-bot-token <t> Configure test bot token
-codever config show                   Show stored configuration summary and provider profiles
-```
-
-## Configuration And Data
-
-Runtime state is stored under:
-
-```text
-~/.config/codever
-```
-
-Important files and directories include:
-
-| Path | Description |
-|------|-------------|
-| `daemon.pid` | Background daemon PID. |
-| `daemon.api.port` | Local API port used by MCP subprocesses. |
-| `providers.json` | Optional provider profile definitions. |
-| `logs/daemon/global.log` | Global daemon log. |
-| `logs/daemon/groups/` | Per-group session logs. |
-
-The config store tracks values such as bot tokens, paired Telegram users, group settings, topic state, default provider, and scheduled tasks.
-
-## Architecture
-
-Codever is built around a semantic runtime:
-
-```text
-Telegram handlers   -> route commands, callbacks, and topic messages
-SessionManager      -> owns topic/session lookup and persisted group state
-TopicSession        -> wires one Telegram topic to one runtime session
-Semantic Runtime    -> runs turns, cancellation, commands, and finalization
-Provider Adapter    -> normalizes ACP/provider events into ConversationEvent
-Channel Projector   -> converts ConversationEvent into ChannelMessage
-Delivery Outbox     -> serializes Telegram send/edit operations
-TelegramPort        -> implements ChannelPort for Telegram API details
-MCP Layer           -> exposes Codever resources and tools to agents
-Provider Layer      -> ACP providers: opencode, codebuddy, agent
-```
-
-See [docs/architecture.md](docs/architecture.md) for the full current design.
-
-## Development
-
-```bash
-pnpm typecheck
-pnpm build
-pnpm test
-pnpm test:unit
+- Node.js 20 or newer
+- pnpm 11
+- At least one supported local provider command (`opencode`, `codebuddy`, Cursor `agent`, Codex ACP, or a configured ACP command)
+- Rust and platform WebView tools only when building Tauri packages
+
+## Install and verify
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm typecheck:all
+pnpm test:all
 pnpm test:e2e
+pnpm build:all
+pnpm audit --prod
 ```
 
-Run from source:
+## Configure a Gateway
 
-```bash
-pnpm dev -- <command>
+The Relay URL is always entered explicitly. Use `wss://` outside localhost; unencrypted `ws://` is accepted only for loopback development.
+
+```powershell
+pnpm build
+node dist/index.js init `
+  --relay wss://relay.example.com/v1/gateway/connect `
+  --root D:\projects `
+  --name workstation
 ```
 
-Examples:
+Register project roots locally. Remote clients select a `projectId`; they cannot submit arbitrary working directories.
 
-```bash
-pnpm dev -- start
-pnpm dev -- status
-pnpm dev -- logs -f
+```powershell
+node dist/index.js project add --path D:\projects\codever --name codever
+node dist/index.js project list
 ```
+
+Export the public enrollment bundle. This command never prints the private key.
+
+```powershell
+node dist/index.js enrollment > gateway-enrollment.json
+```
+
+Copy the public `gatewayId`, fingerprint, and `publicKeySpkiPem` into the Relay enrollment file, then start the Gateway:
+
+```powershell
+node dist/index.js start
+```
+
+Gateway configuration and identity default to `~/.config/codever/`. The private key must remain on the Gateway machine. Back it up as a sensitive machine credential; enrollment is secure only while that key and the Relay TLS endpoint remain trusted.
+
+## Run Relay
+
+Copy the examples in `apps/relay/`, configure HTTPS certificate/key and public Gateway enrollments, then:
+
+```powershell
+$env:CODEVER_RELAY_CONFIG = 'D:\codever-relay\relay.json'
+pnpm --filter @codever/relay start
+```
+
+Relay client APIs deny access by default. `CODEVER_RELAY_INSECURE_DEV_AUTH=true` grants every client request and is only for a loopback/private development environment. Do not expose that mode to a network. A production deployment still needs an OIDC/passkey/session authenticator appropriate to the operator environment.
+
+## Run the shared client
+
+```powershell
+pnpm --filter @codever/web dev
+pnpm --filter @codever/web build
+pnpm --filter @codever/web desktop:dev
+```
+
+The recommended Web deployment reverse-proxies Relay under the same HTTPS origin. PWA API responses are never cached. Android requires Android SDK/NDK; iOS builds require macOS, Xcode, and signing credentials. Those native toolchains are not vendored.
+
+## Security boundary
+
+- Relay stores public Gateway keys only; unknown, disabled, stale-epoch, or incorrectly signed Gateways are rejected.
+- Standard TLS protects links and provides ephemeral transport keys. The static Gateway key authenticates the machine; it is not used as a bulk-encryption key.
+- Relay is trusted with plaintext event content in this version. This is not end-to-end encryption against Relay.
+- Provider credentials and unrestricted filesystem access stay on Gateway.
+- Gateway persists before publishing; Relay transports commands at least once and uses idempotency keys to prevent duplicate effects.
+- Permission decisions are Gateway-authoritative and expire fail-closed.
+
+## Current release limits
+
+- Production client authentication is an integration point, not a bundled identity provider.
+- Attachments, remote project creation, key rotation UI, audit UI, notifications, and store signing are not yet implemented.
+- Tauri configuration is shared across desktop/mobile, but Android/iOS packages must be built and tested on their required platform toolchains.
+- Legacy Telegram source remains in the repository during the rewrite, but it is not part of the new build entrypoint and is not a compatibility requirement for this branch.

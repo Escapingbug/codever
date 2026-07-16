@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Codever">
+  <rect width="512" height="512" fill="#11130f"/>
+  <circle cx="256" cy="256" r="205" fill="#1d201a"/>
+  <path d="M350 161c-27-22-60-34-96-34-76 0-134 54-134 130s58 130 134 130c38 0 72-13 99-37l-44-54c-15 13-32 19-52 19-35 0-60-24-60-58s25-58 60-58c19 0 36 6 49 17z" fill="#c4f36a"/>
+  <circle cx="353" cy="347" r="39" fill="#7bb8ff"/>
+</svg>

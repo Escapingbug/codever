@@ -9,6 +9,9 @@ import type { RichUserInput, SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
 import type { RetryDeliveryCommandResult } from '@/runtime/semanticSessionRuntime'
+import type { DecisionOption, DecisionRequest, DecisionResponse } from '@/runtime/decision'
+
+export type { DecisionOption, DecisionRequest, DecisionResponse } from '@/runtime/decision'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -21,22 +24,6 @@ export interface ChannelMessage {
     format: 'markdown' | 'html' | 'plain'
     replyMarkup?: unknown
     attachments?: ChannelAttachment[]
-}
-
-export interface DecisionOption {
-    label: string
-    value: string
-}
-
-export interface DecisionRequest {
-    type: 'permission' | 'question'
-    title: string
-    details?: string
-    options: DecisionOption[]
-}
-
-export interface DecisionResponse {
-    value: string
 }
 
 export interface SessionStatus {

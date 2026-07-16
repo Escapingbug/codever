@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup'
 import path from 'path'
 
 export default defineConfig({
-    entry: ['src/index.ts', 'src/daemon.ts', 'src/mcp/stdio.ts'],
+    entry: ['src/index.ts', 'src/mcp/stdio.ts'],
   format: ['esm'],
   outDir: 'dist',
   splitting: false,

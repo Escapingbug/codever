@@ -1,0 +1,230 @@
+<script setup lang="ts">
+import type { CodeverSession, JsonObject, JsonValue, SessionEventEnvelope } from '@codever/protocol'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { SessionEventSocket, type SocketConnectionState } from '../api/sessionEventSocket'
+import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
+import SessionControls from '../components/SessionControls.vue'
+import StatusDot from '../components/StatusDot.vue'
+import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
+
+const route = useRoute()
+const state = useCodeverState()
+const gatewayId = computed(() => String(route.params.gatewayId))
+const projectId = computed(() => String(route.params.projectId))
+const sessionId = computed(() => String(route.params.sessionId))
+const gateway = computed(() => state.gateways.value.find((item) => item.id === gatewayId.value))
+const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find((item) => item.id === projectId.value))
+// Protocol values are immutable snapshots; shallow refs avoid recursively unwrapping
+// the deeply inferred Zod event union.
+const session = shallowRef<CodeverSession>()
+const events = shallowRef<SessionEventEnvelope[]>([])
+const socketState = ref<SocketConnectionState>('closed')
+const loadError = ref('')
+const liveError = ref('')
+const loading = ref(true)
+const draft = ref('')
+const sendWhenOnline = ref(false)
+const sending = ref(false)
+const savingControls = ref(false)
+const showMobileControls = ref(false)
+const submittingDecisionId = ref<string>()
+const selectedEvent = shallowRef<SessionEventEnvelope>()
+const timelineElement = ref<HTMLElement>()
+let eventSocket: SessionEventSocket | undefined
+
+const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
+const liveConnected = computed(() => socketState.value === 'connected')
+const canMutate = computed(() => gatewayOnline.value
+  && liveConnected.value
+  && session.value?.state !== 'closed'
+  && session.value?.state !== 'offline')
+const canSend = computed(() => canMutate.value || (!gatewayOnline.value && sendWhenOnline.value))
+const connectionLabel = computed(() => {
+  if (!gatewayOnline.value) return 'Gateway offline'
+  if (socketState.value === 'connected') return 'Live'
+  if (socketState.value === 'reconnecting') return 'Reconnecting'
+  return 'Connection unavailable'
+})
+
+onMounted(() => {
+  void state.loadGateways()
+  void state.loadProjects(gatewayId.value)
+})
+watch(sessionId, () => void loadSession(), { immediate: true })
+onBeforeUnmount(() => eventSocket?.close())
+
+async function loadSession(): Promise<void> {
+  eventSocket?.close()
+  eventSocket = undefined
+  loading.value = true
+  loadError.value = ''
+  liveError.value = ''
+  events.value = []
+  selectedEvent.value = undefined
+  const requestedId = sessionId.value
+  try {
+    session.value = await state.api.getSession(requestedId)
+    state.replaceSession(session.value)
+    let after = 0
+    while (requestedId === sessionId.value) {
+      const page = await state.api.getSessionEvents(requestedId, after)
+      appendEvents(page.events)
+      if (page.nextAfter === null || page.nextAfter <= after) break
+      after = page.nextAfter
+    }
+    if (requestedId !== sessionId.value) return
+    startLiveConnection(requestedId)
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : 'Could not load the session'
+  } finally {
+    if (requestedId === sessionId.value) loading.value = false
+  }
+}
+
+function startLiveConnection(id: string): void {
+  const cursor = events.value.at(-1)?.seq ?? 0
+  eventSocket = new SessionEventSocket({
+    baseUrl: state.api.baseUrl,
+    sessionId: id,
+    after: cursor,
+    onEvent: (event) => {
+      appendEvents([event])
+      if (event.event.kind === 'session_state' && session.value) {
+        session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
+        state.replaceSession(session.value)
+      }
+      void scrollToLatest()
+    },
+    onStateChange: (value) => { socketState.value = value },
+    onError: (error) => { liveError.value = error.message },
+  })
+  eventSocket.connect()
+}
+
+function appendEvents(incoming: SessionEventEnvelope[]): void {
+  const known = new Set(events.value.map((event) => event.eventId))
+  const additions = incoming.filter((event) => event.sessionId === sessionId.value && !known.has(event.eventId))
+  if (!additions.length) return
+  events.value = [...events.value, ...additions].sort((a, b) => a.seq - b.seq)
+}
+
+async function scrollToLatest(): Promise<void> {
+  await nextTick()
+  timelineElement.value?.scrollTo({ top: timelineElement.value.scrollHeight, behavior: 'smooth' })
+}
+
+async function sendMessage(): Promise<void> {
+  const text = draft.value.trim()
+  if (!text || !canSend.value || sending.value) return
+  sending.value = true
+  try {
+    await state.api.sendMessage(sessionId.value, {
+      text,
+      sendWhenOnline: !gatewayOnline.value ? true : undefined,
+    })
+    draft.value = ''
+    sendWhenOnline.value = false
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Message was not accepted'
+  } finally {
+    sending.value = false
+  }
+}
+
+async function cancel(): Promise<void> {
+  if (!canMutate.value) return
+  try {
+    await state.api.cancelSession(sessionId.value, { reason: 'Cancelled from web client' })
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Cancel was not accepted'
+  }
+}
+
+async function saveControls(config: JsonObject): Promise<void> {
+  if (!canMutate.value || !session.value) return
+  savingControls.value = true
+  try {
+    await state.api.patchSessionConfig(sessionId.value, config)
+    session.value = {
+      ...session.value,
+      provider: typeof config.provider === 'string' ? config.provider : session.value.provider,
+      model: typeof config.model === 'string' ? config.model : undefined,
+      mode: typeof config.mode === 'string' ? config.mode : undefined,
+      config: { ...session.value.config, ...config },
+    }
+    state.replaceSession(session.value)
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Session controls were not saved'
+  } finally {
+    savingControls.value = false
+  }
+}
+
+async function resolveDecision(decisionId: string, value: JsonValue): Promise<void> {
+  if (!canMutate.value) return
+  submittingDecisionId.value = decisionId
+  try {
+    await state.api.resolveDecision(sessionId.value, decisionId, value)
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Decision response was not accepted'
+  } finally {
+    submittingDecisionId.value = undefined
+  }
+}
+
+function submitOnShortcut(event: KeyboardEvent): void {
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+    event.preventDefault()
+    void sendMessage()
+  }
+}
+</script>
+
+<template>
+  <div class="session-page">
+    <header class="session-header">
+      <div class="session-identity">
+        <small>{{ gateway?.name }} / {{ project?.name }}</small>
+        <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="session" :status="session.state" :label="session.state" /></div>
+      </div>
+      <button class="icon-button mobile-controls-button" aria-label="Session controls" @click="showMobileControls = !showMobileControls">⚙</button>
+      <SessionControls v-if="session" :class="{ 'session-controls--mobile-open': showMobileControls }" :session="session" :gateway="gateway" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
+      <button v-if="session?.state === 'querying'" class="button button--danger" :disabled="!canMutate" @click="cancel">Stop</button>
+    </header>
+
+    <div v-if="!gatewayOnline || !liveConnected" class="connection-banner" :class="{ 'connection-banner--offline': !gatewayOnline }">
+      <span class="pulse-dot" />
+      <div><strong>{{ connectionLabel }}</strong><small v-if="!gatewayOnline">Cached history remains available. Execution state may be unknown.</small><small v-else>Live events will resume from cursor {{ eventSocket?.getCursor() ?? 0 }}.</small></div>
+    </div>
+    <button v-if="liveError" class="inline-alert" @click="liveError = ''">{{ liveError }} <span>×</span></button>
+
+    <div v-if="loadError" class="session-load-state"><div class="error-banner"><strong>Session unavailable</strong>{{ loadError }}</div><button class="button" @click="loadSession">Try again</button></div>
+    <div v-else-if="loading" class="session-load-state"><span class="loader" /><p>Loading conversation…</p></div>
+    <template v-else>
+      <section ref="timelineElement" class="conversation-pane" aria-label="Conversation timeline">
+        <ConversationTimeline
+          :events="events"
+          :mutable="canMutate"
+          :submitting-decision-id="submittingDecisionId"
+          @resolve-decision="resolveDecision"
+          @select="selectedEvent = $event"
+        />
+      </section>
+
+      <aside class="inspector" :class="{ 'inspector--open': selectedEvent }">
+        <div class="inspector-heading"><div><span class="eyebrow">Event inspector</span><h2>{{ selectedEvent?.event.kind.replaceAll('_', ' ') ?? 'Details' }}</h2></div><button class="icon-button" @click="selectedEvent = undefined">×</button></div>
+        <template v-if="selectedEvent"><dl><dt>Sequence</dt><dd>{{ selectedEvent.seq }}</dd><dt>Event ID</dt><dd>{{ selectedEvent.eventId }}</dd><dt>Source</dt><dd>{{ selectedEvent.event.meta?.source ?? 'live' }}</dd><dt>Time</dt><dd>{{ new Date(selectedEvent.timestamp).toLocaleString() }}</dd></dl><pre>{{ JSON.stringify(selectedEvent.event, null, 2) }}</pre></template>
+        <div v-else class="inspector-empty"><span>◇</span><p>Select an event to inspect its structured payload.</p></div>
+      </aside>
+
+      <footer class="composer-wrap">
+        <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
+        <div class="composer" :class="{ 'composer--disabled': !canSend }">
+          <textarea v-model="draft" rows="2" :disabled="!canSend" :placeholder="canSend ? 'Message Codever…' : 'Reconnect to send a message'" @keydown="submitOnShortcut" />
+          <div class="composer-footer"><span><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span><button class="send-button" :disabled="!draft.trim() || !canSend || sending" aria-label="Send message" @click="sendMessage">{{ sending ? '…' : '↑' }}</button></div>
+        </div>
+      </footer>
+    </template>
+  </div>
+</template>
