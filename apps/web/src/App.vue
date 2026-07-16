@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNavigation from './components/AppNavigation.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
+import { navigateToParent } from './navigation'
 import { clientSession } from './state/clientSession'
 
 const route = useRoute()
@@ -16,7 +17,7 @@ const isPublicEntry = computed(() => route.name === 'onboarding' || route.name =
   <div class="app-shell" :class="[`route-depth-${depth}`, { 'app-shell--entry': isPublicEntry }]">
     <PwaUpdateBanner />
     <header v-if="!isPublicEntry" class="mobile-header">
-      <button v-if="showBack" class="icon-button" aria-label="Go back" @click="router.back()">←</button>
+      <button v-if="showBack" class="icon-button" aria-label="Go back" @click="navigateToParent(router)">←</button>
       <span v-else />
       <RouterLink class="mobile-brand" to="/gateways"><span class="brand-mark">C</span> Codever</RouterLink>
       <RouterLink class="connection-pill" to="/settings">{{ clientSession.activeProfile.value?.name ?? 'Relay' }}</RouterLink>

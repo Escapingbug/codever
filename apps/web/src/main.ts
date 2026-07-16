@@ -4,6 +4,7 @@ import { createCodeverRouter } from './router'
 import { relayApiKey } from './api/relayApi'
 import { clientSession } from './state/clientSession'
 import { registerCodeverServiceWorker } from './pwa/serviceWorker'
+import { installAndroidBackHandler } from './navigation'
 import './styles.css'
 
 export async function startCodever(): Promise<void> {
@@ -14,6 +15,7 @@ export async function startCodever(): Promise<void> {
   clientSession.onUnauthorized(() => { void router.replace({ name: 'login' }) })
   app.use(router)
   if (window.location.hostname === 'tauri.localhost') await router.push('/')
+  await installAndroidBackHandler(router)
   app.mount('#app')
 
   void registerCodeverServiceWorker().catch((error: unknown) => {
