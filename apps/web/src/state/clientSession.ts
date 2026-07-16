@@ -1,6 +1,7 @@
 import type { AccountProfile, AuthSessionDto, LoginDto, LoginResultDto } from '@codever/protocol'
 import { computed, ref } from 'vue'
 import { RelayApi, RelayApiError } from '../api/relayApi'
+import { DEMO_RELAY_URL, isDemoRelayUrl } from '../api/demoRelay'
 
 export interface RelayProfile {
   id: string
@@ -25,6 +26,7 @@ const STORAGE_KEY = 'codever.client.v1'
 
 export function normalizeRelayUrl(value: string): string {
   const url = new URL(value.trim())
+  if (isDemoRelayUrl(url.toString())) return DEMO_RELAY_URL
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Relay URL must use http:// or https://')
   url.hash = ''
   url.search = ''

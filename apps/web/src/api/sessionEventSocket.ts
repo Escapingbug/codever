@@ -1,4 +1,5 @@
 import { CLIENT_EVENT_PROTOCOL, parseSessionEventEnvelope, type SessionEventEnvelope } from '@codever/protocol'
+import { demoRelay, isDemoRelayUrl } from './demoRelay'
 
 export type SocketConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'closed'
 
@@ -20,6 +21,7 @@ export class SessionEventSocket {
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private reconnectAttempt = 0
   private stopped = false
+  private demoUnsubscribe?: () => void
   private cursor: number
   private readonly seenEventIds = new Set<string>()
   private readonly webSocketFactory: (url: string, protocols: string[]) => WebSocket
@@ -36,6 +38,12 @@ export class SessionEventSocket {
   connect(): void {
     if (this.socket || this.stopped) return
     this.setState(this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting')
+
+    if (isDemoRelayUrl(this.options.baseUrl)) {
+      this.demoUnsubscribe ??= demoRelay.subscribe(this.options.sessionId, this.cursor, event => this.handleEvent(event))
+      this.setState('connected')
+      return
+    }
 
     try {
       const socket = this.webSocketFactory(this.buildUrl(), this.buildProtocols())
@@ -67,6 +75,8 @@ export class SessionEventSocket {
 
   close(): void {
     this.stopped = true
+    this.demoUnsubscribe?.()
+    this.demoUnsubscribe = undefined
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = undefined
     const socket = this.socket
@@ -84,14 +94,18 @@ export class SessionEventSocket {
       const parsed = typeof raw === 'string' ? JSON.parse(raw) as unknown : raw
       const candidate = isSessionEventFrame(parsed) ? parsed.event : parsed
       const envelope = parseSessionEventEnvelope(candidate)
-      if (envelope.sessionId !== this.options.sessionId) return
-      if (envelope.seq <= this.cursor || this.seenEventIds.has(envelope.eventId)) return
-      this.cursor = envelope.seq
-      this.seenEventIds.add(envelope.eventId)
-      this.options.onEvent(envelope)
+      this.handleEvent(envelope)
     } catch (error) {
       this.options.onError?.(error instanceof Error ? error : new Error('Invalid live event'))
     }
+  }
+
+  private handleEvent(envelope: SessionEventEnvelope): void {
+    if (envelope.sessionId !== this.options.sessionId) return
+    if (envelope.seq <= this.cursor || this.seenEventIds.has(envelope.eventId)) return
+    this.cursor = envelope.seq
+    this.seenEventIds.add(envelope.eventId)
+    this.options.onEvent(envelope)
   }
 
   private reconnect(): void {

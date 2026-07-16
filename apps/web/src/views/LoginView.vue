@@ -2,11 +2,13 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { clientSession, friendlyRelayError } from '../state/clientSession'
+import { isDemoRelayUrl } from '../api/demoRelay'
 
 const route = useRoute()
 const router = useRouter()
-const username = ref('')
-const password = ref('')
+const demo = isDemoRelayUrl(clientSession.activeProfile.value?.baseUrl ?? '')
+const username = ref(demo ? 'demo' : '')
+const password = ref(demo ? 'demo' : '')
 const deviceName = ref(defaultDeviceName())
 const busy = ref(false)
 const error = ref(clientSession.initializationError.value)
@@ -38,6 +40,7 @@ function defaultDeviceName(): string {
       <span class="eyebrow">{{ clientSession.activeProfile.value?.name }}</span>
       <h1>Sign in to Relay</h1>
       <p class="entry-copy">{{ clientSession.activeProfile.value?.baseUrl }}</p>
+      <p v-if="demo" class="success-banner">Offline demo: credentials are prefilled. No network connection is used.</p>
       <form class="relay-form" @submit.prevent="login">
         <label>Username<input v-model="username" required autocomplete="username" autocapitalize="none" /></label>
         <label>Password<input v-model="password" required type="password" autocomplete="current-password" /></label>

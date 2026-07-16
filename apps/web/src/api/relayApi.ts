@@ -25,6 +25,7 @@ import {
   parseLoginResultDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
+import { demoRelay, isDemoRelayUrl } from './demoRelay'
 
 export interface RelayApiOptions {
   baseUrl: string | (() => string | undefined)
@@ -67,10 +68,12 @@ export class RelayApi {
   }
 
   async checkHealth(): Promise<void> {
+    if (this.isDemo) return demoRelay.checkHealth()
     await this.request('/health', {}, false)
   }
 
   async login(body: LoginDto): Promise<LoginResultDto> {
+    if (this.isDemo) return demoRelay.login(body)
     return parseLoginResultDto(await this.request('/v1/auth/login', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -78,28 +81,34 @@ export class RelayApi {
   }
 
   async getAuthSession(): Promise<AuthSessionDto> {
+    if (this.isDemo) return demoRelay.session()
     return parseAuthSessionDto(await this.request('/v1/auth/session'))
   }
 
   async logout(): Promise<void> {
+    if (this.isDemo) return
     await this.request('/v1/auth/logout', { method: 'POST' })
   }
 
   async listGateways(): Promise<Gateway[]> {
+    if (this.isDemo) return demoRelay.listGateways()
     return parseGatewayListDto(await this.request('/v1/gateways')).gateways
   }
 
   async listProjects(gatewayId: string): Promise<Project[]> {
+    if (this.isDemo) return demoRelay.listProjects(gatewayId)
     const data = await this.request(`/v1/gateways/${encodeURIComponent(gatewayId)}/projects`)
     return parseProjectListDto(data).projects
   }
 
   async listSessions(projectId: string): Promise<CodeverSession[]> {
+    if (this.isDemo) return demoRelay.listSessions(projectId)
     const data = await this.request(`/v1/projects/${encodeURIComponent(projectId)}/sessions`)
     return parseSessionListDto(data).sessions
   }
 
   async getSession(sessionId: string): Promise<CodeverSession> {
+    if (this.isDemo) return demoRelay.getSession(sessionId)
     const data = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}`)
     return parseSessionDto(data).session
   }
@@ -108,6 +117,10 @@ export class RelayApi {
     events: SessionEventEnvelope[]
     nextAfter: number | null
   }> {
+    if (this.isDemo) {
+      const events = demoRelay.getEvents(sessionId, after)
+      return { events, nextAfter: events.at(-1)?.seq ?? null }
+    }
     const data = await this.request(
       `/v1/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`,
     )
@@ -116,6 +129,7 @@ export class RelayApi {
   }
 
   async createSession(projectId: string, body: CreateSessionDto): Promise<CodeverSession> {
+    if (this.isDemo) return demoRelay.createSession(projectId, body)
     const data = await this.mutate(
       `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
       'POST',
@@ -125,14 +139,17 @@ export class RelayApi {
   }
 
   sendMessage(sessionId: string, body: SendMessageDto): Promise<MutationReceiptDto> {
+    if (this.isDemo) return Promise.resolve(demoRelay.sendMessage(sessionId, body.text))
     return this.mutationReceipt(`/v1/sessions/${encodeURIComponent(sessionId)}/messages`, 'POST', body)
   }
 
   cancelSession(sessionId: string, body: CancelSessionDto = {}): Promise<MutationReceiptDto> {
+    if (this.isDemo) return Promise.resolve(demoRelay.cancel(sessionId))
     return this.mutationReceipt(`/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, 'POST', body)
   }
 
   patchSessionConfig(sessionId: string, config: JsonObject): Promise<MutationReceiptDto> {
+    if (this.isDemo) return Promise.resolve(demoRelay.patchConfig(sessionId, config))
     return this.mutationReceipt(
       `/v1/sessions/${encodeURIComponent(sessionId)}/config`,
       'PATCH',
@@ -141,6 +158,7 @@ export class RelayApi {
   }
 
   resolveDecision(sessionId: string, decisionId: string, value: JsonValue): Promise<MutationReceiptDto> {
+    if (this.isDemo) return Promise.resolve(demoRelay.resolveDecision(sessionId, decisionId, value))
     const body: ResolveDecisionDto = { value }
     return this.mutationReceipt(
       `/v1/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(decisionId)}`,
@@ -183,6 +201,10 @@ export class RelayApi {
       throw new RelayApiError(details.message ?? response.statusText, response.status, details.code)
     }
     return data
+  }
+
+  private get isDemo(): boolean {
+    return isDemoRelayUrl(this.baseUrl)
   }
 }
 

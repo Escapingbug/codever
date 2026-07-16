@@ -67,6 +67,7 @@ describe('client session', () => {
 
   it('normalizes URLs and rejects unsafe schemes', () => {
     expect(normalizeRelayUrl(' https://relay.example.test/api/ ')).toBe('https://relay.example.test/api')
+    expect(normalizeRelayUrl('demo://preview/')).toBe('demo://preview')
     expect(() => normalizeRelayUrl('file:///relay')).toThrow('http:// or https://')
   })
 

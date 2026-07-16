@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { clientSession, friendlyRelayError, type RelayProfile } from '../state/clientSession'
+import { DEMO_RELAY_URL } from '../api/demoRelay'
 
 const props = defineProps<{ profile?: RelayProfile; submitLabel?: string }>()
 const emit = defineEmits<{ saved: [profile: RelayProfile]; cancel: [] }>()
@@ -26,6 +27,12 @@ async function submit(): Promise<void> {
     busy.value = false
   }
 }
+
+async function useDemo(): Promise<void> {
+  name.value = 'Offline preview'
+  baseUrl.value = DEMO_RELAY_URL
+  await submit()
+}
 </script>
 
 <template>
@@ -36,6 +43,7 @@ async function submit(): Promise<void> {
     <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
     <p v-if="status" class="success-banner">{{ status }}</p>
     <div class="form-actions">
+      <button v-if="!profile" type="button" class="button" :disabled="busy" @click="useDemo">Use offline demo</button>
       <button v-if="profile" type="button" class="button" :disabled="busy" @click="emit('cancel')">Cancel</button>
       <button class="button button--primary" :disabled="busy || !name.trim() || !baseUrl.trim()">{{ busy ? 'Checking…' : (submitLabel ?? 'Save Relay') }}</button>
     </div>
