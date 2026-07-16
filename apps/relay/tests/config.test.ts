@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadRelayConfig, StaticEnrolledGatewayKeyRepository } from '../src/config'
+import { hashPassword } from '../src/accountAuth'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const temporaryDirectories: string[] = []
@@ -80,6 +81,46 @@ describe('Relay runtime configuration', () => {
         })
         await expect(loadRelayConfig({ CODEVER_RELAY_REPOSITORY_MODE: 'volatile' }))
             .rejects.toThrow('repositoryMode must be durable or memory')
+    })
+
+    it('loads strictly validated users from inline config and a users file without plaintext passwords', async () => {
+        const directory = await temporaryDirectory()
+        const passwordHash = await hashPassword('secret')
+        await writeFile(join(directory, 'users.json'), JSON.stringify({ users: [{
+            username: 'alice', passwordHash, workspaceId: 'workspace-1', roles: ['operator'], enabled: true,
+        }] }))
+        await writeFile(join(directory, 'relay.json'), JSON.stringify({
+            usersFile: './users.json', sessionTtlSeconds: 7200,
+        }))
+
+        await expect(loadRelayConfig({ CODEVER_RELAY_CONFIG: join(directory, 'relay.json') })).resolves.toMatchObject({
+            sessionTtlSeconds: 7200,
+            users: [{
+                id: 'workspace-1:alice', username: 'alice', passwordHash,
+                workspaceId: 'workspace-1', roles: ['operator'], enabled: true,
+            }],
+        })
+        await expect(loadRelayConfig({ CODEVER_RELAY_USERS_JSON: JSON.stringify([{
+            username: 'alice', password: 'secret', workspaceId: 'workspace-1', roles: ['admin'], enabled: true,
+        }]) })).rejects.toThrow('must never contain plaintext passwords')
+        await expect(loadRelayConfig({ CODEVER_RELAY_USERS_JSON: JSON.stringify([{
+            username: 'alice', passwordHash: 'invalid', workspaceId: 'workspace-1', roles: ['root'], enabled: true,
+        }]) })).rejects.toThrow('passwordHash must be a supported scrypt hash')
+    })
+
+    it('rejects duplicate usernames across user sources and unknown user fields', async () => {
+        const directory = await temporaryDirectory()
+        const passwordHash = await hashPassword('secret')
+        await writeFile(join(directory, 'users.json'), JSON.stringify([{ username: 'Alice', passwordHash, workspaceId: 'one', roles: ['viewer'], enabled: true }]))
+        await writeFile(join(directory, 'relay.json'), JSON.stringify({
+            usersFile: './users.json',
+            users: [{ username: 'alice', passwordHash, workspaceId: 'two', roles: ['admin'], enabled: true }],
+        }))
+        await expect(loadRelayConfig({ CODEVER_RELAY_CONFIG: join(directory, 'relay.json') }))
+            .rejects.toThrow('Duplicate Relay username')
+        await expect(loadRelayConfig({ CODEVER_RELAY_USERS_JSON: JSON.stringify([{
+            username: 'bob', passwordHash, workspaceId: 'one', roles: ['viewer'], enabled: true, note: 'nope',
+        }]) })).rejects.toThrow('unknown field')
     })
 })
 

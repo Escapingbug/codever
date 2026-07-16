@@ -2,6 +2,7 @@ import type { FastifyRequest } from 'fastify'
 import { createPublicKey, verify, type KeyObject } from 'node:crypto'
 import {
     serializeGatewayAuthPayload,
+    type AccountRole,
     type GatewayAuthResponse,
     type RelayAuthChallenge,
     type RelayAuthRejected,
@@ -11,6 +12,7 @@ export interface ClientIdentity {
     id: string
     workspaceId: string
     deviceId?: string
+    roles?: AccountRole[]
 }
 
 export interface ClientAuthorizationTarget {

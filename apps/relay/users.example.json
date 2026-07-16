@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "id": "admin-1",
+      "username": "admin",
+      "passwordHash": "scrypt$v1$16384$8$1$bHEjxgjJRt8nqn0usi9LaA$QGVOubOBqmmYVc_krO_j2Rx6VTM73D-FuUSywsrNfdw",
+      "workspaceId": "development",
+      "roles": ["admin"],
+      "enabled": true
+    }
+  ]
+}

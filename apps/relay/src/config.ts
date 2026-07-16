@@ -1,7 +1,9 @@
 import { createHash, createPublicKey } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
+import type { AccountRole } from '@codever/protocol'
 import type { EnrolledGatewayKey, EnrolledGatewayKeyRepository } from './auth'
+import { validatePasswordHash, type RelayUserAccount } from './accountAuth'
 
 export interface RelayTlsConfig {
     cert: Buffer
@@ -21,6 +23,8 @@ export interface RelayRuntimeConfig {
     devWorkspaceId: string
     dataDirectory: string
     repositoryMode: 'durable' | 'memory'
+    users: RelayUserAccount[]
+    sessionTtlSeconds: number
 }
 
 interface JsonRelayConfig extends Record<string, unknown> {
@@ -33,10 +37,15 @@ interface JsonRelayConfig extends Record<string, unknown> {
     gateways?: unknown
     dataDirectory?: unknown
     repositoryMode?: unknown
+    usersFile?: unknown
+    users?: unknown
+    sessionTtlSeconds?: unknown
 }
 
-const CONFIG_KEYS = new Set(['host', 'port', 'relayId', 'logger', 'tls', 'enrollmentFile', 'gateways', 'dataDirectory', 'repositoryMode'])
+const CONFIG_KEYS = new Set(['host', 'port', 'relayId', 'logger', 'tls', 'enrollmentFile', 'gateways', 'dataDirectory', 'repositoryMode', 'usersFile', 'users', 'sessionTtlSeconds'])
 const GATEWAY_KEYS = new Set(['gatewayId', 'fingerprint', 'publicKeySpkiPem', 'enabled'])
+const USER_KEYS = new Set(['id', 'username', 'passwordHash', 'workspaceId', 'roles', 'enabled'])
+const ACCOUNT_ROLES = new Set<AccountRole>(['viewer', 'operator', 'gateway_admin', 'admin'])
 
 export async function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): Promise<RelayRuntimeConfig> {
     const configPath = optionalString(env.CODEVER_RELAY_CONFIG, 'CODEVER_RELAY_CONFIG')
@@ -61,6 +70,11 @@ export async function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): Pro
     const dataDirectory = resolveFrom(configDirectory, dataDirectoryValue)
     const repositoryMode = parseRepositoryMode(
         env.CODEVER_RELAY_REPOSITORY_MODE ?? json.repositoryMode ?? 'durable',
+    )
+    const sessionTtlSeconds = parsePositiveInteger(
+        env.CODEVER_RELAY_SESSION_TTL_SECONDS ?? json.sessionTtlSeconds ?? 30 * 24 * 60 * 60,
+        'sessionTtlSeconds',
+        60,
     )
 
     const tlsJson = json.tls === undefined ? undefined : requireObject(json.tls, 'tls')
@@ -88,6 +102,20 @@ export async function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): Pro
         : []
     const gateways = uniqueGateways([...fromFile, ...inlineFromConfig, ...inlineFromEnvironment])
 
+    const usersFile = optionalString(env.CODEVER_RELAY_USERS_FILE, 'CODEVER_RELAY_USERS_FILE')
+        ?? optionalString(json.usersFile, 'usersFile')
+    const usersFromEnvironment = env.CODEVER_RELAY_USERS_JSON === undefined
+        ? []
+        : parseUserCollection(parseJsonText(env.CODEVER_RELAY_USERS_JSON, 'CODEVER_RELAY_USERS_JSON'), 'CODEVER_RELAY_USERS_JSON')
+    const usersFromConfig = json.users === undefined ? [] : parseUserCollection(json.users, 'users')
+    const usersFromFile = usersFile
+        ? parseUserCollection(
+            await readJson(resolveFrom(configDirectory, usersFile), 'Relay users file'),
+            'Relay users file',
+        )
+        : []
+    const users = uniqueUsers([...usersFromFile, ...usersFromConfig, ...usersFromEnvironment])
+
     return {
         host,
         port,
@@ -99,6 +127,8 @@ export async function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): Pro
         devWorkspaceId,
         dataDirectory,
         repositoryMode,
+        users,
+        sessionTtlSeconds,
     }
 }
 
@@ -193,6 +223,56 @@ function uniqueGateways(keys: EnrolledGatewayKey[]): EnrolledGatewayKey[] {
     return [...result.values()]
 }
 
+function parseUserCollection(value: unknown, label: string): RelayUserAccount[] {
+    let collection: unknown
+    if (Array.isArray(value)) {
+        collection = value
+    } else {
+        const object = requireObject(value, label)
+        if ('password' in object) throw new Error(`${label} must never contain plaintext passwords`)
+        rejectUnknownKeys(object, new Set(['users']), label)
+        collection = object.users
+    }
+    if (!Array.isArray(collection)) throw new Error(`${label} must be an array or an object with a users array`)
+    return collection.map((entry, index) => parseUser(entry, `${label}[${index}]`))
+}
+
+function parseUser(value: unknown, label: string): RelayUserAccount {
+    const entry = requireObject(value, label)
+    if ('password' in entry || Object.keys(entry).some(key => /^plain.*password$/i.test(key))) {
+        throw new Error(`${label} must never contain plaintext passwords`)
+    }
+    rejectUnknownKeys(entry, USER_KEYS, label)
+    const username = requiredString(entry.username, `${label}.username`)
+    const passwordHash = requiredString(entry.passwordHash, `${label}.passwordHash`)
+    validatePasswordHash(passwordHash)
+    const workspaceId = requiredString(entry.workspaceId, `${label}.workspaceId`)
+    if (!Array.isArray(entry.roles) || entry.roles.length === 0) throw new Error(`${label}.roles must be a non-empty array`)
+    const roles = entry.roles.map((role, index) => {
+        if (typeof role !== 'string' || !ACCOUNT_ROLES.has(role as AccountRole)) {
+            throw new Error(`${label}.roles[${index}] is invalid`)
+        }
+        return role as AccountRole
+    })
+    if (new Set(roles).size !== roles.length) throw new Error(`${label}.roles must not contain duplicates`)
+    const id = optionalString(entry.id, `${label}.id`) ?? `${workspaceId}:${username.toLocaleLowerCase('en-US')}`
+    const enabled = entry.enabled === undefined ? true : parseBoolean(entry.enabled, `${label}.enabled`)
+    return { id, username, passwordHash, workspaceId, roles, enabled }
+}
+
+function uniqueUsers(users: RelayUserAccount[]): RelayUserAccount[] {
+    const ids = new Set<string>()
+    const names = new Set<string>()
+    for (const user of users) {
+        const name = user.username.toLocaleLowerCase('en-US')
+        if (ids.has(user.id)) throw new Error(`Duplicate Relay user id: ${user.id}`)
+        if (names.has(name)) throw new Error(`Duplicate Relay username: ${user.username}`)
+        ids.add(user.id)
+        names.add(name)
+    }
+    return users
+}
+
 function resolveFrom(directory: string, path: string): string {
     return isAbsolute(path) ? path : resolve(directory, path)
 }
@@ -234,4 +314,10 @@ function parsePort(value: unknown): number {
 function parseRepositoryMode(value: unknown): 'durable' | 'memory' {
     if (value === 'durable' || value === 'memory') return value
     throw new Error('repositoryMode must be durable or memory')
+}
+
+function parsePositiveInteger(value: unknown, label: string, minimum: number): number {
+    const number = typeof value === 'number' ? value : Number(value)
+    if (!Number.isSafeInteger(number) || number < minimum) throw new Error(`${label} must be an integer of at least ${minimum}`)
+    return number
 }

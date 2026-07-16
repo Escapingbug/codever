@@ -6,6 +6,9 @@ import {
     parseCreateSessionDto,
     parseGatewayFrame,
     parseGatewayHandshakeFrame,
+    parseAuthSessionDto,
+    parseLoginDto,
+    parseLoginResultDto,
     parsePatchSessionConfigDto,
     parseResolveDecisionDto,
     parseSendMessageDto,
@@ -27,6 +30,10 @@ import {
     type ClientIdentity,
     type GatewayAuthenticator,
 } from './auth'
+import {
+    selectWebSocketProtocol,
+    type AccountSessionService,
+} from './accountAuth'
 import { GatewayConnectionRegistry } from './connectionRegistry'
 import { createInMemoryRelayRepositories } from './memoryRepositories'
 import type {
@@ -58,6 +65,7 @@ export interface CreateRelayServerOptions {
     createSessionTimeoutMs?: number
     logger?: boolean
     https?: HttpsServerOptions
+    accountService?: AccountSessionService
 }
 
 export interface RelayServer extends FastifyInstance {
@@ -102,9 +110,39 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         void reply.code(statusCode).send({ error: message })
     })
 
-    await app.register(websocket)
+    await app.register(websocket, { options: { handleProtocols: selectWebSocketProtocol } })
 
     app.get('/health', async () => ({ status: 'ok' }))
+
+    app.post('/v1/auth/login', async (request, reply) => {
+        if (!options.accountService) throw new HttpError(503, 'Account authentication is not configured')
+        const input = parseInput(() => parseLoginDto(request.body))
+        const session = await options.accountService.login(input)
+        if (!session) {
+            await reply.code(401).send({ error: 'Invalid username or password' })
+            return
+        }
+        return parseLoginResultDto(session)
+    })
+
+    app.get('/v1/auth/session', async (request, reply) => {
+        if (!options.accountService) throw new HttpError(503, 'Account authentication is not configured')
+        const session = await options.accountService.current(request)
+        if (!session) {
+            await reply.code(401).send({ error: 'Client authentication required' })
+            return
+        }
+        return parseAuthSessionDto(session)
+    })
+
+    app.post('/v1/auth/logout', async (request, reply) => {
+        if (!options.accountService) throw new HttpError(503, 'Account authentication is not configured')
+        if (!await options.accountService.logout(request)) {
+            await reply.code(401).send({ error: 'Client authentication required' })
+            return
+        }
+        await reply.code(204).send()
+    })
 
     app.get('/v1/gateways', async (request, reply) => {
         const identity = await requireClient(request, reply, clientAuthenticator, 'gateway:list', {})

@@ -1,12 +1,13 @@
-import { parseSessionEventEnvelope, type SessionEventEnvelope } from '@codever/protocol'
+import { CLIENT_EVENT_PROTOCOL, parseSessionEventEnvelope, type SessionEventEnvelope } from '@codever/protocol'
 
 export type SocketConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'closed'
 
 export interface SessionEventSocketOptions {
   baseUrl: string
   sessionId: string
+  accessToken?: string
   after?: number
-  webSocketFactory?: (url: string) => WebSocket
+  webSocketFactory?: (url: string, protocols: string[]) => WebSocket
   schedule?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>
   random?: () => number
   onEvent: (event: SessionEventEnvelope) => void
@@ -21,13 +22,13 @@ export class SessionEventSocket {
   private stopped = false
   private cursor: number
   private readonly seenEventIds = new Set<string>()
-  private readonly webSocketFactory: (url: string) => WebSocket
+  private readonly webSocketFactory: (url: string, protocols: string[]) => WebSocket
   private readonly schedule: NonNullable<SessionEventSocketOptions['schedule']>
   private readonly random: () => number
 
   constructor(private readonly options: SessionEventSocketOptions) {
     this.cursor = options.after ?? 0
-    this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url))
+    this.webSocketFactory = options.webSocketFactory ?? ((url, protocols) => new WebSocket(url, protocols))
     this.schedule = options.schedule ?? ((callback, delay) => setTimeout(callback, delay))
     this.random = options.random ?? Math.random
   }
@@ -37,7 +38,7 @@ export class SessionEventSocket {
     this.setState(this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting')
 
     try {
-      const socket = this.webSocketFactory(this.buildUrl())
+      const socket = this.webSocketFactory(this.buildUrl(), this.buildProtocols())
       this.socket = socket
       socket.addEventListener('open', () => {
         if (socket !== this.socket) return
@@ -111,6 +112,12 @@ export class SessionEventSocket {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(this.options.sessionId)}/events/ws`
     url.search = new URLSearchParams({ after: String(this.cursor) }).toString()
     return url.toString()
+  }
+
+  private buildProtocols(): string[] {
+    const protocols = [CLIENT_EVENT_PROTOCOL]
+    if (this.options.accessToken) protocols.push(`codever.bearer.${this.options.accessToken}`)
+    return protocols
   }
 
   private setState(state: SocketConnectionState): void {

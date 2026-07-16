@@ -1,6 +1,8 @@
 import type { FastifyRequest } from 'fastify'
+import { join } from 'node:path'
 import type { ClientAction, ClientAuthenticator, ClientAuthorizationTarget, ClientIdentity } from './auth'
-import { DenyAllClientAuthenticator, EcdsaP256GatewayAuthenticator } from './auth'
+import { EcdsaP256GatewayAuthenticator } from './auth'
+import { AuthSessionRepository, BearerAccountAuthenticator } from './accountAuth'
 import { loadRelayConfig, StaticEnrolledGatewayKeyRepository } from './config'
 import { createDurableRelayRepositories } from './durableRepositories'
 import { createInMemoryRelayRepositories } from './memoryRepositories'
@@ -26,9 +28,17 @@ const config = await loadRelayConfig()
 const repositories = config.repositoryMode === 'memory'
     ? createInMemoryRelayRepositories()
     : await createDurableRelayRepositories(config.dataDirectory)
+const accountAuthenticator = config.insecureDevAuth
+    ? undefined
+    : new BearerAccountAuthenticator({
+        users: config.users,
+        sessions: await AuthSessionRepository.open(join(config.dataDirectory, 'auth-sessions.json')),
+        gateways: repositories.gateways,
+        sessionTtlSeconds: config.sessionTtlSeconds,
+    })
 const clientAuthenticator = config.insecureDevAuth
     ? new InsecureDevelopmentClientAuthenticator(config.devWorkspaceId)
-    : new DenyAllClientAuthenticator()
+    : accountAuthenticator!
 if (config.insecureDevAuth) {
     process.stderr.write('WARNING: CODEVER_RELAY_INSECURE_DEV_AUTH=true; all client requests are authorized.\n')
 }
@@ -40,6 +50,7 @@ const app = await createRelayServer({
     relayId: config.relayId,
     logger: config.logger,
     clientAuthenticator,
+    ...(accountAuthenticator && { accountService: accountAuthenticator }),
     gatewayAuthenticator: new EcdsaP256GatewayAuthenticator(
         new StaticEnrolledGatewayKeyRepository(config.gateways),
     ),

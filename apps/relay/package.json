@@ -14,6 +14,7 @@
     "start": "tsx src/main.ts",
     "build": "tsup src/main.ts --format esm --platform node --out-dir dist --clean",
     "start:built": "node dist/main.js",
+    "password:hash": "tsx src/passwordCli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

@@ -1,6 +1,6 @@
 # Codever Relay
 
-The Relay accepts outbound Gateway WebSocket connections and serves the Web client API. Client authentication is deny-all by default.
+The Relay accepts outbound Gateway WebSocket connections and serves the Web client API. Normal client access uses local Relay accounts and opaque bearer sessions.
 
 ## Start
 
@@ -26,8 +26,11 @@ Supported environment overrides:
 - `CODEVER_RELAY_HOST`, `CODEVER_RELAY_PORT`, `CODEVER_RELAY_ID`, `CODEVER_RELAY_LOGGER`
 - `CODEVER_RELAY_TLS_CERT_FILE`, `CODEVER_RELAY_TLS_KEY_FILE`
 - `CODEVER_RELAY_ENROLLMENT_FILE`
+- `CODEVER_RELAY_USERS_FILE`
 - `CODEVER_RELAY_DATA_DIRECTORY`, `CODEVER_RELAY_REPOSITORY_MODE`
 - `CODEVER_RELAY_GATEWAYS_JSON` containing an enrollment array or `{ "gateways": [...] }`
+- `CODEVER_RELAY_USERS_JSON` containing a user array or `{ "users": [...] }`
+- `CODEVER_RELAY_SESSION_TTL_SECONDS` (minimum 60; defaults to 30 days)
 - `CODEVER_RELAY_DEV_WORKSPACE_ID`
 
 TLS certificate and key must be supplied together. They are the Relay HTTPS server credentials, not a Gateway identity.
@@ -48,9 +51,44 @@ Copy `enrollment.example.json` to a private deployment configuration location an
 
 The Relay verifies that each key is an EC P-256 public key and that its SHA-256 fingerprint matches. Unknown fields and all private-key fields are rejected. A Gateway identity private key must remain on the Gateway machine and must never be copied to the Relay.
 
-## Client authentication safety
+## Client accounts and sessions
 
-No production client authenticator exists in this entry point yet, so API requests are rejected by default. Local development can explicitly disable this boundary:
+Set `usersFile` to a JSON file based on `users.example.json`, or set `users` directly in the Relay config. Every user accepts only these fields:
+
+- optional `id` (otherwise derived from workspace and username)
+- `username`
+- `passwordHash`
+- `workspaceId`
+- non-empty `roles`: `viewer`, `operator`, `gateway_admin`, or `admin`
+- `enabled`
+
+Plaintext password fields and unknown fields are rejected. Generate a fresh scrypt hash by piping a password on stdin; password arguments are intentionally unsupported:
+
+```powershell
+$secret = Read-Host -AsSecureString
+$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+try {
+  [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | pnpm --filter @codever/relay password:hash
+} finally {
+  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+}
+```
+
+The auth API is:
+
+- `POST /v1/auth/login` with username, password, and optional device name
+- `GET /v1/auth/session` with a bearer token
+- `POST /v1/auth/logout` with a bearer token
+
+Bearer tokens are random opaque values. Only SHA-256 token hashes, account IDs, optional device names, and lifecycle timestamps are stored in `dataDirectory/auth-sessions.json`; logout revokes the matching record and expired records are rejected. User enablement is checked on every request.
+
+REST requests use `Authorization: Bearer <token>`. Browser event WebSockets offer both `codever.events.v1` and `codever.bearer.<token>` in `Sec-WebSocket-Protocol`; the Relay reads the bearer protocol but negotiates only the fixed `codever.events.v1` protocol. The token is never placed in the URL.
+
+`viewer` is read-only. `operator` can also create/configure/cancel/message sessions and answer decisions. `gateway_admin` currently has those same API capabilities, while `admin` allows every client action. All target Gateway resources are checked against the account workspace.
+
+## Insecure development authentication
+
+Local development can explicitly disable account authentication:
 
 ```powershell
 $env:CODEVER_RELAY_INSECURE_DEV_AUTH='true'

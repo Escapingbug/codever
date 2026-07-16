@@ -34,7 +34,7 @@ describe('SessionEventSocket', () => {
   it('resumes from a cursor and ignores duplicate or stale events', () => {
     const socket = new FakeWebSocket()
     const received = vi.fn()
-    const factory = vi.fn(() => socket as unknown as WebSocket)
+    const factory = vi.fn((_url: string, _protocols: string[]) => socket as unknown as WebSocket)
     const client = new SessionEventSocket({
       baseUrl: 'https://relay.example.test', sessionId: 'session-1', after: 4,
       webSocketFactory: factory, onEvent: received,
@@ -46,7 +46,10 @@ describe('SessionEventSocket', () => {
     socket.emit('message', JSON.stringify(event(5)))
     socket.emit('message', JSON.stringify(event(3)))
 
-    expect(factory).toHaveBeenCalledWith('wss://relay.example.test/v1/sessions/session-1/events/ws?after=4')
+    expect(factory).toHaveBeenCalledWith(
+      'wss://relay.example.test/v1/sessions/session-1/events/ws?after=4',
+      ['codever.events.v1'],
+    )
     expect(received).toHaveBeenCalledTimes(1)
     expect(client.getCursor()).toBe(5)
   })
@@ -72,8 +75,28 @@ describe('SessionEventSocket', () => {
     first.emit('close')
     retry?.()
 
-    expect(factory).toHaveBeenLastCalledWith('ws://localhost:4000/api/v1/sessions/session-1/events/ws?after=1')
+    expect(factory).toHaveBeenLastCalledWith(
+      'ws://localhost:4000/api/v1/sessions/session-1/events/ws?after=1',
+      ['codever.events.v1'],
+    )
     expect(schedule).toHaveBeenCalledWith(expect.any(Function), 750)
     expect(states).toContain('reconnecting')
+  })
+
+  it('passes the bearer token as a WebSocket subprotocol and never in the URL', () => {
+    const socket = new FakeWebSocket()
+    const factory = vi.fn((_url: string, _protocols: string[]) => socket as unknown as WebSocket)
+    const client = new SessionEventSocket({
+      baseUrl: 'https://relay.example.test', sessionId: 'session-1', accessToken: 'secret-token',
+      webSocketFactory: factory, onEvent: vi.fn(),
+    })
+
+    client.connect()
+
+    expect(factory).toHaveBeenCalledWith(
+      'wss://relay.example.test/v1/sessions/session-1/events/ws?after=0',
+      ['codever.events.v1', 'codever.bearer.secret-token'],
+    )
+    expect(factory.mock.calls[0]?.[0]).not.toContain('secret-token')
   })
 })

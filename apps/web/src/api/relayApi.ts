@@ -10,6 +10,9 @@ import type {
   ResolveDecisionDto,
   SendMessageDto,
   SessionEventEnvelope,
+  AuthSessionDto,
+  LoginDto,
+  LoginResultDto,
 } from '@codever/protocol'
 import {
   parseGatewayListDto,
@@ -18,13 +21,16 @@ import {
   parseSessionDto,
   parseSessionEventsDto,
   parseSessionListDto,
+  parseAuthSessionDto,
+  parseLoginResultDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
 
 export interface RelayApiOptions {
-  baseUrl: string
+  baseUrl: string | (() => string | undefined)
   fetch?: typeof globalThis.fetch
   getAccessToken?: () => string | undefined
+  onUnauthorized?: () => void
 }
 
 export class RelayApiError extends Error {
@@ -39,14 +45,44 @@ export class RelayApiError extends Error {
 }
 
 export class RelayApi {
-  readonly baseUrl: string
+  private readonly baseUrlSource: RelayApiOptions['baseUrl']
   private readonly fetcher: typeof globalThis.fetch
   private readonly getAccessToken?: () => string | undefined
+  private readonly onUnauthorized?: () => void
 
   constructor(options: RelayApiOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '')
+    this.baseUrlSource = options.baseUrl
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
     this.getAccessToken = options.getAccessToken
+    this.onUnauthorized = options.onUnauthorized
+  }
+
+  get baseUrl(): string {
+    const value = typeof this.baseUrlSource === 'function' ? this.baseUrlSource() : this.baseUrlSource
+    return (value ?? '').replace(/\/+$/, '')
+  }
+
+  get accessToken(): string | undefined {
+    return this.getAccessToken?.()
+  }
+
+  async checkHealth(): Promise<void> {
+    await this.request('/health', {}, false)
+  }
+
+  async login(body: LoginDto): Promise<LoginResultDto> {
+    return parseLoginResultDto(await this.request('/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }, false))
+  }
+
+  async getAuthSession(): Promise<AuthSessionDto> {
+    return parseAuthSessionDto(await this.request('/v1/auth/session'))
+  }
+
+  async logout(): Promise<void> {
+    await this.request('/v1/auth/logout', { method: 'POST' })
   }
 
   async listGateways(): Promise<Gateway[]> {
@@ -125,15 +161,16 @@ export class RelayApi {
     })
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<unknown> {
+  private async request(path: string, init: RequestInit = {}, authenticate = true): Promise<unknown> {
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     if (init.body) headers.set('Content-Type', 'application/json')
-    const accessToken = this.getAccessToken?.()
+    const accessToken = authenticate ? this.getAccessToken?.() : undefined
     if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
 
     let response: Response
     try {
+      if (!this.baseUrl) throw new Error('No Relay profile is configured')
       response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers })
     } catch (error) {
       throw new RelayApiError(error instanceof Error ? error.message : 'Relay is unreachable', 0, 'network_error')
@@ -141,6 +178,7 @@ export class RelayApi {
 
     const data = await response.json().catch(() => undefined)
     if (!response.ok) {
+      if (response.status === 401 && authenticate) this.onUnauthorized?.()
       const details = asErrorDetails(data)
       throw new RelayApiError(details.message ?? response.statusText, response.status, details.code)
     }
@@ -155,6 +193,7 @@ function createIdempotencyKey(): string {
 function asErrorDetails(value: unknown): { code?: string; message?: string } {
   if (!value || typeof value !== 'object') return {}
   const record = value as Record<string, unknown>
+  if (typeof record.error === 'string') return { message: record.error }
   const source = record.error && typeof record.error === 'object'
     ? record.error as Record<string, unknown>
     : record

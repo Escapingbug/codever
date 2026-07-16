@@ -216,6 +216,40 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .mobile-breadcrumb { display: none; }
 .mobile-controls-button { display: none; }
 
+.app-shell--entry { display: block; }
+.app-shell--entry .main-stage { min-height: 100vh; }
+.entry-page { display: grid; min-height: 100vh; place-items: center; padding: 28px 16px; background: radial-gradient(circle at 50% 0%, rgba(196,243,106,.08), transparent 34%), var(--bg); }
+.entry-card { width: min(560px, 100%); padding: clamp(24px, 5vw, 42px); border: 1px solid var(--line); border-radius: 18px; background: rgba(23,26,21,.96); box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+.entry-card--narrow { width: min(460px, 100%); }
+.entry-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 38px; font-weight: 750; }
+.entry-copy { margin-bottom: 26px; color: var(--muted); font-size: .82rem; line-height: 1.6; overflow-wrap: anywhere; }
+.relay-form { display: grid; gap: 15px; }
+.relay-form label { display: grid; gap: 6px; color: var(--muted); font-size: .7rem; font-weight: 650; }
+.relay-form input { width: 100%; min-height: 44px; padding: 9px 11px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--panel-2); }
+.relay-form input:focus { border-color: #617a3c; box-shadow: 0 0 0 3px rgba(196,243,106,.07); }
+.form-help { margin: -3px 0 0; color: var(--muted); font-size: .68rem; line-height: 1.5; }
+.success-banner { margin: 0; padding: 11px 13px; color: var(--accent); border: 1px solid #42562d; border-radius: 8px; background: var(--accent-dim); font-size: .72rem; }
+.relay-form .error-banner { margin: 0; font-size: .72rem; line-height: 1.5; }
+.entry-submit { width: 100%; min-height: 44px; margin-top: 3px; }
+.text-link { display: block; margin-top: 18px; color: var(--accent); font-size: .72rem; text-align: center; }
+.settings-link { position: sticky; bottom: 0; display: flex; align-items: center; gap: 9px; margin: auto 8px 8px; padding: 10px; color: var(--muted); border: 1px solid var(--line-soft); border-radius: 9px; background: #171a15; font-size: .75rem; }
+.settings-link:hover, .settings-link.router-link-active { color: var(--text); background: var(--panel-3); }
+.nav-rail--gateways { display: flex; flex-direction: column; }
+.nav-rail--gateways .nav-list { flex: 1; }
+.settings-page { max-width: 960px; }
+.settings-section { margin-bottom: 38px; }
+.profile-list { display: grid; gap: 10px; }
+.profile-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
+.profile-card--active { border-color: #4b6032; }
+.profile-card > div:first-child { display: grid; min-width: 0; gap: 5px; }
+.profile-card small { overflow-wrap: anywhere; }
+.profile-card .relay-form { width: 100%; }
+.active-badge { width: max-content; padding: 3px 7px; color: var(--accent); border-radius: 10px; background: var(--accent-dim); font-size: .6rem; }
+.profile-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.account-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.account-card h2 { margin-bottom: 4px; }
+.account-card p { margin: 0; color: var(--muted); font-size: .72rem; }
+
 @media (max-width: 1120px) {
   .app-shell { grid-template-columns: 190px 250px minmax(0, 1fr); }
   .session-page { grid-template-columns: minmax(0, 1fr); }
@@ -265,6 +299,12 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .composer-wrap { padding: 6px 10px 10px; }
   .inspector { top: 54px; }
   .mobile-breadcrumb { display: inline; color: var(--muted); font-size: .68rem; }
+  .entry-page { min-height: 100dvh; padding: 16px; }
+  .entry-card { padding: 24px 18px; }
+  .settings-page { padding-top: 26px; }
+  .profile-card, .account-card { align-items: stretch; flex-direction: column; }
+  .profile-actions { flex-wrap: wrap; }
+  .profile-actions .button { flex: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

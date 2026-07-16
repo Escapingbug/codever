@@ -1,4 +1,5 @@
 export * from './auth'
+export * from './accountAuth'
 export * from './connectionRegistry'
 export * from './config'
 export * from './memoryRepositories'

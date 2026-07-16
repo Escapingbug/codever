@@ -86,6 +86,7 @@ function startLiveConnection(id: string): void {
   const cursor = events.value.at(-1)?.seq ?? 0
   eventSocket = new SessionEventSocket({
     baseUrl: state.api.baseUrl,
+    accessToken: state.api.accessToken,
     sessionId: id,
     after: cursor,
     onEvent: (event) => {
@@ -213,7 +214,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
       </section>
 
       <aside class="inspector" :class="{ 'inspector--open': selectedEvent }">
-        <div class="inspector-heading"><div><span class="eyebrow">Event inspector</span><h2>{{ selectedEvent?.event.kind.replaceAll('_', ' ') ?? 'Details' }}</h2></div><button class="icon-button" @click="selectedEvent = undefined">×</button></div>
+        <div class="inspector-heading"><div><span class="eyebrow">Event inspector</span><h2>{{ selectedEvent?.event.kind.replaceAll('_', ' ') ?? 'Details' }}</h2></div><button class="icon-button" aria-label="Close inspector" @click="selectedEvent = undefined">×</button></div>
         <template v-if="selectedEvent"><dl><dt>Sequence</dt><dd>{{ selectedEvent.seq }}</dd><dt>Event ID</dt><dd>{{ selectedEvent.eventId }}</dd><dt>Source</dt><dd>{{ selectedEvent.event.meta?.source ?? 'live' }}</dd><dt>Time</dt><dd>{{ new Date(selectedEvent.timestamp).toLocaleString() }}</dd></dl><pre>{{ JSON.stringify(selectedEvent.event, null, 2) }}</pre></template>
         <div v-else class="inspector-empty"><span>◇</span><p>Select an event to inspect its structured payload.</p></div>
       </aside>
