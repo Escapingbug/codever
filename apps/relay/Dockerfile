@@ -10,6 +10,9 @@ RUN pnpm install --frozen-lockfile --filter @codever/relay... \
     && pnpm --filter @codever/relay build \
     && pnpm store prune
 
+RUN mkdir -p /app/data \
+    && chown node:node /app/data
+
 USER node
 EXPOSE 8787
 
