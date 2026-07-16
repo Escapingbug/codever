@@ -11,6 +11,10 @@ import type {
   SendMessageDto,
   SessionEventEnvelope,
   AuthSessionDto,
+  ApproveGatewayEnrollmentDto,
+  EnrolledGatewayKeyDto,
+  GatewayEnrollmentDto,
+  GatewayEnrollmentListDto,
   LoginDto,
   LoginResultDto,
 } from '@codever/protocol'
@@ -22,6 +26,10 @@ import {
   parseSessionEventsDto,
   parseSessionListDto,
   parseAuthSessionDto,
+  parseEnrolledGatewayKeyDto,
+  parseEnrolledGatewayKeyListDto,
+  parseGatewayEnrollmentDto,
+  parseGatewayEnrollmentListDto,
   parseLoginResultDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
@@ -93,6 +101,40 @@ export class RelayApi {
   async listGateways(): Promise<Gateway[]> {
     if (this.isDemo) return demoRelay.listGateways()
     return parseGatewayListDto(await this.request('/v1/gateways')).gateways
+  }
+
+  async listGatewayEnrollments(): Promise<GatewayEnrollmentListDto> {
+    if (this.isDemo) return demoRelay.listEnrollments()
+    return parseGatewayEnrollmentListDto(await this.request('/v1/gateway-enrollments'))
+  }
+
+  async getGatewayEnrollment(code: string): Promise<GatewayEnrollmentDto> {
+    if (this.isDemo) return demoRelay.getEnrollment(code)
+    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}`))
+  }
+
+  async approveGatewayEnrollment(code: string, body: ApproveGatewayEnrollmentDto): Promise<GatewayEnrollmentDto> {
+    if (this.isDemo) return demoRelay.approveEnrollment(code, body)
+    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}/approve`, {
+      method: 'POST', body: JSON.stringify(body),
+    }))
+  }
+
+  async rejectGatewayEnrollment(code: string, reason?: string): Promise<GatewayEnrollmentDto> {
+    if (this.isDemo) return demoRelay.rejectEnrollment(code, reason)
+    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}/reject`, {
+      method: 'POST', body: JSON.stringify({ ...(reason && { reason }) }),
+    }))
+  }
+
+  async listEnrolledGateways(): Promise<EnrolledGatewayKeyDto[]> {
+    if (this.isDemo) return demoRelay.listEnrolledGateways()
+    return parseEnrolledGatewayKeyListDto(await this.request('/v1/enrolled-gateways')).gateways
+  }
+
+  async revokeEnrolledGateway(gatewayId: string): Promise<EnrolledGatewayKeyDto> {
+    if (this.isDemo) return demoRelay.revokeGateway(gatewayId)
+    return parseEnrolledGatewayKeyDto(await this.request(`/v1/enrolled-gateways/${encodeURIComponent(gatewayId)}/revoke`, { method: 'POST' }))
   }
 
   async listProjects(gatewayId: string): Promise<Project[]> {
@@ -210,6 +252,10 @@ export class RelayApi {
 
 function createIdempotencyKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function normalizePairingCode(value: string): string {
+  return value.replace(/[\s-]/g, '').toUpperCase()
 }
 
 function asErrorDetails(value: unknown): { code?: string; message?: string } {

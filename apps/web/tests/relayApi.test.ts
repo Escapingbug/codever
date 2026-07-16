@@ -87,4 +87,30 @@ describe('RelayApi', () => {
     await expect(api.listGateways()).rejects.toMatchObject({ status: 401 })
     expect(unauthorized).toHaveBeenCalledOnce()
   })
+
+  it('confirms the exact pending Gateway identity when approving enrollment', async () => {
+    const pending = {
+      enrollmentId: 'enrollment-1', code: 'ABCD2345', gatewayId: 'gateway-new', workspaceId: 'workspace-1',
+      name: 'New Gateway', platform: 'linux', fingerprint: 'sha256:pending-gateway-fingerprint', status: 'pending',
+      createdAt: timestamp, expiresAt: '2026-07-16T09:00:00.000Z',
+    }
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(pending), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        enrollmentId: pending.enrollmentId, gatewayId: pending.gatewayId, workspaceId: pending.workspaceId,
+        name: pending.name, platform: pending.platform, fingerprint: pending.fingerprint, status: 'approved',
+        createdAt: pending.createdAt, expiresAt: pending.expiresAt, approvedAt: timestamp,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const api = new RelayApi({ baseUrl: 'https://relay.example.test', fetch: fetcher })
+
+    const request = await api.getGatewayEnrollment('abcd-2345')
+    await api.approveGatewayEnrollment('abcd-2345', {
+      fingerprint: request.fingerprint, name: request.name, platform: request.platform,
+    })
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe('https://relay.example.test/v1/gateway-enrollments/ABCD2345')
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      fingerprint: pending.fingerprint, name: pending.name, platform: pending.platform,
+    })
+  })
 })

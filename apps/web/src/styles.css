@@ -238,6 +238,11 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .nav-rail--gateways .nav-list { flex: 1; }
 .settings-page { max-width: 960px; }
 .settings-section { margin-bottom: 38px; }
+.pairing-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.pairing-form label { display: grid; gap: 7px; color: var(--muted); font-weight: 700; }
+.pairing-confirmation { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--panel); }
+.pairing-confirmation code { overflow-wrap: anywhere; }
+.section-heading--sub { margin-top: 24px; }
 .profile-list { display: grid; gap: 10px; }
 .profile-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
 .profile-card--active { border-color: #4b6032; }
@@ -305,6 +310,7 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .profile-card, .account-card { align-items: stretch; flex-direction: column; }
   .profile-actions { flex-wrap: wrap; }
   .profile-actions .button { flex: 1; }
+  .pairing-form { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

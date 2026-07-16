@@ -1,9 +1,13 @@
 import type {
   AccountProfile,
+  ApproveGatewayEnrollmentDto,
   AuthSessionDto,
   CodeverSession,
   CreateSessionDto,
   Gateway,
+  GatewayEnrollmentDto,
+  GatewayEnrollmentListDto,
+  EnrolledGatewayKeyDto,
   JsonObject,
   JsonValue,
   LoginDto,
@@ -21,6 +25,16 @@ const timestamp = '2026-07-16T12:00:00.000Z'
 const user: AccountProfile = {
   id: 'demo-user', username: 'demo', workspaceId: 'demo-workspace', roles: ['admin'],
 }
+const demoEnrollment: GatewayEnrollmentDto = {
+  enrollmentId: 'demo-enrollment-new-laptop', code: 'DEMO2345', gatewayId: 'demo-gateway-pending',
+  workspaceId: 'demo-workspace', name: 'New studio workstation', platform: 'linux',
+  fingerprint: 'sha256:demo-preview-gateway-fingerprint-2345', status: 'pending',
+  createdAt: '2026-07-16T11:58:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z',
+}
+const enrolledGatewayKeys: EnrolledGatewayKeyDto[] = [{
+  gatewayId, workspaceId: 'demo-workspace', name: 'Development workstation', platform: 'windows',
+  fingerprint: 'sha256:demo-development-workstation-key', enabled: true, enrolledAt: timestamp,
+}]
 
 const gateways: Gateway[] = [{
   id: gatewayId,
@@ -138,6 +152,40 @@ export const demoRelay = {
     return { expiresAt: '2099-01-01T00:00:00.000Z', user }
   },
   listGateways: (): Gateway[] => structuredClone(gateways),
+  listEnrollments(): GatewayEnrollmentListDto {
+    return { bootstrapComplete: true, enrollments: demoEnrollment.status === 'pending' ? [structuredClone(demoEnrollment)] : [] }
+  },
+  getEnrollment(code: string): GatewayEnrollmentDto {
+    if (code.replace(/[\s-]/g, '').toUpperCase() !== demoEnrollment.code) throw new Error('Demo pairing code is DEMO-2345')
+    return structuredClone(demoEnrollment)
+  },
+  approveEnrollment(code: string, confirmation: ApproveGatewayEnrollmentDto): GatewayEnrollmentDto {
+    const enrollment = this.getEnrollment(code)
+    if (confirmation.fingerprint !== enrollment.fingerprint || confirmation.name !== enrollment.name || confirmation.platform !== enrollment.platform) throw new Error('Gateway confirmation details changed')
+    demoEnrollment.status = 'approved'
+    demoEnrollment.approvedAt = new Date().toISOString()
+    const key: EnrolledGatewayKeyDto = {
+      gatewayId: enrollment.gatewayId, workspaceId: enrollment.workspaceId, name: enrollment.name,
+      platform: enrollment.platform, fingerprint: enrollment.fingerprint, enabled: true, enrolledAt: demoEnrollment.approvedAt,
+    }
+    enrolledGatewayKeys.push(key)
+    return structuredClone(demoEnrollment)
+  },
+  rejectEnrollment(code: string, reason?: string): GatewayEnrollmentDto {
+    this.getEnrollment(code)
+    demoEnrollment.status = 'rejected'
+    demoEnrollment.rejectedAt = new Date().toISOString()
+    if (reason) demoEnrollment.rejectionReason = reason
+    return structuredClone(demoEnrollment)
+  },
+  listEnrolledGateways: (): EnrolledGatewayKeyDto[] => structuredClone(enrolledGatewayKeys),
+  revokeGateway(id: string): EnrolledGatewayKeyDto {
+    const key = enrolledGatewayKeys.find(value => value.gatewayId === id)
+    if (!key) throw new Error('Enrolled Gateway not found')
+    key.enabled = false
+    key.revokedAt = new Date().toISOString()
+    return structuredClone(key)
+  },
   listProjects: (id: string): Project[] => structuredClone(projects.filter(project => project.gatewayId === id)),
   listSessions: (id: string): CodeverSession[] => structuredClone(sessions.filter(session => session.projectId === id)),
   getSession(id: string): CodeverSession {

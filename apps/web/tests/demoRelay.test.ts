@@ -50,4 +50,17 @@ describe('offline Demo Relay', () => {
     const api = new RelayApi({ baseUrl: DEMO_RELAY_URL })
     await expect(api.login({ username: 'real', password: 'secret' })).rejects.toThrow('demo / demo')
   })
+
+  it('previews Gateway pairing and approval without network access', async () => {
+    const api = new RelayApi({ baseUrl: DEMO_RELAY_URL })
+    const pending = await api.getGatewayEnrollment('DEMO-2345')
+
+    const enrolled = await api.approveGatewayEnrollment('DEMO-2345', {
+      fingerprint: pending.fingerprint, name: pending.name, platform: pending.platform,
+    })
+
+    expect(enrolled.gatewayId).toBe(pending.gatewayId)
+    expect(enrolled.status).toBe('approved')
+    expect((await api.listGatewayEnrollments()).enrollments).toEqual([])
+  })
 })

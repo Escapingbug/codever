@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import RelayProfileForm from '../components/RelayProfileForm.vue'
+import GatewayEnrollmentPanel from '../components/GatewayEnrollmentPanel.vue'
 import { clientSession, type RelayProfile } from '../state/clientSession'
 
 const router = useRouter()
@@ -43,6 +44,8 @@ async function logout(): Promise<void> {
         </article>
       </div>
     </section>
+
+    <GatewayEnrollmentPanel />
 
     <section class="settings-section account-card">
       <div><span class="eyebrow">Current account</span><h2>{{ clientSession.activeAuth.value?.user.username }}</h2><p>{{ clientSession.activeAuth.value?.user.roles.join(', ') }} · expires {{ new Date(clientSession.activeAuth.value?.expiresAt ?? '').toLocaleString() }}</p></div>
