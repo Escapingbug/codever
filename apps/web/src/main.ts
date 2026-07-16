@@ -6,13 +6,17 @@ import { clientSession } from './state/clientSession'
 import { registerCodeverServiceWorker } from './pwa/serviceWorker'
 import './styles.css'
 
-const app = createApp(App)
-app.provide(relayApiKey, clientSession.api)
-const router = createCodeverRouter(clientSession)
-clientSession.onUnauthorized(() => { void router.replace({ name: 'login' }) })
-app.use(router)
-app.mount('#app')
+export async function startCodever(): Promise<void> {
+  await clientSession.initialize()
+  const app = createApp(App)
+  app.provide(relayApiKey, clientSession.api)
+  const router = createCodeverRouter(clientSession)
+  clientSession.onUnauthorized(() => { void router.replace({ name: 'login' }) })
+  app.use(router)
+  if (window.location.hostname === 'tauri.localhost') await router.push('/')
+  app.mount('#app')
 
-void registerCodeverServiceWorker().catch((error: unknown) => {
-  console.warn('Codever service worker registration failed', error)
-})
+  void registerCodeverServiceWorker().catch((error: unknown) => {
+    console.warn('Codever service worker registration failed', error)
+  })
+}
