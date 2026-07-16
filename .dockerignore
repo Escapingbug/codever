@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/dist
+**/target
+**/gen
+*.apk
+*.apk.idsig
+android-*.png
+android-*.xml
+
