@@ -184,7 +184,7 @@ export class SecureRelayClient {
     this.failure = error
     const socket = this.socket
     this.socket = undefined
-    if (socket?.readyState === 0 || socket?.readyState === 1) socket.close(1011, 'Secure session failed')
+    if (socket?.readyState === 0 || socket?.readyState === 1) socket.close(4001, 'Secure session failed')
     this.options.onError?.(error)
     this.connectState?.reject(error)
     this.connectState = undefined

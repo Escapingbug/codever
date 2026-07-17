@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import type { CodeverSession, JsonValue, PatchSessionConfigDto, ProviderSessionListDto, SessionEventEnvelope } from '@codever/protocol'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 
 const route = useRoute()
+const router = useRouter()
 const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId))
 const projectId = computed(() => String(route.params.projectId))
@@ -28,6 +29,7 @@ const draft = ref('')
 const sendWhenOnline = ref(false)
 const sending = ref(false)
 const savingControls = ref(false)
+const updatingArchive = ref(false)
 const showMobileControls = ref(false)
 const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
@@ -127,10 +129,36 @@ async function sendMessage(): Promise<void> {
     })
     draft.value = ''
     sendWhenOnline.value = false
+    if (session.value?.archivedAt) {
+      session.value = { ...session.value, archivedAt: undefined }
+      state.replaceSession(session.value)
+    }
   } catch (error) {
     liveError.value = error instanceof Error ? error.message : 'Message was not accepted'
   } finally {
     sending.value = false
+  }
+}
+
+async function toggleArchive(): Promise<void> {
+  if (!canMutate.value || !session.value || updatingArchive.value) return
+  updatingArchive.value = true
+  liveError.value = ''
+  const archived = !session.value.archivedAt
+  try {
+    await state.api.setSessionArchived(sessionId.value, archived)
+    session.value = {
+      ...session.value,
+      ...(archived ? { archivedAt: new Date().toISOString() } : { archivedAt: undefined }),
+    }
+    state.replaceSession(session.value)
+    if (archived) {
+      await router.replace({ name: 'project', params: { gatewayId: gatewayId.value, projectId: projectId.value } })
+    }
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Task collection was not updated'
+  } finally {
+    updatingArchive.value = false
   }
 }
 
@@ -192,6 +220,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
       <button class="icon-button mobile-controls-button" aria-label="Session controls" @click="showMobileControls = !showMobileControls">⚙</button>
       <SessionControls v-if="session" :class="{ 'session-controls--mobile-open': showMobileControls }" :session="session" :capabilities="providerCapabilities" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
       <button v-if="session?.state === 'querying'" class="button button--danger" :disabled="!canMutate" @click="cancel">Stop</button>
+      <button v-else-if="session" class="button" :disabled="!canMutate || updatingArchive" @click="toggleArchive">{{ session.archivedAt ? 'Restore' : 'Archive' }}</button>
     </header>
 
     <div v-if="!gatewayOnline || !liveConnected" class="connection-banner" :class="{ 'connection-banner--offline': !gatewayOnline }">

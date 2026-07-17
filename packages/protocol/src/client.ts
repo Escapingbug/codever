@@ -15,6 +15,17 @@ export const ProviderSessionListDtoSchema = z.object({
     discoverySupported: z.boolean(),
     models: z.array(ProviderModelSchema),
     permissionModes: z.array(z.string().min(1)),
+    capabilities: z.object({
+        resume: z.boolean(),
+        cancel: z.boolean(),
+        changeModel: z.boolean(),
+        changeMode: z.boolean(),
+        fork: z.boolean(),
+        retry: z.boolean(),
+        editHistory: z.boolean(),
+        listBranches: z.boolean(),
+        attachFiles: z.boolean(),
+    }).strict(),
     sessions: z.array(ProviderSessionSchema),
 }).strict()
 export const SessionEventsDtoSchema = z.object({

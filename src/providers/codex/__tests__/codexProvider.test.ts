@@ -155,6 +155,28 @@ describe('CodexProvider', () => {
         await expect(provider.getSessionFirstMessage('session-with-context'))
             .resolves.toBe('The actual user prompt')
     })
+
+    it('does not expose subagent rollouts as separate sessions', async () => {
+        const { CodexProvider } = await import('../index')
+        const cwd = path.join(tmpdir(), 'project')
+        const codexHome = await createCodexHome([{
+            id: 'main-session',
+            cwd,
+            message: 'Main task',
+            timestamp: '2026-07-15T03:00:00.000Z',
+        }, {
+            id: 'subagent-rollout',
+            sessionId: 'main-session',
+            cwd,
+            message: 'Delegated turn',
+            timestamp: '2026-07-15T04:00:00.000Z',
+        }])
+
+        const sessions = await new CodexProvider({ codexHome }).listSessions(cwd)
+
+        expect(sessions).toHaveLength(1)
+        expect(sessions[0]?.sessionId).toBe('main-session')
+    })
 })
 
 describe('parseCodexModels', () => {
@@ -191,6 +213,7 @@ describe('parseCodexModels', () => {
 
 async function createCodexHome(sessions: Array<{
     id: string
+    sessionId?: string
     cwd: string
     message: string
     timestamp: string
@@ -209,7 +232,12 @@ async function createCodexHome(sessions: Array<{
             JSON.stringify({
                 timestamp: session.timestamp,
                 type: 'session_meta',
-                payload: { id: session.id, cwd: session.cwd, timestamp: session.timestamp },
+                payload: {
+                    id: session.id,
+                    session_id: session.sessionId ?? session.id,
+                    cwd: session.cwd,
+                    timestamp: session.timestamp,
+                },
             }),
             ...(session.malformedLine ? ['not-json'] : []),
             ...(session.injectedContext ? [JSON.stringify({

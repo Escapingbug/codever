@@ -170,7 +170,14 @@ interface Project {
 
 Project roots are created locally or by an explicitly authorized remote operation. The Gateway canonicalizes paths and rejects traversal, symlink escapes where policy requires it, and paths outside configured allowlists.
 
-### 6.4 Session
+### 6.4 Provider-native task and execution bridge
+
+The user-visible task is the Provider's native session. A task is identified by
+`(gatewayId, projectId, provider, providerSessionId)` and may have been created by
+the local Provider CLI or through Codever. Local and remote use therefore remain
+two entrances to the same Provider history.
+
+`CodeverSession` is an internal, lazily created execution bridge:
 
 ```ts
 interface CodeverSession {
@@ -186,11 +193,17 @@ interface CodeverSession {
     config: Record<string, unknown>
     createdAt: string
     updatedAt: string
+    archivedAt?: string
     lastEventSeq: number
 }
 ```
 
-`providerSessionId` remains opaque and Gateway-local. `CodeverSession.id` is the stable identity used by clients, Relay, Telegram bindings, scheduler, and MCP tools.
+`providerSessionId` remains opaque and Gateway-local. Opening a discovered native
+task atomically creates or reuses one bridge. Merely discovering or viewing a
+task does not make it active and does not create a second Provider session.
+`archivedAt` is client organization metadata; archiving never closes or deletes
+the Provider-native session. Sending a new message restores an archived task to
+the recent collection.
 
 ### 6.5 Channel Binding
 
@@ -520,7 +533,7 @@ Desktop layout:
 Mobile layout uses the same routes and components with Project-first session navigation:
 
 ```text
-Gateway list -> Project / active sessions -> New or continue session -> Conversation -> Event detail
+Projects -> unified Provider-native task list -> Conversation workspace
 ```
 
 Primary route identity:
@@ -544,9 +557,10 @@ Primary route identity:
 
 - project identity and Gateway location;
 - repository/worktree status where available;
-- currently executing sessions across providers;
-- active sessions across all Providers as the primary entry point;
-- a New Session flow that either starts fresh or browses provider-native history;
+- currently executing tasks across providers;
+- one searchable task list containing native sessions from every Provider;
+- recent, archived, and running are views over the same task collection;
+- New Task always starts fresh; continuing happens by opening an existing task;
 - scheduled tasks;
 - Telegram/channel bindings;
 - project access policy.
@@ -572,14 +586,20 @@ Conversation identity is deliberately limited to User and Agent. User prompts re
 
 ### 13.5 Project-first Session Semantics
 
-The client does not ask the user to create a Codever session and then choose a Provider. The visible flow is:
+The client does not expose Codever bridge sessions as a management concept. The visible flow is:
 
-1. Select a Gateway and Project.
-2. See currently active sessions across all Providers.
-3. Select New Session.
-4. Either start a completely new task after choosing a Provider, or choose a Provider and continue one of its native sessions.
+1. Select a Project; Gateway identity is supporting metadata, not a required navigation step.
+2. See native tasks discovered from all Providers, including sessions created by local CLIs.
+3. Open any task to continue it, creating or reusing its internal bridge on demand.
+4. Select New Task only when a completely fresh Provider session is intended.
 
 `CodeverSession` remains an internal durable routing, event, decision, and audit handle. When a user opens a provider-native session, Gateway atomically creates or reuses one internal bridge keyed by `(projectId, provider, providerSessionId)`. The client does not expose this bridge as a separate management step.
+
+There is no Codever-specific `active/inactive` lifecycle. Runtime state describes
+whether a turn is running, waiting, idle, offline, or failed. Recent/archive is a
+separate organizational dimension. A local CLI turn and a remote turn update the
+same native history; simultaneous writers must be rejected or explicitly forked
+rather than silently creating duplicate tasks.
 
 Provider capability discovery supplies model choices, supported reasoning levels, and permission modes. The UI renders these as native controls. Slash commands remain an optional compatibility and expert surface, not the primary configuration interface.
 
@@ -752,6 +772,8 @@ Implementation is isolated in a dedicated worktree and feature branch. It may re
 11. Project roots are explicit Gateway resources, not arbitrary remote paths.
 12. Provider context and visible Codever transcript are separate persisted concepts.
 13. Telegram bindings do not define session identity.
+14. Provider-native sessions are the user-visible task identity; Codever sessions are execution bridges.
+15. Archive state never closes or deletes Provider history.
 
 ## 19. Initial Decisions
 

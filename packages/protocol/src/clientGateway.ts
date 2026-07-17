@@ -51,6 +51,11 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         input: CancelSessionDtoSchema,
     }).strict(),
     z.object({
+        kind: z.literal('session.archive.set'),
+        sessionId: OpaqueIdSchema,
+        archived: z.boolean(),
+    }).strict(),
+    z.object({
         kind: z.literal('session.config.patch'),
         sessionId: OpaqueIdSchema,
         input: PatchSessionConfigDtoSchema,

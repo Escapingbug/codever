@@ -56,6 +56,7 @@ export const CodeverSessionSchema = z.object({
     config: JsonObjectSchema,
     createdAt: IsoDateTimeSchema,
     updatedAt: IsoDateTimeSchema,
+    archivedAt: IsoDateTimeSchema.optional(),
     lastEventSeq: NonNegativeIntegerSchema,
 }).strict()
 
@@ -68,7 +69,7 @@ export const ProviderSessionSchema = z.object({
     firstMessage: z.string().optional(),
     codeverSessionId: OpaqueIdSchema.optional(),
     state: SessionStateSchema.optional(),
-    active: z.boolean(),
+    archivedAt: IsoDateTimeSchema.optional(),
 }).strict()
 
 export const ProviderModelSchema = z.object({

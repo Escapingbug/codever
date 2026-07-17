@@ -99,14 +99,18 @@ export class GatewaySessionService {
             .filter(session => session.provider === provider && session.state !== 'closed' && session.providerSessionId)
         const bridgeByProviderId = new Map(bridges.map(session => [session.providerSessionId!, session]))
         const factory = this.options.providerDiscoveryFactory
-        if (!factory) return { projectId, provider, discoverySupported: false, models: [], permissionModes: [], sessions: [] }
+        if (!factory) return {
+            projectId, provider, discoverySupported: false, models: [], permissionModes: [],
+            capabilities: providerCapabilities(false, false, false), sessions: [],
+        }
 
         const discoveryProvider = await factory(provider, project)
         try {
             const models = discoveryProvider.getAvailableModels()
             const permissionModes = discoveryProvider.getAvailablePermissionModes()
+            const capabilities = providerCapabilities(Boolean(discoveryProvider.listSessions), models.length > 0, permissionModes.length > 0)
             if (!discoveryProvider.listSessions) {
-                return { projectId, provider, discoverySupported: false, models, permissionModes, sessions: [] }
+                return { projectId, provider, discoverySupported: false, models, permissionModes, capabilities, sessions: [] }
             }
             const discovered = await discoveryProvider.listSessions(project.canonicalRoot)
             const sessions: ProviderSession[] = discovered.map(entry => {
@@ -118,11 +122,14 @@ export class GatewaySessionService {
                     updatedAt: new Date(normalizeEpoch(entry.updated)).toISOString(),
                     ...(entry.cwd ? { cwd: entry.cwd } : {}),
                     ...(entry.firstMessage !== undefined ? { firstMessage: entry.firstMessage } : {}),
-                    ...(bridge ? { codeverSessionId: bridge.id, state: bridge.state } : {}),
-                    active: bridge?.state === 'querying' || bridge?.state === 'canceling',
+                    ...(bridge ? {
+                        codeverSessionId: bridge.id,
+                        state: bridge.state,
+                        ...(bridge.archivedAt ? { archivedAt: bridge.archivedAt } : {}),
+                    } : {}),
                 }
             })
-            return { projectId, provider, discoverySupported: true, models, permissionModes, sessions }
+            return { projectId, provider, discoverySupported: true, models, permissionModes, capabilities, sessions }
         } finally {
             await discoveryProvider.destroy?.().catch(() => undefined)
         }
@@ -149,6 +156,14 @@ export class GatewaySessionService {
             : idempotencyKey
         const queryInput = isSendMessageDto(input) ? input.text : input as AgentQueryInput
         return this.idempotent(`${sessionId}:send`, key, () => this.serialize(sessionId, async () => {
+            const session = await this.requireOpenSession(sessionId)
+            if (session.archivedAt) {
+                await this.options.repository.save({
+                    ...session,
+                    archivedAt: undefined,
+                    updatedAt: new Date(this.now()).toISOString(),
+                })
+            }
             const runtime = await this.runtimeFor(sessionId)
             const result = await runtime.startQuery(queryInput)
             await this.flushMetadata()
@@ -166,6 +181,18 @@ export class GatewaySessionService {
             await this.flushMetadata()
             return cancelled
         })
+    }
+
+    setArchived(sessionId: string, archived: boolean, idempotencyKey?: string): Promise<CodeverSession> {
+        return this.idempotent(`${sessionId}:archive`, idempotencyKey, () => this.serialize(sessionId, async () => {
+            const session = await this.requireOpenSession(sessionId)
+            const updatedAt = new Date(this.now()).toISOString()
+            return this.options.repository.save({
+                ...session,
+                ...(archived ? { archivedAt: updatedAt } : { archivedAt: undefined }),
+                updatedAt,
+            })
+        }))
     }
 
     patchConfig(
@@ -443,6 +470,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeEpoch(value: number): number {
     return value > 0 && value < 10_000_000_000 ? value * 1_000 : value
+}
+
+function providerCapabilities(resume: boolean, changeModel: boolean, changeMode: boolean) {
+    return {
+        resume,
+        cancel: true,
+        changeModel,
+        changeMode,
+        fork: false,
+        retry: false,
+        editHistory: false,
+        listBranches: false,
+        attachFiles: false,
+    }
 }
 
 function requireText(value: string, field: string): string {

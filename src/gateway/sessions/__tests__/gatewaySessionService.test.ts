@@ -39,7 +39,18 @@ describe('GatewaySessionService', () => {
             discoverySupported: true,
             models: [{ id: 'model-a', name: 'Model A' }],
             permissionModes: ['default', 'bypassPermissions'],
-            sessions: [{ providerSessionId: 'native-1', title: 'Existing work', active: false }],
+            capabilities: {
+                resume: true,
+                cancel: true,
+                changeModel: true,
+                changeMode: true,
+                fork: false,
+                retry: false,
+                editHistory: false,
+                listBranches: false,
+                attachFiles: false,
+            },
+            sessions: [{ providerSessionId: 'native-1', title: 'Existing work' }],
         })
         expect(discovery.destroyCalls).toBe(1)
 
@@ -51,6 +62,15 @@ describe('GatewaySessionService', () => {
 
         const connected = await service.listProviderSessions(fixture.project.id, 'mock')
         expect(connected.sessions[0]).toMatchObject({ codeverSessionId: first.id, state: 'idle' })
+        expect(connected.sessions[0]).not.toHaveProperty('archivedAt')
+
+        const archived = await service.setArchived(first.id, true)
+        expect(archived.archivedAt).toBeTypeOf('string')
+        const archivedCatalog = await service.listProviderSessions(fixture.project.id, 'mock')
+        expect(archivedCatalog.sessions[0]?.archivedAt).toBe(archived.archivedAt)
+
+        await service.sendMessage(first.id, 'continue')
+        expect((await service.get(first.id)).archivedAt).toBeUndefined()
         await service.destroy()
         await fixture.events.close()
     })

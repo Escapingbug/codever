@@ -165,9 +165,26 @@ export class RelayApi {
 
   async createSession(projectId: string, input: CreateSessionDto): Promise<CodeverSession> {
     const gatewayId = this.requireProjectGateway(projectId)
-    const payload = this.completed(await this.requestGateway(gatewayId, { kind: 'session.create', projectId, input })) as { session: CodeverSession }
-    await this.refreshProjectInventory(projectId)
-    return payload.session
+    try {
+      const payload = this.completed(await this.requestGateway(gatewayId, { kind: 'session.create', projectId, input })) as { session: CodeverSession }
+      await this.refreshProjectInventory(projectId)
+      return payload.session
+    } catch (error) {
+      if (!(error instanceof RelayApiError) || error.code !== 'idempotency_in_doubt' || !input.providerSessionId) throw error
+      const inventory = await this.inventory(gatewayId)
+      const recovered = inventory.sessions.find(session =>
+        session.projectId === projectId
+        && session.provider === input.provider
+        && session.providerSessionId === input.providerSessionId
+        && session.state !== 'closed',
+      )
+      if (recovered) return recovered
+      throw new RelayApiError(
+        'The Gateway restarted while attaching this provider task. Refresh the task list before trying again.',
+        0,
+        'idempotency_in_doubt',
+      )
+    }
   }
 
   async sendMessage(sessionId: string, input: SendMessageDto): Promise<MutationReceiptDto> {
@@ -179,6 +196,12 @@ export class RelayApi {
   async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
     return this.completed(await this.requestGateway(
       this.requireSessionGateway(sessionId), { kind: 'session.cancel', sessionId, input },
+    )) as MutationReceiptDto
+  }
+
+  async setSessionArchived(sessionId: string, archived: boolean): Promise<MutationReceiptDto> {
+    return this.completed(await this.requestGateway(
+      this.requireSessionGateway(sessionId), { kind: 'session.archive.set', sessionId, archived },
     )) as MutationReceiptDto
   }
 
@@ -312,7 +335,12 @@ export class RelayApi {
   }
   private completed(response: ClientGatewayResponseFrame): unknown {
     if (response.status === 'completed') return response.payload
-    if (response.status === 'failed') throw new RelayApiError(response.error.message, 0, response.error.code)
+    if (response.status === 'failed') {
+      const message = response.error.code === 'idempotency_in_doubt'
+        ? 'The Gateway restarted before this operation could be confirmed. Refresh before deciding whether to try again.'
+        : response.error.message
+      throw new RelayApiError(message, 0, response.error.code)
+    }
     throw new RelayApiError('Gateway request was accepted but did not complete')
   }
   private publishEvents(events: SessionEventEnvelope[]): void {

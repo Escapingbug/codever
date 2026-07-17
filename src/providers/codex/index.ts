@@ -185,9 +185,11 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
 
     if (!metadata) return null
     firstMessage ||= fallbackMessage
-    const sessionId = stringValue(metadata.id) || stringValue(metadata.session_id)
+    const rolloutId = stringValue(metadata.id)
+    const sessionId = stringValue(metadata.session_id) || rolloutId
     const cwd = stringValue(metadata.cwd)
     if (!sessionId || !cwd) return null
+    if (rolloutId && rolloutId !== sessionId) return null
 
     const fileStat = await stat(file)
     const metadataTime = Date.parse(stringValue(metadata.timestamp))

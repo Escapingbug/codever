@@ -9,7 +9,9 @@ const route = useRoute()
 const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId ?? ''))
 const projectId = computed(() => String(route.params.projectId ?? ''))
-const sessions = computed(() => state.sessionsByProject[projectId.value] ?? [])
+const sessions = computed(() => (state.sessionsByProject[projectId.value] ?? [])
+  .filter(session => session.state !== 'closed' && !session.archivedAt)
+  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))
 const projects = computed(() => state.gateways.value.flatMap(gateway =>
   (state.projectsByGateway[gateway.id] ?? []).map(project => ({ gateway, project })),
 ))
@@ -43,11 +45,11 @@ watch(projectId, id => { if (id) void state.loadSessions(id) }, { immediate: tru
 
   <aside v-if="currentProject" class="nav-rail nav-rail--sessions">
     <div class="rail-heading rail-heading--large"><div><small>{{ currentProject.gateway.name }}</small><strong>{{ currentProject.project.name }}</strong></div></div>
-    <nav class="project-list" aria-label="Active sessions">
+    <nav class="project-list" aria-label="Recently attached tasks">
       <RouterLink v-for="session in sessions" :key="session.id" class="session-link" :to="{ name: 'session', params: { gatewayId, projectId, sessionId: session.id } }">
         <StatusDot :status="session.state" /><span><strong>{{ session.title ?? 'Untitled session' }}</strong><small>{{ session.provider }}<template v-if="session.model"> · {{ session.model }}</template></small></span>
       </RouterLink>
-      <span v-if="!sessions.length" class="nav-empty">No active sessions yet</span>
+      <span v-if="!sessions.length" class="nav-empty">Open a task to attach it here</span>
     </nav>
   </aside>
 </template>

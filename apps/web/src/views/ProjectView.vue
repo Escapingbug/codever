@@ -5,6 +5,19 @@ import { useRoute, useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 
+interface ProjectTask {
+  key: string
+  provider: string
+  providerSessionId?: string
+  codeverSessionId?: string
+  title: string
+  firstMessage?: string
+  updatedAt: string
+  state?: CodeverSession['state']
+  archivedAt?: string
+  draft: boolean
+}
+
 const route = useRoute()
 const router = useRouter()
 const state = useCodeverState()
@@ -12,58 +25,80 @@ const gatewayId = computed(() => String(route.params.gatewayId))
 const projectId = computed(() => String(route.params.projectId))
 const gateway = computed(() => state.gateways.value.find(item => item.id === gatewayId.value))
 const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find(item => item.id === projectId.value))
-const activeSessions = computed(() => [...(state.sessionsByProject[projectId.value] ?? [])]
-  .filter(session => session.state !== 'closed')
-  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))
+const bridges = computed(() => state.sessionsByProject[projectId.value] ?? [])
 const providers = computed(() => gateway.value?.capabilities.providers ?? [])
+const providerSessions = ref<ProviderSession[]>([])
 const selectedProvider = ref('')
 const providerFilter = ref('all')
-const scopeFilter = ref<'all' | 'active' | 'inactive'>('all')
+const scopeFilter = ref<'recent' | 'archived' | 'all'>('recent')
 const searchQuery = ref('')
 const title = ref('')
 const showCreate = ref(false)
-const inactiveSessions = ref<ProviderSession[]>([])
 const discovering = ref(false)
 const creating = ref(false)
-const historyError = ref('')
+const taskError = ref('')
 const createError = ref('')
-const openingProviderSessionId = ref('')
+const openingKey = ref('')
+const archivingKey = ref('')
 const creatorElement = ref<HTMLElement>()
 let discoveryGeneration = 0
 
+const tasks = computed<ProjectTask[]>(() => {
+  const result = new Map<string, ProjectTask>()
+  for (const native of providerSessions.value) {
+    const key = `${native.provider}:${native.providerSessionId}`
+    result.set(key, {
+      key,
+      provider: native.provider,
+      providerSessionId: native.providerSessionId,
+      ...(native.codeverSessionId ? { codeverSessionId: native.codeverSessionId } : {}),
+      title: native.title,
+      ...(native.firstMessage !== undefined ? { firstMessage: native.firstMessage } : {}),
+      updatedAt: native.updatedAt,
+      ...(native.state ? { state: native.state } : {}),
+      ...(native.archivedAt ? { archivedAt: native.archivedAt } : {}),
+      draft: false,
+    })
+  }
+  for (const bridge of bridges.value) {
+    const nativeKey = bridge.providerSessionId ? `${bridge.provider}:${bridge.providerSessionId}` : undefined
+    if (nativeKey && result.has(nativeKey)) continue
+    const key = nativeKey ?? `draft:${bridge.id}`
+    result.set(key, {
+      key,
+      provider: bridge.provider,
+      ...(bridge.providerSessionId ? { providerSessionId: bridge.providerSessionId } : {}),
+      codeverSessionId: bridge.id,
+      title: bridge.title ?? 'Untitled task',
+      updatedAt: bridge.updatedAt,
+      state: bridge.state,
+      ...(bridge.archivedAt ? { archivedAt: bridge.archivedAt } : {}),
+      draft: !bridge.providerSessionId,
+    })
+  }
+  return [...result.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+})
+
 const normalizedSearch = computed(() => searchQuery.value.trim().toLocaleLowerCase())
-const visibleActiveSessions = computed(() => scopeFilter.value === 'inactive' ? [] : activeSessions.value.filter(session =>
-  matchesProvider(session.provider) && matchesSearch(activeSearchText(session)),
-))
-const visibleInactiveSessions = computed(() => scopeFilter.value === 'active' ? [] : inactiveSessions.value.filter(session =>
-  matchesProvider(session.provider) && matchesSearch(inactiveSearchText(session)),
-))
-const visibleCount = computed(() => visibleActiveSessions.value.length + visibleInactiveSessions.value.length)
+const visibleTasks = computed(() => tasks.value.filter(task => {
+  if (providerFilter.value !== 'all' && task.provider !== providerFilter.value) return false
+  if (scopeFilter.value === 'recent' && task.archivedAt) return false
+  if (scopeFilter.value === 'archived' && !task.archivedAt) return false
+  if (!normalizedSearch.value) return true
+  return [task.title, task.firstMessage, task.provider, task.providerSessionId]
+    .filter(Boolean).join(' ').toLocaleLowerCase().includes(normalizedSearch.value)
+}))
+
+const runningTasks = computed(() => visibleTasks.value.filter(task => task.state === 'querying' || task.state === 'canceling'))
+const readyTasks = computed(() => visibleTasks.value.filter(task => task.state !== 'querying' && task.state !== 'canceling'))
 
 onMounted(() => state.loadWorkspace())
-watch(project, value => { if (value) void state.loadSessions(value.id) }, { immediate: true })
+watch(project, value => { if (value) void refreshTasks() }, { immediate: true })
 watch([project, providers], ([nextProject, nextProviders]) => {
   if (!selectedProvider.value || !nextProviders.includes(selectedProvider.value)) {
     selectedProvider.value = nextProject?.defaultProvider ?? nextProviders[0] ?? ''
   }
 }, { immediate: true })
-watch([project, providers], ([value]) => { if (value) void discoverProviderSessions() }, { immediate: true })
-
-function matchesProvider(provider: string): boolean {
-  return providerFilter.value === 'all' || provider === providerFilter.value
-}
-
-function matchesSearch(value: string): boolean {
-  return !normalizedSearch.value || value.toLocaleLowerCase().includes(normalizedSearch.value)
-}
-
-function activeSearchText(session: CodeverSession): string {
-  return [session.title, session.provider, session.providerSessionId, session.model, session.mode].filter(Boolean).join(' ')
-}
-
-function inactiveSearchText(session: ProviderSession): string {
-  return [session.title, session.firstMessage, session.provider, session.providerSessionId, session.cwd].filter(Boolean).join(' ')
-}
 
 function openCreate(): void {
   createError.value = ''
@@ -71,33 +106,26 @@ function openCreate(): void {
   void nextTick(() => creatorElement.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
-async function discoverProviderSessions(): Promise<void> {
+async function refreshTasks(): Promise<void> {
+  const generation = ++discoveryGeneration
   const currentProjectId = projectId.value
   const currentProviders = [...providers.value]
-  const generation = ++discoveryGeneration
-  if (!currentProviders.length) {
-    inactiveSessions.value = []
-    return
-  }
   discovering.value = true
-  historyError.value = ''
+  taskError.value = ''
   try {
+    await state.loadSessions(currentProjectId)
     const attempts = await Promise.allSettled(currentProviders.map(provider =>
       state.api.discoverProviderSessions(currentProjectId, provider),
     ))
     if (generation !== discoveryGeneration) return
-    const results = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-    if (!results.length && attempts.some(result => result.status === 'rejected')) {
-      throw new Error('No provider history could be loaded')
+    const successful = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+    providerSessions.value = successful.flatMap(result => result.sessions)
+    if (!successful.length && attempts.some(result => result.status === 'rejected')) {
+      throw new Error('Provider task history could not be loaded')
     }
-    const known = new Set(activeSessions.value.map(session => `${session.provider}:${session.providerSessionId ?? ''}`))
-    inactiveSessions.value = results
-      .flatMap(result => result.sessions)
-      .filter(session => !session.codeverSessionId && !known.has(`${session.provider}:${session.providerSessionId}`))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   } catch (error) {
     if (generation === discoveryGeneration) {
-      historyError.value = error instanceof Error ? error.message : 'Could not load inactive sessions'
+      taskError.value = error instanceof Error ? error.message : 'Could not load project tasks'
     }
   } finally {
     if (generation === discoveryGeneration) discovering.value = false
@@ -117,29 +145,58 @@ async function createNewSession(): Promise<void> {
     state.replaceSession(session)
     await openSession(session.id)
   } catch (error) {
-    createError.value = error instanceof Error ? error.message : 'Could not create the session'
+    createError.value = error instanceof Error ? error.message : 'Could not create the task'
   } finally {
     creating.value = false
   }
 }
 
-async function continueProviderSession(providerSession: ProviderSession): Promise<void> {
-  if (openingProviderSessionId.value) return
-  openingProviderSessionId.value = providerSession.providerSessionId
-  historyError.value = ''
+async function openTask(task: ProjectTask): Promise<void> {
+  if (openingKey.value || archivingKey.value) return
+  openingKey.value = task.key
+  taskError.value = ''
   try {
-    const session = await state.api.createSession(projectId.value, {
-      provider: providerSession.provider,
-      providerSessionId: providerSession.providerSessionId,
-      title: providerSession.title,
-      config: {},
-    })
-    state.replaceSession(session)
-    await openSession(session.id)
+    let sessionId = task.codeverSessionId
+    if (!sessionId) {
+      const session = await state.api.createSession(projectId.value, {
+        provider: task.provider,
+        providerSessionId: task.providerSessionId,
+        title: task.title,
+        config: {},
+      })
+      state.replaceSession(session)
+      sessionId = session.id
+    }
+    await openSession(sessionId)
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : 'Could not continue the session'
+    taskError.value = error instanceof Error ? error.message : 'Could not open the task'
   } finally {
-    openingProviderSessionId.value = ''
+    openingKey.value = ''
+  }
+}
+
+async function toggleArchive(task: ProjectTask): Promise<void> {
+  if (openingKey.value || archivingKey.value) return
+  archivingKey.value = task.key
+  taskError.value = ''
+  try {
+    let sessionId = task.codeverSessionId
+    if (!sessionId) {
+      const bridge = await state.api.createSession(projectId.value, {
+        provider: task.provider,
+        providerSessionId: task.providerSessionId,
+        title: task.title,
+        config: {},
+      })
+      state.replaceSession(bridge)
+      sessionId = bridge.id
+    }
+    await state.api.setSessionArchived(sessionId, !task.archivedAt)
+    await refreshTasks()
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : 'Could not update the task'
+  } finally {
+    archivingKey.value = ''
   }
 }
 
@@ -158,73 +215,69 @@ async function openSession(sessionId: string): Promise<void> {
           <summary>Project details</summary>
           <dl>
             <div><dt>Path</dt><dd>{{ project.rootPath }}</dd></div>
-            <div v-if="project.canonicalRoot !== project.rootPath"><dt>Resolved path</dt><dd>{{ project.canonicalRoot }}</dd></div>
             <div><dt>Gateway</dt><dd>{{ gateway?.name }} · {{ gateway?.platform }}</dd></div>
             <div v-if="project.defaultProvider"><dt>Default provider</dt><dd>{{ project.defaultProvider }}</dd></div>
           </dl>
         </details>
       </div>
-      <button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">＋ New session</button>
+      <button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">＋ New task</button>
     </header>
 
-    <section v-if="showCreate" ref="creatorElement" class="session-creator" aria-label="Create a new session">
+    <section v-if="showCreate" ref="creatorElement" class="session-creator" aria-label="Create a new task">
       <div class="session-creator__heading">
-        <div><span class="eyebrow">New session</span><h2>Start a fresh task</h2></div>
+        <div><span class="eyebrow">New task</span><h2>Start with a fresh provider session</h2></div>
         <button class="icon-button" aria-label="Close" @click="showCreate = false">×</button>
       </div>
       <label class="creator-provider"><span>Provider</span><select v-model="selectedProvider"><option v-for="provider in providers" :key="provider" :value="provider">{{ provider }}</option></select></label>
-      <div v-if="createError" class="error-banner"><strong>Session unavailable</strong>{{ createError }}</div>
+      <div v-if="createError" class="error-banner"><strong>Task unavailable</strong>{{ createError }}</div>
       <form class="fresh-session-form" @submit.prevent="createNewSession">
-        <label><span>Session title</span><input v-model="title" autofocus placeholder="Optional — describe the task" /></label>
-        <button class="button button--primary" :disabled="creating || !selectedProvider">{{ creating ? 'Creating…' : 'Create session' }}</button>
+        <label><span>Task title</span><input v-model="title" autofocus placeholder="Optional — describe the task" /></label>
+        <button class="button button--primary" :disabled="creating || !selectedProvider">{{ creating ? 'Creating…' : 'Create task' }}</button>
       </form>
     </section>
 
     <section class="sessions-section">
       <div class="section-heading sessions-heading">
-        <div><span class="eyebrow">Project work</span><h2>Sessions</h2></div>
-        <span>{{ visibleCount }}</span>
+        <div><span class="eyebrow">Provider-native history</span><h2>Tasks</h2></div>
+        <span>{{ visibleTasks.length }}</span>
       </div>
 
-      <div class="session-filters" aria-label="Session filters">
-        <label class="session-search"><span class="sr-only">Search sessions</span><input v-model="searchQuery" type="search" placeholder="Search sessions" /></label>
-        <label><span class="sr-only">Session status</span><select v-model="scopeFilter"><option value="all">All sessions</option><option value="active">Active only</option><option value="inactive">Inactive only</option></select></label>
+      <div class="session-filters" aria-label="Task filters">
+        <label class="session-search"><span class="sr-only">Search tasks</span><input v-model="searchQuery" type="search" placeholder="Search tasks" /></label>
+        <label><span class="sr-only">Task collection</span><select v-model="scopeFilter"><option value="recent">Recent</option><option value="archived">Archived</option><option value="all">All tasks</option></select></label>
         <label><span class="sr-only">Provider</span><select v-model="providerFilter"><option value="all">All providers</option><option v-for="provider in providers" :key="provider" :value="provider">{{ provider }}</option></select></label>
-        <button class="button" :disabled="discovering" @click="discoverProviderSessions">{{ discovering ? 'Refreshing…' : 'Refresh' }}</button>
+        <button class="button" :disabled="discovering" @click="refreshTasks">{{ discovering ? 'Refreshing…' : 'Refresh' }}</button>
       </div>
 
-      <div v-if="historyError" class="error-banner"><strong>History unavailable</strong>{{ historyError }}</div>
+      <div v-if="taskError" class="error-banner"><strong>Tasks unavailable</strong>{{ taskError }}</div>
 
-      <template v-if="scopeFilter !== 'inactive'">
-        <div class="session-group-label"><span>Active</span><small>{{ visibleActiveSessions.length }}</small></div>
-        <div v-if="visibleActiveSessions.length" class="session-table">
-          <RouterLink v-for="session in visibleActiveSessions" :key="session.id" class="session-row" :to="{ name: 'session', params: { gatewayId, projectId, sessionId: session.id } }">
-            <StatusDot :status="session.state" />
-            <div><strong>{{ session.title ?? 'Untitled session' }}</strong><small>{{ session.provider }} · {{ session.model ?? 'default model' }} · {{ gateway?.name }}</small></div>
-            <span class="session-mode">{{ session.mode ?? 'default' }}</span>
-            <time>{{ new Date(session.updatedAt).toLocaleString() }}</time><span>→</span>
-          </RouterLink>
+      <template v-if="runningTasks.length">
+        <div class="session-group-label"><span>Running</span><small>{{ runningTasks.length }}</small></div>
+        <div class="session-table">
+          <article v-for="task in runningTasks" :key="task.key" class="session-row session-row--task" tabindex="0" @click="openTask(task)" @keydown.enter="openTask(task)">
+            <StatusDot :status="task.state ?? 'idle'" />
+            <div><strong>{{ task.title }}</strong><small>{{ task.provider }} · {{ gateway?.name }}</small></div>
+            <span class="session-mode">{{ task.state }}</span>
+            <time>{{ new Date(task.updatedAt).toLocaleString() }}</time>
+            <button class="task-archive" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
+          </article>
         </div>
-        <p v-else class="session-group-empty">No active sessions match these filters.</p>
       </template>
 
-      <template v-if="scopeFilter !== 'active'">
-        <div class="session-group-label session-group-label--inactive"><span>Inactive · available to continue</span><small>{{ visibleInactiveSessions.length }}</small></div>
-        <div v-if="visibleInactiveSessions.length" class="session-table">
-          <button v-for="providerSession in visibleInactiveSessions" :key="`${providerSession.provider}:${providerSession.providerSessionId}`" class="session-row session-row--button" :disabled="Boolean(openingProviderSessionId)" @click="continueProviderSession(providerSession)">
-            <StatusDot status="offline" />
-            <div><strong>{{ providerSession.title }}</strong><small>{{ providerSession.firstMessage || providerSession.providerSessionId }}</small></div>
-            <span class="session-mode">{{ providerSession.provider }}</span>
-            <time>{{ new Date(providerSession.updatedAt).toLocaleString() }}</time><span>{{ openingProviderSessionId === providerSession.providerSessionId ? '…' : '→' }}</span>
-          </button>
-        </div>
-        <div v-else-if="discovering" class="creator-loading"><span class="loader" /> Loading provider history…</div>
-        <p v-else class="session-group-empty">No inactive sessions match these filters.</p>
-      </template>
-
-      <div class="session-actions">
-        <button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">New session</button>
+      <div class="session-group-label" :class="{ 'session-group-label--inactive': runningTasks.length }"><span>{{ scopeFilter === 'archived' ? 'Archived' : 'Ready to continue' }}</span><small>{{ readyTasks.length }}</small></div>
+      <div v-if="readyTasks.length" class="session-table">
+        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" @click="openTask(task)" @keydown.enter="openTask(task)">
+          <StatusDot :status="task.state ?? 'idle'" />
+          <div><strong>{{ task.title }}</strong><small>{{ task.firstMessage || `${task.provider} · ${gateway?.name}` }}</small></div>
+          <span class="session-mode">{{ task.draft ? 'draft' : task.provider }}</span>
+          <time>{{ new Date(task.updatedAt).toLocaleString() }}</time>
+          <button class="task-archive" :disabled="archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
+        </article>
       </div>
+      <div v-else-if="discovering" class="creator-loading"><span class="loader" /> Loading provider tasks…</div>
+      <p v-else class="session-group-empty">No tasks match these filters.</p>
+
+      <div class="session-actions"><button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">New task</button></div>
     </section>
   </div>
 </template>

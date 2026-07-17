@@ -262,6 +262,14 @@ export async function handleClientRequest(
                 )
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
+            case 'session.archive.set':
+                await context.sessions.setArchived(
+                    request.payload.sessionId,
+                    request.payload.archived,
+                    request.idempotencyKey,
+                )
+                payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
             case 'session.config.patch':
                 await context.sessions.patchConfig(request.payload.sessionId, {
                     ...request.payload.input,

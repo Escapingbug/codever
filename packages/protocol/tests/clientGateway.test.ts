@@ -46,6 +46,7 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'session.create', projectId: 'project-1', input: { provider: 'codex', config: {} } },
             { kind: 'session.message', sessionId: 'session-1', input: { text: 'hello' } },
             { kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' } },
+            { kind: 'session.archive.set', sessionId: 'session-1', archived: true },
             { kind: 'session.config.patch', sessionId: 'session-1', input: { config: {}, model: null } },
             {
                 kind: 'decision.respond', sessionId: 'session-1', decisionId: 'decision-1',
@@ -77,7 +78,7 @@ describe('encrypted Client to Gateway request frames', () => {
         expect(() => parseClientGatewayRequestFrame(request({
             kind: 'events.list', sessionId: 'session-1', limit: 1_001,
         }))).toThrow()
-        expect(() => parseClientGatewayRequestFrame(request({ kind: 'session.close' }))).toThrow()
+        expect(() => parseClientGatewayRequestFrame(request({ kind: 'session.archive.set', sessionId: 'session-1' }))).toThrow()
     })
 })
 
