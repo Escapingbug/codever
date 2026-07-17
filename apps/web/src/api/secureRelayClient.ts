@@ -32,7 +32,8 @@ export class SecureRelayClient {
     if (this.connectState) return this.connectState.promise
     this.connectState = deferred<void>()
     try {
-      const socket = (this.options.webSocketFactory ?? (url => new WebSocket(url)))(this.url())
+      const endpoint = this.url()
+      const socket = (this.options.webSocketFactory ?? (url => new WebSocket(url)))(endpoint)
       this.socket = socket
       socket.addEventListener('open', () => {
         void this.options.handshake.start().then(frame => this.sendRaw(frame)).catch(error => this.fail(asError(error)))
@@ -40,8 +41,12 @@ export class SecureRelayClient {
       socket.addEventListener('message', event => {
         this.incoming = this.incoming.then(() => this.handleMessage(event.data)).catch(error => this.fail(asError(error)))
       })
-      socket.addEventListener('error', () => this.fail(new Error('Secure Relay connection failed')))
-      socket.addEventListener('close', event => this.fail(new Error(`Secure Relay connection closed (${event.code})`)))
+      socket.addEventListener('error', () => this.fail(new Error(
+        `Could not reach Relay at ${new URL(endpoint).host}. The pairing code was not checked. Verify the domain and Advanced port.`,
+      )))
+      socket.addEventListener('close', event => this.fail(new Error(event.code === 1008
+        ? 'Relay rejected this pairing attempt. Generate a fresh Relay client code and try again within three minutes.'
+        : `Secure Relay connection closed (${event.code})`)))
     } catch (error) {
       this.fail(asError(error))
     }

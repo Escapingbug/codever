@@ -45,19 +45,19 @@ watch(gatewayId, (id) => void state.loadProjects(id), { immediate: true })
       <strong>This Gateway is {{ gateway.status }}.</strong> History may be cached, but execution controls are unavailable.
     </div>
     <section v-if="state.errors[`projects:${gatewayId}`]?.includes('pairing')" class="settings-section">
-      <div class="section-heading"><div><span class="eyebrow">End-to-end security</span><h2>Pair this Gateway</h2></div></div>
-      <p>Run <code>codever device pair</code> locally on the Gateway and enter the one-time code within three minutes.</p>
+      <div class="section-heading"><div><span class="eyebrow">Setup · Step 2 of 2</span><h2>Pair this client with Gateway</h2></div></div>
+      <p>Enter the one-time <strong>Gateway device code</strong>. It is valid for three minutes and is not the Relay code from step 1.</p>
       <form class="relay-form" @submit.prevent="pairGateway">
-        <label>Gateway pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" /></label>
+        <label>Gateway device pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" /></label>
         <p v-if="pairingError" class="error-banner">{{ pairingError }}</p>
-        <button class="button button--primary" :disabled="pairing">{{ pairing ? 'Pairing…' : 'Pair Gateway' }}</button>
+        <button class="button button--primary" :disabled="pairing">{{ pairing ? 'Pairing Gateway…' : 'Pair Gateway' }}</button>
       </form>
     </section>
     <section>
       <div class="section-heading"><div><span class="eyebrow">Approved roots</span><h2>Projects</h2></div></div>
       <div class="project-grid">
         <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }">
-          <span class="folder-icon">⌘</span>
+          <span class="folder-icon">▱</span>
           <div><h3>{{ project.name }}</h3><p>{{ project.repoIdentity ?? project.rootPath }}</p><small>{{ project.defaultProvider ?? 'Default provider' }}</small></div>
           <span>→</span>
         </RouterLink>

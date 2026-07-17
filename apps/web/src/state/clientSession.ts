@@ -5,16 +5,26 @@ import { createPlatformSecretStore, type SecretStore } from '../security/secretS
 
 export interface RelayProfile { id: string; name: string; baseUrl: string }
 export interface RelayIdentity { relayId: string; credentialId: string; createdAt: string }
+export const DEFAULT_RELAY_PORT = 8788
 
 interface PersistedState { version: 3; profiles: RelayProfile[]; activeProfileId?: string }
 const STORAGE_KEY = 'codever.client.v1'
 
-export function normalizeRelayUrl(value: string): string {
-  const url = new URL(value.trim())
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Relay URL must use http:// or https://')
-  url.hash = ''
-  url.search = ''
-  return url.toString().replace(/\/$/, '')
+export function normalizeRelayUrl(value: string, port = DEFAULT_RELAY_PORT): string {
+  const address = value.trim()
+  if (!address) throw new Error('Relay domain is required')
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('Relay port must be between 1 and 65535')
+  if (address.includes('://')) throw new Error('Enter only the Relay domain, without http:// or https://')
+  if (/[/?#@]/.test(address)) throw new Error('Enter only the Relay domain, without a path')
+  const parsed = new URL(`http://${address}`)
+  if (parsed.port) throw new Error('Change the port in Advanced connection settings')
+  parsed.port = String(port)
+  return parsed.toString().replace(/\/$/, '')
+}
+
+export function relayProfileAddress(baseUrl: string): { domain: string; port: number } {
+  const parsed = new URL(baseUrl)
+  return { domain: parsed.hostname, port: Number(parsed.port || DEFAULT_RELAY_PORT) }
 }
 
 export function createClientSession(storage: Storage = localStorage, secrets: SecretStore = createPlatformSecretStore()) {
@@ -74,11 +84,11 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     await initializePromise
   }
 
-  function saveProfile(input: { id?: string; name: string; baseUrl: string }): RelayProfile {
+  function saveProfile(input: { id?: string; name: string; domain: string; port?: number }): RelayProfile {
     const profile: RelayProfile = {
       id: input.id ?? `relay_${crypto.randomUUID()}`,
       name: required(input.name, 'Relay name'),
-      baseUrl: normalizeRelayUrl(input.baseUrl),
+      baseUrl: normalizeRelayUrl(input.domain, input.port),
     }
     const index = profiles.value.findIndex(value => value.id === profile.id)
     if (index >= 0) {

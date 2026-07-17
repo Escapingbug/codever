@@ -253,6 +253,9 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .relay-form input { width: 100%; min-height: 44px; padding: 9px 11px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--panel-2); }
 .relay-form input:focus { border-color: #617a3c; box-shadow: 0 0 0 3px rgba(196,243,106,.07); }
 .form-help { margin: -3px 0 0; color: var(--muted); font-size: .68rem; line-height: 1.5; }
+.advanced-settings { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.advanced-settings summary { color: var(--muted); cursor: pointer; font-size: .72rem; font-weight: 650; }
+.advanced-settings[open] { display: grid; gap: 12px; }
 .success-banner { margin: 0; padding: 11px 13px; color: var(--accent); border: 1px solid #42562d; border-radius: 8px; background: var(--accent-dim); font-size: .72rem; }
 .relay-form .error-banner { margin: 0; font-size: .72rem; line-height: 1.5; }
 .entry-submit { width: 100%; min-height: 44px; margin-top: 3px; }
