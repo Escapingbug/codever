@@ -34,6 +34,7 @@ const scopeFilter = ref<'recent' | 'archived' | 'all'>('recent')
 const searchQuery = ref('')
 const title = ref('')
 const showCreate = ref(false)
+const showFilters = ref(false)
 const discovering = ref(false)
 const creating = ref(false)
 const taskError = ref('')
@@ -47,6 +48,7 @@ const tasks = computed<ProjectTask[]>(() => {
   const result = new Map<string, ProjectTask>()
   for (const native of providerSessions.value) {
     const key = `${native.provider}:${native.providerSessionId}`
+    if (result.has(key)) continue
     result.set(key, {
       key,
       provider: native.provider,
@@ -206,11 +208,11 @@ async function openSession(sessionId: string): Promise<void> {
 </script>
 
 <template>
-  <div class="page page--overview">
-    <header class="page-header project-title">
+  <div class="page page--overview page--project-tasks">
+    <header class="page-header project-title project-title--compact">
       <div>
-        <span class="eyebrow">{{ gateway?.name }}</span>
         <h1>{{ project?.name ?? 'Project' }}</h1>
+        <small class="project-location">{{ gateway?.name }}</small>
         <details v-if="project" class="project-details">
           <summary>Project details</summary>
           <dl>
@@ -236,20 +238,23 @@ async function openSession(sessionId: string): Promise<void> {
       </form>
     </section>
 
-    <section class="sessions-section">
+    <section class="sessions-section sessions-section--primary">
       <div class="section-heading sessions-heading">
-        <div><span class="eyebrow">Provider-native history</span><h2>Tasks</h2></div>
-        <span>{{ visibleTasks.length }}</span>
+        <div><h2>Tasks</h2><span class="task-count">{{ visibleTasks.length }}</span></div>
+        <div class="session-list-actions">
+          <button class="button button--compact" :class="{ 'button--selected': showFilters }" @click="showFilters = !showFilters">Filter</button>
+          <button class="button button--compact" :disabled="discovering" @click="refreshTasks">Refresh</button>
+        </div>
       </div>
 
-      <div class="session-filters" aria-label="Task filters">
+      <div v-if="showFilters" class="session-filters" aria-label="Task filters">
         <label class="session-search"><span class="sr-only">Search tasks</span><input v-model="searchQuery" type="search" placeholder="Search tasks" /></label>
         <label><span class="sr-only">Task collection</span><select v-model="scopeFilter"><option value="recent">Recent</option><option value="archived">Archived</option><option value="all">All tasks</option></select></label>
         <label><span class="sr-only">Provider</span><select v-model="providerFilter"><option value="all">All providers</option><option v-for="provider in providers" :key="provider" :value="provider">{{ provider }}</option></select></label>
-        <button class="button" :disabled="discovering" @click="refreshTasks">{{ discovering ? 'Refreshing…' : 'Refresh' }}</button>
       </div>
 
       <div v-if="taskError" class="error-banner"><strong>Tasks unavailable</strong>{{ taskError }}</div>
+      <div v-if="discovering" class="session-refresh-state" role="status"><span class="loader" /><span><strong>Refreshing tasks</strong><small>Loaded tasks remain available while provider history is updated.</small></span></div>
 
       <template v-if="runningTasks.length">
         <div class="session-group-label"><span>Running</span><small>{{ runningTasks.length }}</small></div>
@@ -274,10 +279,9 @@ async function openSession(sessionId: string): Promise<void> {
           <button class="task-archive" :disabled="archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
         </article>
       </div>
-      <div v-else-if="discovering" class="creator-loading"><span class="loader" /> Loading provider tasks…</div>
+      <div v-else-if="discovering" class="session-group-empty">Waiting for the first provider tasks…</div>
       <p v-else class="session-group-empty">No tasks match these filters.</p>
 
-      <div class="session-actions"><button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">New task</button></div>
     </section>
   </div>
 </template>

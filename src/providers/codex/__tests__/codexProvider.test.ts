@@ -177,6 +177,29 @@ describe('CodexProvider', () => {
         expect(sessions).toHaveLength(1)
         expect(sessions[0]?.sessionId).toBe('main-session')
     })
+
+    it('coalesces multiple root rollouts for the same native session', async () => {
+        const { CodexProvider } = await import('../index')
+        const cwd = path.join(tmpdir(), 'project')
+        const codexHome = await createCodexHome([{
+            id: 'same-session',
+            fileId: 'older-rollout',
+            cwd,
+            message: 'Older title',
+            timestamp: '2030-07-15T03:00:00.000Z',
+        }, {
+            id: 'same-session',
+            fileId: 'newer-rollout',
+            cwd,
+            message: 'Current title',
+            timestamp: '2030-07-15T04:00:00.000Z',
+        }])
+
+        const sessions = await new CodexProvider({ codexHome }).listSessions(cwd)
+
+        expect(sessions).toHaveLength(1)
+        expect(sessions[0]).toMatchObject({ sessionId: 'same-session', title: 'Current title' })
+    })
 })
 
 describe('parseCodexModels', () => {
@@ -213,6 +236,7 @@ describe('parseCodexModels', () => {
 
 async function createCodexHome(sessions: Array<{
     id: string
+    fileId?: string
     sessionId?: string
     cwd: string
     message: string
@@ -269,7 +293,7 @@ async function createCodexHome(sessions: Array<{
             })] : []),
         ]
         await writeFile(
-            path.join(sessionDir, `rollout-${session.timestamp.replace(/:/g, '-')}-${session.id}.jsonl`),
+            path.join(sessionDir, `rollout-${session.timestamp.replace(/:/g, '-')}-${session.fileId ?? session.id}.jsonl`),
             `${records.join('\n')}\n`,
             'utf-8',
         )

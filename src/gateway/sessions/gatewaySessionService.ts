@@ -113,7 +113,14 @@ export class GatewaySessionService {
                 return { projectId, provider, discoverySupported: false, models, permissionModes, capabilities, sessions: [] }
             }
             const discovered = await discoveryProvider.listSessions(project.canonicalRoot)
-            const sessions: ProviderSession[] = discovered.map(entry => {
+            const latestByProviderSessionId = new Map<string, (typeof discovered)[number]>()
+            for (const entry of discovered) {
+                const existing = latestByProviderSessionId.get(entry.sessionId)
+                if (!existing || normalizeEpoch(entry.updated) > normalizeEpoch(existing.updated)) {
+                    latestByProviderSessionId.set(entry.sessionId, entry)
+                }
+            }
+            const sessions: ProviderSession[] = [...latestByProviderSessionId.values()].map(entry => {
                 const bridge = bridgeByProviderId.get(entry.sessionId)
                 return {
                     provider,

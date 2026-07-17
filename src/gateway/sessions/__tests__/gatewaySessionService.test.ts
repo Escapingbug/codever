@@ -282,7 +282,10 @@ class DiscoveryProvider extends MockProvider {
     override getAvailableModels(): ModelEntry[] { return [{ id: 'model-a', name: 'Model A' }] }
     override getAvailablePermissionModes(): string[] { return ['default', 'bypassPermissions'] }
     async listSessions(cwd: string): Promise<SessionEntry[]> {
-        return [{ sessionId: 'native-1', title: 'Existing work', updated: 1_752_662_400_000, cwd, firstMessage: 'Continue this work' }]
+        return [
+            { sessionId: 'native-1', title: 'Existing work', updated: 1_752_662_400_000, cwd, firstMessage: 'Continue this work' },
+            { sessionId: 'native-1', title: 'Stale duplicate', updated: 1_752_662_300_000, cwd, firstMessage: 'Old copy' },
+        ]
     }
 }
 

@@ -11,6 +11,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
+import { finished } from 'node:stream/promises'
 import { AcpProvider } from '@/providers/acp'
 import type { ModelEntry, SessionEntry } from '@/providers/provider'
 
@@ -19,7 +20,7 @@ const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp']
 const CODEX_MODELS_COMMAND = 'codex'
 const CODEX_MODELS_ARGS = ['debug', 'models']
 const CODEX_MODEL_PROVIDER = 'openai'
-const SESSION_READ_BATCH_SIZE = 32
+const SESSION_READ_BATCH_SIZE = 8
 
 export interface CodexProviderOptions {
     name?: string
@@ -80,10 +81,15 @@ export class CodexProvider extends AcpProvider {
             }
             const normalizedCwd = normalizeCwd(cwd)
 
-            return sessions
+            const matching = sessions
                 .filter((session): session is SessionEntry => session !== null)
                 .filter(session => !cwd || normalizeCwd(session.cwd ?? '') === normalizedCwd)
-                .sort((a, b) => b.updated - a.updated)
+            const latestBySessionId = new Map<string, SessionEntry>()
+            for (const session of matching) {
+                const existing = latestBySessionId.get(session.sessionId)
+                if (!existing || session.updated > existing.updated) latestBySessionId.set(session.sessionId, session)
+            }
+            return [...latestBySessionId.values()].sort((a, b) => b.updated - a.updated)
         } catch (e) {
             const error = e as NodeJS.ErrnoException
             if (error?.code !== 'ENOENT') {
@@ -155,8 +161,9 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
     let metadata: CodexSessionMeta | undefined
     let firstMessage = ''
     let fallbackMessage = ''
+    const input = createReadStream(file, { encoding: 'utf-8' })
     const lines = createInterface({
-        input: createReadStream(file, { encoding: 'utf-8' }),
+        input,
         crlfDelay: Infinity,
     })
 
@@ -181,6 +188,8 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
         }
     } finally {
         lines.close()
+        input.destroy()
+        await finished(input).catch(() => undefined)
     }
 
     if (!metadata) return null

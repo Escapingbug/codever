@@ -76,6 +76,7 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 
 .page { width: 100%; max-width: 100%; height: 100vh; overflow-x: hidden; overflow-y: auto; }
 .page--overview { padding: clamp(24px, 5vw, 64px); }
+.page--project-tasks { padding: clamp(16px, 2.5vw, 30px); }
 .page-header, .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
 .page-header { margin-bottom: 42px; }
 .page-header p { margin: 0; color: var(--muted); }
@@ -85,6 +86,9 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .project-details dl div { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 12px; }
 .project-details dt { color: var(--muted); }
 .project-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); font-family: "SFMono-Regular", Consolas, monospace; }
+.project-title--compact { align-items: center; margin-bottom: 16px; }
+.project-title--compact h1 { margin: 0; font-size: clamp(1.25rem, 2.5vw, 1.8rem); }
+.project-location { display: block; margin-top: 3px; color: var(--muted); font-size: .68rem; }
 .header-actions, .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .eyebrow { display: block; margin-bottom: 8px; font-size: .67rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
 .button { min-height: 38px; padding: 8px 14px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); cursor: pointer; }
@@ -131,14 +135,24 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .session-row strong { font-size: .83rem; }
 .session-row small, .session-row time { color: var(--muted); font-size: .68rem; }
 .sessions-section { min-width: 0; }
-.sessions-heading { margin-top: 0; }
-.session-filters { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto; gap: 9px; margin-bottom: 18px; }
+.sessions-section--primary { min-height: calc(100vh - 150px); }
+.sessions-heading { align-items: center; margin: 0 0 10px; }
+.sessions-heading > div:first-child { display: flex; align-items: baseline; gap: 8px; }
+.task-count { color: var(--muted); font-size: .7rem; }
+.session-list-actions { display: flex; gap: 7px; }
+.button--compact { min-height: 32px; padding: 5px 10px; font-size: .7rem; }
+.button--selected { color: var(--accent); border-color: #617a3c; }
+.session-filters { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; gap: 9px; margin-bottom: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
 .session-filters input, .session-filters select { width: 100%; min-height: 40px; padding: 8px 11px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--panel-2); }
 .session-filters input:focus, .session-filters select:focus { border-color: #617a3c; }
 .session-group-label { display: flex; align-items: center; gap: 8px; margin: 20px 2px 10px; color: var(--text); font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .session-group-label::after { height: 1px; flex: 1; background: var(--line); content: ""; }
 .session-group-label small { order: 2; font-weight: 400; }
 .session-group-label--inactive { margin-top: 30px; color: var(--muted); }
+.session-refresh-state { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 8px 11px; color: var(--muted); border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel); }
+.session-refresh-state > span:last-child { display: grid; gap: 1px; }
+.session-refresh-state strong { color: var(--text); font-size: .72rem; }
+.session-refresh-state small { font-size: .64rem; }
 .session-group-empty { margin: 0; padding: 18px 14px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; font-size: .76rem; }
 .create-session { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 30px; padding: 20px; border: 1px solid #3b4828; border-radius: var(--radius); background: var(--panel); }
 .create-session label, .session-controls label { display: grid; gap: 5px; color: var(--muted); font-size: .65rem; }
@@ -327,9 +341,12 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .main-stage { width: 100%; min-height: calc(100dvh - 54px); overflow-x: hidden; }
   .page { height: auto; min-height: calc(100dvh - 54px); }
   .page--overview { width: 100%; padding: 24px 16px 48px; }
+  .page--project-tasks { padding: 12px 10px 24px; }
   .page-header { align-items: flex-start; margin-bottom: 26px; }
   .page-header .button { white-space: nowrap; }
   .page-header .header-actions { flex-direction: column; align-items: stretch; }
+  .project-title--compact { margin-bottom: 10px; }
+  .project-title--compact .button { min-height: 34px; padding: 6px 10px; }
   .gateway-grid, .project-grid { width: 100%; grid-template-columns: minmax(0, 1fr); }
   .gateway-card, .project-card { padding: 16px; }
   .session-table { border: 0; overflow: visible; }
