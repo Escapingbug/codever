@@ -1,0 +1,21 @@
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+RUN corepack enable
+
+COPY . .
+RUN pnpm install --frozen-lockfile --filter @codever/gateway... \
+    && pnpm --filter @codever/protocol build \
+    && pnpm --filter @codever/secure-channel build \
+    && pnpm --filter @codever/gateway build \
+    && pnpm store prune
+
+RUN mkdir -p /app/data /workspace \
+    && chown -R node:node /app/data /workspace
+
+USER node
+
+ENTRYPOINT ["node", "dist/index.js"]
+CMD ["start", "--config", "/config/gateway.json"]

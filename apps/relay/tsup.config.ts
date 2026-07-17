@@ -9,5 +9,5 @@ export default defineConfig({
     clean: true,
     sourcemap: true,
     splitting: false,
-    noExternal: ['@codever/protocol'],
+    noExternal: ['@codever/protocol', '@codever/secure-channel'],
 })

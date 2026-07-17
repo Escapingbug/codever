@@ -8,6 +8,7 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
+  noExternal: ['@codever/protocol', '@codever/secure-channel'],
   esbuildOptions(options) {
     options.alias = {
       '@': path.resolve('./src')
