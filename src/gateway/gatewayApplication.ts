@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -370,7 +371,7 @@ async function loadTls(tls: NonNullable<GatewayConfig['tls']>) {
 function platform(): GatewayPlatform {
     if (process.platform === 'win32') return 'windows'
     if (process.platform === 'darwin') return 'macos'
-    if (process.platform === 'linux') return 'linux'
+    if (process.platform === 'linux') return existsSync('/.dockerenv') ? 'container' : 'linux'
     return 'unknown'
 }
 
