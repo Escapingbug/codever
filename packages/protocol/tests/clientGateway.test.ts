@@ -21,6 +21,11 @@ const session = {
     config: {}, createdAt: timestamp, updatedAt: timestamp, lastEventSeq: 0,
 }
 
+const project = {
+    id: 'project-1', gatewayId: 'gateway-1', name: 'Codever', rootPath: '/workspace/codever',
+    canonicalRoot: '/workspace/codever', defaultProvider: 'codex',
+}
+
 const event = {
     schemaVersion: 1,
     gatewayId: 'gateway-1',
@@ -36,6 +41,7 @@ describe('encrypted Client to Gateway request frames', () => {
     it('parses every supported request payload', () => {
         const payloads = [
             { kind: 'inventory.get' },
+            { kind: 'project.create', input: { name: 'Codever', rootPath: '/workspace/codever' } },
             { kind: 'provider.sessions.list', projectId: 'project-1', provider: 'codex' },
             { kind: 'session.create', projectId: 'project-1', input: { provider: 'codex', config: {} } },
             { kind: 'session.message', sessionId: 'session-1', input: { text: 'hello' } },
@@ -60,6 +66,12 @@ describe('encrypted Client to Gateway request frames', () => {
         expect(() => parseClientGatewayRequestFrame(withoutIdempotencyKey)).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({ kind: 'inventory.get', extra: true }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'project.create', input: { name: ' ', rootPath: '/workspace/codever' },
+        }))).toThrow()
+        expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'project.create', input: { name: 'Codever', rootPath: '/workspace/codever', extra: true },
+        }))).toThrow()
+        expect(() => parseClientGatewayRequestFrame(request({
             kind: 'session.message', sessionId: 'session-1', input: { text: '' },
         }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
@@ -78,6 +90,10 @@ describe('encrypted Gateway to Client response and event frames', () => {
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-1',
             status: 'completed', completedAt: timestamp, payload: { session },
+        }).status).toBe('completed')
+        expect(parseClientGatewayResponseFrame({
+            version: 1, type: 'gateway.client.response', requestId: 'request-project',
+            status: 'completed', completedAt: timestamp, payload: { project },
         }).status).toBe('completed')
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-2',

@@ -2,6 +2,7 @@ import type {
   CancelSessionDto,
   CodeverSession,
   ClientGatewayResponseFrame,
+  CreateProjectDto,
   CreateSessionDto,
   Gateway,
   InventorySnapshot,
@@ -27,6 +28,8 @@ export interface RelayApiOptions {
   secrets: SecretStore
   fetch?: typeof globalThis.fetch
   onDisconnected?: () => void
+  requestTimeoutMs?: number
+  longRequestTimeoutMs?: number
 }
 
 export class RelayApiError extends Error {
@@ -42,11 +45,13 @@ export class RelayApi {
   private readonly deviceCredentials: ClientDeviceCredentialStore
   private relay?: SecureRelayClient
   private relayCredential?: ClientRelayCredential
+  private relayOpening?: Promise<void>
   private readonly gatewayConnections = new Map<string, GatewaySecureConnection>()
   private readonly inventories = new Map<string, InventorySnapshot>()
   private readonly projectGateways = new Map<string, string>()
   private readonly sessionGateways = new Map<string, string>()
   private readonly eventSubscribers = new Map<string, Set<(event: SessionEventEnvelope) => void>>()
+  private readonly durableIdempotencyGateways = new Set<string>()
 
   constructor(private readonly options: RelayApiOptions) {
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
@@ -90,10 +95,23 @@ export class RelayApi {
     this.inventories.clear()
     this.projectGateways.clear()
     this.sessionGateways.clear()
+    this.durableIdempotencyGateways.clear()
     if (deleteCredential && this.relayProfileId) await this.relayCredentials.delete(this.relayProfileId)
   }
 
-  async listGateways(): Promise<Gateway[]> { return (await this.requireRelay()).listGateways() }
+  async listGateways(): Promise<Gateway[]> {
+    const relay = await this.requireRelay()
+    try {
+      const gateways = await relay.listGateways()
+      this.rememberGatewayCapabilities(gateways)
+      return gateways
+    } catch (error) {
+      if (this.relay === relay) throw error
+      const gateways = await (await this.requireRelay()).listGateways()
+      this.rememberGatewayCapabilities(gateways)
+      return gateways
+    }
+  }
 
   async pairGateway(gatewayId: string, pairingCode: string, credentialId = `device_${crypto.randomUUID()}`): Promise<void> {
     const relay = await this.requireRelay()
@@ -112,13 +130,21 @@ export class RelayApi {
     return (await this.inventory(gatewayId)).projects
   }
 
+  async createProject(gatewayId: string, input: CreateProjectDto): Promise<Project> {
+    const payload = this.completed(
+      await this.requestGateway(gatewayId, { kind: 'project.create', input }),
+    ) as { project: Project }
+    return payload.project
+  }
+
   async listSessions(projectId: string): Promise<CodeverSession[]> {
     const gatewayId = this.requireProjectGateway(projectId)
     return (await this.inventory(gatewayId)).sessions.filter(session => session.projectId === projectId)
   }
 
   async discoverProviderSessions(projectId: string, provider: string): Promise<ProviderSessionListDto> {
-    return this.completed(await (await this.gatewayForProject(projectId)).request({ kind: 'provider.sessions.list', projectId, provider })) as ProviderSessionListDto
+    const gatewayId = this.requireProjectGateway(projectId)
+    return this.completed(await this.requestGateway(gatewayId, { kind: 'provider.sessions.list', projectId, provider })) as ProviderSessionListDto
   }
 
   async getSession(sessionId: string): Promise<CodeverSession> {
@@ -129,32 +155,41 @@ export class RelayApi {
   }
 
   async getSessionEvents(sessionId: string, after = 0): Promise<{ events: SessionEventEnvelope[]; nextAfter: number | null }> {
-    const payload = this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'events.list', sessionId, after })) as {
+    const payload = this.completed(await this.requestGateway(
+      this.requireSessionGateway(sessionId), { kind: 'events.list', sessionId, after },
+    )) as {
       events: SessionEventEnvelope[]; nextAfter: number | null
     }
     return payload
   }
 
   async createSession(projectId: string, input: CreateSessionDto): Promise<CodeverSession> {
-    const payload = this.completed(await (await this.gatewayForProject(projectId)).request({ kind: 'session.create', projectId, input })) as { session: CodeverSession }
+    const gatewayId = this.requireProjectGateway(projectId)
+    const payload = this.completed(await this.requestGateway(gatewayId, { kind: 'session.create', projectId, input })) as { session: CodeverSession }
     await this.refreshProjectInventory(projectId)
     return payload.session
   }
 
   async sendMessage(sessionId: string, input: SendMessageDto): Promise<MutationReceiptDto> {
-    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.message', sessionId, input })) as MutationReceiptDto
+    return this.completed(await this.requestGateway(
+      this.requireSessionGateway(sessionId), { kind: 'session.message', sessionId, input },
+    )) as MutationReceiptDto
   }
 
   async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
-    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.cancel', sessionId, input })) as MutationReceiptDto
+    return this.completed(await this.requestGateway(
+      this.requireSessionGateway(sessionId), { kind: 'session.cancel', sessionId, input },
+    )) as MutationReceiptDto
   }
 
   async patchSessionConfig(sessionId: string, input: PatchSessionConfigDto): Promise<MutationReceiptDto> {
-    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.config.patch', sessionId, input })) as MutationReceiptDto
+    return this.completed(await this.requestGateway(
+      this.requireSessionGateway(sessionId), { kind: 'session.config.patch', sessionId, input },
+    )) as MutationReceiptDto
   }
 
   async resolveDecision(sessionId: string, decisionId: string, value: JsonValue): Promise<MutationReceiptDto> {
-    return this.completed(await (await this.gatewayForSession(sessionId)).request({
+    return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
       kind: 'decision.respond', sessionId, decisionId, input: { value },
     })) as MutationReceiptDto
   }
@@ -182,17 +217,34 @@ export class RelayApi {
     const relay = new SecureRelayClient({
       baseUrl: this.baseUrl,
       handshake,
-      onError: () => this.options.onDisconnected?.(),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      onError: () => {
+        if (this.relay === relay) {
+          this.relay = undefined
+          this.gatewayConnections.clear()
+          this.options.onDisconnected?.()
+        }
+      },
     })
-    await relay.connect()
     this.relay = relay
+    try {
+      await relay.connect()
+    } catch (error) {
+      if (this.relay === relay) this.relay = undefined
+      throw error
+    }
     this.relayCredential = await this.relayCredentials.load(this.relayProfileId)
   }
 
   private async requireRelay(): Promise<SecureRelayClient> {
     if (this.relay) return this.relay
-    const restored = await this.restoreRelay()
-    if (!restored || !this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
+    if (!this.relayOpening) {
+      this.relayOpening = this.restoreRelay().then(restored => {
+        if (!restored || !this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
+      }).finally(() => { this.relayOpening = undefined })
+    }
+    await this.relayOpening
+    if (!this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
     return this.relay
   }
 
@@ -216,15 +268,13 @@ export class RelayApi {
   }
 
   private async inventory(gatewayId: string): Promise<InventorySnapshot> {
-    const payload = this.completed(await (await this.gateway(gatewayId)).request({ kind: 'inventory.get' })) as InventorySnapshot
+    const payload = this.completed(await this.requestGateway(gatewayId, { kind: 'inventory.get' })) as InventorySnapshot
     this.inventories.set(gatewayId, payload)
     for (const project of payload.projects) this.projectGateways.set(project.id, gatewayId)
     for (const session of payload.sessions) this.sessionGateways.set(session.id, gatewayId)
     return payload
   }
 
-  private gatewayForProject(projectId: string): Promise<GatewaySecureConnection> { return this.gateway(this.requireProjectGateway(projectId)) }
-  private gatewayForSession(sessionId: string): Promise<GatewaySecureConnection> { return this.gateway(this.requireSessionGateway(sessionId)) }
   private requireProjectGateway(projectId: string): string {
     const value = this.projectGateways.get(projectId)
     if (!value) throw new RelayApiError('Load the Gateway inventory before accessing this project')
@@ -236,6 +286,30 @@ export class RelayApi {
     return value
   }
   private async refreshProjectInventory(projectId: string): Promise<void> { await this.inventory(this.requireProjectGateway(projectId)) }
+  private async requestGateway(
+    gatewayId: string,
+    payload: Parameters<GatewaySecureConnection['request']>[0],
+  ): Promise<ClientGatewayResponseFrame> {
+    const idempotencyKey = crypto.randomUUID()
+    const timeoutMs = payload.kind === 'session.message'
+      ? this.options.longRequestTimeoutMs ?? 30 * 60_000
+      : this.options.requestTimeoutMs
+    try {
+      return await (await this.gateway(gatewayId)).request(payload, idempotencyKey, timeoutMs)
+    } catch (error) {
+      this.gatewayConnections.delete(gatewayId)
+      if (!isRetrySafe(payload) && !this.durableIdempotencyGateways.has(gatewayId)) throw error
+      return (await this.gateway(gatewayId)).request(payload, idempotencyKey, timeoutMs)
+    }
+  }
+  private rememberGatewayCapabilities(gateways: Gateway[]): void {
+    this.durableIdempotencyGateways.clear()
+    for (const gateway of gateways) {
+      if (gateway.capabilities.features.includes('durable-idempotency')) {
+        this.durableIdempotencyGateways.add(gateway.id)
+      }
+    }
+  }
   private completed(response: ClientGatewayResponseFrame): unknown {
     if (response.status === 'completed') return response.payload
     if (response.status === 'failed') throw new RelayApiError(response.error.message, 0, response.error.code)
@@ -248,6 +322,10 @@ export class RelayApi {
 
 function source(value: string | (() => string | undefined)): string | undefined {
   return typeof value === 'function' ? value() : value
+}
+
+function isRetrySafe(payload: Parameters<GatewaySecureConnection['request']>[0]): boolean {
+  return payload.kind === 'inventory.get' || payload.kind === 'events.list' || payload.kind === 'provider.sessions.list'
 }
 
 export const relayApiKey: InjectionKey<RelayApi> = Symbol('relay-api')

@@ -9,9 +9,11 @@ import {
 } from './common'
 import {
     CancelSessionDtoSchema,
+    CreateProjectDtoSchema,
     CreateSessionDtoSchema,
     MutationReceiptDtoSchema,
     PatchSessionConfigDtoSchema,
+    ProjectDtoSchema,
     ProviderSessionListDtoSchema,
     ResolveDecisionDtoSchema,
     SendMessageDtoSchema,
@@ -24,6 +26,10 @@ import { SessionEventEnvelopeSchema } from './events'
 
 export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('inventory.get') }).strict(),
+    z.object({
+        kind: z.literal('project.create'),
+        input: CreateProjectDtoSchema,
+    }).strict(),
     z.object({
         kind: z.literal('provider.sessions.list'),
         projectId: OpaqueIdSchema,
@@ -73,6 +79,7 @@ export const ClientGatewayRequestFrameSchema = z.object({
 
 export const ClientGatewayCompletedPayloadSchema = z.union([
     InventorySnapshotSchema,
+    ProjectDtoSchema,
     ProviderSessionListDtoSchema,
     SessionDtoSchema,
     SessionEventsDtoSchema,

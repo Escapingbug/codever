@@ -15,7 +15,9 @@ import type { RelaySecureHandshake } from '../security/relaySecureHandshake'
 export class SecureRelayClient {
   private socket?: WebSocket
   private connectState?: Deferred<void>
+  private failure?: Error
   private incoming = Promise.resolve()
+  private outgoing = Promise.resolve()
   private readonly gatewayListRequests = new Map<string, Deferred<Gateway[]>>()
   private readonly openingGateways = new Map<string, GatewaySecureConnection>()
   private readonly tunnels = new Map<string, GatewaySecureConnection>()
@@ -25,9 +27,11 @@ export class SecureRelayClient {
     handshake: RelaySecureHandshake
     webSocketFactory?: (url: string) => WebSocket
     onError?: (error: Error) => void
+    requestTimeoutMs?: number
   }) {}
 
   connect(): Promise<void> {
+    if (this.failure) return Promise.reject(this.failure)
     if (this.options.handshake.ready && this.socket?.readyState === 1) return Promise.resolve()
     if (this.connectState) return this.connectState.promise
     this.connectState = deferred<void>()
@@ -35,6 +39,8 @@ export class SecureRelayClient {
       const endpoint = this.url()
       const socket = (this.options.webSocketFactory ?? (url => new WebSocket(url)))(endpoint)
       this.socket = socket
+      const timer = setTimeout(() => this.fail(new Error('Secure Relay handshake timed out')), this.requestTimeoutMs)
+      this.connectState.promise.then(() => clearTimeout(timer), () => clearTimeout(timer))
       socket.addEventListener('open', () => {
         void this.options.handshake.start().then(frame => this.sendRaw(frame)).catch(error => this.fail(asError(error)))
       })
@@ -58,25 +64,42 @@ export class SecureRelayClient {
     const requestId = id()
     const waiting = deferred<Gateway[]>()
     this.gatewayListRequests.set(requestId, waiting)
-    await this.sendSecure({ version: PROTOCOL_VERSION, type: 'client.relay.gateways.request', requestId })
-    return waiting.promise
+    const timer = setTimeout(() => {
+      if (this.gatewayListRequests.delete(requestId)) waiting.reject(new Error('Relay Gateway list request timed out'))
+    }, this.requestTimeoutMs)
+    try {
+      await this.sendSecure(
+        { version: PROTOCOL_VERSION, type: 'client.relay.gateways.request', requestId },
+        () => this.gatewayListRequests.has(requestId),
+      )
+      return await waiting.promise
+    } catch (error) {
+      this.gatewayListRequests.delete(requestId)
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async openGateway(gatewayId: string, handshake: DeviceSecureHandshake, onEvent?: (event: ClientGatewayEventFrame) => void): Promise<GatewaySecureConnection> {
     await this.connect()
     if (this.openingGateways.has(gatewayId)) throw new Error(`Gateway ${gatewayId} is already opening`)
-    const connection = new GatewaySecureConnection(gatewayId, handshake, frame => this.sendSecure(frame), onEvent)
+    const connection = new GatewaySecureConnection(
+      gatewayId, handshake, frame => this.sendSecure(frame), onEvent, this.requestTimeoutMs,
+    )
     this.openingGateways.set(gatewayId, connection)
-    await this.sendSecure({
-      version: PROTOCOL_VERSION,
-      type: 'device.tunnel.open',
-      messageId: id(),
-      payload: { gatewayId },
-    } satisfies ClientDeviceTunnelRequestFrame)
+    const timer = setTimeout(() => this.fail(new Error(`Gateway ${gatewayId} secure handshake timed out`)), this.requestTimeoutMs)
     try {
+      await this.sendSecure({
+        version: PROTOCOL_VERSION,
+        type: 'device.tunnel.open',
+        messageId: id(),
+        payload: { gatewayId },
+      } satisfies ClientDeviceTunnelRequestFrame)
       await connection.connected
       return connection
     } finally {
+      clearTimeout(timer)
       this.openingGateways.delete(gatewayId)
     }
   }
@@ -131,7 +154,25 @@ export class SecureRelayClient {
     await connection.receive(frame.payload.opaquePayload)
   }
 
-  private async sendSecure(value: unknown): Promise<void> { this.sendRaw(await this.options.handshake.encrypt(value)) }
+  private sendSecure(value: unknown, isCurrent: () => boolean = () => true): Promise<void> {
+    const queued = this.enqueueOutgoing(async () => {
+      if (!isCurrent()) throw new Error('Relay request timed out before it was sent')
+      const encrypted = await this.options.handshake.encrypt(value)
+      if (!isCurrent()) throw new Error('Relay request timed out before it was sent')
+      this.sendRaw(encrypted)
+    })
+    return queued.catch(error => {
+      const failure = asError(error)
+      this.fail(failure)
+      throw failure
+    })
+  }
+
+  private enqueueOutgoing(operation: () => Promise<void> | void): Promise<void> {
+    const queued = this.outgoing.then(operation)
+    this.outgoing = queued.catch(() => undefined)
+    return queued
+  }
 
   private sendRaw(value: unknown): void {
     if (this.socket?.readyState !== 1) throw new Error('Secure Relay socket is not open')
@@ -139,6 +180,11 @@ export class SecureRelayClient {
   }
 
   private fail(error: Error): void {
+    if (this.failure) return
+    this.failure = error
+    const socket = this.socket
+    this.socket = undefined
+    if (socket?.readyState === 0 || socket?.readyState === 1) socket.close(1011, 'Secure session failed')
     this.options.onError?.(error)
     this.connectState?.reject(error)
     this.connectState = undefined
@@ -148,6 +194,8 @@ export class SecureRelayClient {
     this.openingGateways.clear()
     this.tunnels.clear()
   }
+
+  private get requestTimeoutMs(): number { return this.options.requestTimeoutMs ?? 30_000 }
 
   private url(): string {
     const url = new URL(this.options.baseUrl)
@@ -162,12 +210,14 @@ export class GatewaySecureConnection {
   private tunnelId?: string
   private readonly connectState = deferred<void>()
   private readonly requests = new Map<string, Deferred<ClientGatewayResponseFrame>>()
+  private outgoing = Promise.resolve()
 
   constructor(
     readonly gatewayId: string,
     private readonly handshake: DeviceSecureHandshake,
     private readonly sendOuter: (frame: ClientDeviceTunnelRequestFrame) => Promise<void>,
     private readonly onEvent?: (event: ClientGatewayEventFrame) => void,
+    private readonly requestTimeoutMs = 30_000,
   ) {}
 
   get connected(): Promise<void> { return this.connectState.promise }
@@ -196,24 +246,38 @@ export class GatewaySecureConnection {
     waiting.resolve(frame)
   }
 
-  async request(payload: ClientGatewayRequestPayload, idempotencyKey = id()): Promise<ClientGatewayResponseFrame> {
+  async request(
+    payload: ClientGatewayRequestPayload,
+    idempotencyKey = id(),
+    timeoutMs = this.requestTimeoutMs,
+  ): Promise<ClientGatewayResponseFrame> {
     await this.connected
     const requestId = id()
     const waiting = deferred<ClientGatewayResponseFrame>()
     this.requests.set(requestId, waiting)
+    const timer = setTimeout(() => {
+      if (this.requests.delete(requestId)) waiting.reject(new Error('Gateway request timed out'))
+    }, timeoutMs)
     try {
-      await this.sendData(await this.handshake.encryptRequest({
-        version: PROTOCOL_VERSION,
-        type: 'client.gateway.request',
-        requestId,
-        idempotencyKey,
-        payload,
-      }))
+      await this.enqueueOutgoing(async () => {
+        if (!this.requests.has(requestId)) throw new Error('Gateway request timed out before it was sent')
+        const opaquePayload = await this.handshake.encryptRequest({
+          version: PROTOCOL_VERSION,
+          type: 'client.gateway.request',
+          requestId,
+          idempotencyKey,
+          payload,
+        })
+        if (!this.requests.has(requestId)) throw new Error('Gateway request timed out before it was sent')
+        await this.sendData(opaquePayload)
+      })
+      return await waiting.promise
     } catch (error) {
       this.requests.delete(requestId)
       throw error
+    } finally {
+      clearTimeout(timer)
     }
-    return waiting.promise
   }
 
   fail(error: Error): void {
@@ -231,6 +295,12 @@ export class GatewaySecureConnection {
       payload: { tunnelId: this.tunnelId, opaquePayload },
     })
   }
+
+  private enqueueOutgoing(operation: () => Promise<void>): Promise<void> {
+    const queued = this.outgoing.then(operation)
+    this.outgoing = queued.catch(() => undefined)
+    return queued
+  }
 }
 
 interface Deferred<T> { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void }
@@ -238,6 +308,7 @@ function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
   let reject!: (error: Error) => void
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  void promise.catch(() => undefined)
   return { promise, resolve, reject }
 }
 function id(): string { return globalThis.crypto.randomUUID() }

@@ -78,6 +78,7 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .page-header, .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
 .page-header { margin-bottom: 42px; }
 .page-header p { margin: 0; color: var(--muted); }
+.header-actions, .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .eyebrow { display: block; margin-bottom: 8px; font-size: .67rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
 .button { min-height: 38px; padding: 8px 14px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); cursor: pointer; }
 .button:hover:not(:disabled) { border-color: #4a5141; background: var(--panel-3); }
@@ -250,8 +251,8 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .entry-copy { margin-bottom: 26px; color: var(--muted); font-size: .82rem; line-height: 1.6; overflow-wrap: anywhere; }
 .relay-form { display: grid; gap: 15px; }
 .relay-form label { display: grid; gap: 6px; color: var(--muted); font-size: .7rem; font-weight: 650; }
-.relay-form input { width: 100%; min-height: 44px; padding: 9px 11px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--panel-2); }
-.relay-form input:focus { border-color: #617a3c; box-shadow: 0 0 0 3px rgba(196,243,106,.07); }
+.relay-form input, .relay-form select { width: 100%; min-height: 44px; padding: 9px 11px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--panel-2); }
+.relay-form input:focus, .relay-form select:focus { border-color: #617a3c; box-shadow: 0 0 0 3px rgba(196,243,106,.07); }
 .form-help { margin: -3px 0 0; color: var(--muted); font-size: .68rem; line-height: 1.5; }
 .advanced-settings { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
 .advanced-settings summary { color: var(--muted); cursor: pointer; font-size: .72rem; font-weight: 650; }
@@ -266,6 +267,8 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .nav-rail--gateways .nav-list { flex: 1; }
 .settings-page { max-width: 960px; }
 .settings-section { margin-bottom: 38px; }
+.project-create-panel { max-width: 680px; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.project-create-panel .form-help { margin: 8px 0 18px; }
 .pairing-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
 .pairing-form label { display: grid; gap: 7px; color: var(--muted); font-weight: 700; }
 .pairing-confirmation { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--panel); }
@@ -305,6 +308,7 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .page--overview { width: 100%; padding: 24px 16px 48px; }
   .page-header { align-items: flex-start; margin-bottom: 26px; }
   .page-header .button { white-space: nowrap; }
+  .page-header .header-actions { flex-direction: column; align-items: stretch; }
   .gateway-grid, .project-grid { width: 100%; grid-template-columns: minmax(0, 1fr); }
   .gateway-card, .project-card { padding: 16px; }
   .session-table { border: 0; overflow: visible; }

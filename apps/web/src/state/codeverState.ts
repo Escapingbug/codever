@@ -1,4 +1,4 @@
-import type { CodeverSession, Gateway, Project } from '@codever/protocol'
+import type { CodeverSession, CreateProjectDto, Gateway, Project } from '@codever/protocol'
 import { computed, inject, reactive, ref } from 'vue'
 import { RelayApi, relayApiKey } from '../api/relayApi'
 
@@ -43,6 +43,24 @@ export function useCodeverState() {
     }
   }
 
+  async function createProject(gatewayId: string, input: CreateProjectDto): Promise<Project> {
+    const key = `project:create:${gatewayId}`
+    pending.add(key)
+    errors[key] = undefined
+    try {
+      const project = await api.createProject(gatewayId, input)
+      await load(`projects:${gatewayId}`, () => api.listProjects(gatewayId), (value) => {
+        projectsByGateway[gatewayId] = value
+      })
+      return project
+    } catch (error) {
+      errors[key] = error instanceof Error ? error.message : 'Unable to create project'
+      throw error
+    } finally {
+      pending.delete(key)
+    }
+  }
+
   return {
     api,
     gateways,
@@ -51,6 +69,7 @@ export function useCodeverState() {
     pending: computed(() => pending),
     errors,
     loadWorkspace,
+    createProject,
     loadGateways: () => load('gateways', () => api.listGateways(), (value) => { gateways.value = value }),
     loadProjects: (gatewayId: string) => load(
       `projects:${gatewayId}`,

@@ -6,6 +6,7 @@ import { SessionEventEnvelopeSchema } from './events'
 
 export const GatewayListDtoSchema = z.object({ gateways: z.array(GatewaySchema) }).strict()
 export const ProjectListDtoSchema = z.object({ gatewayId: OpaqueIdSchema, projects: z.array(ProjectSchema) }).strict()
+export const ProjectDtoSchema = z.object({ project: ProjectSchema }).strict()
 export const SessionListDtoSchema = z.object({ projectId: OpaqueIdSchema, sessions: z.array(CodeverSessionSchema) }).strict()
 export const SessionDtoSchema = z.object({ session: CodeverSessionSchema }).strict()
 export const ProviderSessionListDtoSchema = z.object({
@@ -61,6 +62,7 @@ export const MutationReceiptDtoSchema = z.object({
 
 export type GatewayListDto = z.infer<typeof GatewayListDtoSchema>
 export type ProjectListDto = z.infer<typeof ProjectListDtoSchema>
+export type ProjectDto = z.infer<typeof ProjectDtoSchema>
 export type SessionListDto = z.infer<typeof SessionListDtoSchema>
 export type SessionDto = z.infer<typeof SessionDtoSchema>
 export type ProviderSessionListDto = z.infer<typeof ProviderSessionListDtoSchema>
@@ -75,6 +77,7 @@ export type MutationReceiptDto = z.infer<typeof MutationReceiptDtoSchema>
 
 export const parseGatewayListDto = (value: unknown): GatewayListDto => parseWithSchema(GatewayListDtoSchema, value)
 export const parseProjectListDto = (value: unknown): ProjectListDto => parseWithSchema(ProjectListDtoSchema, value)
+export const parseProjectDto = (value: unknown): ProjectDto => parseWithSchema(ProjectDtoSchema, value)
 export const parseSessionListDto = (value: unknown): SessionListDto => parseWithSchema(SessionListDtoSchema, value)
 export const parseSessionDto = (value: unknown): SessionDto => parseWithSchema(SessionDtoSchema, value)
 export const parseProviderSessionListDto = (value: unknown): ProviderSessionListDto => parseWithSchema(ProviderSessionListDtoSchema, value)

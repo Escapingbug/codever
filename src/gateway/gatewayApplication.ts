@@ -25,6 +25,9 @@ import {
     type DeviceCredentialRecord,
 } from './security'
 import type { OpaquePairingTicket } from '@codever/secure-channel'
+import { GatewayRequestLedger } from './requestLedger'
+
+export const GATEWAY_FEATURES = ['sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency']
 
 export interface GatewayApplication {
     readonly config: GatewayConfig
@@ -53,6 +56,7 @@ export async function createGatewayApplication(
     })
     const metadata = await FileSessionMetadataRepository.open(join(config.dataDirectory, 'sessions.json'))
     const events = new FileConversationEventStore<GatewayConversationEvent>(join(config.dataDirectory, 'events.jsonl'))
+    const requestLedger = await GatewayRequestLedger.open(join(config.dataDirectory, 'client-request-ledger.json'))
     const sessions = await GatewaySessionService.open({
         gatewayId: config.gatewayId,
         projects,
@@ -83,15 +87,8 @@ export async function createGatewayApplication(
     const inventory = async (): Promise<InventorySnapshot> => ({
         generatedAt: new Date().toISOString(),
         revision: inventoryRevision,
-        projects: (await projects.list({ includeArchived: true })).map((project) => ({
-            id: project.id,
-            gatewayId: config.gatewayId,
-            name: project.name,
-            rootPath: project.rootPath,
-            canonicalRoot: project.canonicalRoot,
-            ...(project.defaultProvider ? { defaultProvider: project.defaultProvider } : {}),
-            ...(project.archivedAt ? { archivedAt: project.archivedAt } : {}),
-        })),
+        projects: (await projects.list({ includeArchived: true }))
+            .map(project => toWireProject(project, config.gatewayId)),
         sessions: await metadata.list(),
     })
 
@@ -113,7 +110,7 @@ export async function createGatewayApplication(
             capabilities: {
                 protocolVersions: [PROTOCOL_VERSION],
                 providers: listProviders(),
-                features: ['sessions', 'events', 'tools', 'decisions', 'cancel'],
+                features: GATEWAY_FEATURES,
             },
         },
         handleDeviceTunnel: async (payload, actions) => {
@@ -123,9 +120,18 @@ export async function createGatewayApplication(
                     gatewayId: config.gatewayId,
                     authenticator: deviceAuthenticator,
                     send: actions.send,
-                    handleRequest: (request, credentialId) => handleClientRequest(
-                        request, credentialId, inventory, sessions, events,
-                    ),
+                    handleRequest: (request, credentialId) => {
+                        const operation = () => handleClientRequest(request, {
+                            credentialId,
+                            gatewayId: config.gatewayId,
+                            inventory,
+                            projects,
+                            sessions,
+                            events,
+                            inventoryChanged: () => { inventoryRevision += 1 },
+                        })
+                        return isReadRequest(request) ? operation() : requestLedger.execute(request, credentialId, operation)
+                    },
                 }))
                 return
             }
@@ -200,40 +206,56 @@ export async function createGatewayApplication(
     }
 }
 
-async function handleClientRequest(
+export interface ClientRequestContext {
+    credentialId: string
+    gatewayId: string
+    inventory: () => Promise<InventorySnapshot>
+    projects: ProjectRegistry
+    sessions: GatewaySessionService
+    events: FileConversationEventStore<GatewayConversationEvent>
+    inventoryChanged: () => void
+}
+
+export async function handleClientRequest(
     request: ClientGatewayRequestFrame,
-    credentialId: string,
-    inventory: () => Promise<InventorySnapshot>,
-    sessions: GatewaySessionService,
-    events: FileConversationEventStore<GatewayConversationEvent>,
+    context: ClientRequestContext,
 ): Promise<ClientGatewayResponseFrame> {
     const completedAt = new Date().toISOString()
     try {
         let payload: ClientGatewayCompletedPayload
         switch (request.payload.kind) {
             case 'inventory.get':
-                payload = await inventory()
+                payload = await context.inventory()
                 break
+            case 'project.create': {
+                const project = await context.projects.create(request.payload.input)
+                context.inventoryChanged()
+                payload = { project: toWireProject(project, context.gatewayId) }
+                break
+            }
             case 'provider.sessions.list':
-                payload = await sessions.listProviderSessions(request.payload.projectId, request.payload.provider)
+                payload = await context.sessions.listProviderSessions(
+                    request.payload.projectId,
+                    request.payload.provider,
+                )
                 break
             case 'session.create': {
                 const input = request.payload.input
-                payload = { session: await sessions.create(request.payload.projectId, {
+                payload = { session: await context.sessions.create(request.payload.projectId, {
                     ...input,
                     idempotencyKey: request.idempotencyKey,
                 }) }
                 break
             }
             case 'session.message':
-                await sessions.sendMessage(request.payload.sessionId, {
+                await context.sessions.sendMessage(request.payload.sessionId, {
                     text: request.payload.input.text,
                     idempotencyKey: request.idempotencyKey,
                 })
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
             case 'session.cancel':
-                await sessions.cancel(
+                await context.sessions.cancel(
                     request.payload.sessionId,
                     request.payload.input.reason,
                     request.idempotencyKey,
@@ -241,7 +263,7 @@ async function handleClientRequest(
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
             case 'session.config.patch':
-                await sessions.patchConfig(request.payload.sessionId, {
+                await context.sessions.patchConfig(request.payload.sessionId, {
                     ...request.payload.input,
                     idempotencyKey: request.idempotencyKey,
                 })
@@ -250,18 +272,22 @@ async function handleClientRequest(
             case 'decision.respond': {
                 const value = request.payload.input.value
                 if (typeof value !== 'string') throw new Error('Decision response must be an option ID string')
-                await sessions.respondDecision(
+                await context.sessions.respondDecision(
                     request.payload.sessionId,
                     request.payload.decisionId,
                     value,
-                    credentialId,
+                    context.credentialId,
                     request.idempotencyKey,
                 )
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
             }
             case 'events.list': {
-                const all = await loadWireEvents(events, request.payload.sessionId, request.payload.after ?? 0)
+                const all = await loadWireEvents(
+                    context.events,
+                    request.payload.sessionId,
+                    request.payload.after ?? 0,
+                )
                 const selected = all.slice(0, request.payload.limit ?? 500)
                 payload = {
                     sessionId: request.payload.sessionId,
@@ -286,6 +312,27 @@ async function handleClientRequest(
                 retryable: false,
             },
         }
+    }
+}
+
+function isReadRequest(request: ClientGatewayRequestFrame): boolean {
+    return request.payload.kind === 'inventory.get'
+        || request.payload.kind === 'events.list'
+        || request.payload.kind === 'provider.sessions.list'
+}
+
+function toWireProject(
+    project: Awaited<ReturnType<ProjectRegistry['get']>>,
+    gatewayId: string,
+) {
+    return {
+        id: project.id,
+        gatewayId,
+        name: project.name,
+        rootPath: project.rootPath,
+        canonicalRoot: project.canonicalRoot,
+        ...(project.defaultProvider ? { defaultProvider: project.defaultProvider } : {}),
+        ...(project.archivedAt ? { archivedAt: project.archivedAt } : {}),
     }
 }
 
