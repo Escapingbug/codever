@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util'
 import { createGatewayApplication, defaultGatewayConfigPath, loadGatewayConfig, writeGatewayConfig } from './gateway/index.js'
+import { runGatewayDevicePairCommand, startGatewayLocalControlServer } from './gateway/localControl.js'
 
 async function main(): Promise<void> {
     const { positionals, values } = parseArgs({
@@ -37,6 +38,10 @@ async function main(): Promise<void> {
     }
 
     const config = await loadGatewayConfig(configPath)
+    if (command === 'device' && positionals[1] === 'pair') {
+        console.log(JSON.stringify(await runGatewayDevicePairCommand(config.dataDirectory), null, 2))
+        return
+    }
     const application = await createGatewayApplication(config, {
         ...(config.secure.pairingCode ? {
             onRelayCredentialSaved: async () => {
@@ -63,9 +68,7 @@ async function main(): Promise<void> {
     }
     if (command === 'device') {
         const subcommand = positionals[1]
-        if (subcommand === 'pair') {
-            console.log(JSON.stringify(application.issueDevicePairing(), null, 2))
-        } else if (subcommand === 'list') {
+        if (subcommand === 'list') {
             console.log(JSON.stringify(await application.listDevices(), null, 2))
         } else if (subcommand === 'revoke') {
             if (!values.id) throw new Error('device revoke requires --id')
@@ -78,9 +81,11 @@ async function main(): Promise<void> {
     }
     if (command !== 'start') throw new Error(`Unknown command: ${command}`)
 
+    const localControl = await startGatewayLocalControlServer(config.dataDirectory, application.issueDevicePairing)
     application.start()
     console.log(`Gateway ${config.name} (${config.gatewayId}) connecting to ${config.relayUrl}`)
     const shutdown = async () => {
+        await localControl.close()
         await application.close()
         process.exit(0)
     }
