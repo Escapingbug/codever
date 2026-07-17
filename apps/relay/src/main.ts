@@ -26,6 +26,10 @@ const repositories = config.repositoryMode === 'memory'
 const gatewayCredentials = await SecureCredentialRepository.open(
     join(config.dataDirectory, 'secure-gateway-credentials.json'),
 )
+for (const gateway of await repositories.gateways.list()) {
+    const credential = await gatewayCredentials.get(gateway.id)
+    if (!credential?.enabled) await repositories.gateways.remove(gateway.id)
+}
 const clientCredentials = await ClientCredentialRepository.open(
     join(config.dataDirectory, 'secure-client-credentials.json'),
 )

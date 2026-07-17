@@ -19,6 +19,10 @@ export class InMemoryGatewayRepository implements GatewayRepository {
         this.values.set(gateway.id, clone(gateway))
     }
 
+    async remove(id: string): Promise<boolean> {
+        return this.values.delete(id)
+    }
+
     async updateConnection(id: string, status: Gateway['status'], connectionEpoch?: string, lastSeenAt?: string): Promise<void> {
         const current = this.values.get(id)
         if (!current) return

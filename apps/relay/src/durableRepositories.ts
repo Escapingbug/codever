@@ -60,6 +60,17 @@ export class DurableGatewayRepository implements GatewayRepository {
         })
     }
 
+    async remove(id: string): Promise<boolean> {
+        let removed = false
+        await this.mutate(next => {
+            const index = next.gateways.findIndex(value => value.id === id)
+            if (index < 0) return
+            next.gateways.splice(index, 1)
+            removed = true
+        })
+        return removed
+    }
+
     async updateConnection(id: string, status: Gateway['status'], connectionEpoch?: string, lastSeenAt?: string): Promise<void> {
         await this.mutate(next => {
             const gateway = next.gateways.find(value => value.id === id)

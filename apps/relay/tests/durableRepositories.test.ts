@@ -26,6 +26,19 @@ describe('durable Relay repositories', () => {
         })
         expect((await restored.gateways.get('gateway-1'))).not.toHaveProperty('connectionEpoch')
     })
+
+    it('durably removes orphaned Gateway metadata', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-relay-repository-'))
+        directories.push(directory)
+        const repositories = await createDurableRelayRepositories(directory)
+        await repositories.gateways.upsert(gateway())
+
+        await expect(repositories.gateways.remove('gateway-1')).resolves.toBe(true)
+        await expect(repositories.gateways.remove('gateway-1')).resolves.toBe(false)
+
+        const reopened = await createDurableRelayRepositories(directory)
+        await expect(reopened.gateways.list()).resolves.toEqual([])
+    })
 })
 
 function gateway(): Gateway {
