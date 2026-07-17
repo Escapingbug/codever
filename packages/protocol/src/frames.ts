@@ -6,6 +6,7 @@ import {
     GatewayDeviceTunnelDataPayloadSchema,
     GatewayDeviceTunnelOpenPayloadSchema,
 } from './deviceTunnel'
+import { GatewayBlobRequestFrameSchema, RelayBlobResponseFrameSchema } from './relayBlob'
 
 const frame = <TType extends string, TPayload extends z.ZodType>(type: TType, payload: TPayload) => z.object({
     version: z.literal(PROTOCOL_VERSION),
@@ -56,6 +57,8 @@ export const GatewayFrameSchema = z.discriminatedUnion('type', [
     GatewayDeviceTunnelOpenFrameSchema,
     GatewayDeviceTunnelDataFrameSchema,
     GatewayDeviceTunnelCloseFrameSchema,
+    ...GatewayBlobRequestFrameSchema.options,
+    RelayBlobResponseFrameSchema,
 ])
 
 export type GatewayHello = z.infer<typeof GatewayHelloSchema>

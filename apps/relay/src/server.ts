@@ -6,7 +6,10 @@ import {
     parseSecureControlFrame,
     parseSecureDataFrame,
     type GatewayFrame,
+    type GatewayBlobRequestFrame,
     type GatewaySecureHandshakeFrame,
+    type RelayBlobOperation,
+    type RelayBlobResponseFrame,
 } from '@codever/protocol'
 import { SessionCipher } from '@codever/secure-channel'
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
@@ -19,6 +22,7 @@ import { InMemoryGatewayRepository } from './memoryRepositories'
 import type { GatewayRepository } from './repositories'
 import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
 import type { SecureClientAuthenticator } from './secureClientAuth'
+import { RelayBlobStore, RelayBlobStoreError } from './relayBlobStore'
 
 export interface RelayRepositories {
     gateways: GatewayRepository
@@ -32,6 +36,8 @@ export interface CreateRelayServerOptions {
     secureGatewayAuthenticator?: SecureGatewayAuthenticator
     secureClientAuthenticator?: SecureClientAuthenticator
     deviceTunnelRegistry?: DeviceTunnelRegistry
+    blobStore?: RelayBlobStore
+    blobDirectory?: string
 }
 
 export interface RelayServer extends FastifyInstance {
@@ -40,6 +46,7 @@ export interface RelayServer extends FastifyInstance {
         connections: GatewayConnectionRegistry
         clients: ClientConnectionRegistry
         deviceTunnels: DeviceTunnelRegistry
+        blobs: RelayBlobStore
     }
 }
 
@@ -48,8 +55,9 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     const connections = options.connectionRegistry ?? new GatewayConnectionRegistry()
     const clients = options.clientConnectionRegistry ?? new ClientConnectionRegistry()
     const deviceTunnels = options.deviceTunnelRegistry ?? new DeviceTunnelRegistry()
+    const blobs = options.blobStore ?? new RelayBlobStore(options.blobDirectory ?? './data/blobs')
     const app = Fastify({ logger: options.logger ?? false }) as unknown as RelayServer
-    app.decorate('relay', { repositories, connections, clients, deviceTunnels })
+    app.decorate('relay', { repositories, connections, clients, deviceTunnels, blobs })
 
     app.setErrorHandler((error: unknown, _request, reply) => {
         const statusCode = 500
@@ -99,6 +107,7 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
             connections,
             options.secureGatewayAuthenticator,
             deviceTunnels,
+            blobs,
             app,
         )
     })
@@ -122,6 +131,7 @@ function handleSecureGatewaySocket(
     connections: GatewayConnectionRegistry,
     authenticator: SecureGatewayAuthenticator,
     deviceTunnels: DeviceTunnelRegistry,
+    blobs: RelayBlobStore,
     app: FastifyInstance,
 ): void {
     let pendingHandshakeId: string | undefined
@@ -261,7 +271,7 @@ function handleSecureGatewaySocket(
                 return
             }
             if (!connections.isCurrent(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
-            await consumeSecureGatewayFrame(frame, repositories.gateways, deviceTunnels, socket)
+            await consumeSecureGatewayFrame(frame, repositories.gateways, deviceTunnels, connections, blobs, socket)
         }).catch(error => {
             app.log.error(error)
             if (!cipher && socket.readyState === socket.OPEN) {
@@ -289,6 +299,8 @@ async function consumeSecureGatewayFrame(
     frame: GatewayFrame,
     gateways: GatewayRepository,
     deviceTunnels: DeviceTunnelRegistry,
+    connections: GatewayConnectionRegistry,
+    blobs: RelayBlobStore,
     socket: WebSocket,
 ): Promise<void> {
     switch (frame.type) {
@@ -305,7 +317,95 @@ async function consumeSecureGatewayFrame(
                 frame.gatewayId, frame.payload.tunnelId, frame.payload.code ?? 'normal', frame.payload.reason,
             )) throw new Error(`Unknown device tunnel ${frame.payload.tunnelId}`)
             return
+        case 'gateway.blob.begin':
+        case 'gateway.blob.put-chunk':
+        case 'gateway.blob.complete':
+        case 'gateway.blob.manifest':
+        case 'gateway.blob.get-chunk':
+        case 'gateway.blob.delete':
+            await consumeBlobRequest(frame, connections, blobs)
+            return
         default:
             socket.close(1008, `Unexpected secure gateway frame type: ${frame.type}`)
+    }
+}
+
+async function consumeBlobRequest(
+    frame: GatewayBlobRequestFrame,
+    connections: GatewayConnectionRegistry,
+    blobs: RelayBlobStore,
+): Promise<void> {
+    const operation = blobOperation(frame)
+    let payload: RelayBlobResponseFrame['payload']
+    try {
+        switch (frame.type) {
+            case 'gateway.blob.begin':
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'begin', status: 'succeeded',
+                    manifest: await blobs.begin(frame.gatewayId, frame.payload),
+                }
+                break
+            case 'gateway.blob.put-chunk':
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'put-chunk', status: 'succeeded',
+                    manifest: await blobs.putChunk(frame.gatewayId, frame.payload.blobId, frame.payload.index, frame.payload.opaqueChunk),
+                }
+                break
+            case 'gateway.blob.complete':
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'complete', status: 'succeeded',
+                    manifest: await blobs.complete(frame.gatewayId, frame.payload.blobId),
+                }
+                break
+            case 'gateway.blob.manifest':
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'manifest', status: 'succeeded',
+                    manifest: await blobs.manifest(frame.gatewayId, frame.payload.blobId),
+                }
+                break
+            case 'gateway.blob.get-chunk':
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'get-chunk', status: 'succeeded',
+                    blobId: frame.payload.blobId, index: frame.payload.index,
+                    opaqueChunk: await blobs.getChunk(frame.gatewayId, frame.payload.blobId, frame.payload.index),
+                }
+                break
+            case 'gateway.blob.delete':
+                await blobs.delete(frame.gatewayId, frame.payload.blobId)
+                payload = {
+                    requestId: frame.payload.requestId, operation: 'delete', status: 'succeeded',
+                    blobId: frame.payload.blobId, deleted: true,
+                }
+                break
+        }
+    } catch (error) {
+        const known = error instanceof RelayBlobStoreError ? error : undefined
+        payload = {
+            requestId: frame.payload.requestId,
+            operation,
+            status: 'failed',
+            code: known?.code ?? 'storage_error',
+            message: known?.message ?? 'Relay Blob operation failed',
+        }
+    }
+    const response: RelayBlobResponseFrame = {
+        version: 1,
+        type: 'relay.blob.response',
+        messageId: randomUUID(),
+        gatewayId: frame.gatewayId,
+        connectionEpoch: frame.connectionEpoch,
+        payload,
+    }
+    connections.send(frame.gatewayId, response)
+}
+
+function blobOperation(frame: GatewayBlobRequestFrame): RelayBlobOperation {
+    switch (frame.type) {
+        case 'gateway.blob.begin': return 'begin'
+        case 'gateway.blob.put-chunk': return 'put-chunk'
+        case 'gateway.blob.complete': return 'complete'
+        case 'gateway.blob.manifest': return 'manifest'
+        case 'gateway.blob.get-chunk': return 'get-chunk'
+        case 'gateway.blob.delete': return 'delete'
     }
 }

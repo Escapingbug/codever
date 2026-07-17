@@ -8,6 +8,7 @@ import { SecureClientAuthenticator } from './secureClientAuth'
 import { SecureCredentialRepository } from './secureCredentialRepository'
 import { SecureGatewayAuthenticator } from './secureGatewayAuth'
 import { createRelayServer } from './server'
+import { RelayBlobStore } from './relayBlobStore'
 
 const config = await loadRelayConfig()
 if (process.argv[2] === 'pair') {
@@ -52,6 +53,7 @@ const app = await createRelayServer({
     secureGatewayAuthenticator,
     secureClientAuthenticator,
     repositories,
+    blobStore: new RelayBlobStore(join(config.dataDirectory, 'blobs')),
 })
 const localControl = await startLocalControlServer(
     config.dataDirectory,

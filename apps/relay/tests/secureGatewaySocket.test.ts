@@ -1,6 +1,7 @@
 import {
     parseGatewaySecureHandshakeFrame,
     parseRelaySecureAuthAcceptedPayload,
+    parseRelayBlobResponseFrame,
     parseSecureControlFrame,
     parseSecureDataFrame,
     PROTOCOL_VERSION,
@@ -15,14 +16,22 @@ import {
     startOpaquePairingClient,
 } from '@codever/secure-channel'
 import { randomUUID } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { createInMemoryRelayRepositories } from '../src/memoryRepositories'
 import { createRelayServer, type RelayServer } from '../src/server'
 import { SecureGatewayAuthenticator } from '../src/secureGatewayAuth'
+import { RelayBlobStore } from '../src/relayBlobStore'
 
 const servers: RelayServer[] = []
-afterEach(async () => { await Promise.all(servers.splice(0).map(server => server.close())) })
+const directories: string[] = []
+afterEach(async () => {
+    await Promise.all(servers.splice(0).map(server => server.close()))
+    await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
 
 describe('secure Gateway WebSocket', () => {
     it('accepts a one-time OPAQUE pairing and carries only encrypted application frames', async () => {
@@ -34,6 +43,7 @@ describe('secure Gateway WebSocket', () => {
         const app = await createRelayServer({
             repositories,
             secureGatewayAuthenticator: authenticator,
+            blobStore: new RelayBlobStore(await temporaryDirectory()),
         })
         servers.push(app)
         await app.listen({ host: '127.0.0.1', port: 0 })
@@ -121,6 +131,33 @@ describe('secure Gateway WebSocket', () => {
         socket.send(wire)
         await waitFor(async () => (await repositories.gateways.get('gateway-1'))?.status === 'online')
 
+        await sendEncrypted(socket, cipher, blobFrame('gateway.blob.begin', accepted.connectionEpoch, {
+            requestId: 'blob-begin', blobId: 'blob-1', totalSize: 5, chunkSize: 5,
+        }))
+        expect(parseRelayBlobResponseFrame(await decryptMessage(socket, cipher)).payload).toMatchObject({
+            requestId: 'blob-begin', operation: 'begin', status: 'succeeded',
+        })
+
+        await sendEncrypted(socket, cipher, blobFrame('gateway.blob.complete', accepted.connectionEpoch, {
+            requestId: 'blob-incomplete', blobId: 'blob-1',
+        }))
+        expect(parseRelayBlobResponseFrame(await decryptMessage(socket, cipher)).payload).toMatchObject({
+            requestId: 'blob-incomplete', operation: 'complete', status: 'failed', code: 'incomplete',
+        })
+
+        await sendEncrypted(socket, cipher, blobFrame('gateway.blob.put-chunk', accepted.connectionEpoch, {
+            requestId: 'blob-put', blobId: 'blob-1', index: 0, opaqueChunk: Buffer.from('abcde').toString('base64url'),
+        }))
+        expect(parseRelayBlobResponseFrame(await decryptMessage(socket, cipher)).payload).toMatchObject({
+            requestId: 'blob-put', operation: 'put-chunk', status: 'succeeded',
+        })
+        await sendEncrypted(socket, cipher, blobFrame('gateway.blob.complete', accepted.connectionEpoch, {
+            requestId: 'blob-complete', blobId: 'blob-1',
+        }))
+        expect(parseRelayBlobResponseFrame(await decryptMessage(socket, cipher)).payload).toMatchObject({
+            requestId: 'blob-complete', operation: 'complete', status: 'succeeded', manifest: { complete: true },
+        })
+
         const closed = onceClose(socket)
         socket.send(JSON.stringify({
             version: 1,
@@ -138,6 +175,28 @@ describe('secure Gateway WebSocket', () => {
         await expect(closed).resolves.toMatchObject({ code: 1008 })
     }, 20_000)
 })
+
+function blobFrame(type: string, connectionEpoch: string, payload: object): object {
+    return {
+        version: PROTOCOL_VERSION, type, messageId: randomUUID(), gatewayId: 'gateway-1', connectionEpoch, payload,
+    }
+}
+
+async function sendEncrypted(socket: WebSocket, cipher: SessionCipher, value: unknown): Promise<void> {
+    socket.send(JSON.stringify({
+        version: 1, type: 'secure.data', messageId: randomUUID(), envelope: await cipher.encrypt(value),
+    }))
+}
+
+async function decryptMessage(socket: WebSocket, cipher: SessionCipher): Promise<unknown> {
+    return cipher.decrypt(parseSecureDataFrame(JSON.parse(await onceMessage(socket))).envelope)
+}
+
+async function temporaryDirectory(): Promise<string> {
+    const path = await mkdtemp(join(tmpdir(), 'codever-relay-integration-'))
+    directories.push(path)
+    return path
+}
 
 function onceOpen(socket: WebSocket): Promise<void> {
     return new Promise((resolve, reject) => {

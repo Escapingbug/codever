@@ -52,7 +52,7 @@ export const CreateProjectDtoSchema = z.object({
 
 export const SendMessageDtoSchema = z.object({
     text: z.string(),
-    attachmentIds: z.array(OpaqueIdSchema).max(5).optional(),
+    attachmentIds: z.array(OpaqueIdSchema).optional(),
     sendWhenOnline: z.boolean().optional(),
     expiresAt: IsoDateTimeSchema.optional(),
 }).strict().refine(value => value.text.trim().length > 0 || Boolean(value.attachmentIds?.length), {
@@ -64,9 +64,22 @@ export const AttachmentUploadDtoSchema = z.object({
     sessionId: OpaqueIdSchema,
     filename: z.string().min(1),
     mimeType: z.string().min(1),
-    sizeBytes: NonNegativeIntegerSchema,
-    receivedBytes: NonNegativeIntegerSchema,
+    sizeBytes: NonNegativeIntegerSchema.max(Number.MAX_SAFE_INTEGER),
+    receivedBytes: NonNegativeIntegerSchema.max(Number.MAX_SAFE_INTEGER),
     status: z.enum(['uploading', 'ready', 'cancelled']),
+}).strict()
+export const SessionAttachmentDtoSchema = z.object({
+    attachmentId: OpaqueIdSchema,
+    sessionId: OpaqueIdSchema,
+    filename: z.string().min(1),
+    mimeType: z.string().min(1),
+    sizeBytes: NonNegativeIntegerSchema.max(Number.MAX_SAFE_INTEGER),
+    createdAt: IsoDateTimeSchema,
+    status: z.literal('ready'),
+}).strict()
+export const SessionAttachmentListDtoSchema = z.object({
+    sessionId: OpaqueIdSchema,
+    attachments: z.array(SessionAttachmentDtoSchema),
 }).strict()
 export const CancelSessionDtoSchema = z.object({ reason: z.string().min(1).optional() }).strict()
 export const PatchSessionConfigDtoSchema = z.object({
@@ -95,6 +108,8 @@ export type CreateSessionDto = z.infer<typeof CreateSessionDtoSchema>
 export type CreateProjectDto = z.infer<typeof CreateProjectDtoSchema>
 export type SendMessageDto = z.infer<typeof SendMessageDtoSchema>
 export type AttachmentUploadDto = z.infer<typeof AttachmentUploadDtoSchema>
+export type SessionAttachmentDto = z.infer<typeof SessionAttachmentDtoSchema>
+export type SessionAttachmentListDto = z.infer<typeof SessionAttachmentListDtoSchema>
 export type CancelSessionDto = z.infer<typeof CancelSessionDtoSchema>
 export type PatchSessionConfigDto = z.infer<typeof PatchSessionConfigDtoSchema>
 export type ResolveDecisionDto = z.infer<typeof ResolveDecisionDtoSchema>
@@ -111,6 +126,8 @@ export const parseCreateSessionDto = (value: unknown): CreateSessionDto => parse
 export const parseCreateProjectDto = (value: unknown): CreateProjectDto => parseWithSchema(CreateProjectDtoSchema, value)
 export const parseSendMessageDto = (value: unknown): SendMessageDto => parseWithSchema(SendMessageDtoSchema, value)
 export const parseAttachmentUploadDto = (value: unknown): AttachmentUploadDto => parseWithSchema(AttachmentUploadDtoSchema, value)
+export const parseSessionAttachmentDto = (value: unknown): SessionAttachmentDto => parseWithSchema(SessionAttachmentDtoSchema, value)
+export const parseSessionAttachmentListDto = (value: unknown): SessionAttachmentListDto => parseWithSchema(SessionAttachmentListDtoSchema, value)
 export const parseCancelSessionDto = (value: unknown): CancelSessionDto => parseWithSchema(CancelSessionDtoSchema, value)
 export const parsePatchSessionConfigDto = (value: unknown): PatchSessionConfigDto => parseWithSchema(PatchSessionConfigDtoSchema, value)
 export const parseResolveDecisionDto = (value: unknown): ResolveDecisionDto => parseWithSchema(ResolveDecisionDtoSchema, value)

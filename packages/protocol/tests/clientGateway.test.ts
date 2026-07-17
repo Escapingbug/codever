@@ -50,8 +50,10 @@ describe('encrypted Client to Gateway request frames', () => {
                 mimeType: 'text/plain', sizeBytes: 12,
             },
             { kind: 'attachment.upload.chunk', attachmentId: 'attachment-1', offset: 0, data: 'aGVsbG8=' },
-            { kind: 'attachment.upload.complete', attachmentId: 'attachment-1', sha256: 'a'.repeat(64) },
+            { kind: 'attachment.upload.complete', attachmentId: 'attachment-1' },
             { kind: 'attachment.upload.cancel', attachmentId: 'attachment-1' },
+            { kind: 'attachment.list', sessionId: 'session-1' },
+            { kind: 'attachment.delete', sessionId: 'session-1', attachmentIds: ['attachment-1'] },
             { kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' } },
             { kind: 'session.archive.set', sessionId: 'session-1', archived: true },
             { kind: 'session.config.patch', sessionId: 'session-1', input: { config: {}, model: null } },
@@ -86,9 +88,20 @@ describe('encrypted Client to Gateway request frames', () => {
         expect(parseClientGatewayRequestFrame(request({
             kind: 'session.message', sessionId: 'session-1', input: { text: '', attachmentIds: ['attachment-1'] },
         })).payload.kind).toBe('session.message')
-        expect(() => parseClientGatewayRequestFrame(request({
+        expect(parseClientGatewayRequestFrame(request({
             kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'large.bin',
-            mimeType: 'application/octet-stream', sizeBytes: 25 * 1024 * 1024 + 1,
+            mimeType: 'application/octet-stream', sizeBytes: Number.MAX_SAFE_INTEGER,
+        })).payload.kind).toBe('attachment.upload.begin')
+        expect(parseClientGatewayRequestFrame(request({
+            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'empty.bin',
+            mimeType: 'application/octet-stream', sizeBytes: 0,
+        })).payload.kind).toBe('attachment.upload.begin')
+        expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'unsafe.bin',
+            mimeType: 'application/octet-stream', sizeBytes: Number.MAX_SAFE_INTEGER + 1,
+        }))).toThrow()
+        expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'attachment.upload.complete', attachmentId: 'attachment-1', sha256: 'a'.repeat(64),
         }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
             kind: 'events.list', sessionId: 'session-1', limit: 1_001,
@@ -106,6 +119,17 @@ describe('encrypted Gateway to Client response and event frames', () => {
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-1',
             status: 'completed', completedAt: timestamp, payload: { session },
+        }).status).toBe('completed')
+        expect(parseClientGatewayResponseFrame({
+            version: 1, type: 'gateway.client.response', requestId: 'request-attachments',
+            status: 'completed', completedAt: timestamp,
+            payload: {
+                sessionId: 'session-1',
+                attachments: [{
+                    attachmentId: 'attachment-1', sessionId: 'session-1', filename: 'notes.txt',
+                    mimeType: 'text/plain', sizeBytes: 5, createdAt: timestamp, status: 'ready',
+                }],
+            },
         }).status).toBe('completed')
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-project',
