@@ -38,7 +38,14 @@ export interface GatewayApplication {
     close(): Promise<void>
 }
 
-export async function createGatewayApplication(config: GatewayConfig): Promise<GatewayApplication> {
+export interface GatewayApplicationOptions {
+    onRelayCredentialSaved?: () => Promise<void>
+}
+
+export async function createGatewayApplication(
+    config: GatewayConfig,
+    options: GatewayApplicationOptions = {},
+): Promise<GatewayApplication> {
     registerConfiguredProviders(config.providersPath)
     const projects = await ProjectRegistry.open({
         storagePath: join(config.dataDirectory, 'projects.json'),
@@ -90,7 +97,10 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
 
     const gatewayPlatform = platform()
     const tls = config.tls ? await loadTls(config.tls) : undefined
-    const secureCredentialStore = new GatewaySecureCredentialStore(join(config.dataDirectory, 'secure-relay-credential.json'))
+    const secureCredentialStore = new GatewaySecureCredentialStore(
+        join(config.dataDirectory, 'secure-relay-credential.json'),
+        options.onRelayCredentialSaved,
+    )
     const relay = new RelayLink({
         url: config.relayUrl,
         gatewayId: config.gatewayId,

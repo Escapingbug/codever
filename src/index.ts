@@ -37,7 +37,13 @@ async function main(): Promise<void> {
     }
 
     const config = await loadGatewayConfig(configPath)
-    const application = await createGatewayApplication(config)
+    const application = await createGatewayApplication(config, {
+        ...(config.secure.pairingCode ? {
+            onRelayCredentialSaved: async () => {
+                await writeGatewayConfig({ ...config, secure: {} }, configPath)
+            },
+        } : {}),
+    })
     if (command === 'project') {
         const subcommand = positionals[1]
         if (subcommand === 'add') {

@@ -11,7 +11,10 @@ export interface GatewaySecureCredential {
 }
 
 export class GatewaySecureCredentialStore {
-    constructor(readonly path: string) {}
+    constructor(
+        readonly path: string,
+        private readonly afterSave?: () => Promise<void>,
+    ) {}
 
     async load(gatewayId: string): Promise<GatewaySecureCredential | undefined> {
         let value: unknown
@@ -34,6 +37,7 @@ export class GatewaySecureCredentialStore {
         await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
         await rename(temporary, this.path)
         await chmod(this.path, 0o600)
+        await this.afterSave?.()
     }
 }
 
