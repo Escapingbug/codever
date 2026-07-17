@@ -67,6 +67,9 @@ export async function createGatewayApplication(
             if (!provider) throw new Error(`Unknown provider: ${name}`)
             return provider
         },
+        initializeProvider: async (provider) => {
+            if (!provider.isReady()) await provider.init?.()
+        },
         providerDiscoveryFactory: (name) => {
             const provider = createProviderInstance(name)
             if (!provider) throw new Error(`Unknown provider: ${name}`)
@@ -137,7 +140,10 @@ export async function createGatewayApplication(
             }
             const device = deviceSessions.get(payload.tunnelId)
             if ('opaquePayload' in payload) {
-                if (!device) throw new Error('Unknown device tunnel')
+                if (!device) {
+                    actions.close('Unknown or expired device tunnel')
+                    return
+                }
                 await device.receive(payload.opaquePayload)
                 return
             }
@@ -291,6 +297,9 @@ export async function handleClientRequest(
                 break
             }
             case 'events.list': {
+                if ((request.payload.after ?? 0) === 0) {
+                    await context.sessions.hydrateProviderHistory(request.payload.sessionId)
+                }
                 const all = await loadWireEvents(
                     context.events,
                     request.payload.sessionId,

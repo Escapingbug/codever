@@ -8,6 +8,7 @@ export interface GatewayUserMessageEvent {
     kind: 'user_message'
     turnId: string
     input: AgentQueryInput
+    source?: 'live' | 'replay'
 }
 
 export interface GatewayTurnEvent {

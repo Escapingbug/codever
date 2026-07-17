@@ -8,7 +8,7 @@ export function toWireConversationEvent(event: GatewayConversationEvent): WireCo
         return {
             kind: 'user_message',
             text: inputText(event.input),
-            meta: { turnId: event.turnId, source: 'live' },
+            meta: { turnId: event.turnId, source: event.source ?? 'live' },
         }
     }
     if (event.kind === 'turn') {

@@ -60,13 +60,20 @@ onBeforeUnmount(() => unsubscribeEvents?.())
 async function loadSession(): Promise<void> {
   unsubscribeEvents?.()
   unsubscribeEvents = undefined
-  loading.value = true
+  const requestedId = sessionId.value
+  const memoryCached = state.eventsBySession[requestedId] ?? []
+  events.value = memoryCached
+  loading.value = memoryCached.length === 0
   loadError.value = ''
   liveError.value = ''
-  events.value = []
   selectedEvent.value = undefined
-  const requestedId = sessionId.value
   try {
+    const persisted = await state.loadCachedSessionEvents(requestedId)
+    if (requestedId !== sessionId.value) return
+    if (persisted.length) {
+      events.value = persisted
+      loading.value = false
+    }
     session.value = await state.api.getSession(requestedId)
     state.replaceSession(session.value)
     let after = 0
@@ -79,7 +86,9 @@ async function loadSession(): Promise<void> {
     if (requestedId !== sessionId.value) return
     startLiveConnection(requestedId)
   } catch (error) {
-    loadError.value = error instanceof Error ? error.message : 'Could not load the session'
+    const message = error instanceof Error ? error.message : 'Could not load the session'
+    if (events.value.length) liveError.value = `Could not refresh this cached conversation: ${message}`
+    else loadError.value = message
   } finally {
     if (requestedId === sessionId.value) loading.value = false
   }
@@ -111,6 +120,7 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
   const additions = incoming.filter((event) => event.sessionId === sessionId.value && !known.has(event.eventId))
   if (!additions.length) return
   events.value = [...events.value, ...additions].sort((a, b) => a.seq - b.seq)
+  state.replaceSessionEvents(sessionId.value, events.value)
 }
 
 async function scrollToLatest(): Promise<void> {

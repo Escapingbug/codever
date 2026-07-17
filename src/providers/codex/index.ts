@@ -6,6 +6,7 @@
  */
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -13,7 +14,7 @@ import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { finished } from 'node:stream/promises'
 import { AcpProvider } from '@/providers/acp'
-import type { ModelEntry, SessionEntry } from '@/providers/provider'
+import type { ModelEntry, SessionEntry, SessionHistoryEntry } from '@/providers/provider'
 
 const CODEX_ACP_COMMAND = 'npx'
 const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp']
@@ -116,6 +117,31 @@ export class CodexProvider extends AcpProvider {
         return ''
     }
 
+    async getSessionHistory(sessionId: string, cwd: string): Promise<SessionHistoryEntry[]> {
+        try {
+            const files = await findRolloutFiles(path.join(this.codexHome, 'sessions'))
+            const entries: SessionHistoryEntry[] = []
+            for (const file of files) {
+                if (!path.basename(file).includes(sessionId)) continue
+                entries.push(...await readCodexHistory(file, sessionId, cwd))
+            }
+            const unique = new Map<string, SessionHistoryEntry>()
+            for (const entry of entries) unique.set(entry.id, entry)
+            const sorted = [...unique.values()].sort((left, right) => left.timestamp - right.timestamp)
+            let turnId = `initial_${sessionId}`
+            return sorted.map((entry) => {
+                if (entry.role === 'user') turnId = entry.id
+                return { ...entry, turnId }
+            })
+        } catch (e) {
+            const error = e as NodeJS.ErrnoException
+            if (error?.code !== 'ENOENT') {
+                console.error(`[codex] Failed to read session history: ${e instanceof Error ? e.message : String(e)}`)
+            }
+            return []
+        }
+    }
+
     getAvailableModels(): ModelEntry[] {
         try {
             const output = spawnCodexModels(this.modelsCommand, this.modelsArgs, this.env, this.cwd)
@@ -210,6 +236,56 @@ async function readCodexSession(file: string): Promise<SessionEntry | null> {
         cwd,
         firstMessage,
     }
+}
+
+async function readCodexHistory(file: string, expectedSessionId: string, expectedCwd: string): Promise<SessionHistoryEntry[]> {
+    const input = createReadStream(file, { encoding: 'utf-8' })
+    const lines = createInterface({ input, crlfDelay: Infinity })
+    const entries: SessionHistoryEntry[] = []
+    let accepted = false
+    try {
+        for await (const line of lines) {
+            let record: CodexRolloutLine
+            try {
+                record = JSON.parse(line) as CodexRolloutLine
+            } catch {
+                continue
+            }
+            if (record.type === 'session_meta' && record.payload) {
+                const metadata = record.payload as CodexSessionMeta
+                const rolloutId = stringValue(metadata.id)
+                const sessionId = stringValue(metadata.session_id) || rolloutId
+                accepted = sessionId === expectedSessionId
+                    && (!expectedCwd || normalizeCwd(stringValue(metadata.cwd)) === normalizeCwd(expectedCwd))
+                    && (!rolloutId || rolloutId === sessionId)
+                continue
+            }
+            if (!accepted || record.type !== 'event_msg' || !record.payload) continue
+            const payloadType = stringValue(record.payload.type)
+            const role = payloadType === 'user_message' ? 'user'
+                : payloadType === 'agent_message' ? 'assistant'
+                    : undefined
+            if (!role) continue
+            const text = stringValue(record.payload.message).trim()
+            if (!text || (role === 'user' && isInjectedContext(text))) continue
+            const timestampText = stringValue(record.timestamp)
+            const timestamp = Date.parse(timestampText)
+            const stableTimestamp = Number.isFinite(timestamp) ? timestamp : 0
+            entries.push({
+                id: createHash('sha256')
+                    .update(`${expectedSessionId}\0${timestampText}\0${role}\0${text}`)
+                    .digest('hex'),
+                role,
+                text,
+                timestamp: stableTimestamp,
+            })
+        }
+    } finally {
+        lines.close()
+        input.destroy()
+        await finished(input).catch(() => undefined)
+    }
+    return entries
 }
 
 function extractUserEventMessage(record: CodexRolloutLine): string {

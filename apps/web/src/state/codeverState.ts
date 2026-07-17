@@ -1,10 +1,13 @@
-import type { CodeverSession, CreateProjectDto, Gateway, Project } from '@codever/protocol'
-import { computed, inject, reactive, ref } from 'vue'
+import type { CodeverSession, CreateProjectDto, Gateway, Project, ProviderSession, SessionEventEnvelope } from '@codever/protocol'
+import { computed, inject, reactive, ref, shallowReactive } from 'vue'
 import { RelayApi, relayApiKey } from '../api/relayApi'
+import { readCached, writeCached } from './localCache'
 
 const gateways = ref<Gateway[]>([])
 const projectsByGateway = reactive<Record<string, Project[]>>({})
 const sessionsByProject = reactive<Record<string, CodeverSession[]>>({})
+const providerSessionsByProject = shallowReactive<Record<string, ProviderSession[]>>({})
+const eventsBySession = shallowReactive<Record<string, SessionEventEnvelope[]>>({})
 const pending = reactive(new Set<string>())
 const errors = reactive<Record<string, string | undefined>>({})
 let workspaceLoad: Promise<void> | undefined
@@ -66,6 +69,8 @@ export function useCodeverState() {
     gateways,
     projectsByGateway,
     sessionsByProject,
+    providerSessionsByProject,
+    eventsBySession,
     pending: computed(() => pending),
     errors,
     loadWorkspace,
@@ -87,6 +92,26 @@ export function useCodeverState() {
       const index = sessions.findIndex((item) => item.id === session.id)
       if (index >= 0) sessions[index] = session
       else sessions.unshift(session)
+    },
+    loadCachedProviderSessions: async (projectId: string) => {
+      if (providerSessionsByProject[projectId]) return providerSessionsByProject[projectId]
+      const cached = await readCached<ProviderSession[]>(`provider-sessions:${projectId}`) ?? []
+      providerSessionsByProject[projectId] = cached
+      return cached
+    },
+    replaceProviderSessions: (projectId: string, sessions: ProviderSession[]) => {
+      providerSessionsByProject[projectId] = sessions
+      writeCached(`provider-sessions:${projectId}`, sessions)
+    },
+    loadCachedSessionEvents: async (sessionId: string) => {
+      if (eventsBySession[sessionId]) return eventsBySession[sessionId]
+      const cached = await readCached<SessionEventEnvelope[]>(`session-events:${sessionId}`) ?? []
+      eventsBySession[sessionId] = cached
+      return cached
+    },
+    replaceSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
+      eventsBySession[sessionId] = events
+      writeCached(`session-events:${sessionId}`, events)
     },
   }
 }

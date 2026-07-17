@@ -29,6 +29,7 @@ export class GatewaySessionService {
     private readonly subscribers = new Set<GatewayEventSubscriber>()
     private readonly mutationQueues = new Map<string, Promise<void>>()
     private readonly idempotentResults = new Map<string, Promise<unknown>>()
+    private readonly historyHydrations = new Map<string, Promise<void>>()
     private metadataQueue: Promise<void> = Promise.resolve()
     private metadataError: unknown
     private readonly now: () => number
@@ -145,6 +146,63 @@ export class GatewaySessionService {
     async get(sessionId: string): Promise<CodeverSession> {
         await this.assertUsable()
         return this.requireSession(sessionId)
+    }
+
+    hydrateProviderHistory(sessionId: string): Promise<void> {
+        const existing = this.historyHydrations.get(sessionId)
+        if (existing) return existing
+        const hydration = this.serialize(sessionId, async () => {
+            const session = await this.requireOpenSession(sessionId)
+            if (!session.providerSessionId || !this.options.providerDiscoveryFactory) return
+            const project = await this.options.projects.get(session.projectId)
+            const provider = await this.options.providerDiscoveryFactory(session.provider, project)
+            try {
+                if (!provider.getSessionHistory) return
+                const history = await provider.getSessionHistory(session.providerSessionId, project.canonicalRoot)
+                for (const [index, entry] of history.entries()) {
+                    const timestampMs = entry.timestamp > 0 ? entry.timestamp : Date.parse(session.createdAt)
+                    const timestamp = new Date(timestampMs).toISOString()
+                    const turnId = `native_${(entry.turnId ?? entry.id).slice(0, 24)}`
+                    const event: GatewayConversationEvent = entry.role === 'user'
+                        ? { kind: 'user_message', turnId, input: entry.text, source: 'replay' }
+                        : {
+                            kind: 'assistant_text_delta',
+                            text: `${entry.text}\n\n`,
+                            meta: {
+                                id: `native_${entry.id}`,
+                                sessionId: session.id,
+                                turnId,
+                                provider: session.provider,
+                                seq: index + 1,
+                                timestamp: timestampMs,
+                                sourcePhase: 'replay',
+                            },
+                        }
+                    const envelope = await this.options.eventStore.append({
+                        gatewayId: session.gatewayId,
+                        projectId: session.projectId,
+                        sessionId: session.id,
+                        eventId: `native_${entry.id}`,
+                        timestamp,
+                        event,
+                    })
+                    // Native provider history is a snapshot requested by events.list,
+                    // not a live event stream. Broadcasting it here races hundreds of
+                    // encrypted tunnel frames with the list response and can invalidate
+                    // receive sequence numbers. Apply metadata only; the caller reads
+                    // the durable snapshot after hydration completes.
+                    await this.applyEvent(envelope)
+                }
+                await this.flushMetadata()
+            } finally {
+                await provider.destroy?.().catch(() => undefined)
+            }
+        })
+        this.historyHydrations.set(sessionId, hydration)
+        void hydration.finally(() => {
+            if (this.historyHydrations.get(sessionId) === hydration) this.historyHydrations.delete(sessionId)
+        }).catch(() => undefined)
+        return hydration
     }
 
     subscribe(subscriber: GatewayEventSubscriber): () => void {

@@ -47,6 +47,7 @@ export class RelayApi {
   private relayCredential?: ClientRelayCredential
   private relayOpening?: Promise<void>
   private readonly gatewayConnections = new Map<string, GatewaySecureConnection>()
+  private readonly gatewayOpenings = new Map<string, Promise<GatewaySecureConnection>>()
   private readonly inventories = new Map<string, InventorySnapshot>()
   private readonly projectGateways = new Map<string, string>()
   private readonly sessionGateways = new Map<string, string>()
@@ -92,6 +93,7 @@ export class RelayApi {
     this.relay = undefined
     this.relayCredential = undefined
     this.gatewayConnections.clear()
+    this.gatewayOpenings.clear()
     this.inventories.clear()
     this.projectGateways.clear()
     this.sessionGateways.clear()
@@ -245,6 +247,7 @@ export class RelayApi {
         if (this.relay === relay) {
           this.relay = undefined
           this.gatewayConnections.clear()
+          this.gatewayOpenings.clear()
           this.options.onDisconnected?.()
         }
       },
@@ -274,20 +277,30 @@ export class RelayApi {
   private async gateway(gatewayId: string): Promise<GatewaySecureConnection> {
     const existing = this.gatewayConnections.get(gatewayId)
     if (existing) return existing
-    const credential = await this.deviceCredentials.load(this.relayProfileId, gatewayId)
-    if (!credential) throw new RelayApiError('Gateway pairing is required', 401, 'gateway_pairing_required')
-    const handshake = new DeviceSecureHandshake({
-      relayProfileId: this.relayProfileId,
-      gatewayId,
-      credentialId: credential.credentialId,
-      credential,
-      saveCredential: value => this.deviceCredentials.save(value),
-    })
-    const connection = await (await this.requireRelay()).openGateway(
-      gatewayId, handshake, event => this.publishEvents(event.payload.events),
-    )
-    this.gatewayConnections.set(gatewayId, connection)
-    return connection
+    const opening = this.gatewayOpenings.get(gatewayId)
+    if (opening) return opening
+    const created = (async () => {
+      const credential = await this.deviceCredentials.load(this.relayProfileId, gatewayId)
+      if (!credential) throw new RelayApiError('Gateway pairing is required', 401, 'gateway_pairing_required')
+      const handshake = new DeviceSecureHandshake({
+        relayProfileId: this.relayProfileId,
+        gatewayId,
+        credentialId: credential.credentialId,
+        credential,
+        saveCredential: value => this.deviceCredentials.save(value),
+      })
+      const connection = await (await this.requireRelay()).openGateway(
+        gatewayId, handshake, event => this.publishEvents(event.payload.events),
+      )
+      this.gatewayConnections.set(gatewayId, connection)
+      return connection
+    })()
+    this.gatewayOpenings.set(gatewayId, created)
+    try {
+      return await created
+    } finally {
+      if (this.gatewayOpenings.get(gatewayId) === created) this.gatewayOpenings.delete(gatewayId)
+    }
   }
 
   private async inventory(gatewayId: string): Promise<InventorySnapshot> {

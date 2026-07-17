@@ -133,6 +133,29 @@ describe('CodexProvider', () => {
             .resolves.toBe('Hello from Codex')
     })
 
+    it('reads visible user and assistant history without injected context', async () => {
+        const { CodexProvider } = await import('../index')
+        const cwd = path.join(tmpdir(), 'project')
+        const codexHome = await createCodexHome([{
+            id: 'session-history',
+            cwd,
+            message: 'User question',
+            assistantMessage: 'Agent answer',
+            timestamp: '2026-07-15T03:00:00.000Z',
+            injectedContext: true,
+            userEvent: true,
+        }])
+
+        const history = await new CodexProvider({ codexHome }).getSessionHistory('session-history', cwd)
+
+        expect(history.map(entry => ({ role: entry.role, text: entry.text }))).toEqual([
+            { role: 'user', text: 'User question' },
+            { role: 'assistant', text: 'Agent answer' },
+        ])
+        expect(new Set(history.map(entry => entry.id)).size).toBe(2)
+        expect(history[0]?.turnId).toBe(history[1]?.turnId)
+    })
+
     it('uses the semantic user event instead of injected system context', async () => {
         const { CodexProvider } = await import('../index')
         const codexHome = await createCodexHome([{
@@ -244,6 +267,7 @@ async function createCodexHome(sessions: Array<{
     malformedLine?: boolean
     injectedContext?: boolean
     responseMessage?: string
+    assistantMessage?: string
     userEvent?: boolean
 }>): Promise<string> {
     const codexHome = await mkdtemp(path.join(tmpdir(), 'codever-codex-'))
@@ -290,6 +314,11 @@ async function createCodexHome(sessions: Array<{
                 timestamp: session.timestamp,
                 type: 'event_msg',
                 payload: { type: 'user_message', message: session.message },
+            })] : []),
+            ...(session.assistantMessage ? [JSON.stringify({
+                timestamp: new Date(Date.parse(session.timestamp) + 1_000).toISOString(),
+                type: 'event_msg',
+                payload: { type: 'agent_message', message: session.assistantMessage },
             })] : []),
         ]
         await writeFile(

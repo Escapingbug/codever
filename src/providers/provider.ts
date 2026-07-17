@@ -70,8 +70,19 @@ export interface SessionEntry {
     firstMessage?: string
 }
 
+export interface SessionHistoryEntry {
+    id: string
+    turnId?: string
+    role: 'user' | 'assistant'
+    text: string
+    timestamp: number
+}
+
 export interface AgentProvider {
     readonly name: string
+
+    /** Initialize the provider before its first query. Safe to call when already ready. */
+    init?(): Promise<void>
 
     startQuery(prompt: AgentQueryInput, config: AgentQueryConfig): AgentQueryHandle
 
@@ -100,6 +111,9 @@ export interface AgentProvider {
 
     /** Get the first user message for a specific session (lazy, on-demand) */
     getSessionFirstMessage?(sessionId: string): Promise<string>
+
+    /** Read provider-owned visible conversation history without starting a turn. */
+    getSessionHistory?(sessionId: string, cwd: string): Promise<SessionHistoryEntry[]>
 
     /** Clear provider-specific session state (e.g., opencode session ID) */
     clearSessionId?(): void

@@ -51,7 +51,9 @@ export class SecureRelayClient {
         `Could not reach Relay at ${new URL(endpoint).host}. The pairing code was not checked. Verify the domain and Advanced port.`,
       )))
       socket.addEventListener('close', event => this.fail(new Error(event.code === 1008
-        ? 'Relay rejected this pairing attempt. Generate a fresh Relay client code and try again within three minutes.'
+        ? (this.options.handshake.ready
+            ? 'Relay rejected the authenticated secure session because of a protocol error.'
+            : 'Relay rejected this pairing attempt. Generate a fresh Relay client code and try again within three minutes.')
         : `Secure Relay connection closed (${event.code})`)))
     } catch (error) {
       this.fail(asError(error))
@@ -145,7 +147,9 @@ export class SecureRelayClient {
       return
     }
     const connection = this.tunnels.get(frame.payload.tunnelId)
-    if (!connection) throw new Error(`Unknown device tunnel ${frame.payload.tunnelId}`)
+    // A close/data frame can arrive after a timed-out request replaced its tunnel.
+    // It is authenticated by the Relay but no longer belongs to live client state.
+    if (!connection) return
     if (frame.type === 'relay.device-tunnel.closed') {
       this.tunnels.delete(frame.payload.tunnelId)
       connection.fail(new Error(frame.payload.reason ?? frame.payload.code))

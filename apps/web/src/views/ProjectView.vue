@@ -27,7 +27,7 @@ const gateway = computed(() => state.gateways.value.find(item => item.id === gat
 const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find(item => item.id === projectId.value))
 const bridges = computed(() => state.sessionsByProject[projectId.value] ?? [])
 const providers = computed(() => gateway.value?.capabilities.providers ?? [])
-const providerSessions = ref<ProviderSession[]>([])
+const providerSessions = computed(() => state.providerSessionsByProject[projectId.value] ?? [])
 const selectedProvider = ref('')
 const providerFilter = ref('all')
 const scopeFilter = ref<'recent' | 'archived' | 'all'>('recent')
@@ -115,13 +115,16 @@ async function refreshTasks(): Promise<void> {
   discovering.value = true
   taskError.value = ''
   try {
+    await state.loadCachedProviderSessions(currentProjectId)
     await state.loadSessions(currentProjectId)
     const attempts = await Promise.allSettled(currentProviders.map(provider =>
       state.api.discoverProviderSessions(currentProjectId, provider),
     ))
     if (generation !== discoveryGeneration) return
     const successful = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-    providerSessions.value = successful.flatMap(result => result.sessions)
+    if (successful.length || currentProviders.length === 0) {
+      state.replaceProviderSessions(currentProjectId, successful.flatMap(result => result.sessions))
+    }
     if (!successful.length && attempts.some(result => result.status === 'rejected')) {
       throw new Error('Provider task history could not be loaded')
     }

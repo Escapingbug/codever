@@ -163,6 +163,7 @@ export class GatewaySessionRuntime {
         const turnId = this.createId()
         await this.record({ kind: 'user_message', turnId, input })
 
+        await this.ensureProviderReady()
         if (!this.config.provider.isReady()) {
             const message = this.config.provider.getInitError() ?? `Provider "${this.config.provider.name}" is not ready.`
             await this.recordError('provider_not_ready', message, turnId)
@@ -242,6 +243,20 @@ export class GatewaySessionRuntime {
         })
         await this.transition(status === 'error' ? 'error' : 'idle', `turn_${status}`)
         return { turnId, status, ...(summary ? { summary } : {}) }
+    }
+
+    private async ensureProviderReady(): Promise<void> {
+        if (this.config.provider.isReady()) return
+        try {
+            if (this.config.provider.wasReady?.() && this.config.provider.reinit) {
+                await this.config.provider.reinit()
+            } else if (this.config.provider.init) {
+                await this.config.provider.init()
+            }
+        } catch {
+            // Providers retain their initialization error. The normal durable
+            // provider_not_ready event below reports it to the client.
+        }
     }
 
     private async recordProviderEvent(

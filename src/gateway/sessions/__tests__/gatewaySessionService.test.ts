@@ -64,6 +64,16 @@ describe('GatewaySessionService', () => {
         expect(connected.sessions[0]).toMatchObject({ codeverSessionId: first.id, state: 'idle' })
         expect(connected.sessions[0]).not.toHaveProperty('archivedAt')
 
+        const replayedLiveEvents: GatewayConversationEvent[] = []
+        const unsubscribe = service.subscribe(envelope => replayedLiveEvents.push(envelope.event))
+        await service.hydrateProviderHistory(first.id)
+        await service.hydrateProviderHistory(first.id)
+        unsubscribe()
+        const imported = await fixture.events.list(first.id)
+        expect(imported.events).toHaveLength(2)
+        expect(imported.events.map(event => event.event.kind)).toEqual(['user_message', 'assistant_text_delta'])
+        expect(replayedLiveEvents).toEqual([])
+
         const archived = await service.setArchived(first.id, true)
         expect(archived.archivedAt).toBeTypeOf('string')
         const archivedCatalog = await service.listProviderSessions(fixture.project.id, 'mock')
@@ -285,6 +295,12 @@ class DiscoveryProvider extends MockProvider {
         return [
             { sessionId: 'native-1', title: 'Existing work', updated: 1_752_662_400_000, cwd, firstMessage: 'Continue this work' },
             { sessionId: 'native-1', title: 'Stale duplicate', updated: 1_752_662_300_000, cwd, firstMessage: 'Old copy' },
+        ]
+    }
+    async getSessionHistory() {
+        return [
+            { id: 'history-user', role: 'user' as const, text: 'Earlier question', timestamp: 1_752_662_400_000 },
+            { id: 'history-agent', role: 'assistant' as const, text: 'Earlier answer', timestamp: 1_752_662_401_000 },
         ]
     }
 }

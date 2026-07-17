@@ -188,6 +188,22 @@ describe('GatewaySessionRuntime', () => {
         }))
         expect(events).toContainEqual(expect.objectContaining({ kind: 'state', state: 'error' }))
     })
+
+    it('initializes a cold provider before the first query', async () => {
+        const provider = new MockProvider(() => iterable(async function* () {
+            yield { kind: 'result', status: 'success' }
+        }))
+        provider.ready = false
+        provider.init = vi.fn(async () => { provider.ready = true })
+        const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+        const runtime = createRuntime(provider, store)
+
+        await expect(runtime.startQuery('continue')).resolves.toMatchObject({ status: 'success' })
+
+        expect(provider.init).toHaveBeenCalledOnce()
+        expect(provider.starts).toHaveLength(1)
+        expect(runtime.getState()).toBe('idle')
+    })
 })
 
 class TrackingStore extends MemoryConversationEventStore<GatewayConversationEvent> {
@@ -207,6 +223,8 @@ class MockProvider implements AgentProvider {
     interruptCalls = 0
     destroyCalls = 0
     maxConcurrent = 0
+    ready = true
+    init?: () => Promise<void>
     private concurrent = 0
 
     constructor(private readonly query: (
@@ -230,7 +248,7 @@ class MockProvider implements AgentProvider {
         }
     }
 
-    isReady(): boolean { return true }
+    isReady(): boolean { return this.ready }
     getInitError(): string | null { return null }
     getAvailableModels(): ModelEntry[] { return [] }
     getAvailablePermissionModes(): string[] { return [] }
