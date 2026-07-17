@@ -39,7 +39,12 @@ export const ConversationEventSchema = z.discriminatedUnion('kind', [
         kind: z.literal('user_message'),
         text: z.string(),
         actorId: OpaqueIdSchema.optional(),
-        attachmentIds: z.array(OpaqueIdSchema).optional(),
+        attachments: z.array(z.object({
+            id: OpaqueIdSchema,
+            filename: z.string().min(1),
+            mimeType: z.string().min(1),
+            sizeBytes: PositiveIntegerSchema,
+        }).strict()).optional(),
     }),
     event({ kind: z.literal('turn_started') }),
     event({ kind: z.literal('assistant_text_delta'), text: z.string() }),

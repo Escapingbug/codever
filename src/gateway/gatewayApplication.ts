@@ -27,8 +27,9 @@ import {
 } from './security'
 import type { OpaquePairingTicket } from '@codever/secure-channel'
 import { GatewayRequestLedger } from './requestLedger'
+import { GatewayAttachmentStore } from './attachments'
 
-export const GATEWAY_FEATURES = ['sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency']
+export const GATEWAY_FEATURES = ['sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency', 'attachment.upload']
 
 export interface GatewayApplication {
     readonly config: GatewayConfig
@@ -57,6 +58,7 @@ export async function createGatewayApplication(
     const metadata = await FileSessionMetadataRepository.open(join(config.dataDirectory, 'sessions.json'))
     const events = new FileConversationEventStore<GatewayConversationEvent>(join(config.dataDirectory, 'events.jsonl'))
     const requestLedger = await GatewayRequestLedger.open(join(config.dataDirectory, 'client-request-ledger.json'))
+    const attachments = await GatewayAttachmentStore.open(config.dataDirectory)
     const sessions = await GatewaySessionService.open({
         gatewayId: config.gatewayId,
         projects,
@@ -131,6 +133,7 @@ export async function createGatewayApplication(
                             projects,
                             sessions,
                             events,
+                            attachments,
                             inventoryChanged: () => { inventoryRevision += 1 },
                         })
                         return isReadRequest(request) ? operation() : requestLedger.execute(request, credentialId, operation)
@@ -219,6 +222,7 @@ export interface ClientRequestContext {
     projects: ProjectRegistry
     sessions: GatewaySessionService
     events: FileConversationEventStore<GatewayConversationEvent>
+    attachments: GatewayAttachmentStore
     inventoryChanged: () => void
 }
 
@@ -254,11 +258,51 @@ export async function handleClientRequest(
                 break
             }
             case 'session.message':
+                await context.sessions.get(request.payload.sessionId)
+                const attachmentIds = request.payload.input.attachmentIds ?? []
+                const attachmentParts = await context.attachments.resolveParts(
+                    request.payload.sessionId,
+                    context.credentialId,
+                    attachmentIds,
+                )
                 await context.sessions.sendMessage(request.payload.sessionId, {
-                    text: request.payload.input.text,
-                    idempotencyKey: request.idempotencyKey,
+                    parts: [
+                        ...(request.payload.input.text.trim() ? [{ type: 'text' as const, text: request.payload.input.text }] : []),
+                        ...attachmentParts,
+                    ],
+                }, request.idempotencyKey)
+                await context.attachments.discardReady(attachmentIds, context.credentialId).catch(error => {
+                    console.error('[gateway:attachments]', error instanceof Error ? error.message : error)
                 })
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
+            case 'attachment.upload.begin':
+                await context.sessions.get(request.payload.sessionId)
+                payload = await context.attachments.begin({
+                    sessionId: request.payload.sessionId,
+                    credentialId: context.credentialId,
+                    filename: request.payload.filename,
+                    mimeType: request.payload.mimeType,
+                    sizeBytes: request.payload.sizeBytes,
+                })
+                break
+            case 'attachment.upload.chunk':
+                payload = await context.attachments.appendChunk({
+                    attachmentId: request.payload.attachmentId,
+                    credentialId: context.credentialId,
+                    offset: request.payload.offset,
+                    data: request.payload.data,
+                })
+                break
+            case 'attachment.upload.complete':
+                payload = await context.attachments.complete(
+                    request.payload.attachmentId,
+                    context.credentialId,
+                    request.payload.sha256,
+                )
+                break
+            case 'attachment.upload.cancel':
+                payload = await context.attachments.cancel(request.payload.attachmentId, context.credentialId)
                 break
             case 'session.cancel':
                 await context.sessions.cancel(

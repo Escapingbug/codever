@@ -51,4 +51,25 @@ describe('toWireConversationEvent', () => {
             output: { count: '1', callback: null },
         })
     })
+
+    it('projects uploaded files as user-visible attachment metadata without duplicating filenames in text', () => {
+        const wire = parseConversationEvent(toWireConversationEvent({
+            kind: 'user_message',
+            turnId: 'turn-attachment',
+            input: {
+                parts: [
+                    { type: 'text', text: 'Inspect this file' },
+                    {
+                        type: 'file', path: 'D:/cache/attachment.bin', filename: 'report.pdf',
+                        mimeType: 'application/pdf', sizeBytes: 2048, source: 'attachment:attachment-1',
+                    },
+                ],
+            },
+        }))
+        expect(wire).toMatchObject({
+            kind: 'user_message',
+            text: 'Inspect this file',
+            attachments: [{ id: 'attachment-1', filename: 'report.pdf', sizeBytes: 2048 }],
+        })
+    })
 })

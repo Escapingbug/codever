@@ -28,9 +28,11 @@ describe('event wire schemas', () => {
             kind: 'user_message',
             text: 'continue',
             actorId: 'user-1',
-            attachmentIds: ['attachment-1'],
+            attachments: [{
+                id: 'attachment-1', filename: 'notes.txt', mimeType: 'text/plain', sizeBytes: 12,
+            }],
             meta: { source: 'live' },
-        })).toMatchObject({ kind: 'user_message', text: 'continue' })
+        })).toMatchObject({ kind: 'user_message', text: 'continue', attachments: [{ filename: 'notes.txt' }] })
     })
 
     it('parses a versioned structured event and narrows its variant', () => {

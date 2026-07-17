@@ -53,8 +53,12 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         >
           <div class="message-body">
             <div class="message-meta"><strong>You</strong><span>{{ time(entry.envelope.timestamp) }}</span></div>
-            <div>{{ entry.envelope.event.text }}</div>
-            <small v-if="entry.envelope.event.attachmentIds?.length">{{ entry.envelope.event.attachmentIds.length }} attachment(s)</small>
+            <div v-if="entry.envelope.event.text">{{ entry.envelope.event.text }}</div>
+            <div v-if="entry.envelope.event.attachments?.length" class="message-attachments">
+              <span v-for="attachment in entry.envelope.event.attachments" :key="attachment.id" class="attachment-chip">
+                <strong>{{ attachment.filename }}</strong><small>{{ Math.max(1, Math.round(attachment.sizeBytes / 1024)) }} KiB</small>
+              </span>
+            </div>
           </div>
         </article>
 

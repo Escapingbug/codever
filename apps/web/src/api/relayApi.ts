@@ -1,5 +1,6 @@
 import type {
   CancelSessionDto,
+  AttachmentUploadDto,
   CodeverSession,
   ClientGatewayResponseFrame,
   CreateProjectDto,
@@ -198,6 +199,55 @@ export class RelayApi {
     )) as MutationReceiptDto
   }
 
+  async uploadAttachment(
+    sessionId: string,
+    file: File,
+    options: { signal?: AbortSignal; onProgress?: (receivedBytes: number, sizeBytes: number) => void } = {},
+  ): Promise<AttachmentUploadDto> {
+    let attachmentId: string | undefined
+    try {
+      assertNotAborted(options.signal)
+      let upload = this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+        kind: 'attachment.upload.begin',
+        sessionId,
+        filename: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        sizeBytes: file.size,
+      })) as AttachmentUploadDto
+      attachmentId = upload.attachmentId
+      options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
+
+      const chunkBytes = 192 * 1024
+      while (upload.receivedBytes < file.size) {
+        assertNotAborted(options.signal)
+        const offset = upload.receivedBytes
+        const bytes = new Uint8Array(await file.slice(offset, offset + chunkBytes).arrayBuffer())
+        upload = this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+          kind: 'attachment.upload.chunk',
+          attachmentId,
+          offset,
+          data: bytesToBase64(bytes),
+        })) as AttachmentUploadDto
+        options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
+      }
+
+      assertNotAborted(options.signal)
+      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+      return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+        kind: 'attachment.upload.complete', attachmentId, sha256: hex(new Uint8Array(digest)),
+      })) as AttachmentUploadDto
+    } catch (error) {
+      if (attachmentId) await this.cancelAttachment(sessionId, attachmentId).catch(() => undefined)
+      throw error
+    }
+  }
+
+  async cancelAttachment(sessionId: string, attachmentId: string): Promise<AttachmentUploadDto> {
+    return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+      kind: 'attachment.upload.cancel', attachmentId,
+    })) as AttachmentUploadDto
+  }
+
   async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
     return this.completed(await this.requestGateway(
       this.requireSessionGateway(sessionId), { kind: 'session.cancel', sessionId, input },
@@ -370,6 +420,23 @@ function source(value: string | (() => string | undefined)): string | undefined 
 
 function isRetrySafe(payload: Parameters<GatewaySecureConnection['request']>[0]): boolean {
   return payload.kind === 'inventory.get' || payload.kind === 'events.list' || payload.kind === 'provider.sessions.list'
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException('Upload cancelled', 'AbortError')
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const block = 0x8000
+  for (let index = 0; index < bytes.length; index += block) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + block))
+  }
+  return btoa(binary)
+}
+
+function hex(bytes: Uint8Array): string {
+  return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
 }
 
 export const relayApiKey: InjectionKey<RelayApi> = Symbol('relay-api')

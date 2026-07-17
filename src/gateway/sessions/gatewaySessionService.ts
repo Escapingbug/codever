@@ -547,7 +547,7 @@ function providerCapabilities(resume: boolean, changeModel: boolean, changeMode:
         retry: false,
         editHistory: false,
         listBranches: false,
-        attachFiles: false,
+        attachFiles: true,
     }
 }
 

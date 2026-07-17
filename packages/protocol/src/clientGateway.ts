@@ -19,6 +19,7 @@ import {
     SendMessageDtoSchema,
     SessionDtoSchema,
     SessionEventsDtoSchema,
+    AttachmentUploadDtoSchema,
 } from './client'
 import { ProtocolErrorSchema } from './commands'
 import { InventorySnapshotSchema } from './frames'
@@ -44,6 +45,28 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         kind: z.literal('session.message'),
         sessionId: OpaqueIdSchema,
         input: SendMessageDtoSchema,
+    }).strict(),
+    z.object({
+        kind: z.literal('attachment.upload.begin'),
+        sessionId: OpaqueIdSchema,
+        filename: z.string().min(1).max(255),
+        mimeType: z.string().min(1).max(255),
+        sizeBytes: PositiveIntegerSchema.max(25 * 1024 * 1024),
+    }).strict(),
+    z.object({
+        kind: z.literal('attachment.upload.chunk'),
+        attachmentId: OpaqueIdSchema,
+        offset: NonNegativeIntegerSchema,
+        data: z.string().min(1).max(300_000),
+    }).strict(),
+    z.object({
+        kind: z.literal('attachment.upload.complete'),
+        attachmentId: OpaqueIdSchema,
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    }).strict(),
+    z.object({
+        kind: z.literal('attachment.upload.cancel'),
+        attachmentId: OpaqueIdSchema,
     }).strict(),
     z.object({
         kind: z.literal('session.cancel'),
@@ -89,6 +112,7 @@ export const ClientGatewayCompletedPayloadSchema = z.union([
     ProviderSessionListDtoSchema,
     SessionDtoSchema,
     SessionEventsDtoSchema,
+    AttachmentUploadDtoSchema,
     MutationReceiptDtoSchema,
 ])
 

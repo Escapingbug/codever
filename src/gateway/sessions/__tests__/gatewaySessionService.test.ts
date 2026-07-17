@@ -48,7 +48,7 @@ describe('GatewaySessionService', () => {
                 retry: false,
                 editHistory: false,
                 listBranches: false,
-                attachFiles: false,
+                attachFiles: true,
             },
             sessions: [{ providerSessionId: 'native-1', title: 'Existing work' }],
         })

@@ -5,9 +5,11 @@ import type { GatewayConversationEvent, GatewayUserMessageEvent } from './events
 
 export function toWireConversationEvent(event: GatewayConversationEvent): WireConversationEvent | null {
     if (event.kind === 'user_message') {
+        const attachments = inputAttachments(event.input)
         return {
             kind: 'user_message',
             text: inputText(event.input),
+            ...(attachments.length ? { attachments } : {}),
             meta: { turnId: event.turnId, source: event.source ?? 'live' },
         }
     }
@@ -149,11 +151,20 @@ function providerEventToWire(event: ConversationEvent): WireConversationEvent | 
 
 function inputText(input: GatewayUserMessageEvent['input']): string {
     if (typeof input === 'string') return input
-    return input.parts.map((part) => {
-        if (part.type === 'text') return part.text
-        if (part.filename) return `[${part.filename}]`
-        return `[${part.type}]`
-    }).join('\n')
+    return input.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
+}
+
+function inputAttachments(input: GatewayUserMessageEvent['input']) {
+    if (typeof input === 'string') return []
+    return input.parts.flatMap(part => {
+        if (part.type === 'text' || !part.source?.startsWith('attachment:')) return []
+        return [{
+            id: part.source.slice('attachment:'.length),
+            filename: part.filename ?? 'attachment',
+            mimeType: part.mimeType,
+            sizeBytes: part.sizeBytes ?? 0,
+        }]
+    }).filter(attachment => attachment.sizeBytes > 0)
 }
 
 function wireToolContent(content: ToolResultContentBlock, fallbackTerminalId: string): ToolContent {

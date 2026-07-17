@@ -45,6 +45,13 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'provider.sessions.list', projectId: 'project-1', provider: 'codex' },
             { kind: 'session.create', projectId: 'project-1', input: { provider: 'codex', config: {} } },
             { kind: 'session.message', sessionId: 'session-1', input: { text: 'hello' } },
+            {
+                kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'notes.txt',
+                mimeType: 'text/plain', sizeBytes: 12,
+            },
+            { kind: 'attachment.upload.chunk', attachmentId: 'attachment-1', offset: 0, data: 'aGVsbG8=' },
+            { kind: 'attachment.upload.complete', attachmentId: 'attachment-1', sha256: 'a'.repeat(64) },
+            { kind: 'attachment.upload.cancel', attachmentId: 'attachment-1' },
             { kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' } },
             { kind: 'session.archive.set', sessionId: 'session-1', archived: true },
             { kind: 'session.config.patch', sessionId: 'session-1', input: { config: {}, model: null } },
@@ -76,6 +83,13 @@ describe('encrypted Client to Gateway request frames', () => {
         expect(() => parseClientGatewayRequestFrame(request({
             kind: 'session.message', sessionId: 'session-1', input: { text: '' },
         }))).toThrow()
+        expect(parseClientGatewayRequestFrame(request({
+            kind: 'session.message', sessionId: 'session-1', input: { text: '', attachmentIds: ['attachment-1'] },
+        })).payload.kind).toBe('session.message')
+        expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'large.bin',
+            mimeType: 'application/octet-stream', sizeBytes: 25 * 1024 * 1024 + 1,
+        }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
             kind: 'events.list', sessionId: 'session-1', limit: 1_001,
         }))).toThrow()
@@ -101,6 +115,14 @@ describe('encrypted Gateway to Client response and event frames', () => {
             version: 1, type: 'gateway.client.response', requestId: 'request-2',
             status: 'completed', completedAt: timestamp,
             payload: { commandId: 'command-1', status: 'completed', completedAt: timestamp },
+        }).status).toBe('completed')
+        expect(parseClientGatewayResponseFrame({
+            version: 1, type: 'gateway.client.response', requestId: 'request-upload',
+            status: 'completed', completedAt: timestamp,
+            payload: {
+                attachmentId: 'attachment-1', sessionId: 'session-1', filename: 'notes.txt',
+                mimeType: 'text/plain', sizeBytes: 5, receivedBytes: 5, status: 'ready',
+            },
         }).status).toBe('completed')
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-1',
