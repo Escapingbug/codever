@@ -35,7 +35,7 @@ watch(gatewayId, (id) => void state.loadProjects(id), { immediate: true })
   <div class="page page--overview">
     <header class="page-header gateway-title">
       <div>
-        <RouterLink class="mobile-breadcrumb" to="/gateways">Gateways /</RouterLink>
+        <RouterLink class="mobile-breadcrumb" to="/projects">Projects /</RouterLink>
         <span class="eyebrow">Gateway</span>
         <h1>{{ gateway?.name ?? 'Gateway' }}</h1>
         <p v-if="gateway"><StatusDot :status="gateway.status" :label="gateway.status" /> · {{ gateway.platform }} · v{{ gateway.version }}</p>
@@ -56,7 +56,7 @@ watch(gatewayId, (id) => void state.loadProjects(id), { immediate: true })
     <section>
       <div class="section-heading"><div><span class="eyebrow">Approved roots</span><h2>Projects</h2></div></div>
       <div class="project-grid">
-        <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="`/gateways/${gatewayId}/projects/${project.id}`">
+        <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }">
           <span class="folder-icon">⌘</span>
           <div><h3>{{ project.name }}</h3><p>{{ project.repoIdentity ?? project.rootPath }}</p><small>{{ project.defaultProvider ?? 'Default provider' }}</small></div>
           <span>→</span>

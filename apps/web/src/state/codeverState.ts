@@ -7,10 +7,12 @@ const projectsByGateway = reactive<Record<string, Project[]>>({})
 const sessionsByProject = reactive<Record<string, CodeverSession[]>>({})
 const pending = reactive(new Set<string>())
 const errors = reactive<Record<string, string | undefined>>({})
+let workspaceLoad: Promise<void> | undefined
 
 export function useCodeverState() {
-  const api = inject(relayApiKey)
-  if (!api) throw new Error('RelayApi was not provided')
+  const injectedApi = inject(relayApiKey)
+  if (!injectedApi) throw new Error('RelayApi was not provided')
+  const api: RelayApi = injectedApi
 
   async function load<T>(key: string, task: () => Promise<T>, apply: (value: T) => void): Promise<void> {
     pending.add(key)
@@ -24,6 +26,23 @@ export function useCodeverState() {
     }
   }
 
+  async function loadWorkspace(): Promise<void> {
+    if (workspaceLoad) return workspaceLoad
+    workspaceLoad = (async () => {
+      await load('gateways', () => api.listGateways(), (value) => { gateways.value = value })
+      await Promise.all(gateways.value.map((gateway) => load(
+        `projects:${gateway.id}`,
+        () => api.listProjects(gateway.id),
+        (value) => { projectsByGateway[gateway.id] = value },
+      )))
+    })()
+    try {
+      await workspaceLoad
+    } finally {
+      workspaceLoad = undefined
+    }
+  }
+
   return {
     api,
     gateways,
@@ -31,6 +50,7 @@ export function useCodeverState() {
     sessionsByProject,
     pending: computed(() => pending),
     errors,
+    loadWorkspace,
     loadGateways: () => load('gateways', () => api.listGateways(), (value) => { gateways.value = value }),
     loadProjects: (gatewayId: string) => load(
       `projects:${gatewayId}`,

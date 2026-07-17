@@ -12,12 +12,12 @@ const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId))
 const projectId = computed(() => String(route.params.projectId))
 const sessionId = computed(() => String(route.params.sessionId))
-const provider = computed(() => String(route.params.provider))
 const gateway = computed(() => state.gateways.value.find((item) => item.id === gatewayId.value))
 const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find((item) => item.id === projectId.value))
 // Protocol values are immutable snapshots; shallow refs avoid recursively unwrapping
 // the deeply inferred Zod event union.
 const session = shallowRef<CodeverSession>()
+const provider = computed(() => session.value?.provider ?? '')
 const providerCapabilities = shallowRef<ProviderSessionListDto>()
 const events = shallowRef<SessionEventEnvelope[]>([])
 const socketState = ref<'connected' | 'closed'>('closed')
@@ -84,6 +84,7 @@ async function loadSession(): Promise<void> {
 }
 
 async function loadProviderCapabilities(): Promise<void> {
+  if (!provider.value) return
   try {
     providerCapabilities.value = await state.api.discoverProviderSessions(projectId.value, provider.value)
   } catch {

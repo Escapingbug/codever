@@ -12,28 +12,28 @@ export function createCodeverRouter(session: ClientSession = clientSession): Rou
   const router = createRouter({
     history: window.location.hostname === 'tauri.localhost' ? createMemoryHistory() : createWebHashHistory(),
     routes: [
-      { path: '/', redirect: '/gateways' },
+      { path: '/', redirect: '/projects' },
       { path: '/onboarding', name: 'onboarding', component: OnboardingView },
       { path: '/login', name: 'login', component: LoginView },
       { path: '/settings', name: 'settings', component: SettingsView },
-      { path: '/gateways', name: 'gateways', component: GatewayListView },
+      { path: '/projects', name: 'projects', component: GatewayListView },
       { path: '/gateways/:gatewayId', name: 'gateway', component: GatewayView },
-      { path: '/gateways/:gatewayId/projects/:projectId', name: 'project', component: ProjectView },
+      { path: '/projects/:gatewayId/:projectId', name: 'project', component: ProjectView },
       {
-        path: '/gateways/:gatewayId/projects/:projectId/providers/:provider/sessions/:sessionId',
+        path: '/projects/:gatewayId/:projectId/sessions/:sessionId',
         name: 'session',
         component: SessionView,
       },
-      { path: '/:pathMatch(.*)*', redirect: '/gateways' },
+      { path: '/:pathMatch(.*)*', redirect: '/projects' },
     ],
   })
   router.beforeEach(async (to) => {
     await session.initialize()
     const addingRelay = to.name === 'onboarding' && to.query.add === '1'
     if (!session.hasProfiles.value) return to.name === 'onboarding' ? true : { name: 'onboarding' }
-    if (session.hasProfiles.value && to.name === 'onboarding' && !addingRelay) return session.isAuthenticated.value ? { name: 'gateways' } : { name: 'login' }
+    if (session.hasProfiles.value && to.name === 'onboarding' && !addingRelay) return session.isAuthenticated.value ? { name: 'projects' } : { name: 'login' }
     if (!session.isAuthenticated.value && to.name !== 'login' && !addingRelay) return { name: 'login', query: { redirect: to.fullPath } }
-    if (session.isAuthenticated.value && to.name === 'login') return { name: 'gateways' }
+    if (session.isAuthenticated.value && to.name === 'login') return { name: 'projects' }
     return true
   })
   return router

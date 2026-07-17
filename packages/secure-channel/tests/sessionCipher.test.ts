@@ -32,7 +32,9 @@ describe('SessionCipher', () => {
         await expect(receiver.decrypt(first)).rejects.toThrow('Unexpected receive sequence')
 
         await expect(receiver.decrypt({ ...second, channelId: randomUUID() })).rejects.toThrow('another channel')
-        const tampered = { ...second, ciphertext: `${second.ciphertext.slice(0, -1)}A` }
+        const tamperedBytes = Buffer.from(second.ciphertext, 'base64')
+        tamperedBytes[0] = tamperedBytes[0]! ^ 1
+        const tampered = { ...second, ciphertext: tamperedBytes.toString('base64') }
         await expect(receiver.decrypt(tampered)).rejects.toBeInstanceOf(SecureChannelError)
         await expect(receiver.decrypt(second)).resolves.toEqual({ index: 1 })
     })

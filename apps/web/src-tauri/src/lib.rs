@@ -4,7 +4,25 @@ fn keyring_entry(account: &str) -> Result<keyring_core::Entry, String> {
     if account.is_empty() || account.len() > 240 || !account.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.')) {
         return Err("invalid secret account".into());
     }
+    ensure_platform_keyring()?;
     keyring_core::Entry::new(KEYRING_SERVICE, account).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn ensure_platform_keyring() -> Result<(), String> {
+    use std::sync::OnceLock;
+
+    static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+    INITIALIZED.get_or_init(|| {
+        let store = android_native_keyring_store::Store::new().map_err(|error| error.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }).clone()
+}
+
+#[cfg(not(target_os = "android"))]
+fn ensure_platform_keyring() -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -34,8 +52,6 @@ fn secure_secret_delete(account: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(target_os = "android")]
-    keyring_core::set_default_store(android_native_keyring_store::Store::new().expect("failed to initialize Android Keystore"));
     #[cfg(target_os = "windows")]
     keyring_core::set_default_store(windows_native_keyring_store::Store::new().expect("failed to initialize Windows Credential Manager"));
     #[cfg(target_os = "macos")]

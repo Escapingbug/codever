@@ -29,7 +29,7 @@ const emit = defineEmits<{ resolve: [value: JsonValue] }>()
         class="button"
         :class="[`button--${option.style ?? 'default'}`]"
         :disabled="disabled || submitting"
-        @click="emit('resolve', option.value)"
+        @click.stop="emit('resolve', option.value)"
       >{{ option.label }}</button>
     </div>
     <small v-if="disabled && !resolution" class="offline-copy">Reconnect to answer this decision.</small>

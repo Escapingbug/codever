@@ -11,10 +11,10 @@ export function parentRoute(
     case 'session':
       return { name: 'project', params: { gatewayId: params.gatewayId, projectId: params.projectId } }
     case 'project':
-      return { name: 'gateway', params: { gatewayId: params.gatewayId } }
+      return { name: 'projects' }
     case 'gateway':
     case 'settings':
-      return { name: 'gateways' }
+      return { name: 'projects' }
     case 'onboarding':
       return query.add === '1' ? { name: 'login' } : null
     default:

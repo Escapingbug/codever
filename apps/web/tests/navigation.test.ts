@@ -6,14 +6,14 @@ describe('client navigation', () => {
     expect(parentRoute('session', { gatewayId: 'gateway-1', projectId: 'project-1', provider: 'codex', sessionId: 'session-1' }))
       .toEqual({ name: 'project', params: { gatewayId: 'gateway-1', projectId: 'project-1' } })
     expect(parentRoute('project', { gatewayId: 'gateway-1', projectId: 'project-1' }))
-      .toEqual({ name: 'gateway', params: { gatewayId: 'gateway-1' } })
-    expect(parentRoute('gateway', { gatewayId: 'gateway-1' })).toEqual({ name: 'gateways' })
-    expect(parentRoute('settings', {})).toEqual({ name: 'gateways' })
+      .toEqual({ name: 'projects' })
+    expect(parentRoute('gateway', { gatewayId: 'gateway-1' })).toEqual({ name: 'projects' })
+    expect(parentRoute('settings', {})).toEqual({ name: 'projects' })
     expect(parentRoute('onboarding', {}, { add: '1' })).toEqual({ name: 'login' })
   })
 
   it('leaves root pages for the native app to close', () => {
-    expect(parentRoute('gateways', {})).toBeNull()
+    expect(parentRoute('projects', {})).toBeNull()
     expect(parentRoute('login', {})).toBeNull()
     expect(parentRoute('onboarding', {})).toBeNull()
   })
@@ -26,6 +26,6 @@ describe('client navigation', () => {
     }
 
     await expect(navigateToParent(router as never)).resolves.toBe(true)
-    expect(push).toHaveBeenCalledWith({ name: 'gateway', params: { gatewayId: 'gateway-1' } })
+    expect(push).toHaveBeenCalledWith({ name: 'projects' })
   })
 })

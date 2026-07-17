@@ -15,7 +15,7 @@ async function pair(): Promise<void> {
   try {
     await clientSession.pairRelay(pairingCode.value)
     const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
-      ? route.query.redirect : '/gateways'
+      ? route.query.redirect : '/projects'
     await router.replace(redirect)
   } catch (cause) {
     error.value = friendlyRelayError(cause)

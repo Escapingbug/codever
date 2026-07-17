@@ -19,7 +19,7 @@ const isPublicEntry = computed(() => route.name === 'onboarding' || route.name =
     <header v-if="!isPublicEntry" class="mobile-header">
       <button v-if="showBack" class="icon-button" aria-label="Go back" @click="navigateToParent(router)">←</button>
       <span v-else />
-      <RouterLink class="mobile-brand" to="/gateways"><span class="brand-mark">C</span> Codever</RouterLink>
+      <RouterLink class="mobile-brand" to="/projects"><span class="brand-mark">C</span> Codever</RouterLink>
       <RouterLink class="connection-pill" to="/settings">{{ clientSession.activeProfile.value?.name ?? 'Relay' }}</RouterLink>
     </header>
     <AppNavigation v-if="!isPublicEntry" />

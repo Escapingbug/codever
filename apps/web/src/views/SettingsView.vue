@@ -10,7 +10,7 @@ const adding = ref(false)
 
 async function switchProfile(id: string): Promise<void> {
   await clientSession.selectProfile(id)
-  await router.replace(clientSession.isAuthenticated.value ? '/gateways' : '/login')
+  await router.replace(clientSession.isAuthenticated.value ? '/projects' : '/login')
 }
 
 function remove(profile: RelayProfile): void {
