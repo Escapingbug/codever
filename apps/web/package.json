@@ -12,7 +12,9 @@
     "desktop:dev": "pnpm dlx @tauri-apps/cli@2.11.4 dev",
     "desktop:build": "pnpm dlx @tauri-apps/cli@2.11.4 build",
     "android:init": "pnpm dlx @tauri-apps/cli@2.11.4 android init",
-    "android:dev": "pnpm dlx @tauri-apps/cli@2.11.4 android dev",
+    "android:prepare": "node scripts/prepare-android.mjs",
+    "android:build": "pnpm android:prepare && pnpm dlx @tauri-apps/cli@2.11.4 android build",
+    "android:dev": "pnpm android:prepare && pnpm dlx @tauri-apps/cli@2.11.4 android dev",
     "ios:init": "pnpm dlx @tauri-apps/cli@2.11.4 ios init",
     "ios:dev": "pnpm dlx @tauri-apps/cli@2.11.4 ios dev"
   },
