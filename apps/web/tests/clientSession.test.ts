@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createClientSession, normalizeRelayUrl } from '../src/state/clientSession'
+import { MemorySecretStore } from '../src/security/secretStore'
 
 const timestamp = '2026-07-16T08:00:00.000Z'
 
@@ -8,12 +9,13 @@ describe('client session', () => {
 
   it('persists multiple Relay profiles and the active selection', async () => {
     const storage = new MemoryStorage()
-    const first = createClientSession(storage)
+    const secrets = new MemorySecretStore()
+    const first = createClientSession(storage, secrets)
     const home = first.saveProfile({ name: 'Home', baseUrl: 'https://home.example.test/' })
     const work = first.saveProfile({ name: 'Work', baseUrl: 'https://work.example.test/api/' })
     first.selectProfile(home.id)
 
-    const restored = createClientSession(storage)
+    const restored = createClientSession(storage, secrets)
     await restored.initialize()
 
     expect(restored.profiles.value).toEqual([home, work])
@@ -24,6 +26,7 @@ describe('client session', () => {
 
   it('stores authentication independently for each profile and restores it through session validation', async () => {
     const storage = new MemoryStorage()
+    const secrets = new MemorySecretStore()
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
         accessToken: 'token-for-home-profile', expiresAt: timestamp,
@@ -34,11 +37,12 @@ describe('client session', () => {
         user: { id: 'user-1', username: 'alice', workspaceId: 'workspace-1', roles: ['operator'] },
       }))
     vi.stubGlobal('fetch', fetcher)
-    const first = createClientSession(storage)
+    const first = createClientSession(storage, secrets)
     first.saveProfile({ name: 'Home', baseUrl: 'https://home.example.test' })
     await first.login({ username: 'alice', password: 'password', deviceName: 'phone' })
 
-    const restored = createClientSession(storage)
+    expect(storage.getItem('codever.client.v1')).not.toContain('token-for-home-profile')
+    const restored = createClientSession(storage, secrets)
     await restored.initialize()
 
     expect(restored.isAuthenticated.value).toBe(true)

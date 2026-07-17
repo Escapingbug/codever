@@ -2,6 +2,7 @@ import type { AccountProfile, AuthSessionDto, LoginDto, LoginResultDto } from '@
 import { computed, ref } from 'vue'
 import { RelayApi, RelayApiError } from '../api/relayApi'
 import { DEMO_RELAY_URL, isDemoRelayUrl } from '../api/demoRelay'
+import { createPlatformSecretStore, type SecretStore } from '../security/secretStore'
 
 export interface RelayProfile {
   id: string
@@ -16,9 +17,14 @@ interface StoredAuth {
 }
 
 interface PersistedState {
-  version: 1
+  version: 2
   profiles: RelayProfile[]
   activeProfileId?: string
+  auth: Record<string, Omit<StoredAuth, 'accessToken'>>
+}
+
+interface LegacyPersistedState extends Omit<PersistedState, 'version' | 'auth'> {
+  version: 1
   auth: Record<string, StoredAuth>
 }
 
@@ -33,7 +39,7 @@ export function normalizeRelayUrl(value: string): string {
   return url.toString().replace(/\/$/, '')
 }
 
-export function createClientSession(storage: Storage = localStorage) {
+export function createClientSession(storage: Storage = localStorage, secrets: SecretStore = createPlatformSecretStore()) {
   const profiles = ref<RelayProfile[]>([])
   const activeProfileId = ref<string>()
   const auth = ref<Record<string, StoredAuth>>({})
@@ -55,25 +61,42 @@ export function createClientSession(storage: Storage = localStorage) {
 
   function persist(): void {
     const value: PersistedState = {
-      version: 1,
+      version: 2,
       profiles: profiles.value,
       activeProfileId: activeProfileId.value,
-      auth: auth.value,
+      auth: Object.fromEntries(Object.entries(auth.value).map(([id, value]) => [id, { expiresAt: value.expiresAt, user: value.user }])),
     }
     storage.setItem(STORAGE_KEY, JSON.stringify(value))
   }
 
-  function restore(): void {
+  async function restore(): Promise<void> {
     const raw = storage.getItem(STORAGE_KEY)
     if (!raw) return
     try {
-      const value = JSON.parse(raw) as Partial<PersistedState>
-      if (value.version !== 1 || !Array.isArray(value.profiles)) return
+      const value = JSON.parse(raw) as Partial<PersistedState | LegacyPersistedState>
+      if ((value.version !== 1 && value.version !== 2) || !Array.isArray(value.profiles)) return
       profiles.value = value.profiles.filter(isRelayProfile)
       activeProfileId.value = profiles.value.some((item) => item.id === value.activeProfileId)
         ? value.activeProfileId
         : profiles.value[0]?.id
-      auth.value = value.auth && typeof value.auth === 'object' ? value.auth : {}
+      const restored: Record<string, StoredAuth> = {}
+      if (value.auth && typeof value.auth === 'object') {
+        for (const [profileId, metadata] of Object.entries(value.auth)) {
+          if (!metadata || typeof metadata !== 'object' || !('expiresAt' in metadata) || !('user' in metadata)) continue
+          const legacyToken = value.version === 1 && 'accessToken' in metadata && typeof metadata.accessToken === 'string'
+            ? metadata.accessToken
+            : undefined
+          if (legacyToken) await secrets.set(tokenAccount(profileId), legacyToken)
+          const accessToken = legacyToken ?? await secrets.get(tokenAccount(profileId))
+          if (accessToken) restored[profileId] = {
+            accessToken,
+            expiresAt: String(metadata.expiresAt),
+            user: metadata.user as AccountProfile,
+          }
+        }
+      }
+      auth.value = restored
+      if (value.version === 1) persist()
     } catch {
       storage.removeItem(STORAGE_KEY)
     }
@@ -82,11 +105,11 @@ export function createClientSession(storage: Storage = localStorage) {
   async function initialize(): Promise<void> {
     if (initializePromise) return initializePromise
     initializePromise = (async () => {
-      restore()
+      await restore()
       if (activeProfile.value && activeAuth.value) {
         try {
           const session = await api.getAuthSession()
-          saveAuthSession(session, activeAuth.value.accessToken)
+          await saveAuthSession(session, activeAuth.value.accessToken)
         } catch (error) {
           if (error instanceof RelayApiError && error.status === 401) clearActiveAuth()
           else initializationError.value = friendlyRelayError(error)
@@ -117,6 +140,7 @@ export function createClientSession(storage: Storage = localStorage) {
         const nextAuth = { ...auth.value }
         delete nextAuth[profile.id]
         auth.value = nextAuth
+        void secrets.delete(tokenAccount(profile.id))
       }
     }
     else profiles.value.push(profile)
@@ -130,6 +154,7 @@ export function createClientSession(storage: Storage = localStorage) {
     const nextAuth = { ...auth.value }
     delete nextAuth[id]
     auth.value = nextAuth
+    void secrets.delete(tokenAccount(id))
     if (activeProfileId.value === id) activeProfileId.value = profiles.value[0]?.id
     persist()
   }
@@ -143,11 +168,12 @@ export function createClientSession(storage: Storage = localStorage) {
 
   async function login(input: LoginDto): Promise<void> {
     const session = await api.login(input)
-    saveAuthSession(session, session.accessToken)
+    await saveAuthSession(session, session.accessToken)
   }
 
-  function saveAuthSession(session: AuthSessionDto | LoginResultDto, accessToken: string): void {
+  async function saveAuthSession(session: AuthSessionDto | LoginResultDto, accessToken: string): Promise<void> {
     if (!activeProfileId.value) throw new Error('No Relay profile is selected')
+    await secrets.set(tokenAccount(activeProfileId.value), accessToken)
     auth.value = { ...auth.value, [activeProfileId.value]: { accessToken, expiresAt: session.expiresAt, user: session.user } }
     persist()
   }
@@ -156,6 +182,7 @@ export function createClientSession(storage: Storage = localStorage) {
     if (!activeProfileId.value) return
     const next = { ...auth.value }
     delete next[activeProfileId.value]
+    void secrets.delete(tokenAccount(activeProfileId.value))
     auth.value = next
     persist()
   }
@@ -175,6 +202,8 @@ export function createClientSession(storage: Storage = localStorage) {
     initialize, testProfile, saveProfile, removeProfile, selectProfile, login, logout, clearActiveAuth, onUnauthorized,
   }
 }
+
+function tokenAccount(profileId: string): string { return `relay-token:${profileId}` }
 
 function isRelayProfile(value: unknown): value is RelayProfile {
   if (!value || typeof value !== 'object') return false
