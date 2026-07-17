@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 
 const gradleUrl = new URL('../src-tauri/gen/android/app/build.gradle.kts', import.meta.url)
 const gradlePath = fileURLToPath(gradleUrl)
+const activityUrl = new URL('../src-tauri/gen/android/app/src/main/java/dev/codever/client/MainActivity.kt', import.meta.url)
 const themeUrls = [
   new URL('../src-tauri/gen/android/app/src/main/res/values/themes.xml', import.meta.url),
   new URL('../src-tauri/gen/android/app/src/main/res/values-night/themes.xml', import.meta.url),
@@ -31,6 +32,20 @@ for (const themeUrl of themeUrls) {
     if (!theme.includes(closingStyle)) throw new Error(`Unable to find the Android theme in ${themePath}`)
     await writeFile(themeUrl, theme.replace(closingStyle, `${statusBarItems}\n${closingStyle}`), 'utf8')
   }
+}
+
+const activityPath = fileURLToPath(activityUrl)
+let activity = await readFile(activityUrl, 'utf8')
+if (!activity.includes('WindowCompat.getInsetsController')) {
+  const importAnchor = 'import androidx.activity.enableEdgeToEdge'
+  const superAnchor = '    super.onCreate(savedInstanceState)'
+  if (!activity.includes(importAnchor) || !activity.includes(superAnchor)) {
+    throw new Error(`Unable to configure Android system-bar contrast in ${activityPath}`)
+  }
+  activity = activity
+    .replace(importAnchor, `${importAnchor}\nimport androidx.core.view.WindowCompat`)
+    .replace(superAnchor, `${superAnchor}\n    WindowCompat.getInsetsController(window, window.decorView).apply {\n      isAppearanceLightStatusBars = false\n      isAppearanceLightNavigationBars = false\n    }`)
+  await writeFile(activityUrl, activity, 'utf8')
 }
 
 process.stdout.write('Android native OPAQUE transport and dark system bars enabled for release builds.\n')
