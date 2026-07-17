@@ -73,4 +73,4 @@ The Rust entry point uses `#[tauri::mobile_entry_point]`, so the same Vue bundle
 
 ## Security boundary
 
-The shell grants only `core:default` to the main WebView and does not install filesystem, shell, process, or HTTP plugins. The CSP permits outbound HTTPS/WSS connections for the user-configured Relay. Add native plugins only with a narrowly scoped capability and a concrete UI requirement.
+The shell grants only `core:default` to the main WebView and does not install filesystem, shell, process, or HTTP plugins. The CSP permits the configured Relay transports and allows WebAssembly compilation for the OPAQUE implementation through the narrow `wasm-unsafe-eval` source; ordinary JavaScript `unsafe-eval` remains disabled. Add native plugins only with a narrowly scoped capability and a concrete UI requirement.
