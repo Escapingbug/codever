@@ -6,6 +6,7 @@ import ConversationTimeline from '../components/timeline/ConversationTimeline.vu
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
+import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
 
 const route = useRoute()
 const router = useRouter()
@@ -35,7 +36,9 @@ const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
 const timelineElement = ref<HTMLElement>()
 let unsubscribeEvents: (() => void) | undefined
-const HISTORY_PAGE_SIZE = 80
+const HISTORY_PAGE_SIZE = 24
+const INITIAL_AGENT_REPLIES = 5
+const MAX_INITIAL_HISTORY_PAGES = 8
 const HISTORY_LOAD_THRESHOLD = 96
 const hasMoreBefore = ref(false)
 const loadingOlder = ref(false)
@@ -66,7 +69,7 @@ async function loadSession(): Promise<void> {
   unsubscribeEvents = undefined
   const requestedId = sessionId.value
   const memoryCached = state.eventsBySession[requestedId] ?? []
-  events.value = memoryCached.slice(-HISTORY_PAGE_SIZE)
+  events.value = recentConversation(memoryCached)
   hasMoreBefore.value = memoryCached.length > events.value.length
   loading.value = events.value.length === 0
   loadError.value = ''
@@ -76,18 +79,33 @@ async function loadSession(): Promise<void> {
     const persisted = await state.loadCachedSessionEvents(requestedId)
     if (requestedId !== sessionId.value) return
     if (persisted.length) {
-      events.value = persisted.slice(-HISTORY_PAGE_SIZE)
+      events.value = recentConversation(persisted)
       hasMoreBefore.value = persisted.length > events.value.length
       loading.value = false
     }
     session.value = await state.api.getSession(requestedId)
     state.replaceSession(session.value)
     startLiveConnection(requestedId)
-    const page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
-    const lastRemoteSeq = page.events.at(-1)?.seq ?? 0
+    let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
+    let remoteEvents = page.events
+    let pageCount = 1
+    while (
+      page.previousBefore !== null
+      && countAgentReplies(remoteEvents) < INITIAL_AGENT_REPLIES
+      && pageCount < MAX_INITIAL_HISTORY_PAGES
+    ) {
+      page = await state.api.getSessionEvents(requestedId, {
+        before: page.previousBefore,
+        limit: HISTORY_PAGE_SIZE,
+      })
+      remoteEvents = mergeEvents(page.events, remoteEvents)
+      pageCount += 1
+    }
+    remoteEvents = recentConversation(remoteEvents)
+    const lastRemoteSeq = remoteEvents.at(-1)?.seq ?? 0
     const liveSinceRequest = events.value.filter(event => event.seq > lastRemoteSeq)
-    events.value = mergeEvents(page.events, liveSinceRequest)
-    state.mergeSessionEvents(requestedId, page.events)
+    events.value = mergeEvents(remoteEvents, liveSinceRequest)
+    state.mergeSessionEvents(requestedId, remoteEvents)
     hasMoreBefore.value = page.previousBefore !== null
     if (requestedId !== sessionId.value) return
     await scrollToLatest(false)
@@ -134,6 +152,29 @@ function mergeEvents(...groups: SessionEventEnvelope[][]): SessionEventEnvelope[
   const merged = new Map<string, SessionEventEnvelope>()
   for (const event of groups.flat()) merged.set(event.eventId, event)
   return [...merged.values()].sort((left, right) => left.seq - right.seq)
+}
+
+function countAgentReplies(source: SessionEventEnvelope[]): number {
+  return agentReplies(source).length
+}
+
+function recentConversation(source: SessionEventEnvelope[]): SessionEventEnvelope[] {
+  if (!source.length) return []
+  const ordered = [...source].sort((left, right) => left.seq - right.seq)
+  const replies = agentReplies(ordered)
+  const boundary = replies.at(-INITIAL_AGENT_REPLIES)?.events.at(0)?.seq
+  if (boundary === undefined) return ordered.slice(-HISTORY_PAGE_SIZE)
+  const precedingUser = [...ordered].reverse().find(envelope =>
+    envelope.seq <= boundary && envelope.event.kind === 'user_message',
+  )
+  const firstSeq = precedingUser?.seq ?? boundary
+  return ordered.filter(envelope => envelope.seq >= firstSeq)
+}
+
+function agentReplies(source: SessionEventEnvelope[]): AssistantTimelineEntry[] {
+  return buildTimeline(source).filter((entry): entry is AssistantTimelineEntry =>
+    entry.type === 'assistant' && Boolean(entry.text.trim()),
+  )
 }
 
 async function scrollToLatest(smooth = true): Promise<void> {

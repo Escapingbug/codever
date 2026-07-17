@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_RELAY_PORT, normalizeRelayUrl, relayProfileAddress } from '../src/state/clientSession'
+import { MemorySecretStore } from '../src/security/secretStore'
+import { createClientSession, DEFAULT_RELAY_PORT, normalizeRelayUrl, relayProfileAddress } from '../src/state/clientSession'
 
 describe('Relay profile address', () => {
   it('turns a domain into the native Relay URL with the hidden default port', () => {
@@ -19,4 +20,26 @@ describe('Relay profile address', () => {
   it('loads the domain and port from a stored profile for editing', () => {
     expect(relayProfileAddress('http://relay.example.com:9443')).toEqual({ domain: 'relay.example.com', port: 9443 })
   })
+
+  it('keeps one Relay and treats a second save as replacement', () => {
+    const session = createClientSession(memoryStorage(), new MemorySecretStore())
+    const first = session.saveProfile({ name: 'Primary', domain: 'relay-one.example' })
+    const replaced = session.saveProfile({ name: 'Replacement', domain: 'relay-two.example' })
+
+    expect(session.profiles.value).toHaveLength(1)
+    expect(replaced.id).toBe(first.id)
+    expect(session.activeProfile.value?.baseUrl).toContain('relay-two.example')
+  })
 })
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>()
+  return {
+    get length() { return values.size },
+    clear: () => values.clear(),
+    getItem: key => values.get(key) ?? null,
+    key: index => [...values.keys()][index] ?? null,
+    removeItem: key => { values.delete(key) },
+    setItem: (key, value) => { values.set(key, value) },
+  }
+}

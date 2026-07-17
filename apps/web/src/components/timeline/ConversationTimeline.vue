@@ -2,6 +2,7 @@
 import type { JsonValue, SessionEventEnvelope } from '@codever/protocol'
 import { computed } from 'vue'
 import { buildTimeline, decisionResolution } from '../../timeline/model'
+import MarkdownContent from '../MarkdownContent.vue'
 import DecisionEventCard from './DecisionEventCard.vue'
 import ToolEventCard from './ToolEventCard.vue'
 
@@ -38,7 +39,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
               <i />{{ entry.status === 'working' ? 'Working' : entry.status.replace('_', ' ') }}
             </span>
           </div>
-          <div class="assistant-copy">{{ entry.text }}</div>
+          <MarkdownContent class="assistant-copy" :content="entry.text" />
         </div>
       </article>
 

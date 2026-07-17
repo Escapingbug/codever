@@ -57,9 +57,10 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     try {
       const value = JSON.parse(raw) as Partial<PersistedState>
       if (!Array.isArray(value.profiles)) return
-      profiles.value = value.profiles.filter(isRelayProfile)
-      activeProfileId.value = profiles.value.some(profile => profile.id === value.activeProfileId)
-        ? value.activeProfileId : profiles.value[0]?.id
+      const restored = value.profiles.filter(isRelayProfile)
+      const selected = restored.find(profile => profile.id === value.activeProfileId) ?? restored[0]
+      profiles.value = selected ? [selected] : []
+      activeProfileId.value = selected?.id
       for (const profile of profiles.value) {
         const credential = await credentialStore.load(profile.id)
         if (credential) identities.value[profile.id] = publicIdentity(credential)
@@ -86,21 +87,21 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
 
   function saveProfile(input: { id?: string; name: string; domain: string; port?: number }): RelayProfile {
     const profile: RelayProfile = {
-      id: input.id ?? `relay_${crypto.randomUUID()}`,
+      id: input.id ?? profiles.value[0]?.id ?? `relay_${crypto.randomUUID()}`,
       name: required(input.name, 'Relay name'),
       baseUrl: normalizeRelayUrl(input.domain, input.port),
     }
-    const index = profiles.value.findIndex(value => value.id === profile.id)
-    if (index >= 0) {
-      const changed = profiles.value[index]!.baseUrl !== profile.baseUrl
-      profiles.value[index] = profile
+    const existing = profiles.value[0]
+    if (existing) {
+      const changed = existing.baseUrl !== profile.baseUrl
       if (changed) {
         void credentialStore.delete(profile.id)
         const next = { ...identities.value }; delete next[profile.id]; identities.value = next
         void api.disconnect()
       }
-    } else profiles.value.push(profile)
-    activeProfileId.value ??= profile.id
+    }
+    profiles.value = [profile]
+    activeProfileId.value = profile.id
     persist()
     return profile
   }

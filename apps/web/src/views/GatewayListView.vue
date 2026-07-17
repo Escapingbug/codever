@@ -17,6 +17,7 @@ const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform)
 const unavailableGateways = computed(() => state.gateways.value.filter(gateway =>
   state.errors[`projects:${gateway.id}`],
 ))
+const pairingGateway = computed(() => state.gateways.value.find(gateway => gateway.id === pairingGatewayId.value))
 const creating = ref(false)
 const createOpen = ref(false)
 const createError = ref('')
@@ -24,10 +25,34 @@ const gatewayId = ref('')
 const projectName = ref('')
 const rootPath = ref('')
 const defaultProvider = ref('')
+const addGatewayOpen = ref(false)
+const pairingGatewayId = ref('')
+const gatewayPairingCode = ref('')
+const pairingGatewayBusy = ref(false)
+const gatewayPairingError = ref('')
 
 watch(availableGateways, gateways => {
   if (!gateways.some(gateway => gateway.id === gatewayId.value)) gatewayId.value = gateways[0]?.id ?? ''
 }, { immediate: true })
+watch(() => state.gateways.value, gateways => {
+  if (!gateways.some(gateway => gateway.id === pairingGatewayId.value)) pairingGatewayId.value = gateways[0]?.id ?? ''
+}, { immediate: true })
+
+async function pairNewGateway(): Promise<void> {
+  if (!pairingGatewayId.value || !gatewayPairingCode.value.trim()) return
+  pairingGatewayBusy.value = true
+  gatewayPairingError.value = ''
+  try {
+    await state.api.pairGateway(pairingGatewayId.value, gatewayPairingCode.value.trim())
+    await state.loadProjects(pairingGatewayId.value)
+    gatewayPairingCode.value = ''
+    addGatewayOpen.value = false
+  } catch (error) {
+    gatewayPairingError.value = error instanceof Error ? error.message : 'Gateway pairing failed'
+  } finally {
+    pairingGatewayBusy.value = false
+  }
+}
 
 async function createProject(): Promise<void> {
   creating.value = true
@@ -61,10 +86,43 @@ onMounted(() => state.loadWorkspace())
       <div><span class="eyebrow">Your workspace</span><h1>Projects</h1><p>Continue work across every connected machine.</p></div>
       <div class="header-actions">
         <button class="button" :disabled="state.pending.value.has('gateways')" @click="state.loadWorkspace">Refresh</button>
+        <button class="button" @click="addGatewayOpen = !addGatewayOpen">Add Gateway</button>
         <button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = !createOpen">＋ New project</button>
       </div>
     </header>
     <div v-if="state.errors.gateways" class="error-banner"><strong>Relay unavailable</strong>{{ state.errors.gateways }}</div>
+
+    <section v-if="addGatewayOpen" class="settings-section project-create-panel">
+      <div class="section-heading">
+        <div><span class="eyebrow">Remote machine</span><h2>Add Gateway</h2></div>
+        <button class="icon-button" aria-label="Close" @click="addGatewayOpen = false">×</button>
+      </div>
+      <p class="form-help">Choose a Gateway connected to this Relay, then enter its one-time three-minute device code.</p>
+      <form v-if="state.gateways.value.length" class="relay-form" @submit.prevent="pairNewGateway">
+        <label>Gateway
+          <select v-model="pairingGatewayId" required>
+            <option v-for="gateway in state.gateways.value" :key="gateway.id" :value="gateway.id">
+              {{ gateway.name }} · {{ gateway.platform }} · {{ gateway.status }}
+            </option>
+          </select>
+        </label>
+        <label>Gateway device pairing code
+          <input v-model="gatewayPairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" />
+        </label>
+        <p v-if="pairingGateway" class="form-help">Pairing {{ pairingGateway.name }}. This is not the Relay client code.</p>
+        <p v-if="gatewayPairingError" class="error-banner" role="alert">{{ gatewayPairingError }}</p>
+        <div class="form-actions">
+          <button type="button" class="button" @click="addGatewayOpen = false">Cancel</button>
+          <button class="button button--primary" :disabled="pairingGatewayBusy">
+            {{ pairingGatewayBusy ? 'Pairing Gateway…' : 'Pair Gateway' }}
+          </button>
+        </div>
+      </form>
+      <div v-else class="empty-state empty-state--compact">
+        <h2>No Gateway discovered</h2>
+        <p>Start a Gateway and connect it to this Relay first, then refresh this page.</p>
+      </div>
+    </section>
 
     <section v-if="createOpen" class="settings-section project-create-panel">
       <div class="section-heading"><div><span class="eyebrow">Remote machine</span><h2>New project</h2></div></div>

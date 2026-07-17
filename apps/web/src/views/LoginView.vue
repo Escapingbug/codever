@@ -39,7 +39,6 @@ async function pair(): Promise<void> {
         <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
         <button class="button button--primary entry-submit" :disabled="busy">{{ busy ? 'Pairing Relay…' : 'Pair Relay' }}</button>
       </form>
-      <RouterLink class="text-link" to="/onboarding?add=1">Add another Relay</RouterLink>
     </section>
   </main>
 </template>
