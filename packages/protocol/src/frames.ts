@@ -3,6 +3,11 @@ import { IsoDateTimeSchema, NonNegativeIntegerSchema, OpaqueIdSchema, PROTOCOL_V
 import { CommandAcceptedSchema, CommandFailedSchema, CommandRequestSchema, CommandResultSchema } from './commands'
 import { CodeverSessionSchema, GatewayCapabilitiesSchema, GatewayPlatformSchema, ProjectSchema, SessionStateSchema } from './domain'
 import { SessionEventEnvelopeSchema } from './events'
+import {
+    GatewayDeviceTunnelClosePayloadSchema,
+    GatewayDeviceTunnelDataPayloadSchema,
+    GatewayDeviceTunnelOpenPayloadSchema,
+} from './deviceTunnel'
 
 const handshakeFrame = <TType extends string, TPayload extends z.ZodType>(type: TType, payload: TPayload) => z.object({
     version: z.literal(PROTOCOL_VERSION),
@@ -119,12 +124,21 @@ export const CommandFailedFrameSchema = frame('command.failed', CommandFailedSch
 export const DecisionResponseFrameSchema = frame('decision.response', DecisionResponseSchema)
 export const SyncRequestFrameSchema = frame('sync.request', SyncRequestSchema)
 export const SyncCompleteFrameSchema = frame('sync.complete', SyncCompleteSchema)
+export const GatewayDeviceTunnelOpenFrameSchema = frame('device.tunnel.open', GatewayDeviceTunnelOpenPayloadSchema)
+export const GatewayDeviceTunnelDataFrameSchema = frame('device.tunnel.data', GatewayDeviceTunnelDataPayloadSchema)
+export const GatewayDeviceTunnelCloseFrameSchema = frame('device.tunnel.close', GatewayDeviceTunnelClosePayloadSchema)
 
 export const CommandLifecycleFrameSchema = z.discriminatedUnion('type', [
     CommandRequestFrameSchema,
     CommandAcceptedFrameSchema,
     CommandResultFrameSchema,
     CommandFailedFrameSchema,
+])
+
+export const GatewayDeviceTunnelFrameSchema = z.discriminatedUnion('type', [
+    GatewayDeviceTunnelOpenFrameSchema,
+    GatewayDeviceTunnelDataFrameSchema,
+    GatewayDeviceTunnelCloseFrameSchema,
 ])
 
 export const GatewayFrameSchema = z.discriminatedUnion('type', [
@@ -140,6 +154,9 @@ export const GatewayFrameSchema = z.discriminatedUnion('type', [
     DecisionResponseFrameSchema,
     SyncRequestFrameSchema,
     SyncCompleteFrameSchema,
+    GatewayDeviceTunnelOpenFrameSchema,
+    GatewayDeviceTunnelDataFrameSchema,
+    GatewayDeviceTunnelCloseFrameSchema,
 ])
 
 export type GatewayHello = z.infer<typeof GatewayHelloSchema>
@@ -155,6 +172,10 @@ export type SessionEventAck = z.infer<typeof SessionEventAckSchema>
 export type DecisionResponse = z.infer<typeof DecisionResponseSchema>
 export type SyncRequest = z.infer<typeof SyncRequestSchema>
 export type SyncComplete = z.infer<typeof SyncCompleteSchema>
+export type GatewayDeviceTunnelOpenFrame = z.infer<typeof GatewayDeviceTunnelOpenFrameSchema>
+export type GatewayDeviceTunnelDataFrame = z.infer<typeof GatewayDeviceTunnelDataFrameSchema>
+export type GatewayDeviceTunnelCloseFrame = z.infer<typeof GatewayDeviceTunnelCloseFrameSchema>
+export type GatewayDeviceTunnelFrame = z.infer<typeof GatewayDeviceTunnelFrameSchema>
 export type GatewayFrame = z.infer<typeof GatewayFrameSchema>
 export type GatewayFrameType = GatewayFrame['type']
 export type CommandLifecycleFrame = z.infer<typeof CommandLifecycleFrameSchema>
@@ -162,6 +183,7 @@ export type CommandLifecycleFrame = z.infer<typeof CommandLifecycleFrameSchema>
 export const parseGatewayFrame = (value: unknown): GatewayFrame => parseWithSchema(GatewayFrameSchema, value)
 export const parseGatewayHandshakeFrame = (value: unknown): GatewayHandshakeFrame => parseWithSchema(GatewayHandshakeFrameSchema, value)
 export const parseCommandLifecycleFrame = (value: unknown): CommandLifecycleFrame => parseWithSchema(CommandLifecycleFrameSchema, value)
+export const parseGatewayDeviceTunnelFrame = (value: unknown): GatewayDeviceTunnelFrame => parseWithSchema(GatewayDeviceTunnelFrameSchema, value)
 
 /** Canonical, domain-separated bytes signed during Gateway authentication. */
 export function serializeGatewayAuthPayload(

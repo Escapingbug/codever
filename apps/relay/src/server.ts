@@ -9,6 +9,7 @@ import {
     parseGatewayEnrollmentChallengeRequest,
     parseGatewayEnrollmentProofDto,
     parseGatewaySecureHandshakeFrame,
+    parseClientDeviceTunnelFrame,
     parseSecureDataFrame,
     parseSecureControlFrame,
     parseApproveGatewayEnrollmentDto,
@@ -46,6 +47,7 @@ import {
     type AccountSessionService,
 } from './accountAuth'
 import { GatewayConnectionRegistry } from './connectionRegistry'
+import { DeviceTunnelRegistry } from './deviceTunnelRegistry'
 import { createInMemoryRelayRepositories } from './memoryRepositories'
 import type {
     CommandRecord,
@@ -91,6 +93,7 @@ export interface CreateRelayServerOptions {
     enrollmentChallengeStore?: EnrollmentChallengeStore
     enrollmentTtlMs?: number
     secureGatewayAuthenticator?: SecureGatewayAuthenticator
+    deviceTunnelRegistry?: DeviceTunnelRegistry
 }
 
 export interface RelayServer extends FastifyInstance {
@@ -98,6 +101,7 @@ export interface RelayServer extends FastifyInstance {
         repositories: RelayRepositories
         connections: GatewayConnectionRegistry
         eventStreams: SessionEventStreams
+        deviceTunnels: DeviceTunnelRegistry
     }
 }
 
@@ -121,6 +125,7 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     const clientAuthenticator = options.clientAuthenticator ?? new DenyAllClientAuthenticator()
     const gatewayAuthenticator = options.gatewayAuthenticator ?? new DenyAllGatewayAuthenticator()
     const connections = options.connectionRegistry ?? new GatewayConnectionRegistry()
+    const deviceTunnels = options.deviceTunnelRegistry ?? new DeviceTunnelRegistry()
     const eventStreams = new SessionEventStreams(repositories.events, options.eventStreams)
     const createSessionTimeoutMs = options.createSessionTimeoutMs ?? 30_000
     const enrollmentTtlMs = options.enrollmentTtlMs ?? 10 * 60_000
@@ -132,7 +137,7 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         throw new Error('createSessionTimeoutMs must be a positive safe integer')
     }
     const app = Fastify({ logger: options.logger ?? false, ...(options.https && { https: options.https }) }) as unknown as RelayServer
-    app.decorate('relay', { repositories, connections, eventStreams })
+    app.decorate('relay', { repositories, connections, eventStreams, deviceTunnels })
 
     app.setErrorHandler((error: unknown, _request, reply) => {
         const statusCode = error instanceof HttpError ? error.statusCode : 500
@@ -358,6 +363,18 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         socket.once('error', unsubscribe)
     })
 
+    app.get('/v2/device/connect/:gatewayId', {
+        websocket: true,
+        preValidation: async (request, reply) => {
+            const { gatewayId } = request.params as Required<Pick<IdParams, 'gatewayId'>>
+            await requireGateway(repositories, gatewayId)
+            await requireClient(request, reply, clientAuthenticator, 'gateway:tunnel', { gatewayId })
+        },
+    }, (socket, request) => {
+        const { gatewayId } = request.params as Required<Pick<IdParams, 'gatewayId'>>
+        handleDeviceTunnelSocket(socket, gatewayId, connections, deviceTunnels, app)
+    })
+
     app.post('/v1/sessions/:sessionId/messages', async (request, reply) => {
         const body = parseInput(() => parseSendMessageDto(request.body))
         return routeSessionCommand(request, reply, repositories, connections, clientAuthenticator, 'session:message', {
@@ -391,7 +408,7 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
     })
 
     app.get('/v1/gateway/connect', { websocket: true }, (socket, request) => {
-        handleGatewaySocket(socket, request, repositories, connections, eventStreams, gatewayAuthenticator, app, {
+        handleGatewaySocket(socket, request, repositories, connections, eventStreams, deviceTunnels, gatewayAuthenticator, app, {
             relayId: options.relayId ?? 'codever-relay',
             challengeTtlMs: options.challengeTtlMs ?? 30_000,
         })
@@ -404,11 +421,111 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         }
         handleSecureGatewaySocket(
             socket, request, repositories, connections, eventStreams,
-            options.secureGatewayAuthenticator, app,
+            options.secureGatewayAuthenticator, deviceTunnels, app,
         )
     })
 
     return app
+}
+
+function handleDeviceTunnelSocket(
+    socket: WebSocket,
+    gatewayId: string,
+    connections: GatewayConnectionRegistry,
+    tunnels: DeviceTunnelRegistry,
+    app: FastifyInstance,
+): void {
+    let tunnelId: string | undefined
+    let incoming = Promise.resolve()
+
+    socket.on('message', data => {
+        incoming = incoming.then(async () => {
+            const frame = parseClientDeviceTunnelFrame(JSON.parse(data.toString()) as unknown)
+            const connection = connections.get(gatewayId)
+            if (!connection?.ready) {
+                socket.close(1013, 'Gateway is offline')
+                return
+            }
+            if (!tunnelId) {
+                if (frame.type !== 'device.tunnel.open' || frame.payload.gatewayId !== gatewayId) {
+                    socket.close(1008, 'device.tunnel.open must be the first frame')
+                    return
+                }
+                tunnelId = tunnels.open(gatewayId, socket)
+                const openedAt = new Date().toISOString()
+                if (!connections.send(gatewayId, {
+                    version: 1,
+                    type: 'device.tunnel.open',
+                    messageId: randomUUID(),
+                    gatewayId,
+                    connectionEpoch: connection.connectionEpoch,
+                    payload: { tunnelId, openedAt },
+                })) {
+                    tunnels.close(tunnelId, 'gateway_offline', 'Gateway connection was lost')
+                    return
+                }
+                socket.send(JSON.stringify({
+                    version: 1,
+                    type: 'relay.device-tunnel.opened',
+                    messageId: randomUUID(),
+                    payload: { gatewayId, tunnelId, openedAt },
+                }))
+                return
+            }
+            if (frame.type === 'device.tunnel.data') {
+                if (!tunnels.owns(frame.payload.tunnelId, gatewayId, socket)) {
+                    socket.close(1008, 'Device tunnel ID mismatch')
+                    return
+                }
+                if (!connections.send(gatewayId, {
+                    version: 1,
+                    type: 'device.tunnel.data',
+                    messageId: randomUUID(),
+                    gatewayId,
+                    connectionEpoch: connection.connectionEpoch,
+                    payload: { tunnelId, opaquePayload: frame.payload.opaquePayload },
+                })) tunnels.close(tunnelId, 'gateway_offline', 'Gateway connection was lost')
+                return
+            }
+            if (frame.type === 'device.tunnel.close') {
+                if (!tunnels.owns(frame.payload.tunnelId, gatewayId, socket)) {
+                    socket.close(1008, 'Device tunnel ID mismatch')
+                    return
+                }
+                connections.send(gatewayId, {
+                    version: 1,
+                    type: 'device.tunnel.close',
+                    messageId: randomUUID(),
+                    gatewayId,
+                    connectionEpoch: connection.connectionEpoch,
+                    payload: { tunnelId, code: 'normal', ...(frame.payload.reason ? { reason: frame.payload.reason } : {}) },
+                })
+                tunnels.close(tunnelId, 'normal', frame.payload.reason)
+                tunnelId = undefined
+                return
+            }
+            socket.close(1008, 'Unexpected device tunnel frame')
+        }).catch(error => {
+            app.log.error(error)
+            if (tunnelId) tunnels.close(tunnelId, 'protocol_error', 'Invalid device tunnel frame')
+            else socket.close(1008, 'Invalid device tunnel frame')
+        })
+    })
+
+    socket.on('close', () => {
+        for (const removedId of tunnels.removeSocket(socket)) {
+            const connection = connections.get(gatewayId)
+            if (!connection?.ready) continue
+            connections.send(gatewayId, {
+                version: 1,
+                type: 'device.tunnel.close',
+                messageId: randomUUID(),
+                gatewayId,
+                connectionEpoch: connection.connectionEpoch,
+                payload: { tunnelId: removedId, code: 'normal', reason: 'Device connection closed' },
+            })
+        }
+    })
 }
 
 function handleSecureGatewaySocket(
@@ -418,6 +535,7 @@ function handleSecureGatewaySocket(
     connections: GatewayConnectionRegistry,
     eventStreams: SessionEventStreams,
     authenticator: SecureGatewayAuthenticator,
+    deviceTunnels: DeviceTunnelRegistry,
     app: FastifyInstance,
 ): void {
     let pendingHandshakeId: string | undefined
@@ -470,7 +588,7 @@ function handleSecureGatewaySocket(
                 })
                 credentialProvisioningRequired = finished.credentialProvisioningRequired
                 const activeCipher = cipher
-                connections.replace({
+                const replaced = connections.replace({
                     gatewayId,
                     connectionEpoch: epoch,
                     socket,
@@ -481,6 +599,7 @@ function handleSecureGatewaySocket(
                         envelope: await activeCipher.encrypt(frameToSend),
                     }),
                 })
+                if (replaced) deviceTunnels.closeGateway(gatewayId, 'gateway_replaced', 'Gateway connection was replaced')
                 const acceptedPayload = {
                     gatewayId,
                     connectionEpoch: epoch,
@@ -568,7 +687,7 @@ function handleSecureGatewaySocket(
                 return
             }
             if (!connections.isCurrent(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
-            await consumeGatewayFrame(frame, repositories, connections, eventStreams, socket)
+            await consumeGatewayFrame(frame, repositories, connections, eventStreams, deviceTunnels, socket)
         }).catch(error => {
             app.log.error(error)
             const rejection: GatewaySecureHandshakeFrame = {
@@ -584,6 +703,7 @@ function handleSecureGatewaySocket(
 
     socket.on('close', () => {
         if (gatewayId && epoch && connections.removeIfCurrent(gatewayId, epoch, socket)) {
+            deviceTunnels.closeGateway(gatewayId, 'gateway_offline', 'Gateway disconnected')
             void repositories.gateways.updateConnection(gatewayId, 'offline', undefined, new Date().toISOString())
         }
     })
@@ -809,6 +929,7 @@ function handleGatewaySocket(
     repositories: RelayRepositories,
     connections: GatewayConnectionRegistry,
     eventStreams: SessionEventStreams,
+    deviceTunnels: DeviceTunnelRegistry,
     authenticator: GatewayAuthenticator,
     app: FastifyInstance,
     options: { relayId: string; challengeTtlMs: number },
@@ -857,7 +978,8 @@ function handleGatewaySocket(
                 }
                 gatewayId = response.payload.gatewayId
                 epoch = randomUUID()
-                connections.replace({ gatewayId, connectionEpoch: epoch, socket })
+                const replaced = connections.replace({ gatewayId, connectionEpoch: epoch, socket })
+                if (replaced) deviceTunnels.closeGateway(gatewayId, 'gateway_replaced', 'Gateway connection was replaced')
                 const accepted: GatewayHandshakeFrame = {
                     version: 1,
                     type: 'relay.auth.accepted',
@@ -905,7 +1027,7 @@ function handleGatewaySocket(
                 socket.close(4001, 'Stale connection epoch')
                 return
             }
-            await consumeGatewayFrame(frame, repositories, connections, eventStreams, socket)
+            await consumeGatewayFrame(frame, repositories, connections, eventStreams, deviceTunnels, socket)
         })().catch(error => {
             app.log.error(error)
             socket.close(1011, 'Failed to process frame')
@@ -914,6 +1036,7 @@ function handleGatewaySocket(
 
     socket.on('close', () => {
         if (gatewayId && epoch && connections.removeIfCurrent(gatewayId, epoch, socket)) {
+            deviceTunnels.closeGateway(gatewayId, 'gateway_offline', 'Gateway disconnected')
             void repositories.gateways.updateConnection(gatewayId, 'offline', undefined, new Date().toISOString())
         }
     })
@@ -938,6 +1061,7 @@ async function consumeGatewayFrame(
     repositories: RelayRepositories,
     connections: GatewayConnectionRegistry,
     eventStreams: SessionEventStreams,
+    deviceTunnels: DeviceTunnelRegistry,
     socket: WebSocket,
 ): Promise<void> {
     switch (frame.type) {
@@ -1012,6 +1136,18 @@ async function consumeGatewayFrame(
                     throw new Error(`Sync completion references unknown or mismatched session ${cursor.sessionId}`)
                 }
             }
+            return
+        case 'device.tunnel.data':
+            if (!deviceTunnels.send(frame.gatewayId, frame.payload.tunnelId, frame.payload.opaquePayload)) {
+                throw new Error(`Unknown device tunnel ${frame.payload.tunnelId}`)
+            }
+            return
+        case 'device.tunnel.close':
+            deviceTunnels.close(
+                frame.payload.tunnelId,
+                frame.payload.code ?? 'normal',
+                frame.payload.reason,
+            )
             return
         default:
             socket.close(1008, `Unexpected gateway frame type: ${frame.type}`)

@@ -6,6 +6,7 @@ import {
     parseSessionEventEnvelope,
     type CommandFailed,
     type GatewayFrame,
+    type GatewayDeviceTunnelFrame,
     type GatewayHandshakeFrame,
     type Heartbeat,
     type InventorySnapshot,
@@ -254,6 +255,11 @@ export class RelayLink {
             case 'sync.request':
                 await this.processSyncRequest(frame.payload)
                 return
+            case 'device.tunnel.open':
+            case 'device.tunnel.data':
+            case 'device.tunnel.close':
+                await this.processDeviceTunnel(frame)
+                return
             default:
                 throw new RelayLinkError(`Unexpected Relay frame type: ${frame.type}`)
         }
@@ -296,6 +302,11 @@ export class RelayLink {
                 return
             case 'sync.request':
                 await this.processSyncRequest(frame.payload)
+                return
+            case 'device.tunnel.open':
+            case 'device.tunnel.data':
+            case 'device.tunnel.close':
+                await this.processDeviceTunnel(frame)
                 return
             default:
                 throw new RelayLinkError(`Unexpected secure Relay frame type: ${frame.type}`)
@@ -455,6 +466,47 @@ export class RelayLink {
         this.replayCommand(entry)
     }
 
+    private async processDeviceTunnel(frame: GatewayDeviceTunnelFrame): Promise<void> {
+        const handler = this.options.handleDeviceTunnel
+        if (!handler) {
+            this.sendDeviceTunnelFrame('device.tunnel.close', {
+                tunnelId: frame.payload.tunnelId,
+                reason: 'Gateway does not support device tunnels',
+            })
+            return
+        }
+
+        let closed = frame.type === 'device.tunnel.close'
+        const close = (reason?: string): void => {
+            if (closed) return
+            closed = true
+            this.sendDeviceTunnelFrame('device.tunnel.close', {
+                tunnelId: frame.payload.tunnelId,
+                ...(reason ? { reason } : {}),
+            })
+        }
+        try {
+            await handler(frame.payload, {
+                send: opaquePayload => {
+                    if (closed) throw new RelayLinkError(`Device tunnel ${frame.payload.tunnelId} is closed`)
+                    this.sendDeviceTunnelFrame('device.tunnel.data', { tunnelId: frame.payload.tunnelId, opaquePayload })
+                },
+                close,
+            })
+        } catch (error) {
+            this.reportError(new RelayLinkError(`Device tunnel handler failed for ${frame.payload.tunnelId}`, {
+                cause: error,
+            }))
+            try {
+                close(error instanceof Error ? error.message : 'Device tunnel handler failed')
+            } catch (closeError) {
+                this.reportError(new RelayLinkError(`Failed to close device tunnel ${frame.payload.tunnelId}`, {
+                    cause: closeError,
+                }))
+            }
+        }
+    }
+
     private replayCommand(entry: CommandLedgerEntry): void {
         if (!this.isOnline()) return
         if (entry.acceptedAt) {
@@ -610,6 +662,21 @@ export class RelayLink {
             payload,
         } as Extract<GatewayFrame, { type: TType }>
         this.sendRaw(frame, this.socket)
+    }
+
+    private sendDeviceTunnelFrame<TType extends GatewayDeviceTunnelFrame['type']>(
+        type: TType,
+        payload: Extract<GatewayDeviceTunnelFrame, { type: TType }>['payload'],
+    ): void {
+        if (!this.connectionEpoch || !this.socket) throw new RelayLinkError('Cannot send data before Relay authentication')
+        this.sendRaw({
+            version: PROTOCOL_VERSION,
+            type,
+            messageId: this.messageId(),
+            gatewayId: this.options.gatewayId,
+            connectionEpoch: this.connectionEpoch,
+            payload,
+        } as Extract<GatewayDeviceTunnelFrame, { type: TType }>, this.socket)
     }
 
     private sendRaw(frame: GatewayFrame | GatewayHandshakeFrame, socket: WebSocket): void {

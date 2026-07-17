@@ -1,5 +1,8 @@
 import type {
     CommandRequest,
+    GatewayDeviceTunnelClosePayload,
+    GatewayDeviceTunnelDataPayload,
+    GatewayDeviceTunnelOpenPayload,
     GatewayHello,
     Heartbeat,
     InventorySnapshot,
@@ -30,6 +33,21 @@ export type RelayCommandHandler = (
     context: RelayCommandContext,
 ) => JsonValue | undefined | Promise<JsonValue | undefined>
 
+export type DeviceTunnelFramePayload =
+    | GatewayDeviceTunnelOpenPayload
+    | GatewayDeviceTunnelDataPayload
+    | GatewayDeviceTunnelClosePayload
+
+export interface DeviceTunnelActions {
+    send: (opaquePayload: GatewayDeviceTunnelDataPayload['opaquePayload']) => void
+    close: (reason?: string) => void
+}
+
+export type DeviceTunnelHandler = (
+    payload: DeviceTunnelFramePayload,
+    actions: DeviceTunnelActions,
+) => void | Promise<void>
+
 export interface RelayLinkOptions {
     url: string
     gatewayId: string
@@ -37,6 +55,7 @@ export interface RelayLinkOptions {
     hello: Omit<GatewayHello, 'connectedAt'>
     getInventory: () => InventorySnapshot | Promise<InventorySnapshot>
     handleCommand: RelayCommandHandler
+    handleDeviceTunnel?: DeviceTunnelHandler
     loadEventsAfter?: (
         sessionId: string,
         afterSeq: number,

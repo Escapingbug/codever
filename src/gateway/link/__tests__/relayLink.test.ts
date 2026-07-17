@@ -106,6 +106,87 @@ describe('RelayLink', () => {
         })
         expect(loadEventsAfter).toHaveBeenCalledWith('session-1', 3)
     })
+
+    it('dispatches device tunnel frames and exposes tunnel send and close actions', async () => {
+        const identity = createIdentity()
+        const relay = await createMockRelay(identity)
+        const payloads: unknown[] = []
+        const link = createLink(relay.url, identity, {
+            handleDeviceTunnel: async (payload, actions) => {
+                payloads.push(payload)
+                if ('openedAt' in payload) actions.send('gateway-response')
+                if ('opaquePayload' in payload) actions.close('request complete')
+            },
+        })
+        await link.start()
+        const connection = await relay.connection(0)
+        await consumeStartup(connection)
+
+        connection.send(dataFrame(connection, 'device.tunnel.open', {
+            tunnelId: 'tunnel-1', openedAt: new Date().toISOString(),
+        }))
+        expect(await connection.next('device.tunnel.data')).toMatchObject({
+            payload: { tunnelId: 'tunnel-1', opaquePayload: 'gateway-response' },
+        })
+
+        connection.send(dataFrame(connection, 'device.tunnel.data', {
+            tunnelId: 'tunnel-1', opaquePayload: 'device-request',
+        }))
+        expect(await connection.next('device.tunnel.close')).toMatchObject({
+            payload: { tunnelId: 'tunnel-1', reason: 'request complete' },
+        })
+
+        connection.send(dataFrame(connection, 'device.tunnel.close', {
+            tunnelId: 'tunnel-1', code: 'normal', reason: 'done',
+        }))
+        await vi.waitFor(() => expect(payloads).toHaveLength(3))
+        expect(payloads).toEqual([
+            expect.objectContaining({ tunnelId: 'tunnel-1', openedAt: expect.any(String) }),
+            { tunnelId: 'tunnel-1', opaquePayload: 'device-request' },
+            { tunnelId: 'tunnel-1', code: 'normal', reason: 'done' },
+        ])
+    })
+
+    it('closes only the device tunnel when its handler fails', async () => {
+        const identity = createIdentity()
+        const relay = await createMockRelay(identity)
+        const errors: Error[] = []
+        const handler = vi.fn(async () => { throw new Error('tunnel exploded') })
+        const link = createLink(relay.url, identity, { handleDeviceTunnel: handler, onError: error => errors.push(error) })
+        await link.start()
+        const connection = await relay.connection(0)
+        await consumeStartup(connection)
+
+        connection.send(dataFrame(connection, 'device.tunnel.data', {
+            tunnelId: 'tunnel-bad', opaquePayload: 'request',
+        }))
+        expect(await connection.next('device.tunnel.close')).toMatchObject({
+            payload: { tunnelId: 'tunnel-bad', reason: 'tunnel exploded' },
+        })
+        await vi.waitFor(() => expect(errors.at(-1)?.message).toContain('Device tunnel handler failed'))
+        expect(link.state).toBe('online')
+        expect(connection.socket.readyState).toBe(WebSocket.OPEN)
+    })
+
+    it('dispatches decrypted secure device tunnel frames through the same handler', async () => {
+        const identity = createIdentity()
+        const handler = vi.fn(async () => undefined)
+        const link = createLink('ws://127.0.0.1:1', identity, { handleDeviceTunnel: handler })
+        const frame = dataFrame({ epoch: 'secure-epoch' } as MockConnection, 'device.tunnel.data', {
+            tunnelId: 'secure-tunnel', opaquePayload: 'encrypted-request',
+        })
+        Object.assign(link as any, {
+            connectionEpoch: 'secure-epoch',
+            secureHandshake: { ready: true, decryptApplication: async () => frame },
+        })
+
+        await (link as any).handleSecureMessage({}, 0, {} as WebSocket)
+
+        expect(handler).toHaveBeenCalledWith(
+            { tunnelId: 'secure-tunnel', opaquePayload: 'encrypted-request' },
+            expect.objectContaining({ send: expect.any(Function), close: expect.any(Function) }),
+        )
+    })
 })
 
 interface MockConnection {

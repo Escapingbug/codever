@@ -27,6 +27,7 @@ export type ClientAction =
     | 'gateway:enrollment:approve'
     | 'gateway:enrollment:reject'
     | 'gateway:revoke'
+    | 'gateway:tunnel'
     | 'project:list'
     | 'session:list'
     | 'session:create'
