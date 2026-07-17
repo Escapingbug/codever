@@ -11,6 +11,7 @@ async function main(): Promise<void> {
             path: { type: 'string' },
             name: { type: 'string' },
             workspace: { type: 'string' },
+            id: { type: 'string' },
             help: { type: 'boolean', short: 'h' },
         },
     })
@@ -55,6 +56,21 @@ async function main(): Promise<void> {
         await application.close()
         return
     }
+    if (command === 'device') {
+        const subcommand = positionals[1]
+        if (subcommand === 'pair') {
+            console.log(JSON.stringify(application.issueDevicePairing(), null, 2))
+        } else if (subcommand === 'list') {
+            console.log(JSON.stringify(await application.listDevices(), null, 2))
+        } else if (subcommand === 'revoke') {
+            if (!values.id) throw new Error('device revoke requires --id')
+            console.log(JSON.stringify({ credentialId: values.id, revoked: await application.revokeDevice(values.id) }, null, 2))
+        } else {
+            throw new Error('device requires pair, list, or revoke')
+        }
+        await application.close()
+        return
+    }
     if (command !== 'start') throw new Error(`Unknown command: ${command}`)
 
     application.start()
@@ -75,6 +91,9 @@ Usage:
   codever enrollment [-c <config>]   Print the public enrollment bundle (never the private key)
   codever project add --path <absolute-path> [--name <name>]
   codever project list [-c <config>]
+  codever device pair [-c <config>]  Issue a one-time 3-minute client pairing code
+  codever device list [-c <config>]  List Gateway-owned client credentials
+  codever device revoke --id <credential-id> [-c <config>]
   codever start [-c <config>]        Run the outbound Gateway service
 `)
 }

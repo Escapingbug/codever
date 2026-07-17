@@ -1,4 +1,5 @@
 export * from './gatewayApplication'
+export * from './security'
 export * from './gatewayConfig'
 export * from './identity'
 export * from './link'
