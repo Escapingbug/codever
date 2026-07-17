@@ -1,84 +1,59 @@
-import type { FastifyRequest } from 'fastify'
 import { join } from 'node:path'
-import type { ClientAction, ClientAuthenticator, ClientAuthorizationTarget, ClientIdentity } from './auth'
-import { EcdsaP256GatewayAuthenticator } from './auth'
-import { AuthSessionRepository, BearerAccountAuthenticator } from './accountAuth'
+import { ClientCredentialRepository } from './clientCredentialRepository'
 import { loadRelayConfig } from './config'
 import { createDurableRelayRepositories } from './durableRepositories'
+import { runLocalPairCommand, startLocalControlServer } from './localControl'
 import { createInMemoryRelayRepositories } from './memoryRepositories'
-import { createRelayServer } from './server'
-import { GatewayEnrollmentRepository } from './enrollmentRepository'
-import { runLocalControlCommand, startLocalControlServer } from './localControl'
+import { SecureClientAuthenticator } from './secureClientAuth'
 import { SecureCredentialRepository } from './secureCredentialRepository'
 import { SecureGatewayAuthenticator } from './secureGatewayAuth'
-
-class InsecureDevelopmentClientAuthenticator implements ClientAuthenticator {
-    constructor(private readonly workspaceId: string) {}
-
-    async authenticate(_request: FastifyRequest): Promise<ClientIdentity> {
-        return { id: 'insecure-development-user', workspaceId: this.workspaceId, deviceId: 'insecure-development-device' }
-    }
-
-    async authorize(
-        _identity: ClientIdentity,
-        _action: ClientAction,
-        _target: ClientAuthorizationTarget,
-    ): Promise<true> {
-        return true
-    }
-}
+import { createRelayServer } from './server'
 
 const config = await loadRelayConfig()
-if (process.argv[2] === 'enrollment') {
-    const result = await runLocalControlCommand(config.dataDirectory, process.argv.slice(3))
+if (process.argv[2] === 'pair') {
+    const target = process.argv[3]
+    if (target !== 'gateway' && target !== 'client') {
+        throw new Error('Usage: codever-relay pair <gateway|client>')
+    }
+    const result = await runLocalPairCommand(config.dataDirectory, target)
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     process.exit(0)
 }
+
 const repositories = config.repositoryMode === 'memory'
     ? createInMemoryRelayRepositories()
     : await createDurableRelayRepositories(config.dataDirectory)
-const accountAuthenticator = config.insecureDevAuth
-    ? undefined
-    : new BearerAccountAuthenticator({
-        users: config.users,
-        sessions: await AuthSessionRepository.open(join(config.dataDirectory, 'auth-sessions.json')),
-        gateways: repositories.gateways,
-        sessionTtlSeconds: config.sessionTtlSeconds,
-    })
-const clientAuthenticator = config.insecureDevAuth
-    ? new InsecureDevelopmentClientAuthenticator(config.devWorkspaceId)
-    : accountAuthenticator!
-const enrollmentRepository = await GatewayEnrollmentRepository.open({
-    ...(config.repositoryMode === 'durable' && { path: join(config.dataDirectory, 'gateway-enrollments.json') }),
-    initialGateways: config.gateways,
-})
-const secureCredentials = await SecureCredentialRepository.open(join(config.dataDirectory, 'secure-gateway-credentials.json'))
+const gatewayCredentials = await SecureCredentialRepository.open(
+    join(config.dataDirectory, 'secure-gateway-credentials.json'),
+)
+const clientCredentials = await ClientCredentialRepository.open(
+    join(config.dataDirectory, 'secure-client-credentials.json'),
+)
 const secureGatewayAuthenticator = await SecureGatewayAuthenticator.create({
     relayId: config.relayId,
-    serverSetup: secureCredentials.serverSetup,
-    credentials: secureCredentials,
+    serverSetup: gatewayCredentials.serverSetup,
+    credentials: gatewayCredentials,
 })
-if (config.insecureDevAuth) {
-    process.stderr.write('WARNING: CODEVER_RELAY_INSECURE_DEV_AUTH=true; all client requests are authorized.\n')
-}
+const secureClientAuthenticator = await SecureClientAuthenticator.create({
+    relayId: config.relayId,
+    serverSetup: clientCredentials.serverSetup,
+    credentials: clientCredentials,
+})
 if (config.repositoryMode === 'memory') {
-    process.stderr.write('WARNING: CODEVER_RELAY_REPOSITORY_MODE=memory; all Relay state will be lost at process exit.\n')
+    process.stderr.write('WARNING: CODEVER_RELAY_REPOSITORY_MODE=memory; Gateway metadata will be lost at process exit.\n')
 }
 
 const app = await createRelayServer({
-    relayId: config.relayId,
     logger: config.logger,
-    clientAuthenticator,
-    ...(accountAuthenticator && { accountService: accountAuthenticator }),
-    gatewayAuthenticator: new EcdsaP256GatewayAuthenticator(
-        enrollmentRepository,
-    ),
-    enrollmentRepository,
     secureGatewayAuthenticator,
+    secureClientAuthenticator,
     repositories,
-    ...(config.tls && { https: { cert: config.tls.cert, key: config.tls.key } }),
 })
-const localControl = await startLocalControlServer(config.dataDirectory, enrollmentRepository, secureGatewayAuthenticator)
+const localControl = await startLocalControlServer(
+    config.dataDirectory,
+    secureGatewayAuthenticator,
+    secureClientAuthenticator,
+)
 
 const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down Relay')

@@ -31,7 +31,10 @@ describe('secure Gateway WebSocket', () => {
             relayId: 'relay-1', serverSetup: await createOpaqueServerSetup(),
             credentials: { get: async () => undefined, put: async (gatewayId, registrationRecord) => ({ gatewayId, registrationRecord, enabled: true }) },
         })
-        const app = await createRelayServer({ repositories, relayId: 'relay-1', secureGatewayAuthenticator: authenticator })
+        const app = await createRelayServer({
+            repositories,
+            secureGatewayAuthenticator: authenticator,
+        })
         servers.push(app)
         await app.listen({ host: '127.0.0.1', port: 0 })
         const address = app.server.address()
@@ -118,7 +121,22 @@ describe('secure Gateway WebSocket', () => {
         expect(wire).not.toContain('Secure Gateway')
         socket.send(wire)
         await waitFor(async () => (await repositories.gateways.get('gateway-1'))?.status === 'online')
-        socket.close()
+
+        const closed = onceClose(socket)
+        socket.send(JSON.stringify({
+            version: 1,
+            type: 'secure.data',
+            messageId: randomUUID(),
+            envelope: await cipher.encrypt({
+                version: 1,
+                type: 'gateway.inventory.snapshot',
+                messageId: randomUUID(),
+                gatewayId: 'gateway-1',
+                connectionEpoch: accepted.connectionEpoch,
+                payload: { generatedAt: new Date().toISOString(), revision: 1, projects: [], sessions: [] },
+            }),
+        }))
+        await expect(closed).resolves.toMatchObject({ code: 1008 })
     }, 20_000)
 })
 
@@ -134,6 +152,10 @@ function onceMessage(socket: WebSocket): Promise<string> {
         socket.once('message', data => resolve(data.toString()))
         socket.once('error', reject)
     })
+}
+
+function onceClose(socket: WebSocket): Promise<{ code: number; reason: string }> {
+    return new Promise(resolve => socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {

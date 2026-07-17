@@ -1,19 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { parseEnrollGatewayDto, parseMutationReceiptDto, parseSendMessageDto } from '../src/index'
+import { parseMutationReceiptDto, parseSendMessageDto } from '../src/index'
 
 describe('client resource DTO schemas', () => {
-    it('accepts public-only Gateway enrollment payloads', () => {
-        expect(parseEnrollGatewayDto({
-            name: 'workstation',
-            identity: {
-                version: 1,
-                algorithm: 'ECDSA-P256-SHA256',
-                fingerprint: 'sha256:abc',
-                publicKeySpkiPem: '-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n',
-            },
-        }).name).toBe('workstation')
-    })
-
     it('parses mutation requests and lifecycle receipts', () => {
         expect(parseSendMessageDto({ text: 'hello', sendWhenOnline: true })).toEqual({
             text: 'hello', sendWhenOnline: true,

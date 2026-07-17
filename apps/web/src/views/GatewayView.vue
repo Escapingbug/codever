@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { useCodeverState } from '../state/codeverState'
@@ -9,6 +9,23 @@ const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId))
 const gateway = computed(() => state.gateways.value.find((item) => item.id === gatewayId.value))
 const projects = computed(() => state.projectsByGateway[gatewayId.value] ?? [])
+const pairingCode = ref('')
+const pairing = ref(false)
+const pairingError = ref('')
+
+async function pairGateway(): Promise<void> {
+  pairing.value = true
+  pairingError.value = ''
+  try {
+    await state.api.pairGateway(gatewayId.value, pairingCode.value)
+    await state.loadProjects(gatewayId.value)
+    pairingCode.value = ''
+  } catch (error) {
+    pairingError.value = error instanceof Error ? error.message : 'Gateway pairing failed'
+  } finally {
+    pairing.value = false
+  }
+}
 
 onMounted(() => state.loadGateways())
 watch(gatewayId, (id) => void state.loadProjects(id), { immediate: true })
@@ -27,6 +44,15 @@ watch(gatewayId, (id) => void state.loadProjects(id), { immediate: true })
     <div v-if="gateway && gateway.status !== 'online'" class="offline-banner">
       <strong>This Gateway is {{ gateway.status }}.</strong> History may be cached, but execution controls are unavailable.
     </div>
+    <section v-if="state.errors[`projects:${gatewayId}`]?.includes('pairing')" class="settings-section">
+      <div class="section-heading"><div><span class="eyebrow">End-to-end security</span><h2>Pair this Gateway</h2></div></div>
+      <p>Run <code>codever device pair</code> locally on the Gateway and enter the one-time code within three minutes.</p>
+      <form class="relay-form" @submit.prevent="pairGateway">
+        <label>Gateway pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" /></label>
+        <p v-if="pairingError" class="error-banner">{{ pairingError }}</p>
+        <button class="button button--primary" :disabled="pairing">{{ pairing ? 'Pairing…' : 'Pair Gateway' }}</button>
+      </form>
+    </section>
     <section>
       <div class="section-heading"><div><span class="eyebrow">Approved roots</span><h2>Projects</h2></div></div>
       <div class="project-grid">

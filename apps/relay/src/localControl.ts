@@ -2,18 +2,17 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { join } from 'node:path'
-import type { GatewayEnrollmentRepository } from './enrollmentRepository'
 import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
+import type { SecureClientAuthenticator } from './secureClientAuth'
 
 const SECRET_FILE = 'relay-control.secret'
 const SOCKET_FILE = 'relay-control.sock'
 
-type ControlRequest =
-    | { secret: string; command: 'list' }
-    | { secret: string; command: 'approve'; code: string }
-    | { secret: string; command: 'reject'; code: string; reason?: string }
-    | { secret: string; command: 'pair' }
-    | { secret: string; command: 'reset-bootstrap'; confirm: string }
+interface ControlRequest {
+    secret: string
+    command: 'pair'
+    target: 'gateway' | 'client'
+}
 
 export interface LocalControlServer {
     address: string
@@ -22,8 +21,8 @@ export interface LocalControlServer {
 
 export async function startLocalControlServer(
     dataDirectory: string,
-    enrollments: GatewayEnrollmentRepository,
-    secureGatewayAuthenticator?: SecureGatewayAuthenticator,
+    secureGatewayAuthenticator: SecureGatewayAuthenticator,
+    secureClientAuthenticator: SecureClientAuthenticator,
 ): Promise<LocalControlServer> {
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 })
     const secret = await loadOrCreateSecret(dataDirectory)
@@ -39,7 +38,7 @@ export async function startLocalControlServer(
             if (newline < 0) return
             const line = input.slice(0, newline)
             input = ''
-            void handle(line, secret, enrollments, secureGatewayAuthenticator).then(
+            void handle(line, secret, secureGatewayAuthenticator, secureClientAuthenticator).then(
                 result => socket.end(`${JSON.stringify({ ok: true, result })}\n`),
                 error => socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`),
             )
@@ -56,17 +55,9 @@ export async function startLocalControlServer(
     }
 }
 
-export async function runLocalControlCommand(dataDirectory: string, args: string[]): Promise<unknown> {
+export async function runLocalPairCommand(dataDirectory: string, target: 'gateway' | 'client'): Promise<unknown> {
     const secret = (await readFile(join(dataDirectory, SECRET_FILE), 'utf8')).trim()
-    const [command, rawCode, ...rest] = args
-    let request: ControlRequest
-    if (command === 'list') request = { secret, command }
-    else if (command === 'pair') request = { secret, command }
-    else if (command === 'approve' && rawCode) request = { secret, command, code: normalizeCode(rawCode) }
-    else if (command === 'reject' && rawCode) request = { secret, command, code: normalizeCode(rawCode), ...(rest.length && { reason: rest.join(' ') }) }
-    else if (command === 'reset-bootstrap') request = { secret, command, confirm: rest[0] ?? rawCode ?? '' }
-    else throw new Error('Usage: relay enrollment <pair|list|approve CODE|reject CODE [reason]|reset-bootstrap RESET-GATEWAY-BOOTSTRAP>')
-    return send(controlAddress(dataDirectory), request)
+    return send(controlAddress(dataDirectory), { secret, command: 'pair', target })
 }
 
 export function controlAddress(dataDirectory: string): string {
@@ -78,23 +69,16 @@ export function controlAddress(dataDirectory: string): string {
 async function handle(
     line: string,
     expectedSecret: string,
-    enrollments: GatewayEnrollmentRepository,
-    secureGatewayAuthenticator?: SecureGatewayAuthenticator,
+    gatewayAuthenticator: SecureGatewayAuthenticator,
+    clientAuthenticator: SecureClientAuthenticator,
 ): Promise<unknown> {
     const request = JSON.parse(line) as ControlRequest
     if (!request || typeof request !== 'object' || !safeEqual(request.secret, expectedSecret)) throw new Error('Local control authentication failed')
-    if (request.command === 'list') return { bootstrapComplete: enrollments.bootstrapComplete, enrollments: await enrollments.listPending() }
-    if (request.command === 'pair') {
-        if (!secureGatewayAuthenticator) throw new Error('Secure Gateway pairing is not configured')
-        return secureGatewayAuthenticator.issuePairing()
+    if (request.command !== 'pair' || (request.target !== 'gateway' && request.target !== 'client')
+        || Object.keys(request).some(key => key !== 'secret' && key !== 'command' && key !== 'target')) {
+        throw new Error('Unknown local control command')
     }
-    if (request.command === 'approve') return enrollments.approve(normalizeCode(request.code), 'local')
-    if (request.command === 'reject') return enrollments.reject(normalizeCode(request.code), request.reason)
-    if (request.command === 'reset-bootstrap') {
-        await enrollments.resetBootstrap(request.confirm)
-        return { bootstrapComplete: false }
-    }
-    throw new Error('Unknown local control command')
+    return request.target === 'gateway' ? gatewayAuthenticator.issuePairing() : clientAuthenticator.issuePairing()
 }
 
 async function loadOrCreateSecret(dataDirectory: string): Promise<string> {
@@ -125,7 +109,9 @@ function send(address: string, request: ControlRequest): Promise<unknown> {
                 const response = JSON.parse(output) as { ok: boolean; result?: unknown; error?: string }
                 if (!response.ok) reject(new Error(response.error ?? 'Local control command failed'))
                 else resolve(response.result)
-            } catch (error) { reject(error) }
+            } catch (error) {
+                reject(error)
+            }
         })
     })
 }
@@ -133,7 +119,10 @@ function send(address: string, request: ControlRequest): Promise<unknown> {
 function listen(server: Server, address: string): Promise<void> {
     return new Promise((resolve, reject) => {
         server.once('error', reject)
-        server.listen(address, () => { server.off('error', reject); resolve() })
+        server.listen(address, () => {
+            server.off('error', reject)
+            resolve()
+        })
     })
 }
 
@@ -144,5 +133,6 @@ function safeEqual(left: unknown, right: string): boolean {
     return a.length === b.length && timingSafeEqual(a, b)
 }
 
-function normalizeCode(value: string): string { return value.replace(/[\s-]/g, '').toUpperCase() }
-function isNotFound(error: unknown): boolean { return error instanceof Error && 'code' in error && error.code === 'ENOENT' }
+function isNotFound(error: unknown): boolean {
+    return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+}

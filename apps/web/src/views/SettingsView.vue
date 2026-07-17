@@ -2,7 +2,6 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import RelayProfileForm from '../components/RelayProfileForm.vue'
-import GatewayEnrollmentPanel from '../components/GatewayEnrollmentPanel.vue'
 import { clientSession, type RelayProfile } from '../state/clientSession'
 
 const router = useRouter()
@@ -10,7 +9,7 @@ const editing = ref<RelayProfile>()
 const adding = ref(false)
 
 async function switchProfile(id: string): Promise<void> {
-  clientSession.selectProfile(id)
+  await clientSession.selectProfile(id)
   await router.replace(clientSession.isAuthenticated.value ? '/gateways' : '/login')
 }
 
@@ -21,7 +20,7 @@ function remove(profile: RelayProfile): void {
   else if (!clientSession.isAuthenticated.value) void router.replace('/login')
 }
 
-async function logout(): Promise<void> {
+async function forgetCredential(): Promise<void> {
   await clientSession.logout()
   await router.replace('/login')
 }
@@ -29,8 +28,7 @@ async function logout(): Promise<void> {
 
 <template>
   <div class="page page--overview settings-page">
-    <header class="page-header"><div><span class="eyebrow">Client</span><h1>Settings</h1><p>Manage Relay connections and this device's account session.</p></div></header>
-
+    <header class="page-header"><div><span class="eyebrow">Client</span><h1>Settings</h1><p>Manage Relay profiles and native OPAQUE credentials.</p></div></header>
     <section class="settings-section">
       <div class="section-heading"><div><span class="eyebrow">Connections</span><h2>Relay profiles</h2></div><button class="button" @click="adding = true; editing = undefined">Add Relay</button></div>
       <RelayProfileForm v-if="adding" submit-label="Add Relay" @saved="adding = false" @cancel="adding = false" />
@@ -44,12 +42,9 @@ async function logout(): Promise<void> {
         </article>
       </div>
     </section>
-
-    <GatewayEnrollmentPanel />
-
     <section class="settings-section account-card">
-      <div><span class="eyebrow">Current account</span><h2>{{ clientSession.activeAuth.value?.user.username }}</h2><p>{{ clientSession.activeAuth.value?.user.roles.join(', ') }} · expires {{ new Date(clientSession.activeAuth.value?.expiresAt ?? '').toLocaleString() }}</p></div>
-      <button class="button button--danger" @click="logout">Sign out</button>
+      <div><span class="eyebrow">Relay credential</span><h2>{{ clientSession.activeAuth.value?.relayId }}</h2><p>Client {{ clientSession.activeAuth.value?.credentialId }} · paired {{ new Date(clientSession.activeAuth.value?.createdAt ?? '').toLocaleString() }}</p></div>
+      <button class="button button--danger" @click="forgetCredential">Forget credential</button>
     </section>
   </div>
 </template>

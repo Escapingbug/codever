@@ -1,42 +1,46 @@
 import { randomUUID } from 'node:crypto'
-import { PROTOCOL_VERSION, type ClientDeviceTunnelFrame } from '@codever/protocol'
-import type WebSocket from 'ws'
+import { PROTOCOL_VERSION, type RelayDeviceTunnelFrame } from '@codever/protocol'
 
 export type DeviceTunnelCloseCode = Extract<
-    ClientDeviceTunnelFrame,
+    RelayDeviceTunnelFrame,
     { type: 'relay.device-tunnel.closed' }
 >['payload']['code']
 
 interface DeviceTunnel {
     tunnelId: string
     gatewayId: string
-    socket: WebSocket
+    ownerId: string
+    send: (frame: RelayDeviceTunnelFrame) => void | Promise<void>
+}
+
+export interface RemovedDeviceTunnel {
+    tunnelId: string
+    gatewayId: string
 }
 
 export class DeviceTunnelRegistry {
     private readonly tunnels = new Map<string, DeviceTunnel>()
 
-    open(gatewayId: string, socket: WebSocket): string {
+    open(gatewayId: string, ownerId: string, send: DeviceTunnel['send']): string {
         const tunnelId = randomUUID()
-        this.tunnels.set(tunnelId, { tunnelId, gatewayId, socket })
+        this.tunnels.set(tunnelId, { tunnelId, gatewayId, ownerId, send })
         return tunnelId
     }
 
-    owns(tunnelId: string, gatewayId: string, socket: WebSocket): boolean {
+    gatewayForOwner(tunnelId: string, ownerId: string): string | undefined {
         const tunnel = this.tunnels.get(tunnelId)
-        return tunnel?.gatewayId === gatewayId && tunnel.socket === socket
+        return tunnel?.ownerId === ownerId ? tunnel.gatewayId : undefined
     }
 
     send(gatewayId: string, tunnelId: string, opaquePayload: string): boolean {
         const tunnel = this.tunnels.get(tunnelId)
-        if (!tunnel || tunnel.gatewayId !== gatewayId || tunnel.socket.readyState !== tunnel.socket.OPEN) return false
-        const frame: ClientDeviceTunnelFrame = {
+        if (!tunnel || tunnel.gatewayId !== gatewayId) return false
+        void Promise.resolve(tunnel.send({
             version: PROTOCOL_VERSION,
             type: 'relay.device-tunnel.data',
             messageId: randomUUID(),
             payload: { tunnelId, opaquePayload },
-        }
-        tunnel.socket.send(JSON.stringify(frame))
+        })).catch(() => undefined)
         return true
     }
 
@@ -44,17 +48,18 @@ export class DeviceTunnelRegistry {
         const tunnel = this.tunnels.get(tunnelId)
         if (!tunnel) return false
         this.tunnels.delete(tunnelId)
-        if (tunnel.socket.readyState === tunnel.socket.OPEN) {
-            const frame: ClientDeviceTunnelFrame = {
-                version: PROTOCOL_VERSION,
-                type: 'relay.device-tunnel.closed',
-                messageId: randomUUID(),
-                payload: { tunnelId, code, ...(reason ? { reason } : {}) },
-            }
-            tunnel.socket.send(JSON.stringify(frame))
-            tunnel.socket.close(code === 'normal' ? 1000 : 1011, reason ?? code)
-        }
+        void Promise.resolve(tunnel.send({
+            version: PROTOCOL_VERSION,
+            type: 'relay.device-tunnel.closed',
+            messageId: randomUUID(),
+            payload: { tunnelId, code, ...(reason ? { reason } : {}) },
+        })).catch(() => undefined)
         return true
+    }
+
+    closeFromGateway(gatewayId: string, tunnelId: string, code: DeviceTunnelCloseCode, reason?: string): boolean {
+        const tunnel = this.tunnels.get(tunnelId)
+        return tunnel?.gatewayId === gatewayId && this.close(tunnelId, code, reason)
     }
 
     closeGateway(gatewayId: string, code: DeviceTunnelCloseCode, reason?: string): void {
@@ -63,12 +68,12 @@ export class DeviceTunnelRegistry {
         }
     }
 
-    removeSocket(socket: WebSocket): string[] {
-        const removed: string[] = []
+    removeOwner(ownerId: string): RemovedDeviceTunnel[] {
+        const removed: RemovedDeviceTunnel[] = []
         for (const tunnel of [...this.tunnels.values()]) {
-            if (tunnel.socket !== socket) continue
+            if (tunnel.ownerId !== ownerId) continue
             this.tunnels.delete(tunnel.tunnelId)
-            removed.push(tunnel.tunnelId)
+            removed.push({ tunnelId: tunnel.tunnelId, gatewayId: tunnel.gatewayId })
         }
         return removed
     }

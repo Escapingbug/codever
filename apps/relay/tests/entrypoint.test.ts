@@ -9,23 +9,12 @@ import { describe, expect, it } from 'vitest'
 const relayDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 describe('Relay executable entry point', () => {
-    it('starts with deny-all client authentication by default', async () => {
+    it('starts on plain HTTP and exposes no legacy account or gateway-list routes', async () => {
         const relay = await startRelay({})
         try {
-            const response = await fetch(`${relay.address}/v1/gateways`)
-            expect(response.status).toBe(401)
-            expect(relay.stderr()).not.toContain('INSECURE_DEV_AUTH=true')
-        } finally {
-            await relay.stop()
-        }
-    })
-
-    it('allows clients only when insecure development authentication is explicitly true', async () => {
-        const relay = await startRelay({ CODEVER_RELAY_INSECURE_DEV_AUTH: 'true' })
-        try {
-            const response = await fetch(`${relay.address}/v1/gateways`)
-            expect(response.status).toBe(200)
-            expect(relay.stderr()).toContain('CODEVER_RELAY_INSECURE_DEV_AUTH=true')
+            expect((await fetch(`${relay.address}/health`)).status).toBe(200)
+            expect((await fetch(`${relay.address}/v1/gateways`)).status).toBe(404)
+            expect((await fetch(`${relay.address}/v1/auth/session`)).status).toBe(404)
         } finally {
             await relay.stop()
         }

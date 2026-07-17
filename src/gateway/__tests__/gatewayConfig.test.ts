@@ -28,7 +28,7 @@ describe('Gateway config', () => {
         expect(await readFile(configPath, 'utf8')).not.toContain('PRIVATE KEY')
     })
 
-    it('requires TLS or the OPAQUE application encryption layer on public networks', () => {
+    it('requires the OPAQUE application encryption layer on every network', () => {
         const base = {
             version: 1,
             gatewayId: 'gateway-1',
@@ -37,8 +37,8 @@ describe('Gateway config', () => {
             dataDirectory: resolve('codever-data'),
             allowedRoots: [resolve('projects')],
         }
-        expect(() => parseGatewayConfig({ ...base, relayUrl: 'ws://relay.example.com/connect' })).toThrow('wss://')
-        expect(parseGatewayConfig({ ...base, relayUrl: 'ws://127.0.0.1:3000/connect' }).relayUrl).toContain('127.0.0.1')
+        expect(() => parseGatewayConfig({ ...base, relayUrl: 'ws://relay.example.com/connect' })).toThrow('secure configuration')
+        expect(parseGatewayConfig({ ...base, relayUrl: 'ws://127.0.0.1:3000/connect', secure: {} }).relayUrl).toContain('127.0.0.1')
         expect(parseGatewayConfig({
             ...base,
             relayUrl: 'ws://relay.example.com/v2/gateway/connect',
@@ -47,5 +47,8 @@ describe('Gateway config', () => {
             relayUrl: 'ws://relay.example.com/v2/gateway/connect',
             secure: { pairingCode: 'ABC234-DEFGH-JKLMN' },
         })
+        expect(parseGatewayConfig({
+            ...base, relayUrl: 'ws://relay.example.com/v2/gateway/connect', secure: {},
+        }).secure).toEqual({})
     })
 })

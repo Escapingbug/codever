@@ -2,7 +2,6 @@
 import type { CodeverSession, JsonValue, PatchSessionConfigDto, ProviderSessionListDto, SessionEventEnvelope } from '@codever/protocol'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { SessionEventSocket, type SocketConnectionState } from '../api/sessionEventSocket'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
@@ -21,7 +20,7 @@ const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).
 const session = shallowRef<CodeverSession>()
 const providerCapabilities = shallowRef<ProviderSessionListDto>()
 const events = shallowRef<SessionEventEnvelope[]>([])
-const socketState = ref<SocketConnectionState>('closed')
+const socketState = ref<'connected' | 'closed'>('closed')
 const loadError = ref('')
 const liveError = ref('')
 const loading = ref(true)
@@ -33,7 +32,7 @@ const showMobileControls = ref(false)
 const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
 const timelineElement = ref<HTMLElement>()
-let eventSocket: SessionEventSocket | undefined
+let unsubscribeEvents: (() => void) | undefined
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
 const liveConnected = computed(() => socketState.value === 'connected')
@@ -45,7 +44,6 @@ const canSend = computed(() => canMutate.value || (!gatewayOnline.value && sendW
 const connectionLabel = computed(() => {
   if (!gatewayOnline.value) return 'Gateway offline'
   if (socketState.value === 'connected') return 'Live'
-  if (socketState.value === 'reconnecting') return 'Reconnecting'
   return 'Connection unavailable'
 })
 
@@ -55,11 +53,11 @@ onMounted(() => {
 })
 watch(sessionId, () => void loadSession(), { immediate: true })
 watch([projectId, provider], () => void loadProviderCapabilities(), { immediate: true })
-onBeforeUnmount(() => eventSocket?.close())
+onBeforeUnmount(() => unsubscribeEvents?.())
 
 async function loadSession(): Promise<void> {
-  eventSocket?.close()
-  eventSocket = undefined
+  unsubscribeEvents?.()
+  unsubscribeEvents = undefined
   loading.value = true
   loadError.value = ''
   liveError.value = ''
@@ -94,24 +92,15 @@ async function loadProviderCapabilities(): Promise<void> {
 }
 
 function startLiveConnection(id: string): void {
-  const cursor = events.value.at(-1)?.seq ?? 0
-  eventSocket = new SessionEventSocket({
-    baseUrl: state.api.baseUrl,
-    accessToken: state.api.accessToken,
-    sessionId: id,
-    after: cursor,
-    onEvent: (event) => {
-      appendEvents([event])
-      if (event.event.kind === 'session_state' && session.value) {
-        session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
-        state.replaceSession(session.value)
-      }
-      void scrollToLatest()
-    },
-    onStateChange: (value) => { socketState.value = value },
-    onError: (error) => { liveError.value = error.message },
+  unsubscribeEvents = state.api.subscribeSession(id, event => {
+    appendEvents([event])
+    if (event.event.kind === 'session_state' && session.value) {
+      session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
+      state.replaceSession(session.value)
+    }
+    void scrollToLatest()
   })
-  eventSocket.connect()
+  socketState.value = 'connected'
 }
 
 function appendEvents(incoming: SessionEventEnvelope[]): void {
@@ -206,7 +195,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
 
     <div v-if="!gatewayOnline || !liveConnected" class="connection-banner" :class="{ 'connection-banner--offline': !gatewayOnline }">
       <span class="pulse-dot" />
-      <div><strong>{{ connectionLabel }}</strong><small v-if="!gatewayOnline">Cached history remains available. Execution state may be unknown.</small><small v-else>Live events will resume from cursor {{ eventSocket?.getCursor() ?? 0 }}.</small></div>
+      <div><strong>{{ connectionLabel }}</strong><small v-if="!gatewayOnline">The encrypted Gateway channel is offline.</small><small v-else>Live events continue after sequence {{ events.at(-1)?.seq ?? 0 }}.</small></div>
     </div>
     <button v-if="liveError" class="inline-alert" @click="liveError = ''">{{ liveError }} <span>×</span></button>
 

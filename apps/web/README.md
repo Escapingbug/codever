@@ -16,7 +16,7 @@ pnpm build
 pnpm exec vite preview
 ```
 
-The service worker is registered only in production builds. At install time it reads the built `index.html` and pre-caches the hashed JavaScript/CSS assets together with the navigation shell, manifest, and SVG icons. Navigations use network-first behavior and fall back to the cached shell; same-origin static files use cache-first behavior. Relay API requests under `/v1/` are deliberately never cached.
+The service worker is registered only in production builds. At install time it reads the built `index.html` and pre-caches the hashed JavaScript/CSS assets together with the navigation shell, manifest, and SVG icons. Navigations use network-first behavior and fall back to the cached shell; same-origin static files use cache-first behavior. Relay traffic uses encrypted WebSocket sessions and never passes through the service-worker cache.
 
 An installed client checks for a new service worker on page load and once per hour. A waiting version displays an in-app update banner; the user chooses when to activate it, then the page reloads after the new worker takes control. Increase `CACHE_VERSION` in `public/service-worker.js` whenever shell caching rules or explicitly cached files change.
 

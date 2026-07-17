@@ -1,287 +1,253 @@
 import type {
   CancelSessionDto,
   CodeverSession,
+  ClientGatewayResponseFrame,
   CreateSessionDto,
   Gateway,
-  JsonObject,
+  InventorySnapshot,
   JsonValue,
   MutationReceiptDto,
+  PatchSessionConfigDto,
   Project,
-  ResolveDecisionDto,
+  ProviderSessionListDto,
   SendMessageDto,
   SessionEventEnvelope,
-  AuthSessionDto,
-  ApproveGatewayEnrollmentDto,
-  EnrolledGatewayKeyDto,
-  GatewayEnrollmentDto,
-  GatewayEnrollmentListDto,
-  LoginDto,
-  LoginResultDto,
-  ProviderSessionListDto,
-  PatchSessionConfigDto,
-} from '@codever/protocol'
-import {
-  parseGatewayListDto,
-  parseMutationReceiptDto,
-  parseProjectListDto,
-  parseSessionDto,
-  parseSessionEventsDto,
-  parseSessionListDto,
-  parseAuthSessionDto,
-  parseEnrolledGatewayKeyDto,
-  parseEnrolledGatewayKeyListDto,
-  parseGatewayEnrollmentDto,
-  parseGatewayEnrollmentListDto,
-  parseLoginResultDto,
-  parseProviderSessionListDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
-import { demoRelay, isDemoRelayUrl } from './demoRelay'
+import { DeviceSecureHandshake } from '../security/deviceSecureHandshake'
+import { ClientDeviceCredentialStore } from '../security/deviceCredentialStore'
+import { RelaySecureHandshake } from '../security/relaySecureHandshake'
+import { ClientRelayCredentialStore, type ClientRelayCredential } from '../security/relayCredentialStore'
+import type { SecretStore } from '../security/secretStore'
+import { GatewaySecureConnection, SecureRelayClient } from './secureRelayClient'
 
 export interface RelayApiOptions {
   baseUrl: string | (() => string | undefined)
+  relayProfileId: string | (() => string | undefined)
+  secrets: SecretStore
   fetch?: typeof globalThis.fetch
-  getAccessToken?: () => string | undefined
-  onUnauthorized?: () => void
+  onDisconnected?: () => void
 }
 
 export class RelayApiError extends Error {
-  constructor(
-    message: string,
-    public readonly status: number,
-    public readonly code?: string,
-  ) {
+  constructor(message: string, public readonly status = 0, public readonly code?: string) {
     super(message)
     this.name = 'RelayApiError'
   }
 }
 
 export class RelayApi {
-  private readonly baseUrlSource: RelayApiOptions['baseUrl']
   private readonly fetcher: typeof globalThis.fetch
-  private readonly getAccessToken?: () => string | undefined
-  private readonly onUnauthorized?: () => void
+  private readonly relayCredentials: ClientRelayCredentialStore
+  private readonly deviceCredentials: ClientDeviceCredentialStore
+  private relay?: SecureRelayClient
+  private relayCredential?: ClientRelayCredential
+  private readonly gatewayConnections = new Map<string, GatewaySecureConnection>()
+  private readonly inventories = new Map<string, InventorySnapshot>()
+  private readonly projectGateways = new Map<string, string>()
+  private readonly sessionGateways = new Map<string, string>()
+  private readonly eventSubscribers = new Map<string, Set<(event: SessionEventEnvelope) => void>>()
 
-  constructor(options: RelayApiOptions) {
-    this.baseUrlSource = options.baseUrl
+  constructor(private readonly options: RelayApiOptions) {
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
-    this.getAccessToken = options.getAccessToken
-    this.onUnauthorized = options.onUnauthorized
+    this.relayCredentials = new ClientRelayCredentialStore(options.secrets)
+    this.deviceCredentials = new ClientDeviceCredentialStore(options.secrets)
   }
 
-  get baseUrl(): string {
-    const value = typeof this.baseUrlSource === 'function' ? this.baseUrlSource() : this.baseUrlSource
-    return (value ?? '').replace(/\/+$/, '')
-  }
-
-  get accessToken(): string | undefined {
-    return this.getAccessToken?.()
-  }
+  get baseUrl(): string { return (source(this.options.baseUrl) ?? '').replace(/\/+$/, '') }
+  get relayProfileId(): string { return source(this.options.relayProfileId) ?? '' }
 
   async checkHealth(): Promise<void> {
-    if (this.isDemo) return demoRelay.checkHealth()
-    await this.request('/health', {}, false)
-  }
-
-  async login(body: LoginDto): Promise<LoginResultDto> {
-    if (this.isDemo) return demoRelay.login(body)
-    return parseLoginResultDto(await this.request('/v1/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }, false))
-  }
-
-  async getAuthSession(): Promise<AuthSessionDto> {
-    if (this.isDemo) return demoRelay.session()
-    return parseAuthSessionDto(await this.request('/v1/auth/session'))
-  }
-
-  async logout(): Promise<void> {
-    if (this.isDemo) return
-    await this.request('/v1/auth/logout', { method: 'POST' })
-  }
-
-  async listGateways(): Promise<Gateway[]> {
-    if (this.isDemo) return demoRelay.listGateways()
-    return parseGatewayListDto(await this.request('/v1/gateways')).gateways
-  }
-
-  async listGatewayEnrollments(): Promise<GatewayEnrollmentListDto> {
-    if (this.isDemo) return demoRelay.listEnrollments()
-    return parseGatewayEnrollmentListDto(await this.request('/v1/gateway-enrollments'))
-  }
-
-  async getGatewayEnrollment(code: string): Promise<GatewayEnrollmentDto> {
-    if (this.isDemo) return demoRelay.getEnrollment(code)
-    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}`))
-  }
-
-  async approveGatewayEnrollment(code: string, body: ApproveGatewayEnrollmentDto): Promise<GatewayEnrollmentDto> {
-    if (this.isDemo) return demoRelay.approveEnrollment(code, body)
-    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}/approve`, {
-      method: 'POST', body: JSON.stringify(body),
-    }))
-  }
-
-  async rejectGatewayEnrollment(code: string, reason?: string): Promise<GatewayEnrollmentDto> {
-    if (this.isDemo) return demoRelay.rejectEnrollment(code, reason)
-    return parseGatewayEnrollmentDto(await this.request(`/v1/gateway-enrollments/${encodeURIComponent(normalizePairingCode(code))}/reject`, {
-      method: 'POST', body: JSON.stringify({ ...(reason && { reason }) }),
-    }))
-  }
-
-  async listEnrolledGateways(): Promise<EnrolledGatewayKeyDto[]> {
-    if (this.isDemo) return demoRelay.listEnrolledGateways()
-    return parseEnrolledGatewayKeyListDto(await this.request('/v1/enrolled-gateways')).gateways
-  }
-
-  async revokeEnrolledGateway(gatewayId: string): Promise<EnrolledGatewayKeyDto> {
-    if (this.isDemo) return demoRelay.revokeGateway(gatewayId)
-    return parseEnrolledGatewayKeyDto(await this.request(`/v1/enrolled-gateways/${encodeURIComponent(gatewayId)}/revoke`, { method: 'POST' }))
-  }
-
-  async listProjects(gatewayId: string): Promise<Project[]> {
-    if (this.isDemo) return demoRelay.listProjects(gatewayId)
-    const data = await this.request(`/v1/gateways/${encodeURIComponent(gatewayId)}/projects`)
-    return parseProjectListDto(data).projects
-  }
-
-  async listSessions(projectId: string): Promise<CodeverSession[]> {
-    if (this.isDemo) return demoRelay.listSessions(projectId)
-    const data = await this.request(`/v1/projects/${encodeURIComponent(projectId)}/sessions`)
-    return parseSessionListDto(data).sessions
-  }
-
-  async discoverProviderSessions(projectId: string, provider: string): Promise<ProviderSessionListDto> {
-    if (this.isDemo) return demoRelay.discoverProviderSessions(projectId, provider)
-    const data = await this.mutate(
-      `/v1/projects/${encodeURIComponent(projectId)}/providers/${encodeURIComponent(provider)}/sessions/discover`,
-      'POST',
-      {},
-    )
-    return parseProviderSessionListDto(data)
-  }
-
-  async getSession(sessionId: string): Promise<CodeverSession> {
-    if (this.isDemo) return demoRelay.getSession(sessionId)
-    const data = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}`)
-    return parseSessionDto(data).session
-  }
-
-  async getSessionEvents(sessionId: string, after = 0): Promise<{
-    events: SessionEventEnvelope[]
-    nextAfter: number | null
-  }> {
-    if (this.isDemo) {
-      const events = demoRelay.getEvents(sessionId, after)
-      return { events, nextAfter: events.at(-1)?.seq ?? null }
-    }
-    const data = await this.request(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`,
-    )
-    const parsed = parseSessionEventsDto(data)
-    return { events: parsed.events, nextAfter: parsed.nextAfter }
-  }
-
-  async createSession(projectId: string, body: CreateSessionDto): Promise<CodeverSession> {
-    if (this.isDemo) return demoRelay.createSession(projectId, body)
-    const data = await this.mutate(
-      `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
-      'POST',
-      body,
-    )
-    return parseSessionDto(data).session
-  }
-
-  sendMessage(sessionId: string, body: SendMessageDto): Promise<MutationReceiptDto> {
-    if (this.isDemo) return Promise.resolve(demoRelay.sendMessage(sessionId, body.text))
-    return this.mutationReceipt(`/v1/sessions/${encodeURIComponent(sessionId)}/messages`, 'POST', body)
-  }
-
-  cancelSession(sessionId: string, body: CancelSessionDto = {}): Promise<MutationReceiptDto> {
-    if (this.isDemo) return Promise.resolve(demoRelay.cancel(sessionId))
-    return this.mutationReceipt(`/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, 'POST', body)
-  }
-
-  patchSessionConfig(sessionId: string, body: PatchSessionConfigDto): Promise<MutationReceiptDto> {
-    if (this.isDemo) return Promise.resolve(demoRelay.patchConfig(sessionId, body))
-    return this.mutationReceipt(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/config`,
-      'PATCH',
-      body,
-    )
-  }
-
-  resolveDecision(sessionId: string, decisionId: string, value: JsonValue): Promise<MutationReceiptDto> {
-    if (this.isDemo) return Promise.resolve(demoRelay.resolveDecision(sessionId, decisionId, value))
-    const body: ResolveDecisionDto = { value }
-    return this.mutationReceipt(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(decisionId)}`,
-      'POST',
-      body,
-    )
-  }
-
-  private async mutationReceipt(path: string, method: string, body: unknown): Promise<MutationReceiptDto> {
-    return parseMutationReceiptDto(await this.mutate(path, method, body))
-  }
-
-  private mutate(path: string, method: string, body: unknown): Promise<unknown> {
-    return this.request(path, {
-      method,
-      body: JSON.stringify(body),
-      headers: { 'Idempotency-Key': createIdempotencyKey() },
-    })
-  }
-
-  private async request(path: string, init: RequestInit = {}, authenticate = true): Promise<unknown> {
-    const headers = new Headers(init.headers)
-    headers.set('Accept', 'application/json')
-    if (init.body) headers.set('Content-Type', 'application/json')
-    const accessToken = authenticate ? this.getAccessToken?.() : undefined
-    if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
-
-    let response: Response
+    if (!this.baseUrl) throw new RelayApiError('No Relay profile is configured')
     try {
-      if (!this.baseUrl) throw new Error('No Relay profile is configured')
-      response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers })
+      const response = await this.fetcher(`${this.baseUrl}/health`, { headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error(response.statusText)
     } catch (error) {
       throw new RelayApiError(error instanceof Error ? error.message : 'Relay is unreachable', 0, 'network_error')
     }
+  }
 
-    const data = await response.json().catch(() => undefined)
-    if (!response.ok) {
-      if (response.status === 401 && authenticate) this.onUnauthorized?.()
-      const details = asErrorDetails(data)
-      throw new RelayApiError(details.message ?? response.statusText, response.status, details.code)
+  async restoreRelay(): Promise<ClientRelayCredential | undefined> {
+    if (!this.relayProfileId) return undefined
+    const credential = await this.relayCredentials.load(this.relayProfileId)
+    if (!credential) return undefined
+    await this.openRelay({ credentialId: credential.credentialId, credential })
+    return credential
+  }
+
+  async pairRelay(pairingCode: string, credentialId = `client_${crypto.randomUUID()}`): Promise<ClientRelayCredential> {
+    await this.openRelay({ credentialId, pairingCode })
+    const credential = await this.relayCredentials.load(this.relayProfileId)
+    if (!credential) throw new RelayApiError('Relay credential provisioning did not complete')
+    return credential
+  }
+
+  async disconnect(deleteCredential = false): Promise<void> {
+    this.relay?.close()
+    this.relay = undefined
+    this.relayCredential = undefined
+    this.gatewayConnections.clear()
+    this.inventories.clear()
+    this.projectGateways.clear()
+    this.sessionGateways.clear()
+    if (deleteCredential && this.relayProfileId) await this.relayCredentials.delete(this.relayProfileId)
+  }
+
+  async listGateways(): Promise<Gateway[]> { return (await this.requireRelay()).listGateways() }
+
+  async pairGateway(gatewayId: string, pairingCode: string, credentialId = `device_${crypto.randomUUID()}`): Promise<void> {
+    const relay = await this.requireRelay()
+    const handshake = new DeviceSecureHandshake({
+      relayProfileId: this.relayProfileId,
+      gatewayId,
+      credentialId,
+      pairingCode,
+      saveCredential: value => this.deviceCredentials.save(value),
+    })
+    const connection = await relay.openGateway(gatewayId, handshake, event => this.publishEvents(event.payload.events))
+    this.gatewayConnections.set(gatewayId, connection)
+  }
+
+  async listProjects(gatewayId: string): Promise<Project[]> {
+    return (await this.inventory(gatewayId)).projects
+  }
+
+  async listSessions(projectId: string): Promise<CodeverSession[]> {
+    const gatewayId = this.requireProjectGateway(projectId)
+    return (await this.inventory(gatewayId)).sessions.filter(session => session.projectId === projectId)
+  }
+
+  async discoverProviderSessions(projectId: string, provider: string): Promise<ProviderSessionListDto> {
+    return this.completed(await (await this.gatewayForProject(projectId)).request({ kind: 'provider.sessions.list', projectId, provider })) as ProviderSessionListDto
+  }
+
+  async getSession(sessionId: string): Promise<CodeverSession> {
+    const gatewayId = this.requireSessionGateway(sessionId)
+    const session = (await this.inventory(gatewayId)).sessions.find(value => value.id === sessionId)
+    if (!session) throw new RelayApiError(`Unknown session ${sessionId}`, 404, 'session_not_found')
+    return session
+  }
+
+  async getSessionEvents(sessionId: string, after = 0): Promise<{ events: SessionEventEnvelope[]; nextAfter: number | null }> {
+    const payload = this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'events.list', sessionId, after })) as {
+      events: SessionEventEnvelope[]; nextAfter: number | null
     }
-    return data
+    return payload
   }
 
-  private get isDemo(): boolean {
-    return isDemoRelayUrl(this.baseUrl)
+  async createSession(projectId: string, input: CreateSessionDto): Promise<CodeverSession> {
+    const payload = this.completed(await (await this.gatewayForProject(projectId)).request({ kind: 'session.create', projectId, input })) as { session: CodeverSession }
+    await this.refreshProjectInventory(projectId)
+    return payload.session
+  }
+
+  async sendMessage(sessionId: string, input: SendMessageDto): Promise<MutationReceiptDto> {
+    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.message', sessionId, input })) as MutationReceiptDto
+  }
+
+  async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
+    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.cancel', sessionId, input })) as MutationReceiptDto
+  }
+
+  async patchSessionConfig(sessionId: string, input: PatchSessionConfigDto): Promise<MutationReceiptDto> {
+    return this.completed(await (await this.gatewayForSession(sessionId)).request({ kind: 'session.config.patch', sessionId, input })) as MutationReceiptDto
+  }
+
+  async resolveDecision(sessionId: string, decisionId: string, value: JsonValue): Promise<MutationReceiptDto> {
+    return this.completed(await (await this.gatewayForSession(sessionId)).request({
+      kind: 'decision.respond', sessionId, decisionId, input: { value },
+    })) as MutationReceiptDto
+  }
+
+  subscribeSession(sessionId: string, subscriber: (event: SessionEventEnvelope) => void): () => void {
+    const subscribers = this.eventSubscribers.get(sessionId) ?? new Set()
+    subscribers.add(subscriber)
+    this.eventSubscribers.set(sessionId, subscribers)
+    return () => {
+      subscribers.delete(subscriber)
+      if (!subscribers.size) this.eventSubscribers.delete(sessionId)
+    }
+  }
+
+  private async openRelay(input: { credentialId: string; pairingCode?: string; credential?: ClientRelayCredential }): Promise<void> {
+    if (!this.baseUrl || !this.relayProfileId) throw new RelayApiError('Relay profile is incomplete')
+    this.relay?.close()
+    const handshake = new RelaySecureHandshake({
+      relayProfileId: this.relayProfileId,
+      credentialId: input.credentialId,
+      ...(input.pairingCode ? { pairingCode: input.pairingCode } : {}),
+      ...(input.credential ? { credential: input.credential } : {}),
+      saveCredential: value => this.relayCredentials.save(value),
+    })
+    const relay = new SecureRelayClient({
+      baseUrl: this.baseUrl,
+      handshake,
+      onError: () => this.options.onDisconnected?.(),
+    })
+    await relay.connect()
+    this.relay = relay
+    this.relayCredential = await this.relayCredentials.load(this.relayProfileId)
+  }
+
+  private async requireRelay(): Promise<SecureRelayClient> {
+    if (this.relay) return this.relay
+    const restored = await this.restoreRelay()
+    if (!restored || !this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
+    return this.relay
+  }
+
+  private async gateway(gatewayId: string): Promise<GatewaySecureConnection> {
+    const existing = this.gatewayConnections.get(gatewayId)
+    if (existing) return existing
+    const credential = await this.deviceCredentials.load(this.relayProfileId, gatewayId)
+    if (!credential) throw new RelayApiError('Gateway pairing is required', 401, 'gateway_pairing_required')
+    const handshake = new DeviceSecureHandshake({
+      relayProfileId: this.relayProfileId,
+      gatewayId,
+      credentialId: credential.credentialId,
+      credential,
+      saveCredential: value => this.deviceCredentials.save(value),
+    })
+    const connection = await (await this.requireRelay()).openGateway(
+      gatewayId, handshake, event => this.publishEvents(event.payload.events),
+    )
+    this.gatewayConnections.set(gatewayId, connection)
+    return connection
+  }
+
+  private async inventory(gatewayId: string): Promise<InventorySnapshot> {
+    const payload = this.completed(await (await this.gateway(gatewayId)).request({ kind: 'inventory.get' })) as InventorySnapshot
+    this.inventories.set(gatewayId, payload)
+    for (const project of payload.projects) this.projectGateways.set(project.id, gatewayId)
+    for (const session of payload.sessions) this.sessionGateways.set(session.id, gatewayId)
+    return payload
+  }
+
+  private gatewayForProject(projectId: string): Promise<GatewaySecureConnection> { return this.gateway(this.requireProjectGateway(projectId)) }
+  private gatewayForSession(sessionId: string): Promise<GatewaySecureConnection> { return this.gateway(this.requireSessionGateway(sessionId)) }
+  private requireProjectGateway(projectId: string): string {
+    const value = this.projectGateways.get(projectId)
+    if (!value) throw new RelayApiError('Load the Gateway inventory before accessing this project')
+    return value
+  }
+  private requireSessionGateway(sessionId: string): string {
+    const value = this.sessionGateways.get(sessionId)
+    if (!value) throw new RelayApiError('Load the Gateway inventory before accessing this session')
+    return value
+  }
+  private async refreshProjectInventory(projectId: string): Promise<void> { await this.inventory(this.requireProjectGateway(projectId)) }
+  private completed(response: ClientGatewayResponseFrame): unknown {
+    if (response.status === 'completed') return response.payload
+    if (response.status === 'failed') throw new RelayApiError(response.error.message, 0, response.error.code)
+    throw new RelayApiError('Gateway request was accepted but did not complete')
+  }
+  private publishEvents(events: SessionEventEnvelope[]): void {
+    for (const event of events) for (const subscriber of this.eventSubscribers.get(event.sessionId) ?? []) subscriber(event)
   }
 }
 
-function createIdempotencyKey(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(36).slice(2)}`
-}
-
-function normalizePairingCode(value: string): string {
-  return value.replace(/[\s-]/g, '').toUpperCase()
-}
-
-function asErrorDetails(value: unknown): { code?: string; message?: string } {
-  if (!value || typeof value !== 'object') return {}
-  const record = value as Record<string, unknown>
-  if (typeof record.error === 'string') return { message: record.error }
-  const source = record.error && typeof record.error === 'object'
-    ? record.error as Record<string, unknown>
-    : record
-  return {
-    code: typeof source.code === 'string' ? source.code : undefined,
-    message: typeof source.message === 'string' ? source.message : undefined,
-  }
+function source(value: string | (() => string | undefined)): string | undefined {
+  return typeof value === 'function' ? value() : value
 }
 
 export const relayApiKey: InjectionKey<RelayApi> = Symbol('relay-api')

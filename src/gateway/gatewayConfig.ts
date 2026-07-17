@@ -19,7 +19,7 @@ export interface GatewayConfig {
     allowedRoots: string[]
     providersPath?: string
     tls?: GatewayTlsConfig
-    secure?: { pairingCode?: string }
+    secure: { pairingCode?: string }
 }
 
 export function defaultGatewayConfigPath(): string {
@@ -51,7 +51,7 @@ export async function writeGatewayConfig(
         allowedRoots: input.allowedRoots,
         ...(input.providersPath ? { providersPath: input.providersPath } : {}),
         ...(input.tls ? { tls: input.tls } : {}),
-        ...(input.secure ? { secure: input.secure } : {}),
+        secure: input.secure ?? {},
     })
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
@@ -65,7 +65,8 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
     const name = text(value.name, 'name')
     const relayUrl = text(value.relayUrl, 'relayUrl')
     const relay = new URL(relayUrl)
-    const secure = value.secure === undefined ? undefined : parseSecure(value.secure)
+    if (value.secure === undefined) throw new Error('secure configuration is required')
+    const secure = parseSecure(value.secure)
     if (relay.protocol !== 'wss:' && !(relay.protocol === 'ws:' && (isLoopback(relay.hostname) || secure))) {
         throw new Error('relayUrl must use wss://; public ws:// requires secure OPAQUE transport')
     }
@@ -86,7 +87,7 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
         allowedRoots,
         ...(providersPath ? { providersPath } : {}),
         ...(tls ? { tls } : {}),
-        ...(secure ? { secure } : {}),
+        secure,
     }
 }
 

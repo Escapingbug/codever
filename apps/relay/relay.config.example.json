@@ -4,12 +4,5 @@
   "relayId": "my-codever-relay",
   "logger": true,
   "dataDirectory": "./data",
-  "repositoryMode": "durable",
-  "usersFile": "./users.json",
-  "sessionTtlSeconds": 2592000,
-  "tls": {
-    "certFile": "./tls/relay.crt",
-    "keyFile": "./tls/relay.key"
-  },
-  "enrollmentFile": "./enrollment.json"
+  "repositoryMode": "durable"
 }

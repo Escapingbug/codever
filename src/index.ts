@@ -11,6 +11,7 @@ async function main(): Promise<void> {
             path: { type: 'string' },
             name: { type: 'string' },
             workspace: { type: 'string' },
+            'pairing-code': { type: 'string' },
             id: { type: 'string' },
             help: { type: 'boolean', short: 'h' },
         },
@@ -20,12 +21,15 @@ async function main(): Promise<void> {
     if (values.help || !command) return help()
 
     if (command === 'init') {
-        if (!values.relay || !values.root?.length) throw new Error('init requires --relay and at least one --root')
+        if (!values.relay || !values.root?.length || !values['pairing-code']) {
+            throw new Error('init requires --relay, --pairing-code, and at least one --root')
+        }
         const config = await writeGatewayConfig({
             name: values.name ?? process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? 'Codever Gateway',
             relayUrl: values.relay,
             allowedRoots: values.root,
             ...(values.workspace ? { workspaceId: values.workspace } : {}),
+            secure: { pairingCode: values['pairing-code'] },
         }, configPath)
         console.log(`Gateway config written: ${configPath}`)
         console.log(`Gateway ID: ${config.gatewayId}`)
@@ -34,11 +38,6 @@ async function main(): Promise<void> {
 
     const config = await loadGatewayConfig(configPath)
     const application = await createGatewayApplication(config)
-    if (command === 'enrollment') {
-        console.log(JSON.stringify({ gatewayId: config.gatewayId, name: config.name, identity: application.identity.enrollmentBundle() }, null, 2))
-        await application.close()
-        return
-    }
     if (command === 'project') {
         const subcommand = positionals[1]
         if (subcommand === 'add') {
@@ -87,8 +86,7 @@ function help(): void {
     console.log(`codever gateway
 
 Usage:
-  codever init --relay <wss-url> --root <absolute-path> [--root ...] [--name <name>]
-  codever enrollment [-c <config>]   Print the public enrollment bundle (never the private key)
+  codever init --relay <ws-url>/v2/gateway/connect --pairing-code <code> --root <absolute-path> [--root ...]
   codever project add --path <absolute-path> [--name <name>]
   codever project list [-c <config>]
   codever device pair [-c <config>]  Issue a one-time 3-minute client pairing code

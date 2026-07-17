@@ -12,7 +12,6 @@ export async function startCodever(): Promise<void> {
   const app = createApp(App)
   app.provide(relayApiKey, clientSession.api)
   const router = createCodeverRouter(clientSession)
-  clientSession.onUnauthorized(() => { void router.replace({ name: 'login' }) })
   app.use(router)
   if (window.location.hostname === 'tauri.localhost') await router.push('/')
   await installAndroidBackHandler(router)

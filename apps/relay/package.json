@@ -14,8 +14,8 @@
     "start": "tsx src/main.ts",
     "build": "tsup --config tsup.config.ts",
     "start:built": "node dist/main.js",
-    "password:hash": "tsx src/passwordCli.ts",
-    "enrollment": "tsx src/main.ts enrollment",
+    "pair:gateway": "tsx src/main.ts pair gateway",
+    "pair:client": "tsx src/main.ts pair client",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

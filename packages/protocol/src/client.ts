@@ -5,17 +5,6 @@ import { CodeverSessionSchema, GatewaySchema, ProjectSchema, ProviderModelSchema
 import { SessionEventEnvelopeSchema } from './events'
 
 export const GatewayListDtoSchema = z.object({ gateways: z.array(GatewaySchema) }).strict()
-export const GatewayPublicIdentitySchema = z.object({
-    version: z.literal(1),
-    algorithm: z.literal('ECDSA-P256-SHA256'),
-    fingerprint: z.string().startsWith('sha256:'),
-    publicKeySpkiPem: z.string().startsWith('-----BEGIN PUBLIC KEY-----'),
-}).strict()
-export const EnrollGatewayDtoSchema = z.object({
-    name: z.string().trim().min(1),
-    identity: GatewayPublicIdentitySchema,
-}).strict()
-export const EnrolledGatewayDtoSchema = z.object({ gateway: GatewaySchema }).strict()
 export const ProjectListDtoSchema = z.object({ gatewayId: OpaqueIdSchema, projects: z.array(ProjectSchema) }).strict()
 export const SessionListDtoSchema = z.object({ projectId: OpaqueIdSchema, sessions: z.array(CodeverSessionSchema) }).strict()
 export const SessionDtoSchema = z.object({ session: CodeverSessionSchema }).strict()
@@ -71,9 +60,6 @@ export const MutationReceiptDtoSchema = z.object({
 }).strict()
 
 export type GatewayListDto = z.infer<typeof GatewayListDtoSchema>
-export type GatewayPublicIdentity = z.infer<typeof GatewayPublicIdentitySchema>
-export type EnrollGatewayDto = z.infer<typeof EnrollGatewayDtoSchema>
-export type EnrolledGatewayDto = z.infer<typeof EnrolledGatewayDtoSchema>
 export type ProjectListDto = z.infer<typeof ProjectListDtoSchema>
 export type SessionListDto = z.infer<typeof SessionListDtoSchema>
 export type SessionDto = z.infer<typeof SessionDtoSchema>
@@ -88,8 +74,6 @@ export type ResolveDecisionDto = z.infer<typeof ResolveDecisionDtoSchema>
 export type MutationReceiptDto = z.infer<typeof MutationReceiptDtoSchema>
 
 export const parseGatewayListDto = (value: unknown): GatewayListDto => parseWithSchema(GatewayListDtoSchema, value)
-export const parseEnrollGatewayDto = (value: unknown): EnrollGatewayDto => parseWithSchema(EnrollGatewayDtoSchema, value)
-export const parseEnrolledGatewayDto = (value: unknown): EnrolledGatewayDto => parseWithSchema(EnrolledGatewayDtoSchema, value)
 export const parseProjectListDto = (value: unknown): ProjectListDto => parseWithSchema(ProjectListDtoSchema, value)
 export const parseSessionListDto = (value: unknown): SessionListDto => parseWithSchema(SessionListDtoSchema, value)
 export const parseSessionDto = (value: unknown): SessionDto => parseWithSchema(SessionDtoSchema, value)
