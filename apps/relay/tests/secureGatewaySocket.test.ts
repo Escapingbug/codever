@@ -90,7 +90,6 @@ describe('secure Gateway WebSocket', () => {
             clientRegistrationState: registrationStart.clientRegistrationState,
             registrationResponse: registrationResponse.payload.registrationResponse,
             expectedServerStaticPublicKey: registrationResponse.payload.serverStaticPublicKey,
-            keyStretching: 'memory-constrained',
         })
         socket.send(JSON.stringify({
             version: 1, type: 'secure.data', messageId: randomUUID(),

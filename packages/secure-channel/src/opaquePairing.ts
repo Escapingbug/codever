@@ -127,7 +127,7 @@ export class OpaquePairingAuthority {
             registrationResponse: server.registrationResponse,
             password: secret,
             identifiers,
-            keyStretching: 'rfc-recommended',
+            keyStretching: 'memory-constrained',
         })
         const expiresAtMs = this.options.now() + this.options.pairingTtlMs
         this.pairings.set(pairingId, {
@@ -251,7 +251,7 @@ export function finishOpaquePairingClient(input: {
             loginResponse: input.loginResponse,
             password: secret,
             identifiers: pairingIdentifiers(pairingId, input.serverId),
-            keyStretching: 'rfc-recommended',
+            keyStretching: 'memory-constrained',
         })
     } catch (error) {
         throw new OpaquePairingError('Pairing authentication failed', 'authentication_failed', { cause: error })

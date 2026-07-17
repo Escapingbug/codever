@@ -26,7 +26,6 @@ describe('OPAQUE long-lived device credential', () => {
             secret, subjectId: 'gateway-1', serverId: 'relay-1',
             clientRegistrationState: registrationStart.clientRegistrationState,
             registrationResponse, expectedServerStaticPublicKey: serverPublicKey,
-            keyStretching: 'memory-constrained',
         })
         expect(registration.registrationRecord).not.toContain(secret)
 
@@ -38,7 +37,6 @@ describe('OPAQUE long-lived device credential', () => {
         const clientFinish = await finishOpaqueCredentialClientLogin({
             secret, subjectId: 'gateway-1', serverId: 'relay-1', clientLoginState: clientStart.clientLoginState,
             loginResponse: serverStart.loginResponse, expectedServerStaticPublicKey: serverPublicKey,
-            keyStretching: 'memory-constrained',
         })
         const serverSessionKey = await finishOpaqueCredentialServerLogin({
             serverLoginState: serverStart.serverLoginState, finishLoginRequest: clientFinish.finishLoginRequest,

@@ -1,7 +1,5 @@
 import * as opaque from '@serenity-kit/opaque'
 
-export type OpaqueKeyStretching = 'rfc-recommended' | 'rfc-draft-recommended' | 'memory-constrained'
-
 export interface OpaqueCredentialClientRegistrationStart {
     clientRegistrationState: string
     registrationRequest: string
@@ -49,7 +47,6 @@ export async function finishOpaqueCredentialRegistration(input: {
     clientRegistrationState: string
     registrationResponse: string
     expectedServerStaticPublicKey?: string
-    keyStretching?: OpaqueKeyStretching
 }): Promise<{ registrationRecord: string; serverStaticPublicKey: string }> {
     await opaque.ready
     assertSecret(input.secret)
@@ -58,7 +55,7 @@ export async function finishOpaqueCredentialRegistration(input: {
         clientRegistrationState: input.clientRegistrationState,
         registrationResponse: input.registrationResponse,
         identifiers: credentialIdentifiers(input.subjectId, input.serverId),
-        keyStretching: input.keyStretching ?? 'rfc-recommended',
+        keyStretching: 'memory-constrained',
     })
     if (input.expectedServerStaticPublicKey && result.serverStaticPublicKey !== input.expectedServerStaticPublicKey) {
         throw new Error('Relay static public key changed during credential registration')
@@ -96,7 +93,6 @@ export async function finishOpaqueCredentialClientLogin(input: {
     clientLoginState: string
     loginResponse: string
     expectedServerStaticPublicKey: string
-    keyStretching?: OpaqueKeyStretching
 }): Promise<{ finishLoginRequest: string; sessionKey: string }> {
     await opaque.ready
     assertSecret(input.secret)
@@ -105,7 +101,7 @@ export async function finishOpaqueCredentialClientLogin(input: {
         clientLoginState: input.clientLoginState,
         loginResponse: input.loginResponse,
         identifiers: credentialIdentifiers(input.subjectId, input.serverId),
-        keyStretching: input.keyStretching ?? 'rfc-recommended',
+        keyStretching: 'memory-constrained',
     })
     if (!result) throw new Error('Credential authentication failed')
     if (result.serverStaticPublicKey !== input.expectedServerStaticPublicKey) {

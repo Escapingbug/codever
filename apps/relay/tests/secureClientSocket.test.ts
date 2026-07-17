@@ -117,7 +117,6 @@ describe('secure Client WebSocket', () => {
             clientRegistrationState: registrationStart.clientRegistrationState,
             registrationResponse: registrationResponse.payload.registrationResponse,
             expectedServerStaticPublicKey: registrationResponse.payload.serverStaticPublicKey,
-            keyStretching: 'memory-constrained',
         })
         await sendEncrypted(socket, cipher, {
             version: PROTOCOL_VERSION,
