@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProjectRegistry } from '..'
 
@@ -84,30 +84,31 @@ describe('ProjectRegistry', () => {
         await expect(readFile(fixture.storagePath, 'utf8')).resolves.toContain(project.id)
     })
 
-    it('rejects relative paths, parent traversal, and roots outside the allowlist', async () => {
+    it('rejects relative paths and explicit parent traversal', async () => {
         const fixture = await makeFixture()
-        const outside = await makeDirectory(fixture.base, 'outside')
         const registry = await openRegistry(fixture)
 
         await expect(registry.create({ name: 'Relative', rootPath: 'relative' }))
             .rejects.toMatchObject({ code: 'invalid_argument' })
         await expect(registry.create({
             name: 'Traversal',
-            rootPath: join(fixture.allowedRoot, '..', 'outside'),
+            rootPath: `${fixture.allowedRoot}${sep}..${sep}outside`,
         })).rejects.toMatchObject({ code: 'path_not_allowed' })
-        await expect(registry.create({ name: 'Outside', rootPath: outside }))
-            .rejects.toMatchObject({ code: 'path_not_allowed' })
     })
 
-    it('rejects a symlink that escapes an allowed root', async () => {
+    it('accepts any accessible absolute directory and stores its canonical path', async () => {
         const fixture = await makeFixture()
         const outside = await makeDirectory(fixture.base, 'outside')
+        const linkedTarget = await makeDirectory(fixture.base, 'linked-target')
         const escapedLink = join(fixture.allowedRoot, 'escaped-link')
-        await symlink(outside, escapedLink, process.platform === 'win32' ? 'junction' : 'dir')
+        await symlink(linkedTarget, escapedLink, process.platform === 'win32' ? 'junction' : 'dir')
         const registry = await openRegistry(fixture)
 
-        await expect(registry.create({ name: 'Escaped', rootPath: escapedLink }))
-            .rejects.toMatchObject({ code: 'path_not_allowed' })
+        const direct = await registry.create({ name: 'Outside', rootPath: outside })
+        expect(direct.canonicalRoot).toBe(await realpath(outside))
+
+        const linked = await registry.create({ name: 'Linked outside', rootPath: escapedLink })
+        expect(linked.canonicalRoot).toBe(await realpath(linkedTarget))
     })
 
     it('accepts an internal symlink but stores its canonical real path', async () => {
@@ -123,7 +124,7 @@ describe('ProjectRegistry', () => {
         expect(project.canonicalRoot).toBe(await realpath(target))
     })
 
-    it('rejects reopen when an active project symlink has been retargeted outside policy', async () => {
+    it('rejects reopen when an active project symlink resolves to a different directory', async () => {
         const fixture = await makeFixture()
         const inside = await makeDirectory(fixture.allowedRoot, 'inside')
         const outside = await makeDirectory(fixture.base, 'outside')
@@ -135,17 +136,6 @@ describe('ProjectRegistry', () => {
         await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
 
         await expect(openRegistry(fixture)).rejects.toMatchObject({ code: 'path_not_allowed' })
-    })
-
-    it('requires an explicit non-empty allowed-root policy', async () => {
-        const base = await makeTemporaryDirectory()
-
-        await expect(ProjectRegistry.open({
-            storagePath: join(base, 'projects.json'),
-            allowedRootPolicy: { roots: [] },
-        })).rejects.toEqual(expect.objectContaining({
-            code: 'invalid_argument',
-        }))
     })
 
     it('does not expose mutable internal records', async () => {
@@ -177,7 +167,6 @@ async function makeFixture(): Promise<Fixture> {
 async function openRegistry(fixture: Fixture): Promise<ProjectRegistry> {
     return ProjectRegistry.open({
         storagePath: fixture.storagePath,
-        allowedRootPolicy: { roots: [fixture.allowedRoot] },
     })
 }
 

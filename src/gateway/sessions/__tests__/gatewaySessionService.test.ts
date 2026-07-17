@@ -272,7 +272,6 @@ async function createFixture() {
     await mkdir(root, { recursive: true })
     const projects = await ProjectRegistry.open({
         storagePath: join(directory, 'projects.json'),
-        allowedRootPolicy: { roots: [join(directory, 'allowed')] },
     })
     const project = await projects.create({ name: 'Project', rootPath: root })
     const metadataPath = join(directory, 'sessions.json')

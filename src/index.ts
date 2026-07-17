@@ -8,7 +8,6 @@ async function main(): Promise<void> {
         options: {
             config: { type: 'string', short: 'c' },
             relay: { type: 'string' },
-            root: { type: 'string', multiple: true },
             path: { type: 'string' },
             name: { type: 'string' },
             workspace: { type: 'string' },
@@ -22,13 +21,12 @@ async function main(): Promise<void> {
     if (values.help || !command) return help()
 
     if (command === 'init') {
-        if (!values.relay || !values.root?.length || !values['pairing-code']) {
-            throw new Error('init requires --relay, --pairing-code, and at least one --root')
+        if (!values.relay || !values['pairing-code']) {
+            throw new Error('init requires --relay and --pairing-code')
         }
         const config = await writeGatewayConfig({
             name: values.name ?? process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? 'Codever Gateway',
             relayUrl: values.relay,
-            allowedRoots: values.root,
             ...(values.workspace ? { workspaceId: values.workspace } : {}),
             secure: { pairingCode: values['pairing-code'] },
         }, configPath)
@@ -97,7 +95,7 @@ function help(): void {
     console.log(`codever gateway
 
 Usage:
-  codever init --relay <ws-url>/v2/gateway/connect --pairing-code <code> --root <absolute-path> [--root ...]
+  codever init --relay <ws-url>/v2/gateway/connect --pairing-code <code> [--name <machine-name>]
   codever project add --path <absolute-path> [--name <name>]
   codever project list [-c <config>]
   codever device pair [-c <config>]  Issue a one-time 3-minute client pairing code

@@ -16,14 +16,14 @@ Web / PWA / Tauri client
     local ACP agents
 ```
 
-The Gateway remains the trusted execution boundary on each controlled machine. It owns approved project roots, provider credentials/processes, decisions, and the authoritative event journal. One Relay accepts multiple independently enrolled Gateways and exposes Gateway → Project → Session navigation to a single Vue client shared by browsers, installed PWAs, desktop, Android, and iOS shells.
+The Gateway remains the trusted execution boundary on each controlled machine. It owns project validation, provider credentials/processes, decisions, and the authoritative event journal. One Relay accepts multiple independently enrolled Gateways and exposes Gateway → Project → Session navigation to a single Vue client shared by browsers, installed PWAs, desktop, Android, and iOS shells.
 
 ## Implemented
 
 - Browser-safe, versioned protocol schemas for inventory, events, commands, authentication, sync, and client DTOs.
 - Per-Gateway P-256 static identity stored locally as a PKCS#8 private key; enrollment exports only the SPKI public key and fingerprint.
 - TLS server validation plus signed Relay challenges bound to the Relay challenge, Gateway ID, and key fingerprint.
-- Explicit local project allowlists with canonical path and traversal/symlink escape checks.
+- Gateway-native project path validation with canonical paths and retargeted-symlink checks.
 - Gateway-owned session runtime, decision broker, provider normalization, durable metadata, and append-only event journal.
 - Outbound reconnecting Gateway link with epochs, heartbeats, command idempotency, event ACKs, and cursor replay.
 - Multi-Gateway Relay REST/WSS APIs, enrollment, deny-by-default authorization, event subscriptions, and restart sync.
@@ -59,11 +59,11 @@ The Relay URL is always entered explicitly. Use `wss://` outside localhost; unen
 pnpm build
 node dist/index.js init `
   --relay wss://relay.example.com/v1/gateway/connect `
-  --root D:\projects `
+  --pairing-code ABC234-DEFGH-JKLMN `
   --name workstation
 ```
 
-Register project roots locally. Remote clients select a `projectId`; they cannot submit arbitrary working directories.
+Gateway initialization establishes only the machine identity and Relay credential. Projects are created separately from the client or CLI and may use any absolute directory accessible to the Gateway process.
 
 ```powershell
 node dist/index.js project add --path D:\projects\codever --name codever

@@ -15,11 +15,9 @@ describe('Gateway config', () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-config-'))
         paths.push(directory)
         const configPath = join(directory, 'gateway.json')
-        const root = join(directory, 'projects')
         const written = await writeGatewayConfig({
             name: 'Office PC',
             relayUrl: 'wss://relay.example.com/connect',
-            allowedRoots: [root],
         }, configPath)
         const loaded = await loadGatewayConfig(configPath)
 
@@ -35,7 +33,6 @@ describe('Gateway config', () => {
             workspaceId: 'workspace-1',
             name: 'Gateway',
             dataDirectory: resolve('codever-data'),
-            allowedRoots: [resolve('projects')],
         }
         expect(() => parseGatewayConfig({ ...base, relayUrl: 'ws://relay.example.com/connect' })).toThrow('secure configuration')
         expect(parseGatewayConfig({ ...base, relayUrl: 'ws://127.0.0.1:3000/connect', secure: {} }).relayUrl).toContain('127.0.0.1')

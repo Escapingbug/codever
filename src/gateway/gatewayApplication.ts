@@ -53,7 +53,6 @@ export async function createGatewayApplication(
     registerConfiguredProviders(config.providersPath)
     const projects = await ProjectRegistry.open({
         storagePath: join(config.dataDirectory, 'projects.json'),
-        allowedRootPolicy: { roots: config.allowedRoots },
     })
     const metadata = await FileSessionMetadataRepository.open(join(config.dataDirectory, 'sessions.json'))
     const events = new FileConversationEventStore<GatewayConversationEvent>(join(config.dataDirectory, 'events.jsonl'))

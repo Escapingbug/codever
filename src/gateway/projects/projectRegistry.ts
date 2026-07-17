@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import {
     ProjectRegistryError,
     type CreateProjectInput,
@@ -28,33 +28,19 @@ export class ProjectRegistry {
     private constructor(
         private readonly storagePath: string,
         private readonly temporaryPath: string,
-        private readonly allowedRoots: readonly string[],
         projects: Project[],
     ) {
         this.projects = projects
     }
 
     static async open(options: ProjectRegistryOptions): Promise<ProjectRegistry> {
-        const storagePath = resolveRequiredPath(options.storagePath, 'storagePath')
-        const configuredRoots = options.allowedRootPolicy?.roots
-        if (!configuredRoots || configuredRoots.length === 0) {
-            throw new ProjectRegistryError(
-                'invalid_argument',
-                'allowedRootPolicy.roots must contain at least one directory',
-            )
-        }
-
-        const allowedRoots = await Promise.all(configuredRoots.map((root) => canonicalizeDirectory(
-            resolveRequiredPath(root, 'allowedRootPolicy root'),
-            'Allowed root',
-        )))
-        const uniqueAllowedRoots = [...new Set(allowedRoots)]
+        const storagePath = resolveStoragePath(options.storagePath)
         const temporaryPath = `${storagePath}.tmp`
         const persisted = await recoverPersistence(storagePath, temporaryPath)
         const projects = persisted?.projects ?? []
 
-        await validateActiveProjects(projects, uniqueAllowedRoots)
-        return new ProjectRegistry(storagePath, temporaryPath, uniqueAllowedRoots, projects)
+        await validateActiveProjects(projects)
+        return new ProjectRegistry(storagePath, temporaryPath, projects)
     }
 
     async create(input: CreateProjectInput): Promise<Project> {
@@ -63,7 +49,6 @@ export class ProjectRegistry {
             const defaultProvider = optionalNonEmpty(input.defaultProvider, 'defaultProvider')
             const rootPath = resolveProjectInput(input.rootPath)
             const canonicalRoot = await canonicalizeDirectory(rootPath, 'Project root')
-            this.assertAllowed(canonicalRoot)
 
             if (this.projects.some((project) => samePath(project.canonicalRoot, canonicalRoot))) {
                 throw new ProjectRegistryError(
@@ -120,14 +105,6 @@ export class ProjectRegistry {
             this.projects = nextProjects
             return copyProject(archived)
         })
-    }
-
-    private assertAllowed(canonicalRoot: string): void {
-        if (this.allowedRoots.some((allowedRoot) => isWithin(allowedRoot, canonicalRoot))) return
-        throw new ProjectRegistryError(
-            'path_not_allowed',
-            `Project root is outside the configured allowed roots: ${canonicalRoot}`,
-        )
     }
 
     private async persist(projects: Project[]): Promise<void> {
@@ -214,7 +191,7 @@ function isProject(value: unknown): value is Project {
         && (value.archivedAt === undefined || isNonEmptyString(value.archivedAt))
 }
 
-async function validateActiveProjects(projects: readonly Project[], allowedRoots: readonly string[]): Promise<void> {
+async function validateActiveProjects(projects: readonly Project[]): Promise<void> {
     const canonicalRoots = new Set<string>()
     for (const project of projects) {
         if (canonicalRoots.has(project.canonicalRoot)) {
@@ -233,12 +210,6 @@ async function validateActiveProjects(projects: readonly Project[], allowedRoots
                 `Persisted project root no longer resolves to its registered canonical path: ${project.rootPath}`,
             )
         }
-        if (!allowedRoots.some((allowedRoot) => isWithin(allowedRoot, currentCanonicalRoot))) {
-            throw new ProjectRegistryError(
-                'path_not_allowed',
-                `Persisted project root is outside the configured allowed roots: ${project.rootPath}`,
-            )
-        }
     }
 }
 
@@ -253,10 +224,10 @@ function resolveProjectInput(value: string): string {
     return resolve(input)
 }
 
-function resolveRequiredPath(value: string, field: string): string {
-    const input = requireNonEmpty(value, field)
+function resolveStoragePath(value: string): string {
+    const input = requireNonEmpty(value, 'storagePath')
     if (!isAbsolute(input)) {
-        throw new ProjectRegistryError('invalid_argument', `${field} must be absolute`)
+        throw new ProjectRegistryError('invalid_argument', 'storagePath must be absolute')
     }
     return resolve(input)
 }
@@ -269,11 +240,6 @@ async function canonicalizeDirectory(path: string, label: string): Promise<strin
     }
     await access(canonical, constants.R_OK)
     return canonical
-}
-
-function isWithin(parent: string, candidate: string): boolean {
-    const child = relative(parent, candidate)
-    return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
 }
 
 function samePath(left: string, right: string): boolean {

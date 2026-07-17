@@ -16,7 +16,6 @@ export interface GatewayConfig {
     name: string
     relayUrl: string
     dataDirectory: string
-    allowedRoots: string[]
     providersPath?: string
     tls?: GatewayTlsConfig
     secure: { pairingCode?: string }
@@ -37,7 +36,7 @@ export async function loadGatewayConfig(path = defaultGatewayConfigPath()): Prom
 }
 
 export async function writeGatewayConfig(
-    input: Pick<GatewayConfig, 'name' | 'relayUrl' | 'allowedRoots'> & Partial<GatewayConfig>,
+    input: Pick<GatewayConfig, 'name' | 'relayUrl'> & Partial<GatewayConfig>,
     path = defaultGatewayConfigPath(),
 ): Promise<GatewayConfig> {
     const target = resolve(path)
@@ -48,7 +47,6 @@ export async function writeGatewayConfig(
         name: input.name,
         relayUrl: input.relayUrl,
         dataDirectory: input.dataDirectory ?? join(dirname(target), 'gateway-data'),
-        allowedRoots: input.allowedRoots,
         ...(input.providersPath ? { providersPath: input.providersPath } : {}),
         ...(input.tls ? { tls: input.tls } : {}),
         secure: input.secure ?? {},
@@ -71,10 +69,6 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
         throw new Error('relayUrl must use wss://; public ws:// requires secure OPAQUE transport')
     }
     const dataDirectory = absolute(value.dataDirectory, 'dataDirectory')
-    if (!Array.isArray(value.allowedRoots) || value.allowedRoots.length === 0) {
-        throw new Error('allowedRoots must contain at least one absolute directory')
-    }
-    const allowedRoots = [...new Set(value.allowedRoots.map((root) => absolute(root, 'allowedRoots item')))]
     const providersPath = value.providersPath === undefined ? undefined : absolute(value.providersPath, 'providersPath')
     const tls = value.tls === undefined ? undefined : parseTls(value.tls)
     return {
@@ -84,7 +78,6 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
         name,
         relayUrl: relay.toString(),
         dataDirectory,
-        allowedRoots,
         ...(providersPath ? { providersPath } : {}),
         ...(tls ? { tls } : {}),
         secure,

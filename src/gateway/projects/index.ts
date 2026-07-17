@@ -1,7 +1,6 @@
 export { ProjectRegistry } from './projectRegistry'
 export {
     ProjectRegistryError,
-    type AllowedRootPolicy,
     type CreateProjectInput,
     type ListProjectsOptions,
     type Project,

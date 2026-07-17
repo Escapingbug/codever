@@ -20,7 +20,6 @@ describe('Gateway project.create request', () => {
         await mkdir(root)
         const projects = await ProjectRegistry.open({
             storagePath: join(directory, 'projects.json'),
-            allowedRootPolicy: { roots: [directory] },
         })
         let revision = 1
         const inventory = async (): Promise<InventorySnapshot> => ({

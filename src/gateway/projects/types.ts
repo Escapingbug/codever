@@ -20,14 +20,8 @@ export interface ListProjectsOptions {
     includeArchived?: boolean
 }
 
-export interface AllowedRootPolicy {
-    /** Existing directories under which project roots may be registered. */
-    roots: readonly string[]
-}
-
 export interface ProjectRegistryOptions {
     storagePath: string
-    allowedRootPolicy: AllowedRootPolicy
 }
 
 export type ProjectRegistryErrorCode =
