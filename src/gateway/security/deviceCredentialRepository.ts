@@ -1,11 +1,12 @@
-import { createOpaqueServerSetup } from '@codever/secure-channel'
+import { createOpaqueServerSetup, generateHpkeKeyPair, hpkeKeyId, type HpkeKeyPair } from '@codever/secure-channel'
 import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 export interface DeviceCredentialRecord {
     credentialId: string
-    registrationRecord: string
+    hpkePublicKey: string
+    hpkeKeyId: string
     enabled: boolean
     label: string
     createdAt: string
@@ -14,17 +15,18 @@ export interface DeviceCredentialRecord {
 
 export interface DeviceCredentialStore {
     get(credentialId: string): Promise<DeviceCredentialRecord | undefined>
-    put(credentialId: string, registrationRecord: string, label?: string): Promise<DeviceCredentialRecord>
+    put(credentialId: string, hpkeKeyId: string, hpkePublicKey: string, label?: string): Promise<DeviceCredentialRecord>
     revoke(credentialId: string): Promise<boolean>
 }
 
 interface DeviceCredentialSnapshot {
-    formatVersion: 1
+    formatVersion: 2
     serverSetup: string
+    hpkeKeyPair: HpkeKeyPair
     credentials: DeviceCredentialRecord[]
 }
 
-/** Durable Gateway-owned OPAQUE setup and device credential records. */
+/** Durable Gateway pairing setup, HPKE identity, and authorized device public keys. */
 export class DeviceCredentialRepository implements DeviceCredentialStore {
     private writeQueue: Promise<void> = Promise.resolve()
 
@@ -38,10 +40,18 @@ export class DeviceCredentialRepository implements DeviceCredentialStore {
         let snapshot: DeviceCredentialSnapshot
         try {
             snapshot = parseSnapshot(JSON.parse(await readFile(path, 'utf8')))
+            if (await hpkeKeyId(snapshot.hpkeKeyPair.publicKey) !== snapshot.hpkeKeyPair.keyId) {
+                throw new Error('Gateway HPKE key ID does not match its public key')
+            }
             await chmod(path, 0o600)
         } catch (error) {
             if (!isNotFound(error)) throw error
-            snapshot = { formatVersion: 1, serverSetup: await createOpaqueServerSetup(), credentials: [] }
+            snapshot = {
+                formatVersion: 2,
+                serverSetup: await createOpaqueServerSetup(),
+                hpkeKeyPair: await generateHpkeKeyPair(),
+                credentials: [],
+            }
             const repository = new DeviceCredentialRepository(path, snapshot, options.now ?? Date.now)
             await repository.persist()
             return repository
@@ -53,6 +63,10 @@ export class DeviceCredentialRepository implements DeviceCredentialStore {
         return this.snapshot.serverSetup
     }
 
+    get hpkeKeyPair(): HpkeKeyPair {
+        return { ...this.snapshot.hpkeKeyPair }
+    }
+
     async get(credentialId: string): Promise<DeviceCredentialRecord | undefined> {
         const record = this.snapshot.credentials.find(value => value.credentialId === credentialId)
         return record && { ...record }
@@ -62,21 +76,23 @@ export class DeviceCredentialRepository implements DeviceCredentialStore {
         return this.snapshot.credentials.map(record => ({ ...record }))
     }
 
-    async put(credentialId: string, registrationRecord: string, label = credentialId): Promise<DeviceCredentialRecord> {
+    async put(credentialId: string, hpkeKeyId: string, hpkePublicKey: string, label = credentialId): Promise<DeviceCredentialRecord> {
         assertRequired(credentialId, 'credentialId')
-        assertRequired(registrationRecord, 'registrationRecord')
+        assertRequired(hpkeKeyId, 'hpkeKeyId')
+        assertHpkePublicKey(hpkePublicKey)
         assertRequired(label, 'label')
 
         const next: DeviceCredentialRecord = {
             credentialId,
-            registrationRecord,
+            hpkePublicKey,
+            hpkeKeyId,
             enabled: true,
             label,
             createdAt: new Date(this.now()).toISOString(),
         }
-        const index = this.snapshot.credentials.findIndex(value => value.credentialId === credentialId)
-        if (index === -1) this.snapshot.credentials.push(next)
-        else this.snapshot.credentials[index] = next
+        const existing = this.snapshot.credentials.find(value => value.credentialId === credentialId)
+        if (existing) throw new Error('Gateway device credential ID is already registered')
+        this.snapshot.credentials.push(next)
         await this.persist()
         return { ...next }
     }
@@ -115,15 +131,16 @@ export class DeviceCredentialRepository implements DeviceCredentialStore {
 }
 
 function parseSnapshot(value: unknown): DeviceCredentialSnapshot {
-    if (!isRecord(value) || value.formatVersion !== 1 || typeof value.serverSetup !== 'string'
-        || !value.serverSetup.trim() || !Array.isArray(value.credentials)) {
+    if (!isRecord(value) || value.formatVersion !== 2 || typeof value.serverSetup !== 'string'
+        || !value.serverSetup.trim() || !isHpkeKeyPair(value.hpkeKeyPair) || !Array.isArray(value.credentials)) {
         throw new Error('Invalid Gateway device credential repository')
     }
 
     const credentialIds = new Set<string>()
     const credentials = value.credentials.map(item => {
         if (!isRecord(item) || typeof item.credentialId !== 'string' || !item.credentialId.trim()
-            || typeof item.registrationRecord !== 'string' || !item.registrationRecord.trim()
+            || typeof item.hpkePublicKey !== 'string' || !isHpkePublicKey(item.hpkePublicKey)
+            || typeof item.hpkeKeyId !== 'string' || !item.hpkeKeyId.trim()
             || typeof item.enabled !== 'boolean' || typeof item.label !== 'string' || !item.label.trim()
             || typeof item.createdAt !== 'string' || !isTimestamp(item.createdAt)
             || (item.revokedAt !== undefined && (typeof item.revokedAt !== 'string' || !isTimestamp(item.revokedAt)))) {
@@ -133,14 +150,29 @@ function parseSnapshot(value: unknown): DeviceCredentialSnapshot {
         credentialIds.add(item.credentialId)
         return {
             credentialId: item.credentialId,
-            registrationRecord: item.registrationRecord,
+            hpkePublicKey: item.hpkePublicKey,
+            hpkeKeyId: item.hpkeKeyId,
             enabled: item.enabled,
             label: item.label,
             createdAt: item.createdAt,
             ...(typeof item.revokedAt === 'string' ? { revokedAt: item.revokedAt } : {}),
         }
     })
-    return { formatVersion: 1, serverSetup: value.serverSetup, credentials }
+    return { formatVersion: 2, serverSetup: value.serverSetup, hpkeKeyPair: value.hpkeKeyPair, credentials }
+}
+
+function isHpkeKeyPair(value: unknown): value is HpkeKeyPair {
+    return isRecord(value) && typeof value.keyId === 'string' && !!value.keyId.trim()
+        && typeof value.publicKey === 'string' && isHpkePublicKey(value.publicKey)
+        && typeof value.privateKey === 'string' && isHpkePublicKey(value.privateKey)
+}
+
+function isHpkePublicKey(value: string): boolean {
+    return /^[A-Za-z0-9_-]{43}$/.test(value)
+}
+
+function assertHpkePublicKey(value: string): void {
+    if (!isHpkePublicKey(value)) throw new Error('Gateway device credential HPKE public key is invalid')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

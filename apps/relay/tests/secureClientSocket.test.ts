@@ -83,6 +83,7 @@ describe('secure Client WebSocket', () => {
         const response = parseRelayClientSecureHandshakeFrame(JSON.parse(await onceMessage(socket)))
         if (response.type !== 'relay.client-auth.response') throw new Error('Expected Client authentication response')
         const finished = finishOpaquePairingClient({
+            domain: 'relay-client',
             code: ticket.code, serverId: 'relay-1', clientLoginState: pairing.clientLoginState,
             loginResponse: response.payload.loginResponse,
         })

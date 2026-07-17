@@ -37,7 +37,7 @@ describe('relay client secure protocol', () => {
         })).type).toBe('client.relay-auth.finish')
         expect(parseRelayClientSecureHandshakeFrame(frame('relay.client-auth.accepted', {
             handshakeId: 'handshake-1',
-            envelope: { version: 1, channelId: 'channel-1', sequence: '0', ciphertext: 'A'.repeat(16) },
+            envelope: { version: 2, channelId: 'channel-1', messageId: 'record-1', nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(16) },
         })).type).toBe('relay.client-auth.accepted')
         expect(parseRelayClientSecureHandshakeFrame(frame('relay.client-auth.rejected', {
             code: 'authentication_failed',

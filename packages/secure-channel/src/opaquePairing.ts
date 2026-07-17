@@ -3,6 +3,7 @@ import * as opaque from '@serenity-kit/opaque'
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const LOCATOR_LENGTH = 6
 const SECRET_LENGTH = 10
+export type OpaquePairingDomain = 'relay-client' | 'relay-gateway' | 'gateway-device'
 
 export interface OpaquePairingTicket {
     pairingId: string
@@ -63,6 +64,7 @@ export class OpaquePairingAuthority {
     private constructor(
         private readonly serverSetup: string,
         private readonly serverId: string,
+        private readonly domain: OpaquePairingDomain,
         private readonly options: {
             pairingTtlMs: number
             handshakeTtlMs: number
@@ -77,6 +79,7 @@ export class OpaquePairingAuthority {
 
     static async create(input: {
         serverId: string
+        domain: OpaquePairingDomain
         serverSetup?: string
         pairingTtlMs?: number
         handshakeTtlMs?: number
@@ -95,7 +98,7 @@ export class OpaquePairingAuthority {
             throw new Error('handshakeTtlMs must be positive and no longer than pairingTtlMs')
         }
         if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0) throw new Error('maxAttempts must be positive')
-        return new OpaquePairingAuthority(input.serverSetup ?? opaque.server.createSetup(), input.serverId, {
+        return new OpaquePairingAuthority(input.serverSetup ?? opaque.server.createSetup(), input.serverId, input.domain, {
             pairingTtlMs,
             handshakeTtlMs,
             maxAttempts,
@@ -115,7 +118,7 @@ export class OpaquePairingAuthority {
         if (!pairingId || this.pairings.has(pairingId)) throw new Error('Unable to allocate a unique pairing ID')
         const secret = randomCode(this.options.randomBytes, SECRET_LENGTH)
         const code = formatPairingCode(pairingId, secret)
-        const identifiers = pairingIdentifiers(pairingId, this.serverId)
+        const identifiers = pairingIdentifiers(pairingId, this.serverId, this.domain)
         const client = opaque.client.startRegistration({ password: secret })
         const server = opaque.server.createRegistrationResponse({
             serverSetup: this.serverSetup,
@@ -156,7 +159,7 @@ export class OpaquePairingAuthority {
                 registrationRecord: pairing.registrationRecord,
                 startLoginRequest,
                 userIdentifier: pairingId,
-                identifiers: pairingIdentifiers(pairingId, this.serverId),
+                identifiers: pairingIdentifiers(pairingId, this.serverId, this.domain),
             })
         } catch (error) {
             if (pairing.attemptsRemaining === 0) this.deletePairing(pairingId)
@@ -184,7 +187,7 @@ export class OpaquePairingAuthority {
             result = opaque.server.finishLogin({
                 serverLoginState: handshake.serverLoginState,
                 finishLoginRequest,
-                identifiers: pairingIdentifiers(handshake.pairingId, this.serverId),
+                identifiers: pairingIdentifiers(handshake.pairingId, this.serverId, this.domain),
             })
         } catch (error) {
             const pairing = this.pairings.get(handshake.pairingId)
@@ -239,6 +242,7 @@ export async function startOpaquePairingClient(codeInput: string): Promise<Opaqu
 export function finishOpaquePairingClient(input: {
     code: string
     serverId: string
+    domain: OpaquePairingDomain
     clientLoginState: string
     loginResponse: string
     expectedServerStaticPublicKey?: string
@@ -250,7 +254,7 @@ export function finishOpaquePairingClient(input: {
             clientLoginState: input.clientLoginState,
             loginResponse: input.loginResponse,
             password: secret,
-            identifiers: pairingIdentifiers(pairingId, input.serverId),
+            identifiers: pairingIdentifiers(pairingId, input.serverId, input.domain),
             keyStretching: 'memory-constrained',
         })
     } catch (error) {
@@ -287,8 +291,15 @@ function normalizePairingId(input: string): string {
     return normalized
 }
 
-function pairingIdentifiers(pairingId: string, serverId: string): { client: string; server: string } {
-    return { client: `codever-pairing:${pairingId}`, server: `codever-relay:${serverId}` }
+function pairingIdentifiers(
+    pairingId: string,
+    serverId: string,
+    domain: OpaquePairingDomain,
+): { client: string; server: string } {
+    return {
+        client: `codever:${domain}:pairing:${pairingId}`,
+        server: `codever:${domain}:server:${serverId}`,
+    }
 }
 
 function randomCode(randomBytes: (length: number) => Uint8Array, length: number): string {

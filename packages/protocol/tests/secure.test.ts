@@ -28,7 +28,7 @@ describe('secure transport protocol', () => {
             messageId: 'message-2',
             payload: {
                 handshakeId: 'handshake-1',
-                envelope: { version: 1, channelId: 'channel-1', sequence: '0', ciphertext: 'A'.repeat(32) },
+                envelope: { version: 2, channelId: 'channel-1', messageId: 'record-1', nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(32) },
             },
         })
         expect(JSON.stringify(frame)).not.toContain('connectionEpoch')
@@ -44,7 +44,7 @@ describe('secure transport protocol', () => {
             type: 'secure.data',
             messageId: 'message-3',
             gatewayId: 'gateway-1',
-            envelope: { version: 1, channelId: 'channel-1', sequence: '0', ciphertext: 'A'.repeat(32) },
+            envelope: { version: 2, channelId: 'channel-1', messageId: 'record-1', nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(32) },
         })).toThrow()
     })
 

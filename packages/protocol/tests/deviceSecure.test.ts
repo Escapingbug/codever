@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { parseDeviceCredentialFrame, parseDeviceSecureHandshakeFrame } from '../src/index'
+import {
+    parseDeviceBindingFrame,
+    parseDeviceHpkeDataFrame,
+    parseDeviceKeyProvisioningFrame,
+    parseDeviceSecureHandshakeFrame,
+} from '../src/index'
 
-const frame = (type: string, payload: unknown) => ({
-    version: 1,
-    type,
-    messageId: 'message-1',
-    payload,
-})
+const frame = (type: string, payload: unknown) => ({ version: 1, type, messageId: 'message-1', payload })
+const key = 'A'.repeat(43)
 
-describe('device secure authentication protocol', () => {
-    it('parses the complete client and Gateway OPAQUE handshake', () => {
+describe('device security protocol', () => {
+    it('parses the one-time OPAQUE pairing handshake', () => {
         expect(parseDeviceSecureHandshakeFrame(frame('client.secure-auth.start', {
-            mode: 'pairing', credentialId: 'device-1', subjectId: 'pairing-1', startLoginRequest: 'opaque-start',
+            credentialId: 'device-1', pairingId: 'pairing-1', startLoginRequest: 'opaque-start',
         })).type).toBe('client.secure-auth.start')
         expect(parseDeviceSecureHandshakeFrame(frame('gateway.secure-auth.response', {
             gatewayId: 'gateway-1', handshakeId: 'handshake-1', loginResponse: 'opaque-response',
@@ -22,58 +23,47 @@ describe('device secure authentication protocol', () => {
         })).type).toBe('client.secure-auth.finish')
         expect(parseDeviceSecureHandshakeFrame(frame('gateway.secure-auth.accepted', {
             handshakeId: 'handshake-1',
-            envelope: { version: 1, channelId: 'channel-1', sequence: '0', ciphertext: 'A'.repeat(16) },
+            envelope: {
+                version: 2, channelId: 'channel-1', messageId: 'record-1', nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(16),
+            },
         })).type).toBe('gateway.secure-auth.accepted')
-        expect(parseDeviceSecureHandshakeFrame(frame('gateway.secure-auth.rejected', {
-            code: 'authentication_failed', message: 'bad credential',
-        })).type).toBe('gateway.secure-auth.rejected')
     })
 
-    it('parses encrypted device credential registration messages', () => {
-        expect(parseDeviceCredentialFrame(frame('device.credential.registration.start', {
-            deviceId: 'device-1', registrationRequest: 'registration-request',
-        })).type).toBe('device.credential.registration.start')
-        expect(parseDeviceCredentialFrame(frame('device.credential.registration.response', {
-            deviceId: 'device-1', registrationResponse: 'registration-response',
-            serverStaticPublicKey: 'A'.repeat(16),
-        })).type).toBe('device.credential.registration.response')
-        expect(parseDeviceCredentialFrame(frame('device.credential.registration.commit', {
-            deviceId: 'device-1', registrationRecord: 'registration-record',
-        })).type).toBe('device.credential.registration.commit')
-        expect(parseDeviceCredentialFrame(frame('device.credential.registration.accepted', {
-            deviceId: 'device-1', registeredAt: '2026-07-17T10:00:00+08:00',
-        })).type).toBe('device.credential.registration.accepted')
+    it('parses key provisioning without a long-term password credential', () => {
+        expect(parseDeviceKeyProvisioningFrame(frame('device.key.register', {
+            deviceId: 'device-1', deviceHpkeKeyId: 'key-device', deviceHpkePublicKey: key,
+        })).type).toBe('device.key.register')
+        expect(parseDeviceKeyProvisioningFrame(frame('gateway.key.registered', {
+            deviceId: 'device-1', gatewayHpkeKeyId: 'key-gateway', gatewayHpkePublicKey: key,
+            registeredAt: '2026-07-17T10:00:00+08:00',
+        })).type).toBe('gateway.key.registered')
     })
 
-    it('rejects malformed, unknown, and non-strict handshake frames', () => {
+    it('parses HPKE bind and encrypted data frames', () => {
+        expect(parseDeviceBindingFrame(frame('device.bind', {
+            gatewayId: 'gateway-1', credentialId: 'device-1', boundAt: '2026-07-17T10:00:00+08:00',
+        })).type).toBe('device.bind')
+        expect(parseDeviceHpkeDataFrame({
+            version: 1,
+            type: 'device.hpke-data',
+            messageId: 'message-1',
+            envelope: {
+                version: 1,
+                suite: 'DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_128_GCM',
+                messageId: 'message-1', senderId: 'device-1', recipientId: 'gateway-1',
+                senderKeyId: 'key-device', recipientKeyId: 'key-gateway',
+                createdAt: '2026-07-17T10:00:00+08:00', expiresAt: '2026-07-18T10:00:00+08:00',
+                enc: key, ciphertext: 'A'.repeat(16),
+            },
+        }).type).toBe('device.hpke-data')
+    })
+
+    it('rejects credential login and malformed key registration', () => {
         expect(() => parseDeviceSecureHandshakeFrame(frame('client.secure-auth.start', {
-            mode: 'password', credentialId: 'device-1', subjectId: 'device-1', startLoginRequest: 'request',
+            mode: 'credential', credentialId: 'device-1', subjectId: 'device-1', startLoginRequest: 'request',
         }))).toThrow()
-        expect(() => parseDeviceSecureHandshakeFrame(frame('gateway.secure-auth.response', {
-            gatewayId: 'gateway-1', handshakeId: 'handshake-1', loginResponse: '',
-            expiresAt: 'not-a-date', attemptsRemaining: -1,
-        }))).toThrow()
-        expect(() => parseDeviceSecureHandshakeFrame({
-            ...frame('client.secure-auth.finish', {
-                handshakeId: 'handshake-1', finishLoginRequest: 'request',
-            }),
-            extra: true,
-        })).toThrow()
-        expect(() => parseDeviceSecureHandshakeFrame(frame('client.secure-auth.unknown', {}))).toThrow()
-    })
-
-    it('rejects plaintext, incomplete, and oversized credential messages', () => {
-        expect(() => parseDeviceCredentialFrame(frame('device.credential.registration.start', {
-            deviceId: 'device-1', registrationRequest: 'request', plaintextSecret: 'secret',
-        }))).toThrow()
-        expect(() => parseDeviceCredentialFrame(frame('device.credential.registration.response', {
-            deviceId: 'device-1', registrationResponse: 'response', serverStaticPublicKey: 'short',
-        }))).toThrow()
-        expect(() => parseDeviceCredentialFrame(frame('device.credential.registration.commit', {
-            deviceId: 'device-1', registrationRecord: 'A'.repeat(16_385),
-        }))).toThrow()
-        expect(() => parseDeviceCredentialFrame(frame('device.credential.registration.accepted', {
-            deviceId: 'device-1',
+        expect(() => parseDeviceKeyProvisioningFrame(frame('device.key.register', {
+            deviceId: 'device-1', deviceHpkeKeyId: 'key-device', deviceHpkePublicKey: 'short',
         }))).toThrow()
     })
 })

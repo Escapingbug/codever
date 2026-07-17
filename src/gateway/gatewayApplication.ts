@@ -87,6 +87,7 @@ export async function createGatewayApplication(
         gatewayId: config.gatewayId,
         serverSetup: deviceCredentials.serverSetup,
         credentials: deviceCredentials,
+        hpkeKeyPair: deviceCredentials.hpkeKeyPair,
     })
     const deviceSessions = new Map<string, DeviceSecureSession>()
 

@@ -65,6 +65,7 @@ describe('secure Gateway WebSocket', () => {
         expect(response.type).toBe('relay.secure-auth.response')
         if (response.type !== 'relay.secure-auth.response') throw new Error('Unexpected response')
         const clientFinish = finishOpaquePairingClient({
+            domain: 'relay-gateway',
             code: ticket.code, serverId: 'relay-1', clientLoginState: clientStart.clientLoginState,
             loginResponse: response.payload.loginResponse,
         })

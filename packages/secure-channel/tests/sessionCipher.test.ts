@@ -19,7 +19,7 @@ describe('SessionCipher', () => {
         await expect(initiator.decrypt(response)).resolves.toEqual({ event: 'agent.message', text: 'private answer' })
     })
 
-    it('rejects replayed, reordered, cross-channel, and tampered envelopes', async () => {
+    it('decrypts reordered and repeated records without shared receive state', async () => {
         const sessionKey = randomBytes(32)
         const channelId = randomUUID()
         const sender = await SessionCipher.create({ sessionKey, role: 'initiator', channelId, crypto })
@@ -27,16 +27,15 @@ describe('SessionCipher', () => {
         const first = await sender.encrypt({ index: 0 })
         const second = await sender.encrypt({ index: 1 })
 
-        await expect(receiver.decrypt(second)).rejects.toThrow('Unexpected receive sequence')
+        await expect(receiver.decrypt(second)).resolves.toEqual({ index: 1 })
         await expect(receiver.decrypt(first)).resolves.toEqual({ index: 0 })
-        await expect(receiver.decrypt(first)).rejects.toThrow('Unexpected receive sequence')
+        await expect(receiver.decrypt(first)).resolves.toEqual({ index: 0 })
 
         await expect(receiver.decrypt({ ...second, channelId: randomUUID() })).rejects.toThrow('another channel')
-        const tamperedBytes = Buffer.from(second.ciphertext, 'base64')
+        const tamperedBytes = Buffer.from(second.ciphertext, 'base64url')
         tamperedBytes[0] = tamperedBytes[0]! ^ 1
-        const tampered = { ...second, ciphertext: tamperedBytes.toString('base64') }
+        const tampered = { ...second, ciphertext: tamperedBytes.toString('base64url') }
         await expect(receiver.decrypt(tampered)).rejects.toBeInstanceOf(SecureChannelError)
-        await expect(receiver.decrypt(second)).resolves.toEqual({ index: 1 })
     })
 
     it('cannot decrypt with a different PAKE session key', async () => {

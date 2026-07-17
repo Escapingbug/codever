@@ -7,13 +7,14 @@ import {
 
 describe('OpaquePairingAuthority', () => {
     it('derives a matching session key and consumes the one-time code atomically', async () => {
-        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1' })
+        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', domain: 'relay-client' })
         const ticket = authority.issue()
         const clientStart = await startOpaquePairingClient(ticket.code)
         const serverStart = authority.begin(clientStart.pairingId, clientStart.startLoginRequest)
         const clientFinish = finishOpaquePairingClient({
             code: ticket.code,
             serverId: 'relay-1',
+            domain: 'relay-client',
             clientLoginState: clientStart.clientLoginState,
             loginResponse: serverStart.loginResponse,
         })
@@ -28,7 +29,7 @@ describe('OpaquePairingAuthority', () => {
 
     it('expires after three minutes and clears incomplete handshakes', async () => {
         let now = Date.parse('2026-07-17T00:00:00.000Z')
-        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', now: () => now })
+        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', domain: 'relay-client', now: () => now })
         const ticket = authority.issue()
         const client = await startOpaquePairingClient(ticket.code)
         const started = authority.begin(client.pairingId, client.startLoginRequest)
@@ -39,7 +40,7 @@ describe('OpaquePairingAuthority', () => {
     })
 
     it('closes the request after the total attempt budget regardless of source IP', async () => {
-        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', maxAttempts: 5 })
+        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', domain: 'relay-client', maxAttempts: 5 })
         const ticket = authority.issue()
         for (let index = 0; index < 5; index += 1) {
             const wrong = await startOpaquePairingClient(`${ticket.pairingId}-AAAAAAAAAA`)
@@ -51,26 +52,27 @@ describe('OpaquePairingAuthority', () => {
     })
 
     it('allows the final budgeted attempt to finish successfully', async () => {
-        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', maxAttempts: 1 })
+        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', domain: 'relay-client', maxAttempts: 1 })
         const ticket = authority.issue()
         const clientStart = await startOpaquePairingClient(ticket.code)
         const serverStart = authority.begin(ticket.pairingId, clientStart.startLoginRequest)
         expect(authority.hasOpenPairing(ticket.pairingId)).toBe(false)
         const clientFinish = finishOpaquePairingClient({
-            code: ticket.code, serverId: 'relay-1', clientLoginState: clientStart.clientLoginState,
+            code: ticket.code, serverId: 'relay-1', domain: 'relay-client', clientLoginState: clientStart.clientLoginState,
             loginResponse: serverStart.loginResponse,
         })
         expect(authority.finish(serverStart.handshakeId, clientFinish.finishLoginRequest).sessionKey).toBe(clientFinish.sessionKey)
     })
 
     it('rejects the wrong code and a changed Relay identity', async () => {
-        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1' })
+        const authority = await OpaquePairingAuthority.create({ serverId: 'relay-1', domain: 'relay-client' })
         const ticket = authority.issue()
         const wrong = await startOpaquePairingClient(`${ticket.pairingId}-AAAAAAAAAA`)
         const serverStart = authority.begin(wrong.pairingId, wrong.startLoginRequest)
         expect(() => finishOpaquePairingClient({
             code: `${ticket.pairingId}-AAAAAAAAAA`,
             serverId: 'relay-1',
+            domain: 'relay-client',
             clientLoginState: wrong.clientLoginState,
             loginResponse: serverStart.loginResponse,
         })).toThrow('authentication failed')
@@ -80,6 +82,7 @@ describe('OpaquePairingAuthority', () => {
         expect(() => finishOpaquePairingClient({
             code: ticket.code,
             serverId: 'another-relay',
+            domain: 'relay-client',
             clientLoginState: correct.clientLoginState,
             loginResponse: correctResponse.loginResponse,
         })).toThrow('authentication failed')

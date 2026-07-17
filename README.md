@@ -108,12 +108,15 @@ The recommended Web deployment reverse-proxies Relay under the same HTTPS origin
 
 ## Security boundary
 
-- Relay stores public Gateway keys only; unknown, disabled, stale-epoch, or incorrectly signed Gateways are rejected.
-- Standard TLS protects links and provides ephemeral transport keys. The static Gateway key authenticates the machine; it is not used as a bulk-encryption key.
-- Relay is trusted with plaintext event content in this version. This is not end-to-end encryption against Relay.
-- Provider credentials and unrestricted filesystem access stay on Gateway.
-- Gateway persists before publishing; Relay transports commands at least once and uses idempotency keys to prevent duplicate effects.
-- Permission decisions are Gateway-authoritative and expire fail-closed.
+- Direct Client↔Relay and Gateway↔Relay links authenticate with OPAQUE-derived credentials. Their record protection uses independent random-nonce records, so delayed frames do not corrupt a shared receive counter.
+- Client↔Gateway pairing uses a three-minute, one-time OPAQUE code only to provision long-term X25519 device keys.
+- After pairing, every Client↔Gateway business message uses RFC 9180 HPKE Auth mode. Relay routes the envelope but cannot decrypt it or forge either endpoint.
+- HPKE envelopes bind Client/Gateway identities, both key IDs, message ID, creation time, and expiry. Gateway checks device revocation before every request.
+- Replayed messages return the cached response, while business `idempotencyKey` values prevent duplicate side effects across reconnects.
+- TLS remains recommended to hide routing metadata and reduce infrastructure exposure, but inner content confidentiality and endpoint authentication do not depend on HTTPS.
+- Provider credentials and unrestricted filesystem access stay on Gateway. Permission decisions remain Gateway-authoritative and fail closed.
+
+The complete protocol and threat model are documented in `docs/security-v2.md`.
 
 ## Current release limits
 

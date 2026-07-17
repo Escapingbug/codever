@@ -101,6 +101,7 @@ export class SecureGatewayHandshake {
                 this.relayStaticPublicKey = this.credential.relayStaticPublicKey
             } else {
                 const finished = finishOpaquePairingClient({
+                    domain: 'relay-gateway',
                     code: this.pairingCode!,
                     serverId: this.relayId,
                     clientLoginState: this.clientLoginState!,

@@ -1,9 +1,6 @@
 import {
-    finishOpaqueCredentialClientLogin,
-    finishOpaqueCredentialRegistration,
     finishOpaquePairingClient,
-    startOpaqueCredentialLogin,
-    startOpaqueCredentialRegistration,
+    generateHpkeKeyPair,
     startOpaquePairingClient,
 } from '@codever/secure-channel'
 import { mkdtemp } from 'node:fs/promises'
@@ -14,7 +11,7 @@ import { DeviceAuthenticator } from '../deviceAuthenticator'
 import { DeviceCredentialRepository } from '../deviceCredentialRepository'
 
 describe('DeviceAuthenticator', () => {
-    it('binds pairing to the Gateway identity and consumes it exactly once', async () => {
+    it('uses OPAQUE only for one-time pairing and consumes the pairing handshake once', async () => {
         const now = Date.parse('2026-07-17T08:00:00.000Z')
         const { authenticator } = await fixture(() => now)
         const ticket = authenticator.issuePairing()
@@ -22,100 +19,71 @@ describe('DeviceAuthenticator', () => {
         expect(Date.parse(ticket.expiresAt) - now).toBe(3 * 60_000)
 
         const clientStart = await startOpaquePairingClient(ticket.code)
-        const serverStart = await authenticator.begin({
-            mode: 'pairing',
+        const serverStart = authenticator.begin({
             credentialId: 'device-1',
-            subjectId: clientStart.pairingId,
+            pairingId: clientStart.pairingId,
             startLoginRequest: clientStart.startLoginRequest,
         })
         expect(Date.parse(serverStart.expiresAt) - now).toBe(30_000)
+
         const clientFinish = finishOpaquePairingClient({
+            domain: 'gateway-device',
             code: ticket.code,
             serverId: 'gateway-1',
             clientLoginState: clientStart.clientLoginState,
             loginResponse: serverStart.loginResponse,
         })
-        await expect(authenticator.finish({
+        expect(authenticator.finish({
             handshakeId: serverStart.handshakeId,
             finishLoginRequest: clientFinish.finishLoginRequest,
-        })).resolves.toEqual({
+        })).toEqual({
             credentialId: 'device-1',
             sessionKey: clientFinish.sessionKey,
-            credentialProvisioningRequired: true,
         })
-        await expect(authenticator.finish({
+        expect(() => authenticator.finish({
             handshakeId: serverStart.handshakeId,
             finishLoginRequest: clientFinish.finishLoginRequest,
-        })).rejects.toThrow('Gateway device handshake is invalid or expired')
+        })).toThrow('Gateway device pairing handshake is invalid or expired')
     }, 15_000)
 
-    it('rejects a wrong credential and prevents a revoked credential from starting', async () => {
+    it('registers and authorizes an HPKE public key, then rejects it after revocation', async () => {
         const { authenticator } = await fixture()
-        const correctSecret = 'correct-device-secret-000000000000'
-        const registrationStart = await startOpaqueCredentialRegistration(correctSecret)
-        const registrationResponse = await authenticator.createCredentialRegistrationResponse(
+        const deviceKeyPair = await generateHpkeKeyPair()
+
+        await expect(authenticator.register(
             'device-1',
-            registrationStart.registrationRequest,
-        )
-        const registration = await finishOpaqueCredentialRegistration({
-            secret: correctSecret,
-            subjectId: 'device-1',
-            serverId: 'gateway-1',
-            clientRegistrationState: registrationStart.clientRegistrationState,
-            registrationResponse: registrationResponse.registrationResponse,
-            expectedServerStaticPublicKey: registrationResponse.serverStaticPublicKey,
-        })
-        await authenticator.commitCredential('device-1', registration.registrationRecord, 'Alice phone')
-
-        const wrongStart = await startOpaqueCredentialLogin('wrong-device-secret-0000000000000')
-        const wrongServerStart = await authenticator.begin({
-            mode: 'credential',
+            deviceKeyPair.keyId,
+            deviceKeyPair.publicKey,
+            'Alice phone',
+        )).resolves.toMatchObject({
             credentialId: 'device-1',
-            subjectId: 'device-1',
-            startLoginRequest: wrongStart.startLoginRequest,
+            hpkeKeyId: deviceKeyPair.keyId,
+            hpkePublicKey: deviceKeyPair.publicKey,
+            enabled: true,
+            label: 'Alice phone',
         })
-        await expect(finishOpaqueCredentialClientLogin({
-            secret: 'wrong-device-secret-0000000000000',
-            subjectId: 'device-1',
-            serverId: 'gateway-1',
-            clientLoginState: wrongStart.clientLoginState,
-            loginResponse: wrongServerStart.loginResponse,
-            expectedServerStaticPublicKey: registrationResponse.serverStaticPublicKey,
-        })).rejects.toThrow('Credential authentication failed')
-
-        const correctStart = await startOpaqueCredentialLogin(correctSecret)
-        const correctServerStart = await authenticator.begin({
-            mode: 'credential',
-            credentialId: 'device-1',
-            subjectId: 'device-1',
-            startLoginRequest: correctStart.startLoginRequest,
-        })
-        const correctFinish = await finishOpaqueCredentialClientLogin({
-            secret: correctSecret,
-            subjectId: 'device-1',
-            serverId: 'gateway-1',
-            clientLoginState: correctStart.clientLoginState,
-            loginResponse: correctServerStart.loginResponse,
-            expectedServerStaticPublicKey: registrationResponse.serverStaticPublicKey,
-        })
-        await expect(authenticator.finish({
-            handshakeId: correctServerStart.handshakeId,
-            finishLoginRequest: correctFinish.finishLoginRequest,
-        })).resolves.toEqual({
-            credentialId: 'device-1',
-            sessionKey: correctFinish.sessionKey,
-            credentialProvisioningRequired: false,
+        await expect(authenticator.authorize('device-1')).resolves.toMatchObject({
+            hpkeKeyId: deviceKeyPair.keyId,
+            hpkePublicKey: deviceKeyPair.publicKey,
+            enabled: true,
         })
 
         expect(await authenticator.revoke('device-1')).toBe(true)
-        const retry = await startOpaqueCredentialLogin(correctSecret)
-        await expect(authenticator.begin({
-            mode: 'credential',
-            credentialId: 'device-1',
-            subjectId: 'device-1',
-            startLoginRequest: retry.startLoginRequest,
-        })).rejects.toThrow('Device credential is unknown or disabled')
-    }, 15_000)
+        expect(await authenticator.revoke('device-1')).toBe(false)
+        await expect(authenticator.authorize('device-1')).rejects.toThrow('Device credential is unknown or revoked')
+    })
+
+    it('rejects an HPKE public key whose key ID does not match', async () => {
+        const { authenticator } = await fixture()
+        const deviceKeyPair = await generateHpkeKeyPair()
+
+        await expect(authenticator.register(
+            'device-1',
+            'x25519-wrong-key-id',
+            deviceKeyPair.publicKey,
+        )).rejects.toThrow('Device HPKE key ID mismatch')
+        await expect(authenticator.authorize('device-1')).rejects.toThrow('Device credential is unknown or revoked')
+    })
 })
 
 async function fixture(now?: () => number): Promise<{
@@ -128,6 +96,7 @@ async function fixture(now?: () => number): Promise<{
         gatewayId: 'gateway-1',
         serverSetup: repository.serverSetup,
         credentials: repository,
+        hpkeKeyPair: repository.hpkeKeyPair,
         now,
     })
     return { repository, authenticator }

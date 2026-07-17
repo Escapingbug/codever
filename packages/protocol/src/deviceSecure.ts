@@ -1,11 +1,8 @@
 import { z } from 'zod'
 import { IsoDateTimeSchema, OpaqueIdSchema, PROTOCOL_VERSION, parseWithSchema } from './common'
-import { SecureEnvelopeSchema } from './secure'
+import { HpkeEnvelopeSchema, SecureEnvelopeSchema } from './secure'
 
-const deviceSecureFrame = <TType extends string, TPayload extends z.ZodType>(
-    type: TType,
-    payload: TPayload,
-) => z.object({
+const frame = <TType extends string, TPayload extends z.ZodType>(type: TType, payload: TPayload) => z.object({
     version: z.literal(PROTOCOL_VERSION),
     type: z.literal(type),
     messageId: OpaqueIdSchema,
@@ -13,11 +10,11 @@ const deviceSecureFrame = <TType extends string, TPayload extends z.ZodType>(
 }).strict()
 
 const opaqueMessage = z.string().min(1).max(16_384)
+const hpkePublicKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 
 export const ClientSecureAuthStartSchema = z.object({
-    mode: z.enum(['pairing', 'credential']),
     credentialId: OpaqueIdSchema,
-    subjectId: OpaqueIdSchema,
+    pairingId: OpaqueIdSchema,
     startLoginRequest: opaqueMessage,
 }).strict()
 
@@ -34,51 +31,32 @@ export const ClientSecureAuthFinishSchema = z.object({
     finishLoginRequest: opaqueMessage,
 }).strict()
 
+export const GatewaySecureAuthAcceptedPayloadSchema = z.object({
+    gatewayId: OpaqueIdSchema,
+    credentialId: OpaqueIdSchema,
+    acceptedAt: IsoDateTimeSchema,
+    gatewayHpkePublicKey: hpkePublicKey,
+    gatewayHpkeKeyId: OpaqueIdSchema,
+}).strict()
+
 export const GatewaySecureAuthAcceptedSchema = z.object({
     handshakeId: OpaqueIdSchema,
     envelope: SecureEnvelopeSchema,
 }).strict()
 
-export const GatewaySecureAuthAcceptedPayloadSchema = z.object({
-    gatewayId: OpaqueIdSchema,
-    credentialId: OpaqueIdSchema,
-    acceptedAt: IsoDateTimeSchema,
-    credentialProvisioningRequired: z.boolean(),
-}).strict()
-
 export const GatewaySecureAuthRejectedSchema = z.object({
     code: z.enum([
-        'pairing_closed',
-        'pairing_expired',
-        'attempts_exhausted',
-        'unknown_device',
-        'invalid_handshake',
-        'authentication_failed',
-        'protocol_error',
+        'pairing_closed', 'pairing_expired', 'attempts_exhausted',
+        'invalid_handshake', 'authentication_failed', 'protocol_error',
     ]),
     message: z.string().min(1).max(500),
 }).strict()
 
-export const ClientSecureAuthStartFrameSchema = deviceSecureFrame(
-    'client.secure-auth.start',
-    ClientSecureAuthStartSchema,
-)
-export const GatewaySecureAuthResponseFrameSchema = deviceSecureFrame(
-    'gateway.secure-auth.response',
-    GatewaySecureAuthResponseSchema,
-)
-export const ClientSecureAuthFinishFrameSchema = deviceSecureFrame(
-    'client.secure-auth.finish',
-    ClientSecureAuthFinishSchema,
-)
-export const GatewaySecureAuthAcceptedFrameSchema = deviceSecureFrame(
-    'gateway.secure-auth.accepted',
-    GatewaySecureAuthAcceptedSchema,
-)
-export const GatewaySecureAuthRejectedFrameSchema = deviceSecureFrame(
-    'gateway.secure-auth.rejected',
-    GatewaySecureAuthRejectedSchema,
-)
+export const ClientSecureAuthStartFrameSchema = frame('client.secure-auth.start', ClientSecureAuthStartSchema)
+export const GatewaySecureAuthResponseFrameSchema = frame('gateway.secure-auth.response', GatewaySecureAuthResponseSchema)
+export const ClientSecureAuthFinishFrameSchema = frame('client.secure-auth.finish', ClientSecureAuthFinishSchema)
+export const GatewaySecureAuthAcceptedFrameSchema = frame('gateway.secure-auth.accepted', GatewaySecureAuthAcceptedSchema)
+export const GatewaySecureAuthRejectedFrameSchema = frame('gateway.secure-auth.rejected', GatewaySecureAuthRejectedSchema)
 
 export const DeviceSecureHandshakeFrameSchema = z.discriminatedUnion('type', [
     ClientSecureAuthStartFrameSchema,
@@ -88,72 +66,58 @@ export const DeviceSecureHandshakeFrameSchema = z.discriminatedUnion('type', [
     GatewaySecureAuthRejectedFrameSchema,
 ])
 
-export const DeviceCredentialRegistrationStartSchema = z.object({
+export const DeviceKeyRegisterFrameSchema = frame('device.key.register', z.object({
     deviceId: OpaqueIdSchema,
-    registrationRequest: opaqueMessage,
-}).strict()
+    deviceHpkePublicKey: hpkePublicKey,
+    deviceHpkeKeyId: OpaqueIdSchema,
+}).strict())
 
-export const DeviceCredentialRegistrationResponseSchema = z.object({
+export const GatewayKeyRegisteredFrameSchema = frame('gateway.key.registered', z.object({
     deviceId: OpaqueIdSchema,
-    registrationResponse: opaqueMessage,
-    serverStaticPublicKey: z.string().min(16),
-}).strict()
-
-export const DeviceCredentialRegistrationCommitSchema = z.object({
-    deviceId: OpaqueIdSchema,
-    registrationRecord: opaqueMessage,
-}).strict()
-
-export const DeviceCredentialRegistrationAcceptedSchema = z.object({
-    deviceId: OpaqueIdSchema,
+    gatewayHpkePublicKey: hpkePublicKey,
+    gatewayHpkeKeyId: OpaqueIdSchema,
     registeredAt: IsoDateTimeSchema,
-}).strict()
+}).strict())
 
-export const DeviceCredentialRegistrationStartFrameSchema = deviceSecureFrame(
-    'device.credential.registration.start',
-    DeviceCredentialRegistrationStartSchema,
-)
-export const DeviceCredentialRegistrationResponseFrameSchema = deviceSecureFrame(
-    'device.credential.registration.response',
-    DeviceCredentialRegistrationResponseSchema,
-)
-export const DeviceCredentialRegistrationCommitFrameSchema = deviceSecureFrame(
-    'device.credential.registration.commit',
-    DeviceCredentialRegistrationCommitSchema,
-)
-export const DeviceCredentialRegistrationAcceptedFrameSchema = deviceSecureFrame(
-    'device.credential.registration.accepted',
-    DeviceCredentialRegistrationAcceptedSchema,
-)
-
-export const DeviceCredentialFrameSchema = z.discriminatedUnion('type', [
-    DeviceCredentialRegistrationStartFrameSchema,
-    DeviceCredentialRegistrationResponseFrameSchema,
-    DeviceCredentialRegistrationCommitFrameSchema,
-    DeviceCredentialRegistrationAcceptedFrameSchema,
+export const DeviceKeyProvisioningFrameSchema = z.discriminatedUnion('type', [
+    DeviceKeyRegisterFrameSchema,
+    GatewayKeyRegisteredFrameSchema,
 ])
 
-export type ClientSecureAuthStart = z.infer<typeof ClientSecureAuthStartSchema>
-export type GatewaySecureAuthResponse = z.infer<typeof GatewaySecureAuthResponseSchema>
-export type ClientSecureAuthFinish = z.infer<typeof ClientSecureAuthFinishSchema>
-export type GatewaySecureAuthAccepted = z.infer<typeof GatewaySecureAuthAcceptedSchema>
-export type GatewaySecureAuthAcceptedPayload = z.infer<typeof GatewaySecureAuthAcceptedPayloadSchema>
-export type GatewaySecureAuthRejected = z.infer<typeof GatewaySecureAuthRejectedSchema>
-export type ClientSecureAuthStartFrame = z.infer<typeof ClientSecureAuthStartFrameSchema>
-export type GatewaySecureAuthResponseFrame = z.infer<typeof GatewaySecureAuthResponseFrameSchema>
-export type ClientSecureAuthFinishFrame = z.infer<typeof ClientSecureAuthFinishFrameSchema>
-export type GatewaySecureAuthAcceptedFrame = z.infer<typeof GatewaySecureAuthAcceptedFrameSchema>
-export type GatewaySecureAuthRejectedFrame = z.infer<typeof GatewaySecureAuthRejectedFrameSchema>
+export const DeviceHpkeDataFrameSchema = z.object({
+    version: z.literal(PROTOCOL_VERSION),
+    type: z.literal('device.hpke-data'),
+    messageId: OpaqueIdSchema,
+    envelope: HpkeEnvelopeSchema,
+}).strict()
+
+export const DeviceBindFrameSchema = frame('device.bind', z.object({
+    gatewayId: OpaqueIdSchema,
+    credentialId: OpaqueIdSchema,
+    boundAt: IsoDateTimeSchema,
+}).strict())
+
+export const GatewayBoundFrameSchema = frame('gateway.bound', z.object({
+    gatewayId: OpaqueIdSchema,
+    credentialId: OpaqueIdSchema,
+    boundAt: IsoDateTimeSchema,
+}).strict())
+
+export const DeviceBindingFrameSchema = z.discriminatedUnion('type', [DeviceBindFrameSchema, GatewayBoundFrameSchema])
+
 export type DeviceSecureHandshakeFrame = z.infer<typeof DeviceSecureHandshakeFrameSchema>
-export type DeviceCredentialRegistrationStart = z.infer<typeof DeviceCredentialRegistrationStartSchema>
-export type DeviceCredentialRegistrationResponse = z.infer<typeof DeviceCredentialRegistrationResponseSchema>
-export type DeviceCredentialRegistrationCommit = z.infer<typeof DeviceCredentialRegistrationCommitSchema>
-export type DeviceCredentialRegistrationAccepted = z.infer<typeof DeviceCredentialRegistrationAcceptedSchema>
-export type DeviceCredentialFrame = z.infer<typeof DeviceCredentialFrameSchema>
+export type GatewaySecureAuthAcceptedPayload = z.infer<typeof GatewaySecureAuthAcceptedPayloadSchema>
+export type DeviceKeyProvisioningFrame = z.infer<typeof DeviceKeyProvisioningFrameSchema>
+export type DeviceHpkeDataFrame = z.infer<typeof DeviceHpkeDataFrameSchema>
+export type DeviceBindingFrame = z.infer<typeof DeviceBindingFrameSchema>
 
 export const parseDeviceSecureHandshakeFrame = (value: unknown): DeviceSecureHandshakeFrame =>
     parseWithSchema(DeviceSecureHandshakeFrameSchema, value)
-export const parseDeviceCredentialFrame = (value: unknown): DeviceCredentialFrame =>
-    parseWithSchema(DeviceCredentialFrameSchema, value)
 export const parseGatewaySecureAuthAcceptedPayload = (value: unknown): GatewaySecureAuthAcceptedPayload =>
     parseWithSchema(GatewaySecureAuthAcceptedPayloadSchema, value)
+export const parseDeviceKeyProvisioningFrame = (value: unknown): DeviceKeyProvisioningFrame =>
+    parseWithSchema(DeviceKeyProvisioningFrameSchema, value)
+export const parseDeviceHpkeDataFrame = (value: unknown): DeviceHpkeDataFrame =>
+    parseWithSchema(DeviceHpkeDataFrameSchema, value)
+export const parseDeviceBindingFrame = (value: unknown): DeviceBindingFrame =>
+    parseWithSchema(DeviceBindingFrameSchema, value)

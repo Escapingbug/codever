@@ -42,6 +42,7 @@ describe('two-layer secure client path', () => {
         const deviceCredentials = await DeviceCredentialRepository.open(join(directory, 'gateway-devices.json'))
         const deviceAuth = await DeviceAuthenticator.create({
             gatewayId: 'gateway-1', serverSetup: deviceCredentials.serverSetup, credentials: deviceCredentials,
+            hpkeKeyPair: deviceCredentials.hpkeKeyPair,
         })
         const deviceTicket = deviceAuth.issuePairing()
         const deviceSessions = new Map<string, DeviceSecureSession>()

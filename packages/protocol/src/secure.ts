@@ -2,11 +2,28 @@ import { z } from 'zod'
 import { IsoDateTimeSchema, OpaqueIdSchema, PROTOCOL_VERSION, parseWithSchema } from './common'
 
 export const SecureEnvelopeSchema = z.object({
-    version: z.literal(1),
+    version: z.literal(2),
     channelId: OpaqueIdSchema,
-    sequence: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
+    messageId: OpaqueIdSchema,
+    nonce: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
     ciphertext: z.string().regex(/^[A-Za-z0-9_-]+$/).min(16),
 }).strict()
+
+export const HpkeEnvelopeSchema = z.object({
+    version: z.literal(1),
+    suite: z.literal('DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_128_GCM'),
+    messageId: OpaqueIdSchema,
+    senderId: OpaqueIdSchema,
+    recipientId: OpaqueIdSchema,
+    senderKeyId: OpaqueIdSchema,
+    recipientKeyId: OpaqueIdSchema,
+    createdAt: IsoDateTimeSchema,
+    expiresAt: IsoDateTimeSchema,
+    enc: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    ciphertext: z.string().regex(/^[A-Za-z0-9_-]+$/).min(16),
+}).strict().refine(value => Date.parse(value.expiresAt) > Date.parse(value.createdAt), {
+    message: 'expiresAt must be after createdAt',
+})
 
 export const GatewaySecureAuthStartSchema = z.object({
     gatewayId: OpaqueIdSchema,
@@ -114,6 +131,7 @@ export const SecureControlFrameSchema = z.discriminatedUnion('type', [
 ])
 
 export type SecureEnvelope = z.infer<typeof SecureEnvelopeSchema>
+export type HpkeEnvelope = z.infer<typeof HpkeEnvelopeSchema>
 export type GatewaySecureAuthStart = z.infer<typeof GatewaySecureAuthStartSchema>
 export type RelaySecureAuthResponse = z.infer<typeof RelaySecureAuthResponseSchema>
 export type GatewaySecureAuthFinish = z.infer<typeof GatewaySecureAuthFinishSchema>
@@ -125,6 +143,7 @@ export type SecureDataFrame = z.infer<typeof SecureDataFrameSchema>
 export type SecureControlFrame = z.infer<typeof SecureControlFrameSchema>
 
 export const parseSecureEnvelope = (value: unknown): SecureEnvelope => parseWithSchema(SecureEnvelopeSchema, value)
+export const parseHpkeEnvelope = (value: unknown): HpkeEnvelope => parseWithSchema(HpkeEnvelopeSchema, value)
 export const parseGatewaySecureHandshakeFrame = (value: unknown): GatewaySecureHandshakeFrame => parseWithSchema(GatewaySecureHandshakeFrameSchema, value)
 export const parseSecureDataFrame = (value: unknown): SecureDataFrame => parseWithSchema(SecureDataFrameSchema, value)
 export const parseSecureControlFrame = (value: unknown): SecureControlFrame => parseWithSchema(SecureControlFrameSchema, value)

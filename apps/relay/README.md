@@ -1,8 +1,8 @@
 # Codever Relay
 
-Relay is a secure-only ACP Gateway transport. It terminates independent OPAQUE channels for Gateways and Clients, then encrypts every application frame with `SessionCipher`. HTTPS is optional at the deployment edge and is not required by Relay's security model.
+Relay is a secure-only ACP Gateway transport. It authenticates its direct Gateway and Client links with OPAQUE. HTTPS is optional at the deployment edge and is not required by the application security model.
 
-Relay stores Gateway metadata and long-term OPAQUE credential records. It has no user accounts, passwords, bearer tokens, HTTP login, or legacy authentication compatibility. Client-to-Gateway `opaquePayload` values are routed unchanged; Relay never decrypts that inner secure channel.
+Relay stores Gateway metadata and long-term OPAQUE credentials for its own direct links. It has no user accounts, bearer tokens, HTTP login, or legacy authentication compatibility. Client-to-Gateway `opaquePayload` values are routed unchanged. The inner channel uses authenticated HPKE messages, so Relay cannot decrypt or forge Client/Gateway business frames.
 
 ## Start
 
@@ -26,7 +26,7 @@ pnpm --filter @codever/relay pair:gateway
 pnpm --filter @codever/relay pair:client
 ```
 
-Pairing provisions a long-term credential. Subsequent connections use that credential and do not reuse the pairing code.
+These commands provision credentials for direct Relay links. Gateway device pairing is separate: a one-time Gateway pairing code registers a Client X25519 public key, and subsequent Client↔Gateway tunnels authenticate with HPKE rather than another password login.
 
 ## Public surface
 

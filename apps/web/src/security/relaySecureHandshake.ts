@@ -103,6 +103,7 @@ export class RelaySecureHandshake {
         this.relayStaticPublicKey = this.options.credential.relayStaticPublicKey
       } else {
         const finished = finishOpaquePairingClient({
+          domain: 'relay-client',
           code: this.options.pairingCode!,
           serverId: this.relayId,
           clientLoginState: this.clientLoginState!,

@@ -57,6 +57,7 @@ export class SecureClientAuthenticator {
         const randomId = input.randomId ?? (() => globalThis.crypto.randomUUID())
         const handshakeTtlMs = input.handshakeTtlMs ?? 30_000
         const pairing = await OpaquePairingAuthority.create({
+            domain: 'relay-client',
             serverId: input.relayId,
             serverSetup: input.serverSetup,
             now,

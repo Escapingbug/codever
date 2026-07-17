@@ -168,6 +168,12 @@ importers:
 
   packages/secure-channel:
     dependencies:
+      '@hpke/core':
+        specifier: 1.9.0
+        version: 1.9.0
+      '@hpke/dhkem-x25519':
+        specifier: 1.8.0
+        version: 1.8.0
       '@serenity-kit/opaque':
         specifier: 1.1.0
         version: 1.1.0
@@ -439,6 +445,18 @@ packages:
     engines: {node: '>=18.14.1'}
     peerDependencies:
       hono: 4.12.30
+
+  '@hpke/common@1.10.1':
+    resolution: {integrity: sha512-moJwhmtLtuxiUzzNp1jpfBfx8yefKoO9D/RCR9dmwrnc7qjJqId1rEtQz+lSlU5cabX8daToMSx/7HayXOiaFw==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/core@1.9.0':
+    resolution: {integrity: sha512-pFxWl1nNJeQCSUFs7+GAblHvXBCjn9EPN65vdKlYQil2aURaRxfGMO6vBKGqm1YHTKwiAxJQNEI70PbSowMP9Q==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/dhkem-x25519@1.8.0':
+    resolution: {integrity: sha512-S1MWWkAfu+TFxySgv5+2P3O4Mx/jk7BsoplzQaA1s3sfUJVJ2UsZsSzSsMc+FXJumLXncoJFlO6mK6mDGspfmA==}
+    engines: {node: '>=16.0.0'}
 
   '@isaacs/cliui@8.0.2':
     resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
@@ -2437,6 +2455,16 @@ snapshots:
   '@hono/node-server@1.19.14(hono@4.12.30)':
     dependencies:
       hono: 4.12.30
+
+  '@hpke/common@1.10.1': {}
+
+  '@hpke/core@1.9.0':
+    dependencies:
+      '@hpke/common': 1.10.1
+
+  '@hpke/dhkem-x25519@1.8.0':
+    dependencies:
+      '@hpke/common': 1.10.1
 
   '@isaacs/cliui@8.0.2':
     dependencies:

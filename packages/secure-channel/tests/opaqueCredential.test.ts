@@ -12,7 +12,7 @@ import {
     startOpaqueCredentialServerLogin,
 } from '../src/opaqueCredential'
 
-describe('OPAQUE long-lived device credential', () => {
+describe('OPAQUE long-lived Relay credential', () => {
     it('registers without revealing the secret and creates fresh matching login keys', async () => {
         const serverSetup = await createOpaqueServerSetup()
         const serverPublicKey = await getOpaqueServerPublicKey(serverSetup)

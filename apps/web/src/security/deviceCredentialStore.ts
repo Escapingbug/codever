@@ -1,12 +1,14 @@
+import type { HpkeKeyPair } from '@codever/secure-channel'
 import type { SecretStore } from './secretStore'
 
 export interface ClientDeviceCredential {
-  version: 1
+  version: 2
   relayProfileId: string
   gatewayId: string
   credentialId: string
-  secret: string
-  gatewayStaticPublicKey: string
+  deviceHpkeKeyPair: HpkeKeyPair
+  gatewayHpkeKeyId: string
+  gatewayHpkePublicKey: string
   createdAt: string
 }
 
@@ -41,10 +43,19 @@ function account(relayProfileId: string, gatewayId: string): string {
 function parseCredential(value: unknown): ClientDeviceCredential {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid device credential')
   const input = value as Record<string, unknown>
-  if (input.version !== 1) throw new Error('Unsupported device credential version')
-  for (const field of ['relayProfileId', 'gatewayId', 'credentialId', 'secret', 'gatewayStaticPublicKey', 'createdAt'] as const) {
+  if (input.version !== 2) throw new Error('Unsupported device credential version; pair this Gateway again')
+  for (const field of ['relayProfileId', 'gatewayId', 'credentialId', 'gatewayHpkeKeyId', 'gatewayHpkePublicKey', 'createdAt'] as const) {
     if (typeof input[field] !== 'string' || !input[field]) throw new Error(`Invalid device credential ${field}`)
   }
-  if ((input.secret as string).length < 32) throw new Error('Device credential secret is too short')
+  if (!isKeyPair(input.deviceHpkeKeyPair)) throw new Error('Invalid device HPKE key pair')
+  if (!/^[A-Za-z0-9_-]{43}$/.test(input.gatewayHpkePublicKey as string)) throw new Error('Invalid Gateway HPKE public key')
   return input as unknown as ClientDeviceCredential
+}
+
+function isKeyPair(value: unknown): value is HpkeKeyPair {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const key = value as Record<string, unknown>
+  return typeof key.keyId === 'string' && !!key.keyId
+    && typeof key.publicKey === 'string' && /^[A-Za-z0-9_-]{43}$/.test(key.publicKey)
+    && typeof key.privateKey === 'string' && /^[A-Za-z0-9_-]{43}$/.test(key.privateKey)
 }

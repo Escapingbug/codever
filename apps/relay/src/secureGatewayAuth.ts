@@ -61,6 +61,7 @@ export class SecureGatewayAuthenticator {
         const randomId = input.randomId ?? (() => globalThis.crypto.randomUUID())
         const handshakeTtlMs = input.handshakeTtlMs ?? 30_000
         const pairing = await OpaquePairingAuthority.create({
+            domain: 'relay-gateway',
             serverId: input.relayId,
             serverSetup: input.serverSetup,
             now,

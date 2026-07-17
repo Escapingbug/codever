@@ -1,37 +1,40 @@
 import {
   PROTOCOL_VERSION,
-  parseDeviceCredentialFrame,
   parseClientGatewayFrame,
+  parseDeviceBindingFrame,
+  parseDeviceHpkeDataFrame,
+  parseDeviceKeyProvisioningFrame,
   parseDeviceSecureHandshakeFrame,
   parseGatewaySecureAuthAcceptedPayload,
   parseSecureDataFrame,
+  type ClientGatewayFrame,
   type ClientGatewayRequestFrame,
   type ClientGatewayResponseFrame,
-  type ClientGatewayFrame,
-  type DeviceCredentialFrame,
+  type DeviceHpkeDataFrame,
   type DeviceSecureHandshakeFrame,
   type SecureDataFrame,
 } from '@codever/protocol'
 import {
-  finishOpaqueCredentialClientLogin,
-  finishOpaqueCredentialRegistration,
   finishOpaquePairingClient,
-  generateOpaqueCredentialSecret,
+  generateHpkeKeyPair,
+  HpkeMessageCipher,
   SessionCipher,
-  startOpaqueCredentialLogin,
-  startOpaqueCredentialRegistration,
   startOpaquePairingClient,
+  type HpkeKeyPair,
 } from '@codever/secure-channel'
 import type { ClientDeviceCredential } from './deviceCredentialStore'
 
 export class DeviceSecureHandshake {
-  private state: 'idle' | 'waiting-response' | 'waiting-accepted' | 'provisioning' | 'ready' = 'idle'
+  private state: 'idle' | 'waiting-response' | 'waiting-accepted' | 'provisioning' | 'waiting-bind' | 'ready' = 'idle'
   private clientLoginState?: string
   private handshakeId?: string
   private sessionKey?: string
-  private gatewayStaticPublicKey?: string
-  private cipher?: SessionCipher
-  private registration?: { secret: string; clientRegistrationState: string }
+  private provisioningCipher?: SessionCipher
+  private applicationCipher?: HpkeMessageCipher
+  private deviceKeys?: HpkeKeyPair
+  private gatewayKey?: { keyId: string; publicKey: string }
+  private pairingCode?: string
+  private credential?: ClientDeviceCredential
 
   constructor(private readonly options: {
     relayProfileId: string
@@ -41,6 +44,7 @@ export class DeviceSecureHandshake {
     credential?: ClientDeviceCredential
     saveCredential: (credential: ClientDeviceCredential) => Promise<void>
     createMessageId?: () => string
+    now?: () => number
   }) {
     if (!options.pairingCode && !options.credential) throw new Error('A pairing code or device credential is required')
     if (options.credential && (options.credential.gatewayId !== options.gatewayId
@@ -48,175 +52,197 @@ export class DeviceSecureHandshake {
       || options.credential.relayProfileId !== options.relayProfileId)) {
       throw new Error('Device credential identity mismatch')
     }
+    this.pairingCode = options.pairingCode
+    this.credential = options.credential
   }
 
   get ready(): boolean { return this.state === 'ready' }
 
   async start(): Promise<string> {
     if (this.state !== 'idle') throw new Error('Device secure handshake already started')
-    let subjectId: string
-    let startLoginRequest: string
-    let mode: 'pairing' | 'credential'
-    if (this.options.credential) {
-      const started = await startOpaqueCredentialLogin(this.options.credential.secret)
-      this.clientLoginState = started.clientLoginState
-      startLoginRequest = started.startLoginRequest
-      subjectId = this.options.credentialId
-      mode = 'credential'
-    } else {
-      const started = await startOpaquePairingClient(this.options.pairingCode!)
-      this.clientLoginState = started.clientLoginState
-      startLoginRequest = started.startLoginRequest
-      subjectId = started.pairingId
-      mode = 'pairing'
+    if (this.credential) {
+      this.deviceKeys = this.credential.deviceHpkeKeyPair
+      this.gatewayKey = {
+        keyId: this.credential.gatewayHpkeKeyId,
+        publicKey: this.credential.gatewayHpkePublicKey,
+      }
+      await this.initializeApplicationCipher()
+      this.state = 'waiting-bind'
+      return this.encryptBinding()
     }
+    this.deviceKeys = await generateHpkeKeyPair()
+    const started = await startOpaquePairingClient(this.pairingCode!)
+    this.clientLoginState = started.clientLoginState
     this.state = 'waiting-response'
     return encodeOpaquePayload({
       version: PROTOCOL_VERSION,
       type: 'client.secure-auth.start',
       messageId: this.messageId(),
-      payload: { mode, credentialId: this.options.credentialId, subjectId, startLoginRequest },
+      payload: {
+        credentialId: this.options.credentialId,
+        pairingId: started.pairingId,
+        startLoginRequest: started.startLoginRequest,
+      },
     } satisfies DeviceSecureHandshakeFrame)
   }
 
   async handle(opaquePayload: string): Promise<string | undefined> {
     const value = decodeOpaquePayload(opaquePayload)
     if (this.state === 'waiting-response' || this.state === 'waiting-accepted') {
-      return this.handleHandshake(parseDeviceSecureHandshakeFrame(value))
+      return this.handlePairing(parseDeviceSecureHandshakeFrame(value))
     }
-    if (this.state !== 'provisioning') throw new Error('Unexpected secure device payload')
-    const plaintext = await this.cipher!.decrypt(parseSecureDataFrame(value).envelope)
-    return this.handleProvisioning(parseDeviceCredentialFrame(plaintext))
+    if (this.state === 'provisioning') return this.handleProvisioning(value)
+    if (this.state === 'waiting-bind') return this.handleBinding(value)
+    throw new Error('Unexpected secure device payload')
   }
 
   async encryptRequest(request: ClientGatewayRequestFrame): Promise<string> {
-    if (!this.ready || !this.cipher) throw new Error('Device secure channel is not ready')
-    return this.encrypt(request)
+    if (!this.ready) throw new Error('Device secure channel is not ready')
+    return this.encryptApplication(request)
   }
 
   async decryptResponse(opaquePayload: string): Promise<ClientGatewayResponseFrame> {
-    if (!this.ready || !this.cipher) throw new Error('Device secure channel is not ready')
-    return (await this.cipher.decrypt(parseSecureDataFrame(decodeOpaquePayload(opaquePayload)).envelope)) as ClientGatewayResponseFrame
+    return this.decryptFrame(opaquePayload) as Promise<ClientGatewayResponseFrame>
   }
 
   async decryptFrame(opaquePayload: string): Promise<ClientGatewayFrame> {
-    if (!this.ready || !this.cipher) throw new Error('Device secure channel is not ready')
-    return parseClientGatewayFrame(
-      await this.cipher.decrypt(parseSecureDataFrame(decodeOpaquePayload(opaquePayload)).envelope),
-    )
+    if (!this.ready || !this.applicationCipher) throw new Error('Device secure channel is not ready')
+    const wire = parseDeviceHpkeDataFrame(decodeOpaquePayload(opaquePayload))
+    if (wire.messageId !== wire.envelope.messageId) throw new Error('Device HPKE message ID mismatch')
+    return parseClientGatewayFrame(await this.applicationCipher.decrypt(wire.envelope))
   }
 
-  private async handleHandshake(frame: DeviceSecureHandshakeFrame): Promise<string | undefined> {
+  private async handlePairing(frame: DeviceSecureHandshakeFrame): Promise<string | undefined> {
     if (frame.type === 'gateway.secure-auth.rejected') throw new Error(`Gateway authentication rejected: ${frame.payload.message}`)
     if (this.state === 'waiting-response') {
       if (frame.type !== 'gateway.secure-auth.response' || frame.payload.gatewayId !== this.options.gatewayId) {
-        throw new Error('Unexpected Gateway authentication response')
+        throw new Error('Unexpected Gateway pairing response')
       }
       this.handshakeId = frame.payload.handshakeId
-      let finishLoginRequest: string
-      if (this.options.credential) {
-        const finished = await finishOpaqueCredentialClientLogin({
-          secret: this.options.credential.secret,
-          subjectId: this.options.credentialId,
-          serverId: this.options.gatewayId,
-          clientLoginState: this.clientLoginState!,
-          loginResponse: frame.payload.loginResponse,
-          expectedServerStaticPublicKey: this.options.credential.gatewayStaticPublicKey,
-        })
-        finishLoginRequest = finished.finishLoginRequest
-        this.sessionKey = finished.sessionKey
-        this.gatewayStaticPublicKey = this.options.credential.gatewayStaticPublicKey
-      } else {
-        const finished = finishOpaquePairingClient({
-          code: this.options.pairingCode!,
-          serverId: this.options.gatewayId,
-          clientLoginState: this.clientLoginState!,
-          loginResponse: frame.payload.loginResponse,
-        })
-        finishLoginRequest = finished.finishLoginRequest
-        this.sessionKey = finished.sessionKey
-        this.gatewayStaticPublicKey = finished.serverStaticPublicKey
-      }
+      const finished = finishOpaquePairingClient({
+        domain: 'gateway-device',
+        code: this.pairingCode!,
+        serverId: this.options.gatewayId,
+        clientLoginState: this.clientLoginState!,
+        loginResponse: frame.payload.loginResponse,
+      })
+      this.sessionKey = finished.sessionKey
       this.state = 'waiting-accepted'
       return encodeOpaquePayload({
         version: PROTOCOL_VERSION,
         type: 'client.secure-auth.finish',
         messageId: this.messageId(),
-        payload: { handshakeId: frame.payload.handshakeId, finishLoginRequest },
+        payload: { handshakeId: frame.payload.handshakeId, finishLoginRequest: finished.finishLoginRequest },
       } satisfies DeviceSecureHandshakeFrame)
     }
     if (frame.type !== 'gateway.secure-auth.accepted' || frame.payload.handshakeId !== this.handshakeId) {
-      throw new Error('Unexpected Gateway authentication acceptance')
+      throw new Error('Unexpected Gateway pairing acceptance')
     }
-    this.cipher = await SessionCipher.create({
+    this.provisioningCipher = await SessionCipher.create({
       sessionKey: this.sessionKey!, role: 'initiator', channelId: frame.payload.envelope.channelId,
     })
-    const accepted = parseGatewaySecureAuthAcceptedPayload(await this.cipher.decrypt(frame.payload.envelope))
+    const accepted = parseGatewaySecureAuthAcceptedPayload(await this.provisioningCipher.decrypt(frame.payload.envelope))
     if (accepted.gatewayId !== this.options.gatewayId || accepted.credentialId !== this.options.credentialId) {
       throw new Error('Gateway accepted another device identity')
     }
-    if (!accepted.credentialProvisioningRequired) {
-      this.state = 'ready'
-      return undefined
-    }
-    const secret = generateOpaqueCredentialSecret()
-    const registration = await startOpaqueCredentialRegistration(secret)
-    this.registration = { secret, clientRegistrationState: registration.clientRegistrationState }
+    this.gatewayKey = { keyId: accepted.gatewayHpkeKeyId, publicKey: accepted.gatewayHpkePublicKey }
     this.state = 'provisioning'
-    return this.encrypt({
+    return this.encryptTemporary({
       version: PROTOCOL_VERSION,
-      type: 'device.credential.registration.start',
+      type: 'device.key.register',
       messageId: this.messageId(),
-      payload: { deviceId: this.options.credentialId, registrationRequest: registration.registrationRequest },
-    } satisfies DeviceCredentialFrame)
+      payload: {
+        deviceId: this.options.credentialId,
+        deviceHpkeKeyId: this.deviceKeys!.keyId,
+        deviceHpkePublicKey: this.deviceKeys!.publicKey,
+      },
+    })
   }
 
-  private async handleProvisioning(frame: DeviceCredentialFrame): Promise<string | undefined> {
-    if (frame.type === 'device.credential.registration.response') {
-      if (frame.payload.deviceId !== this.options.credentialId) throw new Error('Credential response belongs to another device')
-      const finished = await finishOpaqueCredentialRegistration({
-        secret: this.registration!.secret,
-        subjectId: this.options.credentialId,
-        serverId: this.options.gatewayId,
-        clientRegistrationState: this.registration!.clientRegistrationState,
-        registrationResponse: frame.payload.registrationResponse,
-        expectedServerStaticPublicKey: this.gatewayStaticPublicKey,
-      })
-      return this.encrypt({
-        version: PROTOCOL_VERSION,
-        type: 'device.credential.registration.commit',
-        messageId: this.messageId(),
-        payload: { deviceId: this.options.credentialId, registrationRecord: finished.registrationRecord },
-      } satisfies DeviceCredentialFrame)
+  private async handleProvisioning(value: unknown): Promise<string> {
+    const wire = parseSecureDataFrame(value)
+    const frame = parseDeviceKeyProvisioningFrame(await this.provisioningCipher!.decrypt(wire.envelope))
+    if (frame.type !== 'gateway.key.registered' || frame.payload.deviceId !== this.options.credentialId) {
+      throw new Error('Unexpected Gateway key registration response')
     }
-    if (frame.type !== 'device.credential.registration.accepted' || frame.payload.deviceId !== this.options.credentialId) {
-      throw new Error('Unexpected device credential registration response')
+    if (frame.payload.gatewayHpkeKeyId !== this.gatewayKey!.keyId
+      || frame.payload.gatewayHpkePublicKey !== this.gatewayKey!.publicKey) {
+      throw new Error('Gateway changed its HPKE key during pairing')
     }
-    await this.options.saveCredential({
-      version: 1,
+    this.credential = {
+      version: 2,
       relayProfileId: this.options.relayProfileId,
       gatewayId: this.options.gatewayId,
       credentialId: this.options.credentialId,
-      secret: this.registration!.secret,
-      gatewayStaticPublicKey: this.gatewayStaticPublicKey!,
+      deviceHpkeKeyPair: this.deviceKeys!,
+      gatewayHpkeKeyId: this.gatewayKey!.keyId,
+      gatewayHpkePublicKey: this.gatewayKey!.publicKey,
       createdAt: frame.payload.registeredAt,
-    })
-    this.registration = undefined
+    }
+    await this.options.saveCredential(this.credential)
+    await this.initializeApplicationCipher()
+    this.provisioningCipher = undefined
+    this.pairingCode = undefined
+    this.state = 'waiting-bind'
+    return this.encryptBinding()
+  }
+
+  private async handleBinding(value: unknown): Promise<undefined> {
+    const wire = parseDeviceHpkeDataFrame(value)
+    if (wire.messageId !== wire.envelope.messageId) throw new Error('Device HPKE message ID mismatch')
+    const frame = parseDeviceBindingFrame(await this.applicationCipher!.decrypt(wire.envelope))
+    if (frame.type !== 'gateway.bound' || frame.payload.gatewayId !== this.options.gatewayId
+      || frame.payload.credentialId !== this.options.credentialId) throw new Error('Gateway binding identity mismatch')
     this.state = 'ready'
     return undefined
   }
 
-  private async encrypt(value: unknown): Promise<string> {
+  private async initializeApplicationCipher(): Promise<void> {
+    this.applicationCipher = await HpkeMessageCipher.create({
+      localId: this.options.credentialId,
+      remoteId: this.options.gatewayId,
+      localKeyPair: this.deviceKeys!,
+      remoteKey: this.gatewayKey!,
+      now: () => this.now(),
+    })
+  }
+
+  private encryptBinding(): Promise<string> {
+    return this.encryptApplication({
+      version: PROTOCOL_VERSION,
+      type: 'device.bind',
+      messageId: this.messageId(),
+      payload: {
+        gatewayId: this.options.gatewayId,
+        credentialId: this.options.credentialId,
+        boundAt: new Date(this.now()).toISOString(),
+      },
+    })
+  }
+
+  private async encryptTemporary(value: unknown): Promise<string> {
     const frame: SecureDataFrame = {
       version: PROTOCOL_VERSION,
       type: 'secure.data',
       messageId: this.messageId(),
-      envelope: await this.cipher!.encrypt(value),
+      envelope: await this.provisioningCipher!.encrypt(value),
+    }
+    return encodeOpaquePayload(frame)
+  }
+
+  private async encryptApplication(value: unknown): Promise<string> {
+    const messageId = this.messageId()
+    const frame: DeviceHpkeDataFrame = {
+      version: PROTOCOL_VERSION,
+      type: 'device.hpke-data',
+      messageId,
+      envelope: await this.applicationCipher!.encrypt(value, { messageId }),
     }
     return encodeOpaquePayload(frame)
   }
 
   private messageId(): string { return this.options.createMessageId?.() ?? globalThis.crypto.randomUUID() }
+  private now(): number { return this.options.now?.() ?? Date.now() }
 }
 
 function encodeOpaquePayload(value: unknown): string {

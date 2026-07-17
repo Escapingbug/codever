@@ -20,6 +20,7 @@ describe('SecureGatewayAuthenticator', () => {
             startLoginRequest: clientStart.startLoginRequest,
         })
         const clientFinish = finishOpaquePairingClient({
+            domain: 'relay-gateway',
             code: ticket.code, serverId: 'relay-1', clientLoginState: clientStart.clientLoginState,
             loginResponse: serverStart.loginResponse,
         })
