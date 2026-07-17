@@ -28,7 +28,7 @@ describe('Gateway config', () => {
         expect(await readFile(configPath, 'utf8')).not.toContain('PRIVATE KEY')
     })
 
-    it('requires encrypted transport except for loopback development', () => {
+    it('requires TLS or the OPAQUE application encryption layer on public networks', () => {
         const base = {
             version: 1,
             gatewayId: 'gateway-1',
@@ -39,5 +39,13 @@ describe('Gateway config', () => {
         }
         expect(() => parseGatewayConfig({ ...base, relayUrl: 'ws://relay.example.com/connect' })).toThrow('wss://')
         expect(parseGatewayConfig({ ...base, relayUrl: 'ws://127.0.0.1:3000/connect' }).relayUrl).toContain('127.0.0.1')
+        expect(parseGatewayConfig({
+            ...base,
+            relayUrl: 'ws://relay.example.com/v2/gateway/connect',
+            secure: { pairingCode: 'ABC234-DEFGH-JKLMN' },
+        })).toMatchObject({
+            relayUrl: 'ws://relay.example.com/v2/gateway/connect',
+            secure: { pairingCode: 'ABC234-DEFGH-JKLMN' },
+        })
     })
 })

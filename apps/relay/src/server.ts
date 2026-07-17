@@ -8,6 +8,9 @@ import {
     parseGatewayHandshakeFrame,
     parseGatewayEnrollmentChallengeRequest,
     parseGatewayEnrollmentProofDto,
+    parseGatewaySecureHandshakeFrame,
+    parseSecureDataFrame,
+    parseSecureControlFrame,
     parseApproveGatewayEnrollmentDto,
     parseRejectGatewayEnrollmentDto,
     parseAuthSessionDto,
@@ -22,9 +25,11 @@ import {
     type GatewayCommand,
     type GatewayFrame,
     type GatewayHandshakeFrame,
+    type GatewaySecureHandshakeFrame,
     type MutationReceiptDto,
     type JsonValue,
 } from '@codever/protocol'
+import { SessionCipher } from '@codever/secure-channel'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import type WebSocket from 'ws'
 import {
@@ -60,6 +65,7 @@ import {
     EnrollmentRateLimitError,
     GatewayEnrollmentRepository,
 } from './enrollmentRepository'
+import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
 
 export interface RelayRepositories {
     gateways: GatewayRepository
@@ -84,6 +90,7 @@ export interface CreateRelayServerOptions {
     enrollmentRepository?: GatewayEnrollmentRepository
     enrollmentChallengeStore?: EnrollmentChallengeStore
     enrollmentTtlMs?: number
+    secureGatewayAuthenticator?: SecureGatewayAuthenticator
 }
 
 export interface RelayServer extends FastifyInstance {
@@ -390,7 +397,196 @@ export async function createRelayServer(options: CreateRelayServerOptions = {}):
         })
     })
 
+    app.get('/v2/gateway/connect', { websocket: true }, (socket, request) => {
+        if (!options.secureGatewayAuthenticator) {
+            socket.close(1013, 'Secure Gateway authentication is not configured')
+            return
+        }
+        handleSecureGatewaySocket(
+            socket, request, repositories, connections, eventStreams,
+            options.secureGatewayAuthenticator, app,
+        )
+    })
+
     return app
+}
+
+function handleSecureGatewaySocket(
+    socket: WebSocket,
+    _request: FastifyRequest,
+    repositories: RelayRepositories,
+    connections: GatewayConnectionRegistry,
+    eventStreams: SessionEventStreams,
+    authenticator: SecureGatewayAuthenticator,
+    app: FastifyInstance,
+): void {
+    let pendingHandshakeId: string | undefined
+    let claimedGatewayId: string | undefined
+    let gatewayId: string | undefined
+    let epoch: string | undefined
+    let cipher: SessionCipher | undefined
+    let helloReceived = false
+    let credentialProvisioningRequired = false
+    let credentialRegistrationStarted = false
+    let incoming = Promise.resolve()
+
+    socket.on('message', data => {
+        incoming = incoming.then(async () => {
+            const value = JSON.parse(data.toString()) as unknown
+            if (!cipher) {
+                const frame = parseGatewaySecureHandshakeFrame(value)
+                if (!pendingHandshakeId) {
+                    if (frame.type !== 'gateway.secure-auth.start') throw new Error('Secure authentication must start with gateway.secure-auth.start')
+                    claimedGatewayId = frame.payload.gatewayId
+                    const started = await authenticator.begin(frame.payload)
+                    pendingHandshakeId = started.handshakeId
+                    const response: GatewaySecureHandshakeFrame = {
+                        version: 1,
+                        type: 'relay.secure-auth.response',
+                        messageId: randomUUID(),
+                        payload: {
+                            relayId: authenticator.relayId,
+                            handshakeId: started.handshakeId,
+                            loginResponse: started.loginResponse,
+                            expiresAt: started.expiresAt,
+                            ...(started.attemptsRemaining !== undefined ? { attemptsRemaining: started.attemptsRemaining } : {}),
+                        },
+                    }
+                    socket.send(JSON.stringify(response))
+                    return
+                }
+                if (frame.type !== 'gateway.secure-auth.finish' || frame.payload.handshakeId !== pendingHandshakeId) {
+                    throw new Error('Secure authentication finish does not match the active handshake')
+                }
+                const finished = await authenticator.finish(frame.payload)
+                if (finished.gatewayId !== claimedGatewayId) throw new Error('Authenticated Gateway identity changed')
+                gatewayId = finished.gatewayId
+                epoch = randomUUID()
+                const channelId = randomUUID()
+                cipher = await SessionCipher.create({
+                    sessionKey: finished.sessionKey,
+                    role: 'responder',
+                    channelId,
+                })
+                credentialProvisioningRequired = finished.credentialProvisioningRequired
+                const activeCipher = cipher
+                connections.replace({
+                    gatewayId,
+                    connectionEpoch: epoch,
+                    socket,
+                    encode: async frameToSend => JSON.stringify({
+                        version: 1,
+                        type: 'secure.data',
+                        messageId: randomUUID(),
+                        envelope: await activeCipher.encrypt(frameToSend),
+                    }),
+                })
+                const acceptedPayload = {
+                    gatewayId,
+                    connectionEpoch: epoch,
+                    acceptedAt: new Date().toISOString(),
+                    credentialProvisioningRequired: finished.credentialProvisioningRequired,
+                }
+                const accepted: GatewaySecureHandshakeFrame = {
+                    version: 1,
+                    type: 'relay.secure-auth.accepted',
+                    messageId: randomUUID(),
+                    payload: {
+                        handshakeId: pendingHandshakeId,
+                        envelope: await activeCipher.encrypt(acceptedPayload),
+                    },
+                }
+                socket.send(JSON.stringify(accepted))
+                return
+            }
+
+            const secureFrame = parseSecureDataFrame(value)
+            const decrypted = await cipher.decrypt(secureFrame.envelope)
+            if (credentialProvisioningRequired) {
+                const control = parseSecureControlFrame(decrypted)
+                if (control.type === 'gateway.credential.registration.start') {
+                    if (control.payload.gatewayId !== gatewayId || credentialRegistrationStarted) {
+                        throw new Error('Invalid credential registration start')
+                    }
+                    credentialRegistrationStarted = true
+                    const response = await authenticator.createCredentialRegistrationResponse(
+                        gatewayId!, control.payload.registrationRequest,
+                    )
+                    socket.send(JSON.stringify({
+                        version: 1,
+                        type: 'secure.data',
+                        messageId: randomUUID(),
+                        envelope: await cipher.encrypt({
+                            version: 1,
+                            type: 'relay.credential.registration.response',
+                            messageId: randomUUID(),
+                            payload: { gatewayId, ...response },
+                        }),
+                    }))
+                    return
+                }
+                if (control.type === 'gateway.credential.registration.commit') {
+                    if (control.payload.gatewayId !== gatewayId || !credentialRegistrationStarted) {
+                        throw new Error('Invalid credential registration commit')
+                    }
+                    await authenticator.commitCredential(gatewayId!, control.payload.registrationRecord)
+                    credentialProvisioningRequired = false
+                    socket.send(JSON.stringify({
+                        version: 1,
+                        type: 'secure.data',
+                        messageId: randomUUID(),
+                        envelope: await cipher.encrypt({
+                            version: 1,
+                            type: 'relay.credential.registration.accepted',
+                            messageId: randomUUID(),
+                            payload: { gatewayId, registeredAt: new Date().toISOString() },
+                        }),
+                    }))
+                    return
+                }
+                throw new Error('Gateway credential provisioning must complete before application data')
+            }
+            const frame = parseGatewayFrame(decrypted)
+            if (frame.gatewayId !== gatewayId || frame.connectionEpoch !== epoch) {
+                throw new Error('Gateway identity or connection epoch mismatch')
+            }
+            if (!helloReceived) {
+                if (frame.type !== 'gateway.hello') throw new Error('gateway.hello must be the first encrypted data frame')
+                helloReceived = true
+                await repositories.gateways.upsert({
+                    id: gatewayId!,
+                    workspaceId: frame.payload.workspaceId,
+                    name: frame.payload.name,
+                    platform: frame.payload.platform,
+                    version: frame.payload.gatewayVersion,
+                    capabilities: frame.payload.capabilities,
+                    status: 'online',
+                    connectionEpoch: epoch,
+                    lastSeenAt: frame.payload.connectedAt,
+                })
+                if (!connections.markReady(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
+                return
+            }
+            if (!connections.isCurrent(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
+            await consumeGatewayFrame(frame, repositories, connections, eventStreams, socket)
+        }).catch(error => {
+            app.log.error(error)
+            const rejection: GatewaySecureHandshakeFrame = {
+                version: 1,
+                type: 'relay.secure-auth.rejected',
+                messageId: randomUUID(),
+                payload: { code: 'authentication_failed', message: 'Secure Gateway authentication failed' },
+            }
+            if (!cipher && socket.readyState === socket.OPEN) socket.send(JSON.stringify(rejection))
+            socket.close(1008, 'Secure Gateway protocol error')
+        })
+    })
+
+    socket.on('close', () => {
+        if (gatewayId && epoch && connections.removeIfCurrent(gatewayId, epoch, socket)) {
+            void repositories.gateways.updateConnection(gatewayId, 'offline', undefined, new Date().toISOString())
+        }
+    })
 }
 
 function enrollmentHttpError(error: unknown): HttpError {

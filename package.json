@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@codever/protocol": "workspace:*",
+    "@codever/secure-channel": "workspace:*",
     "@agentclientprotocol/sdk": "^0.19.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opencode-ai/sdk": "^1.4.3",

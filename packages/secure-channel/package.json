@@ -1,0 +1,27 @@
+{
+  "name": "@codever/secure-channel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "tsup": "^8.5.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.4"
+  }
+}

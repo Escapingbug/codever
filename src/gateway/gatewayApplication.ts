@@ -9,7 +9,7 @@ import {
     type SessionEventEnvelope as WireEventEnvelope,
 } from '@codever/protocol'
 import { initializeGatewayIdentity, type GatewayIdentity } from './identity'
-import { ensureGatewayEnrollment, RelayCommandError, RelayLink } from './link'
+import { ensureGatewayEnrollment, GatewaySecureCredentialStore, RelayCommandError, RelayLink } from './link'
 import { ProjectRegistry } from './projects'
 import { GatewaySessionService, FileSessionMetadataRepository } from './sessions'
 import { FileConversationEventStore } from '@/platform/storage'
@@ -73,6 +73,9 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
 
     const gatewayPlatform = platform()
     const tls = config.tls ? await loadTls(config.tls) : undefined
+    const secureCredentialStore = config.secure
+        ? new GatewaySecureCredentialStore(join(config.dataDirectory, 'secure-relay-credential.json'))
+        : undefined
     const relay = new RelayLink({
         url: config.relayUrl,
         gatewayId: config.gatewayId,
@@ -102,6 +105,12 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
             sessionStates: Object.fromEntries((await metadata.list()).map((session) => [session.id, session.state])),
         }),
         ...(tls ? { tls } : {}),
+        ...(secureCredentialStore ? {
+            secure: {
+                credentialStore: secureCredentialStore,
+                ...(config.secure?.pairingCode ? { pairingCode: config.secure.pairingCode } : {}),
+            },
+        } : {}),
         onError: (error) => console.error('[gateway:relay]', error.message),
     })
 
@@ -124,21 +133,23 @@ export async function createGatewayApplication(config: GatewayConfig): Promise<G
             started = true
             void (async () => {
                 while (!closed && relay.state !== 'online') {
-                    try {
-                        const enrollment = await ensureGatewayEnrollment({
-                            relayWebSocketUrl: config.relayUrl,
-                            gatewayId: config.gatewayId,
-                            workspaceId: config.workspaceId,
-                            name: config.name,
-                            platform: gatewayPlatform,
-                            identity,
-                            ...(tls && { tls }),
-                        })
-                        if (enrollment.status === 'pending') {
-                            console.log(`[gateway:enrollment] Pairing code ${enrollment.code}; fingerprint ${enrollment.fingerprint}; expires ${enrollment.expiresAt}`)
+                    if (!config.secure) {
+                        try {
+                            const enrollment = await ensureGatewayEnrollment({
+                                relayWebSocketUrl: config.relayUrl,
+                                gatewayId: config.gatewayId,
+                                workspaceId: config.workspaceId,
+                                name: config.name,
+                                platform: gatewayPlatform,
+                                identity,
+                                ...(tls && { tls }),
+                            })
+                            if (enrollment.status === 'pending') {
+                                console.log(`[gateway:enrollment] Pairing code ${enrollment.code}; fingerprint ${enrollment.fingerprint}; expires ${enrollment.expiresAt}`)
+                            }
+                        } catch (error) {
+                            if (!closed) console.error('[gateway:enrollment]', error instanceof Error ? error.message : error)
                         }
-                    } catch (error) {
-                        if (!closed) console.error('[gateway:enrollment]', error instanceof Error ? error.message : error)
                     }
                     try {
                         await relay.start()

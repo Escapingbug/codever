@@ -19,6 +19,7 @@ export interface GatewayConfig {
     allowedRoots: string[]
     providersPath?: string
     tls?: GatewayTlsConfig
+    secure?: { pairingCode?: string }
 }
 
 export function defaultGatewayConfigPath(): string {
@@ -50,6 +51,7 @@ export async function writeGatewayConfig(
         allowedRoots: input.allowedRoots,
         ...(input.providersPath ? { providersPath: input.providersPath } : {}),
         ...(input.tls ? { tls: input.tls } : {}),
+        ...(input.secure ? { secure: input.secure } : {}),
     })
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
@@ -63,8 +65,9 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
     const name = text(value.name, 'name')
     const relayUrl = text(value.relayUrl, 'relayUrl')
     const relay = new URL(relayUrl)
-    if (relay.protocol !== 'wss:' && !(relay.protocol === 'ws:' && isLoopback(relay.hostname))) {
-        throw new Error('relayUrl must use wss://; ws:// is allowed only for localhost development')
+    const secure = value.secure === undefined ? undefined : parseSecure(value.secure)
+    if (relay.protocol !== 'wss:' && !(relay.protocol === 'ws:' && (isLoopback(relay.hostname) || secure))) {
+        throw new Error('relayUrl must use wss://; public ws:// requires secure OPAQUE transport')
     }
     const dataDirectory = absolute(value.dataDirectory, 'dataDirectory')
     if (!Array.isArray(value.allowedRoots) || value.allowedRoots.length === 0) {
@@ -83,7 +86,19 @@ export function parseGatewayConfig(value: unknown): GatewayConfig {
         allowedRoots,
         ...(providersPath ? { providersPath } : {}),
         ...(tls ? { tls } : {}),
+        ...(secure ? { secure } : {}),
     }
+}
+
+function parseSecure(value: unknown): GatewayConfig['secure'] {
+    if (!isRecord(value)) throw new Error('secure must be an object')
+    if (Object.keys(value).some(key => key !== 'pairingCode')) throw new Error('secure contains an unknown option')
+    if (value.pairingCode === undefined) return {}
+    const pairingCode = text(value.pairingCode, 'secure.pairingCode').toUpperCase()
+    if (!/^[A-HJ-NP-Z2-9]{6}-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$/.test(pairingCode)) {
+        throw new Error('secure.pairingCode is invalid')
+    }
+    return { pairingCode }
 }
 
 function parseTls(value: unknown): GatewayTlsConfig {

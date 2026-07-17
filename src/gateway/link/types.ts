@@ -7,8 +7,9 @@ import type {
     ProtocolError,
     SessionEventEnvelope,
 } from '@codever/protocol'
-import type { GatewayIdentity } from '@/gateway/identity'
+import type { GatewayIdentity } from '../identity'
 import type { ClientOptions } from 'ws'
+import type { GatewaySecureCredentialStore } from './secureCredentialStore'
 
 export type RelayLinkState = 'idle' | 'connecting' | 'authenticating' | 'online' | 'backing_off' | 'stopped'
 
@@ -42,6 +43,10 @@ export interface RelayLinkOptions {
     ) => readonly SessionEventEnvelope[] | Promise<readonly SessionEventEnvelope[]>
     getHeartbeat?: () => Partial<Omit<Heartbeat, 'sentAt' | 'uptimeMs'>> | Promise<Partial<Omit<Heartbeat, 'sentAt' | 'uptimeMs'>>>
     tls?: RelayLinkTlsOptions
+    secure?: {
+        pairingCode?: string
+        credentialStore: GatewaySecureCredentialStore
+    }
     heartbeatIntervalMs?: number
     reconnect?: {
         initialDelayMs?: number

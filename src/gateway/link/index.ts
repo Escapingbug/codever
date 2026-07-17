@@ -1,4 +1,6 @@
 export { RelayLink } from './relayLink'
+export * from './secureCredentialStore'
+export * from './secureGatewayHandshake'
 export { ensureGatewayEnrollment, type GatewayEnrollmentClientOptions } from './gatewayEnrollmentClient'
 export {
     RelayCommandError,

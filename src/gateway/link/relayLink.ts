@@ -20,6 +20,7 @@ import {
     type RelayLinkOptions,
     type RelayLinkState,
 } from './types'
+import { SecureGatewayHandshake } from './secureGatewayHandshake'
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 const DEFAULT_INITIAL_RECONNECT_DELAY_MS = 250
@@ -58,6 +59,8 @@ export class RelayLink {
     private incoming = Promise.resolve()
     private firstOnline?: { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
     private latestInventory?: InventorySnapshot
+    private secureHandshake?: SecureGatewayHandshake
+    private secureOutgoing = Promise.resolve()
 
     constructor(options: RelayLinkOptions) {
         validateOptions(options)
@@ -173,6 +176,8 @@ export class RelayLink {
         const generation = ++this.generation
         this.connectionEpoch = undefined
         this.authenticationChallengeId = undefined
+        this.secureHandshake = undefined
+        this.secureOutgoing = Promise.resolve()
         this.sentInEpoch.clear()
         this.setState('connecting')
 
@@ -191,6 +196,9 @@ export class RelayLink {
         socket.once('open', () => {
             if (!this.isCurrent(generation, socket)) return
             this.setState('authenticating')
+            if (this.options.secure) {
+                void this.startSecureHandshake(socket).catch(error => this.failConnection(error, generation, socket))
+            }
         })
         socket.on('message', data => {
             if (!this.isCurrent(generation, socket)) return
@@ -221,6 +229,11 @@ export class RelayLink {
             throw new RelayLinkError('Relay sent invalid JSON', { cause: error })
         }
 
+        if (this.options.secure) {
+            await this.handleSecureMessage(value, generation, socket)
+            return
+        }
+
         if (!this.connectionEpoch) {
             const frame = parseGatewayHandshakeFrame(value)
             await this.handleHandshakeFrame(frame, generation, socket)
@@ -244,6 +257,65 @@ export class RelayLink {
             default:
                 throw new RelayLinkError(`Unexpected Relay frame type: ${frame.type}`)
         }
+    }
+
+    private async startSecureHandshake(socket: WebSocket): Promise<void> {
+        const secure = this.options.secure!
+        const credential = await secure.credentialStore.load(this.options.gatewayId)
+        this.secureHandshake = new SecureGatewayHandshake({
+            gatewayId: this.options.gatewayId,
+            ...(secure.pairingCode ? { pairingCode: secure.pairingCode } : {}),
+            ...(credential ? { credential } : {}),
+            createMessageId: () => this.messageId(),
+            saveCredential: value => secure.credentialStore.save(value),
+        })
+        this.sendWire(await this.secureHandshake.start(), socket)
+    }
+
+    private async handleSecureMessage(value: unknown, generation: number, socket: WebSocket): Promise<void> {
+        const handshake = this.secureHandshake
+        if (!handshake) throw new RelayLinkError('Secure handshake has not started')
+        if (!handshake.ready) {
+            const input = value && typeof value === 'object' && 'type' in value && value.type === 'secure.data'
+                ? await handshake.handleSecureData(value)
+                : await handshake.handleHandshake(value)
+            if (input) this.sendWire(input, socket)
+            if (handshake.ready) await this.acceptSecureConnection(generation, socket)
+            return
+        }
+        const frame = parseGatewayFrame(await handshake.decryptApplication(value))
+        if (frame.gatewayId !== this.options.gatewayId || frame.connectionEpoch !== this.connectionEpoch) {
+            throw new RelayLinkError('Relay frame belongs to a stale or different secure connection epoch')
+        }
+        switch (frame.type) {
+            case 'session.event.ack':
+                this.processAck(frame.payload.cursors)
+                return
+            case 'command.request':
+                await this.processCommand(frame)
+                return
+            case 'sync.request':
+                await this.processSyncRequest(frame.payload)
+                return
+            default:
+                throw new RelayLinkError(`Unexpected secure Relay frame type: ${frame.type}`)
+        }
+    }
+
+    private async acceptSecureConnection(generation: number, socket: WebSocket): Promise<void> {
+        const accepted = this.secureHandshake?.accepted
+        if (!accepted || !this.isCurrent(generation, socket)) throw new RelayLinkError('Secure Relay acceptance is missing')
+        this.connectionEpoch = accepted.connectionEpoch
+        this.reconnectAttempt = 0
+        this.sentInEpoch.clear()
+        this.setState('online')
+        this.firstOnline?.resolve()
+        this.firstOnline = undefined
+        this.sendDataFrame('gateway.hello', { ...this.options.hello, connectedAt: this.isoNow() })
+        await this.refreshInventory()
+        await this.sendHeartbeat()
+        this.startHeartbeat()
+        this.flushEvents()
     }
 
     private async handleHandshakeFrame(
@@ -542,11 +614,28 @@ export class RelayLink {
 
     private sendRaw(frame: GatewayFrame | GatewayHandshakeFrame, socket: WebSocket): void {
         if (socket.readyState !== WebSocket.OPEN) throw new RelayLinkError('Relay WebSocket is not open')
+        if (this.options.secure && 'gatewayId' in frame) {
+            const validated = parseGatewayFrame(frame)
+            this.secureOutgoing = this.secureOutgoing.then(async () => {
+                const wire = await this.secureHandshake!.encryptApplication(validated)
+                this.sendWire(wire, socket)
+            }).catch(error => {
+                if (socket === this.socket) this.failCurrentConnection(new RelayLinkError('Failed to encrypt Relay frame', { cause: error }))
+            })
+            return
+        }
         const validated = 'gatewayId' in frame
             ? parseGatewayFrame(frame)
             : parseGatewayHandshakeFrame(frame)
         socket.send(JSON.stringify(validated), error => {
             if (error && socket === this.socket) this.failCurrentConnection(new RelayLinkError('Failed to send Relay frame', { cause: error }))
+        })
+    }
+
+    private sendWire(value: unknown, socket: WebSocket): void {
+        if (socket.readyState !== WebSocket.OPEN) throw new RelayLinkError('Relay WebSocket is not open')
+        socket.send(JSON.stringify(value), error => {
+            if (error && socket === this.socket) this.failCurrentConnection(new RelayLinkError('Failed to send secure Relay frame', { cause: error }))
         })
     }
 

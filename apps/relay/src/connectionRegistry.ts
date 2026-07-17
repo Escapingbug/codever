@@ -6,14 +6,16 @@ export interface GatewayConnection {
     connectionEpoch: string
     socket: WebSocket
     ready: boolean
+    encode?: (frame: GatewayFrame) => Promise<string>
+    outgoing: Promise<void>
 }
 
 export class GatewayConnectionRegistry {
     private readonly connections = new Map<string, GatewayConnection>()
 
-    replace(connection: Omit<GatewayConnection, 'ready'> & { ready?: boolean }): GatewayConnection | undefined {
+    replace(connection: Omit<GatewayConnection, 'ready' | 'outgoing'> & { ready?: boolean }): GatewayConnection | undefined {
         const previous = this.connections.get(connection.gatewayId)
-        this.connections.set(connection.gatewayId, { ...connection, ready: connection.ready ?? false })
+        this.connections.set(connection.gatewayId, { ...connection, ready: connection.ready ?? false, outgoing: Promise.resolve() })
         if (previous && previous.socket !== connection.socket) {
             previous.socket.close(4001, 'Replaced by a newer gateway connection')
         }
@@ -46,7 +48,13 @@ export class GatewayConnectionRegistry {
         const current = this.connections.get(gatewayId)
         if (!current || !current.ready || current.socket.readyState !== current.socket.OPEN) return false
         if (frame.connectionEpoch !== current.connectionEpoch) return false
-        current.socket.send(JSON.stringify(frame))
+        current.outgoing = current.outgoing.then(async () => {
+            const payload = current.encode ? await current.encode(frame) : JSON.stringify(frame)
+            if (this.isCurrent(gatewayId, current.connectionEpoch, current.socket)
+                && current.socket.readyState === current.socket.OPEN) {
+                current.socket.send(payload)
+            }
+        }).catch(() => current.socket.close(1011, 'Failed to encrypt or send Gateway frame'))
         return true
     }
 }

@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { join } from 'node:path'
 import type { GatewayEnrollmentRepository } from './enrollmentRepository'
+import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
 
 const SECRET_FILE = 'relay-control.secret'
 const SOCKET_FILE = 'relay-control.sock'
@@ -11,6 +12,7 @@ type ControlRequest =
     | { secret: string; command: 'list' }
     | { secret: string; command: 'approve'; code: string }
     | { secret: string; command: 'reject'; code: string; reason?: string }
+    | { secret: string; command: 'pair' }
     | { secret: string; command: 'reset-bootstrap'; confirm: string }
 
 export interface LocalControlServer {
@@ -18,7 +20,11 @@ export interface LocalControlServer {
     close(): Promise<void>
 }
 
-export async function startLocalControlServer(dataDirectory: string, enrollments: GatewayEnrollmentRepository): Promise<LocalControlServer> {
+export async function startLocalControlServer(
+    dataDirectory: string,
+    enrollments: GatewayEnrollmentRepository,
+    secureGatewayAuthenticator?: SecureGatewayAuthenticator,
+): Promise<LocalControlServer> {
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 })
     const secret = await loadOrCreateSecret(dataDirectory)
     const address = controlAddress(dataDirectory)
@@ -33,7 +39,7 @@ export async function startLocalControlServer(dataDirectory: string, enrollments
             if (newline < 0) return
             const line = input.slice(0, newline)
             input = ''
-            void handle(line, secret, enrollments).then(
+            void handle(line, secret, enrollments, secureGatewayAuthenticator).then(
                 result => socket.end(`${JSON.stringify({ ok: true, result })}\n`),
                 error => socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`),
             )
@@ -55,10 +61,11 @@ export async function runLocalControlCommand(dataDirectory: string, args: string
     const [command, rawCode, ...rest] = args
     let request: ControlRequest
     if (command === 'list') request = { secret, command }
+    else if (command === 'pair') request = { secret, command }
     else if (command === 'approve' && rawCode) request = { secret, command, code: normalizeCode(rawCode) }
     else if (command === 'reject' && rawCode) request = { secret, command, code: normalizeCode(rawCode), ...(rest.length && { reason: rest.join(' ') }) }
     else if (command === 'reset-bootstrap') request = { secret, command, confirm: rest[0] ?? rawCode ?? '' }
-    else throw new Error('Usage: relay enrollment <list|approve CODE|reject CODE [reason]|reset-bootstrap RESET-GATEWAY-BOOTSTRAP>')
+    else throw new Error('Usage: relay enrollment <pair|list|approve CODE|reject CODE [reason]|reset-bootstrap RESET-GATEWAY-BOOTSTRAP>')
     return send(controlAddress(dataDirectory), request)
 }
 
@@ -68,10 +75,19 @@ export function controlAddress(dataDirectory: string): string {
     return `\\\\.\\pipe\\codever-relay-${suffix}`
 }
 
-async function handle(line: string, expectedSecret: string, enrollments: GatewayEnrollmentRepository): Promise<unknown> {
+async function handle(
+    line: string,
+    expectedSecret: string,
+    enrollments: GatewayEnrollmentRepository,
+    secureGatewayAuthenticator?: SecureGatewayAuthenticator,
+): Promise<unknown> {
     const request = JSON.parse(line) as ControlRequest
     if (!request || typeof request !== 'object' || !safeEqual(request.secret, expectedSecret)) throw new Error('Local control authentication failed')
     if (request.command === 'list') return { bootstrapComplete: enrollments.bootstrapComplete, enrollments: await enrollments.listPending() }
+    if (request.command === 'pair') {
+        if (!secureGatewayAuthenticator) throw new Error('Secure Gateway pairing is not configured')
+        return secureGatewayAuthenticator.issuePairing()
+    }
     if (request.command === 'approve') return enrollments.approve(normalizeCode(request.code), 'local')
     if (request.command === 'reject') return enrollments.reject(normalizeCode(request.code), request.reason)
     if (request.command === 'reset-bootstrap') {

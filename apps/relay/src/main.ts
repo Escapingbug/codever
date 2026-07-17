@@ -9,6 +9,8 @@ import { createInMemoryRelayRepositories } from './memoryRepositories'
 import { createRelayServer } from './server'
 import { GatewayEnrollmentRepository } from './enrollmentRepository'
 import { runLocalControlCommand, startLocalControlServer } from './localControl'
+import { SecureCredentialRepository } from './secureCredentialRepository'
+import { SecureGatewayAuthenticator } from './secureGatewayAuth'
 
 class InsecureDevelopmentClientAuthenticator implements ClientAuthenticator {
     constructor(private readonly workspaceId: string) {}
@@ -50,6 +52,12 @@ const enrollmentRepository = await GatewayEnrollmentRepository.open({
     ...(config.repositoryMode === 'durable' && { path: join(config.dataDirectory, 'gateway-enrollments.json') }),
     initialGateways: config.gateways,
 })
+const secureCredentials = await SecureCredentialRepository.open(join(config.dataDirectory, 'secure-gateway-credentials.json'))
+const secureGatewayAuthenticator = await SecureGatewayAuthenticator.create({
+    relayId: config.relayId,
+    serverSetup: secureCredentials.serverSetup,
+    credentials: secureCredentials,
+})
 if (config.insecureDevAuth) {
     process.stderr.write('WARNING: CODEVER_RELAY_INSECURE_DEV_AUTH=true; all client requests are authorized.\n')
 }
@@ -66,10 +74,11 @@ const app = await createRelayServer({
         enrollmentRepository,
     ),
     enrollmentRepository,
+    secureGatewayAuthenticator,
     repositories,
     ...(config.tls && { https: { cert: config.tls.cert, key: config.tls.key } }),
 })
-const localControl = await startLocalControlServer(config.dataDirectory, enrollmentRepository)
+const localControl = await startLocalControlServer(config.dataDirectory, enrollmentRepository, secureGatewayAuthenticator)
 
 const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down Relay')
