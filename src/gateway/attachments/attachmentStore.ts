@@ -1,37 +1,59 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { AttachmentUploadDto } from '@codever/protocol'
+import { RELAY_BLOB_CHUNK_BYTES, type AttachmentUploadDto, type RelayBlobManifest, type SessionAttachmentDto } from '@codever/protocol'
 import type { RichUserInputPart } from '@/runtime/semantic'
 
-export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-export const MAX_ATTACHMENT_CHUNK_BYTES = 192 * 1024
-const MAX_ATTACHMENTS_PER_CREDENTIAL = 20
-const STALE_ATTACHMENT_MS = 24 * 60 * 60 * 1000
+export type { RelayBlobManifest } from '@codever/protocol'
 
-interface AttachmentRecord extends AttachmentUploadDto {
+export const ATTACHMENT_TRANSFER_CHUNK_BYTES = 192 * 1024
+const RELAY_PLAINTEXT_CHUNK_BYTES = RELAY_BLOB_CHUNK_BYTES - 28
+const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000
+
+export interface RelayBlobTransport {
+    begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest>
+    putChunk(blobId: string, index: number, encryptedData: string): Promise<void>
+    complete(blobId: string): Promise<void>
+    manifest(blobId: string): Promise<RelayBlobManifest>
+    getChunk(blobId: string, index: number): Promise<string>
+    delete(blobId: string): Promise<void>
+}
+
+interface AttachmentRecord {
+    attachmentId: string
+    sessionId: string
     credentialId: string
+    filename: string
+    mimeType: string
+    sizeBytes: number
+    receivedBytes: number
+    status: 'uploading' | 'ready'
+    blobId: string
+    dataKey: string
     path: string
     createdAt: string
     updatedAt: string
 }
 
-interface PersistedAttachments { version: 1; records: AttachmentRecord[] }
+interface PersistedAttachments { version: 2; records: AttachmentRecord[] }
 
 export class GatewayAttachmentStore {
     private readonly records = new Map<string, AttachmentRecord>()
+    private readonly leases = new Map<string, number>()
+    private readonly pendingLocalDeletes = new Map<string, string>()
     private mutationQueue = Promise.resolve()
 
     private constructor(
         private readonly root: string,
         private readonly metadataPath: string,
+        private readonly blobs: RelayBlobTransport,
     ) {}
 
-    static async open(dataDirectory: string): Promise<GatewayAttachmentStore> {
+    static async open(dataDirectory: string, blobs: RelayBlobTransport): Promise<GatewayAttachmentStore> {
         const root = join(dataDirectory, 'attachments')
         await mkdir(root, { recursive: true })
-        const store = new GatewayAttachmentStore(root, join(root, 'metadata.json'))
+        const store = new GatewayAttachmentStore(root, join(root, 'metadata.json'), blobs)
         await store.load()
         return store
     }
@@ -44,16 +66,11 @@ export class GatewayAttachmentStore {
         sizeBytes: number
     }): Promise<AttachmentUploadDto> {
         return this.serialize(async () => {
-            await this.pruneStale()
-            if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1 || input.sizeBytes > MAX_ATTACHMENT_BYTES) {
-                throw new Error(`Attachment size must be between 1 and ${MAX_ATTACHMENT_BYTES} bytes`)
-            }
-            const ownedCount = [...this.records.values()].filter(record => record.credentialId === input.credentialId).length
-            if (ownedCount >= MAX_ATTACHMENTS_PER_CREDENTIAL) {
-                throw new Error(`A client can retain at most ${MAX_ATTACHMENTS_PER_CREDENTIAL} attachments`)
+            await this.pruneStaleUploads()
+            if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0) {
+                throw new Error('Attachment size must be a non-negative safe integer')
             }
             const filename = safeFilename(input.filename)
-            const mimeType = input.mimeType.trim() || 'application/octet-stream'
             const attachmentId = `attachment_${randomUUID()}`
             const path = join(this.root, `${attachmentId}.part`)
             await writeFile(path, new Uint8Array(), { flag: 'wx' })
@@ -63,17 +80,19 @@ export class GatewayAttachmentStore {
                 sessionId: input.sessionId,
                 credentialId: input.credentialId,
                 filename,
-                mimeType,
+                mimeType: input.mimeType.trim() || 'application/octet-stream',
                 sizeBytes: input.sizeBytes,
                 receivedBytes: 0,
                 status: 'uploading',
+                blobId: `blob_${randomUUID()}`,
+                dataKey: randomBytes(32).toString('base64'),
                 path,
                 createdAt: now,
                 updatedAt: now,
             }
             this.records.set(attachmentId, record)
             await this.persist()
-            return dto(record)
+            return uploadDto(record)
         })
     }
 
@@ -84,109 +103,207 @@ export class GatewayAttachmentStore {
         data: string
     }): Promise<AttachmentUploadDto> {
         return this.serialize(async () => {
-            const record = this.requireOwned(input.attachmentId, input.credentialId)
+            const record = this.requireUploadOwner(input.attachmentId, input.credentialId)
             if (record.status !== 'uploading') throw new Error('Attachment upload is not open')
             const bytes = decodeBase64(input.data)
-            if (bytes.length < 1 || bytes.length > MAX_ATTACHMENT_CHUNK_BYTES) {
-                throw new Error(`Attachment chunk must be between 1 and ${MAX_ATTACHMENT_CHUNK_BYTES} bytes`)
+            if (bytes.length < 1 || bytes.length > ATTACHMENT_TRANSFER_CHUNK_BYTES) {
+                throw new Error(`Attachment chunk must be between 1 and ${ATTACHMENT_TRANSFER_CHUNK_BYTES} bytes`)
             }
-            if (input.offset < record.receivedBytes) {
-                if (input.offset + bytes.length > record.receivedBytes) throw new Error('Attachment chunk overlaps the received boundary')
-                const existing = (await readFile(record.path)).subarray(input.offset, input.offset + bytes.length)
-                if (!existing.equals(bytes)) throw new Error('Attachment chunk retry does not match stored bytes')
-                return dto(record)
+            if (!Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('Attachment offset is invalid')
+            const handle = await open(record.path, 'r+')
+            try {
+                if (input.offset < record.receivedBytes) {
+                    if (input.offset + bytes.length > record.receivedBytes) throw new Error('Attachment chunk overlaps the received boundary')
+                    const existing = Buffer.allocUnsafe(bytes.length)
+                    await handle.read(existing, 0, existing.length, input.offset)
+                    if (!existing.equals(bytes)) throw new Error('Attachment chunk retry does not match stored bytes')
+                    return uploadDto(record)
+                }
+                if (input.offset !== record.receivedBytes) {
+                    throw new Error(`Attachment chunk offset mismatch: expected ${record.receivedBytes}, received ${input.offset}`)
+                }
+                if (record.receivedBytes + bytes.length > record.sizeBytes) throw new Error('Attachment exceeds declared size')
+                await handle.write(bytes, 0, bytes.length, input.offset)
+            } finally {
+                await handle.close()
             }
-            if (input.offset !== record.receivedBytes) {
-                throw new Error(`Attachment chunk offset mismatch: expected ${record.receivedBytes}, received ${input.offset}`)
-            }
-            if (record.receivedBytes + bytes.length > record.sizeBytes) throw new Error('Attachment exceeds declared size')
-            await writeFile(record.path, bytes, { flag: 'a' })
             record.receivedBytes += bytes.length
             record.updatedAt = new Date().toISOString()
             await this.persist()
-            return dto(record)
+            return uploadDto(record)
         })
     }
 
-    complete(attachmentId: string, credentialId: string, expectedSha256: string): Promise<AttachmentUploadDto> {
+    complete(attachmentId: string, credentialId: string): Promise<AttachmentUploadDto> {
         return this.serialize(async () => {
-            const record = this.requireOwned(attachmentId, credentialId)
-            if (record.status === 'ready') return dto(record)
-            if (record.status !== 'uploading' || record.receivedBytes !== record.sizeBytes) {
+            const record = this.requireUploadOwner(attachmentId, credentialId)
+            if (record.status === 'ready') return uploadDto(record)
+            if (record.receivedBytes !== record.sizeBytes) {
                 throw new Error(`Attachment upload is incomplete: ${record.receivedBytes}/${record.sizeBytes} bytes`)
             }
-            const actual = await sha256(record.path)
-            if (actual !== expectedSha256) throw new Error('Attachment SHA-256 mismatch')
-            const completedPath = join(this.root, `${attachmentId}.bin`)
-            await rename(record.path, completedPath)
-            record.path = completedPath
+            await this.persistEncryptedBlob(record)
             record.status = 'ready'
             record.updatedAt = new Date().toISOString()
             await this.persist()
-            return dto(record)
+            return uploadDto(record)
         })
     }
 
     cancel(attachmentId: string, credentialId: string): Promise<AttachmentUploadDto> {
         return this.serialize(async () => {
-            const record = this.requireOwned(attachmentId, credentialId)
+            const record = this.requireUploadOwner(attachmentId, credentialId)
+            if (record.status === 'ready') throw new Error('Ready Session files must be deleted, not cancelled')
             await rm(record.path, { force: true })
-            record.status = 'cancelled'
-            record.updatedAt = new Date().toISOString()
-            const result = dto(record)
+            await this.blobs.delete(record.blobId).catch(() => undefined)
             this.records.delete(attachmentId)
             await this.persist()
-            return result
+            return { ...uploadDto(record), status: 'cancelled' }
         })
     }
 
-    async resolveParts(sessionId: string, credentialId: string, attachmentIds: string[]): Promise<RichUserInputPart[]> {
-        if (attachmentIds.length > 5) throw new Error('A message can contain at most 5 attachments')
-        const parts: RichUserInputPart[] = []
-        for (const attachmentId of attachmentIds) {
-            const record = this.requireOwned(attachmentId, credentialId)
-            if (record.sessionId !== sessionId) throw new Error('Attachment belongs to a different session')
-            if (record.status !== 'ready') throw new Error(`Attachment is not ready: ${record.filename}`)
-            const common = {
-                mimeType: record.mimeType,
-                filename: record.filename,
-                sizeBytes: record.sizeBytes,
-                source: `attachment:${record.attachmentId}`,
-            }
-            if (record.mimeType.startsWith('image/')) {
-                parts.push({ type: 'image', data: (await readFile(record.path)).toString('base64'), ...common })
-            } else if (record.mimeType.startsWith('audio/')) {
-                parts.push({ type: 'audio', data: (await readFile(record.path)).toString('base64'), ...common })
-            } else {
-                parts.push({ type: 'file', path: record.path, ...common })
-            }
-        }
-        return parts
+    list(sessionId: string): SessionAttachmentDto[] {
+        return [...this.records.values()]
+            .filter(record => record.sessionId === sessionId && record.status === 'ready')
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+            .map(sessionDto)
     }
 
-    discardReady(attachmentIds: string[], credentialId: string): Promise<void> {
+    delete(sessionId: string, attachmentIds: string[]): Promise<void> {
         return this.serialize(async () => {
-            for (const attachmentId of attachmentIds) {
-                const record = this.requireOwned(attachmentId, credentialId)
-                if (record.status !== 'ready') continue
-                await rm(record.path, { force: true })
+            for (const attachmentId of new Set(attachmentIds)) {
+                const record = this.requireSessionAttachment(sessionId, attachmentId)
+                await this.blobs.delete(record.blobId)
                 this.records.delete(attachmentId)
+                if ((this.leases.get(attachmentId) ?? 0) > 0) this.pendingLocalDeletes.set(attachmentId, record.path)
+                else await rm(record.path, { force: true })
             }
             await this.persist()
         })
     }
 
-    private requireOwned(attachmentId: string, credentialId: string): AttachmentRecord {
+    resolveParts(sessionId: string, attachmentIds: string[]): Promise<RichUserInputPart[]> {
+        return this.serialize(async () => {
+            const parts: RichUserInputPart[] = []
+            const acquired: AttachmentRecord[] = []
+            try {
+                for (const attachmentId of new Set(attachmentIds)) {
+                    const record = this.requireSessionAttachment(sessionId, attachmentId)
+                    await this.ensureMaterialized(record)
+                    this.leases.set(attachmentId, (this.leases.get(attachmentId) ?? 0) + 1)
+                    acquired.push(record)
+                    parts.push({
+                        type: 'file',
+                        path: record.path,
+                        mimeType: record.mimeType,
+                        filename: record.filename,
+                        sizeBytes: record.sizeBytes,
+                        source: `attachment:${record.attachmentId}`,
+                    })
+                }
+                return parts
+            } catch (error) {
+                for (const record of acquired) {
+                    const remaining = Math.max(0, (this.leases.get(record.attachmentId) ?? 0) - 1)
+                    if (remaining) this.leases.set(record.attachmentId, remaining)
+                    else {
+                        this.leases.delete(record.attachmentId)
+                        await rm(record.path, { force: true })
+                    }
+                }
+                throw error
+            }
+        })
+    }
+
+    releaseParts(attachmentIds: string[]): Promise<void> {
+        return this.serialize(async () => {
+            for (const attachmentId of new Set(attachmentIds)) {
+                const remaining = Math.max(0, (this.leases.get(attachmentId) ?? 0) - 1)
+                if (remaining > 0) {
+                    this.leases.set(attachmentId, remaining)
+                    continue
+                }
+                this.leases.delete(attachmentId)
+                const record = this.records.get(attachmentId)
+                const path = record?.path ?? this.pendingLocalDeletes.get(attachmentId)
+                this.pendingLocalDeletes.delete(attachmentId)
+                if (path) await rm(path, { force: true })
+            }
+        })
+    }
+
+    private async persistEncryptedBlob(record: AttachmentRecord): Promise<void> {
+        const key = Buffer.from(record.dataKey, 'base64')
+        const chunkCount = Math.ceil(record.sizeBytes / RELAY_PLAINTEXT_CHUNK_BYTES)
+        const manifest = await this.blobs.begin(
+            record.blobId,
+            record.sizeBytes + chunkCount * 28,
+            RELAY_BLOB_CHUNK_BYTES,
+        )
+        if (manifest.chunkCount !== chunkCount || manifest.receivedChunkCount > chunkCount) {
+            throw new Error('Relay Blob resume state does not match the attachment')
+        }
+        let index = 0
+        for await (const value of createReadStream(record.path, { highWaterMark: RELAY_PLAINTEXT_CHUNK_BYTES })) {
+            const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
+            if (index >= manifest.receivedChunkCount) {
+                await this.blobs.putChunk(record.blobId, index, encryptChunk(key, record.blobId, index, bytes))
+            }
+            index += 1
+        }
+        await this.blobs.complete(record.blobId)
+    }
+
+    private async ensureMaterialized(record: AttachmentRecord): Promise<void> {
+        if (await exists(record.path)) return
+        const manifest = await this.blobs.manifest(record.blobId)
+        const expectedChunks = Math.ceil(record.sizeBytes / RELAY_PLAINTEXT_CHUNK_BYTES)
+        if (!manifest.complete || manifest.chunkCount !== expectedChunks) {
+            throw new Error(`Relay file is unavailable or incomplete: ${record.filename}`)
+        }
+        const temporary = `${record.path}.materializing`
+        await rm(temporary, { force: true })
+        await writeFile(temporary, new Uint8Array(), { flag: 'wx' })
+        const key = Buffer.from(record.dataKey, 'base64')
+        let received = 0
+        const handle = await open(temporary, 'r+')
+        try {
+            for (let index = 0; index < manifest.chunkCount; index += 1) {
+                const plaintext = decryptChunk(key, record.blobId, index, await this.blobs.getChunk(record.blobId, index))
+                await handle.write(plaintext, 0, plaintext.length, received)
+                received += plaintext.length
+            }
+        } catch (error) {
+            await handle.close()
+            await rm(temporary, { force: true })
+            throw error
+        }
+        await handle.close()
+        if (received !== record.sizeBytes) {
+            await rm(temporary, { force: true })
+            throw new Error(`Relay file size mismatch: expected ${record.sizeBytes}, received ${received}`)
+        }
+        await rename(temporary, record.path)
+    }
+
+    private requireUploadOwner(attachmentId: string, credentialId: string): AttachmentRecord {
         const record = this.records.get(attachmentId)
         if (!record || record.credentialId !== credentialId) throw new Error('Unknown attachment upload')
         return record
     }
 
-    private async pruneStale(): Promise<void> {
-        const threshold = Date.now() - STALE_ATTACHMENT_MS
+    private requireSessionAttachment(sessionId: string, attachmentId: string): AttachmentRecord {
+        const record = this.records.get(attachmentId)
+        if (!record || record.sessionId !== sessionId || record.status !== 'ready') throw new Error('Unknown Session file')
+        return record
+    }
+
+    private async pruneStaleUploads(): Promise<void> {
+        const threshold = Date.now() - STALE_UPLOAD_MS
         for (const [attachmentId, record] of this.records) {
-            if (Date.parse(record.updatedAt) >= threshold) continue
+            if (record.status !== 'uploading' || Date.parse(record.updatedAt) >= threshold) continue
             await rm(record.path, { force: true })
+            await this.blobs.delete(record.blobId).catch(() => undefined)
             this.records.delete(attachmentId)
         }
     }
@@ -194,7 +311,7 @@ export class GatewayAttachmentStore {
     private async load(): Promise<void> {
         try {
             const value = JSON.parse(await readFile(this.metadataPath, 'utf8')) as PersistedAttachments
-            if (value.version !== 1 || !Array.isArray(value.records)) throw new Error('Invalid attachment metadata')
+            if (value.version !== 2 || !Array.isArray(value.records)) throw new Error('Invalid attachment metadata')
             for (const record of value.records) this.records.set(record.attachmentId, record)
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -203,9 +320,8 @@ export class GatewayAttachmentStore {
 
     private persist(): Promise<void> {
         const temporary = `${this.metadataPath}.tmp`
-        const value: PersistedAttachments = { version: 1, records: [...this.records.values()] }
-        return writeFile(temporary, JSON.stringify(value, null, 2), 'utf8')
-            .then(() => rename(temporary, this.metadataPath))
+        const value: PersistedAttachments = { version: 2, records: [...this.records.values()] }
+        return writeFile(temporary, JSON.stringify(value, null, 2), 'utf8').then(() => rename(temporary, this.metadataPath))
     }
 
     private serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -215,7 +331,7 @@ export class GatewayAttachmentStore {
     }
 }
 
-function dto(record: AttachmentRecord): AttachmentUploadDto {
+function uploadDto(record: AttachmentRecord): AttachmentUploadDto {
     return {
         attachmentId: record.attachmentId,
         sessionId: record.sessionId,
@@ -227,6 +343,18 @@ function dto(record: AttachmentRecord): AttachmentUploadDto {
     }
 }
 
+function sessionDto(record: AttachmentRecord): SessionAttachmentDto {
+    return {
+        attachmentId: record.attachmentId,
+        sessionId: record.sessionId,
+        filename: record.filename,
+        mimeType: record.mimeType,
+        sizeBytes: record.sizeBytes,
+        createdAt: record.createdAt,
+        status: 'ready',
+    }
+}
+
 function safeFilename(value: string): string {
     const filename = value.trim().split(/[\\/]/).at(-1)?.replace(/[\u0000-\u001f]/g, '').trim()
     if (!filename || filename === '.' || filename === '..') throw new Error('Attachment filename is invalid')
@@ -234,12 +362,32 @@ function safeFilename(value: string): string {
 }
 
 function decodeBase64(value: string): Buffer {
+    if (value === '') return Buffer.alloc(0)
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) throw new Error('Attachment chunk is not valid base64')
     return Buffer.from(value, 'base64')
 }
 
-async function sha256(path: string): Promise<string> {
-    const hash = createHash('sha256')
-    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
-    return hash.digest('hex')
+function encryptChunk(key: Buffer, blobId: string, index: number, plaintext: Buffer): string {
+    const iv = createHmac('sha256', key).update(chunkAad(blobId, index)).digest().subarray(0, 12)
+    const cipher = createCipheriv('aes-256-gcm', key, iv)
+    cipher.setAAD(chunkAad(blobId, index))
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+    return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url')
+}
+
+function decryptChunk(key: Buffer, blobId: string, index: number, value: string): Buffer {
+    const encrypted = Buffer.from(value, 'base64url')
+    if (encrypted.length < 28) throw new Error('Relay file chunk is truncated')
+    const decipher = createDecipheriv('aes-256-gcm', key, encrypted.subarray(0, 12))
+    decipher.setAAD(chunkAad(blobId, index))
+    decipher.setAuthTag(encrypted.subarray(12, 28))
+    return Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()])
+}
+
+function chunkAad(blobId: string, index: number): Buffer {
+    return Buffer.from(`codever-relay-blob-v1\0${blobId}\0${index}`, 'utf8')
+}
+
+async function exists(path: string): Promise<boolean> {
+    try { await access(path); return true } catch { return false }
 }

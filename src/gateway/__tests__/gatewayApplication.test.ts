@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION, type InventorySnapshot } from '@codever/protocol'
 import { GATEWAY_FEATURES, handleClientRequest, type ClientRequestContext } from '../gatewayApplication'
 import { ProjectRegistry } from '../projects'
-import { GatewayAttachmentStore } from '../attachments'
+import { GatewayAttachmentStore, type RelayBlobManifest, type RelayBlobTransport } from '../attachments'
 import type { RichUserInput } from '@/runtime/semantic'
 
 const temporaryDirectories: string[] = []
@@ -85,6 +84,7 @@ describe('Gateway project.create request', () => {
 
     it('advertises project creation as a Gateway capability', () => {
         expect(GATEWAY_FEATURES).toContain('project.create')
+        expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining(['attachment.upload', 'attachment.manage', 'relay-blob-storage']))
     })
 })
 
@@ -92,7 +92,7 @@ describe('Gateway attachment requests', () => {
     it('uploads encrypted-request chunks and delivers the resolved input to the session', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-attachment-'))
         temporaryDirectories.push(directory)
-        const attachments = await GatewayAttachmentStore.open(directory)
+        const attachments = await GatewayAttachmentStore.open(directory, new TestRelayBlobs())
         let received: RichUserInput | undefined
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1', attachments,
@@ -120,7 +120,6 @@ describe('Gateway attachment requests', () => {
         expect(chunk.status).toBe('completed')
         const complete = await handleClientRequest(frame('complete', {
             kind: 'attachment.upload.complete', attachmentId,
-            sha256: createHash('sha256').update(bytes).digest('hex'),
         }), context)
         expect(complete.status).toBe('completed')
         const message = await handleClientRequest(frame('message', {
@@ -132,7 +131,9 @@ describe('Gateway attachment requests', () => {
             { type: 'text', text: 'Please review this.' },
             { type: 'file', filename: 'notes.txt', source: `attachment:${attachmentId}` },
         ])
-        await expect(attachments.resolveParts('session-1', 'credential-1', [attachmentId])).rejects.toThrow('Unknown attachment')
+        expect(attachments.list('session-1')).toHaveLength(1)
+        expect((await attachments.resolveParts('session-1', [attachmentId]))[0]).toMatchObject({ filename: 'notes.txt' })
+        await attachments.releaseParts([attachmentId])
     })
 })
 
@@ -146,5 +147,38 @@ function frame(
         requestId: `request-${suffix}`,
         idempotencyKey: `idempotency-${suffix}`,
         payload,
+    }
+}
+
+class TestRelayBlobs implements RelayBlobTransport {
+    private readonly values = new Map<string, { chunks: Map<number, string>; manifest: RelayBlobManifest }>()
+    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest> {
+        if (!this.values.has(blobId)) this.values.set(blobId, {
+            chunks: new Map(), manifest: {
+                blobId, totalSize, chunkSize, chunkCount: Math.ceil(totalSize / chunkSize),
+                receivedChunkCount: 0, complete: false,
+            },
+        })
+        return this.require(blobId).manifest
+    }
+    async putChunk(blobId: string, index: number, encryptedData: string): Promise<void> {
+        const blob = this.require(blobId)
+        blob.chunks.set(index, encryptedData)
+        blob.manifest.receivedChunkCount = blob.chunks.size
+    }
+    async complete(blobId: string): Promise<void> {
+        this.require(blobId).manifest.complete = true
+    }
+    async manifest(blobId: string): Promise<RelayBlobManifest> { return this.require(blobId).manifest }
+    async getChunk(blobId: string, index: number): Promise<string> {
+        const value = this.require(blobId).chunks.get(index)
+        if (!value) throw new Error('Missing test chunk')
+        return value
+    }
+    async delete(blobId: string): Promise<void> { this.values.delete(blobId) }
+    private require(blobId: string) {
+        const value = this.values.get(blobId)
+        if (!value) throw new Error('Missing test blob')
+        return value
     }
 }

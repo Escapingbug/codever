@@ -13,6 +13,7 @@ import type {
   Project,
   ProviderSessionListDto,
   SendMessageDto,
+  SessionAttachmentListDto,
   SessionEventEnvelope,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
@@ -202,19 +203,28 @@ export class RelayApi {
   async uploadAttachment(
     sessionId: string,
     file: File,
-    options: { signal?: AbortSignal; onProgress?: (receivedBytes: number, sizeBytes: number) => void } = {},
+    options: {
+      signal?: AbortSignal
+      onProgress?: (receivedBytes: number, sizeBytes: number) => void
+      onStage?: (stage: 'uploading' | 'storing') => void
+      onUpload?: (upload: AttachmentUploadDto) => void
+      resume?: AttachmentUploadDto
+    } = {},
   ): Promise<AttachmentUploadDto> {
-    let attachmentId: string | undefined
+    let attachmentId = options.resume?.attachmentId
     try {
       assertNotAborted(options.signal)
-      let upload = this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
-        kind: 'attachment.upload.begin',
-        sessionId,
-        filename: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        sizeBytes: file.size,
-      })) as AttachmentUploadDto
+      let upload = options.resume ?? this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+          kind: 'attachment.upload.begin',
+          sessionId,
+          filename: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+        })) as AttachmentUploadDto
+      if (upload.sessionId !== sessionId || upload.sizeBytes !== file.size) throw new Error('Upload resume state does not match this file')
       attachmentId = upload.attachmentId
+      options.onUpload?.(upload)
+      options.onStage?.('uploading')
       options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
 
       const chunkBytes = 192 * 1024
@@ -228,16 +238,21 @@ export class RelayApi {
           offset,
           data: bytesToBase64(bytes),
         })) as AttachmentUploadDto
+        options.onUpload?.(upload)
         options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
       }
 
       assertNotAborted(options.signal)
-      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-      return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
-        kind: 'attachment.upload.complete', attachmentId, sha256: hex(new Uint8Array(digest)),
+      options.onStage?.('storing')
+      const completed = this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+        kind: 'attachment.upload.complete', attachmentId,
       })) as AttachmentUploadDto
+      options.onUpload?.(completed)
+      return completed
     } catch (error) {
-      if (attachmentId) await this.cancelAttachment(sessionId, attachmentId).catch(() => undefined)
+      if (attachmentId && options.signal?.aborted) {
+        await this.cancelAttachment(sessionId, attachmentId).catch(() => undefined)
+      }
       throw error
     }
   }
@@ -246,6 +261,18 @@ export class RelayApi {
     return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
       kind: 'attachment.upload.cancel', attachmentId,
     })) as AttachmentUploadDto
+  }
+
+  async listSessionAttachments(sessionId: string): Promise<SessionAttachmentListDto> {
+    return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+      kind: 'attachment.list', sessionId,
+    })) as SessionAttachmentListDto
+  }
+
+  async deleteSessionAttachments(sessionId: string, attachmentIds: string[]): Promise<MutationReceiptDto> {
+    return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+      kind: 'attachment.delete', sessionId, attachmentIds,
+    })) as MutationReceiptDto
   }
 
   async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
@@ -433,10 +460,6 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(index, index + block))
   }
   return btoa(binary)
-}
-
-function hex(bytes: Uint8Array): string {
-  return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
 }
 
 export const relayApiKey: InjectionKey<RelayApi> = Symbol('relay-api')

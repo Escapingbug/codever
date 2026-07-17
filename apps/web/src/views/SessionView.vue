@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AttachmentUploadDto, CodeverSession, JsonValue, PatchSessionConfigDto, ProviderSessionListDto, SessionEventEnvelope } from '@codever/protocol'
+import type { AttachmentUploadDto, CodeverSession, JsonValue, PatchSessionConfigDto, ProviderSessionListDto, SessionAttachmentDto, SessionEventEnvelope } from '@codever/protocol'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
@@ -39,10 +39,17 @@ interface PendingAttachment {
   upload?: AttachmentUploadDto
   receivedBytes: number
   status: 'uploading' | 'ready' | 'error'
+  stage: 'uploading' | 'storing'
   error?: string
   controller: AbortController
 }
 const pendingAttachments = ref<PendingAttachment[]>([])
+const sessionAttachments = ref<SessionAttachmentDto[]>([])
+const selectedStoredAttachmentIds = ref<string[]>([])
+const cleanupAttachmentIds = ref<string[]>([])
+const showSessionFiles = ref(false)
+const loadingSessionFiles = ref(false)
+const deletingSessionFiles = ref(false)
 const showMobileControls = ref(false)
 const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
@@ -63,9 +70,10 @@ const canMutate = computed(() => gatewayOnline.value
   && session.value?.state !== 'offline')
 const canSend = computed(() => canMutate.value || (!gatewayOnline.value && sendWhenOnline.value))
 const attachmentsUploading = computed(() => pendingAttachments.value.some(item => item.status === 'uploading'))
-const readyAttachmentIds = computed(() => pendingAttachments.value.flatMap(item =>
-  item.status === 'ready' && item.upload ? [item.upload.attachmentId] : [],
-))
+const readyAttachmentIds = computed(() => [...new Set([
+  ...selectedStoredAttachmentIds.value,
+  ...pendingAttachments.value.flatMap(item => item.status === 'ready' && item.upload ? [item.upload.attachmentId] : []),
+])])
 const canSubmitMessage = computed(() => canSend.value
   && !sending.value
   && !attachmentsUploading.value
@@ -111,6 +119,7 @@ async function loadSession(): Promise<void> {
     }
     session.value = await state.api.getSession(requestedId)
     state.replaceSession(session.value)
+    await refreshSessionAttachments()
     startLiveConnection(requestedId)
     let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
     let remoteEvents = page.events
@@ -258,6 +267,8 @@ async function sendMessage(): Promise<void> {
     })
     draft.value = ''
     pendingAttachments.value = []
+    selectedStoredAttachmentIds.value = []
+    await refreshSessionAttachments()
     sendWhenOnline.value = false
     if (session.value?.archivedAt) {
       session.value = { ...session.value, archivedAt: undefined }
@@ -298,24 +309,17 @@ function chooseAttachments(): void {
 
 async function addAttachments(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
-  const available = Math.max(0, 5 - pendingAttachments.value.length)
-  const files = [...(input.files ?? [])].slice(0, available)
+  const files = [...(input.files ?? [])]
   input.value = ''
-  if (!files.length) {
-    if (available === 0) liveError.value = 'A message can contain at most 5 attachments'
-    return
-  }
+  if (!files.length) return
   for (const file of files) {
-    if (file.size < 1 || file.size > 25 * 1024 * 1024) {
-      liveError.value = `${file.name} must be between 1 byte and 25 MiB`
-      continue
-    }
     const attachment: PendingAttachment = {
       localId: crypto.randomUUID(),
       sessionId: sessionId.value,
       file,
       receivedBytes: 0,
       status: 'uploading',
+      stage: 'uploading',
       controller: new AbortController(),
     }
     pendingAttachments.value = [...pendingAttachments.value, attachment]
@@ -324,6 +328,9 @@ async function addAttachments(event: Event): Promise<void> {
 }
 
 async function uploadAttachment(attachment: PendingAttachment): Promise<void> {
+  attachment.status = 'uploading'
+  attachment.error = undefined
+  attachment.controller = new AbortController()
   try {
     const upload = await state.api.uploadAttachment(attachment.sessionId, attachment.file, {
       signal: attachment.controller.signal,
@@ -331,10 +338,17 @@ async function uploadAttachment(attachment: PendingAttachment): Promise<void> {
         attachment.receivedBytes = receivedBytes
         pendingAttachments.value = [...pendingAttachments.value]
       },
+      onStage: stage => {
+        attachment.stage = stage
+        pendingAttachments.value = [...pendingAttachments.value]
+      },
+      onUpload: upload => { attachment.upload = upload },
+      resume: attachment.upload?.status === 'uploading' ? attachment.upload : undefined,
     })
     attachment.upload = upload
     attachment.receivedBytes = upload.receivedBytes
     attachment.status = 'ready'
+    await refreshSessionAttachments()
   } catch (error) {
     if (attachment.controller.signal.aborted) return
     attachment.status = 'error'
@@ -347,11 +361,15 @@ async function uploadAttachment(attachment: PendingAttachment): Promise<void> {
 async function removeAttachment(attachment: PendingAttachment): Promise<void> {
   attachment.controller.abort()
   pendingAttachments.value = pendingAttachments.value.filter(item => item.localId !== attachment.localId)
-  if (attachment.upload) {
+  if (attachment.status === 'error' && attachment.upload?.status === 'uploading') {
     await state.api.cancelAttachment(attachment.sessionId, attachment.upload.attachmentId).catch(error => {
-      liveError.value = error instanceof Error ? error.message : 'Attachment cleanup failed'
+      liveError.value = error instanceof Error ? error.message : 'Upload cleanup failed'
     })
   }
+}
+
+function retryAttachment(attachment: PendingAttachment): void {
+  if (attachment.status === 'error') void uploadAttachment(attachment)
 }
 
 function disposeAttachments(): void {
@@ -359,9 +377,53 @@ function disposeAttachments(): void {
   pendingAttachments.value = []
   for (const attachment of attachments) {
     attachment.controller.abort()
-    if (attachment.upload) {
-      void state.api.cancelAttachment(attachment.sessionId, attachment.upload.attachmentId).catch(() => undefined)
-    }
+  }
+}
+
+async function refreshSessionAttachments(): Promise<void> {
+  const requestedId = sessionId.value
+  loadingSessionFiles.value = true
+  try {
+    const result = await state.api.listSessionAttachments(requestedId)
+    if (requestedId !== sessionId.value) return
+    sessionAttachments.value = result.attachments
+    const available = new Set(result.attachments.map(item => item.attachmentId))
+    selectedStoredAttachmentIds.value = selectedStoredAttachmentIds.value.filter(id => available.has(id))
+    cleanupAttachmentIds.value = cleanupAttachmentIds.value.filter(id => available.has(id))
+  } catch (error) {
+    if (requestedId === sessionId.value) liveError.value = error instanceof Error ? error.message : 'Session files could not be loaded'
+  } finally {
+    if (requestedId === sessionId.value) loadingSessionFiles.value = false
+  }
+}
+
+function toggleStoredAttachment(attachmentId: string): void {
+  selectedStoredAttachmentIds.value = selectedStoredAttachmentIds.value.includes(attachmentId)
+    ? selectedStoredAttachmentIds.value.filter(id => id !== attachmentId)
+    : [...selectedStoredAttachmentIds.value, attachmentId]
+}
+
+function toggleCleanupAttachment(attachmentId: string): void {
+  cleanupAttachmentIds.value = cleanupAttachmentIds.value.includes(attachmentId)
+    ? cleanupAttachmentIds.value.filter(id => id !== attachmentId)
+    : [...cleanupAttachmentIds.value, attachmentId]
+}
+
+async function deleteSelectedSessionFiles(): Promise<void> {
+  if (!cleanupAttachmentIds.value.length || deletingSessionFiles.value) return
+  if (!window.confirm(`Delete ${cleanupAttachmentIds.value.length} encrypted Session file(s) from Relay storage?`)) return
+  deletingSessionFiles.value = true
+  try {
+    const deleting = new Set(cleanupAttachmentIds.value)
+    await state.api.deleteSessionAttachments(sessionId.value, [...deleting])
+    pendingAttachments.value = pendingAttachments.value.filter(item => !item.upload || !deleting.has(item.upload.attachmentId))
+    selectedStoredAttachmentIds.value = selectedStoredAttachmentIds.value.filter(id => !deleting.has(id))
+    cleanupAttachmentIds.value = []
+    await refreshSessionAttachments()
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Session files could not be deleted'
+  } finally {
+    deletingSessionFiles.value = false
   }
 }
 
@@ -460,16 +522,31 @@ function submitOnShortcut(event: KeyboardEvent): void {
 
       <footer class="composer-wrap">
         <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
+        <section v-if="showSessionFiles" class="session-files-panel" aria-label="Files stored for this session">
+          <header><div><strong>Session files</strong><small>End-to-end encrypted in Relay storage</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
+          <div v-if="!sessionAttachments.length && !loadingSessionFiles" class="session-files-empty">No files are stored for this session.</div>
+          <div v-else class="session-files-list">
+            <article v-for="attachment in sessionAttachments" :key="attachment.attachmentId" class="session-file-row">
+              <input type="checkbox" :checked="cleanupAttachmentIds.includes(attachment.attachmentId)" aria-label="Select file for deletion" @change="toggleCleanupAttachment(attachment.attachmentId)" />
+              <div><strong>{{ attachment.filename }}</strong><small>{{ formatBytes(attachment.sizeBytes) }} · {{ new Date(attachment.createdAt).toLocaleString() }}</small></div>
+              <button class="button button--small" :class="{ 'button--selected': selectedStoredAttachmentIds.includes(attachment.attachmentId) }" @click="toggleStoredAttachment(attachment.attachmentId)">{{ selectedStoredAttachmentIds.includes(attachment.attachmentId) ? 'Attached' : 'Attach' }}</button>
+            </article>
+          </div>
+        </section>
         <div class="composer" :class="{ 'composer--disabled': !canSend }">
-          <div v-if="pendingAttachments.length" class="composer-attachments">
+          <div v-if="pendingAttachments.length || selectedStoredAttachmentIds.length" class="composer-attachments">
+            <div v-for="attachmentId in selectedStoredAttachmentIds" :key="`stored-${attachmentId}`" class="composer-attachment composer-attachment--ready">
+              <div><strong>{{ sessionAttachments.find(item => item.attachmentId === attachmentId)?.filename ?? 'Session file' }}</strong><small>Stored in Relay</small></div>
+              <button type="button" aria-label="Remove stored attachment" @click="toggleStoredAttachment(attachmentId)">×</button>
+            </div>
             <div v-for="attachment in pendingAttachments" :key="attachment.localId" class="composer-attachment" :class="`composer-attachment--${attachment.status}`">
-              <div><strong>{{ attachment.file.name }}</strong><small>{{ attachment.status === 'uploading' ? `${formatBytes(attachment.receivedBytes)} / ${formatBytes(attachment.file.size)}` : attachment.status === 'ready' ? formatBytes(attachment.file.size) : attachment.error }}</small></div>
-              <progress v-if="attachment.status === 'uploading'" :value="attachment.receivedBytes" :max="attachment.file.size" />
-              <button type="button" aria-label="Remove attachment" @click="removeAttachment(attachment)">×</button>
+              <div><strong>{{ attachment.file.name }}</strong><small>{{ attachment.status === 'uploading' ? attachment.stage === 'storing' ? 'Encrypting into Relay storage…' : `${formatBytes(attachment.receivedBytes)} / ${formatBytes(attachment.file.size)}` : attachment.status === 'ready' ? formatBytes(attachment.file.size) : attachment.error }}</small></div>
+              <progress v-if="attachment.status === 'uploading' && attachment.stage === 'uploading' && attachment.file.size > 0" :value="attachment.receivedBytes" :max="attachment.file.size" />
+              <span class="composer-attachment-actions"><button v-if="attachment.status === 'error'" type="button" @click="retryAttachment(attachment)">Retry</button><button type="button" aria-label="Remove attachment" @click="removeAttachment(attachment)">×</button></span>
             </div>
           </div>
           <textarea v-model="draft" rows="2" :disabled="!canSend" :placeholder="canSend ? 'Message agent…' : 'Reconnect to send a message'" @keydown="submitOnShortcut" />
-          <div class="composer-footer"><div class="composer-actions"><input ref="fileInput" type="file" multiple hidden @change="addAttachments" /><button class="attachment-button" type="button" :disabled="!canMutate || pendingAttachments.length >= 5" aria-label="Attach files" @click="chooseAttachments">＋ File</button><span class="composer-shortcut"><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span></div><button class="send-button" :disabled="!canSubmitMessage" aria-label="Send message" @click="sendMessage">{{ sending ? '…' : '↑' }}</button></div>
+          <div class="composer-footer"><div class="composer-actions"><input ref="fileInput" type="file" multiple hidden @change="addAttachments" /><button class="attachment-button" type="button" :disabled="!canMutate" aria-label="Upload files" @click="chooseAttachments">＋ Upload</button><button class="attachment-button" type="button" :class="{ 'attachment-button--active': showSessionFiles }" @click="showSessionFiles = !showSessionFiles">Files {{ sessionAttachments.length }}</button><span class="composer-shortcut"><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span></div><button class="send-button" :disabled="!canSubmitMessage" aria-label="Send message" @click="sendMessage">{{ sending ? '…' : '↑' }}</button></div>
         </div>
       </footer>
     </template>

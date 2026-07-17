@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import {
     PROTOCOL_VERSION,
+    parseGatewayBlobRequestFrame,
     parseGatewayFrame,
+    type GatewayBlobRequestFrame,
     type GatewayDeviceTunnelFrame,
     type GatewayFrame,
     type Heartbeat,
+    type RelayBlobManifest,
+    type RelayBlobResponseFrame,
 } from '@codever/protocol'
 import WebSocket, { type ClientOptions, type RawData } from 'ws'
 import { SecureGatewayHandshake } from './secureGatewayHandshake'
@@ -14,6 +18,7 @@ const SECURE_RELAY_PATH = '/v2/gateway/connect'
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 const DEFAULT_INITIAL_RECONNECT_DELAY_MS = 250
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000
+const BLOB_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_RECONNECT_MULTIPLIER = 2
 const DEFAULT_RECONNECT_JITTER = 0.2
 
@@ -31,6 +36,11 @@ export class RelayLink {
     private outgoing = Promise.resolve()
     private firstOnline?: { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
     private secureHandshake?: SecureGatewayHandshake
+    private readonly blobRequests = new Map<string, {
+        resolve: (frame: RelayBlobResponseFrame) => void
+        reject: (error: Error) => void
+        timer: ReturnType<typeof setTimeout>
+    }>()
 
     constructor(private readonly options: RelayLinkOptions) {
         validateOptions(options)
@@ -73,6 +83,7 @@ export class RelayLink {
         this.clearHeartbeatTimer()
         this.connectionEpoch = undefined
         this.secureHandshake = undefined
+        this.rejectBlobRequests(new RelayLinkError('RelayLink stopped'))
 
         const socket = this.socket
         this.socket = undefined
@@ -143,6 +154,7 @@ export class RelayLink {
             this.connectionEpoch = undefined
             this.secureHandshake = undefined
             this.clearHeartbeatTimer()
+            this.rejectBlobRequests(new RelayLinkError('Relay connection closed during Blob operation'))
             if (!this.stopping) {
                 if (code !== 1000) {
                     this.reportError(new RelayLinkError(
@@ -190,6 +202,9 @@ export class RelayLink {
             throw new RelayLinkError('Relay frame belongs to a stale or different secure connection epoch')
         }
         switch (frame.type) {
+            case 'relay.blob.response':
+                this.resolveBlobRequest(frame)
+                return
             case 'device.tunnel.open':
             case 'device.tunnel.data':
             case 'device.tunnel.close':
@@ -261,6 +276,105 @@ export class RelayLink {
             uptimeMs: Math.max(0, this.now() - this.startedAt),
         }
         this.sendApplicationFrame('gateway.heartbeat', heartbeat)
+    }
+
+    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest> {
+        const response = await this.expectBlobSuccess('begin', requestId => this.blobFrame('gateway.blob.begin', requestId, {
+            blobId, totalSize, chunkSize,
+        }))
+        if (response.operation !== 'begin') throw new RelayLinkError('Relay returned the wrong Blob operation')
+        return response.manifest
+    }
+
+    async putChunk(blobId: string, index: number, encryptedData: string): Promise<void> {
+        await this.expectBlobSuccess('put-chunk', requestId => this.blobFrame('gateway.blob.put-chunk', requestId, {
+            blobId, index, opaqueChunk: encryptedData,
+        }))
+    }
+
+    async complete(blobId: string): Promise<void> {
+        await this.expectBlobSuccess('complete', requestId => this.blobFrame('gateway.blob.complete', requestId, { blobId }))
+    }
+
+    async manifest(blobId: string): Promise<RelayBlobManifest> {
+        const response = await this.expectBlobSuccess(
+            'manifest', requestId => this.blobFrame('gateway.blob.manifest', requestId, { blobId }),
+        )
+        if (response.operation !== 'manifest') throw new RelayLinkError('Relay returned the wrong Blob operation')
+        return response.manifest
+    }
+
+    async getChunk(blobId: string, index: number): Promise<string> {
+        const response = await this.expectBlobSuccess(
+            'get-chunk', requestId => this.blobFrame('gateway.blob.get-chunk', requestId, { blobId, index }),
+        )
+        if (response.operation !== 'get-chunk') throw new RelayLinkError('Relay returned the wrong Blob operation')
+        return response.opaqueChunk
+    }
+
+    async delete(blobId: string): Promise<void> {
+        await this.expectBlobSuccess('delete', requestId => this.blobFrame('gateway.blob.delete', requestId, { blobId }))
+    }
+
+    private blobFrame<TType extends GatewayBlobRequestFrame['type']>(
+        type: TType,
+        requestId: string,
+        payload: Omit<Extract<GatewayBlobRequestFrame, { type: TType }>['payload'], 'requestId'>,
+    ): GatewayBlobRequestFrame {
+        return parseGatewayBlobRequestFrame({
+            version: PROTOCOL_VERSION,
+            type,
+            messageId: this.messageId(),
+            gatewayId: this.options.gatewayId,
+            connectionEpoch: this.requireConnectionEpoch(),
+            payload: { requestId, ...payload },
+        })
+    }
+
+    private expectBlobSuccess(
+        operation: RelayBlobResponseFrame['payload']['operation'],
+        create: (requestId: string) => GatewayBlobRequestFrame,
+    ): Promise<Extract<RelayBlobResponseFrame['payload'], { status: 'succeeded' }>> {
+        return this.requestBlob(create).then(frame => {
+            const payload = frame.payload
+            if (payload.operation !== operation) throw new RelayLinkError('Relay Blob response operation mismatch')
+            if (payload.status === 'failed') throw new RelayLinkError(`Relay Blob ${payload.code}: ${payload.message}`)
+            return payload
+        })
+    }
+
+    private requestBlob(create: (requestId: string) => GatewayBlobRequestFrame): Promise<RelayBlobResponseFrame> {
+        if (!this.isOnline()) return Promise.reject(new RelayLinkError('Relay is offline during Blob operation'))
+        const requestId = this.messageId()
+        return new Promise<RelayBlobResponseFrame>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                if (this.blobRequests.delete(requestId)) reject(new RelayLinkError('Relay Blob request timed out'))
+            }, BLOB_REQUEST_TIMEOUT_MS)
+            this.blobRequests.set(requestId, { resolve, reject, timer })
+            try {
+                this.sendEncrypted(create(requestId))
+            } catch (error) {
+                clearTimeout(timer)
+                this.blobRequests.delete(requestId)
+                reject(error instanceof Error ? error : new RelayLinkError(String(error)))
+            }
+        })
+    }
+
+    private resolveBlobRequest(frame: RelayBlobResponseFrame): void {
+        const pending = this.blobRequests.get(frame.payload.requestId)
+        if (!pending) return
+        this.blobRequests.delete(frame.payload.requestId)
+        clearTimeout(pending.timer)
+        pending.resolve(frame)
+    }
+
+    private rejectBlobRequests(error: Error): void {
+        for (const pending of this.blobRequests.values()) {
+            clearTimeout(pending.timer)
+            pending.reject(error)
+        }
+        this.blobRequests.clear()
     }
 
     private startHeartbeat(): void {

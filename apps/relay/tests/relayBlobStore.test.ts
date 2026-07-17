@@ -17,14 +17,14 @@ describe('RelayBlobStore', () => {
     it('persists opaque chunks, resumes, and accepts byte-identical retries', async () => {
         const { store: blobs, path } = await store()
         expect(await blobs.begin('gateway-1', { blobId: 'blob-1', totalSize: 5, chunkSize: 3 })).toMatchObject({
-            chunkCount: 2, receivedChunks: [], complete: false,
+            chunkCount: 2, receivedChunkCount: 0, complete: false,
         })
         await blobs.putChunk('gateway-1', 'blob-1', 0, Buffer.from('abc').toString('base64url'))
         await blobs.putChunk('gateway-1', 'blob-1', 0, Buffer.from('abc').toString('base64url'))
         const reopened = new RelayBlobStore(path)
-        expect(await reopened.manifest('gateway-1', 'blob-1')).toMatchObject({ receivedChunks: [0], complete: false })
+        expect(await reopened.manifest('gateway-1', 'blob-1')).toMatchObject({ receivedChunkCount: 1, complete: false })
         await reopened.putChunk('gateway-1', 'blob-1', 1, Buffer.from('de').toString('base64url'))
-        expect(await reopened.complete('gateway-1', 'blob-1')).toMatchObject({ receivedChunks: [0, 1], complete: true })
+        expect(await reopened.complete('gateway-1', 'blob-1')).toMatchObject({ receivedChunkCount: 2, complete: true })
         expect(Buffer.from(await reopened.getChunk('gateway-1', 'blob-1', 1), 'base64url').toString()).toBe('de')
     })
 
@@ -32,6 +32,8 @@ describe('RelayBlobStore', () => {
         const { store: blobs } = await store()
         await blobs.begin('gateway-1', { blobId: 'blob', totalSize: 5, chunkSize: 3 })
         await expect(blobs.complete('gateway-1', 'blob')).rejects.toMatchObject({ code: 'incomplete' })
+        await expect(blobs.putChunk('gateway-1', 'blob', 1, Buffer.from('de').toString('base64url')))
+            .rejects.toMatchObject({ code: 'invalid_chunk' })
         await expect(blobs.putChunk('gateway-1', 'blob', 0, Buffer.from('ab').toString('base64url')))
             .rejects.toMatchObject({ code: 'invalid_chunk' })
         await blobs.putChunk('gateway-1', 'blob', 0, Buffer.from('abc').toString('base64url'))

@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
     IsoDateTimeSchema,
     JsonValueSchema,
+    NonNegativeIntegerSchema,
     OpaqueIdSchema,
     PositiveIntegerSchema,
     SCHEMA_VERSION,
@@ -43,7 +44,7 @@ export const ConversationEventSchema = z.discriminatedUnion('kind', [
             id: OpaqueIdSchema,
             filename: z.string().min(1),
             mimeType: z.string().min(1),
-            sizeBytes: PositiveIntegerSchema,
+            sizeBytes: NonNegativeIntegerSchema,
         }).strict()).optional(),
     }),
     event({ kind: z.literal('turn_started') }),

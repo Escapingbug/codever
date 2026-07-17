@@ -20,7 +20,7 @@ export const RelayBlobManifestSchema = z.object({
     totalSize: BlobSizeSchema,
     chunkSize: z.number().int().positive().max(RELAY_BLOB_CHUNK_BYTES),
     chunkCount: BlobChunkIndexSchema,
-    receivedChunks: z.array(BlobChunkIndexSchema),
+    receivedChunkCount: BlobChunkIndexSchema,
     complete: z.boolean(),
 }).strict()
 

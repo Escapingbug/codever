@@ -45,7 +45,7 @@ describe('Relay Blob protocol', () => {
     })
 
     it('parses strict succeeded and failed responses', () => {
-        const manifest = { blobId: 'blob', totalSize: 0, chunkSize: 1, chunkCount: 0, receivedChunks: [], complete: true }
+        const manifest = { blobId: 'blob', totalSize: 0, chunkSize: 1, chunkCount: 0, receivedChunkCount: 0, complete: true }
         expect(parseRelayBlobResponseFrame({
             ...base, type: 'relay.blob.response',
             payload: { requestId: 'r1', operation: 'complete', status: 'succeeded', manifest },

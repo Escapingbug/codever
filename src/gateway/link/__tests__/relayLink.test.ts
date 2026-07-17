@@ -107,6 +107,44 @@ describe('RelayLink secure-only transport', () => {
         ])
     })
 
+    it('correlates durable Relay Blob requests without exposing plaintext file data', async () => {
+        const relay = await createMockRelay()
+        const link = createLink(relay.url)
+        await link.start()
+        const connection = await relay.connection()
+        await connection.next('gateway.hello')
+        await connection.next('gateway.heartbeat')
+
+        const beginning = link.begin('blob_test', 3, 3)
+        const begin = await connection.next('gateway.blob.begin')
+        connection.send(blobResponse(connection, begin.payload.requestId, {
+            operation: 'begin', status: 'succeeded', manifest: manifest(false),
+        }))
+        await beginning
+
+        const putting = link.putChunk('blob_test', 0, 'YWJj')
+        const put = await connection.next('gateway.blob.put-chunk')
+        expect(put.payload).toMatchObject({ blobId: 'blob_test', index: 0, opaqueChunk: 'YWJj' })
+        connection.send(blobResponse(connection, put.payload.requestId, {
+            operation: 'put-chunk', status: 'succeeded', manifest: { ...manifest(false), receivedChunkCount: 1 },
+        }))
+        await putting
+
+        const completing = link.complete('blob_test')
+        const complete = await connection.next('gateway.blob.complete')
+        connection.send(blobResponse(connection, complete.payload.requestId, {
+            operation: 'complete', status: 'succeeded', manifest: { ...manifest(true), receivedChunkCount: 1 },
+        }))
+        await completing
+
+        const reading = link.getChunk('blob_test', 0)
+        const get = await connection.next('gateway.blob.get-chunk')
+        connection.send(blobResponse(connection, get.payload.requestId, {
+            operation: 'get-chunk', status: 'succeeded', blobId: 'blob_test', index: 0, opaqueChunk: 'YWJj',
+        }))
+        await expect(reading).resolves.toBe('YWJj')
+    })
+
     it('closes the connection when decrypted data is not a device-tunnel frame', async () => {
         const relay = await createMockRelay()
         const errors: Error[] = []
@@ -246,4 +284,18 @@ function dataFrame<TType extends GatewayFrame['type']>(
         connectionEpoch: connection.epoch,
         payload,
     } as Extract<GatewayFrame, { type: TType }>
+}
+
+function manifest(complete: boolean) {
+    return {
+        blobId: 'blob_test', totalSize: 3, chunkSize: 3, chunkCount: 1, receivedChunkCount: 0, complete,
+    }
+}
+
+function blobResponse(
+    connection: MockConnection,
+    requestId: string,
+    payload: Record<string, unknown>,
+): GatewayFrame {
+    return dataFrame(connection, 'relay.blob.response', { requestId, ...payload } as never)
 }

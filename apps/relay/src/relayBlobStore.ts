@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
     BlobIdSchema,
@@ -14,6 +14,7 @@ interface BlobMetadata {
     blobId: string
     totalSize: number
     chunkSize: number
+    receivedChunkCount: number
     complete: boolean
 }
 
@@ -55,7 +56,7 @@ export class RelayBlobStore {
                 if (existing.totalSize !== input.totalSize || existing.chunkSize !== input.chunkSize) {
                     throw new RelayBlobStoreError('conflict', 'Blob already exists with different properties')
                 }
-                return this.manifestFrom(directory, existing)
+                return this.manifestFrom(existing)
             }
             await mkdir(directory, { recursive: true, mode: 0o700 })
             const metadata: BlobMetadata = {
@@ -63,10 +64,11 @@ export class RelayBlobStore {
                 blobId,
                 totalSize: input.totalSize,
                 chunkSize: input.chunkSize,
+                receivedChunkCount: 0,
                 complete: false,
             }
             await atomicWriteJson(this.metadataPath(directory), metadata)
-            return this.manifestFrom(directory, metadata)
+            return this.manifestFrom(metadata)
         })
     }
 
@@ -78,6 +80,9 @@ export class RelayBlobStore {
             const directory = this.blobDirectory(gatewayId, blobId)
             const metadata = await this.readMetadata(directory, true)
             if (metadata.complete) throw new RelayBlobStoreError('conflict', 'Completed Blob cannot be modified')
+            if (index > metadata.receivedChunkCount) {
+                throw new RelayBlobStoreError('invalid_chunk', `Expected chunk ${metadata.receivedChunkCount}, received ${index}`)
+            }
             const expectedLength = expectedChunkLength(metadata, index)
             if (expectedLength === undefined || bytes.length !== expectedLength) {
                 throw new RelayBlobStoreError('invalid_chunk', 'Chunk index or byte length does not match the Blob manifest')
@@ -90,9 +95,13 @@ export class RelayBlobStore {
             if (existing) {
                 if (!existing.equals(bytes)) throw new RelayBlobStoreError('conflict', `Chunk ${index} already contains different bytes`)
             } else {
+                if (index < metadata.receivedChunkCount) throw new RelayBlobStoreError('storage_error', `Committed chunk ${index} is missing`)
                 await atomicWrite(path, bytes)
             }
-            return this.manifestFrom(directory, metadata)
+            if (index < metadata.receivedChunkCount) return this.manifestFrom(metadata)
+            const advanced = { ...metadata, receivedChunkCount: metadata.receivedChunkCount + 1 }
+            await atomicWriteJson(this.metadataPath(directory), advanced)
+            return this.manifestFrom(advanced)
         })
     }
 
@@ -102,8 +111,7 @@ export class RelayBlobStore {
             const directory = this.blobDirectory(gatewayId, blobId)
             const metadata = await this.readMetadata(directory, true)
             const count = chunkCount(metadata)
-            const received = await this.receivedChunkIndices(directory)
-            if (received.length !== count || received.some((index, position) => index !== position)) {
+            if (metadata.receivedChunkCount !== count) {
                 throw new RelayBlobStoreError('incomplete', 'Blob chunks are not a complete contiguous sequence')
             }
             for (let index = 0; index < count; index += 1) {
@@ -116,10 +124,10 @@ export class RelayBlobStore {
                     throw new RelayBlobStoreError('incomplete', `Blob is missing valid chunk ${index}`)
                 }
             }
-            if (metadata.complete) return this.manifestFrom(directory, metadata)
+            if (metadata.complete) return this.manifestFrom(metadata)
             const completed = { ...metadata, complete: true }
             await atomicWriteJson(this.metadataPath(directory), completed)
-            return this.manifestFrom(directory, completed)
+            return this.manifestFrom(completed)
         })
     }
 
@@ -127,7 +135,7 @@ export class RelayBlobStore {
         const blobId = parseBlobId(blobIdInput)
         return this.serial(gatewayId, blobId, async () => {
             const directory = this.blobDirectory(gatewayId, blobId)
-            return this.manifestFrom(directory, await this.readMetadata(directory, true))
+            return this.manifestFrom(await this.readMetadata(directory, true))
         })
     }
 
@@ -193,31 +201,15 @@ export class RelayBlobStore {
         return parseMetadata(value)
     }
 
-    private async manifestFrom(directory: string, metadata: BlobMetadata): Promise<RelayBlobManifest> {
-        const receivedChunks = await this.receivedChunkIndices(directory)
+    private manifestFrom(metadata: BlobMetadata): RelayBlobManifest {
         return RelayBlobManifestSchema.parse({
             blobId: metadata.blobId,
             totalSize: metadata.totalSize,
             chunkSize: metadata.chunkSize,
             chunkCount: chunkCount(metadata),
-            receivedChunks,
+            receivedChunkCount: metadata.receivedChunkCount,
             complete: metadata.complete,
         })
-    }
-
-    private async receivedChunkIndices(directory: string): Promise<number[]> {
-        let names: string[]
-        try {
-            names = await readdir(directory)
-        } catch (error) {
-            throw storageError('Unable to list Blob chunks', error)
-        }
-        return names.flatMap(name => {
-            const match = /^(0|[1-9][0-9]*)\.chunk$/.exec(name)
-            if (!match) return []
-            const index = Number(match[1])
-            return Number.isSafeInteger(index) ? [index] : []
-        }).sort((left, right) => left - right)
     }
 }
 
@@ -259,16 +251,21 @@ function decodeOpaqueChunk(value: string): Buffer {
 function parseMetadata(value: unknown): BlobMetadata {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw storageError('Invalid Blob manifest')
     const record = value as Record<string, unknown>
-    const allowed = new Set(['formatVersion', 'blobId', 'totalSize', 'chunkSize', 'complete'])
+    const allowed = new Set(['formatVersion', 'blobId', 'totalSize', 'chunkSize', 'receivedChunkCount', 'complete'])
     if (Object.keys(record).some(key => !allowed.has(key)) || record.formatVersion !== 1
         || typeof record.blobId !== 'string' || typeof record.complete !== 'boolean') throw storageError('Invalid Blob manifest')
     const blobId = parseBlobId(record.blobId)
-    if (typeof record.totalSize !== 'number' || typeof record.chunkSize !== 'number') throw storageError('Invalid Blob manifest')
+    if (typeof record.totalSize !== 'number' || typeof record.chunkSize !== 'number'
+        || typeof record.receivedChunkCount !== 'number') throw storageError('Invalid Blob manifest')
     requireSafeSize(record.totalSize, 'totalSize')
     if (!Number.isSafeInteger(record.chunkSize) || record.chunkSize < 1 || record.chunkSize > RELAY_BLOB_CHUNK_BYTES) {
         throw storageError('Invalid Blob manifest')
     }
-    return { formatVersion: 1, blobId, totalSize: record.totalSize, chunkSize: record.chunkSize, complete: record.complete }
+    requireSafeSize(record.receivedChunkCount, 'receivedChunkCount')
+    return {
+        formatVersion: 1, blobId, totalSize: record.totalSize, chunkSize: record.chunkSize,
+        receivedChunkCount: record.receivedChunkCount, complete: record.complete,
+    }
 }
 
 function storageError(message: string, cause?: unknown): RelayBlobStoreError {
