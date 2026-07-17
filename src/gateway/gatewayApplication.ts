@@ -297,19 +297,34 @@ export async function handleClientRequest(
                 break
             }
             case 'events.list': {
-                if ((request.payload.after ?? 0) === 0) {
-                    await context.sessions.hydrateProviderHistory(request.payload.sessionId)
+                const { after, before, limit: requestedLimit, sessionId } = request.payload
+                if (after !== undefined && before !== undefined) {
+                    throw new Error('events.list accepts either after or before, not both')
+                }
+                if (after === undefined && before === undefined) {
+                    await context.sessions.hydrateProviderHistory(sessionId)
                 }
                 const all = await loadWireEvents(
                     context.events,
-                    request.payload.sessionId,
-                    request.payload.after ?? 0,
+                    sessionId,
+                    0,
                 )
-                const selected = all.slice(0, request.payload.limit ?? 500)
+                const limit = requestedLimit ?? 100
+                const eligible = before !== undefined
+                    ? all.filter(event => event.seq < before)
+                    : after !== undefined
+                        ? all.filter(event => event.seq > after)
+                        : all
+                const selected = after !== undefined
+                    ? eligible.slice(0, limit)
+                    : eligible.slice(-limit)
+                const firstSeq = selected.at(0)?.seq
+                const lastSeq = selected.at(-1)?.seq
                 payload = {
-                    sessionId: request.payload.sessionId,
+                    sessionId,
                     events: selected,
-                    nextAfter: selected.at(-1)?.seq ?? null,
+                    previousBefore: firstSeq !== undefined && all.some(event => event.seq < firstSeq) ? firstSeq : null,
+                    nextAfter: lastSeq !== undefined && all.some(event => event.seq > lastSeq) ? lastSeq : null,
                 }
                 break
             }

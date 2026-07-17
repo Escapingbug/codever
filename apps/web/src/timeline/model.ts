@@ -5,6 +5,7 @@ export interface AssistantTimelineEntry {
   key: string
   text: string
   events: SessionEventEnvelope[]
+  status: 'working' | 'success' | 'error' | 'cancelled' | 'max_turns'
 }
 
 export interface ToolTimelineEntry {
@@ -25,20 +26,44 @@ export type TimelineEntry = AssistantTimelineEntry | ToolTimelineEntry | EventTi
 export function buildTimeline(envelopes: SessionEventEnvelope[]): TimelineEntry[] {
   const entries: TimelineEntry[] = []
   const tools = new Map<string, ToolTimelineEntry>()
+  const assistants = new Map<string, AssistantTimelineEntry>()
 
   for (const envelope of [...envelopes].sort((a, b) => a.seq - b.seq)) {
     const event = envelope.event
-    if (event.kind === 'assistant_text_delta') {
-      const previous = entries.at(-1)
+    if (event.kind === 'turn_started') {
       const turnId = event.meta?.turnId
-      if (
-        previous?.type === 'assistant'
-        && previous.events.at(-1)?.event.meta?.turnId === turnId
-      ) {
-        previous.text += event.text
-        previous.events.push(envelope)
+      if (turnId && !assistants.has(turnId)) {
+        const entry: AssistantTimelineEntry = {
+          type: 'assistant', key: envelope.eventId, text: '', events: [envelope], status: 'working',
+        }
+        assistants.set(turnId, entry)
+        entries.push(entry)
+      }
+      continue
+    }
+
+    if (event.kind === 'assistant_text_delta') {
+      const turnId = event.meta?.turnId
+      const existing = turnId ? assistants.get(turnId) : undefined
+      if (existing) {
+        existing.text += event.text
+        existing.events.push(envelope)
       } else {
-        entries.push({ type: 'assistant', key: envelope.eventId, text: event.text, events: [envelope] })
+        const entry: AssistantTimelineEntry = {
+          type: 'assistant', key: envelope.eventId, text: event.text, events: [envelope],
+          status: event.meta?.source === 'replay' ? 'success' : 'working',
+        }
+        if (turnId) assistants.set(turnId, entry)
+        entries.push(entry)
+      }
+      continue
+    }
+
+    if (event.kind === 'turn_finished') {
+      const assistant = event.meta?.turnId ? assistants.get(event.meta.turnId) : undefined
+      if (assistant) {
+        assistant.status = event.status
+        assistant.events.push(envelope)
       }
       continue
     }
@@ -61,10 +86,19 @@ export function buildTimeline(envelopes: SessionEventEnvelope[]): TimelineEntry[
       continue
     }
 
-    entries.push({ type: 'event', key: envelope.eventId, envelope })
+    if (
+      event.kind === 'user_message'
+      || event.kind === 'decision_request'
+      || (event.kind === 'status' && event.level !== 'info')
+    ) {
+      entries.push({ type: 'event', key: envelope.eventId, envelope })
+    }
   }
 
-  return entries
+  return entries.filter(entry => entry.type !== 'assistant'
+    || entry.text.length > 0
+    || entry.status === 'working'
+    || entry.status === 'error')
 }
 
 export function decisionResolution(

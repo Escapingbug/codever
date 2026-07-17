@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { IsoDateTimeSchema, JsonObjectSchema, JsonValueSchema, NonNegativeIntegerSchema, OpaqueIdSchema, parseWithSchema } from './common'
+import { IsoDateTimeSchema, JsonObjectSchema, JsonValueSchema, NonNegativeIntegerSchema, OpaqueIdSchema, PositiveIntegerSchema, parseWithSchema } from './common'
 import { CommandTerminalStatusSchema, ProtocolErrorSchema } from './commands'
 import { CodeverSessionSchema, GatewaySchema, ProjectSchema, ProviderModelSchema, ProviderSessionSchema } from './domain'
 import { SessionEventEnvelopeSchema } from './events'
@@ -32,6 +32,7 @@ export const SessionEventsDtoSchema = z.object({
     sessionId: OpaqueIdSchema,
     events: z.array(SessionEventEnvelopeSchema),
     nextAfter: NonNegativeIntegerSchema.nullable(),
+    previousBefore: PositiveIntegerSchema.nullable(),
 }).strict()
 
 export const CreateSessionDtoSchema = z.object({

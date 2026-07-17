@@ -32,7 +32,12 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
     <template v-for="entry in entries" :key="entry.key">
       <article v-if="entry.type === 'assistant'" class="message message--assistant" @click="select($event, entry.events[0]!)">
         <div class="message-body">
-          <div class="message-meta message-meta--agent"><span>Agent · {{ time(entry.events[0]!.timestamp) }}</span></div>
+          <div class="message-meta message-meta--agent">
+            <span>Agent · {{ time(entry.events[0]!.timestamp) }}</span>
+            <span class="agent-reply-state" :class="`agent-reply-state--${entry.status}`">
+              <i />{{ entry.status === 'working' ? 'Working' : entry.status.replace('_', ' ') }}
+            </span>
+          </div>
           <div class="assistant-copy">{{ entry.text }}</div>
         </div>
       </article>

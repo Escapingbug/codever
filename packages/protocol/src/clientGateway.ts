@@ -70,6 +70,7 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         kind: z.literal('events.list'),
         sessionId: OpaqueIdSchema,
         after: NonNegativeIntegerSchema.optional(),
+        before: PositiveIntegerSchema.optional(),
         limit: PositiveIntegerSchema.max(1_000).optional(),
     }).strict(),
 ])

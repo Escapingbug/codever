@@ -109,9 +109,12 @@ export function useCodeverState() {
       eventsBySession[sessionId] = cached
       return cached
     },
-    replaceSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
-      eventsBySession[sessionId] = events
-      writeCached(`session-events:${sessionId}`, events)
+    mergeSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
+      const merged = new Map((eventsBySession[sessionId] ?? []).map(event => [event.eventId, event]))
+      for (const event of events) merged.set(event.eventId, event)
+      const snapshot = [...merged.values()].sort((left, right) => left.seq - right.seq)
+      eventsBySession[sessionId] = snapshot
+      writeCached(`session-events:${sessionId}`, snapshot)
     },
   }
 }

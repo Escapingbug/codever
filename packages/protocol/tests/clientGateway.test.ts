@@ -53,6 +53,7 @@ describe('encrypted Client to Gateway request frames', () => {
                 input: { value: { approved: true } },
             },
             { kind: 'events.list', sessionId: 'session-1', after: 0, limit: 100 },
+            { kind: 'events.list', sessionId: 'session-1', before: 101, limit: 100 },
         ]
 
         for (const payload of payloads) {

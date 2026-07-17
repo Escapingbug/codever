@@ -26,9 +26,24 @@ describe('timeline model', () => {
       envelope(5, { kind: 'tool', phase: 'completed', toolCallId: 'tool-1', toolName: 'read_file', output: 'done' }),
     ])
 
-    expect(timeline).toHaveLength(3)
+    expect(timeline).toHaveLength(2)
     expect(timeline[0]).toMatchObject({ type: 'assistant', text: 'Hello world' })
     expect(timeline[1]).toMatchObject({ type: 'tool', latest: { phase: 'completed' } })
+  })
+
+  it('projects lifecycle events into assistant state and hides transport details', () => {
+    const timeline = buildTimeline([
+      envelope(1, { kind: 'session_state', state: 'querying' }),
+      envelope(2, { kind: 'turn_started', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(3, { kind: 'provider_session', provider: 'codex', providerSessionId: 'native-1' }),
+      envelope(4, { kind: 'assistant_text_delta', text: 'Done', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(5, { kind: 'command_result', command: 'internal', output: 'ok' }),
+      envelope(6, { kind: 'turn_finished', status: 'success', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(7, { kind: 'session_state', state: 'idle' }),
+    ])
+
+    expect(timeline).toHaveLength(1)
+    expect(timeline[0]).toMatchObject({ type: 'assistant', text: 'Done', status: 'success' })
   })
 
   it('finds the latest resolution for a decision', () => {

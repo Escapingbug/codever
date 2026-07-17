@@ -156,11 +156,14 @@ export class RelayApi {
     return session
   }
 
-  async getSessionEvents(sessionId: string, after = 0): Promise<{ events: SessionEventEnvelope[]; nextAfter: number | null }> {
+  async getSessionEvents(
+    sessionId: string,
+    options: { after?: number; before?: number; limit?: number } = {},
+  ): Promise<{ events: SessionEventEnvelope[]; nextAfter: number | null; previousBefore: number | null }> {
     const payload = this.completed(await this.requestGateway(
-      this.requireSessionGateway(sessionId), { kind: 'events.list', sessionId, after },
+      this.requireSessionGateway(sessionId), { kind: 'events.list', sessionId, ...options },
     )) as {
-      events: SessionEventEnvelope[]; nextAfter: number | null
+      events: SessionEventEnvelope[]; nextAfter: number | null; previousBefore: number | null
     }
     return payload
   }

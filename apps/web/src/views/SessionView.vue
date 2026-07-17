@@ -35,6 +35,10 @@ const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
 const timelineElement = ref<HTMLElement>()
 let unsubscribeEvents: (() => void) | undefined
+const HISTORY_PAGE_SIZE = 80
+const HISTORY_LOAD_THRESHOLD = 96
+const hasMoreBefore = ref(false)
+const loadingOlder = ref(false)
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
 const liveConnected = computed(() => socketState.value === 'connected')
@@ -62,8 +66,9 @@ async function loadSession(): Promise<void> {
   unsubscribeEvents = undefined
   const requestedId = sessionId.value
   const memoryCached = state.eventsBySession[requestedId] ?? []
-  events.value = memoryCached
-  loading.value = memoryCached.length === 0
+  events.value = memoryCached.slice(-HISTORY_PAGE_SIZE)
+  hasMoreBefore.value = memoryCached.length > events.value.length
+  loading.value = events.value.length === 0
   loadError.value = ''
   liveError.value = ''
   selectedEvent.value = undefined
@@ -71,20 +76,21 @@ async function loadSession(): Promise<void> {
     const persisted = await state.loadCachedSessionEvents(requestedId)
     if (requestedId !== sessionId.value) return
     if (persisted.length) {
-      events.value = persisted
+      events.value = persisted.slice(-HISTORY_PAGE_SIZE)
+      hasMoreBefore.value = persisted.length > events.value.length
       loading.value = false
     }
     session.value = await state.api.getSession(requestedId)
     state.replaceSession(session.value)
-    let after = 0
-    while (requestedId === sessionId.value) {
-      const page = await state.api.getSessionEvents(requestedId, after)
-      appendEvents(page.events)
-      if (page.nextAfter === null || page.nextAfter <= after) break
-      after = page.nextAfter
-    }
-    if (requestedId !== sessionId.value) return
     startLiveConnection(requestedId)
+    const page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
+    const lastRemoteSeq = page.events.at(-1)?.seq ?? 0
+    const liveSinceRequest = events.value.filter(event => event.seq > lastRemoteSeq)
+    events.value = mergeEvents(page.events, liveSinceRequest)
+    state.mergeSessionEvents(requestedId, page.events)
+    hasMoreBefore.value = page.previousBefore !== null
+    if (requestedId !== sessionId.value) return
+    await scrollToLatest(false)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not load the session'
     if (events.value.length) liveError.value = `Could not refresh this cached conversation: ${message}`
@@ -105,12 +111,13 @@ async function loadProviderCapabilities(): Promise<void> {
 
 function startLiveConnection(id: string): void {
   unsubscribeEvents = state.api.subscribeSession(id, event => {
+    const nearBottom = isNearTimelineBottom()
     appendEvents([event])
     if (event.event.kind === 'session_state' && session.value) {
       session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
       state.replaceSession(session.value)
     }
-    void scrollToLatest()
+    if (nearBottom) void scrollToLatest()
   })
   socketState.value = 'connected'
 }
@@ -120,12 +127,56 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
   const additions = incoming.filter((event) => event.sessionId === sessionId.value && !known.has(event.eventId))
   if (!additions.length) return
   events.value = [...events.value, ...additions].sort((a, b) => a.seq - b.seq)
-  state.replaceSessionEvents(sessionId.value, events.value)
+  state.mergeSessionEvents(sessionId.value, additions)
 }
 
-async function scrollToLatest(): Promise<void> {
+function mergeEvents(...groups: SessionEventEnvelope[][]): SessionEventEnvelope[] {
+  const merged = new Map<string, SessionEventEnvelope>()
+  for (const event of groups.flat()) merged.set(event.eventId, event)
+  return [...merged.values()].sort((left, right) => left.seq - right.seq)
+}
+
+async function scrollToLatest(smooth = true): Promise<void> {
   await nextTick()
-  timelineElement.value?.scrollTo({ top: timelineElement.value.scrollHeight, behavior: 'smooth' })
+  timelineElement.value?.scrollTo({ top: timelineElement.value.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+}
+
+function isNearTimelineBottom(): boolean {
+  const element = timelineElement.value
+  return !element || element.scrollHeight - element.scrollTop - element.clientHeight < 120
+}
+
+async function handleTimelineScroll(): Promise<void> {
+  const element = timelineElement.value
+  if (!element || element.scrollTop > HISTORY_LOAD_THRESHOLD || loadingOlder.value || !hasMoreBefore.value) return
+  await loadOlderEvents()
+}
+
+async function loadOlderEvents(): Promise<void> {
+  const element = timelineElement.value
+  const earliest = events.value.at(0)?.seq
+  if (!element || earliest === undefined || loadingOlder.value) return
+  loadingOlder.value = true
+  const previousHeight = element.scrollHeight
+  try {
+    const cached = (state.eventsBySession[sessionId.value] ?? [])
+      .filter(event => event.seq < earliest)
+      .slice(-HISTORY_PAGE_SIZE)
+    if (cached.length) {
+      appendEvents(cached)
+      hasMoreBefore.value = cached.at(0)!.seq > 1
+    } else {
+      const page = await state.api.getSessionEvents(sessionId.value, { before: earliest, limit: HISTORY_PAGE_SIZE })
+      appendEvents(page.events)
+      hasMoreBefore.value = page.previousBefore !== null
+    }
+    await nextTick()
+    element.scrollTop += element.scrollHeight - previousHeight
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Earlier messages could not be loaded'
+  } finally {
+    loadingOlder.value = false
+  }
 }
 
 async function sendMessage(): Promise<void> {
@@ -242,7 +293,8 @@ function submitOnShortcut(event: KeyboardEvent): void {
     <div v-if="loadError" class="session-load-state"><div class="error-banner"><strong>Session unavailable</strong>{{ loadError }}</div><button class="button" @click="loadSession">Try again</button></div>
     <div v-else-if="loading" class="session-load-state"><span class="loader" /><p>Loading conversation…</p></div>
     <template v-else>
-      <section ref="timelineElement" class="conversation-pane" aria-label="Conversation timeline">
+      <section ref="timelineElement" class="conversation-pane" aria-label="Conversation timeline" @scroll.passive="handleTimelineScroll">
+        <div v-if="loadingOlder" class="history-loader"><span class="loader" /> Loading earlier messages…</div>
         <ConversationTimeline
           :events="events"
           :mutable="canMutate"
