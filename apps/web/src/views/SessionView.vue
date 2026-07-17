@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { mergeSessionEvents } from '../sessionEvents'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
 
@@ -61,6 +62,8 @@ const MAX_INITIAL_HISTORY_PAGES = 8
 const HISTORY_LOAD_THRESHOLD = 96
 const hasMoreBefore = ref(false)
 const loadingOlder = ref(false)
+const loadingInitialHistory = ref(false)
+let historyGeneration = 0
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
 const liveConnected = computed(() => socketState.value === 'connected')
@@ -99,12 +102,15 @@ onBeforeUnmount(() => {
 })
 
 async function loadSession(): Promise<void> {
+  const generation = ++historyGeneration
   unsubscribeEvents?.()
   unsubscribeEvents = undefined
   const requestedId = sessionId.value
   const memoryCached = state.eventsBySession[requestedId] ?? []
   events.value = recentConversation(memoryCached)
-  hasMoreBefore.value = memoryCached.length > events.value.length
+  hasMoreBefore.value = false
+  loadingOlder.value = false
+  loadingInitialHistory.value = true
   loading.value = events.value.length === 0
   loadError.value = ''
   liveError.value = ''
@@ -114,7 +120,6 @@ async function loadSession(): Promise<void> {
     if (requestedId !== sessionId.value) return
     if (persisted.length) {
       events.value = recentConversation(persisted)
-      hasMoreBefore.value = persisted.length > events.value.length
       loading.value = false
     }
     session.value = await state.api.getSession(requestedId)
@@ -122,34 +127,39 @@ async function loadSession(): Promise<void> {
     await refreshSessionAttachments()
     startLiveConnection(requestedId)
     let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
-    let remoteEvents = page.events
+    let fetchedRemoteEvents = page.events
     let pageCount = 1
     while (
       page.previousBefore !== null
-      && countAgentReplies(remoteEvents) < INITIAL_AGENT_REPLIES
+      && countAgentReplies(fetchedRemoteEvents) < INITIAL_AGENT_REPLIES
       && pageCount < MAX_INITIAL_HISTORY_PAGES
     ) {
       page = await state.api.getSessionEvents(requestedId, {
         before: page.previousBefore,
         limit: HISTORY_PAGE_SIZE,
       })
-      remoteEvents = mergeEvents(page.events, remoteEvents)
+      fetchedRemoteEvents = mergeSessionEvents(page.events, fetchedRemoteEvents)
       pageCount += 1
     }
-    remoteEvents = recentConversation(remoteEvents)
-    const lastRemoteSeq = remoteEvents.at(-1)?.seq ?? 0
+    if (requestedId !== sessionId.value || generation !== historyGeneration) return
+    const remoteEvents = recentConversation(fetchedRemoteEvents)
+    const lastRemoteSeq = fetchedRemoteEvents.at(-1)?.seq ?? 0
     const liveSinceRequest = events.value.filter(event => event.seq > lastRemoteSeq)
-    events.value = mergeEvents(remoteEvents, liveSinceRequest)
-    state.mergeSessionEvents(requestedId, remoteEvents)
+    events.value = mergeSessionEvents(remoteEvents, liveSinceRequest)
+    state.mergeSessionEvents(requestedId, fetchedRemoteEvents)
+    const earliestVisible = events.value.at(0)?.seq
     hasMoreBefore.value = page.previousBefore !== null
-    if (requestedId !== sessionId.value) return
+      || (earliestVisible !== undefined && fetchedRemoteEvents.some(event => event.seq < earliestVisible))
     await scrollToLatest(false)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not load the session'
     if (events.value.length) liveError.value = `Could not refresh this cached conversation: ${message}`
     else loadError.value = message
   } finally {
-    if (requestedId === sessionId.value) loading.value = false
+    if (requestedId === sessionId.value && generation === historyGeneration) {
+      loading.value = false
+      loadingInitialHistory.value = false
+    }
   }
 }
 
@@ -176,17 +186,12 @@ function startLiveConnection(id: string): void {
 }
 
 function appendEvents(incoming: SessionEventEnvelope[]): void {
-  const known = new Set(events.value.map((event) => event.eventId))
-  const additions = incoming.filter((event) => event.sessionId === sessionId.value && !known.has(event.eventId))
-  if (!additions.length) return
-  events.value = [...events.value, ...additions].sort((a, b) => a.seq - b.seq)
+  const additions = incoming.filter(event => event.sessionId === sessionId.value)
+  const merged = mergeSessionEvents(events.value, additions)
+  if (merged.length === events.value.length
+    && merged.every((event, index) => event.eventId === events.value[index]?.eventId)) return
+  events.value = merged
   state.mergeSessionEvents(sessionId.value, additions)
-}
-
-function mergeEvents(...groups: SessionEventEnvelope[][]): SessionEventEnvelope[] {
-  const merged = new Map<string, SessionEventEnvelope>()
-  for (const event of groups.flat()) merged.set(event.eventId, event)
-  return [...merged.values()].sort((left, right) => left.seq - right.seq)
 }
 
 function countAgentReplies(source: SessionEventEnvelope[]): number {
@@ -198,7 +203,10 @@ function recentConversation(source: SessionEventEnvelope[]): SessionEventEnvelop
   const ordered = [...source].sort((left, right) => left.seq - right.seq)
   const replies = agentReplies(ordered)
   const boundary = replies.at(-INITIAL_AGENT_REPLIES)?.events.at(0)?.seq
-  if (boundary === undefined) return ordered.slice(-HISTORY_PAGE_SIZE)
+  // A single rendered reply may contain many delta/tool events. If there are
+  // fewer replies than the initial target, all of those events are required to
+  // reconstruct the complete conversation and must not be cut by page size.
+  if (boundary === undefined) return ordered
   const precedingUser = [...ordered].reverse().find(envelope =>
     envelope.seq <= boundary && envelope.event.kind === 'user_message',
   )
@@ -224,7 +232,8 @@ function isNearTimelineBottom(): boolean {
 
 async function handleTimelineScroll(): Promise<void> {
   const element = timelineElement.value
-  if (!element || element.scrollTop > HISTORY_LOAD_THRESHOLD || loadingOlder.value || !hasMoreBefore.value) return
+  if (!element || element.scrollTop > HISTORY_LOAD_THRESHOLD || loadingInitialHistory.value
+    || loadingOlder.value || !hasMoreBefore.value) return
   await loadOlderEvents()
 }
 
@@ -232,40 +241,37 @@ async function loadOlderEvents(): Promise<void> {
   const element = timelineElement.value
   const earliest = events.value.at(0)?.seq
   if (!element || earliest === undefined || loadingOlder.value) return
+  const requestedId = sessionId.value
+  const generation = historyGeneration
   loadingOlder.value = true
   const previousHeight = element.scrollHeight
   try {
-    const cached = (state.eventsBySession[sessionId.value] ?? [])
-      .filter(event => event.seq < earliest)
-      .slice(-HISTORY_PAGE_SIZE)
-    if (cached.length) {
-      appendEvents(cached)
-      hasMoreBefore.value = cached.at(0)!.seq > 1
-    } else {
-      const page = await state.api.getSessionEvents(sessionId.value, { before: earliest, limit: HISTORY_PAGE_SIZE })
-      appendEvents(page.events)
-      hasMoreBefore.value = page.previousBefore !== null
-    }
+    const page = await state.api.getSessionEvents(requestedId, { before: earliest, limit: HISTORY_PAGE_SIZE })
+    if (requestedId !== sessionId.value || generation !== historyGeneration) return
+    appendEvents(page.events)
+    hasMoreBefore.value = page.events.length > 0 && page.previousBefore !== null
     await nextTick()
     element.scrollTop += element.scrollHeight - previousHeight
   } catch (error) {
     liveError.value = error instanceof Error ? error.message : 'Earlier messages could not be loaded'
   } finally {
-    loadingOlder.value = false
+    if (requestedId === sessionId.value && generation === historyGeneration) loadingOlder.value = false
   }
 }
 
 async function sendMessage(): Promise<void> {
-  const text = draft.value.trim()
+  const submittedDraft = draft.value
+  const text = submittedDraft.trim()
   if (!canSubmitMessage.value) return
   sending.value = true
+  draft.value = ''
+  await nextTick()
   try {
     await state.api.sendMessage(sessionId.value, {
       text,
       attachmentIds: readyAttachmentIds.value,
       sendWhenOnline: !gatewayOnline.value ? true : undefined,
     })
-    draft.value = ''
     pendingAttachments.value = []
     selectedStoredAttachmentIds.value = []
     await refreshSessionAttachments()
@@ -275,6 +281,7 @@ async function sendMessage(): Promise<void> {
       state.replaceSession(session.value)
     }
   } catch (error) {
+    if (!draft.value) draft.value = submittedDraft
     liveError.value = error instanceof Error ? error.message : 'Message was not accepted'
   } finally {
     sending.value = false

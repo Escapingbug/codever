@@ -1,6 +1,7 @@
 import { createMemoryHistory, createRouter, createWebHashHistory, type Router } from 'vue-router'
 import GatewayListView from './views/GatewayListView.vue'
 import GatewayView from './views/GatewayView.vue'
+import MachineListView from './views/MachineListView.vue'
 import ProjectView from './views/ProjectView.vue'
 import SessionView from './views/SessionView.vue'
 import OnboardingView from './views/OnboardingView.vue'
@@ -17,6 +18,7 @@ export function createCodeverRouter(session: ClientSession = clientSession): Rou
       { path: '/login', name: 'login', component: LoginView },
       { path: '/settings', name: 'settings', component: SettingsView },
       { path: '/projects', name: 'projects', component: GatewayListView },
+      { path: '/machines', name: 'machines', component: MachineListView },
       { path: '/gateways/:gatewayId', name: 'gateway', component: GatewayView },
       { path: '/projects/:gatewayId/:projectId', name: 'project', component: ProjectView },
       {

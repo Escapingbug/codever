@@ -7,13 +7,14 @@ describe('client navigation', () => {
       .toEqual({ name: 'project', params: { gatewayId: 'gateway-1', projectId: 'project-1' } })
     expect(parentRoute('project', { gatewayId: 'gateway-1', projectId: 'project-1' }))
       .toEqual({ name: 'projects' })
-    expect(parentRoute('gateway', { gatewayId: 'gateway-1' })).toEqual({ name: 'projects' })
-    expect(parentRoute('settings', {})).toEqual({ name: 'projects' })
+    expect(parentRoute('gateway', { gatewayId: 'gateway-1' })).toEqual({ name: 'machines' })
     expect(parentRoute('onboarding', {}, { add: '1' })).toEqual({ name: 'login' })
   })
 
   it('leaves root pages for the native app to close', () => {
     expect(parentRoute('projects', {})).toBeNull()
+    expect(parentRoute('machines', {})).toBeNull()
+    expect(parentRoute('settings', {})).toBeNull()
     expect(parentRoute('login', {})).toBeNull()
     expect(parentRoute('onboarding', {})).toBeNull()
   })

@@ -3,21 +3,32 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayPathHelp, gatewayPathPlaceholder, validateGatewayPath } from '../gatewayPath'
+import { isGatewayPairingError } from '../gatewayAccess'
 import { useCodeverState } from '../state/codeverState'
 
 const state = useCodeverState()
 const router = useRouter()
+const hasLoadedProjects = (id: string) => Object.prototype.hasOwnProperty.call(state.projectsByGateway, id)
 const projects = computed(() => state.gateways.value.flatMap(gateway =>
   (state.projectsByGateway[gateway.id] ?? []).map(project => ({ project, gateway })),
 ))
-const availableGateways = computed(() => state.gateways.value.filter(gateway => gateway.status === 'online'))
+const pairedGateways = computed(() => state.gateways.value.filter(gateway =>
+  hasLoadedProjects(gateway.id) && !isGatewayPairingError(state.errors[`projects:${gateway.id}`]),
+))
+const availableGateways = computed(() => pairedGateways.value.filter(gateway => gateway.status === 'online'))
+const authorizationCount = computed(() => state.gateways.value.filter(gateway =>
+  isGatewayPairingError(state.errors[`projects:${gateway.id}`]),
+).length)
+const realFailures = computed(() => state.gateways.value.filter(gateway => {
+  const error = state.errors[`projects:${gateway.id}`]
+  return error && !isGatewayPairingError(error) && hasLoadedProjects(gateway.id)
+}))
+const loading = computed(() => state.pending.value.has('gateways') || state.gateways.value.some(gateway =>
+  state.pending.value.has(`projects:${gateway.id}`),
+))
 const selectedGateway = computed(() => availableGateways.value.find(gateway => gateway.id === gatewayId.value))
 const pathPlaceholder = computed(() => gatewayPathPlaceholder(selectedGateway.value?.platform))
 const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform))
-const unavailableGateways = computed(() => state.gateways.value.filter(gateway =>
-  state.errors[`projects:${gateway.id}`],
-))
-const pairingGateway = computed(() => state.gateways.value.find(gateway => gateway.id === pairingGatewayId.value))
 const creating = ref(false)
 const createOpen = ref(false)
 const createError = ref('')
@@ -25,34 +36,10 @@ const gatewayId = ref('')
 const projectName = ref('')
 const rootPath = ref('')
 const defaultProvider = ref('')
-const addGatewayOpen = ref(false)
-const pairingGatewayId = ref('')
-const gatewayPairingCode = ref('')
-const pairingGatewayBusy = ref(false)
-const gatewayPairingError = ref('')
 
 watch(availableGateways, gateways => {
   if (!gateways.some(gateway => gateway.id === gatewayId.value)) gatewayId.value = gateways[0]?.id ?? ''
 }, { immediate: true })
-watch(() => state.gateways.value, gateways => {
-  if (!gateways.some(gateway => gateway.id === pairingGatewayId.value)) pairingGatewayId.value = gateways[0]?.id ?? ''
-}, { immediate: true })
-
-async function pairNewGateway(): Promise<void> {
-  if (!pairingGatewayId.value || !gatewayPairingCode.value.trim()) return
-  pairingGatewayBusy.value = true
-  gatewayPairingError.value = ''
-  try {
-    await state.api.pairGateway(pairingGatewayId.value, gatewayPairingCode.value.trim())
-    await state.loadProjects(pairingGatewayId.value)
-    gatewayPairingCode.value = ''
-    addGatewayOpen.value = false
-  } catch (error) {
-    gatewayPairingError.value = error instanceof Error ? error.message : 'Gateway pairing failed'
-  } finally {
-    pairingGatewayBusy.value = false
-  }
-}
 
 async function createProject(): Promise<void> {
   creating.value = true
@@ -81,96 +68,51 @@ onMounted(() => state.loadWorkspace())
 </script>
 
 <template>
-  <div class="page page--overview">
-    <header class="page-header">
-      <div><span class="eyebrow">Your workspace</span><h1>Projects</h1><p>Continue work across every connected machine.</p></div>
-      <div class="header-actions">
-        <button class="button" :disabled="state.pending.value.has('gateways')" @click="state.loadWorkspace">Refresh</button>
-        <button class="button" @click="addGatewayOpen = !addGatewayOpen">Add Gateway</button>
-        <button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = !createOpen">＋ New project</button>
-      </div>
+  <div class="page page--overview workspace-page">
+    <header class="page-header page-header--compact">
+      <div><span class="eyebrow">Workspace</span><h1>Projects</h1><p>Pick up your work from any connected computer.</p></div>
+      <button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = !createOpen">New project</button>
     </header>
-    <div v-if="state.errors.gateways" class="error-banner"><strong>Relay unavailable</strong>{{ state.errors.gateways }}</div>
 
-    <section v-if="addGatewayOpen" class="settings-section project-create-panel">
-      <div class="section-heading">
-        <div><span class="eyebrow">Remote machine</span><h2>Add Gateway</h2></div>
-        <button class="icon-button" aria-label="Close" @click="addGatewayOpen = false">×</button>
-      </div>
-      <p class="form-help">Choose a Gateway connected to this Relay, then enter its one-time three-minute device code.</p>
-      <form v-if="state.gateways.value.length" class="relay-form" @submit.prevent="pairNewGateway">
-        <label>Gateway
-          <select v-model="pairingGatewayId" required>
-            <option v-for="gateway in state.gateways.value" :key="gateway.id" :value="gateway.id">
-              {{ gateway.name }} · {{ gateway.platform }} · {{ gateway.status }}
-            </option>
-          </select>
-        </label>
-        <label>Gateway device pairing code
-          <input v-model="gatewayPairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" />
-        </label>
-        <p v-if="pairingGateway" class="form-help">Pairing {{ pairingGateway.name }}. This is not the Relay client code.</p>
-        <p v-if="gatewayPairingError" class="error-banner" role="alert">{{ gatewayPairingError }}</p>
-        <div class="form-actions">
-          <button type="button" class="button" @click="addGatewayOpen = false">Cancel</button>
-          <button class="button button--primary" :disabled="pairingGatewayBusy">
-            {{ pairingGatewayBusy ? 'Pairing Gateway…' : 'Pair Gateway' }}
-          </button>
-        </div>
-      </form>
-      <div v-else class="empty-state empty-state--compact">
-        <h2>No Gateway discovered</h2>
-        <p>Start a Gateway and connect it to this Relay first, then refresh this page.</p>
-      </div>
-    </section>
+    <RouterLink v-if="authorizationCount" class="setup-notice" to="/machines">
+      <span class="setup-notice__icon">⌘</span>
+      <span><strong>{{ authorizationCount }} computer{{ authorizationCount === 1 ? '' : 's' }} waiting for authorization</strong><small>Authorize it to use its projects on this client.</small></span>
+      <span>Open Computers →</span>
+    </RouterLink>
+    <div v-if="state.errors.gateways" class="error-banner"><strong>Connection unavailable.</strong> {{ state.errors.gateways }}</div>
+    <RouterLink v-for="gateway in realFailures" :key="gateway.id" class="error-banner error-banner--link" :to="{ name: 'gateway', params: { gatewayId: gateway.id } }">
+      <strong>{{ gateway.name }} needs attention.</strong> {{ state.errors[`projects:${gateway.id}`] }}
+    </RouterLink>
 
     <section v-if="createOpen" class="settings-section project-create-panel">
-      <div class="section-heading"><div><span class="eyebrow">Remote machine</span><h2>New project</h2></div></div>
-      <p class="form-help">Register an existing directory on a Gateway. The path must be inside one of that Gateway's approved roots.</p>
+      <div class="section-heading"><div><span class="eyebrow">On a computer</span><h2>New project</h2></div><button class="icon-button" aria-label="Close" @click="createOpen = false">×</button></div>
+      <p class="form-help">Choose a connected computer and register an existing directory.</p>
       <form class="relay-form" @submit.prevent="createProject">
-        <label>Gateway
-          <select v-model="gatewayId" required>
-            <option v-for="gateway in availableGateways" :key="gateway.id" :value="gateway.id">{{ gateway.name }} · {{ gateway.platform }}</option>
-          </select>
+        <label>Computer
+          <select v-model="gatewayId" required><option v-for="gateway in availableGateways" :key="gateway.id" :value="gateway.id">{{ gateway.name }} · {{ gateway.platform }}</option></select>
         </label>
-        <label>Project name<input v-model="projectName" required autocomplete="off" placeholder="happy-server" /></label>
-        <label>Absolute path on Gateway<input v-model="rootPath" required autocomplete="off" :placeholder="pathPlaceholder" /><small class="field-help">{{ pathHelp }}</small></label>
+        <label>Project name<input v-model="projectName" required autocomplete="off" placeholder="My project" /></label>
+        <label>Project folder<input v-model="rootPath" required autocomplete="off" :placeholder="pathPlaceholder" /><small class="field-help">{{ pathHelp }}</small></label>
         <label>Default provider (optional)<input v-model="defaultProvider" autocomplete="off" placeholder="codex" /></label>
         <p v-if="createError" class="error-banner" role="alert">{{ createError }}</p>
-        <div class="form-actions">
-          <button type="button" class="button" @click="createOpen = false">Cancel</button>
-          <button class="button button--primary" :disabled="creating">{{ creating ? 'Creating…' : 'Create project' }}</button>
-        </div>
+        <div class="form-actions"><button type="button" class="button" @click="createOpen = false">Cancel</button><button class="button button--primary" :disabled="creating">{{ creating ? 'Creating…' : 'Create project' }}</button></div>
       </form>
     </section>
 
     <div v-if="projects.length" class="project-grid">
-      <RouterLink
-        v-for="entry in projects"
-        :key="`${entry.gateway.id}:${entry.project.id}`"
-        class="project-card"
-        :to="{ name: 'project', params: { gatewayId: entry.gateway.id, projectId: entry.project.id } }"
-      >
-        <span class="folder-icon">◇</span>
-        <div>
-          <h3>{{ entry.project.name }}</h3>
-          <small class="gateway-label"><StatusDot :status="entry.gateway.status" /> {{ entry.gateway.name }}</small>
-        </div>
+      <RouterLink v-for="entry in projects" :key="`${entry.gateway.id}:${entry.project.id}`" class="project-card" :to="{ name: 'project', params: { gatewayId: entry.gateway.id, projectId: entry.project.id } }">
+        <span class="folder-icon">▰</span>
+        <div><h3>{{ entry.project.name }}</h3><small class="gateway-label"><StatusDot :status="entry.gateway.status" />{{ entry.gateway.name }}<template v-if="entry.gateway.status !== 'online'"> · Offline</template></small></div>
         <span class="card-arrow">→</span>
       </RouterLink>
     </div>
 
-    <section v-if="unavailableGateways.length" class="unavailable-gateways">
-      <div class="section-heading"><div><span class="eyebrow">Needs attention</span><h2>Unavailable projects</h2></div></div>
-      <RouterLink v-for="gateway in unavailableGateways" :key="gateway.id" class="gateway-notice" :to="{ name: 'gateway', params: { gatewayId: gateway.id } }">
-        <StatusDot :status="gateway.status" />
-        <span><strong>{{ gateway.name }}</strong><small>{{ state.errors[`projects:${gateway.id}`] }}</small></span>
-        <span>Pair →</span>
-      </RouterLink>
-    </section>
-
-    <div v-if="!projects.length && !state.pending.value.size && !state.errors.gateways" class="empty-state">
-      <span class="empty-orbit">◇</span><h2>No projects available</h2><p>Pair a Gateway, then create a project from an approved directory on that machine.</p>
+    <div v-else-if="loading" class="empty-state"><span class="loader" /><h2>Loading projects</h2><p>Available projects will appear as each computer responds.</p></div>
+    <div v-else-if="!state.gateways.value.length || !pairedGateways.length" class="empty-state">
+      <span class="empty-orbit">⌘</span><h2>Connect your first computer</h2><p>Authorize a computer, then its projects and coding sessions will appear here.</p><RouterLink class="button button--primary" to="/machines">Open Computers</RouterLink>
+    </div>
+    <div v-else class="empty-state">
+      <span class="empty-orbit">▰</span><h2>No projects yet</h2><p>Add a folder from one of your connected computers.</p><button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = true">Add project</button>
     </div>
   </div>
 </template>

@@ -15,38 +15,18 @@ async function forgetCredential(): Promise<void> {
 
 <template>
   <div class="page page--overview settings-page">
-    <header class="page-header">
-      <div><span class="eyebrow">Client</span><h1>Settings</h1><p>Manage the Relay connection and native OPAQUE credential.</p></div>
-    </header>
-    <section class="settings-section">
-      <div class="section-heading">
-        <div><span class="eyebrow">Connection</span><h2>Relay</h2></div>
-        <button v-if="!editing" class="button" @click="editing = true">Edit Relay</button>
+    <header class="page-header page-header--compact"><div><span class="eyebrow">Codever</span><h1>Settings</h1><p>Connection and security settings for this client.</p></div></header>
+    <section class="settings-section settings-card">
+      <div class="section-heading"><div><span class="eyebrow">Connection</span><h2>Codever server</h2></div><button v-if="!editing" class="button" @click="editing = true">Change server</button></div>
+      <RelayProfileForm v-if="editing && clientSession.activeProfile.value" :profile="clientSession.activeProfile.value" submit-label="Save server" @saved="editing = false" @cancel="editing = false" />
+      <div v-else-if="clientSession.activeProfile.value" class="server-summary">
+        <span class="status-dot status-dot--connected" /><div><strong>{{ clientSession.activeProfile.value.name }}</strong><small>Connected securely</small></div>
       </div>
-      <RelayProfileForm
-        v-if="editing && clientSession.activeProfile.value"
-        :profile="clientSession.activeProfile.value"
-        submit-label="Save Relay"
-        @saved="editing = false"
-        @cancel="editing = false"
-      />
-      <div v-else-if="clientSession.activeProfile.value" class="profile-list">
-        <article class="profile-card profile-card--active">
-          <div>
-            <strong>{{ clientSession.activeProfile.value.name }}</strong>
-            <small>{{ clientSession.activeProfile.value.baseUrl }}</small>
-            <span class="active-badge">Connected Relay</span>
-          </div>
-        </article>
-      </div>
+      <details v-if="!editing && clientSession.activeProfile.value" class="machine-details"><summary>Technical details</summary><dl><div><dt>Address</dt><dd>{{ clientSession.activeProfile.value.baseUrl }}</dd></div><div><dt>Server ID</dt><dd>{{ clientSession.activeAuth.value?.relayId ?? 'Unknown' }}</dd></div><div><dt>Client credential</dt><dd>{{ clientSession.activeAuth.value?.credentialId ?? 'Unknown' }}</dd></div></dl></details>
     </section>
     <section class="settings-section account-card">
-      <div>
-        <span class="eyebrow">Relay credential</span>
-        <h2>{{ clientSession.activeAuth.value?.relayId }}</h2>
-        <p>Client {{ clientSession.activeAuth.value?.credentialId }} · paired {{ new Date(clientSession.activeAuth.value?.createdAt ?? '').toLocaleString() }}</p>
-      </div>
-      <button class="button button--danger" @click="forgetCredential">Re-pair Relay</button>
+      <div><span class="eyebrow">Security</span><h2>Reconnect this client</h2><p>Remove this client's credential and require a new one-time server code.</p></div>
+      <button class="button button--danger" @click="forgetCredential">Reconnect</button>
     </section>
   </div>
 </template>

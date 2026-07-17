@@ -13,8 +13,7 @@ export function parentRoute(
     case 'project':
       return { name: 'projects' }
     case 'gateway':
-    case 'settings':
-      return { name: 'projects' }
+      return { name: 'machines' }
     case 'onboarding':
       return query.add === '1' ? { name: 'login' } : null
     default:

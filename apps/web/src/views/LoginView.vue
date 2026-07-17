@@ -14,8 +14,7 @@ async function pair(): Promise<void> {
   error.value = ''
   try {
     await clientSession.pairRelay(pairingCode.value)
-    const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
-      ? route.query.redirect : '/projects'
+    const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') ? route.query.redirect : '/projects'
     await router.replace(redirect)
   } catch (cause) {
     error.value = friendlyRelayError(cause)
@@ -29,15 +28,12 @@ async function pair(): Promise<void> {
   <main class="entry-page">
     <section class="entry-card entry-card--narrow">
       <div class="entry-brand"><span class="brand-mark">C</span><span>Codever</span></div>
-      <span class="eyebrow">Setup · Step 1 of 2</span>
-      <h1>Pair this client with Relay</h1>
-      <p class="entry-copy">{{ clientSession.activeProfile.value?.baseUrl }}</p>
-      <p class="entry-copy">Enter the one-time <strong>Relay client code</strong>. It is valid for three minutes. Do not enter the Gateway code here.</p>
-      <p class="form-help">After this succeeds, Codever shows the available Gateways and asks for a Gateway code separately.</p>
+      <span class="eyebrow">Secure connection</span><h1>Authorize this client</h1>
+      <p class="entry-copy">Enter the one-time client code generated on your Codever server. It expires after three minutes.</p>
       <form class="relay-form" @submit.prevent="pair">
-        <label>Relay client pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" /></label>
+        <label>Client pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" /></label>
         <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
-        <button class="button button--primary entry-submit" :disabled="busy">{{ busy ? 'Pairing Relay…' : 'Pair Relay' }}</button>
+        <button class="button button--primary entry-submit" :disabled="busy">{{ busy ? 'Authorizing…' : 'Authorize client' }}</button>
       </form>
     </section>
   </main>

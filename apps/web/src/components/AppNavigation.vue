@@ -2,7 +2,6 @@
 import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useCodeverState } from '../state/codeverState'
-import { clientSession } from '../state/clientSession'
 import StatusDot from './StatusDot.vue'
 
 const route = useRoute()
@@ -26,8 +25,12 @@ watch(projectId, id => { if (id) void state.loadSessions(id) }, { immediate: tru
 <template>
   <aside class="nav-rail nav-rail--gateways">
     <RouterLink class="brand" to="/projects" aria-label="Codever projects"><span class="brand-mark">C</span><span>Codever</span></RouterLink>
-    <div class="rail-heading"><span>Projects</span><button class="icon-button" title="Refresh projects" @click="state.loadWorkspace">↻</button></div>
-    <div v-if="state.errors.gateways" class="inline-error">{{ state.errors.gateways }}</div>
+    <nav class="primary-nav" aria-label="Primary navigation">
+      <RouterLink to="/projects"><span>▣</span><strong>Projects</strong></RouterLink>
+      <RouterLink to="/machines"><span>⌘</span><strong>Computers</strong></RouterLink>
+      <RouterLink to="/settings"><span>⚙</span><strong>Settings</strong></RouterLink>
+    </nav>
+    <div class="rail-heading"><span>Recent projects</span><button class="icon-button" title="Refresh projects" @click="state.loadWorkspace">↻</button></div>
     <nav class="nav-list" aria-label="Projects">
       <RouterLink
         v-for="entry in projects"
@@ -39,8 +42,8 @@ watch(projectId, id => { if (id) void state.loadSessions(id) }, { immediate: tru
         <StatusDot :status="entry.gateway.status" />
         <span class="nav-item-copy"><strong>{{ entry.project.name }}</strong><small>{{ entry.gateway.name }}</small></span>
       </RouterLink>
+      <span v-if="!projects.length" class="nav-empty">Your projects will appear here</span>
     </nav>
-    <RouterLink class="settings-link" to="/settings"><span>⚙</span><span>{{ clientSession.activeProfile.value?.name ?? 'Settings' }}</span></RouterLink>
   </aside>
 
   <aside v-if="currentProject" class="nav-rail nav-rail--sessions">

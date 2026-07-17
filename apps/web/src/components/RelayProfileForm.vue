@@ -34,18 +34,18 @@ function submit(): void {
 
 <template>
   <form class="relay-form" @submit.prevent="submit">
-    <label>Relay domain<input v-model="domain" required inputmode="url" autocomplete="url" placeholder="rd.anciety.my.id" /></label>
-    <p class="form-help">Enter only the domain. Codever adds the native secure connection settings automatically.</p>
+    <label>Server address<input v-model="domain" required inputmode="url" autocomplete="url" placeholder="rd.anciety.my.id" /></label>
+    <p class="form-help">Enter only the domain. Codever configures the secure connection automatically.</p>
     <details class="advanced-settings">
       <summary>Advanced connection settings</summary>
-      <label>Relay port<input v-model.number="port" required type="number" inputmode="numeric" min="1" max="65535" /></label>
+      <label>Server port<input v-model.number="port" required type="number" inputmode="numeric" min="1" max="65535" /></label>
       <label>Display name <span class="form-help">(optional)</span><input v-model="name" autocomplete="off" placeholder="Defaults to the domain" /></label>
-      <p class="form-help">The default Codever Relay port is {{ DEFAULT_RELAY_PORT }}. Change it only when your Relay uses another port.</p>
+      <p class="form-help">The default Codever server port is {{ DEFAULT_RELAY_PORT }}. Change it only for a custom deployment.</p>
     </details>
     <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
     <div class="form-actions">
       <button v-if="profile" type="button" class="button" @click="emit('cancel')">Cancel</button>
-      <button class="button button--primary" :disabled="!domain.trim()">{{ submitLabel ?? 'Save Relay' }}</button>
+      <button class="button button--primary" :disabled="!domain.trim()">{{ submitLabel ?? 'Save server' }}</button>
     </div>
   </form>
 </template>

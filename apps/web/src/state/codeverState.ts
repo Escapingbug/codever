@@ -1,6 +1,7 @@
 import type { CodeverSession, CreateProjectDto, Gateway, Project, ProviderSession, SessionEventEnvelope } from '@codever/protocol'
 import { computed, inject, reactive, ref, shallowReactive } from 'vue'
 import { RelayApi, relayApiKey } from '../api/relayApi'
+import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 
 const gateways = ref<Gateway[]>([])
@@ -110,9 +111,7 @@ export function useCodeverState() {
       return cached
     },
     mergeSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
-      const merged = new Map((eventsBySession[sessionId] ?? []).map(event => [event.eventId, event]))
-      for (const event of events) merged.set(event.eventId, event)
-      const snapshot = [...merged.values()].sort((left, right) => left.seq - right.seq)
+      const snapshot = mergeSessionEvents(eventsBySession[sessionId] ?? [], events)
       eventsBySession[sessionId] = snapshot
       writeCached(`session-events:${sessionId}`, snapshot)
     },
