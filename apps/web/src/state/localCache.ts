@@ -20,13 +20,21 @@ export async function readCached<T>(key: string): Promise<T | undefined> {
 }
 
 export function writeCached(key: string, value: unknown): void {
-  memory.set(key, value)
-  void writeCachedDurable(key, value)
+  const snapshot = toCacheSnapshot(value)
+  memory.set(key, snapshot)
+  void persistSnapshot(key, snapshot).catch(error => {
+    console.error(`Could not persist Client cache entry ${key}`, error)
+  })
 }
 
 /** Resolves only after IndexedDB commits, so a durable transport message can be safely ACKed. */
 export async function writeCachedDurable(key: string, value: unknown): Promise<void> {
-  memory.set(key, value)
+  const snapshot = toCacheSnapshot(value)
+  memory.set(key, snapshot)
+  await persistSnapshot(key, snapshot)
+}
+
+async function persistSnapshot(key: string, snapshot: unknown): Promise<void> {
   const database = await openDatabase()
   if (!database) {
     if (typeof indexedDB === 'undefined') return
@@ -34,11 +42,17 @@ export async function writeCachedDurable(key: string, value: unknown): Promise<v
   }
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, 'readwrite')
-    transaction.objectStore(STORE_NAME).put(value, key)
+    transaction.objectStore(STORE_NAME).put(snapshot, key)
     transaction.oncomplete = () => resolve()
     transaction.onerror = () => reject(transaction.error ?? new Error('Client cache transaction failed'))
     transaction.onabort = () => reject(transaction.error ?? new Error('Client cache transaction was aborted'))
   })
+}
+
+/** IndexedDB cannot clone Vue proxies. Protocol cache entries are JSON values. */
+export function toCacheSnapshot(value: unknown): unknown {
+  if (value === undefined) return undefined
+  return JSON.parse(JSON.stringify(value)) as unknown
 }
 
 function openDatabase(): Promise<IDBDatabase | undefined> {
