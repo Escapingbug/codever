@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:business-e2e": "pnpm test:e2e && pnpm --filter @codever/web typecheck && pnpm --filter @codever/web test && pnpm --filter @codever/web exec playwright test",
     "build:all": "pnpm -r --if-present build",
     "typecheck:all": "pnpm -r --if-present typecheck",
     "test:all": "pnpm -r --if-present test",

@@ -26,6 +26,46 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' }).locator('.agent-reply-state')).toContainText('success')
   })
 
+  test('C02 authorizes a second computer without confusing it with the Relay connection', async ({ page }) => {
+    await page.goto('./e2e.html#/machines')
+    const secondComputer = page.locator('.machine-card').filter({ hasText: 'Second computer' })
+    await expect(secondComputer).toContainText('Authorization required')
+    await secondComputer.click()
+
+    await expect(page.getByRole('heading', { name: 'Authorize this client' })).toBeVisible()
+    await page.getByLabel('Device pairing code').fill('PAIR-GATEWAY-123')
+    await page.getByRole('button', { name: 'Authorize computer' }).click()
+    await expect(page.getByRole('heading', { name: 'No projects on this computer' })).toBeVisible()
+  })
+
+  test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {
+    await page.goto('./e2e.html#/projects')
+    await page.getByRole('button', { name: 'New project' }).click()
+    await page.getByLabel('Computer').selectOption('gateway-e2e')
+    await page.getByLabel('Project name').fill('New Windows project')
+    await page.getByLabel('Project folder').fill('D:\\workspace\\new-project')
+    await page.getByLabel('Default provider (optional)').fill('codex')
+    await page.getByRole('button', { name: 'Create project' }).click()
+
+    await expect(page.getByRole('heading', { name: 'New Windows project' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /New task/ })).toBeVisible()
+  })
+
+  test('C04/C14 starts fresh work or continues an inactive Provider task from one list', async ({ page }) => {
+    await page.goto('./e2e.html#/projects/gateway-e2e/project-e2e')
+    await expect(page.locator('.session-row').filter({ hasText: 'Build Android client' })).toBeVisible()
+    const inactive = page.locator('.session-row').filter({ hasText: 'Local Codex investigation' })
+    await expect(inactive).toContainText('Investigate the local build failure')
+    await inactive.click()
+    await expect(page.getByRole('heading', { name: 'Local Codex investigation' })).toBeVisible()
+
+    await page.goto('./e2e.html#/projects/gateway-e2e/project-e2e')
+    await page.getByRole('button', { name: /New task/ }).click()
+    await page.getByPlaceholder(/describe the task/).fill('Fresh remote task')
+    await page.getByRole('button', { name: 'Create task' }).click()
+    await expect(page.getByRole('heading', { name: 'Fresh remote task' })).toBeVisible()
+  })
+
   test('C06 reopens completed history as a stable snapshot', async ({ page }) => {
     const historic = page.locator('.message--assistant').filter({ hasText: 'Build ready.' })
     await expect(historic).toBeVisible()
@@ -65,6 +105,42 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.composer textarea')).toBeEnabled()
   })
 
+  test('C08 stops an accepted running tool and returns the composer to idle', async ({ page }) => {
+    const composer = page.locator('.composer textarea')
+    await composer.fill('Run a long verification')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
+
+    await expect(page.locator('.message--user').filter({ hasText: 'Run a long verification' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+    await page.getByRole('button', { name: 'Stop' }).click()
+
+    await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+    await expect(page.getByText('idle', { exact: true })).toBeVisible()
+    await expect(composer).toBeEnabled()
+  })
+
+  test('C11 uploads, attaches, sends, and deletes a Session file', async ({ page }) => {
+    await page.locator('input[type=file]').setInputFiles({
+      name: 'requirements.txt', mimeType: 'text/plain', buffer: Buffer.from('vitest\nplaywright\n'),
+    })
+    await expect(page.locator('.composer-attachment--ready')).toContainText('requirements.txt')
+
+    await page.locator('.composer textarea').fill('Use the attached requirements')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    expect(await page.evaluate(() => window.__CODEVER_E2E__.lastSentInput()?.attachmentIds)).toHaveLength(1)
+    await page.evaluate(() => window.__CODEVER_E2E__.completeTurn())
+    await expect(page.locator('.message--user').filter({ hasText: 'requirements.txt' })).toBeVisible()
+
+    await page.getByRole('button', { name: /Files 1/ }).click()
+    const files = page.getByRole('region', { name: 'Files stored for this session' })
+    await expect(files).toContainText('requirements.txt')
+    await files.getByRole('checkbox', { name: 'Select file for deletion' }).check()
+    page.once('dialog', dialog => dialog.accept())
+    await files.getByRole('button', { name: 'Delete (1)' }).click()
+    await expect(files).toContainText('No files are stored for this session.')
+  })
+
   test('C09 changes model behavior from compact UI controls', async ({ page }) => {
     await page.locator('.session-control--model select').selectOption('scripted-model')
     await page.locator('.session-control--reasoning select').selectOption('high')
@@ -102,6 +178,25 @@ test.describe('mobile Session business journey', () => {
 
     await page.locator('.session-filters select').first().selectOption('recent')
     await expect(page.locator('.session-row').filter({ hasText: 'Build Android client' })).toBeVisible()
+  })
+
+  test('C15 incrementally loads earlier history without moving the visible anchor', async ({ page }) => {
+    await page.goto('./e2e.html?history=long#/projects/gateway-e2e/project-e2e/sessions/session-long-history-e2e')
+    await expect(page.getByText('Historical reply 5.')).toBeVisible()
+    await expect(page.getByText('Historical reply 4.')).toHaveCount(0)
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+
+    const pane = page.getByRole('region', { name: 'Conversation timeline' })
+    const anchor = page.getByText('Historical reply 5.')
+    const before = await anchor.evaluate(element => element.getBoundingClientRect().top)
+    await pane.evaluate(element => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event('scroll'))
+    })
+
+    await expect(page.getByText('Historical reply 4.')).toBeVisible()
+    const after = await anchor.evaluate(element => element.getBoundingClientRect().top)
+    expect(Math.abs(after - before)).toBeLessThanOrEqual(2)
   })
 
   test('mobile layout stays within the viewport', async ({ page }) => {

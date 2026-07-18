@@ -1,5 +1,7 @@
 import type {
   CodeverSession,
+  AttachmentUploadDto,
+  CreateSessionDto,
   Gateway,
   PatchSessionConfigDto,
   Project,
@@ -14,6 +16,9 @@ import { relayApiKey, type RelayApi } from '../api/relayApi'
 import { clientSession } from '../state/clientSession'
 import ProjectView from '../views/ProjectView.vue'
 import SessionView from '../views/SessionView.vue'
+import GatewayListView from '../views/GatewayListView.vue'
+import GatewayView from '../views/GatewayView.vue'
+import MachineListView from '../views/MachineListView.vue'
 import '../styles.css'
 
 const gateway: Gateway = {
@@ -21,26 +26,46 @@ const gateway: Gateway = {
   capabilities: { protocolVersions: [1], providers: ['scripted-agent'], features: ['file.export', 'attachment.download'] },
   status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
 }
+const unpairedGateway: Gateway = {
+  id: 'gateway-unpaired-e2e', workspaceId: 'workspace-e2e', name: 'Second computer', platform: 'linux', version: 'e2e',
+  capabilities: { protocolVersions: [1], providers: ['codex'], features: [] },
+  status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
+}
 const project: Project = {
   id: 'project-e2e', gatewayId: gateway.id, name: 'Codever', rootPath: 'D:/workspace', canonicalRoot: 'D:/workspace',
   defaultProvider: 'scripted-agent',
 }
+const projects: Project[] = [project]
+let secondGatewayPaired = false
+const longHistoryFixture = new URLSearchParams(window.location.search).get('history') === 'long'
 const session: CodeverSession = {
-  id: 'session-e2e', gatewayId: gateway.id, projectId: project.id, title: 'Build Android client', state: 'idle',
+  id: longHistoryFixture ? 'session-long-history-e2e' : 'session-e2e', gatewayId: gateway.id, projectId: project.id, title: 'Build Android client', state: 'idle',
   provider: 'scripted-agent', config: {}, createdAt: '2026-07-18T08:00:00.000Z',
   updatedAt: '2026-07-18T08:01:00.000Z', lastEventSeq: 4,
 }
+const sessions: CodeverSession[] = [session]
 
 let sequence = 0
 const events: SessionEventEnvelope[] = []
 const subscribers = new Set<(event: SessionEventEnvelope) => void>()
 const connectionSubscribers = new Set<(state: 'connected' | 'disconnected') => void>()
 let pendingSend: { input: SendMessageDto; resolve: (value: unknown) => void } | undefined
+let activeTurnId = ''
+let lastSentInput: SendMessageDto | undefined
 let exportedPath = ''
 let lastConfig: PatchSessionConfigDto | undefined
 let archiveUpdates = 0
 const attachments: SessionAttachmentDto[] = []
 
+if (longHistoryFixture) {
+  for (let index = 1; index <= 8; index += 1) {
+    const turnId = `historical-turn-${index}`
+    append({ kind: 'user_message', text: `Historical request ${index}`, meta: { turnId, source: 'replay' } }, false)
+    append({ kind: 'turn_started', meta: { turnId, source: 'replay' } }, false)
+    append({ kind: 'assistant_text_delta', text: `Historical reply ${index}.`, meta: { turnId, source: 'replay' } }, false)
+    append({ kind: 'turn_finished', status: 'success', meta: { turnId, source: 'replay' } }, false)
+  }
+}
 append({ kind: 'user_message', text: 'Prepare a test build', clientMessageId: 'historic-message', meta: { turnId: 'historic-turn', source: 'replay' } }, false)
 append({ kind: 'turn_started', meta: { turnId: 'historic-turn', source: 'replay' } }, false)
 append({ kind: 'assistant_text_delta', text: 'Build ready. [Download APK](D:/workspace/codever-client.apk)', meta: { turnId: 'historic-turn', source: 'replay' } }, false)
@@ -55,17 +80,53 @@ const api = {
     return () => connectionSubscribers.delete(callback)
   },
   rememberRoute() {},
-  async listGateways() { return [gateway] },
-  async listProjects() { return [project] },
-  async listSessions() { return [session] },
-  async getSession() { return session },
+  async listGateways() { return [gateway, unpairedGateway] },
+  async listProjects(gatewayId: string) {
+    if (gatewayId === unpairedGateway.id) {
+      if (!secondGatewayPaired) throw new Error('Gateway pairing is required')
+      return []
+    }
+    return [...projects]
+  },
+  async pairGateway(gatewayId: string, pairingCode: string) {
+    if (gatewayId !== unpairedGateway.id || pairingCode !== 'PAIR-GATEWAY-123') throw new Error('Pairing code rejected')
+    secondGatewayPaired = true
+  },
+  async createProject(gatewayId: string, input: { name: string; rootPath: string; defaultProvider?: string }) {
+    const created: Project = {
+      id: `project-created-${projects.length}`, gatewayId, name: input.name,
+      rootPath: input.rootPath, canonicalRoot: input.rootPath,
+      ...(input.defaultProvider ? { defaultProvider: input.defaultProvider } : {}),
+    }
+    projects.push(created)
+    return created
+  },
+  async listSessions(projectId: string) { return projectId === project.id ? [...sessions] : [] },
+  async getSession(sessionId: string) { return sessions.find(item => item.id === sessionId) ?? session },
+  async createSession(projectId: string, input: CreateSessionDto) {
+    const created: CodeverSession = {
+      id: `session-created-${sessions.length}`, gatewayId: gateway.id, projectId,
+      title: input.title ?? 'Untitled task', state: 'idle', provider: input.provider,
+      ...(input.providerSessionId ? { providerSessionId: input.providerSessionId } : {}),
+      config: input.config, createdAt: '2026-07-18T08:04:00.000Z',
+      updatedAt: '2026-07-18T08:04:00.000Z', lastEventSeq: 0,
+    }
+    sessions.push(created)
+    return created
+  },
   async getSessionEvents(_id: string, options: { after?: number; before?: number; limit?: number } = {}) {
     let selected = events
     if (options.after !== undefined) selected = selected.filter(event => event.seq > options.after!)
     if (options.before !== undefined) selected = selected.filter(event => event.seq < options.before!)
     const limit = options.limit ?? selected.length
     selected = options.after !== undefined ? selected.slice(0, limit) : selected.slice(-limit)
-    return { events: selected, nextAfter: null, previousBefore: null }
+    const first = selected.at(0)?.seq
+    const last = selected.at(-1)?.seq
+    return {
+      events: selected,
+      nextAfter: last !== undefined && events.some(event => event.seq > last) ? last : null,
+      previousBefore: first !== undefined && events.some(event => event.seq < first) ? first : null,
+    }
   },
   subscribeSession(_id: string, callback: (event: SessionEventEnvelope) => void) {
     subscribers.add(callback)
@@ -76,13 +137,42 @@ const api = {
       projectId: project.id, provider: session.provider, discoverySupported: true,
       models: [{ id: 'scripted-model', name: 'Scripted model', supportedReasoningLevels: [{ effort: 'medium' }, { effort: 'high' }] }], permissionModes: ['default', 'bypassPermissions'],
       capabilities: { resume: true, cancel: true, changeModel: true, changeMode: true, fork: false, retry: false, editHistory: false, listBranches: false, attachFiles: true },
-      sessions: [{ provider: session.provider, providerSessionId: 'provider-session-e2e', title: session.title!, updatedAt: session.updatedAt, codeverSessionId: session.id, state: session.state }],
+      sessions: [
+        { provider: session.provider, providerSessionId: 'provider-session-e2e', title: session.title!, updatedAt: session.updatedAt, codeverSessionId: session.id, state: session.state },
+        { provider: session.provider, providerSessionId: 'provider-session-inactive', title: 'Local Codex investigation', firstMessage: 'Investigate the local build failure', updatedAt: '2026-07-18T07:30:00.000Z' },
+      ],
     }
   },
   async listSessionAttachments() { return { sessionId: session.id, attachments: [...attachments] } },
   sendMessage(_id: string, input: SendMessageDto) {
+    lastSentInput = input
     return new Promise(resolve => { pendingSend = { input, resolve } })
   },
+  async uploadAttachment(_id: string, file: File, options: {
+    onProgress?: (receivedBytes: number, sizeBytes: number) => void
+    onStage?: (stage: 'uploading' | 'storing') => void
+    onUpload?: (upload: AttachmentUploadDto) => void
+  } = {}) {
+    const attachmentId = `attachment-upload-${attachments.length + 1}`
+    const uploading: AttachmentUploadDto = {
+      attachmentId, sessionId: session.id, filename: file.name,
+      mimeType: file.type || 'application/octet-stream', sizeBytes: file.size,
+      receivedBytes: 0, status: 'uploading',
+    }
+    options.onUpload?.(uploading)
+    options.onStage?.('uploading')
+    options.onProgress?.(file.size, file.size)
+    options.onStage?.('storing')
+    const completed: AttachmentUploadDto = { ...uploading, receivedBytes: file.size, status: 'ready' }
+    options.onUpload?.(completed)
+    attachments.push({
+      attachmentId, sessionId: session.id, filename: file.name,
+      mimeType: uploading.mimeType, sizeBytes: file.size,
+      createdAt: '2026-07-18T08:03:00.000Z', status: 'ready',
+    })
+    return completed
+  },
+  async cancelAttachment() { throw new Error('No active E2E upload') },
   async exportSessionFile(_id: string, path: string) {
     exportedPath = path
     const attachment: SessionAttachmentDto = {
@@ -106,20 +196,32 @@ const api = {
     session.config = patch.config
     return session
   },
-  async cancelSession() {},
+  async cancelSession() {
+    if (!activeTurnId) return
+    append({ kind: 'turn_finished', status: 'cancelled', meta: { turnId: activeTurnId, source: 'live' } })
+    append({ kind: 'session_state', state: 'idle', reason: 'turn_cancelled', meta: { source: 'synthetic' } })
+    activeTurnId = ''
+  },
   async resolveDecision(_id: string, decisionId: string, value: unknown) {
     append({ kind: 'decision_resolved', decisionId, value: value as boolean, optionId: value === true ? 'yes' : 'no', meta: { source: 'live' } })
   },
-  async deleteSessionAttachments() {},
+  async deleteSessionAttachments(_id: string, attachmentIds: string[]) {
+    for (const id of attachmentIds) {
+      const index = attachments.findIndex(item => item.attachmentId === id)
+      if (index >= 0) attachments.splice(index, 1)
+    }
+    return { commandId: 'delete-attachments', status: 'succeeded' }
+  },
 } as unknown as RelayApi
 
-const Placeholder = defineComponent({ setup: () => () => h('main', { 'data-testid': 'machines-page' }, 'Machines') })
+const Placeholder = defineComponent({ setup: () => () => h('main', 'Settings') })
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: `/projects/${gateway.id}/${project.id}` },
-    { path: '/projects', redirect: `/projects/${gateway.id}/${project.id}` },
-    { path: '/machines', component: Placeholder },
+    { path: '/projects', name: 'projects', component: GatewayListView },
+    { path: '/machines', name: 'machines', component: MachineListView },
+    { path: '/gateways/:gatewayId', name: 'gateway', component: GatewayView },
     { path: '/settings', component: Placeholder },
     { path: '/projects/:gatewayId/:projectId', name: 'project', component: ProjectView },
     { path: '/projects/:gatewayId/:projectId/sessions/:sessionId', name: 'session', component: SessionView },
@@ -130,11 +232,13 @@ declare global {
   interface Window {
     __CODEVER_E2E__: {
       completeTurn(): void
+      startLongTurn(): void
       exportedPath(): string
       setConnection(state: 'connected' | 'disconnected'): void
       requestDecision(): void
       lastConfig(): PatchSessionConfigDto | undefined
       archiveUpdates(): number
+      lastSentInput(): SendMessageDto | undefined
     }
   }
 }
@@ -145,12 +249,23 @@ window.__CODEVER_E2E__ = {
     const { input, resolve } = pendingSend
     pendingSend = undefined
     const turnId = `turn-${input.clientMessageId}`
-    append({ kind: 'user_message', text: input.text, clientMessageId: input.clientMessageId, meta: { turnId, source: 'live' } })
+    append(userMessageEvent(input, turnId))
     append({ kind: 'turn_started', meta: { turnId, source: 'live' } })
     append({ kind: 'assistant_text_delta', text: 'First ', meta: { turnId, source: 'live' } })
     append({ kind: 'assistant_text_delta', text: 'reply.', meta: { turnId, source: 'live' } })
     append({ kind: 'turn_finished', status: 'success', meta: { turnId, source: 'live' } })
     resolve({ commandId: input.clientMessageId, status: 'succeeded' })
+  },
+  startLongTurn() {
+    if (!pendingSend) throw new Error('No pending Client message')
+    const { input, resolve } = pendingSend
+    pendingSend = undefined
+    activeTurnId = `turn-${input.clientMessageId}`
+    append(userMessageEvent(input, activeTurnId))
+    append({ kind: 'session_state', state: 'querying', meta: { source: 'synthetic' } })
+    append({ kind: 'turn_started', meta: { turnId: activeTurnId, source: 'live' } })
+    append({ kind: 'tool', phase: 'started', toolCallId: 'long-tool', toolName: 'Bash', category: 'execute', input: { command: 'long task' }, meta: { turnId: activeTurnId, source: 'live' } })
+    resolve({ commandId: input.clientMessageId, status: 'gateway_accepted' })
   },
   exportedPath: () => exportedPath,
   setConnection(state) {
@@ -165,6 +280,7 @@ window.__CODEVER_E2E__ = {
   },
   lastConfig: () => lastConfig,
   archiveUpdates: () => archiveUpdates,
+  lastSentInput: () => lastSentInput,
 }
 
 clientSession.connectionState.value = 'connected'
@@ -183,4 +299,16 @@ function append(event: SessionEventEnvelope['event'], publish = true): void {
   events.push(envelope)
   session.lastEventSeq = sequence
   if (publish) for (const subscriber of subscribers) subscriber(envelope)
+}
+
+function userMessageEvent(input: SendMessageDto, turnId: string): SessionEventEnvelope['event'] {
+  return {
+    kind: 'user_message', text: input.text, clientMessageId: input.clientMessageId,
+    meta: { turnId, source: 'live' },
+    ...(input.attachmentIds?.length ? { attachments: input.attachmentIds.map(id => {
+      const attachment = attachments.find(item => item.attachmentId === id)
+      if (!attachment) throw new Error(`Unknown E2E attachment ${id}`)
+      return { id, filename: attachment.filename, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes }
+    }) } : {}),
+  }
 }

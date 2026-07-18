@@ -337,7 +337,11 @@ export class GatewaySessionRuntime {
             })
         }
 
-        const semanticEvents = this.adapter.toConversationEvents(providerEvent, {
+        // The Gateway runtime owns the authoritative turn lifecycle. Provider
+        // `result` only supplies status/summary below; projecting it as another
+        // semantic turn_finished event would persist two completions for one
+        // user turn and make replay/cached timelines ambiguous.
+        const semanticEvents = providerEvent.kind === 'result' ? [] : this.adapter.toConversationEvents(providerEvent, {
             sessionId: this.config.sessionId,
             turnId,
             provider: this.config.provider.name,

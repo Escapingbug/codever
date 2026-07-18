@@ -46,11 +46,12 @@ describe('C04/C05 scripted Gateway journey', () => {
 
         turn.emit({ kind: 'text', text: 'Building ' })
         turn.emit({ kind: 'text', text: 'complete.' })
-        await eventually(() => live.filter(event => event.kind === 'assistant_text_delta').length === 2)
-        expect(live.filter(event => event.kind === 'assistant_text_delta')).toHaveLength(2)
         turn.finish('success')
 
         await expect(result).resolves.toMatchObject({ status: 'success' })
+        expect(live.filter(event => event.kind === 'assistant_text_delta')).toMatchObject([
+            { text: 'Building complete.' },
+        ])
         expect(live.at(-1)).toMatchObject({ kind: 'state', state: 'idle' })
 
         const stored = await fixture.events.list(session.id)
@@ -62,7 +63,8 @@ describe('C04/C05 scripted Gateway journey', () => {
             clientMessageId: 'client-message-1',
         })
         expect(wire.filter(event => event.kind === 'assistant_text_delta').map(event =>
-            event.kind === 'assistant_text_delta' ? event.text : '')).toEqual(['Building ', 'complete.'])
+            event.kind === 'assistant_text_delta' ? event.text : '')).toEqual(['Building complete.'])
+        expect(wire.filter(event => event.kind === 'turn_finished')).toHaveLength(1)
 
         await service.destroy()
         await fixture.events.close()
@@ -79,13 +81,4 @@ async function createFixture() {
     const repository = await FileSessionMetadataRepository.open(join(directory, 'sessions.json'))
     const events = new FileConversationEventStore<GatewayConversationEvent>(join(directory, 'events.jsonl'))
     return { directory, root, projects, project, repository, events }
-}
-
-async function eventually(assertion: () => boolean, timeoutMs = 1_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-        if (assertion()) return
-        await new Promise(resolve => setTimeout(resolve, 0))
-    }
-    throw new Error('Timed out waiting for scripted Gateway state')
 }

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "name": "codex-development-adjustment",
+  "sessionId": "codex-replay-session-1",
+  "turns": [
+    {
+      "input": "Create answer.txt with one line: first implementation",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call", "toolCallId": "write-1", "title": "Write", "kind": "edit", "status": "in_progress", "rawInput": "{\"path\":\"answer.txt\",\"content\":\"first implementation\\n\"}" } },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call_update", "toolCallId": "write-1", "title": "Write", "kind": "edit", "status": "completed", "rawOutput": { "exitCode": 0 }, "content": [{ "type": "diff", "path": "answer.txt", "oldText": "", "newText": "first implementation\n" }] } },
+        { "type": "notification", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Created **answer.txt**." } } },
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "idle" } } } } }
+      ],
+      "stopReason": "end_turn"
+    },
+    {
+      "input": "Run the long verification command",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call", "toolCallId": "shell-1", "title": "Bash", "kind": "execute", "status": "in_progress", "rawInput": "{\"command\":\"node -e \\\"setTimeout(() => {}, 60000)\\\"\"}" } },
+        { "type": "gate", "name": "long-command-running" },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call_update", "toolCallId": "shell-1", "title": "Bash", "kind": "execute", "status": "completed", "rawOutput": { "exitCode": 0 } } }
+      ],
+      "stopReason": "end_turn"
+    },
+    {
+      "input": "Adjust answer.txt by adding a second line: adjusted requirement",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call", "toolCallId": "write-2", "title": "Write", "kind": "edit", "status": "in_progress", "rawInput": "{\"path\":\"answer.txt\",\"content\":\"first implementation\\nadjusted requirement\\n\"}" } },
+        { "type": "notification", "update": { "sessionUpdate": "tool_call_update", "toolCallId": "write-2", "title": "Write", "kind": "edit", "status": "completed", "rawOutput": { "exitCode": 0 }, "content": [{ "type": "diff", "path": "answer.txt", "oldText": "first implementation\n", "newText": "first implementation\nadjusted requirement\n" }] } },
+        { "type": "notification", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Updated the requirement." } } },
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "idle" } } } } }
+      ],
+      "stopReason": "end_turn"
+    },
+    {
+      "input": "Install the generated APK",
+      "steps": [
+        { "type": "permission", "toolName": "Bash", "input": { "command": "adb install app.apk" } },
+        { "type": "notification", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Installation approved." } } }
+      ],
+      "stopReason": "end_turn"
+    }
+  ]
+}

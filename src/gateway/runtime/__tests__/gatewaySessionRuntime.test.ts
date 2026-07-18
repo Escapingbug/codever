@@ -48,6 +48,7 @@ describe('GatewaySessionRuntime', () => {
             { phase: 'started' },
             { phase: 'finished', status: 'success' },
         ])
+        expect(events.filter((event) => event.kind === 'turn_finished')).toHaveLength(0)
         expect(events.filter((event) => event.kind === 'state').map((event) => event.state)).toEqual([
             'querying', 'idle', 'querying', 'idle',
         ])
