@@ -9,13 +9,13 @@ describe('client navigation', () => {
       .toEqual({ name: 'projects' })
     expect(parentRoute('gateway', { gatewayId: 'gateway-1' })).toEqual({ name: 'machines' })
     expect(parentRoute('onboarding', {}, { add: '1' })).toEqual({ name: 'login' })
+    expect(parentRoute('login', {})).toEqual({ name: 'onboarding', query: { edit: '1' } })
   })
 
   it('leaves root pages for the native app to close', () => {
     expect(parentRoute('projects', {})).toBeNull()
     expect(parentRoute('machines', {})).toBeNull()
     expect(parentRoute('settings', {})).toBeNull()
-    expect(parentRoute('login', {})).toBeNull()
     expect(parentRoute('onboarding', {})).toBeNull()
   })
 

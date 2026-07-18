@@ -5,7 +5,7 @@ import { createPlatformSecretStore, type SecretStore } from '../security/secretS
 
 export interface RelayProfile { id: string; name: string; baseUrl: string }
 export interface RelayIdentity { relayId: string; credentialId: string; createdAt: string }
-export const DEFAULT_RELAY_PORT = 8788
+export const DEFAULT_RELAY_PORT = 8787
 
 interface PersistedState { version: 3; profiles: RelayProfile[]; activeProfileId?: string }
 const STORAGE_KEY = 'codever.client.v1'

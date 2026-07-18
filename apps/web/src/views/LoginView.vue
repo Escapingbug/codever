@@ -22,6 +22,10 @@ async function pair(): Promise<void> {
     busy.value = false
   }
 }
+
+async function editServer(): Promise<void> {
+  await router.push({ name: 'onboarding', query: { edit: '1' } })
+}
 </script>
 
 <template>
@@ -34,6 +38,7 @@ async function pair(): Promise<void> {
         <label>Client pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" /></label>
         <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
         <button class="button button--primary entry-submit" :disabled="busy">{{ busy ? 'Authorizing…' : 'Authorize client' }}</button>
+        <button class="button" type="button" :disabled="busy" @click="editServer">Edit server</button>
       </form>
     </section>
   </main>

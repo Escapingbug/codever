@@ -16,6 +16,8 @@ export function parentRoute(
       return { name: 'machines' }
     case 'onboarding':
       return query.add === '1' ? { name: 'login' } : null
+    case 'login':
+      return { name: 'onboarding', query: { edit: '1' } }
     default:
       return null
   }
