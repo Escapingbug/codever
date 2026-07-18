@@ -15,14 +15,24 @@ describe('Relay runtime configuration', () => {
         const directory = await temporaryDirectory()
         await writeFile(join(directory, 'relay.json'), JSON.stringify({
             host: '0.0.0.0', port: 8787, relayId: 'relay-from-file', logger: false,
-            dataDirectory: './relay-state', repositoryMode: 'memory',
+            dataDirectory: './relay-state', natsUrl: 'nats://nats.internal:4222',
+            natsCredentialsFile: './relay.creds',
         }))
         await expect(loadRelayConfig({
             CODEVER_RELAY_CONFIG: join(directory, 'relay.json'),
             CODEVER_RELAY_PORT: '9443',
         })).resolves.toEqual({
             host: '0.0.0.0', port: 9443, relayId: 'relay-from-file', logger: false,
-            dataDirectory: join(directory, 'relay-state'), repositoryMode: 'memory',
+            dataDirectory: join(directory, 'relay-state'), natsUrl: 'nats://nats.internal:4222',
+            natsGatewayUrl: 'nats://nats.internal:4222',
+            natsWebSocketUrl: 'ws://127.0.0.1:8080/',
+            natsCredentialsFile: join(directory, 'relay.creds'),
+            nscExecutable: 'nsc',
+            nscConfigDirectory: join(directory, 'relay-state', 'nsc-config'),
+            nscStoreDirectory: join(directory, 'relay-state', 'nsc-store'),
+            nscKeysDirectory: join(directory, 'relay-state', 'nsc-keys'),
+            nscOperator: 'CODEVER',
+            nscAccount: 'CODEVER',
         })
     })
 
@@ -45,10 +55,11 @@ describe('Relay runtime configuration', () => {
         }
     })
 
-    it('uses durable storage by default and validates memory mode', async () => {
-        await expect(loadRelayConfig({})).resolves.toMatchObject({ repositoryMode: 'durable' })
-        await expect(loadRelayConfig({ CODEVER_RELAY_REPOSITORY_MODE: 'volatile' }))
-            .rejects.toThrow('repositoryMode must be durable or memory')
+    it('rejects the removed repository mode', async () => {
+        const directory = await temporaryDirectory()
+        await writeFile(join(directory, 'relay.json'), JSON.stringify({ repositoryMode: 'durable' }))
+        await expect(loadRelayConfig({ CODEVER_RELAY_CONFIG: join(directory, 'relay.json') }))
+            .rejects.toThrow('unknown field')
     })
 })
 

@@ -7,10 +7,11 @@ import {
     type ClientGatewayResponseFrame,
     type ClientGatewayCompletedPayload,
     type GatewayPlatform,
+    type Gateway,
     type InventorySnapshot,
     type SessionEventEnvelope as WireEventEnvelope,
 } from '@codever/protocol'
-import { GatewaySecureCredentialStore, RelayLink } from './link'
+import { GatewaySecureCredentialStore, RelayLink, type GatewaySecureCredential } from './link'
 import { ProjectRegistry } from './projects'
 import { GatewaySessionService, FileSessionMetadataRepository } from './sessions'
 import { FileConversationEventStore } from '@/platform/storage'
@@ -22,16 +23,17 @@ import type { GatewayConfig } from './gatewayConfig'
 import {
     DeviceAuthenticator,
     DeviceCredentialRepository,
-    DeviceSecureSession,
     type DeviceCredentialRecord,
 } from './security'
 import type { OpaquePairingTicket } from '@codever/secure-channel'
 import { GatewayRequestLedger } from './requestLedger'
-import { GatewayAttachmentStore } from './attachments'
+import { GatewayAttachmentStore, NatsObjectBlobTransport, SwitchableBlobTransport } from './attachments'
+import { GatewayJetStreamWorker, NatsDevicePairingServer } from './sync'
+import type { NatsConnection } from '@nats-io/transport-node'
 
 export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
-    'attachment.upload', 'attachment.manage', 'relay-blob-storage',
+    'attachment.upload', 'attachment.manage', 'nats-object-storage',
 ]
 
 export interface GatewayApplication {
@@ -47,7 +49,9 @@ export interface GatewayApplication {
 }
 
 export interface GatewayApplicationOptions {
-    onRelayCredentialSaved?: () => Promise<void>
+    onRelayCredentialSaved?: (credential: GatewaySecureCredential) => Promise<void>
+    natsConnection?: NatsConnection
+    connectNats?: (credential: GatewaySecureCredential) => Promise<NatsConnection>
 }
 
 export async function createGatewayApplication(
@@ -89,7 +93,14 @@ export async function createGatewayApplication(
         credentials: deviceCredentials,
         hpkeKeyPair: deviceCredentials.hpkeKeyPair,
     })
-    const deviceSessions = new Map<string, DeviceSecureSession>()
+    const blobTransport = new SwitchableBlobTransport()
+    let durableWorker: GatewayJetStreamWorker | undefined
+    let pairingServer: NatsDevicePairingServer | undefined
+    let durableConnection: NatsConnection | undefined
+    let ownsDurableConnection = false
+    let presenceTimer: ReturnType<typeof setInterval> | undefined
+    let started = false
+    let closed = false
 
     let inventoryRevision = 1
     const inventory = async (): Promise<InventorySnapshot> => ({
@@ -101,62 +112,28 @@ export async function createGatewayApplication(
     })
 
     const gatewayPlatform = platform()
+    const gatewayPresence = (): Gateway => ({
+        id: config.gatewayId,
+        workspaceId: config.workspaceId,
+        name: config.name,
+        platform: gatewayPlatform,
+        version: '0.1.0',
+        capabilities: {
+            protocolVersions: [PROTOCOL_VERSION],
+            providers: listProviders(),
+            features: GATEWAY_FEATURES,
+        },
+        status: 'online',
+        lastSeenAt: new Date().toISOString(),
+    })
     const tls = config.tls ? await loadTls(config.tls) : undefined
     const secureCredentialStore = new GatewaySecureCredentialStore(
         join(config.dataDirectory, 'secure-relay-credential.json'),
-        options.onRelayCredentialSaved,
     )
     let attachments!: GatewayAttachmentStore
     const relay = new RelayLink({
         url: config.relayUrl,
         gatewayId: config.gatewayId,
-        hello: {
-            workspaceId: config.workspaceId,
-            name: config.name,
-            platform: gatewayPlatform,
-            gatewayVersion: '0.1.0',
-            supportedProtocolVersions: [PROTOCOL_VERSION],
-            capabilities: {
-                protocolVersions: [PROTOCOL_VERSION],
-                providers: listProviders(),
-                features: GATEWAY_FEATURES,
-            },
-        },
-        handleDeviceTunnel: async (payload, actions) => {
-            if ('openedAt' in payload) {
-                if (deviceSessions.has(payload.tunnelId)) throw new Error('Device tunnel is already open')
-                deviceSessions.set(payload.tunnelId, new DeviceSecureSession({
-                    gatewayId: config.gatewayId,
-                    authenticator: deviceAuthenticator,
-                    send: actions.send,
-                    handleRequest: (request, credentialId) => {
-                        const operation = () => handleClientRequest(request, {
-                            credentialId,
-                            gatewayId: config.gatewayId,
-                            inventory,
-                            projects,
-                            sessions,
-                            events,
-                            attachments,
-                            inventoryChanged: () => { inventoryRevision += 1 },
-                        })
-                        return isReadRequest(request) ? operation() : requestLedger.execute(request, credentialId, operation)
-                    },
-                }))
-                return
-            }
-            const device = deviceSessions.get(payload.tunnelId)
-            if ('opaquePayload' in payload) {
-                if (!device) {
-                    actions.close('Unknown or expired device tunnel')
-                    return
-                }
-                await device.receive(payload.opaquePayload)
-                return
-            }
-            device?.close()
-            deviceSessions.delete(payload.tunnelId)
-        },
         ...(tls ? { tls } : {}),
         secure: {
             credentialStore: secureCredentialStore,
@@ -164,27 +141,82 @@ export async function createGatewayApplication(
         },
         onError: (error) => console.error('[gateway:relay]', error.message),
     })
-    attachments = await GatewayAttachmentStore.open(config.dataDirectory, relay)
+    attachments = await GatewayAttachmentStore.open(config.dataDirectory, blobTransport)
+
+    const requestContext = (credentialId: string): ClientRequestContext => ({
+        credentialId,
+        gatewayId: config.gatewayId,
+        inventory,
+        projects,
+        sessions,
+        events,
+        attachments,
+        inventoryChanged,
+    })
+    const createDurableWorker = (connection: NatsConnection): GatewayJetStreamWorker =>
+        new GatewayJetStreamWorker({
+            connection,
+            gatewayId: config.gatewayId,
+            credentials: deviceCredentials,
+            requestLedger,
+            handleRequest: (request, credentialId) => handleClientRequest(request, requestContext(credentialId)),
+            onError: error => console.error('[gateway:jetstream]', error.message),
+        })
+
+    const createPairingServer = (connection: NatsConnection): NatsDevicePairingServer =>
+        new NatsDevicePairingServer({
+            connection,
+            gatewayId: config.gatewayId,
+            authenticator: deviceAuthenticator,
+            onError: error => console.error('[gateway:pairing]', error.message),
+        })
+
+    const startPresence = async (): Promise<void> => {
+        if (!durableWorker) return
+        await durableWorker.publishPresence(gatewayPresence())
+        if (presenceTimer) return
+        presenceTimer = setInterval(() => {
+            void durableWorker?.publishPresence(gatewayPresence()).catch(error => {
+                console.error('[gateway:presence]', error instanceof Error ? error.message : error)
+            })
+        }, 15_000)
+        presenceTimer.unref?.()
+    }
+
+    const activateDurable = async (credential?: GatewaySecureCredential): Promise<void> => {
+        if (durableWorker || closed) return
+        const connection = options.natsConnection
+            ?? (credential && options.connectNats ? await options.connectNats(credential) : undefined)
+        if (!connection) return
+        ownsDurableConnection = !options.natsConnection
+        durableConnection = connection
+        blobTransport.use(await NatsObjectBlobTransport.open(connection, config.gatewayId))
+        durableWorker = createDurableWorker(connection)
+        pairingServer = createPairingServer(connection)
+        await durableWorker.start()
+        pairingServer.start()
+        await startPresence()
+        await durableWorker.publishInventory(await inventory())
+    }
+
+    if (options.natsConnection) {
+        durableConnection = options.natsConnection
+        blobTransport.use(await NatsObjectBlobTransport.open(options.natsConnection, config.gatewayId))
+        durableWorker = createDurableWorker(options.natsConnection)
+        pairingServer = createPairingServer(options.natsConnection)
+    }
 
     const unsubscribe = sessions.subscribe((envelope) => {
         const event = toWireConversationEvent(envelope.event)
         if (!event) return
-        for (const [tunnelId, device] of deviceSessions) {
-            if (!device.ready) continue
-            void device.sendEvent({
-                version: PROTOCOL_VERSION,
-                type: 'gateway.client.event',
-                payload: { events: [{ ...envelope, event }] },
-            }).catch(error => {
-                console.error('[gateway:device]', error instanceof Error ? error.message : error)
-                device.close()
-                deviceSessions.delete(tunnelId)
+        const wireEnvelope = { ...envelope, event }
+        if (durableWorker) {
+            void durableWorker.publishEvent(wireEnvelope).catch(error => {
+                console.error('[gateway:jetstream:event]', error instanceof Error ? error.message : error)
             })
         }
     })
 
-    let started = false
-    let closed = false
     return {
         config,
         projects,
@@ -196,10 +228,30 @@ export async function createGatewayApplication(
         start() {
             if (started || closed) return
             started = true
+            if (durableWorker) {
+                pairingServer?.start()
+                void durableWorker.start().then(startPresence).then(inventory).then(value => durableWorker?.publishInventory(value)).catch(error => {
+                    console.error('[gateway:jetstream]', error instanceof Error ? error.message : error)
+                })
+            }
             void (async () => {
+                if (options.connectNats) {
+                    const credential = await secureCredentialStore.load(config.gatewayId)
+                    if (credential) {
+                        await activateDurable(credential)
+                        return
+                    }
+                }
                 while (!closed && relay.state !== 'online') {
                     try {
                         await relay.start()
+                        const credential = await secureCredentialStore.load(config.gatewayId)
+                        if (credential) {
+                            await options.onRelayCredentialSaved?.(credential)
+                            await activateDurable(credential)
+                            await relay.stop()
+                            return
+                        }
                     } catch (error) {
                         if (!closed) console.error('[gateway:relay]', error instanceof Error ? error.message : error)
                     }
@@ -211,12 +263,23 @@ export async function createGatewayApplication(
             if (closed) return
             closed = true
             unsubscribe()
-            for (const device of deviceSessions.values()) device.close()
-            deviceSessions.clear()
+            if (presenceTimer) clearInterval(presenceTimer)
+            await durableWorker?.stop()
+            await pairingServer?.stop()
+            if (ownsDurableConnection && durableConnection) await durableConnection.close()
             await relay.stop()
             await sessions.destroy()
             await events.close()
         },
+    }
+
+    function inventoryChanged(): void {
+        inventoryRevision += 1
+        if (durableWorker) {
+            void inventory().then(value => durableWorker?.publishInventory(value)).catch(error => {
+                console.error('[gateway:jetstream:inventory]', error instanceof Error ? error.message : error)
+            })
+        }
     }
 }
 

@@ -1,14 +1,13 @@
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { ClientCredentialRepository } from './clientCredentialRepository'
 import { loadRelayConfig } from './config'
-import { createDurableRelayRepositories } from './durableRepositories'
 import { runLocalPairCommand, startLocalControlServer } from './localControl'
-import { createInMemoryRelayRepositories } from './memoryRepositories'
 import { SecureClientAuthenticator } from './secureClientAuth'
-import { SecureCredentialRepository } from './secureCredentialRepository'
+import { OpaqueSetupRepository } from './opaqueSetupRepository'
 import { SecureGatewayAuthenticator } from './secureGatewayAuth'
 import { createRelayServer } from './server'
-import { RelayBlobStore } from './relayBlobStore'
+import { startCodeverJetStream } from './jetstream'
+import { NscCredentialIssuer } from './nscCredentialIssuer'
 
 const config = await loadRelayConfig()
 if (process.argv[2] === 'pair') {
@@ -21,39 +20,40 @@ if (process.argv[2] === 'pair') {
     process.exit(0)
 }
 
-const repositories = config.repositoryMode === 'memory'
-    ? createInMemoryRelayRepositories()
-    : await createDurableRelayRepositories(config.dataDirectory)
-const gatewayCredentials = await SecureCredentialRepository.open(
-    join(config.dataDirectory, 'secure-gateway-credentials.json'),
+const natsCredentials = config.natsCredentialsFile ? await readFile(config.natsCredentialsFile) : undefined
+const jetstream = await startCodeverJetStream(config.natsUrl, natsCredentials)
+
+const gatewayOpaque = await OpaqueSetupRepository.open(
+    join(config.dataDirectory, 'gateway-opaque-setup.json'),
 )
-for (const gateway of await repositories.gateways.list()) {
-    const credential = await gatewayCredentials.get(gateway.id)
-    if (!credential?.enabled) await repositories.gateways.remove(gateway.id)
-}
-const clientCredentials = await ClientCredentialRepository.open(
-    join(config.dataDirectory, 'secure-client-credentials.json'),
+const clientOpaque = await OpaqueSetupRepository.open(
+    join(config.dataDirectory, 'client-opaque-setup.json'),
 )
+const natsCredentialIssuer = new NscCredentialIssuer({
+    storeDirectory: config.nscStoreDirectory,
+    keysDirectory: config.nscKeysDirectory,
+    configDirectory: config.nscConfigDirectory,
+    operator: config.nscOperator,
+    account: config.nscAccount,
+    websocketUrl: config.natsWebSocketUrl,
+    natsUrl: config.natsGatewayUrl,
+    executable: config.nscExecutable,
+    jetstreamManager: jetstream.manager,
+})
 const secureGatewayAuthenticator = await SecureGatewayAuthenticator.create({
     relayId: config.relayId,
-    serverSetup: gatewayCredentials.serverSetup,
-    credentials: gatewayCredentials,
+    serverSetup: gatewayOpaque.serverSetup,
+    natsCredentials: natsCredentialIssuer,
 })
 const secureClientAuthenticator = await SecureClientAuthenticator.create({
     relayId: config.relayId,
-    serverSetup: clientCredentials.serverSetup,
-    credentials: clientCredentials,
+    serverSetup: clientOpaque.serverSetup,
+    natsCredentials: natsCredentialIssuer,
 })
-if (config.repositoryMode === 'memory') {
-    process.stderr.write('WARNING: CODEVER_RELAY_REPOSITORY_MODE=memory; Gateway metadata will be lost at process exit.\n')
-}
-
 const app = await createRelayServer({
     logger: config.logger,
     secureGatewayAuthenticator,
     secureClientAuthenticator,
-    repositories,
-    blobStore: new RelayBlobStore(join(config.dataDirectory, 'blobs')),
 })
 const localControl = await startLocalControlServer(
     config.dataDirectory,
@@ -65,6 +65,7 @@ const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down Relay')
     await localControl.close()
     await app.close()
+    await jetstream.close()
 }
 process.once('SIGINT', () => { void shutdown('SIGINT') })
 process.once('SIGTERM', () => { void shutdown('SIGTERM') })

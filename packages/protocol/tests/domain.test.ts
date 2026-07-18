@@ -13,7 +13,6 @@ describe('domain schemas', () => {
             version: '1.0.0',
             capabilities: { protocolVersions: [1], providers: ['cursor'], features: ['events'] },
             status: 'online',
-            connectionEpoch: 'epoch-1',
             lastSeenAt: now,
         })
         const project = parseProject({

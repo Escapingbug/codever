@@ -16,6 +16,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@a2a-js/sdk": "^0.3.14",
+    "@ag-ui/core": "^0.0.57",
     "zod": "^4.4.3"
   },
   "devDependencies": {

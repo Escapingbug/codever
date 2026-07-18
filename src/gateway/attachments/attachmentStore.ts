@@ -2,20 +2,20 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID }
 import { createReadStream } from 'node:fs'
 import { access, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { RELAY_BLOB_CHUNK_BYTES, type AttachmentUploadDto, type RelayBlobManifest, type SessionAttachmentDto } from '@codever/protocol'
+import { OBJECT_BLOB_CHUNK_BYTES, type AttachmentUploadDto, type ObjectBlobManifest, type SessionAttachmentDto } from '@codever/protocol'
 import type { RichUserInputPart } from '@/runtime/semantic'
 
-export type { RelayBlobManifest } from '@codever/protocol'
+export type { ObjectBlobManifest } from '@codever/protocol'
 
 export const ATTACHMENT_TRANSFER_CHUNK_BYTES = 192 * 1024
-const RELAY_PLAINTEXT_CHUNK_BYTES = RELAY_BLOB_CHUNK_BYTES - 28
+const OBJECT_PLAINTEXT_CHUNK_BYTES = OBJECT_BLOB_CHUNK_BYTES - 28
 const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000
 
-export interface RelayBlobTransport {
-    begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest>
+export interface ObjectBlobTransport {
+    begin(blobId: string, totalSize: number, chunkSize: number): Promise<ObjectBlobManifest>
     putChunk(blobId: string, index: number, encryptedData: string): Promise<void>
     complete(blobId: string): Promise<void>
-    manifest(blobId: string): Promise<RelayBlobManifest>
+    manifest(blobId: string): Promise<ObjectBlobManifest>
     getChunk(blobId: string, index: number): Promise<string>
     delete(blobId: string): Promise<void>
 }
@@ -47,10 +47,10 @@ export class GatewayAttachmentStore {
     private constructor(
         private readonly root: string,
         private readonly metadataPath: string,
-        private readonly blobs: RelayBlobTransport,
+        private readonly blobs: ObjectBlobTransport,
     ) {}
 
-    static async open(dataDirectory: string, blobs: RelayBlobTransport): Promise<GatewayAttachmentStore> {
+    static async open(dataDirectory: string, blobs: ObjectBlobTransport): Promise<GatewayAttachmentStore> {
         const root = join(dataDirectory, 'attachments')
         await mkdir(root, { recursive: true })
         const store = new GatewayAttachmentStore(root, join(root, 'metadata.json'), blobs)
@@ -234,17 +234,17 @@ export class GatewayAttachmentStore {
 
     private async persistEncryptedBlob(record: AttachmentRecord): Promise<void> {
         const key = Buffer.from(record.dataKey, 'base64')
-        const chunkCount = Math.ceil(record.sizeBytes / RELAY_PLAINTEXT_CHUNK_BYTES)
+        const chunkCount = Math.ceil(record.sizeBytes / OBJECT_PLAINTEXT_CHUNK_BYTES)
         const manifest = await this.blobs.begin(
             record.blobId,
             record.sizeBytes + chunkCount * 28,
-            RELAY_BLOB_CHUNK_BYTES,
+            OBJECT_BLOB_CHUNK_BYTES,
         )
         if (manifest.chunkCount !== chunkCount || manifest.receivedChunkCount > chunkCount) {
             throw new Error('Relay Blob resume state does not match the attachment')
         }
         let index = 0
-        for await (const value of createReadStream(record.path, { highWaterMark: RELAY_PLAINTEXT_CHUNK_BYTES })) {
+        for await (const value of createReadStream(record.path, { highWaterMark: OBJECT_PLAINTEXT_CHUNK_BYTES })) {
             const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
             if (index >= manifest.receivedChunkCount) {
                 await this.blobs.putChunk(record.blobId, index, encryptChunk(key, record.blobId, index, bytes))
@@ -257,7 +257,7 @@ export class GatewayAttachmentStore {
     private async ensureMaterialized(record: AttachmentRecord): Promise<void> {
         if (await exists(record.path)) return
         const manifest = await this.blobs.manifest(record.blobId)
-        const expectedChunks = Math.ceil(record.sizeBytes / RELAY_PLAINTEXT_CHUNK_BYTES)
+        const expectedChunks = Math.ceil(record.sizeBytes / OBJECT_PLAINTEXT_CHUNK_BYTES)
         if (!manifest.complete || manifest.chunkCount !== expectedChunks) {
             throw new Error(`Relay file is unavailable or incomplete: ${record.filename}`)
         }

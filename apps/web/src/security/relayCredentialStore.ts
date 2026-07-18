@@ -1,13 +1,14 @@
 import type { SecretStore } from './secretStore'
 
 export interface ClientRelayCredential {
-  version: 1
+  version: 3
   relayProfileId: string
   relayId: string
   credentialId: string
-  secret: string
-  relayStaticPublicKey: string
   createdAt: string
+  natsSeed: string
+  natsUserJwt: string
+  natsWebSocketUrl: string
 }
 
 export class ClientRelayCredentialStore {
@@ -37,10 +38,15 @@ function account(profileId: string): string {
 function parseCredential(value: unknown): ClientRelayCredential {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Relay credential')
   const input = value as Record<string, unknown>
-  if (input.version !== 1) throw new Error('Unsupported Relay credential version')
-  for (const field of ['relayProfileId', 'relayId', 'credentialId', 'secret', 'relayStaticPublicKey', 'createdAt'] as const) {
+  if (input.version !== 3) throw new Error('Unsupported Relay credential version; pair this Relay again')
+  for (const field of [
+    'relayProfileId', 'relayId', 'credentialId', 'createdAt',
+    'natsSeed', 'natsUserJwt', 'natsWebSocketUrl',
+  ] as const) {
     if (typeof input[field] !== 'string' || !input[field]) throw new Error(`Invalid Relay credential ${field}`)
   }
-  if ((input.secret as string).length < 32) throw new Error('Relay credential secret is too short')
+  if (!/^SU[A-Z2-7]{56}$/.test(input.natsSeed as string)) throw new Error('Relay NATS seed is invalid')
+  const natsUrl = new URL(input.natsWebSocketUrl as string)
+  if (natsUrl.protocol !== 'ws:' && natsUrl.protocol !== 'wss:') throw new Error('Relay NATS WebSocket URL is invalid')
   return input as unknown as ClientRelayCredential
 }

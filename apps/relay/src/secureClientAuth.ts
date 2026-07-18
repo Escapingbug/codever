@@ -1,165 +1,89 @@
-import {
-    createOpaqueCredentialRegistrationResponse,
-    finishOpaqueCredentialServerLogin,
-    getOpaqueServerPublicKey,
-    OpaquePairingAuthority,
-    startOpaqueCredentialServerLogin,
-    type OpaquePairingTicket,
-} from '@codever/secure-channel'
+import { OpaquePairingAuthority, type OpaquePairingTicket } from '@codever/secure-channel'
+import type { NatsCredentialIssuer } from './nscCredentialIssuer'
 
-export interface ClientCredentialRecord {
+interface PendingHandshake {
     clientId: string
-    registrationRecord: string
-    enabled: boolean
-}
-
-export interface ClientCredentialStore {
-    get(clientId: string): Promise<ClientCredentialRecord | undefined>
-    put(clientId: string, registrationRecord: string): Promise<ClientCredentialRecord>
-}
-
-type PendingHandshake = {
-    mode: 'credential'
-    clientId: string
-    serverLoginState: string
-    expiresAtMs: number
-} | {
-    mode: 'pairing'
-    clientId: string
+    natsPublicKey: string
     authorityHandshakeId: string
     expiresAtMs: number
 }
 
+/** One-time OPAQUE authorization that signs a client-generated NKey public key. */
 export class SecureClientAuthenticator {
     private readonly handshakes = new Map<string, PendingHandshake>()
 
     private constructor(
         readonly relayId: string,
-        readonly serverSetup: string,
         readonly pairing: OpaquePairingAuthority,
-        private readonly credentials: ClientCredentialStore,
         private readonly now: () => number,
-        private readonly randomId: () => string,
-        private readonly handshakeTtlMs: number,
+        private readonly natsCredentials: NatsCredentialIssuer,
     ) {}
 
     static async create(input: {
         relayId: string
         serverSetup: string
-        credentials: ClientCredentialStore
         now?: () => number
         randomId?: () => string
         pairingTtlMs?: number
         handshakeTtlMs?: number
         maxPairingAttempts?: number
+        natsCredentials: NatsCredentialIssuer
     }): Promise<SecureClientAuthenticator> {
         const now = input.now ?? Date.now
-        const randomId = input.randomId ?? (() => globalThis.crypto.randomUUID())
-        const handshakeTtlMs = input.handshakeTtlMs ?? 30_000
         const pairing = await OpaquePairingAuthority.create({
-            domain: 'relay-client',
-            serverId: input.relayId,
-            serverSetup: input.serverSetup,
-            now,
-            randomId,
-            pairingTtlMs: input.pairingTtlMs,
-            handshakeTtlMs,
-            maxAttempts: input.maxPairingAttempts,
+            domain: 'relay-client', serverId: input.relayId, serverSetup: input.serverSetup,
+            now, randomId: input.randomId, pairingTtlMs: input.pairingTtlMs,
+            handshakeTtlMs: input.handshakeTtlMs, maxAttempts: input.maxPairingAttempts,
         })
-        return new SecureClientAuthenticator(
-            input.relayId, input.serverSetup, pairing, input.credentials, now, randomId, handshakeTtlMs,
-        )
+        return new SecureClientAuthenticator(input.relayId, pairing, now, input.natsCredentials)
     }
 
-    issuePairing(): OpaquePairingTicket {
-        return this.pairing.issue()
-    }
-
-    async createCredentialRegistrationResponse(clientId: string, registrationRequest: string): Promise<{
-        registrationResponse: string
-        serverStaticPublicKey: string
-    }> {
-        return {
-            registrationResponse: await createOpaqueCredentialRegistrationResponse({
-                serverSetup: this.serverSetup,
-                subjectId: clientId,
-                serverId: this.relayId,
-                registrationRequest,
-            }),
-            serverStaticPublicKey: await getOpaqueServerPublicKey(this.serverSetup),
-        }
-    }
-
-    async commitCredential(clientId: string, registrationRecord: string): Promise<ClientCredentialRecord> {
-        return this.credentials.put(clientId, registrationRecord)
-    }
+    issuePairing(): OpaquePairingTicket { return this.pairing.issue() }
 
     async begin(input: {
-        mode: 'pairing' | 'credential'
         clientId: string
         subjectId: string
         startLoginRequest: string
+        natsPublicKey: string
     }): Promise<{ handshakeId: string; loginResponse: string; expiresAt: string; attemptsRemaining?: number }> {
         this.prune()
-        if (input.mode === 'pairing') {
-            const started = this.pairing.begin(input.subjectId, input.startLoginRequest)
-            this.handshakes.set(started.handshakeId, {
-                mode: 'pairing', clientId: input.clientId,
-                authorityHandshakeId: started.handshakeId, expiresAtMs: Date.parse(started.expiresAt),
-            })
-            return {
-                handshakeId: started.handshakeId,
-                loginResponse: started.loginResponse,
-                expiresAt: started.expiresAt,
-                attemptsRemaining: started.attemptsRemaining,
-            }
+        const started = this.pairing.begin(input.subjectId, input.startLoginRequest)
+        this.handshakes.set(started.handshakeId, {
+            clientId: input.clientId,
+            natsPublicKey: input.natsPublicKey,
+            authorityHandshakeId: started.handshakeId,
+            expiresAtMs: Date.parse(started.expiresAt),
+        })
+        return {
+            handshakeId: started.handshakeId,
+            loginResponse: started.loginResponse,
+            expiresAt: started.expiresAt,
+            attemptsRemaining: started.attemptsRemaining,
         }
-
-        if (input.subjectId !== input.clientId) throw new Error('Credential subject must match clientId')
-        const credential = await this.credentials.get(input.clientId)
-        if (!credential?.enabled) throw new Error('Client credential is unknown or disabled')
-        const started = await startOpaqueCredentialServerLogin({
-            serverSetup: this.serverSetup,
-            registrationRecord: credential.registrationRecord,
-            subjectId: input.clientId,
-            serverId: this.relayId,
-            startLoginRequest: input.startLoginRequest,
-        })
-        const handshakeId = this.randomId()
-        const expiresAtMs = this.now() + this.handshakeTtlMs
-        this.handshakes.set(handshakeId, {
-            mode: 'credential', clientId: input.clientId,
-            serverLoginState: started.serverLoginState, expiresAtMs,
-        })
-        return { handshakeId, loginResponse: started.loginResponse, expiresAt: new Date(expiresAtMs).toISOString() }
     }
 
     async finish(input: { handshakeId: string; finishLoginRequest: string }): Promise<{
         clientId: string
         sessionKey: string
-        credentialProvisioningRequired: boolean
+        natsUserJwt: string
+        natsWebSocketUrl: string
     }> {
         this.prune()
-        const handshake = this.handshakes.get(input.handshakeId)
-        if (!handshake) throw new Error('Secure Client handshake is invalid or expired')
+        const pending = this.handshakes.get(input.handshakeId)
+        if (!pending) throw new Error('Secure Client handshake is invalid or expired')
         this.handshakes.delete(input.handshakeId)
-        if (handshake.mode === 'pairing') {
-            const finished = this.pairing.finish(handshake.authorityHandshakeId, input.finishLoginRequest)
-            return { clientId: handshake.clientId, sessionKey: finished.sessionKey, credentialProvisioningRequired: true }
+        const finished = this.pairing.finish(pending.authorityHandshakeId, input.finishLoginRequest)
+        const issued = await this.natsCredentials.issueClient(pending.clientId, pending.natsPublicKey)
+        return {
+            clientId: pending.clientId,
+            sessionKey: finished.sessionKey,
+            natsUserJwt: issued.userJwt,
+            natsWebSocketUrl: issued.websocketUrl,
         }
-        const sessionKey = await finishOpaqueCredentialServerLogin({
-            serverLoginState: handshake.serverLoginState,
-            finishLoginRequest: input.finishLoginRequest,
-            subjectId: handshake.clientId,
-            serverId: this.relayId,
-        })
-        return { clientId: handshake.clientId, sessionKey, credentialProvisioningRequired: false }
     }
 
     private prune(): void {
         const now = this.now()
-        for (const [id, handshake] of this.handshakes) {
-            if (handshake.expiresAtMs <= now) this.handshakes.delete(id)
-        }
+        for (const [id, value] of this.handshakes) if (value.expiresAtMs <= now) this.handshakes.delete(id)
     }
 }

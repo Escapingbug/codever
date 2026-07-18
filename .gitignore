@@ -5,6 +5,7 @@ dist/
 .env.*
 !.env.example
 tmp/
+.test-tmp/
 .gitnexus/
 .pi/.gitnexus/
 repro/

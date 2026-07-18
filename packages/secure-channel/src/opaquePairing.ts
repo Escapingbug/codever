@@ -1,5 +1,15 @@
 import * as opaque from '@serenity-kit/opaque'
 
+export async function createOpaqueServerSetup(): Promise<string> {
+    await opaque.ready
+    return opaque.server.createSetup()
+}
+
+export async function getOpaqueServerPublicKey(serverSetup: string): Promise<string> {
+    await opaque.ready
+    return opaque.server.getPublicKey(serverSetup)
+}
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const LOCATOR_LENGTH = 6
 const SECRET_LENGTH = 10

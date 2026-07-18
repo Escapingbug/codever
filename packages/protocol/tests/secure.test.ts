@@ -3,7 +3,6 @@ import {
     parseGatewaySecureHandshakeFrame,
     parseRelaySecureAuthAcceptedPayload,
     parseSecureDataFrame,
-    parseSecureControlFrame,
 } from '../src/secure'
 
 describe('secure transport protocol', () => {
@@ -17,6 +16,7 @@ describe('secure transport protocol', () => {
                 mode: 'pairing',
                 subjectId: 'ABC234',
                 startLoginRequest: 'opaque-request',
+                natsPublicKey: `U${'A'.repeat(55)}`,
             },
         }).type).toBe('gateway.secure-auth.start')
     })
@@ -33,8 +33,9 @@ describe('secure transport protocol', () => {
         })
         expect(JSON.stringify(frame)).not.toContain('connectionEpoch')
         expect(() => parseRelaySecureAuthAcceptedPayload({
-            gatewayId: 'gateway-1', connectionEpoch: 'epoch-1', acceptedAt: new Date().toISOString(),
-            credentialProvisioningRequired: true,
+            gatewayId: 'gateway-1', acceptedAt: new Date().toISOString(),
+            natsUserJwt: `${'a'.repeat(40)}.${'b'.repeat(80)}.${'c'.repeat(64)}`,
+            natsUrl: 'tls://relay.test:4222',
         })).not.toThrow()
     })
 
@@ -48,10 +49,4 @@ describe('secure transport protocol', () => {
         })).toThrow()
     })
 
-    it('strictly validates encrypted credential provisioning messages', () => {
-        expect(parseSecureControlFrame({
-            version: 1, type: 'gateway.credential.registration.start', messageId: 'message-4',
-            payload: { gatewayId: 'gateway-1', registrationRequest: 'opaque-registration-request' },
-        }).type).toBe('gateway.credential.registration.start')
-    })
 })

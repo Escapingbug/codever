@@ -22,6 +22,9 @@
   "dependencies": {
     "@codever/protocol": "workspace:*",
     "@codever/secure-channel": "workspace:*",
+    "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/obj": "^3.4.0",
+    "@nats-io/transport-node": "^3.4.0",
     "@fastify/websocket": "^11.2.0",
     "fastify": "^5.6.2"
   },

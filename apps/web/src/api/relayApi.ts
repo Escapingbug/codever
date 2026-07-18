@@ -3,6 +3,7 @@ import type {
   AttachmentUploadDto,
   CodeverSession,
   ClientGatewayResponseFrame,
+  ClientGatewayRequestPayload,
   CreateProjectDto,
   CreateSessionDto,
   Gateway,
@@ -22,7 +23,11 @@ import { ClientDeviceCredentialStore } from '../security/deviceCredentialStore'
 import { RelaySecureHandshake } from '../security/relaySecureHandshake'
 import { ClientRelayCredentialStore, type ClientRelayCredential } from '../security/relayCredentialStore'
 import type { SecretStore } from '../security/secretStore'
-import { GatewaySecureConnection, SecureRelayClient } from './secureRelayClient'
+import { SecureRelayClient } from './secureRelayClient'
+import { connectDurableNats, DurableSyncClient } from './durableSyncClient'
+import { IndexedDbDurableResponseStore } from './durableResponseStore'
+import { pairGatewayOverNats } from './natsDevicePairingClient'
+import type { NatsConnection } from '@nats-io/nats-core'
 
 export interface RelayApiOptions {
   baseUrl: string | (() => string | undefined)
@@ -47,10 +52,10 @@ export class RelayApi {
   private readonly deviceCredentials: ClientDeviceCredentialStore
   private relay?: SecureRelayClient
   private relayCredential?: ClientRelayCredential
-  private relayOpening?: Promise<void>
-  private readonly gatewayConnections = new Map<string, GatewaySecureConnection>()
-  private readonly gatewayOpenings = new Map<string, Promise<GatewaySecureConnection>>()
+  private nats?: NatsConnection
+  private durable?: DurableSyncClient
   private readonly inventories = new Map<string, InventorySnapshot>()
+  private readonly gateways = new Map<string, Gateway>()
   private readonly projectGateways = new Map<string, string>()
   private readonly sessionGateways = new Map<string, string>()
   private readonly eventSubscribers = new Map<string, Set<(event: SessionEventEnvelope) => void>>()
@@ -79,7 +84,8 @@ export class RelayApi {
     if (!this.relayProfileId) return undefined
     const credential = await this.relayCredentials.load(this.relayProfileId)
     if (!credential) return undefined
-    await this.openRelay({ credentialId: credential.credentialId, credential })
+    this.relayCredential = credential
+    await this.openDurable(credential)
     return credential
   }
 
@@ -87,16 +93,21 @@ export class RelayApi {
     await this.openRelay({ credentialId, pairingCode })
     const credential = await this.relayCredentials.load(this.relayProfileId)
     if (!credential) throw new RelayApiError('Relay credential provisioning did not complete')
+    this.relay?.close(false)
+    this.relay = undefined
     return credential
   }
 
   async disconnect(deleteCredential = false): Promise<void> {
-    this.relay?.close()
+    await this.durable?.close()
+    this.durable = undefined
+    await this.nats?.drain()
+    this.nats = undefined
+    this.relay?.close(false)
     this.relay = undefined
     this.relayCredential = undefined
-    this.gatewayConnections.clear()
-    this.gatewayOpenings.clear()
     this.inventories.clear()
+    this.gateways.clear()
     this.projectGateways.clear()
     this.sessionGateways.clear()
     this.durableIdempotencyGateways.clear()
@@ -104,30 +115,29 @@ export class RelayApi {
   }
 
   async listGateways(): Promise<Gateway[]> {
-    const relay = await this.requireRelay()
-    try {
-      const gateways = await relay.listGateways()
-      this.rememberGatewayCapabilities(gateways)
-      return gateways
-    } catch (error) {
-      if (this.relay === relay) throw error
-      const gateways = await (await this.requireRelay()).listGateways()
-      this.rememberGatewayCapabilities(gateways)
-      return gateways
-    }
+    if (!this.durable) await this.restoreRelay()
+    const staleBefore = Date.now() - 45_000
+    const gateways = [...this.gateways.values()].map(gateway => ({
+      ...gateway,
+      status: gateway.lastSeenAt && Date.parse(gateway.lastSeenAt) >= staleBefore ? 'online' as const : 'offline' as const,
+    }))
+    this.rememberGatewayCapabilities(gateways)
+    return gateways
   }
 
-  async pairGateway(gatewayId: string, pairingCode: string, credentialId = `device_${crypto.randomUUID()}`): Promise<void> {
-    const relay = await this.requireRelay()
+  async pairGateway(gatewayId: string, pairingCode: string, credentialId?: string): Promise<void> {
+    if (!this.durable) await this.restoreRelay()
+    const deviceId = credentialId ?? this.relayCredential?.credentialId
+    if (!deviceId) throw new RelayApiError('Relay credential is required before pairing a Gateway')
     const handshake = new DeviceSecureHandshake({
       relayProfileId: this.relayProfileId,
       gatewayId,
-      credentialId,
+      credentialId: deviceId,
       pairingCode,
       saveCredential: value => this.deviceCredentials.save(value),
     })
-    const connection = await relay.openGateway(gatewayId, handshake, event => this.publishEvents(event.payload.events))
-    this.gatewayConnections.set(gatewayId, connection)
+    if (!this.nats) throw new RelayApiError('Durable Relay synchronization is not connected', 0, 'sync_unavailable')
+    await pairGatewayOverNats({ connection: this.nats, gatewayId, credentialId: deviceId, handshake })
   }
 
   async listProjects(gatewayId: string): Promise<Project[]> {
@@ -309,14 +319,13 @@ export class RelayApi {
     }
   }
 
-  private async openRelay(input: { credentialId: string; pairingCode?: string; credential?: ClientRelayCredential }): Promise<void> {
+  private async openRelay(input: { credentialId: string; pairingCode: string }): Promise<void> {
     if (!this.baseUrl || !this.relayProfileId) throw new RelayApiError('Relay profile is incomplete')
     this.relay?.close()
     const handshake = new RelaySecureHandshake({
       relayProfileId: this.relayProfileId,
       credentialId: input.credentialId,
-      ...(input.pairingCode ? { pairingCode: input.pairingCode } : {}),
-      ...(input.credential ? { credential: input.credential } : {}),
+      pairingCode: input.pairingCode,
       saveCredential: value => this.relayCredentials.save(value),
     })
     const relay = new SecureRelayClient({
@@ -326,8 +335,6 @@ export class RelayApi {
       onError: () => {
         if (this.relay === relay) {
           this.relay = undefined
-          this.gatewayConnections.clear()
-          this.gatewayOpenings.clear()
           this.options.onDisconnected?.()
         }
       },
@@ -340,47 +347,7 @@ export class RelayApi {
       throw error
     }
     this.relayCredential = await this.relayCredentials.load(this.relayProfileId)
-  }
-
-  private async requireRelay(): Promise<SecureRelayClient> {
-    if (this.relay) return this.relay
-    if (!this.relayOpening) {
-      this.relayOpening = this.restoreRelay().then(restored => {
-        if (!restored || !this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
-      }).finally(() => { this.relayOpening = undefined })
-    }
-    await this.relayOpening
-    if (!this.relay) throw new RelayApiError('Relay pairing is required', 401, 'pairing_required')
-    return this.relay
-  }
-
-  private async gateway(gatewayId: string): Promise<GatewaySecureConnection> {
-    const existing = this.gatewayConnections.get(gatewayId)
-    if (existing) return existing
-    const opening = this.gatewayOpenings.get(gatewayId)
-    if (opening) return opening
-    const created = (async () => {
-      const credential = await this.deviceCredentials.load(this.relayProfileId, gatewayId)
-      if (!credential) throw new RelayApiError('Gateway pairing is required', 401, 'gateway_pairing_required')
-      const handshake = new DeviceSecureHandshake({
-        relayProfileId: this.relayProfileId,
-        gatewayId,
-        credentialId: credential.credentialId,
-        credential,
-        saveCredential: value => this.deviceCredentials.save(value),
-      })
-      const connection = await (await this.requireRelay()).openGateway(
-        gatewayId, handshake, event => this.publishEvents(event.payload.events),
-      )
-      this.gatewayConnections.set(gatewayId, connection)
-      return connection
-    })()
-    this.gatewayOpenings.set(gatewayId, created)
-    try {
-      return await created
-    } finally {
-      if (this.gatewayOpenings.get(gatewayId) === created) this.gatewayOpenings.delete(gatewayId)
-    }
+    if (this.relayCredential) await this.openDurable(this.relayCredential)
   }
 
   private async inventory(gatewayId: string): Promise<InventorySnapshot> {
@@ -404,19 +371,50 @@ export class RelayApi {
   private async refreshProjectInventory(projectId: string): Promise<void> { await this.inventory(this.requireProjectGateway(projectId)) }
   private async requestGateway(
     gatewayId: string,
-    payload: Parameters<GatewaySecureConnection['request']>[0],
+    payload: ClientGatewayRequestPayload,
   ): Promise<ClientGatewayResponseFrame> {
     const idempotencyKey = crypto.randomUUID()
     const timeoutMs = payload.kind === 'session.message'
       ? this.options.longRequestTimeoutMs ?? 30 * 60_000
       : this.options.requestTimeoutMs
     try {
-      return await (await this.gateway(gatewayId)).request(payload, idempotencyKey, timeoutMs)
+      return await this.requireDurable().request(gatewayId, payload, idempotencyKey, timeoutMs)
     } catch (error) {
-      this.gatewayConnections.delete(gatewayId)
       if (!isRetrySafe(payload) && !this.durableIdempotencyGateways.has(gatewayId)) throw error
-      return (await this.gateway(gatewayId)).request(payload, idempotencyKey, timeoutMs)
+      return this.requireDurable().request(gatewayId, payload, idempotencyKey, timeoutMs)
     }
+  }
+
+  private async openDurable(credential: ClientRelayCredential): Promise<void> {
+    await this.durable?.close()
+    await this.nats?.drain()
+    const nats = await connectDurableNats(credential)
+    const durable = new DurableSyncClient({
+      connection: nats,
+      relayCredential: credential,
+      deviceCredentials: this.deviceCredentials,
+      responseStore: new IndexedDbDurableResponseStore(credential.relayProfileId, credential.credentialId),
+      onEvent: event => this.publishEvents([event]),
+      onInventory: (gatewayId, inventory) => {
+        this.inventories.set(gatewayId, inventory)
+        for (const project of inventory.projects) this.projectGateways.set(project.id, gatewayId)
+        for (const session of inventory.sessions) this.sessionGateways.set(session.id, gatewayId)
+      },
+      onGateway: gateway => { this.gateways.set(gateway.id, gateway) },
+    })
+    try {
+      await durable.start()
+    } catch (error) {
+      await nats.close()
+      throw error
+    }
+    this.nats = nats
+    this.durable = durable
+  }
+
+  private requireDurable(): DurableSyncClient {
+    if (!this.durable) throw new RelayApiError('Durable Relay synchronization is not connected', 0, 'sync_unavailable')
+    return this.durable
   }
   private rememberGatewayCapabilities(gateways: Gateway[]): void {
     this.durableIdempotencyGateways.clear()
@@ -445,7 +443,7 @@ function source(value: string | (() => string | undefined)): string | undefined 
   return typeof value === 'function' ? value() : value
 }
 
-function isRetrySafe(payload: Parameters<GatewaySecureConnection['request']>[0]): boolean {
+function isRetrySafe(payload: ClientGatewayRequestPayload): boolean {
   return payload.kind === 'inventory.get' || payload.kind === 'events.list' || payload.kind === 'provider.sessions.list'
 }
 

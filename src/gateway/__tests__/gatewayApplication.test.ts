@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION, type InventorySnapshot } from '@codever/protocol'
 import { GATEWAY_FEATURES, handleClientRequest, type ClientRequestContext } from '../gatewayApplication'
 import { ProjectRegistry } from '../projects'
-import { GatewayAttachmentStore, type RelayBlobManifest, type RelayBlobTransport } from '../attachments'
+import { GatewayAttachmentStore, type ObjectBlobManifest, type ObjectBlobTransport } from '../attachments'
 import type { RichUserInput } from '@/runtime/semantic'
 
 const temporaryDirectories: string[] = []
@@ -84,7 +84,7 @@ describe('Gateway project.create request', () => {
 
     it('advertises project creation as a Gateway capability', () => {
         expect(GATEWAY_FEATURES).toContain('project.create')
-        expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining(['attachment.upload', 'attachment.manage', 'relay-blob-storage']))
+        expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining(['attachment.upload', 'attachment.manage', 'nats-object-storage']))
     })
 })
 
@@ -150,9 +150,9 @@ function frame(
     }
 }
 
-class TestRelayBlobs implements RelayBlobTransport {
-    private readonly values = new Map<string, { chunks: Map<number, string>; manifest: RelayBlobManifest }>()
-    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest> {
+class TestRelayBlobs implements ObjectBlobTransport {
+    private readonly values = new Map<string, { chunks: Map<number, string>; manifest: ObjectBlobManifest }>()
+    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<ObjectBlobManifest> {
         if (!this.values.has(blobId)) this.values.set(blobId, {
             chunks: new Map(), manifest: {
                 blobId, totalSize, chunkSize, chunkCount: Math.ceil(totalSize / chunkSize),
@@ -169,7 +169,7 @@ class TestRelayBlobs implements RelayBlobTransport {
     async complete(blobId: string): Promise<void> {
         this.require(blobId).manifest.complete = true
     }
-    async manifest(blobId: string): Promise<RelayBlobManifest> { return this.require(blobId).manifest }
+    async manifest(blobId: string): Promise<ObjectBlobManifest> { return this.require(blobId).manifest }
     async getChunk(blobId: string, index: number): Promise<string> {
         const value = this.require(blobId).chunks.get(index)
         if (!value) throw new Error('Missing test chunk')

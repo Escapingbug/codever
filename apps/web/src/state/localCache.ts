@@ -21,9 +21,20 @@ export async function readCached<T>(key: string): Promise<T | undefined> {
 
 export function writeCached(key: string, value: unknown): void {
   memory.set(key, value)
-  void openDatabase().then(database => {
-    if (!database) return
-    database.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(value, key)
+  void writeCachedDurable(key, value)
+}
+
+/** Resolves only after IndexedDB commits, so a durable transport message can be safely ACKed. */
+export async function writeCachedDurable(key: string, value: unknown): Promise<void> {
+  memory.set(key, value)
+  const database = await openDatabase()
+  if (!database) return
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, 'readwrite')
+    transaction.objectStore(STORE_NAME).put(value, key)
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error ?? new Error('Client cache transaction failed'))
+    transaction.onabort = () => reject(transaction.error ?? new Error('Client cache transaction was aborted'))
   })
 }
 

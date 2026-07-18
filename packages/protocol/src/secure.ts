@@ -27,9 +27,10 @@ export const HpkeEnvelopeSchema = z.object({
 
 export const GatewaySecureAuthStartSchema = z.object({
     gatewayId: OpaqueIdSchema,
-    mode: z.enum(['pairing', 'credential']),
+    mode: z.literal('pairing'),
     subjectId: OpaqueIdSchema,
     startLoginRequest: z.string().min(1).max(16_384),
+    natsPublicKey: z.string().regex(/^U[A-Z2-7]{55}$/),
 }).strict()
 
 export const RelaySecureAuthResponseSchema = z.object({
@@ -47,9 +48,9 @@ export const GatewaySecureAuthFinishSchema = z.object({
 
 export const RelaySecureAuthAcceptedPayloadSchema = z.object({
     gatewayId: OpaqueIdSchema,
-    connectionEpoch: OpaqueIdSchema,
     acceptedAt: IsoDateTimeSchema,
-    credentialProvisioningRequired: z.boolean(),
+    natsUserJwt: z.string().min(100),
+    natsUrl: z.url().refine(value => value.startsWith('nats://') || value.startsWith('tls://')),
 }).strict()
 
 export const RelaySecureAuthAcceptedSchema = z.object({
@@ -98,37 +99,6 @@ export const SecureDataFrameSchema = z.object({
     envelope: SecureEnvelopeSchema,
 }).strict()
 
-const secureControl = <TType extends string, TPayload extends z.ZodType>(type: TType, payload: TPayload) => z.object({
-    version: z.literal(PROTOCOL_VERSION),
-    type: z.literal(type),
-    messageId: OpaqueIdSchema,
-    payload,
-}).strict()
-
-export const GatewayCredentialRegistrationStartFrameSchema = secureControl('gateway.credential.registration.start', z.object({
-    gatewayId: OpaqueIdSchema,
-    registrationRequest: z.string().min(1).max(16_384),
-}).strict())
-export const RelayCredentialRegistrationResponseFrameSchema = secureControl('relay.credential.registration.response', z.object({
-    gatewayId: OpaqueIdSchema,
-    registrationResponse: z.string().min(1).max(16_384),
-    serverStaticPublicKey: z.string().min(16),
-}).strict())
-export const GatewayCredentialRegistrationCommitFrameSchema = secureControl('gateway.credential.registration.commit', z.object({
-    gatewayId: OpaqueIdSchema,
-    registrationRecord: z.string().min(1).max(16_384),
-}).strict())
-export const RelayCredentialRegistrationAcceptedFrameSchema = secureControl('relay.credential.registration.accepted', z.object({
-    gatewayId: OpaqueIdSchema,
-    registeredAt: IsoDateTimeSchema,
-}).strict())
-
-export const SecureControlFrameSchema = z.discriminatedUnion('type', [
-    GatewayCredentialRegistrationStartFrameSchema,
-    RelayCredentialRegistrationResponseFrameSchema,
-    GatewayCredentialRegistrationCommitFrameSchema,
-    RelayCredentialRegistrationAcceptedFrameSchema,
-])
 
 export type SecureEnvelope = z.infer<typeof SecureEnvelopeSchema>
 export type HpkeEnvelope = z.infer<typeof HpkeEnvelopeSchema>
@@ -140,11 +110,9 @@ export type RelaySecureAuthAccepted = z.infer<typeof RelaySecureAuthAcceptedSche
 export type RelaySecureAuthRejected = z.infer<typeof RelaySecureAuthRejectedSchema>
 export type GatewaySecureHandshakeFrame = z.infer<typeof GatewaySecureHandshakeFrameSchema>
 export type SecureDataFrame = z.infer<typeof SecureDataFrameSchema>
-export type SecureControlFrame = z.infer<typeof SecureControlFrameSchema>
 
 export const parseSecureEnvelope = (value: unknown): SecureEnvelope => parseWithSchema(SecureEnvelopeSchema, value)
 export const parseHpkeEnvelope = (value: unknown): HpkeEnvelope => parseWithSchema(HpkeEnvelopeSchema, value)
 export const parseGatewaySecureHandshakeFrame = (value: unknown): GatewaySecureHandshakeFrame => parseWithSchema(GatewaySecureHandshakeFrameSchema, value)
 export const parseSecureDataFrame = (value: unknown): SecureDataFrame => parseWithSchema(SecureDataFrameSchema, value)
-export const parseSecureControlFrame = (value: unknown): SecureControlFrame => parseWithSchema(SecureControlFrameSchema, value)
 export const parseRelaySecureAuthAcceptedPayload = (value: unknown): RelaySecureAuthAcceptedPayload => parseWithSchema(RelaySecureAuthAcceptedPayloadSchema, value)

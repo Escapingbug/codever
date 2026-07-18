@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util'
+import { connect, jwtAuthenticator } from '@nats-io/transport-node'
 import { createGatewayApplication, defaultGatewayConfigPath, loadGatewayConfig, writeGatewayConfig } from './gateway/index.js'
 import { runGatewayDevicePairCommand, startGatewayLocalControlServer } from './gateway/localControl.js'
 
@@ -41,6 +42,15 @@ async function main(): Promise<void> {
         return
     }
     const application = await createGatewayApplication(config, {
+        connectNats: credential => connect({
+            servers: credential.natsUrl,
+            name: `codever-gateway-${config.gatewayId}`,
+            authenticator: jwtAuthenticator(
+                credential.natsUserJwt,
+                new TextEncoder().encode(credential.natsSeed),
+            ),
+            maxReconnectAttempts: -1,
+        }),
         ...(config.secure.pairingCode ? {
             onRelayCredentialSaved: async () => {
                 await writeGatewayConfig({ ...config, secure: {} }, configPath)

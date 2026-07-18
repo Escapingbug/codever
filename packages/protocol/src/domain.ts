@@ -26,7 +26,6 @@ export const GatewaySchema = z.object({
     version: z.string().trim().min(1),
     capabilities: GatewayCapabilitiesSchema,
     status: GatewayStatusSchema,
-    connectionEpoch: OpaqueIdSchema.optional(),
     lastSeenAt: IsoDateTimeSchema.optional(),
 }).strict()
 

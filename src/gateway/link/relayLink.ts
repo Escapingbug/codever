@@ -1,58 +1,31 @@
 import { randomUUID } from 'node:crypto'
-import {
-    PROTOCOL_VERSION,
-    parseGatewayBlobRequestFrame,
-    parseGatewayFrame,
-    type GatewayBlobRequestFrame,
-    type GatewayDeviceTunnelFrame,
-    type GatewayFrame,
-    type Heartbeat,
-    type RelayBlobManifest,
-    type RelayBlobResponseFrame,
-} from '@codever/protocol'
 import WebSocket, { type ClientOptions, type RawData } from 'ws'
 import { SecureGatewayHandshake } from './secureGatewayHandshake'
 import { RelayLinkError, type RelayLinkOptions, type RelayLinkState } from './types'
 
 const SECURE_RELAY_PATH = '/v2/gateway/connect'
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 const DEFAULT_INITIAL_RECONNECT_DELAY_MS = 250
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000
-const BLOB_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_RECONNECT_MULTIPLIER = 2
 const DEFAULT_RECONNECT_JITTER = 0.2
 
 export class RelayLink {
-    private readonly startedAt: number
     private socket?: WebSocket
-    private connectionEpoch?: string
     private stateValue: RelayLinkState = 'idle'
     private generation = 0
     private reconnectAttempt = 0
     private reconnectTimer?: ReturnType<typeof setTimeout>
-    private heartbeatTimer?: ReturnType<typeof setInterval>
     private stopping = false
     private incoming = Promise.resolve()
-    private outgoing = Promise.resolve()
     private firstOnline?: { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
     private secureHandshake?: SecureGatewayHandshake
-    private readonly blobRequests = new Map<string, {
-        resolve: (frame: RelayBlobResponseFrame) => void
-        reject: (error: Error) => void
-        timer: ReturnType<typeof setTimeout>
-    }>()
 
     constructor(private readonly options: RelayLinkOptions) {
         validateOptions(options)
-        this.startedAt = this.now()
     }
 
     get state(): RelayLinkState {
         return this.stateValue
-    }
-
-    get epoch(): string | undefined {
-        return this.connectionEpoch
     }
 
     start(): Promise<void> {
@@ -80,10 +53,7 @@ export class RelayLink {
         this.stopping = true
         this.generation += 1
         this.clearReconnectTimer()
-        this.clearHeartbeatTimer()
-        this.connectionEpoch = undefined
         this.secureHandshake = undefined
-        this.rejectBlobRequests(new RelayLinkError('RelayLink stopped'))
 
         const socket = this.socket
         this.socket = undefined
@@ -115,9 +85,7 @@ export class RelayLink {
         if (this.stopping) return
         this.clearReconnectTimer()
         const generation = ++this.generation
-        this.connectionEpoch = undefined
         this.secureHandshake = undefined
-        this.outgoing = Promise.resolve()
         this.setState('connecting')
 
         let socket: WebSocket
@@ -151,10 +119,7 @@ export class RelayLink {
         socket.once('close', (code, reason) => {
             if (!this.isCurrent(generation, socket)) return
             this.socket = undefined
-            this.connectionEpoch = undefined
             this.secureHandshake = undefined
-            this.clearHeartbeatTimer()
-            this.rejectBlobRequests(new RelayLinkError('Relay connection closed during Blob operation'))
             if (!this.stopping) {
                 if (code !== 1000) {
                     this.reportError(new RelayLinkError(
@@ -168,10 +133,10 @@ export class RelayLink {
 
     private async startSecureHandshake(socket: WebSocket): Promise<void> {
         const credential = await this.options.secure.credentialStore.load(this.options.gatewayId)
+        if (credential) throw new RelayLinkError('Gateway is already provisioned; connect with its NATS credential')
         this.secureHandshake = new SecureGatewayHandshake({
             gatewayId: this.options.gatewayId,
-            ...(this.options.secure.pairingCode ? { pairingCode: this.options.secure.pairingCode } : {}),
-            ...(credential ? { credential } : {}),
+            pairingCode: this.options.secure.pairingCode!,
             createMessageId: () => this.messageId(),
             saveCredential: value => this.options.secure.credentialStore.save(value),
         })
@@ -189,243 +154,23 @@ export class RelayLink {
         const handshake = this.secureHandshake
         if (!handshake) throw new RelayLinkError('Secure Relay handshake has not started')
         if (!handshake.ready) {
-            const output = value && typeof value === 'object' && 'type' in value && value.type === 'secure.data'
-                ? await handshake.handleSecureData(value)
-                : await handshake.handleHandshake(value)
+            const output = await handshake.handleHandshake(value)
             if (output) this.sendWire(output, socket)
             if (handshake.ready) await this.acceptSecureConnection(generation, socket)
             return
         }
 
-        const frame = parseGatewayFrame(await handshake.decryptApplication(value))
-        if (frame.gatewayId !== this.options.gatewayId || frame.connectionEpoch !== this.connectionEpoch) {
-            throw new RelayLinkError('Relay frame belongs to a stale or different secure connection epoch')
-        }
-        switch (frame.type) {
-            case 'relay.blob.response':
-                this.resolveBlobRequest(frame)
-                return
-            case 'device.tunnel.open':
-            case 'device.tunnel.data':
-            case 'device.tunnel.close':
-                await this.processDeviceTunnel(frame)
-                return
-            default:
-                throw new RelayLinkError(`Secure Relay frame type is not allowed: ${frame.type}`)
-        }
+        throw new RelayLinkError('Relay sent an unexpected application frame; Gateway work uses NATS JetStream')
     }
 
     private async acceptSecureConnection(generation: number, socket: WebSocket): Promise<void> {
-        const accepted = this.secureHandshake?.accepted
-        if (!accepted || !this.isCurrent(generation, socket)) {
+        if (!this.secureHandshake?.ready || !this.isCurrent(generation, socket)) {
             throw new RelayLinkError('Secure Relay acceptance is missing')
         }
-        this.connectionEpoch = accepted.connectionEpoch
         this.reconnectAttempt = 0
         this.setState('online')
         this.firstOnline?.resolve()
         this.firstOnline = undefined
-        this.sendApplicationFrame('gateway.hello', { ...this.options.hello, connectedAt: this.isoNow() })
-        await this.sendHeartbeat()
-        this.startHeartbeat()
-    }
-
-    private async processDeviceTunnel(frame: GatewayDeviceTunnelFrame): Promise<void> {
-        const handler = this.options.handleDeviceTunnel
-        if (!handler) {
-            this.sendDeviceTunnelFrame('device.tunnel.close', {
-                tunnelId: frame.payload.tunnelId,
-                reason: 'Gateway does not support device tunnels',
-            })
-            return
-        }
-
-        let closed = frame.type === 'device.tunnel.close'
-        const close = (reason?: string): void => {
-            if (closed) return
-            closed = true
-            this.sendDeviceTunnelFrame('device.tunnel.close', {
-                tunnelId: frame.payload.tunnelId,
-                ...(reason ? { reason } : {}),
-            })
-        }
-        try {
-            await handler(frame.payload, {
-                send: opaquePayload => {
-                    if (closed) throw new RelayLinkError(`Device tunnel ${frame.payload.tunnelId} is closed`)
-                    this.sendDeviceTunnelFrame('device.tunnel.data', { tunnelId: frame.payload.tunnelId, opaquePayload })
-                },
-                close,
-            })
-        } catch (error) {
-            this.reportError(new RelayLinkError(`Device tunnel handler failed for ${frame.payload.tunnelId}`, { cause: error }))
-            try {
-                close(error instanceof Error ? error.message : 'Device tunnel handler failed')
-            } catch (closeError) {
-                this.reportError(new RelayLinkError(`Failed to close device tunnel ${frame.payload.tunnelId}`, {
-                    cause: closeError,
-                }))
-            }
-        }
-    }
-
-    private async sendHeartbeat(): Promise<void> {
-        if (!this.isOnline()) return
-        const heartbeat: Heartbeat = {
-            sentAt: this.isoNow(),
-            uptimeMs: Math.max(0, this.now() - this.startedAt),
-        }
-        this.sendApplicationFrame('gateway.heartbeat', heartbeat)
-    }
-
-    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest> {
-        const response = await this.expectBlobSuccess('begin', requestId => this.blobFrame('gateway.blob.begin', requestId, {
-            blobId, totalSize, chunkSize,
-        }))
-        if (response.operation !== 'begin') throw new RelayLinkError('Relay returned the wrong Blob operation')
-        return response.manifest
-    }
-
-    async putChunk(blobId: string, index: number, encryptedData: string): Promise<void> {
-        await this.expectBlobSuccess('put-chunk', requestId => this.blobFrame('gateway.blob.put-chunk', requestId, {
-            blobId, index, opaqueChunk: encryptedData,
-        }))
-    }
-
-    async complete(blobId: string): Promise<void> {
-        await this.expectBlobSuccess('complete', requestId => this.blobFrame('gateway.blob.complete', requestId, { blobId }))
-    }
-
-    async manifest(blobId: string): Promise<RelayBlobManifest> {
-        const response = await this.expectBlobSuccess(
-            'manifest', requestId => this.blobFrame('gateway.blob.manifest', requestId, { blobId }),
-        )
-        if (response.operation !== 'manifest') throw new RelayLinkError('Relay returned the wrong Blob operation')
-        return response.manifest
-    }
-
-    async getChunk(blobId: string, index: number): Promise<string> {
-        const response = await this.expectBlobSuccess(
-            'get-chunk', requestId => this.blobFrame('gateway.blob.get-chunk', requestId, { blobId, index }),
-        )
-        if (response.operation !== 'get-chunk') throw new RelayLinkError('Relay returned the wrong Blob operation')
-        return response.opaqueChunk
-    }
-
-    async delete(blobId: string): Promise<void> {
-        await this.expectBlobSuccess('delete', requestId => this.blobFrame('gateway.blob.delete', requestId, { blobId }))
-    }
-
-    private blobFrame<TType extends GatewayBlobRequestFrame['type']>(
-        type: TType,
-        requestId: string,
-        payload: Omit<Extract<GatewayBlobRequestFrame, { type: TType }>['payload'], 'requestId'>,
-    ): GatewayBlobRequestFrame {
-        return parseGatewayBlobRequestFrame({
-            version: PROTOCOL_VERSION,
-            type,
-            messageId: this.messageId(),
-            gatewayId: this.options.gatewayId,
-            connectionEpoch: this.requireConnectionEpoch(),
-            payload: { requestId, ...payload },
-        })
-    }
-
-    private expectBlobSuccess(
-        operation: RelayBlobResponseFrame['payload']['operation'],
-        create: (requestId: string) => GatewayBlobRequestFrame,
-    ): Promise<Extract<RelayBlobResponseFrame['payload'], { status: 'succeeded' }>> {
-        return this.requestBlob(create).then(frame => {
-            const payload = frame.payload
-            if (payload.operation !== operation) throw new RelayLinkError('Relay Blob response operation mismatch')
-            if (payload.status === 'failed') throw new RelayLinkError(`Relay Blob ${payload.code}: ${payload.message}`)
-            return payload
-        })
-    }
-
-    private requestBlob(create: (requestId: string) => GatewayBlobRequestFrame): Promise<RelayBlobResponseFrame> {
-        if (!this.isOnline()) return Promise.reject(new RelayLinkError('Relay is offline during Blob operation'))
-        const requestId = this.messageId()
-        return new Promise<RelayBlobResponseFrame>((resolve, reject) => {
-            const timer = setTimeout(() => {
-                if (this.blobRequests.delete(requestId)) reject(new RelayLinkError('Relay Blob request timed out'))
-            }, BLOB_REQUEST_TIMEOUT_MS)
-            this.blobRequests.set(requestId, { resolve, reject, timer })
-            try {
-                this.sendEncrypted(create(requestId))
-            } catch (error) {
-                clearTimeout(timer)
-                this.blobRequests.delete(requestId)
-                reject(error instanceof Error ? error : new RelayLinkError(String(error)))
-            }
-        })
-    }
-
-    private resolveBlobRequest(frame: RelayBlobResponseFrame): void {
-        const pending = this.blobRequests.get(frame.payload.requestId)
-        if (!pending) return
-        this.blobRequests.delete(frame.payload.requestId)
-        clearTimeout(pending.timer)
-        pending.resolve(frame)
-    }
-
-    private rejectBlobRequests(error: Error): void {
-        for (const pending of this.blobRequests.values()) {
-            clearTimeout(pending.timer)
-            pending.reject(error)
-        }
-        this.blobRequests.clear()
-    }
-
-    private startHeartbeat(): void {
-        this.clearHeartbeatTimer()
-        const interval = this.options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS
-        this.heartbeatTimer = setInterval(() => {
-            void this.sendHeartbeat().catch(error => this.failCurrentConnection(error))
-        }, interval)
-        this.heartbeatTimer.unref?.()
-    }
-
-    private sendApplicationFrame<TType extends 'gateway.hello' | 'gateway.heartbeat'>(
-        type: TType,
-        payload: Extract<GatewayFrame, { type: TType }>['payload'],
-    ): void {
-        this.sendEncrypted({
-            version: PROTOCOL_VERSION,
-            type,
-            messageId: this.messageId(),
-            gatewayId: this.options.gatewayId,
-            connectionEpoch: this.requireConnectionEpoch(),
-            payload,
-        } as Extract<GatewayFrame, { type: TType }>)
-    }
-
-    private sendDeviceTunnelFrame<TType extends GatewayDeviceTunnelFrame['type']>(
-        type: TType,
-        payload: Extract<GatewayDeviceTunnelFrame, { type: TType }>['payload'],
-    ): void {
-        this.sendEncrypted({
-            version: PROTOCOL_VERSION,
-            type,
-            messageId: this.messageId(),
-            gatewayId: this.options.gatewayId,
-            connectionEpoch: this.requireConnectionEpoch(),
-            payload,
-        } as Extract<GatewayDeviceTunnelFrame, { type: TType }>)
-    }
-
-    private sendEncrypted(frame: GatewayFrame): void {
-        const socket = this.socket
-        const handshake = this.secureHandshake
-        if (!socket || !handshake?.ready) throw new RelayLinkError('Cannot send before secure Relay authentication')
-        const validated = parseGatewayFrame(frame)
-        this.outgoing = this.outgoing.then(async () => {
-            this.sendWire(await handshake.encryptApplication(validated), socket)
-        }).catch(error => {
-            if (socket === this.socket) {
-                this.failCurrentConnection(new RelayLinkError('Failed to encrypt secure Relay frame', { cause: error }))
-            }
-        })
     }
 
     private sendWire(value: unknown, socket: WebSocket): void {
@@ -435,11 +180,6 @@ export class RelayLink {
                 this.failCurrentConnection(new RelayLinkError('Failed to send secure Relay frame', { cause: error }))
             }
         })
-    }
-
-    private requireConnectionEpoch(): string {
-        if (!this.connectionEpoch) throw new RelayLinkError('Secure Relay connection epoch is missing')
-        return this.connectionEpoch
     }
 
     private failCurrentConnection(error: unknown): void {
@@ -479,7 +219,6 @@ export class RelayLink {
     private isOnline(): boolean {
         return this.stateValue === 'online'
             && this.socket?.readyState === WebSocket.OPEN
-            && this.connectionEpoch !== undefined
             && this.secureHandshake?.ready === true
     }
 
@@ -502,19 +241,6 @@ export class RelayLink {
         this.reconnectTimer = undefined
     }
 
-    private clearHeartbeatTimer(): void {
-        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
-        this.heartbeatTimer = undefined
-    }
-
-    private now(): number {
-        return this.options.now?.() ?? Date.now()
-    }
-
-    private isoNow(): string {
-        return new Date(this.now()).toISOString()
-    }
-
     private messageId(): string {
         return this.options.createMessageId?.() ?? randomUUID()
     }
@@ -535,8 +261,6 @@ function validateOptions(options: RelayLinkOptions): void {
     }
     if (!options.gatewayId.trim()) throw new RelayLinkError('gatewayId is required')
     if (!options.secure?.credentialStore) throw new RelayLinkError('secure credentialStore is required')
-    const heartbeat = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS
-    if (!Number.isFinite(heartbeat) || heartbeat <= 0) throw new RelayLinkError('heartbeatIntervalMs must be positive')
     const reconnect = options.reconnect ?? {}
     const initial = reconnect.initialDelayMs ?? DEFAULT_INITIAL_RECONNECT_DELAY_MS
     const maximum = reconnect.maxDelayMs ?? DEFAULT_MAX_RECONNECT_DELAY_MS

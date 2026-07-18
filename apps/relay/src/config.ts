@@ -7,10 +7,23 @@ export interface RelayRuntimeConfig {
     relayId: string
     logger: boolean
     dataDirectory: string
-    repositoryMode: 'durable' | 'memory'
+    natsUrl: string
+    natsGatewayUrl: string
+    natsWebSocketUrl: string
+    natsCredentialsFile?: string
+    nscExecutable: string
+    nscConfigDirectory: string
+    nscStoreDirectory: string
+    nscKeysDirectory: string
+    nscOperator: string
+    nscAccount: string
 }
 
-const CONFIG_KEYS = new Set(['host', 'port', 'relayId', 'logger', 'dataDirectory', 'repositoryMode'])
+const CONFIG_KEYS = new Set([
+    'host', 'port', 'relayId', 'logger', 'dataDirectory', 'natsUrl', 'natsGatewayUrl',
+    'natsWebSocketUrl', 'natsCredentialsFile', 'nscExecutable', 'nscConfigDirectory', 'nscStoreDirectory', 'nscKeysDirectory',
+    'nscOperator', 'nscAccount',
+])
 const REMOVED_ENVIRONMENT_KEYS = [
     'CODEVER_RELAY_ENROLLMENT_FILE',
     'CODEVER_RELAY_GATEWAYS_JSON',
@@ -33,13 +46,33 @@ export async function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): Pro
 
     const dataDirectoryValue = optionalString(env.CODEVER_RELAY_DATA_DIRECTORY, 'CODEVER_RELAY_DATA_DIRECTORY')
         ?? optionalString(json.dataDirectory, 'dataDirectory') ?? './data'
+    const dataDirectory = resolveFrom(configDirectory, dataDirectoryValue)
+    const natsUrl = parseNatsUrl(env.CODEVER_RELAY_NATS_URL ?? json.natsUrl ?? 'nats://127.0.0.1:4222')
     return {
         host: optionalString(env.CODEVER_RELAY_HOST, 'CODEVER_RELAY_HOST') ?? optionalString(json.host, 'host') ?? '127.0.0.1',
         port: parsePort(env.CODEVER_RELAY_PORT ?? json.port ?? 8787),
         relayId: optionalString(env.CODEVER_RELAY_ID, 'CODEVER_RELAY_ID') ?? optionalString(json.relayId, 'relayId') ?? 'codever-relay',
         logger: parseBoolean(env.CODEVER_RELAY_LOGGER ?? json.logger ?? true, 'logger'),
-        dataDirectory: resolveFrom(configDirectory, dataDirectoryValue),
-        repositoryMode: parseRepositoryMode(env.CODEVER_RELAY_REPOSITORY_MODE ?? json.repositoryMode ?? 'durable'),
+        dataDirectory,
+        natsUrl,
+        natsGatewayUrl: parseNatsUrl(env.CODEVER_RELAY_NATS_GATEWAY_URL ?? json.natsGatewayUrl ?? natsUrl),
+        natsWebSocketUrl: parseNatsWebSocketUrl(
+            env.CODEVER_RELAY_NATS_WEBSOCKET_URL ?? json.natsWebSocketUrl ?? 'ws://127.0.0.1:8080',
+        ),
+        natsCredentialsFile: resolveOptionalPath(configDirectory,
+            optionalString(env.CODEVER_RELAY_NATS_CREDENTIALS_FILE ?? json.natsCredentialsFile, 'natsCredentialsFile')),
+        nscExecutable: optionalString(env.CODEVER_RELAY_NSC_EXECUTABLE ?? json.nscExecutable, 'nscExecutable') ?? 'nsc',
+        nscConfigDirectory: resolveFrom(configDirectory,
+            optionalString(env.CODEVER_RELAY_NSC_CONFIG_DIRECTORY ?? json.nscConfigDirectory, 'nscConfigDirectory')
+                ?? resolve(dataDirectory, 'nsc-config')),
+        nscStoreDirectory: resolveFrom(configDirectory,
+            optionalString(env.CODEVER_RELAY_NSC_STORE_DIRECTORY ?? json.nscStoreDirectory, 'nscStoreDirectory')
+                ?? resolve(dataDirectory, 'nsc-store')),
+        nscKeysDirectory: resolveFrom(configDirectory,
+            optionalString(env.CODEVER_RELAY_NSC_KEYS_DIRECTORY ?? json.nscKeysDirectory, 'nscKeysDirectory')
+                ?? resolve(dataDirectory, 'nsc-keys')),
+        nscOperator: optionalString(env.CODEVER_RELAY_NSC_OPERATOR ?? json.nscOperator, 'nscOperator') ?? 'CODEVER',
+        nscAccount: optionalString(env.CODEVER_RELAY_NSC_ACCOUNT ?? json.nscAccount, 'nscAccount') ?? 'CODEVER',
     }
 }
 
@@ -52,6 +85,9 @@ async function readJson(path: string, label: string): Promise<unknown> {
 }
 
 function resolveFrom(directory: string, path: string): string { return isAbsolute(path) ? path : resolve(directory, path) }
+function resolveOptionalPath(directory: string, path: string | undefined): string | undefined {
+    return path === undefined ? undefined : resolveFrom(directory, path)
+}
 
 function requireObject(value: unknown, label: string): Record<string, unknown> {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`)
@@ -81,7 +117,14 @@ function parsePort(value: unknown): number {
     return port
 }
 
-function parseRepositoryMode(value: unknown): 'durable' | 'memory' {
-    if (value === 'durable' || value === 'memory') return value
-    throw new Error('repositoryMode must be durable or memory')
+function parseNatsUrl(value: unknown): string {
+    const url = new URL(optionalString(value, 'natsUrl')!)
+    if (url.protocol !== 'nats:' && url.protocol !== 'tls:') throw new Error('natsUrl must use nats:// or tls://')
+    return url.toString()
+}
+
+function parseNatsWebSocketUrl(value: unknown): string {
+    const url = new URL(optionalString(value, 'natsWebSocketUrl')!)
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') throw new Error('natsWebSocketUrl must use ws:// or wss://')
+    return url.toString()
 }

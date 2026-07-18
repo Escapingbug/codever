@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
     GatewayAttachmentStore,
-    type RelayBlobManifest,
-    type RelayBlobTransport,
+    type ObjectBlobManifest,
+    type ObjectBlobTransport,
 } from '../attachmentStore'
 
 const directories: string[] = []
@@ -79,12 +79,12 @@ describe('GatewayAttachmentStore Relay persistence', () => {
     })
 })
 
-class FakeRelayBlobs implements RelayBlobTransport {
-    private readonly blobs = new Map<string, { chunks: Map<number, string>; manifest: RelayBlobManifest }>()
+class FakeRelayBlobs implements ObjectBlobTransport {
+    private readonly blobs = new Map<string, { chunks: Map<number, string>; manifest: ObjectBlobManifest }>()
     failCompletes = 0
     putCalls = 0
     get size(): number { return this.blobs.size }
-    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<RelayBlobManifest> {
+    async begin(blobId: string, totalSize: number, chunkSize: number): Promise<ObjectBlobManifest> {
         if (!this.blobs.has(blobId)) this.blobs.set(blobId, {
             chunks: new Map(), manifest: {
                 blobId, totalSize, chunkSize, chunkCount: Math.ceil(totalSize / chunkSize),
@@ -110,7 +110,7 @@ class FakeRelayBlobs implements RelayBlobTransport {
         for (let index = 0; index < blob.manifest.chunkCount; index += 1) if (!blob.chunks.has(index)) throw new Error('Missing chunk')
         blob.manifest.complete = true
     }
-    async manifest(blobId: string): Promise<RelayBlobManifest> { return { ...this.require(blobId).manifest } }
+    async manifest(blobId: string): Promise<ObjectBlobManifest> { return { ...this.require(blobId).manifest } }
     async getChunk(blobId: string, index: number): Promise<string> {
         const value = this.require(blobId).chunks.get(index)
         if (!value) throw new Error('Unknown chunk')
@@ -125,7 +125,7 @@ class FakeRelayBlobs implements RelayBlobTransport {
     }
 }
 
-async function createStore(relay: RelayBlobTransport): Promise<GatewayAttachmentStore> {
+async function createStore(relay: ObjectBlobTransport): Promise<GatewayAttachmentStore> {
     const directory = await mkdtemp(join(tmpdir(), 'codever-attachments-'))
     directories.push(directory)
     return GatewayAttachmentStore.open(directory, relay)

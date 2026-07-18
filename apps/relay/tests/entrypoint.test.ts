@@ -9,15 +9,10 @@ import { describe, expect, it } from 'vitest'
 const relayDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 describe('Relay executable entry point', () => {
-    it('starts on plain HTTP and exposes no legacy account or gateway-list routes', async () => {
-        const relay = await startRelay({})
-        try {
-            expect((await fetch(`${relay.address}/health`)).status).toBe(200)
-            expect((await fetch(`${relay.address}/v1/gateways`)).status).toBe(404)
-            expect((await fetch(`${relay.address}/v1/auth/session`)).status).toBe(404)
-        } finally {
-            await relay.stop()
-        }
+    it('fails closed instead of reporting healthy when JetStream is unavailable', async () => {
+        const natsPort = await availablePort()
+        await expect(startRelay({ CODEVER_RELAY_NATS_URL: `nats://127.0.0.1:${natsPort}` }))
+            .rejects.toThrow(/connection refused/i)
     })
 })
 

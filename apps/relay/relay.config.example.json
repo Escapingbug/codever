@@ -4,5 +4,8 @@
   "relayId": "my-codever-relay",
   "logger": true,
   "dataDirectory": "./data",
-  "repositoryMode": "durable"
+  "natsUrl": "nats://nats:4222",
+  "natsGatewayUrl": "nats://relay.example.com:4222",
+  "natsWebSocketUrl": "wss://relay.example.com/nats",
+  "natsCredentialsFile": "/run/codever-security/relay-admin.creds"
 }

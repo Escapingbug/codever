@@ -2,19 +2,17 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 export interface GatewaySecureCredential {
-    version: 1
+    version: 3
     gatewayId: string
     relayId: string
-    relayStaticPublicKey: string
-    secret: string
     createdAt: string
+    natsSeed: string
+    natsUserJwt: string
+    natsUrl: string
 }
 
 export class GatewaySecureCredentialStore {
-    constructor(
-        readonly path: string,
-        private readonly afterSave?: () => Promise<void>,
-    ) {}
+    constructor(readonly path: string) {}
 
     async load(gatewayId: string): Promise<GatewaySecureCredential | undefined> {
         let value: unknown
@@ -37,25 +35,29 @@ export class GatewaySecureCredentialStore {
         await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
         await rename(temporary, this.path)
         await chmod(this.path, 0o600)
-        await this.afterSave?.()
     }
 }
 
 function parseCredential(value: unknown): GatewaySecureCredential {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid secure Relay credential')
     const input = value as Record<string, unknown>
-    if (input.version !== 1) throw new Error('Unsupported secure Relay credential version')
-    for (const field of ['gatewayId', 'relayId', 'relayStaticPublicKey', 'secret', 'createdAt'] as const) {
+    if (input.version !== 3) throw new Error('Unsupported secure Relay credential version; pair this Gateway again')
+    for (const field of [
+        'gatewayId', 'relayId', 'createdAt', 'natsSeed', 'natsUserJwt', 'natsUrl',
+    ] as const) {
         if (typeof input[field] !== 'string' || input[field].length === 0) throw new Error(`Invalid secure Relay credential ${field}`)
     }
-    if ((input.secret as string).length < 32) throw new Error('Secure Relay credential secret is too short')
+    if (!/^SU[A-Z2-7]{56}$/.test(input.natsSeed as string)) throw new Error('Gateway NATS seed is invalid')
+    const natsUrl = new URL(input.natsUrl as string)
+    if (natsUrl.protocol !== 'nats:' && natsUrl.protocol !== 'tls:') throw new Error('Gateway NATS URL is invalid')
     return {
-        version: 1,
+        version: 3,
         gatewayId: input.gatewayId as string,
         relayId: input.relayId as string,
-        relayStaticPublicKey: input.relayStaticPublicKey as string,
-        secret: input.secret as string,
         createdAt: input.createdAt as string,
+        natsSeed: input.natsSeed as string,
+        natsUserJwt: input.natsUserJwt as string,
+        natsUrl: input.natsUrl as string,
     }
 }
 

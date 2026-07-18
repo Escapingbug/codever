@@ -1,411 +1,108 @@
 import { randomUUID } from 'node:crypto'
 import websocket from '@fastify/websocket'
 import {
-    parseGatewayFrame,
     parseGatewaySecureHandshakeFrame,
-    parseSecureControlFrame,
-    parseSecureDataFrame,
-    type GatewayFrame,
-    type GatewayBlobRequestFrame,
     type GatewaySecureHandshakeFrame,
-    type RelayBlobOperation,
-    type RelayBlobResponseFrame,
 } from '@codever/protocol'
 import { SessionCipher } from '@codever/secure-channel'
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
+import Fastify, { type FastifyInstance } from 'fastify'
 import type WebSocket from 'ws'
-import { ClientConnectionRegistry } from './clientConnectionRegistry'
 import { ClientSecureSession } from './clientSecureSession'
-import { GatewayConnectionRegistry } from './connectionRegistry'
-import { DeviceTunnelRegistry } from './deviceTunnelRegistry'
-import { InMemoryGatewayRepository } from './memoryRepositories'
-import type { GatewayRepository } from './repositories'
-import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
 import type { SecureClientAuthenticator } from './secureClientAuth'
-import { RelayBlobStore, RelayBlobStoreError } from './relayBlobStore'
-
-export interface RelayRepositories {
-    gateways: GatewayRepository
-}
+import type { SecureGatewayAuthenticator } from './secureGatewayAuth'
 
 export interface CreateRelayServerOptions {
-    repositories?: RelayRepositories
-    connectionRegistry?: GatewayConnectionRegistry
-    clientConnectionRegistry?: ClientConnectionRegistry
     logger?: boolean
     secureGatewayAuthenticator?: SecureGatewayAuthenticator
     secureClientAuthenticator?: SecureClientAuthenticator
-    deviceTunnelRegistry?: DeviceTunnelRegistry
-    blobStore?: RelayBlobStore
-    blobDirectory?: string
 }
 
-export interface RelayServer extends FastifyInstance {
-    relay: {
-        repositories: RelayRepositories
-        connections: GatewayConnectionRegistry
-        clients: ClientConnectionRegistry
-        deviceTunnels: DeviceTunnelRegistry
-        blobs: RelayBlobStore
-    }
-}
+export type RelayServer = FastifyInstance
 
+/** The HTTP/WebSocket Relay surface exists only for health and one-time OPAQUE provisioning. */
 export async function createRelayServer(options: CreateRelayServerOptions = {}): Promise<RelayServer> {
-    const repositories = options.repositories ?? { gateways: new InMemoryGatewayRepository() }
-    const connections = options.connectionRegistry ?? new GatewayConnectionRegistry()
-    const clients = options.clientConnectionRegistry ?? new ClientConnectionRegistry()
-    const deviceTunnels = options.deviceTunnelRegistry ?? new DeviceTunnelRegistry()
-    const blobs = options.blobStore ?? new RelayBlobStore(options.blobDirectory ?? './data/blobs')
-    const app = Fastify({ logger: options.logger ?? false }) as unknown as RelayServer
-    app.decorate('relay', { repositories, connections, clients, deviceTunnels, blobs })
-
+    const app = Fastify({ logger: options.logger ?? false })
     app.setErrorHandler((error: unknown, _request, reply) => {
-        const statusCode = 500
         app.log.error(error)
-        const message = error instanceof Error ? error.message : 'Internal server error'
-        void reply.code(statusCode).send({ error: message })
+        void reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' })
     })
-
     await app.register(websocket)
-
     app.get('/health', async () => ({ status: 'ok' }))
 
     app.get('/v2/client/connect', { websocket: true }, socket => {
-        if (!options.secureClientAuthenticator) {
-            socket.close(1013, 'Secure Client authentication is not configured')
-            return
-        }
+        if (!options.secureClientAuthenticator) return socket.close(1013, 'Client pairing is not configured')
         const session = new ClientSecureSession({
-            socket,
-            authenticator: options.secureClientAuthenticator,
-            repositories,
-            clients,
-            gateways: connections,
-            tunnels: deviceTunnels,
-            logError: error => app.log.error(error),
+            socket, authenticator: options.secureClientAuthenticator, logError: error => app.log.error(error),
         })
         socket.on('message', data => {
-            try {
-                session.receive(JSON.parse(data.toString()) as unknown)
-            } catch (error) {
-                app.log.error(error)
-                socket.close(1008, 'Invalid Client frame')
-            }
+            try { session.receive(JSON.parse(data.toString()) as unknown) }
+            catch (error) { app.log.error(error); socket.close(1008, 'Invalid Client pairing frame') }
         })
         socket.on('close', () => session.disconnected())
     })
 
-    app.get('/v2/gateway/connect', { websocket: true }, (socket, request) => {
-        if (!options.secureGatewayAuthenticator) {
-            socket.close(1013, 'Secure Gateway authentication is not configured')
-            return
-        }
-        handleSecureGatewaySocket(
-            socket,
-            request,
-            repositories,
-            connections,
-            options.secureGatewayAuthenticator,
-            deviceTunnels,
-            blobs,
-            app,
-        )
+    app.get('/v2/gateway/connect', { websocket: true }, socket => {
+        if (!options.secureGatewayAuthenticator) return socket.close(1013, 'Gateway pairing is not configured')
+        handleGatewayPairing(socket, options.secureGatewayAuthenticator, app)
     })
-
     return app
 }
 
-function gatewayTunnelFrame<T extends 'device.tunnel.open' | 'device.tunnel.data' | 'device.tunnel.close'>(
-    type: T,
-    gatewayId: string,
-    connectionEpoch: string,
-    payload: Extract<GatewayFrame, { type: T }>['payload'],
-): Extract<GatewayFrame, { type: T }> {
-    return { version: 1, type, messageId: randomUUID(), gatewayId, connectionEpoch, payload } as Extract<GatewayFrame, { type: T }>
-}
-
-function handleSecureGatewaySocket(
+function handleGatewayPairing(
     socket: WebSocket,
-    _request: FastifyRequest,
-    repositories: RelayRepositories,
-    connections: GatewayConnectionRegistry,
     authenticator: SecureGatewayAuthenticator,
-    deviceTunnels: DeviceTunnelRegistry,
-    blobs: RelayBlobStore,
     app: FastifyInstance,
 ): void {
-    let pendingHandshakeId: string | undefined
-    let claimedGatewayId: string | undefined
+    let handshakeId: string | undefined
     let gatewayId: string | undefined
-    let epoch: string | undefined
-    let cipher: SessionCipher | undefined
-    let helloReceived = false
-    let credentialProvisioningRequired = false
-    let credentialRegistrationStarted = false
     let incoming = Promise.resolve()
-
+    let completed = false
     socket.on('message', data => {
         incoming = incoming.then(async () => {
-            const value = JSON.parse(data.toString()) as unknown
-            if (!cipher) {
-                const frame = parseGatewaySecureHandshakeFrame(value)
-                if (!pendingHandshakeId) {
-                    if (frame.type !== 'gateway.secure-auth.start') throw new Error('Secure authentication must start with gateway.secure-auth.start')
-                    claimedGatewayId = frame.payload.gatewayId
-                    const started = await authenticator.begin(frame.payload)
-                    pendingHandshakeId = started.handshakeId
-                    const response: GatewaySecureHandshakeFrame = {
-                        version: 1,
-                        type: 'relay.secure-auth.response',
-                        messageId: randomUUID(),
-                        payload: {
-                            relayId: authenticator.relayId,
-                            handshakeId: started.handshakeId,
-                            loginResponse: started.loginResponse,
-                            expiresAt: started.expiresAt,
-                            ...(started.attemptsRemaining !== undefined ? { attemptsRemaining: started.attemptsRemaining } : {}),
-                        },
-                    }
-                    socket.send(JSON.stringify(response))
-                    return
-                }
-                if (frame.type !== 'gateway.secure-auth.finish' || frame.payload.handshakeId !== pendingHandshakeId) {
-                    throw new Error('Secure authentication finish does not match the active handshake')
-                }
-                const finished = await authenticator.finish(frame.payload)
-                if (finished.gatewayId !== claimedGatewayId) throw new Error('Authenticated Gateway identity changed')
-                gatewayId = finished.gatewayId
-                epoch = randomUUID()
-                const channelId = randomUUID()
-                cipher = await SessionCipher.create({ sessionKey: finished.sessionKey, role: 'responder', channelId })
-                credentialProvisioningRequired = finished.credentialProvisioningRequired
-                const activeCipher = cipher
-                const replaced = connections.replace({
-                    gatewayId,
-                    connectionEpoch: epoch,
-                    socket,
-                    encode: async frameToSend => JSON.stringify({
-                        version: 1,
-                        type: 'secure.data',
-                        messageId: randomUUID(),
-                        envelope: await activeCipher.encrypt(frameToSend),
+            if (completed) throw new Error('Gateway pairing already completed')
+            const frame = parseGatewaySecureHandshakeFrame(JSON.parse(data.toString()))
+            if (!handshakeId) {
+                if (frame.type !== 'gateway.secure-auth.start') throw new Error('Gateway pairing must start with auth.start')
+                gatewayId = frame.payload.gatewayId
+                const started = await authenticator.begin(frame.payload)
+                handshakeId = started.handshakeId
+                return send(socket, {
+                    version: 1, type: 'relay.secure-auth.response', messageId: randomUUID(),
+                    payload: { relayId: authenticator.relayId, ...started },
+                })
+            }
+            if (frame.type !== 'gateway.secure-auth.finish' || frame.payload.handshakeId !== handshakeId) {
+                throw new Error('Gateway pairing finish does not match its start')
+            }
+            const finished = await authenticator.finish(frame.payload)
+            if (finished.gatewayId !== gatewayId) throw new Error('Gateway pairing identity changed')
+            const cipher = await SessionCipher.create({
+                sessionKey: finished.sessionKey, role: 'responder', channelId: randomUUID(),
+            })
+            completed = true
+            send(socket, {
+                version: 1, type: 'relay.secure-auth.accepted', messageId: randomUUID(),
+                payload: {
+                    handshakeId,
+                    envelope: await cipher.encrypt({
+                        gatewayId, acceptedAt: new Date().toISOString(),
+                        natsUserJwt: finished.natsUserJwt, natsUrl: finished.natsUrl,
                     }),
-                })
-                if (replaced) deviceTunnels.closeGateway(gatewayId, 'gateway_replaced', 'Gateway connection was replaced')
-                const accepted: GatewaySecureHandshakeFrame = {
-                    version: 1,
-                    type: 'relay.secure-auth.accepted',
-                    messageId: randomUUID(),
-                    payload: {
-                        handshakeId: pendingHandshakeId,
-                        envelope: await activeCipher.encrypt({
-                            gatewayId,
-                            connectionEpoch: epoch,
-                            acceptedAt: new Date().toISOString(),
-                            credentialProvisioningRequired,
-                        }),
-                    },
-                }
-                socket.send(JSON.stringify(accepted))
-                return
-            }
-
-            const secureFrame = parseSecureDataFrame(value)
-            const decrypted = await cipher.decrypt(secureFrame.envelope)
-            if (credentialProvisioningRequired) {
-                const control = parseSecureControlFrame(decrypted)
-                if (control.type === 'gateway.credential.registration.start') {
-                    if (control.payload.gatewayId !== gatewayId || credentialRegistrationStarted) throw new Error('Invalid credential registration start')
-                    credentialRegistrationStarted = true
-                    const response = await authenticator.createCredentialRegistrationResponse(gatewayId!, control.payload.registrationRequest)
-                    socket.send(JSON.stringify({
-                        version: 1,
-                        type: 'secure.data',
-                        messageId: randomUUID(),
-                        envelope: await cipher.encrypt({
-                            version: 1,
-                            type: 'relay.credential.registration.response',
-                            messageId: randomUUID(),
-                            payload: { gatewayId, ...response },
-                        }),
-                    }))
-                    return
-                }
-                if (control.type === 'gateway.credential.registration.commit') {
-                    if (control.payload.gatewayId !== gatewayId || !credentialRegistrationStarted) throw new Error('Invalid credential registration commit')
-                    await authenticator.commitCredential(gatewayId!, control.payload.registrationRecord)
-                    credentialProvisioningRequired = false
-                    socket.send(JSON.stringify({
-                        version: 1,
-                        type: 'secure.data',
-                        messageId: randomUUID(),
-                        envelope: await cipher.encrypt({
-                            version: 1,
-                            type: 'relay.credential.registration.accepted',
-                            messageId: randomUUID(),
-                            payload: { gatewayId, registeredAt: new Date().toISOString() },
-                        }),
-                    }))
-                    return
-                }
-                throw new Error('Gateway credential provisioning must complete before application data')
-            }
-
-            const frame = parseGatewayFrame(decrypted)
-            if (frame.gatewayId !== gatewayId || frame.connectionEpoch !== epoch) throw new Error('Gateway identity or connection epoch mismatch')
-            if (!helloReceived) {
-                if (frame.type !== 'gateway.hello') throw new Error('gateway.hello must be the first encrypted data frame')
-                helloReceived = true
-                await repositories.gateways.upsert({
-                    id: gatewayId!,
-                    workspaceId: frame.payload.workspaceId,
-                    name: frame.payload.name,
-                    platform: frame.payload.platform,
-                    version: frame.payload.gatewayVersion,
-                    capabilities: frame.payload.capabilities,
-                    status: 'online',
-                    connectionEpoch: epoch,
-                    lastSeenAt: frame.payload.connectedAt,
-                })
-                if (!connections.markReady(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
-                return
-            }
-            if (!connections.isCurrent(gatewayId!, epoch!, socket)) throw new Error('Stale secure connection epoch')
-            await consumeSecureGatewayFrame(frame, repositories.gateways, deviceTunnels, connections, blobs, socket)
+                },
+            })
         }).catch(error => {
             app.log.error(error)
-            if (!cipher && socket.readyState === socket.OPEN) {
-                const rejection: GatewaySecureHandshakeFrame = {
-                    version: 1,
-                    type: 'relay.secure-auth.rejected',
-                    messageId: randomUUID(),
-                    payload: { code: 'authentication_failed', message: 'Secure Gateway authentication failed' },
-                }
-                socket.send(JSON.stringify(rejection))
+            if (socket.readyState === socket.OPEN) {
+                send(socket, {
+                    version: 1, type: 'relay.secure-auth.rejected', messageId: randomUUID(),
+                    payload: { code: 'authentication_failed', message: 'Secure Gateway pairing failed' },
+                })
             }
-            socket.close(1008, 'Secure Gateway protocol error')
+            socket.close(1008, 'Gateway pairing protocol error')
         })
     })
-
-    socket.on('close', () => {
-        if (gatewayId && epoch && connections.removeIfCurrent(gatewayId, epoch, socket)) {
-            deviceTunnels.closeGateway(gatewayId, 'gateway_offline', 'Gateway disconnected')
-            void repositories.gateways.updateConnection(gatewayId, 'offline', undefined, new Date().toISOString())
-        }
-    })
 }
 
-async function consumeSecureGatewayFrame(
-    frame: GatewayFrame,
-    gateways: GatewayRepository,
-    deviceTunnels: DeviceTunnelRegistry,
-    connections: GatewayConnectionRegistry,
-    blobs: RelayBlobStore,
-    socket: WebSocket,
-): Promise<void> {
-    switch (frame.type) {
-        case 'gateway.heartbeat':
-            await gateways.updateConnection(frame.gatewayId, 'online', frame.connectionEpoch, frame.payload.sentAt)
-            return
-        case 'device.tunnel.data':
-            if (!deviceTunnels.send(frame.gatewayId, frame.payload.tunnelId, frame.payload.opaquePayload)) {
-                throw new Error(`Unknown device tunnel ${frame.payload.tunnelId}`)
-            }
-            return
-        case 'device.tunnel.close':
-            if (!deviceTunnels.closeFromGateway(
-                frame.gatewayId, frame.payload.tunnelId, frame.payload.code ?? 'normal', frame.payload.reason,
-            )) throw new Error(`Unknown device tunnel ${frame.payload.tunnelId}`)
-            return
-        case 'gateway.blob.begin':
-        case 'gateway.blob.put-chunk':
-        case 'gateway.blob.complete':
-        case 'gateway.blob.manifest':
-        case 'gateway.blob.get-chunk':
-        case 'gateway.blob.delete':
-            await consumeBlobRequest(frame, connections, blobs)
-            return
-        default:
-            socket.close(1008, `Unexpected secure gateway frame type: ${frame.type}`)
-    }
-}
-
-async function consumeBlobRequest(
-    frame: GatewayBlobRequestFrame,
-    connections: GatewayConnectionRegistry,
-    blobs: RelayBlobStore,
-): Promise<void> {
-    const operation = blobOperation(frame)
-    let payload: RelayBlobResponseFrame['payload']
-    try {
-        switch (frame.type) {
-            case 'gateway.blob.begin':
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'begin', status: 'succeeded',
-                    manifest: await blobs.begin(frame.gatewayId, frame.payload),
-                }
-                break
-            case 'gateway.blob.put-chunk':
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'put-chunk', status: 'succeeded',
-                    manifest: await blobs.putChunk(frame.gatewayId, frame.payload.blobId, frame.payload.index, frame.payload.opaqueChunk),
-                }
-                break
-            case 'gateway.blob.complete':
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'complete', status: 'succeeded',
-                    manifest: await blobs.complete(frame.gatewayId, frame.payload.blobId),
-                }
-                break
-            case 'gateway.blob.manifest':
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'manifest', status: 'succeeded',
-                    manifest: await blobs.manifest(frame.gatewayId, frame.payload.blobId),
-                }
-                break
-            case 'gateway.blob.get-chunk':
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'get-chunk', status: 'succeeded',
-                    blobId: frame.payload.blobId, index: frame.payload.index,
-                    opaqueChunk: await blobs.getChunk(frame.gatewayId, frame.payload.blobId, frame.payload.index),
-                }
-                break
-            case 'gateway.blob.delete':
-                await blobs.delete(frame.gatewayId, frame.payload.blobId)
-                payload = {
-                    requestId: frame.payload.requestId, operation: 'delete', status: 'succeeded',
-                    blobId: frame.payload.blobId, deleted: true,
-                }
-                break
-        }
-    } catch (error) {
-        const known = error instanceof RelayBlobStoreError ? error : undefined
-        payload = {
-            requestId: frame.payload.requestId,
-            operation,
-            status: 'failed',
-            code: known?.code ?? 'storage_error',
-            message: known?.message ?? 'Relay Blob operation failed',
-        }
-    }
-    const response: RelayBlobResponseFrame = {
-        version: 1,
-        type: 'relay.blob.response',
-        messageId: randomUUID(),
-        gatewayId: frame.gatewayId,
-        connectionEpoch: frame.connectionEpoch,
-        payload,
-    }
-    connections.send(frame.gatewayId, response)
-}
-
-function blobOperation(frame: GatewayBlobRequestFrame): RelayBlobOperation {
-    switch (frame.type) {
-        case 'gateway.blob.begin': return 'begin'
-        case 'gateway.blob.put-chunk': return 'put-chunk'
-        case 'gateway.blob.complete': return 'complete'
-        case 'gateway.blob.manifest': return 'manifest'
-        case 'gateway.blob.get-chunk': return 'get-chunk'
-        case 'gateway.blob.delete': return 'delete'
-    }
+function send(socket: WebSocket, frame: GatewaySecureHandshakeFrame): void {
+    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame))
 }

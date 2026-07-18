@@ -23,7 +23,7 @@ import {
     SessionAttachmentListDtoSchema,
 } from './client'
 import { ProtocolErrorSchema } from './commands'
-import { InventorySnapshotSchema } from './frames'
+import { InventorySnapshotSchema } from './inventory'
 import { SessionEventEnvelopeSchema } from './events'
 
 export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [

@@ -1,0 +1,7 @@
+{$CODEVER_DOMAIN} {
+    handle_path /nats* {
+        reverse_proxy nats:8080
+    }
+
+    reverse_proxy relay:8787
+}
