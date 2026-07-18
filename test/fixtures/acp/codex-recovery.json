@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "codex-provider-error-recovery",
+  "sessionId": "codex-recovery-session-1",
+  "turns": [
+    {
+      "input": "Attempt a request that Codex refuses",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } }
+      ],
+      "stopReason": "refusal"
+    },
+    {
+      "input": "Attempt while the Provider transport fails",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } },
+        { "type": "failure", "message": "Agent disconnected during prompt (process_exit, exit=1)" }
+      ],
+      "stopReason": "end_turn"
+    },
+    {
+      "input": "Retry the task after Provider recovery",
+      "steps": [
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "active" } } } } },
+        { "type": "notification", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Recovered and completed the task." } } },
+        { "type": "notification", "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": "idle" } } } } }
+      ],
+      "stopReason": "end_turn"
+    }
+  ]
+}

@@ -403,7 +403,8 @@ export class RelayApi {
     const relay = new SecureRelayClient({
       baseUrl: this.baseUrl,
       handshake,
-      requestTimeoutMs: this.options.requestTimeoutMs,
+      connectTimeoutMs: this.options.requestTimeoutMs,
+      handshakeTimeoutMs: this.options.longRequestTimeoutMs,
       onError: () => {
         if (this.relay === relay) {
           this.relay = undefined

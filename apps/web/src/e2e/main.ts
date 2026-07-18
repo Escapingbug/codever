@@ -49,6 +49,8 @@ let sequence = 0
 const events: SessionEventEnvelope[] = []
 const subscribers = new Set<(event: SessionEventEnvelope) => void>()
 const connectionSubscribers = new Set<(state: 'connected' | 'disconnected') => void>()
+let mockConnectionState: 'connected' | 'disconnected' = 'connected'
+const offlineBacklog: SessionEventEnvelope[] = []
 let pendingSend: { input: SendMessageDto; resolve: (value: unknown) => void } | undefined
 let activeTurnId = ''
 let lastSentInput: SendMessageDto | undefined
@@ -233,6 +235,8 @@ declare global {
     __CODEVER_E2E__: {
       completeTurn(): void
       startLongTurn(): void
+      finishTurnOffline(text: string): void
+      failTurn(message: string): void
       exportedPath(): string
       setConnection(state: 'connected' | 'disconnected'): void
       requestDecision(): void
@@ -250,10 +254,12 @@ window.__CODEVER_E2E__ = {
     pendingSend = undefined
     const turnId = `turn-${input.clientMessageId}`
     append(userMessageEvent(input, turnId))
+    append({ kind: 'session_state', state: 'querying', meta: { source: 'synthetic' } })
     append({ kind: 'turn_started', meta: { turnId, source: 'live' } })
     append({ kind: 'assistant_text_delta', text: 'First ', meta: { turnId, source: 'live' } })
     append({ kind: 'assistant_text_delta', text: 'reply.', meta: { turnId, source: 'live' } })
     append({ kind: 'turn_finished', status: 'success', meta: { turnId, source: 'live' } })
+    append({ kind: 'session_state', state: 'idle', reason: 'turn_success', meta: { source: 'synthetic' } })
     resolve({ commandId: input.clientMessageId, status: 'succeeded' })
   },
   startLongTurn() {
@@ -267,10 +273,42 @@ window.__CODEVER_E2E__ = {
     append({ kind: 'tool', phase: 'started', toolCallId: 'long-tool', toolName: 'Bash', category: 'execute', input: { command: 'long task' }, meta: { turnId: activeTurnId, source: 'live' } })
     resolve({ commandId: input.clientMessageId, status: 'gateway_accepted' })
   },
+  finishTurnOffline(text) {
+    if (!activeTurnId) throw new Error('No active E2E turn')
+    append({ kind: 'assistant_text_delta', text, meta: { turnId: activeTurnId, source: 'live' } })
+    append({ kind: 'turn_finished', status: 'success', meta: { turnId: activeTurnId, source: 'live' } })
+    append({ kind: 'session_state', state: 'idle', reason: 'turn_success', meta: { source: 'synthetic' } })
+    activeTurnId = ''
+  },
+  failTurn(message) {
+    if (!pendingSend) throw new Error('No pending Client message')
+    const { input, resolve } = pendingSend
+    pendingSend = undefined
+    const turnId = `turn-${input.clientMessageId}`
+    append(userMessageEvent(input, turnId))
+    append({ kind: 'session_state', state: 'querying', meta: { source: 'synthetic' } })
+    append({ kind: 'turn_started', meta: { turnId, source: 'live' } })
+    append({ kind: 'status', level: 'error', message, meta: { turnId, source: 'synthetic' } })
+    append({ kind: 'turn_finished', status: 'error', summary: message, meta: { turnId, source: 'live' } })
+    append({ kind: 'session_state', state: 'error', reason: 'turn_error', meta: { source: 'synthetic' } })
+    resolve({ commandId: input.clientMessageId, status: 'succeeded' })
+  },
   exportedPath: () => exportedPath,
   setConnection(state) {
+    mockConnectionState = state
     clientSession.connectionState.value = state
     for (const callback of connectionSubscribers) callback(state)
+    if (state === 'connected') {
+      const queued = offlineBacklog.splice(0)
+      for (const envelope of queued) {
+        // JetStream redelivery may race explicit cursor catch-up. Deliver each
+        // envelope twice so the UI journey enforces sequence-based idempotency.
+        for (const subscriber of subscribers) {
+          subscriber(envelope)
+          subscriber(envelope)
+        }
+      }
+    }
   },
   requestDecision() {
     append({
@@ -298,7 +336,11 @@ function append(event: SessionEventEnvelope['event'], publish = true): void {
   }
   events.push(envelope)
   session.lastEventSeq = sequence
-  if (publish) for (const subscriber of subscribers) subscriber(envelope)
+  if (publish && mockConnectionState === 'connected') {
+    for (const subscriber of subscribers) subscriber(envelope)
+  } else if (publish) {
+    offlineBacklog.push(envelope)
+  }
 }
 
 function userMessageEvent(input: SendMessageDto, turnId: string): SessionEventEnvelope['event'] {

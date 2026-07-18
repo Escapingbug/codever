@@ -23,7 +23,7 @@ sanitized ACP transcripts preserve it for normal CI.
 
 | ID | User journey | ACP replay | Client UI | Durable transport | Live/Android | Current status |
 | --- | --- | --- | --- | --- | --- | --- |
-| C01 | Pair Client with Relay | N/A | partial | secure-channel unit | live Node; Android failing | Partial |
+| C01 | Pair Client with Relay | N/A | partial | full OPAQUE socket integration; slow-device timeout regression | live Node; Android recheck required | Partial |
 | C02 | Pair and list multiple Gateways | N/A | automated | covered components | manual | Covered deterministically |
 | C03 | Create/list Project using Gateway-native paths | N/A | automated (Windows) | command integration | manual | Covered deterministically |
 | C04 | Create Session and send first task | automated | automated | automated | live Codex | Covered |
@@ -31,18 +31,18 @@ sanitized ACP transcripts preserve it for normal CI.
 | C06 | Open cached history without replay animation | N/A | automated | event replay unit | live manual | Covered |
 | C07 | Disconnect, read cache, reconnect, catch up by cursor | automated | automated | automated | live Codex | Covered |
 | C08 | Stop a running tool and continue the same Session | automated | automated | worker liveness | live Codex | Covered |
-| C09 | Change model/mode/reasoning/permission policy | model path automated | automated | command integration | manual | Partial |
+| C09 | Change model/mode/reasoning/permission policy | model path automated | automated | command integration | manual | Covered deterministically |
 | C10 | Resolve permission/decision without inspector collision | automated | automated | command integration | manual | Covered |
 | C11 | Attach/upload/send/delete Session files | provider input unit | automated | object-store unit | manual large-file canary | Covered deterministically |
 | C12 | Open an Agent-generated file link in the current Project | N/A | automated | attachment export unit | manual | Covered |
 | C13 | Archive/restore Session without page-view activation | automated | automated | command integration | manual | Covered |
 | C14 | Browse/attach an inactive Provider-native Session | automated bridge journey | automated | command integration | manual | Covered deterministically |
 | C15 | Incrementally load old history without moving scroll anchor | N/A | automated | pagination unit | manual | Covered deterministically |
-| C16 | Gateway restart during/after a turn and continue | automated graceful restart | not complete | crash reconciliation unit | live plan only | Partial |
-| C17 | Relay restart, duplicate delivery, redelivery, and backlog | N/A | not complete | component tests | fault injection missing | Partial |
-| C18 | Provider error, unavailable Provider, retry, and recovery | fixture support ready | partial | response tests | matrix missing | Partial |
+| C16 | Gateway restart during/after a turn and continue | automated restart/resume | cached UI covered by C07 | pending/completed crash ledger tests | live plan only | Covered deterministically |
+| C17 | Relay restart, duplicate delivery, redelivery, and backlog | N/A | automated reconnect/backlog/dedup | cache retry, ack-loss redelivery, ordering | live process fault injection optional | Covered deterministically |
+| C18 | Provider error, unavailable Provider, retry, and recovery | refusal/failure/retry fixture | automated | response tests | replayed in CI | Covered |
 | C19 | Branch/fork/edit/retry Provider history | unsupported | unsupported | unsupported | unsupported | Not implemented |
-| C20 | Android install, pairing, background/resume, network switch | N/A | viewport only | N/A | pairing currently fails | Open defect |
+| C20 | Android install, pairing, background/resume, network switch | N/A | viewport and lifecycle unit | phase-specific mobile handshake timeout | physical pairing recheck required | Partial |
 
 ## Required CI gates
 
@@ -74,9 +74,17 @@ mapping, Gateway lifecycle, decision handling, metadata, and durable event
 storage are production implementations. Consequently a fixture catches adapter
 and business-state regressions that a final-text API mock cannot catch.
 
-## Next coverage tranche
+## Remaining coverage
 
-The next highest-risk journeys are C20 Android pairing/lifecycle, C11 complete
-attachment flow, C15 pagination/scroll anchoring in Playwright, and C16/C17
-Gateway plus Relay restart fault injection. These are not marked covered merely
-because their individual components have unit tests.
+C20 still needs a repeatable Android instrumentation lane that installs a build,
+pairs against an ephemeral Relay, backgrounds and resumes the WebView, switches
+network state, and verifies cursor catch-up. C01 remains partial until that lane
+proves the complete first-device UI journey on Android. C19 is a product gap,
+not a missing test: branch/fork/edit/retry must first be represented by Provider
+capabilities and a stable cross-provider semantic model.
+
+Live Relay/Gateway process-kill canaries remain useful environmental checks for
+C16/C17, but deterministic CI already covers the observable recovery contract:
+uncertain mutations are not repeated, completed commands replay after restart,
+transient cache and acknowledgement failures request redelivery, duplicate
+events converge by sequence, and cached conversations stay readable offline.

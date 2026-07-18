@@ -34,7 +34,7 @@ import { DurableEventReplayBuffer } from './durableEventReplay'
 const COMMAND_TTL_MS = 7 * 24 * 60 * 60_000
 const CLOSE_GRACE_MS = 1_000
 
-class RetryableDurableMessageError extends Error {
+export class RetryableDurableMessageError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = 'RetryableDurableMessageError'
@@ -190,14 +190,7 @@ export class DurableSyncClient {
   }
 
   private async process(message: JsMsg, handler: (message: JsMsg) => Promise<void>): Promise<void> {
-    try {
-      await handler(message)
-      if (!await message.ackAck()) throw new Error('JetStream did not confirm the Client acknowledgement')
-    } catch (error) {
-      this.report(error)
-      if (error instanceof RetryableDurableMessageError) message.nak(1_000)
-      else message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
-    }
+    await processDurableMessage(message, handler, error => this.report(error))
   }
 
   private async response(message: JsMsg): Promise<void> {
@@ -294,6 +287,24 @@ export class DurableSyncClient {
 
   private report(value: unknown): void { this.options.onError?.(value instanceof Error ? value : new Error(String(value))) }
   private now(): number { return this.options.now?.() ?? Date.now() }
+}
+
+export async function processDurableMessage(
+  message: Pick<JsMsg, 'ackAck' | 'nak' | 'term'>,
+  handler: (message: JsMsg) => Promise<void>,
+  report: (error: Error) => void,
+): Promise<void> {
+  try {
+    await handler(message as JsMsg)
+    if (!await message.ackAck()) {
+      throw new RetryableDurableMessageError('JetStream did not confirm the Client acknowledgement')
+    }
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    report(failure)
+    if (error instanceof RetryableDurableMessageError) message.nak(1_000)
+    else message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
+  }
 }
 
 export async function deliverDurableResponse(

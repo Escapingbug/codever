@@ -120,6 +120,43 @@ test.describe('mobile Session business journey', () => {
     await expect(composer).toBeEnabled()
   })
 
+  test('C17 keeps cached work usable across Relay restart and deduplicates backlog redelivery', async ({ page }) => {
+    await page.locator('.composer textarea').fill('Finish while the Relay restarts')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnection('disconnected'))
+    await page.evaluate(() => window.__CODEVER_E2E__.finishTurnOffline('Completed during Relay restart.'))
+    await expect(page.getByText('Completed during Relay restart.')).toHaveCount(0)
+    await expect(page.locator('.message--user').filter({ hasText: 'Finish while the Relay restarts' })).toBeVisible()
+    await expect(page.locator('.connection-banner')).toContainText('Server offline')
+
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnection('connected'))
+    const recovered = page.locator('.message--assistant').filter({ hasText: 'Completed during Relay restart.' })
+    await expect(recovered).toHaveCount(1)
+    await expect(recovered.locator('.agent-reply-state')).toContainText('success')
+    await expect(page.getByText('idle', { exact: true })).toBeVisible()
+  })
+
+  test('C18 leaves an errored Session retryable and reconciles the successful retry', async ({ page }) => {
+    const composer = page.locator('.composer textarea')
+    await composer.fill('Trigger a Provider failure')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.evaluate(() => window.__CODEVER_E2E__.failTurn('Provider process exited unexpectedly'))
+
+    await expect(page.locator('.session-header').getByText('error', { exact: true })).toBeVisible()
+    await expect(page.locator('.agent-reply-state--error')).toContainText('error')
+    await expect(composer).toBeEnabled()
+    await composer.fill('Retry after Provider recovery')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await page.evaluate(() => window.__CODEVER_E2E__.completeTurn())
+
+    await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' })).toBeVisible()
+    await expect(page.getByText('idle', { exact: true })).toBeVisible()
+    await expect(page.locator('.message--user').filter({ hasText: 'Retry after Provider recovery' })).toHaveCount(1)
+  })
+
   test('C11 uploads, attaches, sends, and deletes a Session file', async ({ page }) => {
     await page.locator('input[type=file]').setInputFiles({
       name: 'requirements.txt', mimeType: 'text/plain', buffer: Buffer.from('vitest\nplaywright\n'),

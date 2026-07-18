@@ -18,6 +18,68 @@ describe('secure connection send ordering', () => {
     expect(close).toHaveBeenCalledWith(4001, 'Secure session failed')
   })
 
+  it('allows mobile credential derivation to exceed the socket connection timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const socket = new FakeWebSocket()
+      let ready = false
+      const handshake = {
+        get ready() { return ready },
+        start: vi.fn(async () => {
+          await new Promise(resolve => setTimeout(resolve, 31_000))
+          return { type: 'client.relay-auth.start' }
+        }),
+        handle: vi.fn(async () => {
+          ready = true
+          return undefined
+        }),
+      }
+      const client = new SecureRelayClient({
+        baseUrl: 'http://relay.example',
+        handshake: handshake as never,
+        webSocketFactory: () => socket as never,
+        connectTimeoutMs: 10_000,
+        handshakeTimeoutMs: 120_000,
+      })
+
+      const connected = client.connect()
+      socket.dispatch('open', {})
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(socket.sent).toHaveLength(1)
+      socket.dispatch('message', { data: JSON.stringify({ type: 'relay.client-auth.accepted' }) })
+
+      await expect(connected).resolves.toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports socket and credential timeouts as different phases', async () => {
+    vi.useFakeTimers()
+    try {
+      const unopened = new FakeWebSocket()
+      const connection = new SecureRelayClient({
+        baseUrl: 'http://relay.example', handshake: {} as never,
+        webSocketFactory: () => unopened as never, connectTimeoutMs: 50,
+      }).connect()
+      await vi.advanceTimersByTimeAsync(50)
+      await expect(connection).rejects.toThrow('before the server accepted the socket')
+
+      const opened = new FakeWebSocket()
+      const pairing = new SecureRelayClient({
+        baseUrl: 'http://relay.example',
+        handshake: { ready: false, start: () => new Promise(() => undefined) } as never,
+        webSocketFactory: () => opened as never,
+        connectTimeoutMs: 50, handshakeTimeoutMs: 100,
+      }).connect()
+      opened.dispatch('open', {})
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(pairing).rejects.toThrow('while creating or verifying credentials')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
 
 })
 
@@ -202,4 +264,24 @@ function controlled<T>() {
   let reject!: (error: Error) => void
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
   return { promise, resolve, reject }
+}
+
+class FakeWebSocket {
+  readyState = 0
+  sent: string[] = []
+  private readonly listeners = new Map<string, Array<(event: never) => void>>()
+
+  addEventListener(type: string, listener: (event: never) => void): void {
+    const values = this.listeners.get(type) ?? []
+    values.push(listener)
+    this.listeners.set(type, values)
+  }
+
+  dispatch(type: string, event: unknown): void {
+    if (type === 'open') this.readyState = 1
+    for (const listener of this.listeners.get(type) ?? []) listener(event as never)
+  }
+
+  send(value: string): void { this.sent.push(value) }
+  close(): void { this.readyState = 3 }
 }

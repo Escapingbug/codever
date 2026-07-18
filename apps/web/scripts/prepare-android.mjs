@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 
 const gradleUrl = new URL('../src-tauri/gen/android/app/build.gradle.kts', import.meta.url)
 const gradlePath = fileURLToPath(gradleUrl)
+const gradlePropertiesUrl = new URL('../src-tauri/gen/android/gradle.properties', import.meta.url)
 const activityUrl = new URL('../src-tauri/gen/android/app/src/main/java/dev/codever/client/MainActivity.kt', import.meta.url)
 const themeUrls = [
   new URL('../src-tauri/gen/android/app/src/main/res/values/themes.xml', import.meta.url),
@@ -19,6 +20,18 @@ if (!source.includes(disabled) && !source.includes(enabled)) {
 if (source.includes(disabled)) {
   await writeFile(gradleUrl, source.replace(disabled, enabled), 'utf8')
 }
+
+let gradleProperties = await readFile(gradlePropertiesUrl, 'utf8')
+const stableKotlinSettings = [
+  // Kotlin's relocatable incremental cache cannot relativize Tauri sources in
+  // Cargo's C: registry against a generated Android project on D:.
+  'kotlin.incremental=false',
+  'kotlin.compiler.execution.strategy=in-process',
+]
+for (const setting of stableKotlinSettings) {
+  if (!gradleProperties.includes(setting)) gradleProperties = `${gradleProperties.trimEnd()}\n${setting}\n`
+}
+await writeFile(gradlePropertiesUrl, gradleProperties, 'utf8')
 
 const statusBarItems = `        <item name="android:statusBarColor">#11130F</item>
         <item name="android:navigationBarColor">#11130F</item>

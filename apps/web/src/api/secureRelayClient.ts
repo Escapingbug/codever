@@ -11,6 +11,8 @@ export class SecureRelayClient {
     handshake: RelaySecureHandshake
     webSocketFactory?: (url: string) => WebSocket
     onError?: (error: Error) => void
+    connectTimeoutMs?: number
+    handshakeTimeoutMs?: number
     requestTimeoutMs?: number
   }) {}
 
@@ -23,9 +25,22 @@ export class SecureRelayClient {
       const endpoint = this.url()
       const socket = (this.options.webSocketFactory ?? (url => new WebSocket(url)))(endpoint)
       this.socket = socket
-      const timer = setTimeout(() => this.fail(new Error('Secure Relay handshake timed out')), this.requestTimeoutMs)
-      this.connectState.promise.then(() => clearTimeout(timer), () => clearTimeout(timer))
+      let handshakeTimer: ReturnType<typeof setTimeout> | undefined
+      const connectTimer = setTimeout(
+        () => this.fail(new Error('Secure Relay connection timed out before the server accepted the socket')),
+        this.connectTimeoutMs,
+      )
+      const clearTimers = () => {
+        clearTimeout(connectTimer)
+        if (handshakeTimer) clearTimeout(handshakeTimer)
+      }
+      this.connectState.promise.then(clearTimers, clearTimers)
       socket.addEventListener('open', () => {
+        clearTimeout(connectTimer)
+        handshakeTimer = setTimeout(
+          () => this.fail(new Error('Secure Relay pairing timed out while creating or verifying credentials')),
+          this.handshakeTimeoutMs,
+        )
         void this.options.handshake.start().then(frame => this.sendRaw(frame)).catch(error => this.fail(asError(error)))
       })
       socket.addEventListener('message', event => {
@@ -88,7 +103,8 @@ export class SecureRelayClient {
     this.connectState = undefined
   }
 
-  private get requestTimeoutMs(): number { return this.options.requestTimeoutMs ?? 30_000 }
+  private get connectTimeoutMs(): number { return this.options.connectTimeoutMs ?? this.options.requestTimeoutMs ?? 30_000 }
+  private get handshakeTimeoutMs(): number { return this.options.handshakeTimeoutMs ?? 120_000 }
 
   private url(): string {
     const url = new URL(this.options.baseUrl)

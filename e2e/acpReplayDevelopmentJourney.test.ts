@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import replayFixture from '../test/fixtures/acp/codex-development.json'
+import recoveryFixture from '../test/fixtures/acp/codex-recovery.json'
 import { createReplayAcpProvider, type AcpReplayFixture } from '../test/support/replayAcpClientManager'
 import { ProjectRegistry } from '@/gateway/projects'
 import { GatewaySessionService, FileSessionMetadataRepository } from '@/gateway/sessions'
@@ -193,6 +194,44 @@ describe('ACP replay development business journey', () => {
 
         await restarted.destroy()
         await events.close()
+    })
+
+    it('C18 exposes refusal and transport failure, then recovers on the same Session', async () => {
+        const fixture = await createFixture()
+        const replay = createReplayAcpProvider(recoveryFixture as AcpReplayFixture)
+        const service = await GatewaySessionService.open({ ...fixture.options, providerFactory: () => replay.provider })
+        const session = await service.create(fixture.project.id, { provider: 'codex', config: {} })
+
+        await expect(service.sendMessage(session.id, {
+            text: 'Attempt a request that Codex refuses', clientMessageId: 'refused', idempotencyKey: 'refused',
+        })).resolves.toMatchObject({ status: 'error', summary: 'Agent refused' })
+        expect((await service.get(session.id)).state).toBe('error')
+
+        await expect(service.sendMessage(session.id, {
+            text: 'Attempt while the Provider transport fails', clientMessageId: 'transport-failure', idempotencyKey: 'transport-failure',
+        })).resolves.toMatchObject({ status: 'error' })
+        expect((await service.get(session.id)).state).toBe('error')
+
+        await expect(service.sendMessage(session.id, {
+            text: 'Retry the task after Provider recovery', clientMessageId: 'recovered', idempotencyKey: 'recovered',
+        })).resolves.toMatchObject({ status: 'success' })
+        expect((await service.get(session.id)).state).toBe('idle')
+        expect(replay.manager.observedResumeSessionIds).toContain('codex-recovery-session-1')
+
+        const wire = (await fixture.events.list(session.id)).events.flatMap(envelope => {
+            const event = toWireConversationEvent(envelope.event)
+            return event ? [event] : []
+        })
+        expect(wire.filter(event => event.kind === 'user_message')).toHaveLength(3)
+        expect(wire.filter(event => event.kind === 'turn_finished').map(event =>
+            event.kind === 'turn_finished' ? event.status : undefined)).toEqual(['error', 'error', 'success'])
+        expect(wire).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'assistant_text_delta', text: 'Recovered and completed the task.' }),
+            expect.objectContaining({ kind: 'session_state', state: 'idle' }),
+        ]))
+
+        await service.destroy()
+        await fixture.events.close()
     })
 })
 

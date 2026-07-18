@@ -17,7 +17,12 @@ export interface AcpReplayPermission {
     input: unknown
 }
 
-export type AcpReplayStep = AcpReplayNotification | AcpReplayGate | AcpReplayPermission
+export interface AcpReplayFailure {
+    type: 'failure'
+    message: string
+}
+
+export type AcpReplayStep = AcpReplayNotification | AcpReplayGate | AcpReplayPermission | AcpReplayFailure
 
 export interface AcpReplayTurn {
     input: string
@@ -47,6 +52,7 @@ interface ActivePrompt {
     sessionId: string
     settled: boolean
     resolve(value: { stopReason: string }): void
+    reject(error: Error): void
 }
 
 /**
@@ -123,11 +129,15 @@ export class ReplayAcpClientManager {
             return Promise.reject(new Error(`ACP replay input mismatch: expected ${JSON.stringify(turn.input)}, received ${JSON.stringify(text)}`))
         }
 
-        const response = new Promise<{ stopReason: string }>(resolve => {
-            this.activePrompt = { sessionId: input.sessionId, settled: false, resolve }
+        const response = new Promise<{ stopReason: string }>((resolve, reject) => {
+            this.activePrompt = { sessionId: input.sessionId, settled: false, resolve, reject }
         })
         const active = this.activePrompt
-        this.processing = this.runTurn(active, turn)
+        this.processing = this.runTurn(active, turn).catch(error => {
+            if (active.settled) return
+            active.settled = true
+            active.reject(error instanceof Error ? error : new Error(String(error)))
+        })
         return response
     }
 
@@ -155,20 +165,22 @@ export class ReplayAcpClientManager {
         if (queued) return Promise.resolve(queued)
         if (options.signal?.aborted) return Promise.reject(new Error('Session update wait aborted'))
         return new Promise((resolve, reject) => {
-            const waiter: Waiter = { resolve, reject, signal: options.signal }
+            let waiter!: Waiter
             const abort = () => {
                 const index = this.waiters.indexOf(waiter)
                 if (index >= 0) this.waiters.splice(index, 1)
                 reject(new Error('Session update wait aborted'))
             }
-            options.signal?.addEventListener('abort', abort, { once: true })
-            this.waiters.push({
-                ...waiter,
+            waiter = {
+                signal: options.signal,
+                reject,
                 resolve: value => {
                     options.signal?.removeEventListener('abort', abort)
                     resolve(value)
                 },
-            })
+            }
+            options.signal?.addEventListener('abort', abort, { once: true })
+            this.waiters.push(waiter)
         })
     }
 
@@ -209,6 +221,7 @@ export class ReplayAcpClientManager {
                 this.permissionResults.push(result)
                 continue
             }
+            if (step.type === 'failure') throw new Error(step.message)
             this.reachedGateResolvers.get(step.name)?.()
             await this.gates.get(step.name)
         }
