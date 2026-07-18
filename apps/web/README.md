@@ -71,6 +71,22 @@ pnpm ios:dev
 
 The Rust entry point uses `#[tauri::mobile_entry_point]`, so the same Vue bundle and the same minimal Rust shell are used on desktop and mobile. No platform-specific business UI is maintained.
 
+## Windows desktop E2E
+
+The Windows lane launches the real Tauri executable and drives its WebView2
+through an embedded W3C WebDriver. It verifies native window behavior, Project
+navigation, Windows Credential Manager persistence across a process restart,
+message reconciliation, offline recovery, Stop, decisions, and Session controls.
+
+```powershell
+pnpm test:desktop-e2e
+```
+
+The dedicated build uses the `desktop-e2e` Cargo feature and the
+`dev.codever.client.e2e` identifier. Its automation server and deterministic
+Relay fixture are absent from normal release builds, and its WebView data cannot
+overwrite the production client's cache.
+
 ## Security boundary
 
 The shell grants only `core:default` to the main WebView and does not install filesystem, shell, process, or HTTP plugins. The CSP permits the configured Relay transports and allows WebAssembly compilation for the OPAQUE implementation through the narrow `wasm-unsafe-eval` source; ordinary JavaScript `unsafe-eval` remains disabled. Add native plugins only with a narrowly scoped capability and a concrete UI requirement.

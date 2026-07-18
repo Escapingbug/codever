@@ -1,0 +1,23 @@
+{
+  "productName": "Codever E2E",
+  "identifier": "dev.codever.client.e2e",
+  "build": {
+    "beforeBuildCommand": "pnpm build --mode native-e2e"
+  },
+  "app": {
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "desktop-e2e-capability",
+          "description": "Native desktop automation capability used only by the dedicated E2E build.",
+          "windows": ["main"],
+          "platforms": ["windows", "linux", "macOS"],
+          "permissions": ["core:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

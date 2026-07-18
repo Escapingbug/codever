@@ -19,6 +19,7 @@ import SessionView from '../views/SessionView.vue'
 import GatewayListView from '../views/GatewayListView.vue'
 import GatewayView from '../views/GatewayView.vue'
 import MachineListView from '../views/MachineListView.vue'
+import { createPlatformSecretStore } from '../security/secretStore'
 import '../styles.css'
 
 const gateway: Gateway = {
@@ -58,6 +59,7 @@ let exportedPath = ''
 let lastConfig: PatchSessionConfigDto | undefined
 let archiveUpdates = 0
 const attachments: SessionAttachmentDto[] = []
+const nativeSecrets = createPlatformSecretStore()
 
 if (longHistoryFixture) {
   for (let index = 1; index <= 8; index += 1) {
@@ -243,6 +245,9 @@ declare global {
       lastConfig(): PatchSessionConfigDto | undefined
       archiveUpdates(): number
       lastSentInput(): SendMessageDto | undefined
+      nativeSecretGet(account: string): Promise<string | undefined>
+      nativeSecretSet(account: string, value: string): Promise<void>
+      nativeSecretDelete(account: string): Promise<void>
     }
   }
 }
@@ -319,6 +324,9 @@ window.__CODEVER_E2E__ = {
   lastConfig: () => lastConfig,
   archiveUpdates: () => archiveUpdates,
   lastSentInput: () => lastSentInput,
+  nativeSecretGet: account => nativeSecrets.get(account),
+  nativeSecretSet: (account, value) => nativeSecrets.set(account, value),
+  nativeSecretDelete: account => nativeSecrets.delete(account),
 }
 
 clientSession.connectionState.value = 'connected'

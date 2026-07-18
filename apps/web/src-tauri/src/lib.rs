@@ -61,7 +61,11 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     keyring_core::set_default_store(zbus_secret_service_keyring_store::Store::new().expect("failed to initialize Secret Service"));
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "desktop-e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![secure_secret_get, secure_secret_set, secure_secret_delete])
         .run(tauri::generate_context!())
         .expect("failed to run Codever");

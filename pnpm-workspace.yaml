@@ -9,4 +9,6 @@ overrides:
   qs: 6.15.2
 
 allowBuilds:
+  edgedriver: false
   esbuild: true
+  geckodriver: false

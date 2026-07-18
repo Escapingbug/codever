@@ -18,6 +18,9 @@ sanitized ACP transcripts preserve it for normal CI.
   recording cannot, then any discovered failure becomes a replay fixture.
 - **Android device**: packaging, WebView lifecycle, secure storage, pairing, and
   foreground/background behavior require emulator or physical-device coverage.
+- **Windows native**: a dedicated Tauri build is driven through its embedded W3C
+  WebDriver. It uses an isolated application identifier and verifies WebView2,
+  native window behavior, and real Windows Credential Manager persistence.
 
 ## Capability matrix
 
@@ -43,6 +46,7 @@ sanitized ACP transcripts preserve it for normal CI.
 | C18 | Provider error, unavailable Provider, retry, and recovery | refusal/failure/retry fixture | automated | response tests | replayed in CI | Covered |
 | C19 | Branch/fork/edit/retry Provider history | unsupported | unsupported | unsupported | unsupported | Not implemented |
 | C20 | Android install, pairing, background/resume, network switch | N/A | viewport and lifecycle unit | phase-specific mobile handshake timeout | physical pairing recheck required | Partial |
+| C21 | Windows native shell, credential restart, and core development journey | replay-backed mock | native WebView2 automated | offline recovery exercised | real Credential Manager and process restart | Covered deterministically |
 
 ## Required CI gates
 
@@ -60,6 +64,11 @@ sanitized ACP transcripts preserve it for normal CI.
 Run the deterministic business gate with `pnpm test:business-e2e`. It executes
 the ACP/Gateway journeys, Web type checking and unit tests, and all mobile
 Playwright journeys using fail-fast command chaining.
+
+On Windows, run `pnpm test:desktop-e2e`. This builds a feature-gated native test
+binary and drives seven core journeys in the real WebView2 process. It is kept
+separate from the portable business gate because native compilation and window
+automation require a Windows desktop session.
 
 ## ACP replay fixture contract
 
@@ -82,6 +91,12 @@ network state, and verifies cursor catch-up. C01 remains partial until that lane
 proves the complete first-device UI journey on Android. C19 is a product gap,
 not a missing test: branch/fork/edit/retry must first be represented by Provider
 capabilities and a stable cross-provider semantic model.
+
+C21 proves the deterministic Windows shell contract, but signed installer
+upgrade/uninstall retention and a live Relay/Gateway process-kill canary remain
+release engineering checks rather than normal deterministic tests. Linux and
+macOS need their own native CI runners before their shells can inherit C21's
+status.
 
 Live Relay/Gateway process-kill canaries remain useful environmental checks for
 C16/C17, but deterministic CI already covers the observable recovery contract:
