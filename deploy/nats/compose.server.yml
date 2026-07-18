@@ -1,0 +1,67 @@
+version: "2.4"
+
+services:
+  security-init:
+    image: codever-relay:${CODEVER_IMAGE_TAG}
+    user: root
+    entrypoint: ["/bin/sh", "/app/deploy/nats/bootstrap.sh"]
+    environment:
+      CODEVER_SECURITY_ROOT: /data/security
+      CODEVER_RELAY_DATA_ROOT: /data/relay
+      CODEVER_NSC_OPERATOR: CODEVER
+      CODEVER_NSC_ACCOUNT: CODEVER
+    volumes:
+      - codever-security:/data/security
+      - codever-relay:/data/relay
+    restart: "no"
+
+  nats:
+    image: nats:2.12.7-alpine
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    depends_on:
+      security-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - codever-security:/etc/nats/security:ro
+      - codever-jetstream:/data/jetstream
+    ports:
+      - "4222:4222"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  relay:
+    image: codever-relay:${CODEVER_IMAGE_TAG}
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      CODEVER_RELAY_HOST: 0.0.0.0
+      CODEVER_RELAY_PORT: 8787
+      CODEVER_RELAY_ID: rd-anciety-codever
+      CODEVER_RELAY_DATA_DIRECTORY: /data/relay
+      CODEVER_RELAY_NATS_URL: nats://nats:4222
+      CODEVER_RELAY_NATS_GATEWAY_URL: nats://${CODEVER_DOMAIN}:4222
+      CODEVER_RELAY_NATS_WEBSOCKET_URL: wss://${CODEVER_DOMAIN}:8787/nats
+      CODEVER_RELAY_NATS_CREDENTIALS_FILE: /data/security/relay-admin.creds
+      CODEVER_RELAY_NSC_STORE_DIRECTORY: /data/security/store
+      CODEVER_RELAY_NSC_KEYS_DIRECTORY: /data/security/keys
+      CODEVER_RELAY_NSC_CONFIG_DIRECTORY: /data/security/config
+      CODEVER_RELAY_NSC_OPERATOR: CODEVER
+      CODEVER_RELAY_NSC_ACCOUNT: CODEVER
+    volumes:
+      - codever-security:/data/security
+      - codever-relay:/data/relay
+    ports:
+      - "127.0.0.1:8788:8787"
+    restart: unless-stopped
+
+volumes:
+  codever-security:
+  codever-jetstream:
+  codever-relay:
