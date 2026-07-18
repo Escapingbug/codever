@@ -2,6 +2,14 @@
 export class DurableEventReplayBuffer<T> {
   private replaying = true
   private readonly buffered: T[] = []
+  private readonly maxBatchSize: number
+
+  constructor(options: { maxBatchSize?: number } = {}) {
+    this.maxBatchSize = options.maxBatchSize ?? 64
+    if (!Number.isSafeInteger(this.maxBatchSize) || this.maxBatchSize < 1) {
+      throw new Error('maxBatchSize must be a positive integer')
+    }
+  }
 
   begin(): void {
     this.replaying = true
@@ -13,9 +21,9 @@ export class DurableEventReplayBuffer<T> {
       return
     }
     this.buffered.push(value)
-    if (pending > 0) return
+    if (pending > 0 && this.buffered.length < this.maxBatchSize) return
     await publish([...this.buffered])
     this.buffered.length = 0
-    this.replaying = false
+    this.replaying = pending > 0
   }
 }

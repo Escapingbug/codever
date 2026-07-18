@@ -48,6 +48,10 @@ export interface GatewayTurnResult {
     summary?: string
 }
 
+export interface GatewayTurnExecution {
+    completion: Promise<GatewayTurnResult>
+}
+
 export type GatewayEventSubscriber = (event: SessionEventEnvelope<GatewayConversationEvent>) => void
 
 /** Transport-neutral execution core for a durable Codever Gateway session. */
@@ -64,6 +68,7 @@ export class GatewaySessionRuntime {
     private destroyed = false
     private destroyPromise: Promise<void> | null = null
     private providerSessionId?: string
+    private providerInitialization: Promise<void> | null = null
     private model?: string
     private providerSettings: Record<string, unknown>
     readonly decisions: DecisionBroker
@@ -74,7 +79,9 @@ export class GatewaySessionRuntime {
         this.providerSessionId = config.providerSessionId
         this.model = config.model
         this.providerSettings = { ...config.providerSettings }
-        this.adapter = config.adapter ?? createProviderSemanticAdapter(config.provider.name)
+        this.adapter = config.adapter ?? createProviderSemanticAdapter(config.provider.name, {
+            boundedToolUpdates: true,
+        })
         this.decisions = new DecisionBroker({
             publish: (event) => this.record(event),
             defaultExpiryMs: config.decisionExpiryMs,
@@ -107,6 +114,18 @@ export class GatewaySessionRuntime {
         return this.enqueue(() => this.runTurn(input, clientMessageId))
     }
 
+    beginQuery(input: AgentQueryInput, clientMessageId?: string): Promise<GatewayTurnExecution> {
+        let accept!: () => void
+        let reject!: (error: unknown) => void
+        const accepted = new Promise<void>((resolve, rejectPromise) => {
+            accept = resolve
+            reject = rejectPromise
+        })
+        const completion = this.enqueue(() => this.runTurn(input, clientMessageId, accept))
+        void completion.catch(reject)
+        return accepted.then(() => ({ completion }))
+    }
+
     async updateSettings(settings: {
         model?: string | null
         providerSettings?: Record<string, unknown>
@@ -127,9 +146,8 @@ export class GatewaySessionRuntime {
     }
 
     async cancel(reason = 'Session turn cancelled.'): Promise<boolean> {
-        const handle = this.activeHandle
         const abortController = this.activeAbortController
-        if (!handle || !abortController || !this.activeTurnId) return false
+        if (!abortController || !this.activeTurnId) return false
 
         let transitionError: unknown
         try {
@@ -139,7 +157,7 @@ export class GatewaySessionRuntime {
         }
         abortController.abort()
         await this.decisions.cancelAll(reason)
-        await handle.interrupt()
+        await this.activeHandle?.interrupt()
         if (transitionError) throw transitionError
         return true
     }
@@ -157,65 +175,70 @@ export class GatewaySessionRuntime {
         return result
     }
 
-    private async runTurn(input: AgentQueryInput, clientMessageId?: string): Promise<GatewayTurnResult> {
+    private async runTurn(
+        input: AgentQueryInput,
+        clientMessageId?: string,
+        onAccepted?: () => void,
+    ): Promise<GatewayTurnResult> {
         if (this.destroyed) throw new Error('Gateway session runtime is closed.')
 
         const turnId = this.createId()
         await this.record({ kind: 'user_message', turnId, input, ...(clientMessageId ? { clientMessageId } : {}) })
-
-        await this.ensureProviderReady()
-        if (!this.config.provider.isReady()) {
-            const message = this.config.provider.getInitError() ?? `Provider "${this.config.provider.name}" is not ready.`
-            await this.recordError('provider_not_ready', message, turnId)
-            await this.transition('error', 'provider_not_ready')
-            return { turnId, status: 'error', summary: message }
-        }
-
         await this.transition('querying')
         await this.record({ kind: 'turn', turnId, phase: 'started' })
         this.activeTurnId = turnId
         this.activeAbortController = new AbortController()
+        onAccepted?.()
 
         let status: GatewayTurnStatus = 'success'
         let summary: string | undefined
         try {
-            const model = this.resolveModel(this.model)
-            const handle = this.config.provider.startQuery(input, {
-                cwd: this.config.cwd,
-                ...(this.providerSessionId ? { sessionId: this.providerSessionId } : {}),
-                signal: this.activeAbortController.signal,
-                ...(model ? { model } : {}),
-                providerSettings: { ...this.providerSettings },
-                permissionHandler: this.createPermissionHandler(turnId),
-                decisionHandler: {
-                    requestDecision: async (request) => {
-                        const opened = await this.decisions.open({
-                            type: request.type,
-                            title: request.title,
-                            ...(request.details ? { details: request.details } : {}),
-                            options: request.options.map((option, index) => ({
-                                id: `option-${index}`,
-                                label: option.label,
-                                value: option.value,
-                            })),
-                            turnId,
-                        })
-                        const resolution = await opened.result
-                        return { value: resolution.status === 'resolved' ? String(resolution.value) : 'deny' }
+            await this.ensureProviderReady(this.activeAbortController.signal)
+            if (this.activeAbortController.signal.aborted) {
+                status = 'cancelled'
+            } else if (!this.config.provider.isReady()) {
+                summary = this.config.provider.getInitError() ?? `Provider "${this.config.provider.name}" is not ready.`
+                status = 'error'
+                await this.recordError('provider_not_ready', summary, turnId)
+            } else {
+                const model = this.resolveModel(this.model)
+                const handle = this.config.provider.startQuery(input, {
+                    cwd: this.config.cwd,
+                    ...(this.providerSessionId ? { sessionId: this.providerSessionId } : {}),
+                    signal: this.activeAbortController.signal,
+                    ...(model ? { model } : {}),
+                    providerSettings: { ...this.providerSettings },
+                    permissionHandler: this.createPermissionHandler(turnId),
+                    decisionHandler: {
+                        requestDecision: async (request) => {
+                            const opened = await this.decisions.open({
+                                type: request.type,
+                                title: request.title,
+                                ...(request.details ? { details: request.details } : {}),
+                                options: request.options.map((option, index) => ({
+                                    id: `option-${index}`,
+                                    label: option.label,
+                                    value: option.value,
+                                })),
+                                turnId,
+                            })
+                            const resolution = await opened.result
+                            return { value: resolution.status === 'resolved' ? String(resolution.value) : 'deny' }
+                        },
                     },
-                },
-            })
-            this.activeHandle = handle
+                })
+                this.activeHandle = handle
 
-            for await (const providerEvent of handle.events) {
-                if (this.activeAbortController.signal.aborted) {
-                    status = 'cancelled'
-                    break
-                }
-                const result = await this.recordProviderEvent(providerEvent, turnId)
-                if (result) {
-                    status = result.status
-                    summary = result.summary
+                for await (const providerEvent of handle.events) {
+                    if (this.activeAbortController.signal.aborted) {
+                        status = 'cancelled'
+                        break
+                    }
+                    const result = await this.recordProviderEvent(providerEvent, turnId)
+                    if (result) {
+                        status = result.status
+                        summary = result.summary
+                    }
                 }
             }
             if (this.activeAbortController.signal.aborted) status = 'cancelled'
@@ -245,17 +268,36 @@ export class GatewaySessionRuntime {
         return { turnId, status, ...(summary ? { summary } : {}) }
     }
 
-    private async ensureProviderReady(): Promise<void> {
+    private async ensureProviderReady(signal: AbortSignal): Promise<void> {
         if (this.config.provider.isReady()) return
+        if (!this.providerInitialization) {
+            const initialization = (async () => {
+                try {
+                    if (this.config.provider.wasReady?.() && this.config.provider.reinit) {
+                        await this.config.provider.reinit()
+                    } else if (this.config.provider.init) {
+                        await this.config.provider.init()
+                    }
+                } catch {
+                    // Providers retain their initialization error. The normal durable
+                    // provider_not_ready event below reports it to the client.
+                }
+            })()
+            this.providerInitialization = initialization
+            void initialization.finally(() => {
+                if (this.providerInitialization === initialization) this.providerInitialization = null
+            })
+        }
+        if (signal.aborted) return
+        let abort!: () => void
+        const aborted = new Promise<void>(resolve => {
+            abort = () => resolve()
+            signal.addEventListener('abort', abort, { once: true })
+        })
         try {
-            if (this.config.provider.wasReady?.() && this.config.provider.reinit) {
-                await this.config.provider.reinit()
-            } else if (this.config.provider.init) {
-                await this.config.provider.init()
-            }
-        } catch {
-            // Providers retain their initialization error. The normal durable
-            // provider_not_ready event below reports it to the client.
+            await Promise.race([this.providerInitialization, aborted])
+        } finally {
+            signal.removeEventListener('abort', abort)
         }
     }
 

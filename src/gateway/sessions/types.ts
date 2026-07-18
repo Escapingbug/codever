@@ -25,11 +25,6 @@ export type SessionProviderFactory = (
     context: SessionProviderContext,
 ) => AgentProvider | Promise<AgentProvider>
 
-export type SessionProviderInitializer = (
-    provider: AgentProvider,
-    context: SessionProviderContext,
-) => void | Promise<void>
-
 export type ProviderDiscoveryFactory = (
     providerName: string,
     project: Project,
@@ -42,7 +37,6 @@ export interface GatewaySessionServiceOptions {
     repository: SessionMetadataRepository
     providerFactory: SessionProviderFactory
     providerDiscoveryFactory?: ProviderDiscoveryFactory
-    initializeProvider?: SessionProviderInitializer
     now?: () => number
     createId?: () => string
     onSubscriberError?: (error: unknown) => void

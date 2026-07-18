@@ -51,3 +51,22 @@ test:
 This lets a test assert intermediate UI state before allowing the next provider
 event, which is essential for catching missing optimistic bubbles and delayed live
 updates.
+
+## Liveness and backpressure invariants
+
+Successful final output is not enough. The following properties must hold while a
+turn is still running or the transport remains continuously backlogged:
+
+- accepting `session.message` must release the Gateway command consumer before the
+  provider turn completes;
+- cancel and decision responses must reach the active turn without waiting behind
+  that turn, and one Session must not block commands for another Session;
+- repeated ACP snapshots for one logical tool call must produce a bounded number of
+  durable semantic events;
+- durable replay must publish bounded batches even when the broker's pending count
+  never reaches zero;
+- Gateway restart must reconcile transient `querying` and `canceling` metadata;
+- cached UI must remain readable and interactive while refresh and replay continue.
+
+Tests for these rules need controllable infinite/paused streams and sustained
+backlogs. Small finite fixtures that always complete cannot establish liveness.

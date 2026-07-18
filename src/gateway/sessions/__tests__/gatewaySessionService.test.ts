@@ -88,7 +88,6 @@ describe('GatewaySessionService', () => {
     it('creates sessions without a provider and lazily uses only the project canonical root', async () => {
         const fixture = await createFixture()
         const providers: MockProvider[] = []
-        const initializeProvider = vi.fn(async () => undefined)
         const service = await GatewaySessionService.open({
             ...fixture.options,
             providerFactory: async () => {
@@ -99,7 +98,6 @@ describe('GatewaySessionService', () => {
                 providers.push(provider)
                 return provider
             },
-            initializeProvider,
         })
 
         const created = await service.create(fixture.project.id, {
@@ -115,7 +113,6 @@ describe('GatewaySessionService', () => {
         await service.sendMessage(created.id, { text: 'hello' })
 
         expect(providers).toHaveLength(1)
-        expect(initializeProvider).toHaveBeenCalledTimes(1)
         expect(providers[0]?.starts[0]?.config.cwd).toBe(fixture.project.canonicalRoot)
         expect(providers[0]?.starts[0]?.config).toMatchObject({
             model: 'model-a',
@@ -222,6 +219,30 @@ describe('GatewaySessionService', () => {
         await restoredEvents.close()
     })
 
+    it('reconciles transient querying state after a Gateway restart', async () => {
+        const fixture = await createFixture()
+        const timestamp = new Date().toISOString()
+        await fixture.options.repository.save({
+            id: 'interrupted-session', gatewayId: 'gateway-1', projectId: fixture.project.id,
+            state: 'querying', provider: 'mock', config: {}, createdAt: timestamp,
+            updatedAt: timestamp, lastEventSeq: 0,
+        })
+
+        const service = await GatewaySessionService.open({
+            ...fixture.options,
+            providerFactory: () => new MockProvider(() => events()),
+        })
+
+        expect((await service.get('interrupted-session')).state).toBe('idle')
+        const recovered = await fixture.events.list('interrupted-session')
+        expect(recovered.events.at(-1)?.event).toMatchObject({
+            kind: 'state', previousState: 'querying', state: 'idle', reason: 'gateway_restarted',
+        })
+
+        await service.destroy()
+        await fixture.events.close()
+    })
+
     it('routes decision responses and durably closes a never-started session', async () => {
         const fixture = await createFixture()
         let permissionResult: unknown
@@ -261,6 +282,39 @@ describe('GatewaySessionService', () => {
         await service.destroy()
         await fixture.events.close()
     })
+
+    it('accepts a long turn without blocking cancellation behind its completion', async () => {
+        const fixture = await createFixture()
+        const providerExited = deferred<void>()
+        let interrupted = false
+        const provider = new MockProvider((_input, config) => iterable(async function* () {
+            await new Promise<void>((resolve) => {
+                const finish = () => {
+                    config.signal.removeEventListener('abort', finish)
+                    resolve()
+                }
+                config.signal.addEventListener('abort', finish, { once: true })
+                if (config.signal.aborted) finish()
+            })
+            providerExited.resolve()
+        }), () => { interrupted = true })
+        const service = await GatewaySessionService.open({
+            ...fixture.options,
+            providerFactory: () => provider,
+        })
+        const session = await service.create(fixture.project.id, { provider: 'mock', config: {} })
+
+        const execution = await service.acceptMessage(session.id, 'keep working')
+        expect((await service.get(session.id)).state).toBe('querying')
+        await expect(service.cancel(session.id, 'stop now')).resolves.toBe(true)
+        await providerExited.promise
+        await expect(execution.completion).resolves.toMatchObject({ status: 'cancelled' })
+        expect(interrupted).toBe(true)
+        expect((await service.get(session.id)).state).toBe('idle')
+
+        await service.destroy()
+        await fixture.events.close()
+    })
 })
 
 class MockProvider implements AgentProvider {
@@ -272,12 +326,12 @@ class MockProvider implements AgentProvider {
         input: AgentQueryInput,
         config: AgentQueryConfig,
         index: number,
-    ) => AsyncIterable<AgentEvent>) {}
+    ) => AsyncIterable<AgentEvent>, private readonly onInterrupt: () => void = () => undefined) {}
 
     startQuery(input: AgentQueryInput, config: AgentQueryConfig): AgentQueryHandle {
         const stream = this.query(input, config, this.starts.length)
         this.starts.push({ input, config })
-        return { events: stream, interrupt: async () => undefined }
+        return { events: stream, interrupt: async () => { this.onInterrupt() } }
     }
 
     isReady(): boolean { return true }

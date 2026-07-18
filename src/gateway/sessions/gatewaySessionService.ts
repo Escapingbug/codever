@@ -7,6 +7,7 @@ import {
     type DecisionResponseResult,
     type GatewayConversationEvent,
     type GatewayEventSubscriber,
+    type GatewayTurnExecution,
     type GatewayTurnResult,
 } from '@/gateway/runtime'
 import type {
@@ -217,6 +218,16 @@ export class GatewaySessionService {
         idempotencyKey?: string,
         clientMessageId?: string,
     ): Promise<GatewayTurnResult> {
+        return this.acceptMessage(sessionId, input, idempotencyKey, clientMessageId)
+            .then(execution => execution.completion)
+    }
+
+    acceptMessage(
+        sessionId: string,
+        input: string | AgentQueryInput | SendSessionMessageInput,
+        idempotencyKey?: string,
+        clientMessageId?: string,
+    ): Promise<GatewayTurnExecution> {
         const key = typeof input === 'object' && input !== null && 'idempotencyKey' in input
             ? input.idempotencyKey
             : idempotencyKey
@@ -231,12 +242,23 @@ export class GatewaySessionService {
                 })
             }
             const runtime = await this.runtimeFor(sessionId)
-            const result = await runtime.startQuery(
+            const execution = await runtime.beginQuery(
                 queryInput,
                 isSendMessageDto(input) ? input.clientMessageId : clientMessageId,
             )
             await this.flushMetadata()
-            return result
+            const completion = execution.completion.then(
+                async result => {
+                    await this.flushMetadata()
+                    return result
+                },
+                async error => {
+                    await this.flushMetadata()
+                    throw error
+                },
+            )
+            void completion.catch(error => this.options.onSubscriberError?.(error))
+            return { completion }
         }))
     }
 
@@ -403,13 +425,6 @@ export class GatewaySessionService {
                 `Provider factory returned "${provider.name}" for "${session.provider}"`,
             )
         }
-        try {
-            await this.options.initializeProvider?.(provider, context)
-        } catch (error) {
-            await provider.destroy?.().catch(() => undefined)
-            throw error
-        }
-
         const runtime = new GatewaySessionRuntime({
             gatewayId: session.gatewayId,
             projectId: session.projectId,
@@ -472,6 +487,23 @@ export class GatewaySessionService {
                 for (const event of page.events) await this.applyEvent(event)
                 if (!page.hasMore || page.events.length === 0) break
                 after = page.cursor
+            }
+            const restored = await this.options.repository.get(session.id)
+            if (restored?.state === 'querying' || restored?.state === 'canceling') {
+                const envelope = await this.options.eventStore.append({
+                    gatewayId: restored.gatewayId,
+                    projectId: restored.projectId,
+                    sessionId: restored.id,
+                    eventId: randomUUID(),
+                    timestamp: new Date(this.now()).toISOString(),
+                    event: {
+                        kind: 'state',
+                        previousState: restored.state,
+                        state: 'idle',
+                        reason: 'gateway_restarted',
+                    },
+                })
+                await this.applyEvent(envelope)
             }
         }
     }

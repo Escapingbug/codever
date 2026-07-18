@@ -76,9 +76,6 @@ export async function createGatewayApplication(
             if (!provider) throw new Error(`Unknown provider: ${name}`)
             return provider
         },
-        initializeProvider: async (provider) => {
-            if (!provider.isReady()) await provider.init?.()
-        },
         providerDiscoveryFactory: (name) => {
             const provider = createProviderInstance(name)
             if (!provider) throw new Error(`Unknown provider: ${name}`)
@@ -333,17 +330,27 @@ export async function handleClientRequest(
                     request.payload.sessionId,
                     attachmentIds,
                 )
+                let releaseAfterCompletion = false
                 try {
-                    await context.sessions.sendMessage(request.payload.sessionId, {
+                    const execution = await context.sessions.acceptMessage(request.payload.sessionId, {
                         parts: [
                             ...(request.payload.input.text.trim() ? [{ type: 'text' as const, text: request.payload.input.text }] : []),
                             ...attachmentParts,
                         ],
                     }, request.idempotencyKey, request.payload.input.clientMessageId)
-                } finally {
-                    await context.attachments.releaseParts(attachmentIds).catch(error => {
+                    releaseAfterCompletion = true
+                    void execution.completion.then(
+                        () => context.attachments.releaseParts(attachmentIds),
+                        () => context.attachments.releaseParts(attachmentIds),
+                    ).catch(error => {
                         console.error('[gateway:attachments]', error instanceof Error ? error.message : error)
                     })
+                } finally {
+                    if (!releaseAfterCompletion) {
+                        await context.attachments.releaseParts(attachmentIds).catch(error => {
+                            console.error('[gateway:attachments]', error instanceof Error ? error.message : error)
+                        })
+                    }
                 }
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break

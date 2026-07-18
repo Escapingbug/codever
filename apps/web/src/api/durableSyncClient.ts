@@ -45,6 +45,7 @@ export interface DurableSyncClientOptions {
   relayCredential: ClientRelayCredential
   deviceCredentials: ClientDeviceCredentialStore
   onEvent: (event: SessionEventEnvelope, standard: StandardConversationEvent) => void | Promise<void>
+  onEvents?: (events: Array<{ event: SessionEventEnvelope; standard: StandardConversationEvent }>) => void | Promise<void>
   onInventory: (gatewayId: string, inventory: InventorySnapshot) => void | Promise<void>
   onGateway: (gateway: Gateway) => void | Promise<void>
   responseStore?: DurableResponseStore
@@ -207,7 +208,11 @@ export class DurableSyncClient {
     }
     const standard = { ...value, codever } as StandardConversationEvent
     await this.eventReplay.deliver({ codever, standard }, message.info.pending, async buffered => {
-      for (const event of buffered) await this.options.onEvent(event.codever, event.standard)
+      if (this.options.onEvents) {
+        await this.options.onEvents(buffered.map(event => ({ event: event.codever, standard: event.standard })))
+      } else {
+        for (const event of buffered) await this.options.onEvent(event.codever, event.standard)
+      }
     })
   }
 

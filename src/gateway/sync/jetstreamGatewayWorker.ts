@@ -34,6 +34,7 @@ import type { DeviceCredentialRecord, DeviceCredentialRepository } from '../secu
 const WORKING_INTERVAL_MS = 10_000
 const RESPONSE_TTL_MS = 31 * 24 * 60 * 60_000
 const EVENT_TTL_MS = 365 * 24 * 60 * 60_000
+const MAX_CONCURRENT_COMMANDS = 16
 
 export interface GatewayJetStreamWorkerOptions {
     connection: NatsConnection
@@ -63,8 +64,8 @@ export class GatewayJetStreamWorker {
         this.stopping = false
         const name = gatewayConsumerName(this.options.gatewayId)
         const consumer = await this.js.consumers.get(CODEVER_STREAMS.commands, name)
-        this.messages = await consumer.consume({ max_messages: 1 })
-        this.loop = this.consume(this.messages)
+        this.messages = await consumer.consume({ max_messages: MAX_CONCURRENT_COMMANDS })
+        this.loop = consumeConcurrently(this.messages, MAX_CONCURRENT_COMMANDS, message => this.process(message))
         void this.loop.catch(error => {
             if (!this.stopping) this.report(error)
         })
@@ -135,13 +136,6 @@ export class GatewayJetStreamWorker {
         })
     }
 
-    private async consume(messages: ConsumerMessages): Promise<void> {
-        for await (const message of messages) {
-            if (this.stopping) return
-            await this.process(message)
-        }
-    }
-
     private async process(message: JsMsg): Promise<void> {
         let heartbeat: ReturnType<typeof setInterval> | undefined
         try {
@@ -168,11 +162,13 @@ export class GatewayJetStreamWorker {
             }
             heartbeat = setInterval(() => message.working(), WORKING_INTERVAL_MS)
             heartbeat.unref?.()
-            const response = await this.options.requestLedger.execute(
-                request,
-                credential.credentialId,
-                () => this.options.handleRequest(request, credential.credentialId),
-            )
+            const response = requestUsesDurableLedger(request)
+                ? await this.options.requestLedger.execute(
+                    request,
+                    credential.credentialId,
+                    () => this.options.handleRequest(request, credential.credentialId),
+                )
+                : await this.options.handleRequest(request, credential.credentialId)
             await this.publishResponse(outer.commandId, credential, cipher, response)
             if (!await message.ackAck()) throw new Error('JetStream did not confirm the Gateway command acknowledgement')
         } catch (error) {
@@ -235,6 +231,30 @@ export class GatewayJetStreamWorker {
 
     private now(): number { return this.options.now?.() ?? Date.now() }
     private messageId(): string { return this.options.messageId?.() ?? randomUUID() }
+}
+
+export async function consumeConcurrently<T>(
+    source: AsyncIterable<T>,
+    limit: number,
+    process: (value: T) => Promise<void>,
+): Promise<void> {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Concurrent consumer limit must be positive')
+    const active = new Set<Promise<void>>()
+    for await (const value of source) {
+        const task = Promise.resolve().then(() => process(value))
+        active.add(task)
+        void task.finally(() => active.delete(task)).catch(() => undefined)
+        if (active.size >= limit) await Promise.race(active)
+    }
+    await Promise.all(active)
+}
+
+export function requestUsesDurableLedger(request: ClientGatewayRequestFrame): boolean {
+    return request.payload.kind !== 'inventory.get'
+        && request.payload.kind !== 'events.list'
+        && request.payload.kind !== 'provider.sessions.list'
+        && request.payload.kind !== 'attachment.list'
+        && request.payload.kind !== 'attachment.download'
 }
 
 function parseEncrypted(value: string): HpkeEnvelope {

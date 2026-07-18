@@ -14,10 +14,13 @@ export interface ProviderSemanticAdapter {
     toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[]
 }
 
-export function createProviderSemanticAdapter(provider: string): ProviderSemanticAdapter {
+export function createProviderSemanticAdapter(
+    provider: string,
+    options: { boundedToolUpdates?: boolean } = {},
+): ProviderSemanticAdapter {
     const normalized = provider.toLowerCase()
     if (normalized.includes('acp') || normalized.includes('opencode') || normalized.includes('codebuddy') || normalized.includes('agent')) {
-        return new AcpProviderSemanticAdapter(provider)
+        return new AcpProviderSemanticAdapter(provider, options)
     }
     return new DefaultProviderSemanticAdapter(provider)
 }
@@ -119,9 +122,14 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
 export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
     private toolCalls = new Map<string, AcpToolSnapshot>()
 
+    constructor(provider: string, private readonly options: { boundedToolUpdates?: boolean } = {}) {
+        super(provider)
+    }
+
     toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[] {
         if (event.kind === 'tool_use') {
-            return super.toConversationEvents(this.normalizeToolUse(event), context)
+            const normalized = this.normalizeToolUse(event)
+            return normalized.emit ? super.toConversationEvents(normalized.event, context) : []
         }
 
         if (event.kind === 'tool_result') {
@@ -196,9 +204,9 @@ export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
         this.toolCalls.clear()
     }
 
-    private normalizeToolUse(event: AgentToolUseEvent): AgentToolUseEvent {
+    private normalizeToolUse(event: AgentToolUseEvent): { event: AgentToolUseEvent; emit: boolean } {
         const toolUseId = event.toolUseId
-        if (!toolUseId) return event
+        if (!toolUseId) return { event, emit: true }
 
         const existing = this.toolCalls.get(toolUseId)
         const toolName = existing && isMissingToolName(event.toolName) ? existing.toolName : event.toolName
@@ -215,14 +223,25 @@ export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
             ...(locations !== undefined ? { locations } : {}),
         }
 
+        // ACP may stream every partial byte of rawInput as another pending
+        // tool_call update. Persisting each partial snapshot amplifies one tool
+        // into thousands of durable events. Keep the latest snapshot in memory,
+        // but emit only the first observation and the first complete/running one.
+        const completesInput = normalized.status === 'running' || normalized.isInputComplete === true
+        const emit = !this.options.boundedToolUpdates
+            || existing === undefined
+            || (completesInput && !existing.emittedCompleteInput)
+        if (this.options.boundedToolUpdates && existing && emit) normalized.status = 'running'
+
         this.toolCalls.set(toolUseId, {
             toolName: normalized.toolName,
             input: normalized.input,
             rawInput: normalized.rawInput,
             toolKind: normalized.toolKind,
             locations: normalized.locations,
+            emittedCompleteInput: existing?.emittedCompleteInput === true || completesInput,
         })
-        return normalized
+        return { event: normalized, emit }
     }
 
     private normalizeToolResult(event: Extract<AgentEvent, { kind: 'tool_result' }>): Extract<AgentEvent, { kind: 'tool_result' }> {
@@ -240,6 +259,7 @@ interface AcpToolSnapshot {
     rawInput?: string
     toolKind?: string
     locations?: Array<{ path: string; line?: number }>
+    emittedCompleteInput: boolean
 }
 
 function stableEventId(event: AgentEvent, context: ProviderAdapterContext, seq: number): string {

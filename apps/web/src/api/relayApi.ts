@@ -455,6 +455,7 @@ export class RelayApi {
       responseStore: new IndexedDbDurableResponseStore(credential.relayProfileId, credential.credentialId),
       eventStore: new IndexedDbSessionEventStore(),
       onEvent: event => this.publishEvents([event]),
+      onEvents: events => this.publishEvents(events.map(value => value.event)),
       onInventory: (gatewayId, inventory) => {
         this.inventories.set(gatewayId, inventory)
         for (const project of inventory.projects) this.projectGateways.set(project.id, gatewayId)

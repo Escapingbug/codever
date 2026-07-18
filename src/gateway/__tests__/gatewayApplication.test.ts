@@ -98,10 +98,11 @@ describe('Gateway attachment requests', () => {
             credentialId: 'credential-1', gatewayId: 'gateway-1', attachments,
             sessions: {
                 get: async () => ({ id: 'session-1' }),
-                sendMessage: async (_sessionId: string, input: RichUserInput) => {
+                acceptMessage: async (_sessionId: string, input: RichUserInput) => {
                     received = input
                     const file = input.parts.find(part => part.type === 'file')
                     if (file?.type === 'file') expect(await readFile(file.path, 'utf8')).toBe('attachment body')
+                    return { completion: Promise.resolve({ turnId: 'turn-1', status: 'success' as const }) }
                 },
             } as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
@@ -182,6 +183,40 @@ describe('Gateway attachment requests', () => {
     })
 })
 
+describe('Gateway command liveness', () => {
+    it('acknowledges a message and accepts cancel while the provider turn is still running', async () => {
+        const completion = deferred<{ turnId: string; status: 'cancelled' }>()
+        let cancelCalls = 0
+        const context = {
+            credentialId: 'credential-1', gatewayId: 'gateway-1',
+            sessions: {
+                get: async () => ({ id: 'session-1' }),
+                acceptMessage: async () => ({ completion: completion.promise }),
+                cancel: async () => { cancelCalls += 1; return true },
+            } as never,
+            attachments: {
+                resolveParts: async () => [],
+                releaseParts: async () => undefined,
+            } as never,
+            inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const accepted = await handleClientRequest(frame('long-message', {
+            kind: 'session.message', sessionId: 'session-1', input: { text: 'long task' },
+        }), context)
+        expect(accepted.status).toBe('completed')
+
+        const cancelled = await handleClientRequest(frame('cancel-long-message', {
+            kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' },
+        }), context)
+        expect(cancelled.status).toBe('completed')
+        expect(cancelCalls).toBe(1)
+        completion.resolve({ turnId: 'turn-1', status: 'cancelled' })
+        await completion.promise
+    })
+})
+
 function frame(
     suffix: string,
     payload: Parameters<typeof handleClientRequest>[0]['payload'],
@@ -193,6 +228,12 @@ function frame(
         idempotencyKey: `idempotency-${suffix}`,
         payload,
     }
+}
+
+function deferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    const promise = new Promise<T>(settle => { resolve = settle })
+    return { promise, resolve }
 }
 
 class TestRelayBlobs implements ObjectBlobTransport {

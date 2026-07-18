@@ -122,6 +122,21 @@ describe('GatewaySessionRuntime', () => {
         ])
     })
 
+    it('acknowledges a started turn before completion so cancellation is independently reachable', async () => {
+        const provider = new MockProvider((_prompt, config) => ({
+            events: iterable(async function* () {
+                await new Promise<void>(resolve => config.signal.addEventListener('abort', () => resolve(), { once: true }))
+            }),
+            interrupt: async () => { provider.interruptCalls += 1 },
+        }))
+        const runtime = createRuntime(provider, new MemoryConversationEventStore<GatewayConversationEvent>())
+
+        const execution = await runtime.beginQuery('long running turn')
+        expect(runtime.getState()).toBe('querying')
+        await expect(runtime.cancel('stop now')).resolves.toBe(true)
+        await expect(execution.completion).resolves.toMatchObject({ status: 'cancelled' })
+    })
+
     it('routes tool permissions through a durable first-response-wins decision', async () => {
         let permissionResult: unknown
         const provider = new MockProvider((_prompt, config) => iterable(async function* () {
@@ -203,6 +218,25 @@ describe('GatewaySessionRuntime', () => {
         expect(provider.init).toHaveBeenCalledOnce()
         expect(provider.starts).toHaveLength(1)
         expect(runtime.getState()).toBe('idle')
+    })
+
+    it('does not make cancellation wait for a cold provider initialization', async () => {
+        const initialization = deferred<void>()
+        const provider = new MockProvider(() => iterable(async function* () {
+            yield { kind: 'result', status: 'success' }
+        }))
+        provider.ready = false
+        provider.init = vi.fn(() => initialization.promise)
+        const runtime = createRuntime(provider, new MemoryConversationEventStore<GatewayConversationEvent>())
+
+        const execution = await runtime.beginQuery('start slowly')
+        await expect(runtime.cancel('cancel initialization')).resolves.toBe(true)
+        await expect(execution.completion).resolves.toMatchObject({ status: 'cancelled' })
+        expect(provider.starts).toHaveLength(0)
+
+        initialization.resolve()
+        await initialization.promise
+        await runtime.destroy()
     })
 })
 
