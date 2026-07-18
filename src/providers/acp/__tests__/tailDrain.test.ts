@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { AcpProvider, formatAgentQueryError } from '@/providers/acp'
+import { AcpClientManager } from '@/providers/acp/AcpClientManager'
 import type { AgentEvent } from '@/providers/types'
 
 interface FakeSessionNotification {
     sessionId: string
-    update: {
-        sessionUpdate: 'agent_message_chunk'
-        content: { type: 'text'; text: string }
-    }
+    update: any
 }
 
 interface FakeWaiter {
@@ -23,6 +21,9 @@ class FakeAcpClientManager {
     promptCapabilities = {}
     promptText = 'final tail'
     loadSessionHistoryText: string | null = null
+    promptCompletesOnlyFromIdle = false
+    completeActivePromptCalls = 0
+    private completePrompt?: (value: { stopReason: string }) => void
 
     private queue: FakeSessionNotification[] = []
     private waiters: FakeWaiter[] = []
@@ -53,6 +54,19 @@ class FakeAcpClientManager {
     }
 
     async prompt(): Promise<{ stopReason: string }> {
+        if (this.promptCompletesOnlyFromIdle) {
+            setTimeout(() => {
+                this.emit({ sessionId: 'session-1', update: {
+                    sessionUpdate: 'session_info_update',
+                    _meta: { codex: { threadStatus: { type: 'active' } } },
+                } })
+                this.emit({ sessionId: 'session-1', update: {
+                    sessionUpdate: 'session_info_update',
+                    _meta: { codex: { threadStatus: { type: 'idle' } } },
+                } })
+            }, 10)
+            return new Promise(resolve => { this.completePrompt = resolve })
+        }
         this.sessionUpdateProcessing = new Promise(resolve => {
             setTimeout(() => {
                 this.emit({
@@ -66,6 +80,12 @@ class FakeAcpClientManager {
             }, 150)
         })
         return { stopReason: 'end_turn' }
+    }
+
+    completeActivePrompt(_sessionId: string, response: { stopReason: string }): boolean {
+        this.completeActivePromptCalls += 1
+        this.completePrompt?.(response)
+        return Boolean(this.completePrompt)
     }
 
     async waitForSessionUpdateProcessing(): Promise<void> {
@@ -215,6 +235,24 @@ describe('AcpProvider tail drain', () => {
         ]))
         expect(clientManager.pendingWaiterCount).toBe(0)
     })
+
+    it('finishes a Codex turn when threadStatus becomes idle even if prompt never returns', async () => {
+        const provider = new AcpProvider({ name: 'codex', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.promptCompletesOnlyFromIdle = true
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('adjust requirement', {
+            cwd: '/repo',
+            signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.completeActivePromptCalls).toBe(1)
+        expect(events.at(-1)).toMatchObject({ kind: 'result', status: 'success' })
+    })
 })
 
 describe('formatAgentQueryError', () => {
@@ -237,5 +275,19 @@ describe('formatAgentQueryError', () => {
         expect(summary).toContain('Error: RequestError: Internal error')
         expect(summary).toContain('code: internal_error')
         expect(summary).toContain('requestId: req_123')
+    })
+})
+
+describe('AcpClientManager prompt completion', () => {
+    it('allows an authoritative idle notification to settle a stuck prompt RPC', async () => {
+        const manager = new AcpClientManager({ command: 'fake', args: [] })
+        ;(manager as any)._connected = true
+        ;(manager as any).connection = { prompt: () => new Promise(() => undefined) }
+
+        const prompt = manager.prompt({ sessionId: 'session-1', prompt: [] })
+        await Promise.resolve()
+        expect(manager.completeActivePrompt('session-1', { stopReason: 'end_turn' })).toBe(true)
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' })
     })
 })

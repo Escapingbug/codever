@@ -32,6 +32,7 @@ import type { DurableSessionEventStore } from './sessionEventStore'
 import { DurableEventReplayBuffer } from './durableEventReplay'
 
 const COMMAND_TTL_MS = 7 * 24 * 60 * 60_000
+const CLOSE_GRACE_MS = 1_000
 
 class RetryableDurableMessageError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -75,6 +76,7 @@ export class DurableSyncClient {
   private readonly ciphers = new Map<string, Promise<HpkeMessageCipher>>()
   private readonly consumers: ConsumerMessages[] = []
   private loops: Promise<void>[] = []
+  private eventDelivery: Promise<void> = Promise.resolve()
   private stopping = false
   private readonly eventReplay = new DurableEventReplayBuffer<{
     codever: SessionEventEnvelope
@@ -99,7 +101,7 @@ export class DurableSyncClient {
       const consumer = await this.js.consumers.get(spec.stream, clientConsumerName(clientId, spec.channel))
       const messages = await consumer.consume({ max_messages: 128 })
       this.consumers.push(messages)
-      const loop = this.consume(messages, spec.handler)
+      const loop = this.consume(messages, spec.handler, spec.channel === 'events' ? 32 : 1)
       this.loops.push(loop)
       void loop.catch(error => { if (!this.stopping) this.report(error) })
     }
@@ -108,7 +110,10 @@ export class DurableSyncClient {
   async close(): Promise<void> {
     this.stopping = true
     await Promise.all(this.consumers.map(consumer => consumer.close()))
-    await Promise.all(this.loops.map(loop => loop.catch(() => undefined)))
+    await Promise.race([
+      Promise.all(this.loops.map(loop => loop.catch(() => undefined))),
+      new Promise<void>(resolve => setTimeout(resolve, CLOSE_GRACE_MS)),
+    ])
     this.consumers.length = 0
     this.loops = []
     const error = new Error('Durable synchronization client closed')
@@ -168,17 +173,30 @@ export class DurableSyncClient {
     }
   }
 
-  private async consume(messages: ConsumerMessages, handler: (message: JsMsg) => Promise<void>): Promise<void> {
+  private async consume(
+    messages: ConsumerMessages,
+    handler: (message: JsMsg) => Promise<void>,
+    concurrency: number,
+  ): Promise<void> {
+    const active = new Set<Promise<void>>()
     for await (const message of messages) {
       if (this.stopping) return
-      try {
-        await handler(message)
-        if (!await message.ackAck()) throw new Error('JetStream did not confirm the Client acknowledgement')
-      } catch (error) {
-        this.report(error)
-        if (error instanceof RetryableDurableMessageError) message.nak(1_000)
-        else message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
-      }
+      const task = this.process(message, handler)
+      active.add(task)
+      void task.finally(() => active.delete(task)).catch(() => undefined)
+      if (active.size >= concurrency) await Promise.race(active)
+    }
+    await Promise.all(active)
+  }
+
+  private async process(message: JsMsg, handler: (message: JsMsg) => Promise<void>): Promise<void> {
+    try {
+      await handler(message)
+      if (!await message.ackAck()) throw new Error('JetStream did not confirm the Client acknowledgement')
+    } catch (error) {
+      this.report(error)
+      if (error instanceof RetryableDurableMessageError) message.nak(1_000)
+      else message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
     }
   }
 
@@ -188,8 +206,17 @@ export class DurableSyncClient {
     const credential = await this.deviceCredential(outer.gatewayId)
     const cipher = await this.cipher(outer.gatewayId, credential)
     const response = parseClientGatewayResponseFrame(await cipher.decrypt(parseEncrypted(outer.opaquePayload)))
-    await this.options.responseStore?.put(outer.gatewayId, outer.commandId, response)
-    this.pending.get(outer.commandId)?.resolve(response)
+    try {
+      await deliverDurableResponse(
+        this.pending.get(outer.commandId),
+        response,
+        () => this.options.responseStore?.put(outer.gatewayId, outer.commandId, response) ?? Promise.resolve(),
+      )
+    } catch (error) {
+      throw new RetryableDurableMessageError('The durable response could not be committed to the Client cache', {
+        cause: error,
+      })
+    }
   }
 
   private async event(message: JsMsg): Promise<void> {
@@ -197,23 +224,32 @@ export class DurableSyncClient {
     this.assertClient(outer.credentialId)
     const credential = await this.deviceCredential(outer.gatewayId)
     const cipher = await this.cipher(outer.gatewayId, credential)
-    const value = await cipher.decrypt(parseEncrypted(outer.opaquePayload)) as Partial<StandardConversationEvent>
-    const codever = parseSessionEventEnvelope(value.codever)
+    const previousDelivery = this.eventDelivery
+    let releaseDelivery!: () => void
+    this.eventDelivery = new Promise<void>(resolve => { releaseDelivery = resolve })
     try {
-      await this.options.eventStore?.merge(codever)
-    } catch (error) {
-      throw new RetryableDurableMessageError('The durable event could not be committed to the Client cache', {
-        cause: error,
-      })
-    }
-    const standard = { ...value, codever } as StandardConversationEvent
-    await this.eventReplay.deliver({ codever, standard }, message.info.pending, async buffered => {
-      if (this.options.onEvents) {
-        await this.options.onEvents(buffered.map(event => ({ event: event.codever, standard: event.standard })))
-      } else {
-        for (const event of buffered) await this.options.onEvent(event.codever, event.standard)
+      const value = await cipher.decrypt(parseEncrypted(outer.opaquePayload)) as Partial<StandardConversationEvent>
+      const codever = parseSessionEventEnvelope(value.codever)
+      try {
+        await this.options.eventStore?.merge(codever)
+      } catch (error) {
+        throw new RetryableDurableMessageError('The durable event could not be committed to the Client cache', {
+          cause: error,
+        })
       }
-    })
+      const standard = { ...value, codever } as StandardConversationEvent
+      await previousDelivery
+      await this.eventReplay.deliver({ codever, standard }, message.info.pending, async buffered => {
+        if (this.options.onEvents) {
+          await this.options.onEvents(buffered.map(event => ({ event: event.codever, standard: event.standard })))
+        } else {
+          for (const event of buffered) await this.options.onEvent(event.codever, event.standard)
+        }
+      })
+    } finally {
+      await previousDelivery
+      releaseDelivery()
+    }
   }
 
   private async inventory(message: JsMsg): Promise<void> {
@@ -258,6 +294,15 @@ export class DurableSyncClient {
 
   private report(value: unknown): void { this.options.onError?.(value instanceof Error ? value : new Error(String(value))) }
   private now(): number { return this.options.now?.() ?? Date.now() }
+}
+
+export async function deliverDurableResponse(
+  waiting: Pick<Deferred<ClientGatewayResponseFrame>, 'resolve'> | undefined,
+  response: ClientGatewayResponseFrame,
+  persist: () => Promise<void>,
+): Promise<void> {
+  waiting?.resolve(response)
+  await persist()
 }
 
 function commandExpiry(payload: ClientGatewayRequestPayload): string | undefined {

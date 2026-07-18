@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNavigation from './components/AppNavigation.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
 import { navigateToParent } from './navigation'
 import { clientSession } from './state/clientSession'
+import { installLifecycleRecovery } from './lifecycleRecovery'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +16,16 @@ const relayConnected = computed(() => clientSession.connectionState.value === 'c
 const relayLabel = computed(() => clientSession.connectionState.value === 'connected' ? 'Connected'
   : clientSession.connectionState.value === 'connecting' ? 'Connecting'
     : clientSession.connectionState.value === 'reconnecting' ? 'Reconnecting' : 'Offline')
+let removeLifecycleRecovery: (() => void) | undefined
+onMounted(() => {
+  removeLifecycleRecovery = installLifecycleRecovery({
+    document,
+    window,
+    suspend: clientSession.suspend,
+    resume: clientSession.resume,
+  })
+})
+onBeforeUnmount(() => removeLifecycleRecovery?.())
 </script>
 
 <template>

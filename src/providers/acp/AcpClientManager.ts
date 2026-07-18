@@ -272,22 +272,26 @@ export class AcpClientManager {
         }
         this.activePrompt = active
 
-        try {
-            const response = await conn.prompt({
+        void conn.prompt({
                 sessionId: params.sessionId,
                 prompt: params.prompt,
-            })
-            active.resolve(response)
-            return response
-        } catch (e) {
-            active.reject(e)
-            throw e
+            }).then(active.resolve, active.reject)
+
+        try {
+            return await promptPromise
         } finally {
             if (this.activePrompt?.promise === promptPromise) {
                 this.activePrompt = null
             }
             this.cancellingSessionIds.delete(params.sessionId)
         }
+    }
+
+    completeActivePrompt(sessionId: string, response: PromptResponse): boolean {
+        const active = this.activePrompt
+        if (!active || active.sessionId !== sessionId) return false
+        active.resolve(response)
+        return true
     }
 
     async setSessionModel(params: Omit<SetSessionModelRequest, '_meta'>): Promise<SetSessionModelResponse> {

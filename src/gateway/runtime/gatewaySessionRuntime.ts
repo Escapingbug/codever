@@ -228,18 +228,40 @@ export class GatewaySessionRuntime {
                     },
                 })
                 this.activeHandle = handle
+                let pendingText: Extract<AgentEvent, { kind: 'text' }> | undefined
+                const flushText = async () => {
+                    if (!pendingText) return
+                    const event = pendingText
+                    pendingText = undefined
+                    const result = await this.recordProviderEvent(event, turnId)
+                    if (result) {
+                        status = result.status
+                        summary = result.summary
+                    }
+                }
 
                 for await (const providerEvent of handle.events) {
                     if (this.activeAbortController.signal.aborted) {
+                        await flushText()
                         status = 'cancelled'
                         break
                     }
+                    if (providerEvent.kind === 'text') {
+                        pendingText = pendingText
+                            ? { ...pendingText, text: pendingText.text + providerEvent.text }
+                            : providerEvent
+                        if (pendingText.text.length < 256) continue
+                        await flushText()
+                        continue
+                    }
+                    await flushText()
                     const result = await this.recordProviderEvent(providerEvent, turnId)
                     if (result) {
                         status = result.status
                         summary = result.summary
                     }
                 }
+                await flushText()
             }
             if (this.activeAbortController.signal.aborted) status = 'cancelled'
         } catch (error) {

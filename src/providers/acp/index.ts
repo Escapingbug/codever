@@ -30,6 +30,13 @@ const ACP_HISTORY_DRAIN_IDLE_MS = 150
 const ACP_HISTORY_DRAIN_MAX_MS = 3_000
 const MAX_AGENT_ERROR_SUMMARY_LENGTH = 1_500
 
+export function readCodexThreadStatus(update: SessionUpdate): 'active' | 'idle' | undefined {
+    if ((update as { sessionUpdate?: string }).sessionUpdate !== 'session_info_update') return undefined
+    const status = (update as { _meta?: { codex?: { threadStatus?: { type?: unknown } } } })
+        ._meta?.codex?.threadStatus?.type
+    return status === 'active' || status === 'idle' ? status : undefined
+}
+
 /**
  * Resolve the command used to launch the codever MCP stdio server.
  *
@@ -758,9 +765,15 @@ export class AcpProvider implements AgentProvider {
                 }
 
                 const toolCalls = new Map<string, ToolCallSnapshot>()
+                let observedActiveCodexThread = false
                 const consumerAbort = new AbortController()
                 updateConsumerAbort = consumerAbort
                 const pushSessionUpdateEvents = (notification: SessionNotification, source: 'updateConsumer' | 'tailDrain'): void => {
+                    const codexThreadStatus = readCodexThreadStatus(notification.update)
+                    if (codexThreadStatus === 'active') observedActiveCodexThread = true
+                    if (codexThreadStatus === 'idle' && observedActiveCodexThread) {
+                        clientManager.completeActivePrompt(sessionId!, { stopReason: 'end_turn' })
+                    }
                     const agentEvents = mapSessionUpdateWithToolState(notification.update, toolCalls, config.debugLog)
                     for (const event of agentEvents) {
                         if (events.done) break

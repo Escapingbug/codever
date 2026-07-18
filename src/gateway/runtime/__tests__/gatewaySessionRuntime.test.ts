@@ -238,6 +238,24 @@ describe('GatewaySessionRuntime', () => {
         await initialization.promise
         await runtime.destroy()
     })
+
+    it('coalesces token-sized text deltas before durable publication', async () => {
+        const provider = new MockProvider(() => iterable(async function* () {
+            for (let index = 0; index < 1_000; index += 1) yield { kind: 'text', text: 'x' }
+            yield { kind: 'result', status: 'success' }
+        }))
+        const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+        const runtime = createRuntime(provider, store)
+
+        await runtime.startQuery('stream text')
+
+        const text = (await store.list('session-1')).events
+            .map(value => value.event)
+            .filter((event): event is Extract<GatewayConversationEvent, { kind: 'assistant_text_delta' }> =>
+                event.kind === 'assistant_text_delta')
+        expect(text).toHaveLength(4)
+        expect(text.map(event => event.text).join('')).toBe('x'.repeat(1_000))
+    })
 })
 
 class TrackingStore extends MemoryConversationEventStore<GatewayConversationEvent> {

@@ -142,6 +142,17 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     persist()
   }
 
+  function suspend(): void { api.markSuspended() }
+  async function resume(): Promise<void> {
+    if (!activeAuth.value) return
+    try {
+      await api.resumeDurable()
+      initializationError.value = ''
+    } catch (error) {
+      initializationError.value = error instanceof Error ? error.message : 'Relay reconnection failed'
+    }
+  }
+
   return {
     profiles,
     activeProfileId,
@@ -159,6 +170,8 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     removeProfile,
     pairRelay,
     logout,
+    suspend,
+    resume,
     onUnauthorized(handler: () => void) { disconnectedHandler = handler },
   }
 }

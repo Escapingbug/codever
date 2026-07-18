@@ -71,6 +71,7 @@ export class RelayApi {
   private readonly durableIdempotencyGateways = new Set<string>()
   private connectionStateValue: RelayConnectionState = 'disconnected'
   private connectionGeneration = 0
+  private recovery?: Promise<void>
 
   constructor(private readonly options: RelayApiOptions) {
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
@@ -112,6 +113,26 @@ export class RelayApi {
     return credential
   }
 
+  markSuspended(): void {
+    if (this.connectionStateValue === 'connected') this.setConnectionState('reconnecting')
+  }
+
+  resumeDurable(): Promise<void> {
+    if (this.recovery) return this.recovery
+    const recovery = (async () => {
+      const credential = this.relayCredential
+        ?? (this.relayProfileId ? await this.relayCredentials.load(this.relayProfileId) : undefined)
+      if (!credential) return
+      this.relayCredential = credential
+      await this.openDurable(credential)
+    })()
+    this.recovery = recovery
+    void recovery.finally(() => {
+      if (this.recovery === recovery) this.recovery = undefined
+    }).catch(() => undefined)
+    return recovery
+  }
+
   async pairRelay(pairingCode: string, credentialId = `client_${crypto.randomUUID()}`): Promise<ClientRelayCredential> {
     await this.openRelay({ credentialId, pairingCode })
     const credential = await this.relayCredentials.load(this.relayProfileId)
@@ -125,7 +146,7 @@ export class RelayApi {
     this.connectionGeneration += 1
     await this.durable?.close()
     this.durable = undefined
-    await this.nats?.drain()
+    await this.nats?.close()
     this.nats = undefined
     this.relay?.close(false)
     this.relay = undefined
@@ -425,13 +446,12 @@ export class RelayApi {
     payload: ClientGatewayRequestPayload,
   ): Promise<ClientGatewayResponseFrame> {
     const idempotencyKey = crypto.randomUUID()
-    const timeoutMs = payload.kind === 'session.message'
-      ? this.options.longRequestTimeoutMs ?? 30 * 60_000
-      : this.options.requestTimeoutMs
+    const timeoutMs = this.options.requestTimeoutMs ?? 10_000
     try {
       return await this.requireDurable().request(gatewayId, payload, idempotencyKey, timeoutMs)
     } catch (error) {
       if (!isRetrySafe(payload) && !this.durableIdempotencyGateways.has(gatewayId)) throw error
+      await this.resumeDurable()
       return this.requireDurable().request(gatewayId, payload, idempotencyKey, timeoutMs)
     }
   }
@@ -440,7 +460,7 @@ export class RelayApi {
     const generation = ++this.connectionGeneration
     this.setConnectionState('connecting')
     await this.durable?.close()
-    await this.nats?.drain()
+    await this.nats?.close()
     let nats: NatsConnection
     try {
       nats = await connectDurableNats(credential)
