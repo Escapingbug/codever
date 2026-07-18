@@ -16,7 +16,7 @@ export function normalizeRelayUrl(value: string, port = DEFAULT_RELAY_PORT): str
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('Relay port must be between 1 and 65535')
   if (address.includes('://')) throw new Error('Enter only the Relay domain, without http:// or https://')
   if (/[/?#@]/.test(address)) throw new Error('Enter only the Relay domain, without a path')
-  const parsed = new URL(`http://${address}`)
+  const parsed = new URL(`https://${address}`)
   if (parsed.port) throw new Error('Change the port in Advanced connection settings')
   parsed.port = String(port)
   return parsed.toString().replace(/\/$/, '')

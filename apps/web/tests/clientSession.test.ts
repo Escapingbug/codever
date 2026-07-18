@@ -4,11 +4,11 @@ import { createClientSession, DEFAULT_RELAY_PORT, normalizeRelayUrl, relayProfil
 
 describe('Relay profile address', () => {
   it('turns a domain into the native Relay URL with the hidden default port', () => {
-    expect(normalizeRelayUrl('rd.anciety.my.id')).toBe(`http://rd.anciety.my.id:${DEFAULT_RELAY_PORT}`)
+    expect(normalizeRelayUrl('rd.anciety.my.id')).toBe(`https://rd.anciety.my.id:${DEFAULT_RELAY_PORT}`)
   })
 
   it('supports an explicitly selected advanced port', () => {
-    expect(normalizeRelayUrl('relay.example.com', 9443)).toBe('http://relay.example.com:9443')
+    expect(normalizeRelayUrl('relay.example.com', 9443)).toBe('https://relay.example.com:9443')
   })
 
   it('rejects protocols, inline ports, and paths in the domain field', () => {
