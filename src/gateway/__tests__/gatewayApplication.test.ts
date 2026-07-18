@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -134,6 +134,51 @@ describe('Gateway attachment requests', () => {
         expect(attachments.list('session-1')).toHaveLength(1)
         expect((await attachments.resolveParts('session-1', [attachmentId]))[0]).toMatchObject({ filename: 'notes.txt' })
         await attachments.releaseParts([attachmentId])
+    })
+
+    it('exports only files inside the Session Project and returns downloadable chunks', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-file-export-'))
+        temporaryDirectories.push(directory)
+        const projectRoot = join(directory, 'project')
+        await mkdir(projectRoot)
+        const apk = Buffer.from('signed apk bytes')
+        await writeFile(join(projectRoot, 'codever.apk'), apk)
+        await writeFile(join(directory, 'outside.apk'), 'outside')
+        const attachments = await GatewayAttachmentStore.open(join(directory, 'attachments'), new TestRelayBlobs())
+        const context = {
+            credentialId: 'credential-1', gatewayId: 'gateway-1', attachments,
+            sessions: { get: async () => ({ id: 'session-1', projectId: 'project-1' }) } as never,
+            projects: { get: async () => ({ id: 'project-1', canonicalRoot: projectRoot }) } as never,
+            inventory: undefined as never, events: undefined as never,
+            inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const exported = await handleClientRequest(frame('export', {
+            kind: 'file.export', sessionId: 'session-1', path: 'codever.apk',
+        }), context)
+        expect(exported.status).toBe('completed')
+        if (exported.status !== 'completed' || !('attachmentId' in exported.payload)) {
+            throw new Error('Expected an exported Session attachment')
+        }
+        expect(exported.payload).toMatchObject({
+            filename: 'codever.apk', mimeType: 'application/vnd.android.package-archive', sizeBytes: apk.length,
+        })
+
+        const downloaded = await handleClientRequest(frame('download', {
+            kind: 'attachment.download', sessionId: 'session-1',
+            attachmentId: exported.payload.attachmentId, offset: 0,
+        }), context)
+        expect(downloaded.status).toBe('completed')
+        if (downloaded.status !== 'completed' || !('data' in downloaded.payload)) {
+            throw new Error('Expected a downloadable attachment chunk')
+        }
+        expect(Buffer.from(downloaded.payload.data, 'base64')).toEqual(apk)
+
+        const outside = await handleClientRequest(frame('outside', {
+            kind: 'file.export', sessionId: 'session-1', path: join(directory, 'outside.apk'),
+        }), context)
+        expect(outside.status).toBe('failed')
+        if (outside.status === 'failed') expect(outside.error.message).toContain('inside the current Project')
     })
 })
 

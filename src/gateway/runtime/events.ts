@@ -7,6 +7,7 @@ export type GatewayTurnStatus = 'success' | 'error' | 'cancelled' | 'max_turns'
 export interface GatewayUserMessageEvent {
     kind: 'user_message'
     turnId: string
+    clientMessageId?: string
     input: AgentQueryInput
     source?: 'live' | 'replay'
 }

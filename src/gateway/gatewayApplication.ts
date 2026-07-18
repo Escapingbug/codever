@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, realpath } from 'node:fs/promises'
+import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
     PROTOCOL_VERSION,
     type ClientGatewayRequestFrame,
@@ -34,6 +34,7 @@ import type { NatsConnection } from '@nats-io/transport-node'
 export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
     'attachment.upload', 'attachment.manage', 'nats-object-storage',
+    'file.export', 'attachment.download',
 ]
 
 export interface GatewayApplication {
@@ -338,7 +339,7 @@ export async function handleClientRequest(
                             ...(request.payload.input.text.trim() ? [{ type: 'text' as const, text: request.payload.input.text }] : []),
                             ...attachmentParts,
                         ],
-                    }, request.idempotencyKey)
+                    }, request.idempotencyKey, request.payload.input.clientMessageId)
                 } finally {
                     await context.attachments.releaseParts(attachmentIds).catch(error => {
                         console.error('[gateway:attachments]', error instanceof Error ? error.message : error)
@@ -384,6 +385,28 @@ export async function handleClientRequest(
                 await context.sessions.get(request.payload.sessionId)
                 await context.attachments.delete(request.payload.sessionId, request.payload.attachmentIds)
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
+            case 'file.export': {
+                const session = await context.sessions.get(request.payload.sessionId)
+                const project = await context.projects.get(session.projectId)
+                const path = await projectFilePath(project.canonicalRoot, request.payload.path)
+                payload = await context.attachments.importLocalFile({
+                    sessionId: session.id,
+                    credentialId: context.credentialId,
+                    path,
+                    filename: basename(path),
+                    mimeType: mimeTypeForPath(path),
+                })
+                break
+            }
+            case 'attachment.download':
+                await context.sessions.get(request.payload.sessionId)
+                payload = await context.attachments.downloadChunk(
+                    request.payload.sessionId,
+                    request.payload.attachmentId,
+                    request.payload.offset,
+                    request.payload.limit,
+                )
                 break
             case 'session.cancel':
                 await context.sessions.cancel(
@@ -472,11 +495,36 @@ export async function handleClientRequest(
     }
 }
 
+async function projectFilePath(rootPath: string, requestedPath: string): Promise<string> {
+    const root = await realpath(resolve(rootPath))
+    const target = await realpath(resolve(isAbsolute(requestedPath) ? requestedPath : join(root, requestedPath)))
+    const child = relative(root, target)
+    if (child === '' || child.startsWith('..') || isAbsolute(child)) {
+        throw new Error('The requested file must be inside the current Project')
+    }
+    return target
+}
+
+function mimeTypeForPath(path: string): string {
+    switch (extname(path).toLowerCase()) {
+        case '.apk': return 'application/vnd.android.package-archive'
+        case '.pdf': return 'application/pdf'
+        case '.png': return 'image/png'
+        case '.jpg': case '.jpeg': return 'image/jpeg'
+        case '.json': return 'application/json'
+        case '.md': return 'text/markdown'
+        case '.txt': return 'text/plain'
+        case '.zip': return 'application/zip'
+        default: return 'application/octet-stream'
+    }
+}
+
 function isReadRequest(request: ClientGatewayRequestFrame): boolean {
     return request.payload.kind === 'inventory.get'
         || request.payload.kind === 'events.list'
         || request.payload.kind === 'provider.sessions.list'
         || request.payload.kind === 'attachment.list'
+        || request.payload.kind === 'attachment.download'
 }
 
 function toWireProject(

@@ -9,6 +9,7 @@ export function toWireConversationEvent(event: GatewayConversationEvent): WireCo
         return {
             kind: 'user_message',
             text: inputText(event.input),
+            ...(event.clientMessageId ? { clientMessageId: event.clientMessageId } : {}),
             ...(attachments.length ? { attachments } : {}),
             meta: { turnId: event.turnId, source: event.source ?? 'live' },
         }

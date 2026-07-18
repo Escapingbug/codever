@@ -103,8 +103,8 @@ export class GatewaySessionRuntime {
         return () => this.subscribers.delete(subscriber)
     }
 
-    startQuery(input: AgentQueryInput): Promise<GatewayTurnResult> {
-        return this.enqueue(() => this.runTurn(input))
+    startQuery(input: AgentQueryInput, clientMessageId?: string): Promise<GatewayTurnResult> {
+        return this.enqueue(() => this.runTurn(input, clientMessageId))
     }
 
     async updateSettings(settings: {
@@ -157,11 +157,11 @@ export class GatewaySessionRuntime {
         return result
     }
 
-    private async runTurn(input: AgentQueryInput): Promise<GatewayTurnResult> {
+    private async runTurn(input: AgentQueryInput, clientMessageId?: string): Promise<GatewayTurnResult> {
         if (this.destroyed) throw new Error('Gateway session runtime is closed.')
 
         const turnId = this.createId()
-        await this.record({ kind: 'user_message', turnId, input })
+        await this.record({ kind: 'user_message', turnId, input, ...(clientMessageId ? { clientMessageId } : {}) })
 
         await this.ensureProviderReady()
         if (!this.config.provider.isReady()) {

@@ -224,7 +224,7 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .connection-banner small { font-size: .65rem; }
 .pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
-.conversation-pane { grid-column: 1; min-width: 0; max-width: 100%; overflow-x: clip; overflow-y: auto; scroll-behavior: smooth; }
+.conversation-pane { position: relative; grid-column: 1; min-width: 0; max-width: 100%; overflow-x: clip; overflow-y: auto; overflow-anchor: none; scroll-behavior: auto; }
 .timeline { width: min(760px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 130px; }
 .message { display: flex; margin-bottom: 28px; cursor: default; }
 .message-body { min-width: 0; font-size: .88rem; line-height: 1.75; white-space: pre-wrap; }
@@ -263,7 +263,7 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .agent-reply-state--working { color: var(--accent); }
 .agent-reply-state--working i { animation: pulse 1.2s ease-in-out infinite; }
 .agent-reply-state--error, .agent-reply-state--cancelled { color: var(--danger); }
-.history-loader { position: sticky; top: 8px; z-index: 3; display: flex; width: fit-content; align-items: center; gap: 8px; margin: 8px auto -38px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,23,18,.94); color: var(--muted); font-size: 12px; }
+.history-loader { position: absolute; z-index: 3; top: 8px; left: 50%; display: flex; width: max-content; align-items: center; gap: 8px; margin: 0; padding: 7px 12px; transform: translateX(-50%); pointer-events: none; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,23,18,.94); color: var(--muted); box-shadow: 0 8px 28px rgba(0,0,0,.28); font-size: 12px; }
 .history-loader .loader { width: 13px; height: 13px; }
 .event-card { margin: 0 0 18px 42px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
 .event-card--error { border-color: #58312d; }
@@ -317,6 +317,15 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .composer { max-width: 760px; margin: 0 auto; padding: 10px 12px 8px; border: 1px solid #414839; border-radius: 12px; background: #1c2019; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
 .composer:focus-within { border-color: #617a3c; }
 .composer--disabled { opacity: .62; }
+.composer-context { margin: -2px -4px 8px; padding: 0 4px 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; border-bottom: 1px solid var(--line-soft); scrollbar-width: none; touch-action: pan-x; }
+.composer-context::-webkit-scrollbar { display: none; }
+.session-controls--compact { min-width: max-content; align-items: center; gap: 6px; }
+.session-controls--compact .session-control { display: flex; width: auto; min-height: 34px; align-items: center; gap: 6px; padding: 0 7px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel-2); }
+.session-controls--compact .session-control > span { color: var(--muted); font-size: .56rem; font-weight: 650; letter-spacing: .02em; white-space: nowrap; }
+.session-controls--compact input, .session-controls--compact select { width: auto; max-width: 150px; min-height: 32px; padding: 3px 18px 3px 0; border: 0; outline: 0; background-color: transparent; font-size: .68rem; }
+.session-controls--compact .control-value { min-height: 32px; padding: 3px 0; border: 0; background: transparent; font-size: .68rem; }
+.session-controls--compact .control-saving { padding: 0 4px; white-space: nowrap; }
+.message--pending { opacity: .78; }
 .composer textarea { width: 100%; max-height: 180px; resize: vertical; padding: 3px; color: var(--text); border: 0; outline: 0; background: transparent; font-size: .82rem; line-height: 1.5; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: .58rem; }
 .composer-actions { display: flex; align-items: center; gap: 10px; }
@@ -352,7 +361,6 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .loader { width: 24px; height: 24px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .mobile-breadcrumb { display: none; }
-.mobile-controls-button { display: none; }
 
 .app-shell--entry { display: block; }
 .app-shell--entry .main-stage { min-height: 100vh; }
@@ -459,10 +467,6 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .session-page { display: grid; width: 100%; max-width: 100%; grid-template: auto auto auto minmax(0,1fr) auto / minmax(0, 1fr); height: calc(100dvh - 112px - var(--safe-top) - var(--safe-bottom)); overflow-x: hidden; }
   .session-header { min-height: 62px; padding: 8px 12px; }
   .session-identity h1 { max-width: 52vw; }
-  .session-controls { position: absolute; z-index: 22; top: 54px; right: 8px; display: none; width: 180px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
-  .session-controls--mobile-open { display: flex; flex-direction: column; align-items: stretch; }
-  .session-controls label { width: 100%; }
-  .mobile-controls-button { display: inline-grid; }
   .connection-banner { padding: 7px 12px; }
   .connection-banner > div { display: grid; gap: 1px; }
   .conversation-pane { grid-column: 1; }
@@ -472,7 +476,14 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .event-card, .system-event { margin-left: 35px; }
   .tool-summary { grid-template-columns: 28px minmax(0,1fr) auto; }
   .tool-phase { display: none; }
-  .composer-wrap { padding: 6px 10px 10px; }
+  .composer-wrap { padding: 5px 8px 8px; }
+  .composer { padding: 8px 9px 7px; border-radius: 11px; }
+  .composer-context { margin: -1px -1px 7px; padding: 0 1px 7px; }
+  .session-controls--compact { gap: 5px; }
+  .session-controls--compact .session-control { min-height: 32px; padding: 0 6px; }
+  .session-controls--compact .session-control--provider { display: none; }
+  .session-controls--compact .session-control > span { font-size: .53rem; }
+  .session-controls--compact input, .session-controls--compact select { max-width: 132px; min-height: 30px; font-size: .65rem; }
   .composer-shortcut { display: none; }
   .session-files-panel { right: 10px; left: 10px; }
   .session-files-panel > header { align-items: stretch; flex-direction: column; }

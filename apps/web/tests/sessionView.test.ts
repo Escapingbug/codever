@@ -76,7 +76,7 @@ describe('session view', () => {
     wrapper.unmount()
   })
 
-  it('clears the Android composer before waiting for message acceptance', async () => {
+  it('shows an optimistic user bubble and clears the Android composer before acceptance', async () => {
     const pendingSend = deferred<unknown>()
     const api = fakeApi('session-composer', [], {
       sendMessage: vi.fn(() => pendingSend.promise),
@@ -89,11 +89,43 @@ describe('session view', () => {
     await wrapper.vm.$nextTick()
 
     expect(composer.element.value).toBe('')
-    expect(api.sendMessage).toHaveBeenCalledWith('session-composer', {
+    const timeline = wrapper.getComponent(ConversationTimeline)
+    expect(timeline.props('pendingMessages')).toMatchObject([{
+      sessionId: 'session-composer', text: 'hello from Android', status: 'sending',
+    }])
+    expect(api.sendMessage).toHaveBeenCalledWith('session-composer', expect.objectContaining({
       text: 'hello from Android', attachmentIds: [], sendWhenOnline: undefined,
-    })
+      clientMessageId: expect.stringMatching(/^message_/),
+    }))
 
     pendingSend.resolve({ commandId: 'command-1', status: 'succeeded' })
+    await flushPromises()
+    expect(timeline.props('pendingMessages')).toMatchObject([{ status: 'accepted' }])
+    wrapper.unmount()
+  })
+
+  it('ends the send transaction at acceptance without waiting for history catch-up', async () => {
+    const pendingSend = deferred<unknown>()
+    const pendingHistory = deferred<HistoryPage>()
+    const api = fakeApi('session-accepted', [], {
+      sendMessage: vi.fn(() => pendingSend.promise),
+      getSessionEvents: vi.fn()
+        .mockResolvedValueOnce({ events: [], nextAfter: null, previousBefore: null })
+        .mockImplementationOnce(() => pendingHistory.promise),
+    })
+    const wrapper = await mountSession(api, 'session-accepted')
+
+    const composer = wrapper.get<HTMLTextAreaElement>('.composer textarea')
+    await composer.setValue('first message')
+    await wrapper.get('.send-button').trigger('click')
+    pendingSend.resolve({ commandId: 'command-1', status: 'succeeded' })
+    await flushPromises()
+
+    expect(wrapper.getComponent(ConversationTimeline).props('pendingMessages')).toMatchObject([{ status: 'accepted' }])
+    await composer.setValue('second message')
+    expect(wrapper.get<HTMLButtonElement>('.send-button').element.disabled).toBe(false)
+
+    pendingHistory.resolve({ events: [], nextAfter: null, previousBefore: null })
     await flushPromises()
     wrapper.unmount()
   })

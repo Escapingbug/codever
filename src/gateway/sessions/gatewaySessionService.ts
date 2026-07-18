@@ -215,6 +215,7 @@ export class GatewaySessionService {
         sessionId: string,
         input: string | AgentQueryInput | SendSessionMessageInput,
         idempotencyKey?: string,
+        clientMessageId?: string,
     ): Promise<GatewayTurnResult> {
         const key = typeof input === 'object' && input !== null && 'idempotencyKey' in input
             ? input.idempotencyKey
@@ -230,7 +231,10 @@ export class GatewaySessionService {
                 })
             }
             const runtime = await this.runtimeFor(sessionId)
-            const result = await runtime.startQuery(queryInput)
+            const result = await runtime.startQuery(
+                queryInput,
+                isSendMessageDto(input) ? input.clientMessageId : clientMessageId,
+            )
             await this.flushMetadata()
             return result
         }))

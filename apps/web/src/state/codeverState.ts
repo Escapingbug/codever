@@ -3,12 +3,14 @@ import { computed, inject, reactive, ref, shallowReactive } from 'vue'
 import { RelayApi, relayApiKey } from '../api/relayApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
+import type { PendingUserMessage } from '../timeline/pendingMessage'
 
 const gateways = ref<Gateway[]>([])
 const projectsByGateway = reactive<Record<string, Project[]>>({})
 const sessionsByProject = reactive<Record<string, CodeverSession[]>>({})
 const providerSessionsByProject = shallowReactive<Record<string, ProviderSession[]>>({})
 const eventsBySession = shallowReactive<Record<string, SessionEventEnvelope[]>>({})
+const pendingMessagesBySession = shallowReactive<Record<string, PendingUserMessage[]>>({})
 const pending = reactive(new Set<string>())
 const errors = reactive<Record<string, string | undefined>>({})
 let workspaceLoad: Promise<void> | undefined
@@ -113,6 +115,7 @@ export function useCodeverState() {
     sessionsByProject,
     providerSessionsByProject,
     eventsBySession,
+    pendingMessagesBySession,
     pending: computed(() => pending),
     errors,
     loadWorkspace,
@@ -152,6 +155,43 @@ export function useCodeverState() {
       const cached = await readCached<SessionEventEnvelope[]>(`session-events:${sessionId}`) ?? []
       eventsBySession[sessionId] = cached
       return cached
+    },
+    loadCachedPendingMessages: async (sessionId: string) => {
+      if (pendingMessagesBySession[sessionId]) return pendingMessagesBySession[sessionId]
+      const cached = await readCached<PendingUserMessage[]>(`pending-messages:${sessionId}`) ?? []
+      pendingMessagesBySession[sessionId] = cached
+      return cached
+    },
+    queuePendingMessage: (message: PendingUserMessage) => {
+      const messages = [...(pendingMessagesBySession[message.sessionId] ?? [])]
+      const index = messages.findIndex(item => item.clientMessageId === message.clientMessageId)
+      if (index >= 0) messages[index] = message
+      else messages.push(message)
+      pendingMessagesBySession[message.sessionId] = messages
+      writeCached(`pending-messages:${message.sessionId}`, messages)
+    },
+    markPendingMessageAccepted: (sessionId: string, clientMessageId: string) => {
+      const messages = (pendingMessagesBySession[sessionId] ?? []).map(message =>
+        message.clientMessageId === clientMessageId ? { ...message, status: 'accepted' as const } : message)
+      pendingMessagesBySession[sessionId] = messages
+      writeCached(`pending-messages:${sessionId}`, messages)
+    },
+    removePendingMessage: (sessionId: string, clientMessageId: string) => {
+      const messages = (pendingMessagesBySession[sessionId] ?? [])
+        .filter(message => message.clientMessageId !== clientMessageId)
+      pendingMessagesBySession[sessionId] = messages
+      writeCached(`pending-messages:${sessionId}`, messages)
+    },
+    reconcilePendingMessages: (sessionId: string, source: SessionEventEnvelope[]) => {
+      const confirmed = new Set(source.flatMap(envelope =>
+        envelope.event.kind === 'user_message' && envelope.event.clientMessageId
+          ? [envelope.event.clientMessageId]
+          : []))
+      if (!confirmed.size) return
+      const messages = (pendingMessagesBySession[sessionId] ?? [])
+        .filter(message => !confirmed.has(message.clientMessageId))
+      pendingMessagesBySession[sessionId] = messages
+      writeCached(`pending-messages:${sessionId}`, messages)
     },
     mergeSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
       const snapshot = mergeSessionEvents(eventsBySession[sessionId] ?? [], events)

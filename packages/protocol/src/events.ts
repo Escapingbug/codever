@@ -39,6 +39,7 @@ export const ConversationEventSchema = z.discriminatedUnion('kind', [
     event({
         kind: z.literal('user_message'),
         text: z.string(),
+        clientMessageId: OpaqueIdSchema.optional(),
         actorId: OpaqueIdSchema.optional(),
         attachments: z.array(z.object({
             id: OpaqueIdSchema,

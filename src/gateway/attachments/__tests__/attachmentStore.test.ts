@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -76,6 +76,38 @@ describe('GatewayAttachmentStore Relay persistence', () => {
         await expect(store.resolveParts('session-2', [upload.attachmentId])).rejects.toThrow('Unknown Session file')
         expect((await store.resolveParts('session-1', [upload.attachmentId]))[0]).toMatchObject({ filename: 'shared.bin' })
         await store.releaseParts([upload.attachmentId])
+    })
+
+    it('imports a Gateway-local file into encrypted Relay storage and downloads it in chunks', async () => {
+        const relay = new FakeRelayBlobs()
+        const store = await createStore(relay)
+        const sourceDirectory = await mkdtemp(join(tmpdir(), 'codever-export-source-'))
+        directories.push(sourceDirectory)
+        const sourcePath = join(sourceDirectory, 'client.apk')
+        const bytes = Buffer.from('a complete apk payload')
+        await writeFile(sourcePath, bytes)
+
+        const attachment = await store.importLocalFile({
+            sessionId: 'session-1', credentialId: 'client-1', path: sourcePath,
+            filename: 'client.apk', mimeType: 'application/vnd.android.package-archive',
+        })
+
+        expect(attachment).toMatchObject({
+            sessionId: 'session-1', filename: 'client.apk', sizeBytes: bytes.length,
+            mimeType: 'application/vnd.android.package-archive', status: 'ready',
+        })
+        expect(relay.allEncryptedText()).not.toContain(bytes.toString())
+
+        const chunks = []
+        let offset = 0
+        do {
+            const chunk = await store.downloadChunk('session-1', attachment.attachmentId, offset, 5)
+            chunks.push(Buffer.from(chunk.data, 'base64'))
+            if (chunk.nextOffset === null) break
+            offset = chunk.nextOffset
+        } while (true)
+        expect(Buffer.concat(chunks)).toEqual(bytes)
+        await expect(store.downloadChunk('session-2', attachment.attachmentId, 0)).rejects.toThrow('Unknown Session file')
     })
 })
 

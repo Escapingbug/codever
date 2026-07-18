@@ -7,6 +7,7 @@ const props = defineProps<{
   capabilities?: ProviderSessionListDto
   disabled?: boolean
   saving?: boolean
+  compact?: boolean
 }>()
 const emit = defineEmits<{ save: [patch: PatchSessionConfigDto] }>()
 
@@ -38,9 +39,9 @@ function save(): void {
 </script>
 
 <template>
-  <div class="session-controls">
-    <label><span>Provider</span><strong class="control-value">{{ session.provider }}</strong></label>
-    <label>
+  <div class="session-controls" :class="{ 'session-controls--compact': compact }">
+    <label class="session-control session-control--provider"><span>Provider</span><strong class="control-value">{{ session.provider }}</strong></label>
+    <label class="session-control session-control--model">
       <span>Model</span>
       <select v-if="models.length" v-model="form.model" :disabled="disabled" @change="save">
         <option value="">Provider default</option>
@@ -48,20 +49,20 @@ function save(): void {
       </select>
       <input v-else v-model="form.model" :disabled="disabled" placeholder="Provider default" @change="save" />
     </label>
-    <label v-if="reasoningLevels.length">
+    <label v-if="reasoningLevels.length" class="session-control session-control--reasoning">
       <span>Reasoning</span>
       <select v-model="form.reasoningEffort" :disabled="disabled" @change="save">
         <option value="">Model default</option>
         <option v-for="level in reasoningLevels" :key="level.effort" :value="level.effort">{{ level.effort }}</option>
       </select>
     </label>
-    <label>
+    <label class="session-control session-control--mode">
       <span>Mode</span>
       <select v-model="form.mode" :disabled="disabled" @change="save">
         <option value="">Default</option><option value="agent">Agent</option><option value="ask">Ask</option><option value="plan">Plan</option>
       </select>
     </label>
-    <label v-if="capabilities?.permissionModes.length">
+    <label v-if="capabilities?.permissionModes.length" class="session-control session-control--permissions">
       <span>Permissions</span>
       <select v-model="form.permissionMode" :disabled="disabled" @change="save">
         <option value="">Provider default</option>

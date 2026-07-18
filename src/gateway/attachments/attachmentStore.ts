@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { access, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { OBJECT_BLOB_CHUNK_BYTES, type AttachmentUploadDto, type ObjectBlobManifest, type SessionAttachmentDto } from '@codever/protocol'
+import { OBJECT_BLOB_CHUNK_BYTES, type AttachmentDownloadChunkDto, type AttachmentUploadDto, type ObjectBlobManifest, type SessionAttachmentDto } from '@codever/protocol'
 import type { RichUserInputPart } from '@/runtime/semantic'
 
 export type { ObjectBlobManifest } from '@codever/protocol'
@@ -166,6 +166,83 @@ export class GatewayAttachmentStore {
             .filter(record => record.sessionId === sessionId && record.status === 'ready')
             .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
             .map(sessionDto)
+    }
+
+    importLocalFile(input: {
+        sessionId: string
+        credentialId: string
+        path: string
+        filename: string
+        mimeType: string
+    }): Promise<SessionAttachmentDto> {
+        return this.serialize(async () => {
+            const source = await stat(input.path)
+            if (!source.isFile()) throw new Error('Only regular files can be exported')
+            if (!Number.isSafeInteger(source.size)) throw new Error('File size is not supported')
+            const attachmentId = `attachment_${randomUUID()}`
+            const path = join(this.root, `${attachmentId}.part`)
+            const now = new Date().toISOString()
+            const record: AttachmentRecord = {
+                attachmentId,
+                sessionId: input.sessionId,
+                credentialId: input.credentialId,
+                filename: safeFilename(input.filename),
+                mimeType: input.mimeType.trim() || 'application/octet-stream',
+                sizeBytes: source.size,
+                receivedBytes: source.size,
+                status: 'uploading',
+                blobId: `blob_${randomUUID()}`,
+                dataKey: randomBytes(32).toString('base64'),
+                path,
+                createdAt: now,
+                updatedAt: now,
+            }
+            await copyFile(input.path, path)
+            this.records.set(attachmentId, record)
+            try {
+                await this.persistEncryptedBlob(record)
+                record.status = 'ready'
+                record.updatedAt = new Date().toISOString()
+                await this.persist()
+                return sessionDto(record)
+            } catch (error) {
+                this.records.delete(attachmentId)
+                await rm(path, { force: true })
+                await this.blobs.delete(record.blobId).catch(() => undefined)
+                throw error
+            }
+        })
+    }
+
+    downloadChunk(
+        sessionId: string,
+        attachmentId: string,
+        offset: number,
+        limit = ATTACHMENT_TRANSFER_CHUNK_BYTES,
+    ): Promise<AttachmentDownloadChunkDto> {
+        return this.serialize(async () => {
+            const record = this.requireSessionAttachment(sessionId, attachmentId)
+            if (!Number.isSafeInteger(offset) || offset < 0 || offset > record.sizeBytes) {
+                throw new Error('Attachment download offset is invalid')
+            }
+            const chunkSize = Math.min(Math.max(1, limit), ATTACHMENT_TRANSFER_CHUNK_BYTES, record.sizeBytes - offset)
+            await this.ensureMaterialized(record)
+            const bytes = Buffer.alloc(chunkSize)
+            const handle = await open(record.path, 'r')
+            let bytesRead = 0
+            try {
+                bytesRead = (await handle.read(bytes, 0, chunkSize, offset)).bytesRead
+            } finally {
+                await handle.close()
+            }
+            const nextOffset = offset + bytesRead
+            return {
+                attachmentId,
+                offset,
+                data: bytes.subarray(0, bytesRead).toString('base64'),
+                nextOffset: nextOffset < record.sizeBytes ? nextOffset : null,
+            }
+        })
     }
 
     delete(sessionId: string, attachmentIds: string[]): Promise<void> {

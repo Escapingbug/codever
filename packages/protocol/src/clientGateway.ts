@@ -20,6 +20,8 @@ import {
     SessionDtoSchema,
     SessionEventsDtoSchema,
     AttachmentUploadDtoSchema,
+    AttachmentDownloadChunkDtoSchema,
+    SessionAttachmentDtoSchema,
     SessionAttachmentListDtoSchema,
 } from './client'
 import { ProtocolErrorSchema } from './commands'
@@ -78,6 +80,18 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         attachmentIds: z.array(OpaqueIdSchema).min(1),
     }).strict(),
     z.object({
+        kind: z.literal('file.export'),
+        sessionId: OpaqueIdSchema,
+        path: z.string().min(1).max(32_768),
+    }).strict(),
+    z.object({
+        kind: z.literal('attachment.download'),
+        sessionId: OpaqueIdSchema,
+        attachmentId: OpaqueIdSchema,
+        offset: NonNegativeIntegerSchema,
+        limit: PositiveIntegerSchema.max(196_608).optional(),
+    }).strict(),
+    z.object({
         kind: z.literal('session.cancel'),
         sessionId: OpaqueIdSchema,
         input: CancelSessionDtoSchema,
@@ -123,6 +137,8 @@ export const ClientGatewayCompletedPayloadSchema = z.union([
     SessionEventsDtoSchema,
     AttachmentUploadDtoSchema,
     SessionAttachmentListDtoSchema,
+    SessionAttachmentDtoSchema,
+    AttachmentDownloadChunkDtoSchema,
     MutationReceiptDtoSchema,
 ])
 

@@ -29,6 +29,7 @@ import {
 import type { ClientDeviceCredential, ClientDeviceCredentialStore } from '../security/deviceCredentialStore'
 import type { ClientRelayCredential } from '../security/relayCredentialStore'
 import type { DurableSessionEventStore } from './sessionEventStore'
+import { DurableEventReplayBuffer } from './durableEventReplay'
 
 const COMMAND_TTL_MS = 7 * 24 * 60 * 60_000
 
@@ -74,6 +75,10 @@ export class DurableSyncClient {
   private readonly consumers: ConsumerMessages[] = []
   private loops: Promise<void>[] = []
   private stopping = false
+  private readonly eventReplay = new DurableEventReplayBuffer<{
+    codever: SessionEventEnvelope
+    standard: StandardConversationEvent
+  }>()
 
   constructor(private readonly options: DurableSyncClientOptions) {
     this.js = jetstream(options.connection)
@@ -108,6 +113,10 @@ export class DurableSyncClient {
     const error = new Error('Durable synchronization client closed')
     for (const pending of this.pending.values()) pending.reject(error)
     this.pending.clear()
+  }
+
+  beginEventReplay(): void {
+    this.eventReplay.begin()
   }
 
   async request(
@@ -196,7 +205,10 @@ export class DurableSyncClient {
         cause: error,
       })
     }
-    await this.options.onEvent(codever, { ...value, codever } as StandardConversationEvent)
+    const standard = { ...value, codever } as StandardConversationEvent
+    await this.eventReplay.deliver({ codever, standard }, message.info.pending, async buffered => {
+      for (const event of buffered) await this.options.onEvent(event.codever, event.standard)
+    })
   }
 
   private async inventory(message: JsMsg): Promise<void> {

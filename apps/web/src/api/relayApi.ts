@@ -1,5 +1,6 @@
 import type {
   CancelSessionDto,
+  AttachmentDownloadChunkDto,
   AttachmentUploadDto,
   CodeverSession,
   ClientGatewayResponseFrame,
@@ -14,6 +15,7 @@ import type {
   Project,
   ProviderSessionListDto,
   SendMessageDto,
+  SessionAttachmentDto,
   SessionAttachmentListDto,
   SessionEventEnvelope,
 } from '@codever/protocol'
@@ -308,6 +310,31 @@ export class RelayApi {
     })) as MutationReceiptDto
   }
 
+  async exportSessionFile(sessionId: string, path: string): Promise<SessionAttachmentDto> {
+    return this.completed(await this.requestGateway(this.requireSessionGateway(sessionId), {
+      kind: 'file.export', sessionId, path,
+    })) as SessionAttachmentDto
+  }
+
+  async downloadAttachment(attachment: SessionAttachmentDto): Promise<Blob> {
+    const chunks: BlobPart[] = []
+    let offset = 0
+    while (true) {
+      const chunk = this.completed(await this.requestGateway(this.requireSessionGateway(attachment.sessionId), {
+        kind: 'attachment.download',
+        sessionId: attachment.sessionId,
+        attachmentId: attachment.attachmentId,
+        offset,
+      })) as AttachmentDownloadChunkDto
+      if (chunk.offset !== offset) throw new RelayApiError('Attachment download returned an unexpected offset')
+      chunks.push(decodeBase64Bytes(chunk.data))
+      if (chunk.nextOffset === null) break
+      if (chunk.nextOffset <= offset) throw new RelayApiError('Attachment download did not advance')
+      offset = chunk.nextOffset
+    }
+    return new Blob(chunks, { type: attachment.mimeType })
+  }
+
   async cancelSession(sessionId: string, input: CancelSessionDto = {}): Promise<MutationReceiptDto> {
     return this.completed(await this.requestGateway(
       this.requireSessionGateway(sessionId), { kind: 'session.cancel', sessionId, input },
@@ -488,7 +515,10 @@ export class RelayApi {
         for await (const status of connection.status()) {
           if (generation !== this.connectionGeneration) return
           if (status.type === 'reconnect') this.setConnectionState('connected')
-          else if (status.type === 'disconnect' || status.type === 'reconnecting') this.setConnectionState('reconnecting')
+          else if (status.type === 'disconnect' || status.type === 'reconnecting') {
+            this.durable?.beginEventReplay()
+            this.setConnectionState('reconnecting')
+          }
         }
       } finally {
         if (generation === this.connectionGeneration) this.setConnectionState('disconnected')
@@ -508,7 +538,8 @@ function source(value: string | (() => string | undefined)): string | undefined 
 }
 
 function isRetrySafe(payload: ClientGatewayRequestPayload): boolean {
-  return payload.kind === 'inventory.get' || payload.kind === 'events.list' || payload.kind === 'provider.sessions.list'
+  return payload.kind === 'inventory.get' || payload.kind === 'events.list'
+    || payload.kind === 'provider.sessions.list' || payload.kind === 'attachment.download'
 }
 
 function assertNotAborted(signal: AbortSignal | undefined): void {
@@ -522,6 +553,13 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(index, index + block))
   }
   return btoa(binary)
+}
+
+function decodeBase64Bytes(value: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }
 
 export const relayApiKey: InjectionKey<RelayApi> = Symbol('relay-api')

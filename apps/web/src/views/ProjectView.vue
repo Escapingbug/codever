@@ -65,6 +65,14 @@ const tasks = computed<ProjectTask[]>(() => {
     })
   }
   for (const bridge of bridges.value) {
+    const linked = [...result.values()].find(task => task.codeverSessionId === bridge.id)
+    if (linked) {
+      linked.state = bridge.state
+      linked.updatedAt = bridge.updatedAt > linked.updatedAt ? bridge.updatedAt : linked.updatedAt
+      linked.archivedAt = bridge.archivedAt
+      linked.draft = false
+      continue
+    }
     const nativeKey = bridge.providerSessionId ? `${bridge.provider}:${bridge.providerSessionId}` : undefined
     if (nativeKey && result.has(nativeKey)) continue
     const key = nativeKey ?? `draft:${bridge.id}`

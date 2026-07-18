@@ -5,15 +5,18 @@ import { buildTimeline, decisionResolution } from '../../timeline/model'
 import MarkdownContent from '../MarkdownContent.vue'
 import DecisionEventCard from './DecisionEventCard.vue'
 import ToolEventCard from './ToolEventCard.vue'
+import type { PendingUserMessage } from '../../timeline/pendingMessage'
 
 const props = defineProps<{
   events: SessionEventEnvelope[]
+  pendingMessages?: PendingUserMessage[]
   mutable: boolean
   submittingDecisionId?: string
 }>()
 const emit = defineEmits<{
   resolveDecision: [decisionId: string, value: JsonValue]
   select: [event: SessionEventEnvelope]
+  openLocalFile: [path: string]
 }>()
 const entries = computed(() => buildTimeline(props.events))
 
@@ -29,7 +32,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
 </script>
 
 <template>
-  <div v-if="entries.length" class="timeline">
+  <div v-if="entries.length || pendingMessages?.length" class="timeline">
     <template v-for="entry in entries" :key="entry.key">
       <article v-if="entry.type === 'assistant'" class="message message--assistant" :data-timeline-key="entry.key" @click="select($event, entry.events[0]!)">
         <div class="message-body">
@@ -39,7 +42,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
               <i />{{ entry.status === 'working' ? 'Working' : entry.status.replace('_', ' ') }}
             </span>
           </div>
-          <MarkdownContent class="assistant-copy" :content="entry.text" />
+          <MarkdownContent class="assistant-copy" :content="entry.text" @open-local-file="emit('openLocalFile', $event)" />
         </div>
       </article>
 
@@ -99,6 +102,22 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         </div>
       </template>
     </template>
+    <article
+      v-for="message in pendingMessages ?? []"
+      :key="message.clientMessageId"
+      class="message message--user message--pending"
+      :data-timeline-key="`pending:${message.clientMessageId}`"
+    >
+      <div class="message-body">
+        <div class="message-meta"><strong>You</strong><span>{{ message.status === 'sending' ? 'Sending…' : 'Sent · synchronizing…' }}</span></div>
+        <div v-if="message.text">{{ message.text }}</div>
+        <div v-if="message.attachments.length" class="message-attachments">
+          <span v-for="attachment in message.attachments" :key="attachment.id" class="attachment-chip">
+            <strong>{{ attachment.filename }}</strong><small>{{ Math.max(1, Math.round(attachment.sizeBytes / 1024)) }} KiB</small>
+          </span>
+        </div>
+      </div>
+    </article>
   </div>
   <div v-else class="empty-state empty-state--timeline">
     <span class="empty-orbit">✦</span>

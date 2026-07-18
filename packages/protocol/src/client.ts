@@ -52,6 +52,7 @@ export const CreateProjectDtoSchema = z.object({
 
 export const SendMessageDtoSchema = z.object({
     text: z.string(),
+    clientMessageId: OpaqueIdSchema.optional(),
     attachmentIds: z.array(OpaqueIdSchema).optional(),
     sendWhenOnline: z.boolean().optional(),
     expiresAt: IsoDateTimeSchema.optional(),
@@ -80,6 +81,12 @@ export const SessionAttachmentDtoSchema = z.object({
 export const SessionAttachmentListDtoSchema = z.object({
     sessionId: OpaqueIdSchema,
     attachments: z.array(SessionAttachmentDtoSchema),
+}).strict()
+export const AttachmentDownloadChunkDtoSchema = z.object({
+    attachmentId: OpaqueIdSchema,
+    offset: NonNegativeIntegerSchema,
+    data: z.string(),
+    nextOffset: NonNegativeIntegerSchema.nullable(),
 }).strict()
 export const CancelSessionDtoSchema = z.object({ reason: z.string().min(1).optional() }).strict()
 export const PatchSessionConfigDtoSchema = z.object({
@@ -110,6 +117,7 @@ export type SendMessageDto = z.infer<typeof SendMessageDtoSchema>
 export type AttachmentUploadDto = z.infer<typeof AttachmentUploadDtoSchema>
 export type SessionAttachmentDto = z.infer<typeof SessionAttachmentDtoSchema>
 export type SessionAttachmentListDto = z.infer<typeof SessionAttachmentListDtoSchema>
+export type AttachmentDownloadChunkDto = z.infer<typeof AttachmentDownloadChunkDtoSchema>
 export type CancelSessionDto = z.infer<typeof CancelSessionDtoSchema>
 export type PatchSessionConfigDto = z.infer<typeof PatchSessionConfigDtoSchema>
 export type ResolveDecisionDto = z.infer<typeof ResolveDecisionDtoSchema>
@@ -128,6 +136,7 @@ export const parseSendMessageDto = (value: unknown): SendMessageDto => parseWith
 export const parseAttachmentUploadDto = (value: unknown): AttachmentUploadDto => parseWithSchema(AttachmentUploadDtoSchema, value)
 export const parseSessionAttachmentDto = (value: unknown): SessionAttachmentDto => parseWithSchema(SessionAttachmentDtoSchema, value)
 export const parseSessionAttachmentListDto = (value: unknown): SessionAttachmentListDto => parseWithSchema(SessionAttachmentListDtoSchema, value)
+export const parseAttachmentDownloadChunkDto = (value: unknown): AttachmentDownloadChunkDto => parseWithSchema(AttachmentDownloadChunkDtoSchema, value)
 export const parseCancelSessionDto = (value: unknown): CancelSessionDto => parseWithSchema(CancelSessionDtoSchema, value)
 export const parsePatchSessionConfigDto = (value: unknown): PatchSessionConfigDto => parseWithSchema(PatchSessionConfigDtoSchema, value)
 export const parseResolveDecisionDto = (value: unknown): ResolveDecisionDto => parseWithSchema(ResolveDecisionDtoSchema, value)

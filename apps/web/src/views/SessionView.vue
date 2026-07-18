@@ -10,6 +10,7 @@ import { mergeSessionEvents } from '../sessionEvents'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
 import { captureScrollAnchor, restoreScrollAnchor } from '../timeline/scrollAnchor'
+import type { PendingUserAttachment, PendingUserMessage } from '../timeline/pendingMessage'
 
 const route = useRoute()
 const router = useRouter()
@@ -53,7 +54,8 @@ const cleanupAttachmentIds = ref<string[]>([])
 const showSessionFiles = ref(false)
 const loadingSessionFiles = ref(false)
 const deletingSessionFiles = ref(false)
-const showMobileControls = ref(false)
+const downloadingAttachmentId = ref('')
+const exportingFile = ref('')
 const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
 const timelineElement = ref<HTMLElement>()
@@ -80,6 +82,7 @@ const readyAttachmentIds = computed(() => [...new Set([
   ...selectedStoredAttachmentIds.value,
   ...pendingAttachments.value.flatMap(item => item.status === 'ready' && item.upload ? [item.upload.attachmentId] : []),
 ])])
+const pendingMessages = computed(() => state.pendingMessagesBySession[sessionId.value] ?? [])
 const canSubmitMessage = computed(() => canSend.value
   && !sending.value
   && !attachmentsUploading.value
@@ -133,6 +136,7 @@ async function loadSession(): Promise<void> {
   selectedEvent.value = undefined
   try {
     await state.hydrateProject(projectId.value)
+    await state.loadCachedPendingMessages(requestedId)
     session.value ??= (state.sessionsByProject[projectId.value] ?? []).find(item => item.id === requestedId)
     const persisted = await state.loadCachedSessionEvents(requestedId)
     if (requestedId !== sessionId.value) return
@@ -142,6 +146,7 @@ async function loadSession(): Promise<void> {
       loading.value = false
       await scrollToLatest(false)
     }
+    state.reconcilePendingMessages(requestedId, events.value)
     void refreshSessionAttachments()
     const remoteSession = await state.api.getSession(requestedId)
     session.value = remoteSession
@@ -166,6 +171,7 @@ async function loadSession(): Promise<void> {
     const followLatest = isNearTimelineBottom()
     events.value = mergeSessionEvents(events.value, remoteEvents)
     state.mergeSessionEvents(requestedId, fetchedRemoteEvents)
+    state.reconcilePendingMessages(requestedId, events.value)
     const earliestVisible = events.value.at(0)?.seq
     hasMoreBefore.value = page.previousBefore !== null
       || (earliestVisible !== undefined && fetchedRemoteEvents.some(event => event.seq < earliestVisible))
@@ -210,6 +216,7 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
     && merged.every((event, index) => event.eventId === events.value[index]?.eventId)) return
   events.value = merged
   state.mergeSessionEvents(sessionId.value, additions)
+  state.reconcilePendingMessages(sessionId.value, additions)
 }
 
 async function catchUpSessionEvents(): Promise<void> {
@@ -321,29 +328,103 @@ async function sendMessage(): Promise<void> {
   const submittedDraft = draft.value
   const text = submittedDraft.trim()
   if (!canSubmitMessage.value) return
+  const clientMessageId = `message_${crypto.randomUUID()}`
+  const optimistic: PendingUserMessage = {
+    clientMessageId,
+    sessionId: sessionId.value,
+    text,
+    attachments: pendingAttachmentMetadata(),
+    createdAt: new Date().toISOString(),
+    status: 'sending',
+  }
+  state.queuePendingMessage(optimistic)
   sending.value = true
   draft.value = ''
   await nextTick()
+  await scrollToLatest(false)
+  let accepted = false
   try {
     await state.api.sendMessage(sessionId.value, {
       text,
+      clientMessageId,
       attachmentIds: readyAttachmentIds.value,
       sendWhenOnline: !gatewayOnline.value ? true : undefined,
     })
-    await catchUpSessionEvents()
+    accepted = true
+    state.markPendingMessageAccepted(sessionId.value, clientMessageId)
     pendingAttachments.value = []
     selectedStoredAttachmentIds.value = []
-    await refreshSessionAttachments()
     sendWhenOnline.value = false
     if (session.value?.archivedAt) {
       session.value = { ...session.value, archivedAt: undefined }
       state.replaceSession(session.value)
     }
   } catch (error) {
-    if (!draft.value) draft.value = submittedDraft
-    liveError.value = error instanceof Error ? error.message : 'Message was not accepted'
+    if (!accepted) {
+      state.removePendingMessage(sessionId.value, clientMessageId)
+      if (!draft.value) draft.value = submittedDraft
+      liveError.value = error instanceof Error ? error.message : 'Message was not accepted'
+    }
   } finally {
     sending.value = false
+  }
+  if (accepted) {
+    void catchUpSessionEvents()
+    void refreshSessionAttachments()
+  }
+}
+
+function pendingAttachmentMetadata(): PendingUserAttachment[] {
+  const stored = selectedStoredAttachmentIds.value.flatMap(id => {
+    const attachment = sessionAttachments.value.find(item => item.attachmentId === id)
+    return attachment ? [{
+      id: attachment.attachmentId,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+    }] : []
+  })
+  const uploaded = pendingAttachments.value.flatMap(item => item.status === 'ready' && item.upload ? [{
+    id: item.upload.attachmentId,
+    filename: item.upload.filename,
+    mimeType: item.upload.mimeType,
+    sizeBytes: item.upload.sizeBytes,
+  }] : [])
+  return [...stored, ...uploaded]
+}
+
+async function openLocalFile(path: string): Promise<void> {
+  if (!canMutate.value || exportingFile.value) return
+  exportingFile.value = path
+  liveError.value = ''
+  try {
+    const attachment = await state.api.exportSessionFile(sessionId.value, path)
+    await refreshSessionAttachments()
+    await downloadSessionAttachment(attachment)
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Project file could not be exported'
+  } finally {
+    exportingFile.value = ''
+  }
+}
+
+async function downloadSessionAttachment(attachment: SessionAttachmentDto): Promise<void> {
+  if (downloadingAttachmentId.value) return
+  downloadingAttachmentId.value = attachment.attachmentId
+  try {
+    const blob = await state.api.downloadAttachment(attachment)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = attachment.filename
+    document.body.append(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Session file could not be downloaded'
+  } finally {
+    downloadingAttachmentId.value = ''
   }
 }
 
@@ -554,8 +635,6 @@ function submitOnShortcut(event: KeyboardEvent): void {
         <small>{{ gateway?.name }} / {{ project?.name }}</small>
         <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="session" :status="session.state" :label="session.state" /></div>
       </div>
-      <button class="icon-button mobile-controls-button" aria-label="Session controls" @click="showMobileControls = !showMobileControls">⚙</button>
-      <SessionControls v-if="session" :class="{ 'session-controls--mobile-open': showMobileControls }" :session="session" :capabilities="providerCapabilities" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
       <button v-if="session?.state === 'querying'" class="button button--danger" :disabled="!canMutate" @click="cancel">Stop</button>
       <button v-else-if="session" class="button" :disabled="!canMutate || updatingArchive" @click="toggleArchive">{{ session.archivedAt ? 'Restore' : 'Archive' }}</button>
     </header>
@@ -578,10 +657,12 @@ function submitOnShortcut(event: KeyboardEvent): void {
         <div v-if="loadingOlder" class="history-loader"><span class="loader" /> Loading earlier messages…</div>
         <ConversationTimeline
           :events="events"
+          :pending-messages="pendingMessages"
           :mutable="canMutate"
           :submitting-decision-id="submittingDecisionId"
           @resolve-decision="resolveDecision"
           @select="selectedEvent = $event"
+          @open-local-file="openLocalFile"
         />
       </section>
 
@@ -600,11 +681,15 @@ function submitOnShortcut(event: KeyboardEvent): void {
             <article v-for="attachment in sessionAttachments" :key="attachment.attachmentId" class="session-file-row">
               <input type="checkbox" :checked="cleanupAttachmentIds.includes(attachment.attachmentId)" aria-label="Select file for deletion" @change="toggleCleanupAttachment(attachment.attachmentId)" />
               <div><strong>{{ attachment.filename }}</strong><small>{{ formatBytes(attachment.sizeBytes) }} · {{ new Date(attachment.createdAt).toLocaleString() }}</small></div>
+              <button class="button button--small" :disabled="Boolean(downloadingAttachmentId)" @click="downloadSessionAttachment(attachment)">{{ downloadingAttachmentId === attachment.attachmentId ? 'Downloading…' : 'Download' }}</button>
               <button class="button button--small" :class="{ 'button--selected': selectedStoredAttachmentIds.includes(attachment.attachmentId) }" @click="toggleStoredAttachment(attachment.attachmentId)">{{ selectedStoredAttachmentIds.includes(attachment.attachmentId) ? 'Attached' : 'Attach' }}</button>
             </article>
           </div>
         </section>
         <div class="composer" :class="{ 'composer--disabled': !canSend }">
+          <div v-if="session" class="composer-context" aria-label="Model and session behavior">
+            <SessionControls compact :session="session" :capabilities="providerCapabilities" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
+          </div>
           <div v-if="pendingAttachments.length || selectedStoredAttachmentIds.length" class="composer-attachments">
             <div v-for="attachmentId in selectedStoredAttachmentIds" :key="`stored-${attachmentId}`" class="composer-attachment composer-attachment--ready">
               <div><strong>{{ sessionAttachments.find(item => item.attachmentId === attachmentId)?.filename ?? 'Session file' }}</strong><small>Stored in Relay</small></div>

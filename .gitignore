@@ -17,3 +17,6 @@ filter-sessions.js
 nul
 test-path.cjs
 .worktrees/
+.build/
+apps/web/test-results/
+apps/web/playwright-report/

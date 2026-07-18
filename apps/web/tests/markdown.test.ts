@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderMarkdown } from '../src/markdown'
+import { localFilePathFromHref, renderMarkdown } from '../src/markdown'
 
 describe('Agent Markdown rendering', () => {
   it('renders common Markdown and safe external links', () => {
@@ -16,5 +16,17 @@ describe('Agent Markdown rendering', () => {
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('href="javascript:')
     expect(html).toContain('&lt;script&gt;')
+  })
+
+  it('marks Gateway-local file links for in-app export without making them router links', () => {
+    const windows = renderMarkdown('[APK](D:/codever/dist/codever.apk)')
+    const linux = renderMarkdown('[report](file:///home/user/project/report.pdf)')
+
+    expect(windows).toContain('href="#"')
+    expect(windows).toContain('data-codever-local-file="D:/codever/dist/codever.apk"')
+    expect(windows).not.toContain('target="_blank"')
+    expect(linux).toContain('data-codever-local-file="/home/user/project/report.pdf"')
+    expect(localFilePathFromHref('https://example.com/file.apk')).toBeUndefined()
+    expect(localFilePathFromHref('../outside.apk')).toBeUndefined()
   })
 })

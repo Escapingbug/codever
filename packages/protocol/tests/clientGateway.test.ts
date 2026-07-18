@@ -54,6 +54,8 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'attachment.upload.cancel', attachmentId: 'attachment-1' },
             { kind: 'attachment.list', sessionId: 'session-1' },
             { kind: 'attachment.delete', sessionId: 'session-1', attachmentIds: ['attachment-1'] },
+            { kind: 'file.export', sessionId: 'session-1', path: '/workspace/codever/client.apk' },
+            { kind: 'attachment.download', sessionId: 'session-1', attachmentId: 'attachment-1', offset: 0 },
             { kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' } },
             { kind: 'session.archive.set', sessionId: 'session-1', archived: true },
             { kind: 'session.config.patch', sessionId: 'session-1', input: { config: {}, model: null } },
@@ -119,6 +121,11 @@ describe('encrypted Gateway to Client response and event frames', () => {
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-1',
             status: 'completed', completedAt: timestamp, payload: { session },
+        }).status).toBe('completed')
+        expect(parseClientGatewayResponseFrame({
+            version: 1, type: 'gateway.client.response', requestId: 'request-download',
+            status: 'completed', completedAt: timestamp,
+            payload: { attachmentId: 'attachment-1', offset: 0, data: 'aGVsbG8=', nextOffset: null },
         }).status).toBe('completed')
         expect(parseClientGatewayResponseFrame({
             version: 1, type: 'gateway.client.response', requestId: 'request-attachments',
