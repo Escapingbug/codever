@@ -5,9 +5,11 @@ import { useRoute, useRouter } from 'vue-router'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
+import type { RelayConnectionState } from '../api/relayApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
+import { captureScrollAnchor, restoreScrollAnchor } from '../timeline/scrollAnchor'
 
 const route = useRoute()
 const router = useRouter()
@@ -23,7 +25,7 @@ const session = shallowRef<CodeverSession>()
 const provider = computed(() => session.value?.provider ?? '')
 const providerCapabilities = shallowRef<ProviderSessionListDto>()
 const events = shallowRef<SessionEventEnvelope[]>([])
-const socketState = ref<'connected' | 'closed'>('closed')
+const relayConnection = ref<RelayConnectionState>(state.api.connectionState)
 const loadError = ref('')
 const liveError = ref('')
 const loading = ref(true)
@@ -56,6 +58,7 @@ const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
 const timelineElement = ref<HTMLElement>()
 let unsubscribeEvents: (() => void) | undefined
+let unsubscribeConnection: (() => void) | undefined
 const HISTORY_PAGE_SIZE = 24
 const INITIAL_AGENT_REPLIES = 5
 const MAX_INITIAL_HISTORY_PAGES = 8
@@ -66,7 +69,7 @@ const loadingInitialHistory = ref(false)
 let historyGeneration = 0
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
-const liveConnected = computed(() => socketState.value === 'connected')
+const liveConnected = computed(() => relayConnection.value === 'connected')
 const canMutate = computed(() => gatewayOnline.value
   && liveConnected.value
   && session.value?.state !== 'closed'
@@ -82,12 +85,21 @@ const canSubmitMessage = computed(() => canSend.value
   && !attachmentsUploading.value
   && (Boolean(draft.value.trim()) || readyAttachmentIds.value.length > 0))
 const connectionLabel = computed(() => {
-  if (!gatewayOnline.value) return 'Gateway offline'
-  if (socketState.value === 'connected') return 'Live'
-  return 'Connection unavailable'
+  if (!gatewayOnline.value) return 'Computer offline'
+  if (relayConnection.value === 'connected') return 'Live updates on'
+  if (relayConnection.value === 'connecting' || relayConnection.value === 'reconnecting') return 'Reconnecting'
+  return 'Server offline'
 })
 
 onMounted(() => {
+  unsubscribeConnection = state.api.subscribeConnection(value => {
+    const recovered = relayConnection.value !== 'connected' && value === 'connected'
+    relayConnection.value = value
+    if (recovered && sessionId.value) {
+      if (events.value.length) hasMoreBefore.value = true
+      void catchUpSessionEvents()
+    }
+  })
   void state.loadGateways()
   void state.loadProjects(gatewayId.value)
 })
@@ -98,6 +110,7 @@ watch(sessionId, (next, previous) => {
 watch([projectId, provider], () => void loadProviderCapabilities(), { immediate: true })
 onBeforeUnmount(() => {
   unsubscribeEvents?.()
+  unsubscribeConnection?.()
   disposeAttachments()
 })
 
@@ -108,24 +121,31 @@ async function loadSession(): Promise<void> {
   const requestedId = sessionId.value
   const memoryCached = state.eventsBySession[requestedId] ?? []
   events.value = recentConversation(memoryCached)
-  hasMoreBefore.value = false
+  session.value = (state.sessionsByProject[projectId.value] ?? []).find(item => item.id === requestedId)
+  state.api.rememberRoute(gatewayId.value, projectId.value, requestedId)
+  startLiveConnection(requestedId)
+  hasMoreBefore.value = hasCachedEventsBefore(requestedId, events.value.at(0)?.seq) || liveConnected.value
   loadingOlder.value = false
   loadingInitialHistory.value = true
-  loading.value = events.value.length === 0
+  loading.value = events.value.length === 0 && !session.value
   loadError.value = ''
   liveError.value = ''
   selectedEvent.value = undefined
   try {
+    await state.hydrateProject(projectId.value)
+    session.value ??= (state.sessionsByProject[projectId.value] ?? []).find(item => item.id === requestedId)
     const persisted = await state.loadCachedSessionEvents(requestedId)
     if (requestedId !== sessionId.value) return
     if (persisted.length) {
-      events.value = recentConversation(persisted)
+      events.value = recentConversation(mergeSessionEvents(events.value, persisted))
+      hasMoreBefore.value = hasCachedEventsBefore(requestedId, events.value.at(0)?.seq) || liveConnected.value
       loading.value = false
+      await scrollToLatest(false)
     }
-    session.value = await state.api.getSession(requestedId)
-    state.replaceSession(session.value)
-    await refreshSessionAttachments()
-    startLiveConnection(requestedId)
+    void refreshSessionAttachments()
+    const remoteSession = await state.api.getSession(requestedId)
+    session.value = remoteSession
+    state.replaceSession(remoteSession)
     let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
     let fetchedRemoteEvents = page.events
     let pageCount = 1
@@ -143,17 +163,16 @@ async function loadSession(): Promise<void> {
     }
     if (requestedId !== sessionId.value || generation !== historyGeneration) return
     const remoteEvents = recentConversation(fetchedRemoteEvents)
-    const lastRemoteSeq = fetchedRemoteEvents.at(-1)?.seq ?? 0
-    const liveSinceRequest = events.value.filter(event => event.seq > lastRemoteSeq)
-    events.value = mergeSessionEvents(remoteEvents, liveSinceRequest)
+    const followLatest = isNearTimelineBottom()
+    events.value = mergeSessionEvents(events.value, remoteEvents)
     state.mergeSessionEvents(requestedId, fetchedRemoteEvents)
     const earliestVisible = events.value.at(0)?.seq
     hasMoreBefore.value = page.previousBefore !== null
       || (earliestVisible !== undefined && fetchedRemoteEvents.some(event => event.seq < earliestVisible))
-    await scrollToLatest(false)
+    if (followLatest) await scrollToLatest(false)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not load the session'
-    if (events.value.length) liveError.value = `Could not refresh this cached conversation: ${message}`
+    if (events.value.length || session.value) liveError.value = `Could not refresh this cached conversation: ${message}`
     else loadError.value = message
   } finally {
     if (requestedId === sessionId.value && generation === historyGeneration) {
@@ -182,7 +201,6 @@ function startLiveConnection(id: string): void {
     }
     if (nearBottom) void scrollToLatest()
   })
-  socketState.value = 'connected'
 }
 
 function appendEvents(incoming: SessionEventEnvelope[]): void {
@@ -192,6 +210,24 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
     && merged.every((event, index) => event.eventId === events.value[index]?.eventId)) return
   events.value = merged
   state.mergeSessionEvents(sessionId.value, additions)
+}
+
+async function catchUpSessionEvents(): Promise<void> {
+  const requestedId = sessionId.value
+  let after = events.value.at(-1)?.seq ?? 0
+  try {
+    for (let pageCount = 0; pageCount < 20; pageCount += 1) {
+      const page = await state.api.getSessionEvents(requestedId, { after, limit: HISTORY_PAGE_SIZE })
+      if (requestedId !== sessionId.value) return
+      appendEvents(page.events)
+      if (page.nextAfter === null || page.nextAfter <= after) return
+      after = page.nextAfter
+    }
+  } catch (error) {
+    if (requestedId === sessionId.value && events.value.length === 0) {
+      liveError.value = error instanceof Error ? error.message : 'Live updates could not be synchronized'
+    }
+  }
 }
 
 function countAgentReplies(source: SessionEventEnvelope[]): number {
@@ -232,8 +268,7 @@ function isNearTimelineBottom(): boolean {
 
 async function handleTimelineScroll(): Promise<void> {
   const element = timelineElement.value
-  if (!element || element.scrollTop > HISTORY_LOAD_THRESHOLD || loadingInitialHistory.value
-    || loadingOlder.value || !hasMoreBefore.value) return
+  if (!element || element.scrollTop > HISTORY_LOAD_THRESHOLD || loadingOlder.value || !hasMoreBefore.value) return
   await loadOlderEvents()
 }
 
@@ -244,19 +279,42 @@ async function loadOlderEvents(): Promise<void> {
   const requestedId = sessionId.value
   const generation = historyGeneration
   loadingOlder.value = true
-  const previousHeight = element.scrollHeight
+  const anchor = captureScrollAnchor(element)
   try {
+    const cached = (state.eventsBySession[requestedId] ?? []).filter(event => event.seq < earliest)
+    if (cached.length) {
+      appendEvents(cached.slice(-HISTORY_PAGE_SIZE))
+      hasMoreBefore.value = cached.length > HISTORY_PAGE_SIZE || liveConnected.value
+      return
+    }
+    if (loadingInitialHistory.value) return
     const page = await state.api.getSessionEvents(requestedId, { before: earliest, limit: HISTORY_PAGE_SIZE })
     if (requestedId !== sessionId.value || generation !== historyGeneration) return
     appendEvents(page.events)
     hasMoreBefore.value = page.events.length > 0 && page.previousBefore !== null
-    await nextTick()
-    element.scrollTop += element.scrollHeight - previousHeight
   } catch (error) {
     liveError.value = error instanceof Error ? error.message : 'Earlier messages could not be loaded'
   } finally {
-    if (requestedId === sessionId.value && generation === historyGeneration) loadingOlder.value = false
+    if (requestedId === sessionId.value && generation === historyGeneration) {
+      loadingOlder.value = false
+      await nextTick()
+      restoreScrollAnchor(element, anchor)
+      await nextAnimationFrame()
+      restoreScrollAnchor(element, anchor)
+    }
   }
+}
+
+function hasCachedEventsBefore(id: string, before: number | undefined): boolean {
+  if (before === undefined) return false
+  return (state.eventsBySession[id] ?? []).some(event => event.seq < before)
+}
+
+function nextAnimationFrame(): Promise<void> {
+  return new Promise(resolve => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve())
+    else resolve()
+  })
 }
 
 async function sendMessage(): Promise<void> {
@@ -272,6 +330,7 @@ async function sendMessage(): Promise<void> {
       attachmentIds: readyAttachmentIds.value,
       sendWhenOnline: !gatewayOnline.value ? true : undefined,
     })
+    await catchUpSessionEvents()
     pendingAttachments.value = []
     selectedStoredAttachmentIds.value = []
     await refreshSessionAttachments()
@@ -503,7 +562,12 @@ function submitOnShortcut(event: KeyboardEvent): void {
 
     <div v-if="!gatewayOnline || !liveConnected" class="connection-banner" :class="{ 'connection-banner--offline': !gatewayOnline }">
       <span class="pulse-dot" />
-      <div><strong>{{ connectionLabel }}</strong><small v-if="!gatewayOnline">The encrypted Gateway channel is offline.</small><small v-else>Live events continue after sequence {{ events.at(-1)?.seq ?? 0 }}.</small></div>
+      <div>
+        <strong>{{ connectionLabel }}</strong>
+        <small v-if="!gatewayOnline">The encrypted Gateway channel is offline. Cached messages remain available.</small>
+        <small v-else-if="relayConnection === 'reconnecting' || relayConnection === 'connecting'">Cached messages remain available. New events will synchronize automatically.</small>
+        <small v-else>Cached messages remain available while the Relay connection is restored.</small>
+      </div>
     </div>
     <button v-if="liveError" class="inline-alert" @click="liveError = ''">{{ liveError }} <span>×</span></button>
 

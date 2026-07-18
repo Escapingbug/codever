@@ -28,8 +28,16 @@ import {
 } from '@nats-io/nats-core'
 import type { ClientDeviceCredential, ClientDeviceCredentialStore } from '../security/deviceCredentialStore'
 import type { ClientRelayCredential } from '../security/relayCredentialStore'
+import type { DurableSessionEventStore } from './sessionEventStore'
 
 const COMMAND_TTL_MS = 7 * 24 * 60 * 60_000
+
+class RetryableDurableMessageError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'RetryableDurableMessageError'
+  }
+}
 
 export interface DurableSyncClientOptions {
   connection: NatsConnection
@@ -39,6 +47,7 @@ export interface DurableSyncClientOptions {
   onInventory: (gatewayId: string, inventory: InventorySnapshot) => void | Promise<void>
   onGateway: (gateway: Gateway) => void | Promise<void>
   responseStore?: DurableResponseStore
+  eventStore?: DurableSessionEventStore
   onError?: (error: Error) => void
   now?: () => number
 }
@@ -157,7 +166,8 @@ export class DurableSyncClient {
         if (!await message.ackAck()) throw new Error('JetStream did not confirm the Client acknowledgement')
       } catch (error) {
         this.report(error)
-        message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
+        if (error instanceof RetryableDurableMessageError) message.nak(1_000)
+        else message.term(error instanceof Error ? error.message : 'Invalid durable Client message')
       }
     }
   }
@@ -179,6 +189,13 @@ export class DurableSyncClient {
     const cipher = await this.cipher(outer.gatewayId, credential)
     const value = await cipher.decrypt(parseEncrypted(outer.opaquePayload)) as Partial<StandardConversationEvent>
     const codever = parseSessionEventEnvelope(value.codever)
+    try {
+      await this.options.eventStore?.merge(codever)
+    } catch (error) {
+      throw new RetryableDurableMessageError('The durable event could not be committed to the Client cache', {
+        cause: error,
+      })
+    }
     await this.options.onEvent(codever, { ...value, codever } as StandardConversationEvent)
   }
 

@@ -12,6 +12,7 @@ const eventsBySession = shallowReactive<Record<string, SessionEventEnvelope[]>>(
 const pending = reactive(new Set<string>())
 const errors = reactive<Record<string, string | undefined>>({})
 let workspaceLoad: Promise<void> | undefined
+let workspaceHydration: Promise<void> | undefined
 
 export function useCodeverState() {
   const injectedApi = inject(relayApiKey)
@@ -33,11 +34,15 @@ export function useCodeverState() {
   async function loadWorkspace(): Promise<void> {
     if (workspaceLoad) return workspaceLoad
     workspaceLoad = (async () => {
-      await load('gateways', () => api.listGateways(), (value) => { gateways.value = value })
+      await hydrateWorkspace()
+      await loadGateways()
       await Promise.all(gateways.value.map((gateway) => load(
         `projects:${gateway.id}`,
         () => api.listProjects(gateway.id),
-        (value) => { projectsByGateway[gateway.id] = value },
+        (value) => {
+          projectsByGateway[gateway.id] = value
+          writeCached(`projects:${gateway.id}`, value)
+        },
       )))
     })()
     try {
@@ -45,6 +50,42 @@ export function useCodeverState() {
     } finally {
       workspaceLoad = undefined
     }
+  }
+
+  async function hydrateWorkspace(): Promise<void> {
+    if (workspaceHydration) return workspaceHydration
+    workspaceHydration = (async () => {
+      const cachedGateways = await readCached<Gateway[]>('gateways') ?? []
+      if (cachedGateways.length && !gateways.value.length) gateways.value = cachedGateways
+      await Promise.all(cachedGateways.map(async gateway => {
+        if (projectsByGateway[gateway.id]) return
+        projectsByGateway[gateway.id] = await readCached<Project[]>(`projects:${gateway.id}`) ?? []
+      }))
+    })()
+    try { await workspaceHydration } finally { workspaceHydration = undefined }
+  }
+
+  async function hydrateProject(projectId: string): Promise<void> {
+    if (!sessionsByProject[projectId]) {
+      sessionsByProject[projectId] = await readCached<CodeverSession[]>(`sessions:${projectId}`) ?? []
+    }
+    if (!providerSessionsByProject[projectId]) {
+      providerSessionsByProject[projectId] = await readCached<ProviderSession[]>(`provider-sessions:${projectId}`) ?? []
+    }
+  }
+
+  async function loadGateways(): Promise<void> {
+    await load('gateways', () => api.listGateways(), value => {
+      gateways.value = value
+      writeCached('gateways', value)
+    })
+  }
+
+  async function loadSessions(projectId: string): Promise<void> {
+    await load(`sessions:${projectId}`, () => api.listSessions(projectId), value => {
+      sessionsByProject[projectId] = value
+      writeCached(`sessions:${projectId}`, value)
+    })
   }
 
   async function createProject(gatewayId: string, input: CreateProjectDto): Promise<Project> {
@@ -75,24 +116,26 @@ export function useCodeverState() {
     pending: computed(() => pending),
     errors,
     loadWorkspace,
+    hydrateWorkspace,
+    hydrateProject,
     createProject,
-    loadGateways: () => load('gateways', () => api.listGateways(), (value) => { gateways.value = value }),
+    loadGateways,
     loadProjects: (gatewayId: string) => load(
       `projects:${gatewayId}`,
       () => api.listProjects(gatewayId),
-      (value) => { projectsByGateway[gatewayId] = value },
+      (value) => {
+        projectsByGateway[gatewayId] = value
+        writeCached(`projects:${gatewayId}`, value)
+      },
     ),
-    loadSessions: (projectId: string) => load(
-      `sessions:${projectId}`,
-      () => api.listSessions(projectId),
-      (value) => { sessionsByProject[projectId] = value },
-    ),
+    loadSessions,
     replaceSession: (session: CodeverSession) => {
-      const sessions = sessionsByProject[session.projectId]
-      if (!sessions) return
+      const sessions = sessionsByProject[session.projectId] ?? []
+      if (!sessionsByProject[session.projectId]) sessionsByProject[session.projectId] = sessions
       const index = sessions.findIndex((item) => item.id === session.id)
       if (index >= 0) sessions[index] = session
       else sessions.unshift(session)
+      writeCached(`sessions:${session.projectId}`, [...sessions])
     },
     loadCachedProviderSessions: async (projectId: string) => {
       if (providerSessionsByProject[projectId]) return providerSessionsByProject[projectId]

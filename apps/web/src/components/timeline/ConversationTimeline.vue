@@ -31,7 +31,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
 <template>
   <div v-if="entries.length" class="timeline">
     <template v-for="entry in entries" :key="entry.key">
-      <article v-if="entry.type === 'assistant'" class="message message--assistant" @click="select($event, entry.events[0]!)">
+      <article v-if="entry.type === 'assistant'" class="message message--assistant" :data-timeline-key="entry.key" @click="select($event, entry.events[0]!)">
         <div class="message-body">
           <div class="message-meta message-meta--agent">
             <span>Agent · {{ time(entry.events[0]!.timestamp) }}</span>
@@ -43,12 +43,13 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         </div>
       </article>
 
-      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" @click="select($event, entry.events.at(-1)!)" />
+      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" :data-timeline-key="entry.key" @click="select($event, entry.events.at(-1)!)" />
 
       <template v-else>
         <article
           v-if="entry.envelope.event.kind === 'user_message'"
           class="message message--user"
+          :data-timeline-key="entry.key"
           @click="select($event, entry.envelope)"
         >
           <div class="message-body">
@@ -64,6 +65,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
 
         <DecisionEventCard
           v-else-if="entry.envelope.event.kind === 'decision_request'"
+          :data-timeline-key="entry.key"
           :request="entry.envelope.event"
           :resolution="decisionResolution(events, entry.envelope.event.decisionId)"
           :disabled="!mutable"
@@ -75,6 +77,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         <article
           v-else-if="entry.envelope.event.kind === 'status'"
           class="event-card status-event"
+          :data-timeline-key="entry.key"
           :class="`status-event--${entry.envelope.event.level}`"
           @click="select($event, entry.envelope)"
         >
@@ -85,6 +88,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         <div
           v-else-if="entry.envelope.event.kind !== 'decision_resolved'"
           class="system-event"
+          :data-timeline-key="entry.key"
           @click="select($event, entry.envelope)"
         >
           <span />

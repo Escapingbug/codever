@@ -28,7 +28,10 @@ export function writeCached(key: string, value: unknown): void {
 export async function writeCachedDurable(key: string, value: unknown): Promise<void> {
   memory.set(key, value)
   const database = await openDatabase()
-  if (!database) return
+  if (!database) {
+    if (typeof indexedDB === 'undefined') return
+    throw new Error('Client cache database is unavailable')
+  }
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, 'readwrite')
     transaction.objectStore(STORE_NAME).put(value, key)

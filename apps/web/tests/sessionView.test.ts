@@ -39,6 +39,43 @@ afterEach(() => {
 })
 
 describe('session view', () => {
+  it('shows a cached conversation while the remote refresh is still pending', async () => {
+    const sessionId = 'session-offline-first'
+    const cachedEvents = [assistantEvent(sessionId, 1, 'turn-1')]
+    const seed = await mountSession(fakeApi(sessionId, cachedEvents), sessionId)
+    seed.unmount()
+
+    const pendingSession = deferred<CodeverSession>()
+    const pendingHistory = deferred<HistoryPage>()
+    const wrapper = await mountSession(fakeApi(sessionId, cachedEvents, {
+      getSession: vi.fn(() => pendingSession.promise),
+      getSessionEvents: vi.fn(() => pendingHistory.promise),
+    }), sessionId, false)
+    await flushPromises()
+
+    expect(wrapper.find('.session-load-state').exists()).toBe(false)
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('renders a durable live event without reopening the session', async () => {
+    const sessionId = 'session-live-update'
+    let subscriber: ((event: SessionEventEnvelope) => void) | undefined
+    const api = fakeApi(sessionId, [], {
+      subscribeSession: vi.fn((_id: string, callback: (event: SessionEventEnvelope) => void) => {
+        subscriber = callback
+        return () => undefined
+      }),
+    })
+    const wrapper = await mountSession(api, sessionId)
+
+    subscriber?.(assistantEvent(sessionId, 1, 'turn-1'))
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('clears the Android composer before waiting for message acceptance', async () => {
     const pendingSend = deferred<unknown>()
     const api = fakeApi('session-composer', [], {
@@ -72,9 +109,11 @@ describe('session view', () => {
     const wrapper = await mountSession(fakeApi(sessionId, cachedEvents, { getSessionEvents }), sessionId, false)
     await flushPromises()
 
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(5)
     await wrapper.get('.conversation-pane').trigger('scroll')
 
     expect(getSessionEvents).toHaveBeenCalledTimes(1)
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(6)
     initialPage.resolve({ events: cachedEvents, nextAfter: null, previousBefore: null })
     await flushPromises()
     wrapper.unmount()
@@ -121,6 +160,12 @@ function fakeApi(
     lastEventSeq: events.at(-1)?.seq ?? 0,
   }
   return {
+    connectionState: 'connected',
+    subscribeConnection: vi.fn((subscriber: (state: string) => void) => {
+      subscriber('connected')
+      return () => undefined
+    }),
+    rememberRoute: vi.fn(),
     listGateways: vi.fn(async () => [gateway]),
     listProjects: vi.fn(async () => [project]),
     getSession: vi.fn(async () => session),

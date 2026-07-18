@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { RelayApi, RelayApiError } from '../api/relayApi'
+import { RelayApi, RelayApiError, type RelayConnectionState } from '../api/relayApi'
 import { ClientRelayCredentialStore } from '../security/relayCredentialStore'
 import { createPlatformSecretStore, type SecretStore } from '../security/secretStore'
 
@@ -33,6 +33,7 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
   const identities = ref<Record<string, RelayIdentity>>({})
   const initialized = ref(false)
   const initializationError = ref('')
+  const connectionState = ref<RelayConnectionState>('disconnected')
   let initializePromise: Promise<void> | undefined
   let disconnectedHandler: (() => void) | undefined
 
@@ -43,6 +44,7 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     relayProfileId: () => activeProfileId.value,
     secrets,
     onDisconnected: () => disconnectedHandler?.(),
+    onConnectionState: value => { connectionState.value = value },
   })
   const credentialStore = new ClientRelayCredentialStore(secrets)
 
@@ -147,6 +149,7 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     activeAuth,
     initialized,
     initializationError,
+    connectionState,
     api,
     hasProfiles: computed(() => profiles.value.length > 0),
     isAuthenticated: computed(() => Boolean(activeAuth.value)),

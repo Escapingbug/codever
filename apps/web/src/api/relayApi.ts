@@ -26,8 +26,10 @@ import type { SecretStore } from '../security/secretStore'
 import { SecureRelayClient } from './secureRelayClient'
 import { connectDurableNats, DurableSyncClient } from './durableSyncClient'
 import { IndexedDbDurableResponseStore } from './durableResponseStore'
+import { IndexedDbSessionEventStore } from './sessionEventStore'
 import { pairGatewayOverNats } from './natsDevicePairingClient'
 import type { NatsConnection } from '@nats-io/nats-core'
+import { mergeSessionEvents } from '../sessionEvents'
 
 export interface RelayApiOptions {
   baseUrl: string | (() => string | undefined)
@@ -35,9 +37,12 @@ export interface RelayApiOptions {
   secrets: SecretStore
   fetch?: typeof globalThis.fetch
   onDisconnected?: () => void
+  onConnectionState?: (state: RelayConnectionState) => void
   requestTimeoutMs?: number
   longRequestTimeoutMs?: number
 }
+
+export type RelayConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 
 export class RelayApiError extends Error {
   constructor(message: string, public readonly status = 0, public readonly code?: string) {
@@ -59,7 +64,11 @@ export class RelayApi {
   private readonly projectGateways = new Map<string, string>()
   private readonly sessionGateways = new Map<string, string>()
   private readonly eventSubscribers = new Map<string, Set<(event: SessionEventEnvelope) => void>>()
+  private readonly connectionSubscribers = new Set<(state: RelayConnectionState) => void>()
+  private readonly eventBacklog = new Map<string, SessionEventEnvelope[]>()
   private readonly durableIdempotencyGateways = new Set<string>()
+  private connectionStateValue: RelayConnectionState = 'disconnected'
+  private connectionGeneration = 0
 
   constructor(private readonly options: RelayApiOptions) {
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
@@ -69,6 +78,18 @@ export class RelayApi {
 
   get baseUrl(): string { return (source(this.options.baseUrl) ?? '').replace(/\/+$/, '') }
   get relayProfileId(): string { return source(this.options.relayProfileId) ?? '' }
+  get connectionState(): RelayConnectionState { return this.connectionStateValue }
+
+  subscribeConnection(subscriber: (state: RelayConnectionState) => void): () => void {
+    this.connectionSubscribers.add(subscriber)
+    subscriber(this.connectionStateValue)
+    return () => this.connectionSubscribers.delete(subscriber)
+  }
+
+  rememberRoute(gatewayId: string, projectId?: string, sessionId?: string): void {
+    if (projectId) this.projectGateways.set(projectId, gatewayId)
+    if (sessionId) this.sessionGateways.set(sessionId, gatewayId)
+  }
 
   async checkHealth(): Promise<void> {
     if (!this.baseUrl) throw new RelayApiError('No Relay profile is configured')
@@ -99,6 +120,7 @@ export class RelayApi {
   }
 
   async disconnect(deleteCredential = false): Promise<void> {
+    this.connectionGeneration += 1
     await this.durable?.close()
     this.durable = undefined
     await this.nats?.drain()
@@ -111,6 +133,7 @@ export class RelayApi {
     this.projectGateways.clear()
     this.sessionGateways.clear()
     this.durableIdempotencyGateways.clear()
+    this.setConnectionState('disconnected')
     if (deleteCredential && this.relayProfileId) await this.relayCredentials.delete(this.relayProfileId)
   }
 
@@ -313,6 +336,7 @@ export class RelayApi {
     const subscribers = this.eventSubscribers.get(sessionId) ?? new Set()
     subscribers.add(subscriber)
     this.eventSubscribers.set(sessionId, subscribers)
+    for (const event of this.eventBacklog.get(sessionId) ?? []) subscriber(event)
     return () => {
       subscribers.delete(subscriber)
       if (!subscribers.size) this.eventSubscribers.delete(sessionId)
@@ -386,14 +410,23 @@ export class RelayApi {
   }
 
   private async openDurable(credential: ClientRelayCredential): Promise<void> {
+    const generation = ++this.connectionGeneration
+    this.setConnectionState('connecting')
     await this.durable?.close()
     await this.nats?.drain()
-    const nats = await connectDurableNats(credential)
+    let nats: NatsConnection
+    try {
+      nats = await connectDurableNats(credential)
+    } catch (error) {
+      if (generation === this.connectionGeneration) this.setConnectionState('disconnected')
+      throw error
+    }
     const durable = new DurableSyncClient({
       connection: nats,
       relayCredential: credential,
       deviceCredentials: this.deviceCredentials,
       responseStore: new IndexedDbDurableResponseStore(credential.relayProfileId, credential.credentialId),
+      eventStore: new IndexedDbSessionEventStore(),
       onEvent: event => this.publishEvents([event]),
       onInventory: (gatewayId, inventory) => {
         this.inventories.set(gatewayId, inventory)
@@ -401,15 +434,23 @@ export class RelayApi {
         for (const session of inventory.sessions) this.sessionGateways.set(session.id, gatewayId)
       },
       onGateway: gateway => { this.gateways.set(gateway.id, gateway) },
+      onError: error => {
+        console.error('Codever durable synchronization error', error)
+      },
     })
     try {
       await durable.start()
     } catch (error) {
       await nats.close()
+      if (generation === this.connectionGeneration) this.setConnectionState('disconnected')
       throw error
     }
     this.nats = nats
     this.durable = durable
+    if (generation === this.connectionGeneration) {
+      this.setConnectionState('connected')
+      this.monitorConnection(nats, generation)
+    }
   }
 
   private requireDurable(): DurableSyncClient {
@@ -435,7 +476,30 @@ export class RelayApi {
     throw new RelayApiError('Gateway request was accepted but did not complete')
   }
   private publishEvents(events: SessionEventEnvelope[]): void {
-    for (const event of events) for (const subscriber of this.eventSubscribers.get(event.sessionId) ?? []) subscriber(event)
+    for (const event of events) {
+      const backlog = mergeSessionEvents(this.eventBacklog.get(event.sessionId) ?? [], [event])
+      this.eventBacklog.set(event.sessionId, backlog.slice(-2_000))
+      for (const subscriber of this.eventSubscribers.get(event.sessionId) ?? []) subscriber(event)
+    }
+  }
+  private monitorConnection(connection: NatsConnection, generation: number): void {
+    void (async () => {
+      try {
+        for await (const status of connection.status()) {
+          if (generation !== this.connectionGeneration) return
+          if (status.type === 'reconnect') this.setConnectionState('connected')
+          else if (status.type === 'disconnect' || status.type === 'reconnecting') this.setConnectionState('reconnecting')
+        }
+      } finally {
+        if (generation === this.connectionGeneration) this.setConnectionState('disconnected')
+      }
+    })()
+  }
+  private setConnectionState(state: RelayConnectionState): void {
+    if (this.connectionStateValue === state) return
+    this.connectionStateValue = state
+    this.options.onConnectionState?.(state)
+    for (const subscriber of this.connectionSubscribers) subscriber(state)
   }
 }
 

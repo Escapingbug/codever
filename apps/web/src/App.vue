@@ -4,12 +4,17 @@ import { useRoute, useRouter } from 'vue-router'
 import AppNavigation from './components/AppNavigation.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
 import { navigateToParent } from './navigation'
+import { clientSession } from './state/clientSession'
 
 const route = useRoute()
 const router = useRouter()
 const depth = computed(() => route.name === 'session' ? 3 : route.name === 'project' ? 2 : 1)
 const showBack = computed(() => depth.value > 1 || route.name === 'gateway')
 const isPublicEntry = computed(() => route.name === 'onboarding' || route.name === 'login')
+const relayConnected = computed(() => clientSession.connectionState.value === 'connected')
+const relayLabel = computed(() => clientSession.connectionState.value === 'connected' ? 'Connected'
+  : clientSession.connectionState.value === 'connecting' ? 'Connecting'
+    : clientSession.connectionState.value === 'reconnecting' ? 'Reconnecting' : 'Offline')
 </script>
 
 <template>
@@ -19,7 +24,7 @@ const isPublicEntry = computed(() => route.name === 'onboarding' || route.name =
       <button v-if="showBack" class="icon-button" aria-label="Go back" @click="navigateToParent(router)">←</button>
       <span v-else />
       <RouterLink class="mobile-brand" to="/projects"><span class="brand-mark">C</span> Codever</RouterLink>
-      <span class="client-status"><span class="status-dot status-dot--connected" />Connected</span>
+      <span class="client-status"><span class="status-dot" :class="relayConnected ? 'status-dot--connected' : 'status-dot--offline'" />{{ relayLabel }}</span>
     </header>
     <AppNavigation v-if="!isPublicEntry" />
     <main class="main-stage"><RouterView /></main>

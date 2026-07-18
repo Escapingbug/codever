@@ -20,7 +20,7 @@ async function forgetCredential(): Promise<void> {
       <div class="section-heading"><div><span class="eyebrow">Connection</span><h2>Codever server</h2></div><button v-if="!editing" class="button" @click="editing = true">Change server</button></div>
       <RelayProfileForm v-if="editing && clientSession.activeProfile.value" :profile="clientSession.activeProfile.value" submit-label="Save server" @saved="editing = false" @cancel="editing = false" />
       <div v-else-if="clientSession.activeProfile.value" class="server-summary">
-        <span class="status-dot status-dot--connected" /><div><strong>{{ clientSession.activeProfile.value.name }}</strong><small>Connected securely</small></div>
+        <span class="status-dot" :class="clientSession.connectionState.value === 'connected' ? 'status-dot--connected' : 'status-dot--offline'" /><div><strong>{{ clientSession.activeProfile.value.name }}</strong><small>{{ clientSession.connectionState.value === 'connected' ? 'Connected securely' : clientSession.connectionState.value === 'reconnecting' ? 'Reconnecting…' : 'Offline — cached data remains available' }}</small></div>
       </div>
       <details v-if="!editing && clientSession.activeProfile.value" class="machine-details"><summary>Technical details</summary><dl><div><dt>Address</dt><dd>{{ clientSession.activeProfile.value.baseUrl }}</dd></div><div><dt>Server ID</dt><dd>{{ clientSession.activeAuth.value?.relayId ?? 'Unknown' }}</dd></div><div><dt>Client credential</dt><dd>{{ clientSession.activeAuth.value?.credentialId ?? 'Unknown' }}</dd></div></dl></details>
     </section>

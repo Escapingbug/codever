@@ -3,6 +3,7 @@ import type { CodeverSession, ProviderSession } from '@codever/protocol'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
+import { clientSession } from '../state/clientSession'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 
 interface ProjectTask {
@@ -27,6 +28,7 @@ const gateway = computed(() => state.gateways.value.find(item => item.id === gat
 const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).find(item => item.id === projectId.value))
 const bridges = computed(() => state.sessionsByProject[projectId.value] ?? [])
 const providers = computed(() => gateway.value?.capabilities.providers ?? [])
+const projectMutable = computed(() => gatewayIsMutable(gateway.value) && clientSession.connectionState.value === 'connected')
 const providerSessions = computed(() => state.providerSessionsByProject[projectId.value] ?? [])
 const selectedProvider = ref('')
 const providerFilter = ref('all')
@@ -112,14 +114,19 @@ async function refreshTasks(): Promise<void> {
   const generation = ++discoveryGeneration
   const currentProjectId = projectId.value
   const currentProviders = [...providers.value]
-  discovering.value = true
   taskError.value = ''
   try {
-    await state.loadCachedProviderSessions(currentProjectId)
-    await state.loadSessions(currentProjectId)
+    // Cached task rows are the page's usable state. Network discovery only
+    // refreshes them in the background and must never gate opening a task.
+    await state.hydrateProject(currentProjectId)
+    state.api.rememberRoute(gatewayId.value, currentProjectId)
+    if (generation !== discoveryGeneration) return
+    discovering.value = true
+    const sessionsRefresh = state.loadSessions(currentProjectId)
     const attempts = await Promise.allSettled(currentProviders.map(provider =>
       state.api.discoverProviderSessions(currentProjectId, provider),
     ))
+    await sessionsRefresh
     if (generation !== discoveryGeneration) return
     const successful = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
     if (successful.length || currentProviders.length === 0) {
@@ -130,7 +137,7 @@ async function refreshTasks(): Promise<void> {
     }
   } catch (error) {
     if (generation === discoveryGeneration) {
-      taskError.value = error instanceof Error ? error.message : 'Could not load project tasks'
+      taskError.value = error instanceof Error ? error.message : 'Could not refresh project tasks'
     }
   } finally {
     if (generation === discoveryGeneration) discovering.value = false
@@ -158,6 +165,10 @@ async function createNewSession(): Promise<void> {
 
 async function openTask(task: ProjectTask): Promise<void> {
   if (openingKey.value || archivingKey.value) return
+  if (!task.codeverSessionId && !projectMutable.value) {
+    taskError.value = 'Connect to the Relay and Gateway before attaching a provider task'
+    return
+  }
   openingKey.value = task.key
   taskError.value = ''
   try {
@@ -181,7 +192,7 @@ async function openTask(task: ProjectTask): Promise<void> {
 }
 
 async function toggleArchive(task: ProjectTask): Promise<void> {
-  if (openingKey.value || archivingKey.value) return
+  if (openingKey.value || archivingKey.value || !projectMutable.value) return
   archivingKey.value = task.key
   taskError.value = ''
   try {
@@ -225,7 +236,7 @@ async function openSession(sessionId: string): Promise<void> {
           </dl>
         </details>
       </div>
-      <button class="button button--primary" :disabled="!gatewayIsMutable(gateway)" @click="openCreate">＋ New task</button>
+      <button class="button button--primary" :disabled="!projectMutable" @click="openCreate">＋ New task</button>
     </header>
 
     <section v-if="showCreate" ref="creatorElement" class="session-creator" aria-label="Create a new task">
@@ -256,7 +267,7 @@ async function openSession(sessionId: string): Promise<void> {
         <label><span class="sr-only">Provider</span><select v-model="providerFilter"><option value="all">All providers</option><option v-for="provider in providers" :key="provider" :value="provider">{{ provider }}</option></select></label>
       </div>
 
-      <div v-if="taskError" class="error-banner"><strong>Tasks unavailable</strong>{{ taskError }}</div>
+      <div v-if="taskError" class="error-banner"><strong>Refresh incomplete</strong>{{ taskError }}</div>
       <div v-if="discovering" class="session-refresh-state" role="status"><span class="loader" /><span><strong>Refreshing tasks</strong><small>Loaded tasks remain available while provider history is updated.</small></span></div>
 
       <template v-if="runningTasks.length">
@@ -267,7 +278,7 @@ async function openSession(sessionId: string): Promise<void> {
             <div><strong>{{ task.title }}</strong><small>{{ task.provider }} · {{ gateway?.name }}</small></div>
             <span class="session-mode">{{ task.state }}</span>
             <time>{{ new Date(task.updatedAt).toLocaleString() }}</time>
-            <button class="task-archive" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
+            <button class="task-archive" :disabled="!projectMutable || archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
           </article>
         </div>
       </template>
@@ -279,7 +290,7 @@ async function openSession(sessionId: string): Promise<void> {
           <div><strong>{{ task.title }}</strong><small>{{ task.firstMessage || `${task.provider} · ${gateway?.name}` }}</small></div>
           <span class="session-mode">{{ task.draft ? 'draft' : task.provider }}</span>
           <time>{{ new Date(task.updatedAt).toLocaleString() }}</time>
-          <button class="task-archive" :disabled="archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
+          <button class="task-archive" :disabled="!projectMutable || archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
         </article>
       </div>
       <div v-else-if="discovering" class="session-group-empty">Waiting for the first provider tasks…</div>
