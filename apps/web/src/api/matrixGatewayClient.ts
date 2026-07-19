@@ -18,6 +18,7 @@ import {
   MATRIX_GATEWAY_EVENT,
   MATRIX_INVENTORY_EVENT,
   MATRIX_RESPONSE_EVENT,
+  isMatrixTransportEvent,
   type MatrixPublicSession,
   type MatrixTransportEvent,
   type SignExecutionInput,
@@ -205,6 +206,10 @@ export class MatrixGatewayClient {
   }
 
   private receive(input: MatrixTransportEvent): void {
+    if (!isMatrixTransportEvent(input)) {
+      this.options.onSecurityError?.('Ignored malformed native Matrix payload')
+      return
+    }
     const eventType = input.event.type
     if (![MATRIX_RESPONSE_EVENT, MATRIX_CONVERSATION_EVENT, MATRIX_INVENTORY_EVENT, MATRIX_GATEWAY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType ?? '')) return
     if (!input.encrypted || !input.verifiedDevice) {

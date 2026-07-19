@@ -11,13 +11,21 @@ function showStartupError(error: unknown): void {
   console.error('Codever startup failed', error)
 }
 
-window.addEventListener('error', event => showStartupError(event.error ?? event.message))
-window.addEventListener('unhandledrejection', event => showStartupError(event.reason))
+let startupComplete = false
+
+function reportUnhandledError(error: unknown): void {
+  if (!startupComplete) {
+    showStartupError(error)
+    return
+  }
+  console.error('Codever runtime error', error)
+}
+
+window.addEventListener('error', event => reportUnhandledError(event.error ?? event.message))
+window.addEventListener('unhandledrejection', event => reportUnhandledError(event.reason))
 
 async function bootstrap(): Promise<void> {
   if (import.meta.env.MODE === 'native-e2e') {
-    localStorage.clear()
-    await deleteDatabase('codever-client-cache')
     await import('./e2e/main')
     return
   }
@@ -25,13 +33,6 @@ async function bootstrap(): Promise<void> {
   await startCodever()
 }
 
-function deleteDatabase(name: string): Promise<void> {
-  return new Promise(resolve => {
-    const request = indexedDB.deleteDatabase(name)
-    request.onsuccess = () => resolve()
-    request.onerror = () => resolve()
-    request.onblocked = () => resolve()
-  })
-}
-
-void bootstrap().catch(showStartupError)
+void bootstrap()
+  .then(() => { startupComplete = true })
+  .catch(showStartupError)

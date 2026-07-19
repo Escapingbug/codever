@@ -35,10 +35,30 @@ describe('Matrix client session', () => {
     expect(second.restore).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'PHONE' }), 'matrix-primary')
     expect(restored.isAuthenticated.value).toBe(true)
   })
+
+  it('restores after native status notifications were queued before the API subscribes', async () => {
+    const storage = memoryStorage()
+    const first = fakeNative()
+    const session = createClientSession(storage, first.value)
+    session.configureServer('rd.anciety.my.id')
+    await session.login('codever', 'secret')
+
+    const second = fakeNative([
+      { kind: 'sync_error', message: 'temporary outage' },
+      { kind: 'session_error', message: 'token refresh failed' },
+    ])
+    const restored = createClientSession(storage, second.value)
+
+    await expect(restored.initialize()).resolves.toBeUndefined()
+    expect(restored.initialized.value).toBe(true)
+    expect(restored.isAuthenticated.value).toBe(true)
+    expect(restored.connectionState.value).toBe('connected')
+    expect(restored.initializationError.value).toBe('')
+  })
 })
 
-function fakeNative() {
-  const listeners = new Set<(value: never) => void>()
+function fakeNative(backlog: unknown[] = []) {
+  const listeners = new Set<(value: unknown) => void>()
   const login = vi.fn(async () => ({ homeserver: 'https://rd.anciety.my.id', userId: '@codever:test', deviceId: 'PHONE' }))
   const restore = vi.fn(async () => undefined)
   const value = {
@@ -46,7 +66,11 @@ function fakeNative() {
     ensureControlRoom: vi.fn(async () => '!control:test'),
     createExecutionIdentity: vi.fn(async () => ({ keyId: 'key-1', publicKey: { kty: 'EC' } })),
     close: vi.fn(async () => undefined),
-    subscribe: vi.fn((listener: (value: never) => void) => { listeners.add(listener); return () => listeners.delete(listener) }),
+    subscribe: vi.fn((listener: (value: unknown) => void) => {
+      listeners.add(listener)
+      for (const value of backlog) listener(value)
+      return () => listeners.delete(listener)
+    }),
     signExecution: vi.fn(async () => 'token'),
     send: vi.fn(async () => '$event'),
   } as unknown as NativeMatrixClient

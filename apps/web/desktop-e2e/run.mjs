@@ -12,6 +12,8 @@ let appOutput = ''
 
 try {
   await startApp()
+  await resetBusinessCache()
+  await restartApp()
   await test('native WebView2 window and desktop layout', async () => {
     assert.equal(await browser.getTitle(), 'Codever')
     assert.equal(await browser.execute(() => window.location.hostname), 'tauri.localhost')
@@ -28,6 +30,43 @@ try {
     assert.ok(layout.documentHeight >= layout.viewportHeight)
   })
 
+  await test('late native listener errors do not replace the running application', async () => {
+    await browser.execute(() => window.__CODEVER_E2E__.reportRuntimeError())
+    assert.equal(await browser.$('h1').getText(), 'Build Android client')
+    assert.equal((await browser.$('body').getText()).includes('Codever could not start.'), false)
+    assert.equal(await browser.$('.composer textarea').isEnabled(), true)
+  })
+
+  await test('WebView cache state survives a native process restart', async () => {
+    const marker = `restart-${Date.now()}`
+    await browser.executeAsync((value, done) => {
+      localStorage.setItem('codever.desktop-e2e.restart', value)
+      const request = indexedDB.open('codever-desktop-e2e', 1)
+      request.onupgradeneeded = () => request.result.createObjectStore('markers')
+      request.onerror = () => done({ error: request.error?.message ?? 'open failed' })
+      request.onsuccess = () => {
+        const transaction = request.result.transaction('markers', 'readwrite')
+        transaction.objectStore('markers').put(value, 'restart')
+        transaction.oncomplete = () => { request.result.close(); done(null) }
+        transaction.onerror = () => done({ error: transaction.error?.message ?? 'write failed' })
+      }
+    }, marker)
+
+    await restartApp()
+
+    const restored = await browser.executeAsync(done => {
+      const local = localStorage.getItem('codever.desktop-e2e.restart')
+      const request = indexedDB.open('codever-desktop-e2e', 1)
+      request.onerror = () => done({ error: request.error?.message ?? 'open failed' })
+      request.onsuccess = () => {
+        const read = request.result.transaction('markers').objectStore('markers').get('restart')
+        read.onsuccess = () => { request.result.close(); done({ local, indexed: read.result }) }
+        read.onerror = () => done({ error: read.error?.message ?? 'read failed' })
+      }
+    })
+    assert.deepEqual(restored, { local: marker, indexed: marker })
+  })
+
   await test('Windows Credential Manager persistence across process restart', async () => {
     const value = `native-secret-${Date.now()}`
     await setNativeSecret(value)
@@ -41,20 +80,21 @@ try {
   })
 
   await test('optimistic message reconciliation and Provider output', async () => {
+    const message = `Run the Windows desktop journey ${Date.now()}`
     const composer = await browser.$('.composer textarea')
-    await composer.setValue('Run the Windows desktop journey')
+    await composer.setValue(message)
     await browser.$('button.send-button').click()
 
     assert.equal(await composer.getValue(), '')
     const pending = await browser.$('.message--pending')
     await pending.waitForDisplayed()
-    assert.match(await pending.getText(), /Run the Windows desktop journey/)
+    assert.ok((await texts('.message--pending')).some(text => text.includes(message)))
 
     await browser.execute(() => window.__CODEVER_E2E__.completeTurn())
     try {
       await browser.waitUntil(async () => {
         const pendingMessages = await texts('.message--pending')
-        return !pendingMessages.some(text => text.includes('Run the Windows desktop journey'))
+        return !pendingMessages.some(text => text.includes(message))
       }, { timeout: 10_000, timeoutMsg: 'The optimistic message was not reconciled' })
     } catch (error) {
       const diagnostic = await browser.execute(() => ({
@@ -71,7 +111,7 @@ try {
     }, { timeout: 10_000, timeoutMsg: 'The authoritative Provider reply was not rendered' })
     const userMessages = await texts('.message--user')
     assert.equal(userMessages
-      .filter(text => text.includes('Run the Windows desktop journey')).length, 1)
+      .filter(text => text.includes(message)).length, 1)
   })
 
   await test('cached conversation and input recovery after connectivity loss', async () => {
@@ -164,6 +204,25 @@ async function startApp() {
 async function restartApp() {
   await stopApp()
   await startApp()
+}
+
+async function resetBusinessCache() {
+  const result = await browser.executeAsync(done => {
+    const request = indexedDB.open('codever-client-cache', 1)
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('snapshots')) request.result.createObjectStore('snapshots')
+    }
+    request.onerror = () => done({ error: request.error?.message ?? 'open failed' })
+    request.onsuccess = () => {
+      const transaction = request.result.transaction('snapshots', 'readwrite')
+      transaction.objectStore('snapshots').clear()
+      transaction.oncomplete = () => { request.result.close(); done(null) }
+      transaction.onerror = () => done({ error: transaction.error?.message ?? 'clear failed' })
+    }
+  })
+  if (result && typeof result === 'object' && 'error' in result) {
+    throw new Error(`Could not isolate the desktop E2E cache: ${result.error}`)
+  }
 }
 
 async function stopApp() {

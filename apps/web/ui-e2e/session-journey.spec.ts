@@ -26,6 +26,14 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' }).locator('.agent-reply-state')).toContainText('success')
   })
 
+  test('C01 keeps the running UI available after a late native listener error', async ({ page }) => {
+    await page.evaluate(() => window.__CODEVER_E2E__.reportRuntimeError())
+
+    await expect(page.getByRole('heading', { name: 'Build Android client' })).toBeVisible()
+    await expect(page.getByText('Codever could not start.')).toHaveCount(0)
+    await expect(page.locator('.composer textarea')).toBeEnabled()
+  })
+
   test('C02 separates Matrix device trust from Gateway execution authorization', async ({ page }) => {
     await page.goto('./e2e.html#/machines')
     const secondComputer = page.locator('.machine-card').filter({ hasText: 'Second computer' })

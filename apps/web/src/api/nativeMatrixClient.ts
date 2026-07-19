@@ -25,6 +25,11 @@ export interface MatrixTransportEvent {
   senderDevice?: string
 }
 
+export interface MatrixTransportStatus {
+  kind: 'sync_error' | 'session_error'
+  message: string
+}
+
 export interface ExecutionIdentity {
   keyId: string
   publicKey: Record<string, unknown>
@@ -63,6 +68,7 @@ export interface SignExecutionInput {
 export class NativeMatrixClient {
   private unlisten?: UnlistenFn
   private readonly subscribers = new Set<(event: MatrixTransportEvent) => void>()
+  private readonly statusSubscribers = new Set<(status: MatrixTransportStatus) => void>()
   private readonly backlog: MatrixTransportEvent[] = []
 
   async login(input: {
@@ -150,6 +156,11 @@ export class NativeMatrixClient {
     return () => this.subscribers.delete(subscriber)
   }
 
+  subscribeStatus(subscriber: (status: MatrixTransportStatus) => void): () => void {
+    this.statusSubscribers.add(subscriber)
+    return () => this.statusSubscribers.delete(subscriber)
+  }
+
   async close(): Promise<void> {
     this.unlisten?.()
     this.unlisten = undefined
@@ -160,7 +171,15 @@ export class NativeMatrixClient {
 
   private async listen(): Promise<void> {
     if (this.unlisten) return
-    this.unlisten = await listen<MatrixTransportEvent>(MATRIX_EVENT_NAME, ({ payload }) => {
+    this.unlisten = await listen<unknown>(MATRIX_EVENT_NAME, ({ payload }) => {
+      if (isMatrixTransportStatus(payload)) {
+        for (const subscriber of this.statusSubscribers) subscriber(payload)
+        return
+      }
+      if (!isMatrixTransportEvent(payload)) {
+        console.error('[matrix] Ignored malformed native Matrix payload')
+        return
+      }
       this.backlog.push(payload)
       if (this.backlog.length > 2_000) this.backlog.splice(0, this.backlog.length - 2_000)
       for (const subscriber of this.subscribers) subscriber(payload)
@@ -170,6 +189,22 @@ export class NativeMatrixClient {
   private requireNative(): void {
     if (!isTauri()) throw new Error('The secure Matrix transport requires the Codever native app')
   }
+}
+
+export function isMatrixTransportEvent(value: unknown): value is MatrixTransportEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const input = value as Partial<MatrixTransportEvent>
+  return typeof input.roomId === 'string'
+    && !!input.event && typeof input.event === 'object' && !Array.isArray(input.event)
+    && typeof input.encrypted === 'boolean'
+    && typeof input.verifiedDevice === 'boolean'
+}
+
+export function isMatrixTransportStatus(value: unknown): value is MatrixTransportStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const input = value as Partial<MatrixTransportStatus>
+  return (input.kind === 'sync_error' || input.kind === 'session_error')
+    && typeof input.message === 'string'
 }
 
 function bytesToBase64(bytes: Uint8Array): string {

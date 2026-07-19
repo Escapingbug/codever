@@ -21,7 +21,11 @@ sanitized ACP transcripts preserve it for normal CI.
   foreground/background behavior require emulator or physical-device coverage.
 - **Windows native**: a dedicated Tauri build is driven through its embedded W3C
   WebDriver. It uses an isolated application identifier and verifies WebView2,
-  native window behavior, and real Windows Credential Manager persistence.
+  native window behavior, runtime-error containment, IndexedDB/localStorage
+  recovery, and real Windows Credential Manager persistence.
+- **Native event boundary**: Vitest drives the actual Tauri event-listener API
+  contract and verifies that Matrix timeline events, sync/session status, and
+  malformed native payloads cannot be confused with one another.
 
 ## Capability matrix
 
@@ -66,8 +70,10 @@ Run the deterministic business gate with `pnpm test:business-e2e`. It executes
 the ACP/Gateway journeys, Web type checking and unit tests, and all mobile
 Playwright journeys using fail-fast command chaining.
 
-On Windows, run `pnpm test:desktop-e2e`. This builds a feature-gated native test
-binary and drives seven core journeys in the real WebView2 process. It is kept
+On Windows, run `pnpm test:release-e2e`. This runs the portable business gate,
+then builds a feature-gated native test binary and drives nine core journeys in
+the real WebView2 process. The narrower `pnpm test:desktop-e2e` command runs only
+the native portion. Native automation is kept
 separate from the portable business gate because native compilation and window
 automation require a Windows desktop session.
 

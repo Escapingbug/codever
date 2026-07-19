@@ -293,11 +293,16 @@ declare global {
       nativeSecretSet(account: string, value: string): Promise<void>
       nativeSecretDelete(account: string): Promise<void>
       approveSecondComputer(): void
+      reportRuntimeError(): void
     }
   }
 }
 
 window.__CODEVER_E2E__ = {
+  reportRuntimeError() {
+    const error = new Error('Synthetic native listener failure')
+    window.dispatchEvent(new ErrorEvent('error', { error, message: error.message }))
+  },
   approveSecondComputer() { secondGatewayAuthorized = true },
   completeTurn() {
     if (!pendingSend) throw new Error('No pending Client message')

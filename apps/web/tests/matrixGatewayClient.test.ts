@@ -26,6 +26,9 @@ class FakeTransport implements MatrixTransportPort {
       roomId: '!control:test', event: { type, content }, ...security,
     })
   }
+  emitRaw(value: unknown): void {
+    for (const listener of this.listeners) listener(value as MatrixTransportEvent)
+  }
 }
 
 function client(transport: FakeTransport, onSecurityError = vi.fn()) {
@@ -44,6 +47,17 @@ function client(transport: FakeTransport, onSecurityError = vi.fn()) {
 }
 
 describe('MatrixGatewayClient', () => {
+  it('does not crash when the native transport reports sync or session status', () => {
+    const transport = new FakeTransport()
+    const { value, onSecurityError } = client(transport)
+    value.start()
+
+    expect(() => transport.emitRaw({ kind: 'sync_error', message: 'temporary outage' })).not.toThrow()
+    expect(() => transport.emitRaw({ kind: 'session_error', message: 'token refresh failed' })).not.toThrow()
+    expect(() => transport.emitRaw(undefined)).not.toThrow()
+    expect(onSecurityError).toHaveBeenCalledWith(expect.stringContaining('native Matrix payload'))
+  })
+
   it('shares a public execution key only through verified encrypted approval events', async () => {
     const transport = new FakeTransport()
     const { value, onSecurityError } = client(transport)
