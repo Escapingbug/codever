@@ -45,7 +45,6 @@ pub const COMMAND_EVENT_TYPE: &str = "io.codever.command.v1";
 pub const RESPONSE_EVENT_TYPE: &str = "io.codever.response.v1";
 pub const CONVERSATION_EVENT_TYPE: &str = "io.codever.conversation.v1";
 pub const INVENTORY_EVENT_TYPE: &str = "io.codever.inventory.v1";
-pub const SESSION_EVENT_TYPE: &str = "io.codever.session.v1";
 pub const GATEWAY_EVENT_TYPE: &str = "io.codever.gateway.v1";
 pub const DISCOVERY_EVENT_TYPE: &str = "io.codever.discovery.v1";
 pub const AUTHORIZATION_EVENT_TYPE: &str = "io.codever.authorization.v1";
@@ -795,7 +794,6 @@ pub fn validate_event_type(event_type: &str) -> Result<()> {
             | RESPONSE_EVENT_TYPE
             | CONVERSATION_EVENT_TYPE
             | INVENTORY_EVENT_TYPE
-            | SESSION_EVENT_TYPE
             | GATEWAY_EVENT_TYPE
             | DISCOVERY_EVENT_TYPE
             | AUTHORIZATION_EVENT_TYPE
@@ -818,7 +816,6 @@ mod tests {
             RESPONSE_EVENT_TYPE,
             CONVERSATION_EVENT_TYPE,
             INVENTORY_EVENT_TYPE,
-            SESSION_EVENT_TYPE,
             GATEWAY_EVENT_TYPE,
             DISCOVERY_EVENT_TYPE,
             AUTHORIZATION_EVENT_TYPE,

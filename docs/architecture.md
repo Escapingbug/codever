@@ -129,10 +129,11 @@ controls.
 
 ## Room/event model
 
-The target model is one encrypted workspace Space, one opaque Gateway control
-room per Gateway and one encrypted room per Project. Sessions are Matrix threads
-rooted by `io.codever.session.v1`. The current deployment uses the encrypted
-control room for all Codever events while project-room provisioning is completed.
+One encrypted control room carries all Codever transport events for the Matrix
+account. Gateway, Project and Session IDs are encrypted payload fields rather
+than Matrix rooms or threads. This minimizes homeserver-visible topology and
+avoids coupling business state recovery to room provisioning. COSE/CWT still
+authorizes the exact target Gateway and operation independently of room access.
 
 Event types and setup are specified in
 [`matrix-transport.md`](matrix-transport.md).

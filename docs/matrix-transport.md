@@ -44,17 +44,17 @@ homeserver host.
 
 ## Room model
 
-- One private encrypted Space represents a Codever workspace.
-- Each Gateway has an opaque encrypted control room for presence, inventory,
-  project creation and authorization administration.
-- Each Project has an opaque encrypted room. Project names and paths are
-  encrypted timeline payloads, not public Matrix state.
-- A Session is rooted by an `io.codever.session.v1` event. Conversation and
-  command events use an `m.thread` relation to that root.
+One private encrypted control room belongs to the Codever Matrix account. All
+Gateway, Project and Session routing identifiers live inside encrypted event
+payloads; they are not represented as Matrix rooms, Spaces, aliases or threads.
+This deliberately keeps Matrix transport topology independent from Codever's
+business hierarchy: the homeserver cannot infer project/session counts from
+room membership, and clients do not need a second room-provisioning state
+machine. Exact Gateway targeting remains enforced by COSE/CWT after E2EE.
 
-The initial implementation uses the encrypted control room while project-room
-provisioning is completed. Event transaction IDs are Codever request/event IDs,
-so Matrix retries converge on one event.
+Event transaction IDs are stable Codever request/event IDs, so Matrix retries
+converge on one event. Clients demultiplex decrypted events by Gateway, Project
+and Session ID and persist those streams in their local cache.
 
 ## Event types
 
@@ -67,7 +67,6 @@ so Matrix retries converge on one event.
 | `io.codever.gateway.v1` | Gateway to Client | Gateway identity, platform and presence |
 | `io.codever.discovery.v1` | Client to Gateway | Encrypted discovery request |
 | `io.codever.authorization.v1` | Client to Client | Verified execution-root approval request |
-| `io.codever.session.v1` | Gateway to Client | Session root for Matrix threads |
 
 Only decrypted events from verified Matrix devices cross the native trust
 boundary. Gateway command handling still requires valid COSE authorization.
