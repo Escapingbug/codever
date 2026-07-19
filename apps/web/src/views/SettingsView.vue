@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import type { MatrixDeviceSnapshot, MatrixVerificationSnapshot } from '../api/nativeMatrixClient'
 import type { ExecutionRootApprovalRequest } from '../api/matrixGatewayClient'
 import ServerForm from '../components/ServerForm.vue'
-import { clientSession } from '../state/clientSession'
+import { clientSession, friendlyCodeverError } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
 
 const router = useRouter()
@@ -38,7 +38,7 @@ async function refreshDevices(): Promise<void> {
     devices.value = nextDevices
     verifications.value = nextVerifications
   } catch (error) {
-    deviceError.value = error instanceof Error ? error.message : 'Unable to load Matrix devices'
+    deviceError.value = friendlyCodeverError(error)
   }
 }
 
@@ -53,7 +53,7 @@ async function startVerification(device: MatrixDeviceSnapshot): Promise<void> {
     const flow = await clientSession.requestVerification(device.deviceId)
     verifications.value = [...verifications.value.filter(value => value.flowId !== flow.flowId), flow]
   } catch (error) {
-    deviceError.value = error instanceof Error ? error.message : 'Unable to start device verification'
+    deviceError.value = friendlyCodeverError(error)
   } finally {
     deviceBusy.value = ''
   }
@@ -65,7 +65,7 @@ async function advance(flowId: string): Promise<void> {
     const flow = await clientSession.advanceVerification(flowId)
     verifications.value = verifications.value.map(value => value.flowId === flowId ? flow : value)
   } catch (error) {
-    deviceError.value = error instanceof Error ? error.message : 'Unable to continue verification'
+    deviceError.value = friendlyCodeverError(error)
   } finally {
     deviceBusy.value = ''
   }
@@ -78,7 +78,7 @@ async function confirm(flowId: string, matches: boolean): Promise<void> {
     verifications.value = verifications.value.map(value => value.flowId === flowId ? flow : value)
     await refreshDevices()
   } catch (error) {
-    deviceError.value = error instanceof Error ? error.message : 'Unable to confirm verification'
+    deviceError.value = friendlyCodeverError(error)
   } finally {
     deviceBusy.value = ''
   }
@@ -90,7 +90,7 @@ async function approveRequest(request: ExecutionRootApprovalRequest): Promise<vo
   try {
     await state.api.approveExecutionRoot(request)
   } catch (error) {
-    deviceError.value = error instanceof Error ? error.message : 'Unable to approve this client'
+    deviceError.value = friendlyCodeverError(error)
   } finally {
     approvalBusy.value = ''
   }
@@ -102,7 +102,7 @@ onMounted(() => {
     try {
       unsubscribeApprovals = state.api.subscribeExecutionApprovals(value => { approvalRequests.value = value })
     } catch (error) {
-      deviceError.value = error instanceof Error ? error.message : 'Unable to watch approval requests'
+      deviceError.value = friendlyCodeverError(error)
     }
     verificationTimer = setInterval(() => void refreshVerifications(), 2_000)
   }

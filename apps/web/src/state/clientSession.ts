@@ -159,6 +159,7 @@ function isIdentity(value: unknown): value is ClientIdentity {
 
 export function friendlyCodeverError(error: unknown): string {
   if (error instanceof CodeverApiError) return error.message
+  if (typeof error === 'string' && error.trim()) return error
   return error instanceof Error ? error.message : 'Unable to connect to Codever'
 }
 

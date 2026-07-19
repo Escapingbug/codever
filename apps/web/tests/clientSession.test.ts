@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createClientSession, normalizeHomeserver } from '../src/state/clientSession'
+import { createClientSession, friendlyCodeverError, normalizeHomeserver } from '../src/state/clientSession'
 import type { NativeMatrixClient } from '../src/api/nativeMatrixClient'
 
 describe('Matrix client session', () => {
+  it('preserves native Tauri string errors instead of replacing the actionable cause', () => {
+    expect(friendlyCodeverError('Matrix device was not found')).toBe('Matrix device was not found')
+    expect(friendlyCodeverError({ message: 'not an Error instance' })).toBe('Unable to connect to Codever')
+  })
+
   it('normalizes one standard-HTTPS server and rejects protocol or port input', () => {
     expect(normalizeHomeserver('rd.anciety.my.id')).toEqual({
       domain: 'rd.anciety.my.id', homeserver: 'https://rd.anciety.my.id',

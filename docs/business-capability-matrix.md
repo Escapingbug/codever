@@ -65,6 +65,9 @@ sanitized ACP transcripts preserve it for normal CI.
    never animate old output or wait for refresh before navigation.
 5. Live Codex canaries remain opt-in, but their last successful transcript and
    artifact assertions are versioned and replayed on every normal test run.
+6. An APK is not ready for user trial until the installed-app vertical gate in
+   [`android-live-e2e.md`](android-live-e2e.md) passes against real Matrix and a
+   real Gateway. Mobile-viewport Playwright does not satisfy this requirement.
 
 Run the deterministic business gate with `pnpm test:business-e2e`. It executes
 the ACP/Gateway journeys, Web type checking and unit tests, and all mobile
