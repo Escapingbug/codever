@@ -40,6 +40,7 @@ export interface GatewaySessionServiceOptions {
     now?: () => number
     createId?: () => string
     onSubscriberError?: (error: unknown) => void
+    onDiagnostic?: (message: string) => void
 }
 
 export interface CreateGatewaySessionInput extends CreateSessionDto {

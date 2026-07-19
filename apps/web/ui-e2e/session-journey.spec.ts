@@ -23,7 +23,24 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.message--pending')).toHaveCount(0)
     await expect(page.locator('.message--user').filter({ hasText: 'Run the complete business flow' })).toHaveCount(1)
     await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' })).toBeVisible()
+    await expect(page.getByLabel('Agent response (success): First reply.')).toBeVisible()
     await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' }).locator('.agent-reply-state')).toContainText('success')
+  })
+
+  test('C04 catches up omitted Provider deltas when Matrix delivers only a state wake-up', async ({ page }) => {
+    const composer = page.locator('.composer textarea')
+    await composer.fill('Exercise durable wake-up delivery')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    await expect(page.locator('.message--pending')).toContainText('Exercise durable wake-up delivery')
+
+    await page.evaluate(() => window.__CODEVER_E2E__.completeTurnWithWakeup())
+
+    await expect(page.locator('.message--pending')).toHaveCount(0)
+    await expect(page.locator('.message--user').filter({ hasText: 'Exercise durable wake-up delivery' })).toHaveCount(1)
+    const reply = page.locator('.message--assistant').filter({ hasText: 'Recovered from the durable journal.' })
+    await expect(reply).toHaveCount(1)
+    await expect(reply.locator('.agent-reply-state')).toContainText('success')
+    await expect(page.getByText('idle', { exact: true })).toBeVisible()
   })
 
   test('C01 keeps the running UI available after a late native listener error', async ({ page }) => {
@@ -40,10 +57,10 @@ test.describe('mobile Session business journey', () => {
     await expect(secondComputer).toContainText('Authorization required')
     await secondComputer.click()
 
-    await expect(page.getByRole('heading', { name: 'Approve this client on the computer' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Authorize this client' })).toBeVisible()
     await page.getByText('Technical details').click()
     await expect(page.getByText('SECONDGATEWAY')).toBeVisible()
-    await expect(page.getByText('Matrix device verification protects encrypted sync.')).toBeVisible()
+    await expect(page.getByText('The computer will bind this control key to the Matrix device you just verified. Unverified devices cannot add control keys.')).toBeVisible()
     await page.evaluate(() => window.__CODEVER_E2E__.approveSecondComputer())
     await page.goto('./e2e.html#/machines')
     await page.locator('.machine-card').filter({ hasText: 'Second computer' }).click()
@@ -55,6 +72,7 @@ test.describe('mobile Session business journey', () => {
     const gatewayDevice = page.locator('.server-summary').filter({ hasText: 'Windows Gateway' })
     await expect(gatewayDevice).toContainText('Not verified')
     await gatewayDevice.getByRole('button', { name: 'Verify' }).click()
+    await expect(page.getByRole('button', { name: 'Cancel verification' })).toBeVisible()
     await page.getByRole('button', { name: 'Continue verification' }).click()
     await expect(page.getByLabel('Verification emoji')).toContainText('🐶')
     await page.getByRole('button', { name: 'They match' }).click()
@@ -77,6 +95,19 @@ test.describe('mobile Session business journey', () => {
 
     await expect(page.getByRole('heading', { name: 'New Windows project' })).toBeVisible()
     await expect(page.getByRole('button', { name: /New task/ })).toBeVisible()
+  })
+
+  test('C03 discards a cancelled Project form instead of reviving stale input', async ({ page }) => {
+    await page.goto('./e2e.html#/projects')
+    await page.getByRole('button', { name: 'New project' }).click()
+    await page.getByLabel('Project name').fill('Stale project')
+    await page.getByLabel('Project folder').fill('D:\\stale')
+    await page.getByRole('button', { name: 'Cancel' }).click()
+    await page.getByRole('button', { name: 'New project' }).click()
+
+    await expect(page.getByLabel('Project name')).toHaveValue('')
+    await expect(page.getByLabel('Project folder')).toHaveValue('')
+    await expect(page.getByLabel('Default provider (optional)')).toHaveValue('')
   })
 
   test('C04/C14 starts fresh work or continues an inactive Provider task from one list', async ({ page }) => {

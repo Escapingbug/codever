@@ -83,6 +83,18 @@ describe.each([
         await store.close()
     })
 
+    it('appends a provider snapshot as one ordered idempotent batch', async () => {
+        const store = await createStore()
+        const snapshot = Array.from({ length: 100 }, (_, index) => makeEvent(`batch-${index}`, 'session-a'))
+        const first = await store.appendMany!(snapshot)
+        const retry = await store.appendMany!(snapshot)
+
+        expect(first.map(event => event.seq)).toEqual(Array.from({ length: 100 }, (_, index) => index + 1))
+        expect(retry).toEqual(first)
+        expect((await store.list('session-a', { after: 95 })).events).toHaveLength(5)
+        await store.close()
+    })
+
     it('rejects a new non-monotonic explicit sequence without poisoning later appends', async () => {
         const store = await createStore()
         await store.appendEnvelope(envelope('event-2', 'session-a', 2))

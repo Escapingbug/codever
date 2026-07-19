@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::{RwLock, mpsc},
+    sync::{Mutex, RwLock, mpsc},
 };
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +114,9 @@ async fn main() -> Result<()> {
     });
 
     let transport = Arc::new(RwLock::new(None::<MatrixTransport>));
+    // Matrix SDK retries server 429 responses internally. Serialize sends so
+    // concurrent RPC callers cannot multiply those retries into a storm.
+    let send_gate = Arc::new(Mutex::new(()));
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines
         .next_line()
@@ -134,14 +137,23 @@ async fn main() -> Result<()> {
             }
         };
         let id = request.id.clone();
-        let result = handle(request, &transport, &output_tx).await;
-        let output = match result {
-            Ok(value) => success(id, value),
-            Err(error) => failure(Some(id), "matrix_transport_error", format!("{error:#}")),
-        };
-        if output_tx.send(output).await.is_err() {
-            break;
-        }
+        let request_transport = transport.clone();
+        let request_send_gate = send_gate.clone();
+        let request_output = output_tx.clone();
+        tokio::spawn(async move {
+            let result = handle(
+                request,
+                &request_transport,
+                &request_output,
+                &request_send_gate,
+            )
+            .await;
+            let output = match result {
+                Ok(value) => success(id, value),
+                Err(error) => failure(Some(id), "matrix_transport_error", format!("{error:#}")),
+            };
+            let _ = request_output.send(output).await;
+        });
     }
     drop(output_tx);
     writer.await.context("IPC writer task failed")??;
@@ -152,6 +164,7 @@ async fn handle(
     request: RpcRequest,
     state: &Arc<RwLock<Option<MatrixTransport>>>,
     output: &mpsc::Sender<RpcOutput>,
+    send_gate: &Arc<Mutex<()>>,
 ) -> Result<Value> {
     match request.method.as_str() {
         "login" => {
@@ -185,6 +198,7 @@ async fn handle(
         "send" => {
             let params: SendParams =
                 serde_json::from_value(request.params).context("invalid send parameters")?;
+            let _send_guard = send_gate.lock().await;
             let transport = state
                 .read()
                 .await

@@ -23,7 +23,11 @@ import type { JWK } from '@codever/execution-auth'
 import { GatewayRequestLedger } from './requestLedger'
 import { FileObjectBlobTransport, GatewayAttachmentStore } from './attachments'
 import { AuthorizedRequestProcessor } from './authorizedRequestProcessor'
-import { MatrixGatewayWorker, NativeMatrixTransport, type MatrixTransport } from './matrix'
+import {
+    GatewayVerificationAgent, MatrixGatewayWorker, NativeMatrixTransport,
+    gatewayVerificationDirectory, type MatrixTransport,
+} from './matrix'
+import { ConversationWakeupPublisher } from './matrix/conversationWakeupPublisher'
 
 export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
@@ -72,6 +76,7 @@ export async function createGatewayApplication(
             if (!provider) throw new Error(`Unknown provider: ${name}`)
             return provider
         },
+        onDiagnostic: message => console.log(`[gateway:session] ${message}`),
     })
     const trust = await ExecutionTrustRepository.open(join(config.dataDirectory, 'execution-trust.json'))
     const replayGuard = await FileExecutionReplayGuard.open(join(config.dataDirectory, 'execution-replay.json'))
@@ -153,16 +158,24 @@ export async function createGatewayApplication(
         processor,
         currentGateway: gatewaySnapshot,
         currentInventory: inventory,
+        trustVerifiedDeviceRoot: async (ownerId, publicKey, label) => { await trust.trust(ownerId, publicKey, label) },
         onError: error => console.error('[gateway:matrix]', error.message),
     })
+    const verificationAgent = new GatewayVerificationAgent(
+        transport,
+        gatewayVerificationDirectory(config.dataDirectory),
+        error => console.error('[gateway:matrix:verification]', error.message),
+    )
 
+    const conversationWakeups = new ConversationWakeupPublisher({
+        publish: envelope => worker.publishConversation(config.matrix.controlRoomId, envelope),
+        onError: error => console.error('[gateway:matrix:event]', error.message),
+    })
     const unsubscribe = sessions.subscribe((envelope) => {
         const event = toWireConversationEvent(envelope.event)
         if (!event) return
         const wireEnvelope = { ...envelope, event }
-        if (started) void worker.publishConversation(config.matrix.controlRoomId, wireEnvelope).catch(error => {
-            console.error('[gateway:matrix:event]', error instanceof Error ? error.message : error)
-        })
+        if (started) conversationWakeups.accept(wireEnvelope)
     })
 
     return {
@@ -177,6 +190,7 @@ export async function createGatewayApplication(
             started = true
             try {
                 await worker.start()
+                await verificationAgent.start()
                 await worker.publishGateway(gatewaySnapshot())
                 await worker.publishInventory(await inventory())
                 heartbeat = setInterval(() => {
@@ -194,6 +208,8 @@ export async function createGatewayApplication(
             closed = true
             if (heartbeat) clearInterval(heartbeat)
             unsubscribe()
+            conversationWakeups.close()
+            await verificationAgent.stop()
             await worker.stop()
             await sessions.destroy()
             await events.close()

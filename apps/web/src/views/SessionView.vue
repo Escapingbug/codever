@@ -69,6 +69,11 @@ const hasMoreBefore = ref(false)
 const loadingOlder = ref(false)
 const loadingInitialHistory = ref(false)
 let historyGeneration = 0
+let liveEventQueue: Promise<void> = Promise.resolve()
+let tailSyncTimer: ReturnType<typeof setTimeout> | undefined
+let tailSyncRunning = false
+let tailSyncAfterSeq: number | undefined
+let disposed = false
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
 const liveConnected = computed(() => syncConnection.value === 'connected')
@@ -100,11 +105,12 @@ onMounted(() => {
     syncConnection.value = value
     if (recovered && sessionId.value) {
       if (events.value.length) hasMoreBefore.value = true
-      void catchUpSessionEvents()
+      scheduleTailSync(0)
     }
   })
   void state.loadGateways()
   void state.loadProjects(gatewayId.value)
+  scheduleTailSync(1_000)
 })
 watch(sessionId, (next, previous) => {
   if (previous && previous !== next) disposeAttachments()
@@ -112,6 +118,8 @@ watch(sessionId, (next, previous) => {
 }, { immediate: true })
 watch([projectId, provider], () => void loadProviderCapabilities(), { immediate: true })
 onBeforeUnmount(() => {
+  disposed = true
+  if (tailSyncTimer) clearTimeout(tailSyncTimer)
   unsubscribeEvents?.()
   unsubscribeConnection?.()
   disposeAttachments()
@@ -119,6 +127,7 @@ onBeforeUnmount(() => {
 
 async function loadSession(): Promise<void> {
   const generation = ++historyGeneration
+  liveEventQueue = Promise.resolve()
   unsubscribeEvents?.()
   unsubscribeEvents = undefined
   const requestedId = sessionId.value
@@ -200,13 +209,38 @@ async function loadProviderCapabilities(): Promise<void> {
 function startLiveConnection(id: string): void {
   unsubscribeEvents = state.api.subscribeSession(id, event => {
     const nearBottom = isNearTimelineBottom()
-    appendEvents([event])
-    if (event.event.kind === 'session_state' && session.value) {
-      session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
-      state.replaceSession(session.value)
-    }
-    if (nearBottom) void scrollToLatest()
+    const generation = historyGeneration
+    liveEventQueue = liveEventQueue
+      .then(() => receiveLiveEvent(id, event, generation, nearBottom))
+      .catch(error => {
+        if (id === sessionId.value && generation === historyGeneration) {
+          liveError.value = error instanceof Error ? error.message : 'Live updates could not be synchronized'
+        }
+      })
   })
+}
+
+async function receiveLiveEvent(
+  id: string,
+  event: SessionEventEnvelope,
+  generation: number,
+  nearBottom: boolean,
+): Promise<void> {
+  if (id !== sessionId.value || generation !== historyGeneration) return
+  const latest = events.value.at(-1)?.seq ?? 0
+  // Matrix carries durable wake-up events rather than every Provider delta.
+  // Fill any sequence gap from the Gateway journal before rendering the wake-up.
+  if (event.seq > latest + 1) {
+    await catchUpSessionEvents(latest, id, generation)
+  }
+  if (id !== sessionId.value || generation !== historyGeneration) return
+  appendEvents([event])
+  if (event.event.kind === 'session_state' && session.value) {
+    session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
+    state.replaceSession(session.value)
+  }
+  if (event.event.kind === 'session_state' && event.event.state === 'querying') scheduleTailSync(0)
+  if (nearBottom) await scrollToLatest()
 }
 
 function appendEvents(incoming: SessionEventEnvelope[]): void {
@@ -217,23 +251,71 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
   events.value = merged
   state.mergeSessionEvents(sessionId.value, additions)
   state.reconcilePendingMessages(sessionId.value, additions)
+  const latestState = [...additions].reverse().find(event => event.event.kind === 'session_state')
+  if (latestState?.event.kind === 'session_state' && session.value) {
+    session.value = {
+      ...session.value,
+      state: latestState.event.state,
+      updatedAt: latestState.timestamp,
+      lastEventSeq: Math.max(session.value.lastEventSeq ?? 0, latestState.seq),
+    }
+    state.replaceSession(session.value)
+  }
 }
 
-async function catchUpSessionEvents(): Promise<void> {
-  const requestedId = sessionId.value
-  let after = events.value.at(-1)?.seq ?? 0
+function scheduleTailSync(delay: number): void {
+  if (disposed) return
+  if (tailSyncTimer) clearTimeout(tailSyncTimer)
+  tailSyncTimer = setTimeout(() => { void runTailSync() }, delay)
+}
+
+async function runTailSync(): Promise<void> {
+  tailSyncTimer = undefined
+  if (disposed) return
+  if (tailSyncRunning || !liveConnected.value) {
+    scheduleTailSync(3_000)
+    return
+  }
+  tailSyncRunning = true
   try {
-    for (let pageCount = 0; pageCount < 20; pageCount += 1) {
-      const page = await state.api.getSessionEvents(requestedId, { after, limit: HISTORY_PAGE_SIZE })
-      if (requestedId !== sessionId.value) return
+    await catchUpSessionEvents()
+    if (tailSyncAfterSeq !== undefined) {
+      const afterSeq = tailSyncAfterSeq
+      const terminal = [...events.value].reverse().find(envelope => envelope.seq > afterSeq
+        && envelope.event.kind === 'session_state'
+        && envelope.event.state !== 'querying')
+      if (terminal) tailSyncAfterSeq = undefined
+    }
+  } catch {
+    // catchUpSessionEvents records a user-visible synchronization error when
+    // there is no usable cached conversation. The next poll retries it.
+  } finally {
+    tailSyncRunning = false
+    const activelyFollowing = tailSyncAfterSeq !== undefined || session.value?.state === 'querying'
+    scheduleTailSync(activelyFollowing ? 1_500 : 15_000)
+  }
+}
+
+async function catchUpSessionEvents(
+  afterSequence = events.value.at(-1)?.seq ?? 0,
+  requestedId = sessionId.value,
+  generation = historyGeneration,
+): Promise<void> {
+  let after = afterSequence
+  try {
+    for (let pageCount = 0; pageCount < 100; pageCount += 1) {
+      const page = await state.api.getSessionEvents(requestedId, { after, limit: 256 })
+      if (requestedId !== sessionId.value || generation !== historyGeneration) return
       appendEvents(page.events)
       if (page.nextAfter === null || page.nextAfter <= after) return
       after = page.nextAfter
     }
+    throw new Error('Live update catch-up exceeded the safety page limit')
   } catch (error) {
-    if (requestedId === sessionId.value && events.value.length === 0) {
+    if (requestedId === sessionId.value && generation === historyGeneration && events.value.length === 0) {
       liveError.value = error instanceof Error ? error.message : 'Live updates could not be synchronized'
     }
+    throw error
   }
 }
 
@@ -369,7 +451,8 @@ async function sendMessage(): Promise<void> {
     sending.value = false
   }
   if (accepted) {
-    void catchUpSessionEvents()
+    tailSyncAfterSeq = events.value.at(-1)?.seq ?? 0
+    scheduleTailSync(0)
     void refreshSessionAttachments()
   }
 }

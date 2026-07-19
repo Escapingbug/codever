@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { CodeverSession, JsonObject, ProviderSession, ProviderSessionListDto } from '@codever/protocol'
 import type { AgentQueryInput } from '@/providers/provider'
-import type { SessionEventEnvelope } from '@/platform/storage'
+import type { NewConversationEvent, SessionEventEnvelope } from '@/platform/storage'
 import {
     GatewaySessionRuntime,
     type DecisionResponseResult,
@@ -155,12 +155,16 @@ export class GatewaySessionService {
         const hydration = this.serialize(sessionId, async () => {
             const session = await this.requireOpenSession(sessionId)
             if (!session.providerSessionId || !this.options.providerDiscoveryFactory) return
+            if (session.providerHistoryHydratedAt) return
             const project = await this.options.projects.get(session.projectId)
             const provider = await this.options.providerDiscoveryFactory(session.provider, project)
             try {
                 if (!provider.getSessionHistory) return
+                const startedAt = Date.now()
+                this.options.onDiagnostic?.(`history ${session.id}: reading provider snapshot`)
                 const history = await provider.getSessionHistory(session.providerSessionId, project.canonicalRoot)
-                for (const [index, entry] of history.entries()) {
+                this.options.onDiagnostic?.(`history ${session.id}: read ${history.length} entries in ${Date.now() - startedAt}ms`)
+                const snapshot: NewConversationEvent<GatewayConversationEvent>[] = history.map((entry, index) => {
                     const timestampMs = entry.timestamp > 0 ? entry.timestamp : Date.parse(session.createdAt)
                     const timestamp = new Date(timestampMs).toISOString()
                     const turnId = `native_${(entry.turnId ?? entry.id).slice(0, 24)}`
@@ -179,22 +183,33 @@ export class GatewaySessionService {
                                 sourcePhase: 'replay',
                             },
                         }
-                    const envelope = await this.options.eventStore.append({
+                    return {
                         gatewayId: session.gatewayId,
                         projectId: session.projectId,
                         sessionId: session.id,
                         eventId: `native_${entry.id}`,
                         timestamp,
                         event,
-                    })
-                    // Native provider history is a snapshot requested by events.list,
-                    // not a live event stream. Broadcasting it here races hundreds of
-                    // encrypted tunnel frames with the list response and can invalidate
-                    // receive sequence numbers. Apply metadata only; the caller reads
-                    // the durable snapshot after hydration completes.
-                    await this.applyEvent(envelope)
-                }
-                await this.flushMetadata()
+                    }
+                })
+                // Native history is a durable snapshot, not a live event stream. Persist
+                // it with one journal flush and one metadata update; per-event fsync/save
+                // made reopening a long Codex session exceed the 30 second request limit.
+                const envelopes = this.options.eventStore.appendMany
+                    ? await this.options.eventStore.appendMany(snapshot)
+                    : await Promise.all(snapshot.map(event => this.options.eventStore.append(event)))
+                this.options.onDiagnostic?.(`history ${session.id}: persisted ${envelopes.length} entries in ${Date.now() - startedAt}ms`)
+                const latest = envelopes.at(-1)
+                const current = await this.requireOpenSession(sessionId)
+                await this.options.repository.save({
+                    ...current,
+                    ...(latest ? {
+                        updatedAt: latest.timestamp,
+                        lastEventSeq: Math.max(current.lastEventSeq, latest.seq),
+                    } : {}),
+                    providerHistoryHydratedAt: new Date(this.now()).toISOString(),
+                })
+                this.options.onDiagnostic?.(`history ${session.id}: hydration complete in ${Date.now() - startedAt}ms`)
             } finally {
                 await provider.destroy?.().catch(() => undefined)
             }
@@ -466,7 +481,13 @@ export class GatewaySessionService {
             lastEventSeq: envelope.seq,
         }
         if (event.kind === 'state') next = { ...next, state: event.state }
-        if (event.kind === 'provider_session') next = { ...next, providerSessionId: event.providerSessionId }
+        if (event.kind === 'provider_session') {
+            next = {
+                ...next,
+                providerSessionId: event.providerSessionId,
+                ...(event.isNewSession ? { providerHistoryHydratedAt: envelope.timestamp } : {}),
+            }
+        }
         if (event.kind === 'settings') {
             next = {
                 ...next,

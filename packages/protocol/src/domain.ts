@@ -56,6 +56,7 @@ export const CodeverSessionSchema = z.object({
     createdAt: IsoDateTimeSchema,
     updatedAt: IsoDateTimeSchema,
     archivedAt: IsoDateTimeSchema.optional(),
+    providerHistoryHydratedAt: IsoDateTimeSchema.optional(),
     lastEventSeq: NonNegativeIntegerSchema,
 }).strict()
 

@@ -34,6 +34,18 @@ export class MemoryConversationEventStore<T = unknown> implements ConversationEv
         })
     }
 
+    async appendMany(events: NewConversationEvent<T>[]): Promise<SessionEventEnvelope<T>[]> {
+        return this.serializeMutation(() => events.map(event => {
+            const duplicate = findDuplicateNew(this.index, event)
+            if (duplicate) return cloneEnvelope(duplicate)
+            return this.appendEnvelopeNow({
+                ...event,
+                schemaVersion: 1,
+                seq: (this.index.lastSeq.get(event.sessionId) ?? 0) + 1,
+            })
+        }))
+    }
+
     async appendEnvelope(event: SessionEventEnvelope<T>): Promise<SessionEventEnvelope<T>> {
         return this.serializeMutation(() => this.appendEnvelopeNow(event))
     }

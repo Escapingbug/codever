@@ -52,7 +52,7 @@ export interface ExecutionRootApprovalRequest {
 interface PendingRequest {
   resolve: (response: ClientGatewayResponseFrame) => void
   reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
+  timer?: ReturnType<typeof setTimeout>
 }
 
 export class MatrixGatewayClient {
@@ -78,7 +78,7 @@ export class MatrixGatewayClient {
     this.unsubscribe?.()
     this.unsubscribe = undefined
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer)
+      if (pending.timer) clearTimeout(pending.timer)
       pending.reject(new Error('Matrix Gateway client closed'))
     }
     this.pending.clear()
@@ -150,11 +150,7 @@ export class MatrixGatewayClient {
       ttlSeconds: 90,
     })
     const response = new Promise<ClientGatewayResponseFrame>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId)
-        reject(new Error('Gateway response timed out; the request may still be visible in Matrix history'))
-      }, this.options.timeoutMs ?? 30_000)
-      this.pending.set(requestId, { resolve, reject, timer })
+      this.pending.set(requestId, { resolve, reject })
     })
     try {
       await this.options.transport.send({
@@ -168,10 +164,17 @@ export class MatrixGatewayClient {
           authorization: { format: 'cose-sign1-cwt', token },
         },
       })
+      const waiting = this.pending.get(requestId)
+      if (waiting) {
+        waiting.timer = setTimeout(() => {
+          this.pending.delete(requestId)
+          waiting.reject(new Error('Gateway response timed out; the request may still be visible in Matrix history'))
+        }, this.options.timeoutMs ?? 30_000)
+      }
     } catch (error) {
       const waiting = this.pending.get(requestId)
       if (waiting) {
-        clearTimeout(waiting.timer)
+        if (waiting.timer) clearTimeout(waiting.timer)
         this.pending.delete(requestId)
       }
       throw error
@@ -259,7 +262,7 @@ export class MatrixGatewayClient {
     if (this.responses.size > 2_000) this.responses.delete(this.responses.keys().next().value!)
     const pending = this.pending.get(response.requestId)
     if (!pending) return
-    clearTimeout(pending.timer)
+    if (pending.timer) clearTimeout(pending.timer)
     this.pending.delete(response.requestId)
     pending.resolve(response)
   }

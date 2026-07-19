@@ -31,6 +31,12 @@ async function requestApproval(): Promise<void> {
       publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: key.kid, x: key.x, y: key.y },
     })
     approvalRequested.value = true
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 500))
+      await state.loadProjects(gatewayId.value)
+      if (!state.errors[`projects:${gatewayId.value}`]) return
+    }
+    throw new Error('The verified computer did not accept this control key. Try again.')
   } catch (requestError) {
     approvalError.value = requestError instanceof Error ? requestError.message : 'Unable to request approval'
   }
@@ -53,11 +59,11 @@ watch(gatewayId, id => { if (id) void state.loadProjects(id) }, { immediate: tru
     <div v-if="error" class="error-banner"><strong>Secure control unavailable.</strong> {{ error }}</div>
     <section v-if="error?.includes('unknown') || error?.includes('authorization')" class="settings-section authorization-card">
       <span class="eyebrow">Execution authorization</span>
-      <h2>Approve this client on the computer</h2>
-      <p>Matrix device verification protects encrypted sync. Gateway execution additionally requires this control key to be approved once.</p>
-      <p v-if="approvalRequested">Approval requested. Open Settings on an already authorized Codever client to approve this key, then refresh.</p>
+      <h2>Authorize this client</h2>
+      <p>The computer will bind this control key to the Matrix device you just verified. Unverified devices cannot add control keys.</p>
+      <p v-if="approvalRequested">Authorizing this verified client…</p>
       <p v-if="approvalError" class="error-banner" role="alert">{{ approvalError }}</p>
-      <button class="button button--primary" :disabled="approvalRequested" @click="requestApproval">Request approval from another client</button>
+      <button class="button button--primary" :disabled="approvalRequested" @click="requestApproval">Authorize this client</button>
       <details class="machine-details">
         <summary>Control key</summary>
         <dl>
@@ -66,7 +72,7 @@ watch(gatewayId, id => { if (id) void state.loadProjects(id) }, { immediate: tru
         </dl>
       </details>
     </section>
-    <section>
+    <section v-if="!error">
       <div class="section-heading"><div><span class="eyebrow">Available here</span><h2>Projects</h2></div><span>{{ projects.length }}</span></div>
       <div v-if="projects.length" class="project-grid">
         <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }">

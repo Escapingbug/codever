@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { JWK } from '@codever/execution-auth'
 import type { Gateway, InventorySnapshot, SessionEventEnvelope } from '@codever/protocol'
 import { AuthorizedRequestProcessor } from '../authorizedRequestProcessor'
 import type { MatrixTransport, NativeMatrixEvent } from './nativeMatrixTransport'
@@ -9,6 +10,7 @@ export const MATRIX_CONVERSATION_EVENT = 'io.codever.conversation.v1'
 export const MATRIX_INVENTORY_EVENT = 'io.codever.inventory.v1'
 export const MATRIX_GATEWAY_EVENT = 'io.codever.gateway.v1'
 export const MATRIX_DISCOVERY_EVENT = 'io.codever.discovery.v1'
+export const MATRIX_AUTHORIZATION_EVENT = 'io.codever.authorization.v1'
 
 export interface MatrixGatewayWorkerOptions {
     gatewayId: string
@@ -17,6 +19,7 @@ export interface MatrixGatewayWorkerOptions {
     processor: AuthorizedRequestProcessor
     currentGateway?: () => Gateway
     currentInventory?: () => Promise<InventorySnapshot>
+    trustVerifiedDeviceRoot?: (ownerId: string, publicKey: JWK, label: string) => Promise<void>
     onError?: (error: Error) => void
 }
 
@@ -68,11 +71,20 @@ export class MatrixGatewayWorker {
 
     private async process(input: NativeMatrixEvent): Promise<void> {
         const eventType = input.event.type
-        if (eventType !== MATRIX_COMMAND_EVENT && eventType !== MATRIX_DISCOVERY_EVENT) return
+        if (typeof eventType !== 'string'
+            || ![MATRIX_COMMAND_EVENT, MATRIX_DISCOVERY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType)) return
         if (!input.encrypted || !input.verifiedDevice) {
             throw new Error('Rejected Matrix control event from an unencrypted or unverified device')
         }
         if (eventType === MATRIX_DISCOVERY_EVENT) {
+            if (this.options.currentGateway) await this.publishGateway(this.options.currentGateway())
+            if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
+            return
+        }
+        if (eventType === MATRIX_AUTHORIZATION_EVENT) {
+            if (!this.options.trustVerifiedDeviceRoot) return
+            const request = parseVerifiedDeviceAuthorization(input.event.content, input.senderDevice, this.options.gatewayId)
+            await this.options.trustVerifiedDeviceRoot(request.ownerId, request.publicKey, request.label)
             if (this.options.currentGateway) await this.publishGateway(this.options.currentGateway())
             if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
             return
@@ -83,6 +95,11 @@ export class MatrixGatewayWorker {
         const idempotencyKey = request && typeof request.idempotencyKey === 'string'
             ? request.idempotencyKey
             : randomUUID()
+        if (response.status === 'failed') {
+            const kind = request && isRecord(request.payload) && typeof request.payload.kind === 'string'
+                ? request.payload.kind : 'unknown'
+            this.report(new Error(`Gateway request ${kind} failed: ${response.error.code}: ${response.error.message}`))
+        }
         await this.options.transport.send({
             roomId: input.roomId,
             eventType: MATRIX_RESPONSE_EVENT,
@@ -94,6 +111,28 @@ export class MatrixGatewayWorker {
     private report(value: unknown): void {
         this.options.onError?.(value instanceof Error ? value : new Error(String(value)))
     }
+}
+
+function parseVerifiedDeviceAuthorization(
+    value: unknown,
+    senderDevice: string | undefined,
+    gatewayId: string,
+): { ownerId: string; label: string; publicKey: JWK } {
+    if (!isRecord(value) || value.version !== 1 || value.type !== 'execution.root.request') {
+        throw new Error('Rejected malformed Matrix execution authorization request')
+    }
+    if (value.gatewayId !== gatewayId) throw new Error('Rejected execution authorization for another Gateway')
+    if (typeof senderDevice !== 'string' || value.ownerId !== senderDevice) {
+        throw new Error('Rejected execution authorization whose owner does not match the verified Matrix device')
+    }
+    if (typeof value.label !== 'string' || !value.label) throw new Error('Rejected execution authorization without a label')
+    const key = value.publicKey
+    if (!isRecord(key) || key.kty !== 'EC' || key.crv !== 'P-256' || key.alg !== 'ES256'
+        || key.use !== 'sig' || typeof key.kid !== 'string' || typeof key.x !== 'string'
+        || typeof key.y !== 'string' || 'd' in key) {
+        throw new Error('Rejected execution authorization with an invalid public key')
+    }
+    return { ownerId: value.ownerId, label: value.label, publicKey: key as JWK }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

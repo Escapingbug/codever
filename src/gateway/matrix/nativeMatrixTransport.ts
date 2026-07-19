@@ -43,6 +43,9 @@ export interface MatrixTransport {
     initialize(): Promise<void>
     send(input: MatrixSendInput): Promise<string>
     downloadEncryptedFile?(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void>
+    listVerifications?(): Promise<NativeMatrixVerification[]>
+    advanceVerification?(flowId: string): Promise<NativeMatrixVerification>
+    confirmVerification?(flowId: string, matches: boolean): Promise<NativeMatrixVerification>
     onEvent(listener: (event: NativeMatrixEvent) => void): () => void
     close(): Promise<void>
 }

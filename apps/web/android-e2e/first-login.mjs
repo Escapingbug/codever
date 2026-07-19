@@ -77,8 +77,15 @@ async function waitForResult(timeout) {
 function delay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)) }
 
 function hierarchy() {
-  run('shell', 'uiautomator', 'dump', '/sdcard/codever-e2e-window.xml')
-  return run('exec-out', 'cat', '/sdcard/codever-e2e-window.xml')
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const result = spawnSync(adb, ['shell', 'uiautomator', 'dump', '/sdcard/codever-e2e-window.xml'], {
+      stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8',
+    })
+    if (result.status === 0) return run('exec-out', 'cat', '/sdcard/codever-e2e-window.xml')
+    if (attempt < 5) spawnSync(adb, ['shell', 'sleep', '0.5'], { stdio: 'ignore' })
+    else throw new Error(`UI hierarchy unavailable after 5 attempts: ${result.error?.message ?? ((result.stderr ?? '').trim() || 'uiautomator returned no diagnostic')}`)
+  }
+  throw new Error('UI hierarchy unavailable')
 }
 
 function nodes(xml) {
@@ -99,6 +106,7 @@ function inputText(value) { run('shell', 'input', 'text', value) }
 function key(code) { run('shell', 'input', 'keyevent', code) }
 function run(...args) {
   const result = spawnSync(adb, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(`ADB command failed (${args.slice(0, 3).join(' ')}): ${result.stderr.trim()}`)
+  if (result.error) throw new Error(`Could not start ADB at ${JSON.stringify(adb)}: ${result.error.message}`)
+  if (result.status !== 0) throw new Error(`ADB command failed (${args.slice(0, 3).join(' ')}): ${(result.stderr ?? '').trim()}`)
   return result.stdout
 }

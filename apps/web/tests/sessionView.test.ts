@@ -35,6 +35,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -70,9 +71,38 @@ describe('session view', () => {
     const wrapper = await mountSession(api, sessionId)
 
     subscriber?.(assistantEvent(sessionId, 1, 'turn-1'))
-    await wrapper.vm.$nextTick()
+    await flushPromises()
 
     expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('fills the journal gap when the first Matrix wake-up is not sequence one', async () => {
+    const sessionId = 'session-first-wakeup-gap'
+    let subscriber: ((event: SessionEventEnvelope) => void) | undefined
+    const first = event(sessionId, 1)
+    const reply = assistantEvent(sessionId, 2, 'turn-1')
+    const terminal = {
+      ...event(sessionId, 3),
+      event: { kind: 'session_state' as const, state: 'idle' as const, reason: 'turn_success' },
+    }
+    const getSessionEvents = vi.fn()
+      .mockResolvedValueOnce({ events: [], nextAfter: null, previousBefore: null })
+      .mockResolvedValueOnce({ events: [first, reply, terminal], nextAfter: null, previousBefore: null })
+    const api = fakeApi(sessionId, [], {
+      getSessionEvents,
+      subscribeSession: vi.fn((_id: string, callback: (event: SessionEventEnvelope) => void) => {
+        subscriber = callback
+        return () => undefined
+      }),
+    })
+    const wrapper = await mountSession(api, sessionId)
+
+    subscriber?.(terminal)
+    await flushPromises()
+
+    expect(getSessionEvents).toHaveBeenLastCalledWith(sessionId, { after: 0, limit: 256 })
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toEqual([first, reply, terminal])
     wrapper.unmount()
   })
 
@@ -127,6 +157,31 @@ describe('session view', () => {
 
     pendingHistory.resolve({ events: [], nextAfter: null, previousBefore: null })
     await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('polls the durable journal after acceptance when Matrix wake-ups are missed', async () => {
+    vi.useFakeTimers()
+    const sessionId = 'session-missed-wakeup'
+    const reply = assistantEvent(sessionId, 2, 'turn-1')
+    const terminal = {
+      ...event(sessionId, 3),
+      event: { kind: 'session_state' as const, state: 'idle' as const, reason: 'turn_success' },
+    }
+    const getSessionEvents = vi.fn()
+      .mockResolvedValueOnce({ events: [], nextAfter: null, previousBefore: null })
+      .mockResolvedValueOnce({ events: [reply, terminal], nextAfter: null, previousBefore: null })
+    const api = fakeApi(sessionId, [], { getSessionEvents })
+    const wrapper = await mountSession(api, sessionId)
+
+    await wrapper.get<HTMLTextAreaElement>('.composer textarea').setValue('recover the reply')
+    await wrapper.get('.send-button').trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(0)
+    await flushPromises()
+
+    expect(getSessionEvents).toHaveBeenCalledTimes(2)
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toEqual([reply, terminal])
     wrapper.unmount()
   })
 

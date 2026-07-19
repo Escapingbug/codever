@@ -8,7 +8,10 @@ use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::SyncSettings,
     deserialized_responses::{EncryptionInfo, VerificationState},
-    encryption::verification::{Verification, VerificationRequest, VerificationRequestState},
+    encryption::{
+        LocalTrust,
+        verification::{Verification, VerificationRequest, VerificationRequestState},
+    },
     ruma::{
         OwnedDeviceId, OwnedMxcUri, OwnedRoomId, OwnedUserId,
         api::client::{room::create_room, uiaa},
@@ -27,14 +30,15 @@ use matrix_sdk_crypto::{AttachmentDecryptor, AttachmentEncryptor, MediaEncryptio
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
@@ -163,6 +167,7 @@ pub struct MatrixTransport {
     events: broadcast::Sender<TransportEvent>,
     stopped: Arc<AtomicBool>,
     verifications: Arc<RwLock<HashMap<String, VerificationRequest>>>,
+    locally_verified_devices: Arc<StdRwLock<HashSet<OwnedDeviceId>>>,
 }
 
 impl MatrixTransport {
@@ -271,7 +276,7 @@ impl MatrixTransport {
             access_token: session.tokens.access_token,
             refresh_token: session.tokens.refresh_token,
         };
-        Ok((Self::from_client(client), stored))
+        Ok((Self::from_client(client).await?, stored))
     }
 
     pub async fn restore(
@@ -307,19 +312,21 @@ impl MatrixTransport {
             .await
             .context("failed to restore the Matrix session")?;
 
-        Ok(Self::from_client(client))
+        Self::from_client(client).await
     }
 
-    fn from_client(client: Client) -> Self {
+    async fn from_client(client: Client) -> Result<Self> {
         let (events, _) = broadcast::channel(1_024);
         let transport = Self {
             client,
             events,
             stopped: Arc::new(AtomicBool::new(false)),
             verifications: Arc::new(RwLock::new(HashMap::new())),
+            locally_verified_devices: Arc::new(StdRwLock::new(HashSet::new())),
         };
         transport.install_event_handler();
-        transport
+        transport.refresh_locally_verified_devices().await?;
+        Ok(transport)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<TransportEvent> {
@@ -384,6 +391,22 @@ impl MatrixTransport {
         &self,
         device_id: &str,
     ) -> Result<VerificationSnapshot> {
+        if let Some(existing) = self
+            .verifications
+            .read()
+            .await
+            .values()
+            .map(verification_snapshot)
+            .find(|snapshot| {
+                snapshot.other_device_id.as_deref() == Some(device_id)
+                    && !matches!(
+                        snapshot.stage.as_str(),
+                        "done" | "cancelled" | "unsupported"
+                    )
+            })
+        {
+            return Ok(existing);
+        }
         let user_id = self
             .client
             .user_id()
@@ -425,6 +448,31 @@ impl MatrixTransport {
             });
         }
         Ok(devices)
+    }
+
+    async fn refresh_locally_verified_devices(&self) -> Result<()> {
+        let user_id = self
+            .client
+            .user_id()
+            .context("Matrix client is not logged in")?;
+        let response = self.client.devices().await?;
+        let mut verified = HashSet::new();
+        for item in response.devices {
+            if self
+                .client
+                .encryption()
+                .get_device(user_id, &item.device_id)
+                .await?
+                .is_some_and(|device| device.is_verified())
+            {
+                verified.insert(item.device_id);
+            }
+        }
+        *self
+            .locally_verified_devices
+            .write()
+            .expect("local trust lock poisoned") = verified;
+        Ok(())
     }
 
     pub async fn verification_requests(&self) -> Vec<VerificationSnapshot> {
@@ -482,7 +530,26 @@ impl MatrixTransport {
             bail!("SAS verification has no short authentication string yet");
         }
         if matches {
-            sas.confirm().await?
+            let other_device_id = sas.other_device().device_id().to_owned();
+            sas.confirm().await?;
+            // A Gateway intentionally does not hold the account's cross-signing
+            // private keys. Persist the trust established by SAS in the Matrix
+            // crypto store so it survives native transport and Gateway restarts.
+            let user_id = self
+                .client
+                .user_id()
+                .context("Matrix client is not logged in")?;
+            self.client
+                .encryption()
+                .get_device(user_id, &other_device_id)
+                .await?
+                .context("Verified Matrix device disappeared before trust was persisted")?
+                .set_local_trust(LocalTrust::Verified)
+                .await?;
+            self.locally_verified_devices
+                .write()
+                .expect("local trust lock poisoned")
+                .insert(other_device_id);
         } else {
             sas.mismatch().await?
         }
@@ -519,11 +586,14 @@ impl MatrixTransport {
         if room.state() != RoomState::Joined {
             bail!("Matrix room is not joined");
         }
-        let response = room
-            .send_raw(event_type, content)
-            .with_transaction_id(transaction_id.into())
-            .await
-            .context("failed to send the Matrix event")?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            room.send_raw(event_type, content)
+                .with_transaction_id(transaction_id.into()),
+        )
+        .await
+        .context("Matrix event send timed out")?
+        .context("failed to send the Matrix event")?;
         Ok(response.response.event_id.to_string())
     }
 
@@ -673,20 +743,29 @@ impl MatrixTransport {
 
     fn install_event_handler(&self) {
         let sender = self.events.clone();
+        let locally_verified_devices = self.locally_verified_devices.clone();
         self.client.add_event_handler(
             move |raw: Raw<AnySyncTimelineEvent>,
                   room: Room,
                   encryption: Option<EncryptionInfo>| {
                 let sender = sender.clone();
+                let locally_verified_devices = locally_verified_devices.clone();
                 async move {
-                    let Ok(event) = serde_json::from_str(raw.json().get()) else {
+                    let Ok(event) = serde_json::from_str::<Value>(raw.json().get()) else {
                         return;
                     };
                     let encrypted = encryption.is_some();
-                    let verified_device = encryption.as_ref().is_some_and(|value| {
+                    let cross_signing_verified = encryption.as_ref().is_some_and(|value| {
                         matches!(value.verification_state, VerificationState::Verified)
                     });
                     let sender_device = encryption.and_then(|value| value.sender_device);
+                    let verified_device = sender_is_verified(
+                        cross_signing_verified,
+                        sender_device.as_ref(),
+                        &locally_verified_devices
+                            .read()
+                            .expect("local trust lock poisoned"),
+                    );
                     let _ = sender.send(TransportEvent {
                         room_id: room.room_id().to_owned(),
                         event,
@@ -804,6 +883,15 @@ pub fn validate_event_type(event_type: &str) -> Result<()> {
     }
 }
 
+fn sender_is_verified(
+    cross_signing_verified: bool,
+    sender_device: Option<&OwnedDeviceId>,
+    locally_verified_devices: &HashSet<OwnedDeviceId>,
+) -> bool {
+    cross_signing_verified
+        || sender_device.is_some_and(|device_id| locally_verified_devices.contains(device_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,6 +912,26 @@ mod tests {
         }
         assert!(validate_event_type("m.room.message").is_err());
         assert!(validate_event_type("io.attacker.command").is_err());
+    }
+
+    #[test]
+    fn persisted_local_device_trust_authorizes_events_after_transport_restart() {
+        let verified: OwnedDeviceId = "PHONEDEVICE".into();
+        let unknown: OwnedDeviceId = "ATTACKER".into();
+        let locally_verified = HashSet::from([verified.clone()]);
+
+        assert!(sender_is_verified(
+            false,
+            Some(&verified),
+            &locally_verified
+        ));
+        assert!(sender_is_verified(true, Some(&unknown), &HashSet::new()));
+        assert!(!sender_is_verified(
+            false,
+            Some(&unknown),
+            &locally_verified
+        ));
+        assert!(!sender_is_verified(false, None, &locally_verified));
     }
 
     #[test]

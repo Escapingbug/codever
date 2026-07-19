@@ -13,9 +13,12 @@ import {
     loadGatewayConfig,
     loadMatrixCredential,
     NativeMatrixTransport,
+    gatewayVerificationDirectory,
+    readGatewayVerificationStatus,
     type GatewayConfig,
     type NativeMatrixVerification,
     writeGatewayConfig,
+    writeGatewayVerificationDecision,
     writeMatrixCredential,
 } from './gateway/index.js'
 
@@ -161,6 +164,12 @@ async function verifyGatewayDevice(config: GatewayConfig, expectedDevice?: strin
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         throw new Error('Device verification requires an interactive terminal')
     }
+    const runningDirectory = gatewayVerificationDirectory(config.dataDirectory)
+    const runningStatus = await readGatewayVerificationStatus(runningDirectory)
+    if (runningStatus && Date.now() - Date.parse(runningStatus.updatedAt) < 5_000) {
+        await verifyRunningGateway(runningDirectory, expectedDevice)
+        return
+    }
     const credential = await loadMatrixCredential(config)
     const transport = new NativeMatrixTransport({
         executablePath: config.matrix.transportBinaryPath,
@@ -199,6 +208,51 @@ async function verifyGatewayDevice(config: GatewayConfig, expectedDevice?: strin
     } finally {
         await transport.close()
     }
+}
+
+async function verifyRunningGateway(directory: string, expectedDevice?: string): Promise<void> {
+    console.log('Gateway is running. Waiting up to three minutes for a client verification request...')
+    const deadline = Date.now() + 180_000
+    let flow: NativeMatrixVerification | undefined
+    while (Date.now() < deadline) {
+        const status = await readGatewayVerificationStatus(directory)
+        if (!status || Date.now() - Date.parse(status.updatedAt) > 5_000) {
+            throw new Error('Running Gateway verification agent stopped responding')
+        }
+        flow = status.flows.find(value => value.stage === 'present_sas'
+            && (!expectedDevice || value.otherDeviceId === expectedDevice))
+        if (flow) break
+        const cancelled = status.flows.find(value => value.stage === 'cancelled'
+            && (!expectedDevice || value.otherDeviceId === expectedDevice))
+        if (cancelled) throw new Error(cancelled.cancellation?.reason ?? 'Device verification was cancelled')
+        await delay(500)
+    }
+    if (!flow) throw new Error('No Matrix device verification reached emoji comparison within three minutes')
+    console.log(`Verification request from ${flow.otherDeviceId ?? expectedDevice ?? 'another device'}:`)
+    console.log((flow.emojis ?? []).map(value => `${value.symbol} ${value.description}`).join('   '))
+    const prompt = createInterface({ input: process.stdin, output: process.stdout })
+    let answer: string
+    try {
+        answer = await prompt.question('Do both devices show these emoji in this order? [y/N] ')
+    } finally {
+        prompt.close()
+    }
+    const matches = /^y(?:es)?$/i.test(answer.trim())
+    await writeGatewayVerificationDecision(directory, flow.flowId, matches)
+    if (!matches) throw new Error('Device verification cancelled because the emoji did not match')
+
+    const completionDeadline = Date.now() + 30_000
+    while (Date.now() < completionDeadline) {
+        const status = await readGatewayVerificationStatus(directory)
+        const current = status?.flows.find(value => value.flowId === flow!.flowId)
+        if (current?.stage === 'done') {
+            console.log(`Matrix device ${current.otherDeviceId ?? flow.otherDeviceId ?? ''} is verified.`)
+            return
+        }
+        if (current?.stage === 'cancelled') throw new Error(current.cancellation?.reason ?? 'Device verification was cancelled')
+        await delay(500)
+    }
+    throw new Error('Matrix device verification confirmation timed out')
 }
 
 async function waitForVerificationSas(

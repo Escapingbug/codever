@@ -37,6 +37,19 @@ const selectedGateway = computed(() => availableGateways.value.find(gateway => g
 const pathPlaceholder = computed(() => gatewayPathPlaceholder(selectedGateway.value?.platform))
 const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform))
 
+function resetProjectForm(): void {
+  createOpen.value = false
+  createError.value = ''
+  projectName.value = ''
+  rootPath.value = ''
+  defaultProvider.value = ''
+}
+
+function openProjectForm(): void {
+  resetProjectForm()
+  createOpen.value = true
+}
+
 watch(availableGateways, gateways => {
   if (!gateways.some(gateway => gateway.id === gatewayId.value)) gatewayId.value = gateways[0]?.id ?? ''
 }, { immediate: true })
@@ -52,10 +65,7 @@ async function createProject(): Promise<void> {
       rootPath: rootPath.value,
       ...(defaultProvider.value.trim() ? { defaultProvider: defaultProvider.value.trim() } : {}),
     })
-    createOpen.value = false
-    projectName.value = ''
-    rootPath.value = ''
-    defaultProvider.value = ''
+    resetProjectForm()
     await router.push({ name: 'project', params: { gatewayId: gatewayId.value, projectId: project.id } })
   } catch (error) {
     createError.value = error instanceof Error ? error.message : 'Unable to create project'
@@ -71,7 +81,7 @@ onMounted(() => state.loadWorkspace())
   <div class="page page--overview workspace-page">
     <header class="page-header page-header--compact">
       <div><span class="eyebrow">Workspace</span><h1>Projects</h1><p>Pick up your work from any connected computer.</p></div>
-      <button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = !createOpen">New project</button>
+      <button class="button button--primary" :disabled="!availableGateways.length" @click="openProjectForm">New project</button>
     </header>
 
     <RouterLink v-if="authorizationCount" class="setup-notice" to="/machines">
@@ -85,7 +95,7 @@ onMounted(() => state.loadWorkspace())
     </RouterLink>
 
     <section v-if="createOpen" class="settings-section project-create-panel">
-      <div class="section-heading"><div><span class="eyebrow">On a computer</span><h2>New project</h2></div><button class="icon-button" aria-label="Close" @click="createOpen = false">×</button></div>
+      <div class="section-heading"><div><span class="eyebrow">On a computer</span><h2>New project</h2></div><button class="icon-button" aria-label="Close" @click="resetProjectForm">×</button></div>
       <p class="form-help">Choose a connected computer and register an existing directory.</p>
       <form class="server-form" @submit.prevent="createProject">
         <label>Computer
@@ -95,7 +105,7 @@ onMounted(() => state.loadWorkspace())
         <label>Project folder<input v-model="rootPath" required autocomplete="off" :placeholder="pathPlaceholder" /><small class="field-help">{{ pathHelp }}</small></label>
         <label>Default provider (optional)<input v-model="defaultProvider" autocomplete="off" placeholder="codex" /></label>
         <p v-if="createError" class="error-banner" role="alert">{{ createError }}</p>
-        <div class="form-actions"><button type="button" class="button" @click="createOpen = false">Cancel</button><button class="button button--primary" :disabled="creating">{{ creating ? 'Creating…' : 'Create project' }}</button></div>
+        <div class="form-actions"><button type="button" class="button" @click="resetProjectForm">Cancel</button><button class="button button--primary" :disabled="creating">{{ creating ? 'Creating…' : 'Create project' }}</button></div>
       </form>
     </section>
 
@@ -112,7 +122,7 @@ onMounted(() => state.loadWorkspace())
       <span class="empty-orbit" aria-hidden="true">◎</span><h2>Connect your first computer</h2><p>Authorize a computer, then its projects and coding sessions will appear here.</p><RouterLink class="button button--primary" to="/machines">Open Computers</RouterLink>
     </div>
     <div v-else class="empty-state">
-      <span class="empty-orbit" aria-hidden="true">▰</span><h2>No projects yet</h2><p>Add a folder from one of your connected computers.</p><button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = true">Add project</button>
+      <span class="empty-orbit" aria-hidden="true">▰</span><h2>No projects yet</h2><p>Add a folder from one of your connected computers.</p><button class="button button--primary" :disabled="!availableGateways.length" @click="openProjectForm">Add project</button>
     </div>
   </div>
 </template>

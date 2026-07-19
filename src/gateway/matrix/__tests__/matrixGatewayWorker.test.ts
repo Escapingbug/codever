@@ -2,7 +2,7 @@ import type { ClientGatewayResponseFrame } from '@codever/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import type { AuthorizedRequestProcessor } from '../../authorizedRequestProcessor'
 import {
-    MatrixGatewayWorker, MATRIX_COMMAND_EVENT, MATRIX_DISCOVERY_EVENT,
+    MatrixGatewayWorker, MATRIX_AUTHORIZATION_EVENT, MATRIX_COMMAND_EVENT, MATRIX_DISCOVERY_EVENT,
     MATRIX_GATEWAY_EVENT, MATRIX_INVENTORY_EVENT, MATRIX_RESPONSE_EVENT,
 } from '../matrixGatewayWorker'
 import type { MatrixSendInput, MatrixTransport, NativeMatrixEvent } from '../nativeMatrixTransport'
@@ -52,6 +52,35 @@ describe('MatrixGatewayWorker', () => {
         })
     })
 
+    it('binds an execution root only to the verified Matrix sender device', async () => {
+        const transport = new FakeTransport()
+        const trustVerifiedDeviceRoot = vi.fn(async () => undefined)
+        const worker = new MatrixGatewayWorker({
+            gatewayId: 'gateway-1', controlRoomId: '!control:test', transport,
+            processor: { process: vi.fn() } as unknown as AuthorizedRequestProcessor,
+            trustVerifiedDeviceRoot,
+        })
+        await worker.start()
+        transport.emit(authorizationEvent('PHONE', 'PHONE'))
+        await vi.waitFor(() => expect(trustVerifiedDeviceRoot).toHaveBeenCalledTimes(1))
+        expect(trustVerifiedDeviceRoot).toHaveBeenCalledWith('PHONE', expect.objectContaining({ kid: 'client-key' }), 'Codever PHONE')
+    })
+
+    it('rejects execution roots that claim a different owner than the verified Matrix device', async () => {
+        const transport = new FakeTransport()
+        const trustVerifiedDeviceRoot = vi.fn(async () => undefined)
+        const onError = vi.fn()
+        const worker = new MatrixGatewayWorker({
+            gatewayId: 'gateway-1', controlRoomId: '!control:test', transport,
+            processor: { process: vi.fn() } as unknown as AuthorizedRequestProcessor,
+            trustVerifiedDeviceRoot, onError,
+        })
+        await worker.start()
+        transport.emit(authorizationEvent('PHONE', 'ATTACKER'))
+        await vi.waitFor(() => expect(onError).toHaveBeenCalled())
+        expect(trustVerifiedDeviceRoot).not.toHaveBeenCalled()
+    })
+
     it.each([
         ['unencrypted', false, true],
         ['unverified', true, false],
@@ -96,6 +125,22 @@ function commandEvent(encrypted: boolean, verifiedDevice: boolean): NativeMatrix
                     idempotencyKey: 'command-1', payload: { kind: 'inventory.get' },
                 },
                 authorization: { format: 'cose-sign1-cwt', token: 'token' },
+            },
+        },
+    }
+}
+
+function authorizationEvent(senderDevice: string, ownerId: string): NativeMatrixEvent {
+    return {
+        roomId: '!control:test', encrypted: true, verifiedDevice: true, senderDevice,
+        event: {
+            type: MATRIX_AUTHORIZATION_EVENT,
+            content: {
+                version: 1, type: 'execution.root.request', requestId: 'approval-1', gatewayId: 'gateway-1',
+                ownerId, label: `Codever ${ownerId}`,
+                publicKey: {
+                    kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'client-key', x: 'x', y: 'y',
+                },
             },
         },
     }

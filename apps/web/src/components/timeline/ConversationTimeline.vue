@@ -32,9 +32,23 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
 </script>
 
 <template>
-  <div v-if="entries.length || pendingMessages?.length" class="timeline">
+  <div
+    v-if="entries.length || pendingMessages?.length"
+    class="timeline"
+    role="log"
+    aria-live="polite"
+    aria-relevant="additions text"
+  >
     <template v-for="entry in entries" :key="entry.key">
-      <article v-if="entry.type === 'assistant'" class="message message--assistant" :data-timeline-key="entry.key" @click="select($event, entry.events[0]!)">
+      <article
+        v-if="entry.type === 'assistant'"
+        class="message message--assistant"
+        :data-timeline-key="entry.key"
+        :aria-label="`Agent response (${entry.status}): ${entry.text}`"
+        role="article"
+        tabindex="0"
+        @click="select($event, entry.events[0]!)"
+      >
         <div class="message-body">
           <div class="message-meta message-meta--agent">
             <span>Agent · {{ time(entry.events[0]!.timestamp) }}</span>
@@ -53,6 +67,9 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
           v-if="entry.envelope.event.kind === 'user_message'"
           class="message message--user"
           :data-timeline-key="entry.key"
+          :aria-label="`Your message: ${entry.envelope.event.text}`"
+          role="article"
+          tabindex="0"
           @click="select($event, entry.envelope)"
         >
           <div class="message-body">
@@ -107,6 +124,9 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
       :key="message.clientMessageId"
       class="message message--user message--pending"
       :data-timeline-key="`pending:${message.clientMessageId}`"
+      :aria-label="`Your pending message (${message.status}): ${message.text}`"
+      role="article"
+      tabindex="0"
     >
       <div class="message-body">
         <div class="message-meta"><strong>You</strong><span>{{ message.status === 'sending' ? 'Sending…' : 'Sent · synchronizing…' }}</span></div>

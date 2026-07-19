@@ -72,6 +72,8 @@ describe('GatewaySessionService', () => {
         const imported = await fixture.events.list(first.id)
         expect(imported.events).toHaveLength(2)
         expect(imported.events.map(event => event.event.kind)).toEqual(['user_message', 'assistant_text_delta'])
+        expect(discovery.historyCalls).toBe(1)
+        expect((await service.get(first.id)).providerHistoryHydratedAt).toBeTypeOf('string')
         expect(replayedLiveEvents).toEqual([])
 
         const archived = await service.setArchived(first.id, true)
@@ -88,6 +90,7 @@ describe('GatewaySessionService', () => {
     it('creates sessions without a provider and lazily uses only the project canonical root', async () => {
         const fixture = await createFixture()
         const providers: MockProvider[] = []
+        const discovery = new DiscoveryProvider()
         const service = await GatewaySessionService.open({
             ...fixture.options,
             providerFactory: async () => {
@@ -98,6 +101,7 @@ describe('GatewaySessionService', () => {
                 providers.push(provider)
                 return provider
             },
+            providerDiscoveryFactory: () => discovery,
         })
 
         const created = await service.create(fixture.project.id, {
@@ -124,8 +128,14 @@ describe('GatewaySessionService', () => {
             providerSessionId: 'provider-session-1',
             model: 'model-a',
         })
+        expect(updated.providerHistoryHydratedAt).toBeTypeOf('string')
         expect(updated.lastEventSeq).toBeGreaterThan(0)
         expect(observed).toEqual(observed.map((_, index) => index + 1))
+
+        const eventCount = (await fixture.events.list(created.id)).events.length
+        await service.hydrateProviderHistory(created.id)
+        expect(discovery.historyCalls).toBe(0)
+        expect((await fixture.events.list(created.id)).events).toHaveLength(eventCount)
 
         await service.destroy()
         await fixture.events.close()
@@ -342,6 +352,7 @@ class MockProvider implements AgentProvider {
 }
 
 class DiscoveryProvider extends MockProvider {
+    historyCalls = 0
     constructor() { super(() => events()) }
     override getAvailableModels(): ModelEntry[] { return [{ id: 'model-a', name: 'Model A' }] }
     override getAvailablePermissionModes(): string[] { return ['default', 'bypassPermissions'] }
@@ -352,6 +363,7 @@ class DiscoveryProvider extends MockProvider {
         ]
     }
     async getSessionHistory() {
+        this.historyCalls += 1
         return [
             { id: 'history-user', role: 'user' as const, text: 'Earlier question', timestamp: 1_752_662_400_000 },
             { id: 'history-agent', role: 'assistant' as const, text: 'Earlier answer', timestamp: 1_752_662_401_000 },

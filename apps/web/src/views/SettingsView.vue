@@ -20,8 +20,8 @@ let verificationTimer: ReturnType<typeof setInterval> | undefined
 let unsubscribeApprovals: (() => void) | undefined
 
 const visibleVerifications = computed(() => verifications.value
-  .filter(value => value.stage !== 'done')
-  .slice(-5))
+  .filter(value => !['done', 'cancelled'].includes(value.stage))
+  .slice(-1))
 
 async function signOut(): Promise<void> {
   await clientSession.logout()
@@ -74,9 +74,34 @@ async function advance(flowId: string): Promise<void> {
 async function confirm(flowId: string, matches: boolean): Promise<void> {
   deviceBusy.value = flowId
   try {
+    const expectedDeviceId = verifications.value.find(value => value.flowId === flowId)?.otherDeviceId
     const flow = await clientSession.confirmVerification(flowId, matches)
     verifications.value = verifications.value.map(value => value.flowId === flowId ? flow : value)
-    await refreshDevices()
+    if (matches && expectedDeviceId) await refreshUntilVerified(expectedDeviceId)
+    else await refreshDevices()
+  } catch (error) {
+    deviceError.value = friendlyCodeverError(error)
+  } finally {
+    deviceBusy.value = ''
+  }
+}
+
+async function refreshUntilVerified(deviceId: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const nextDevices = await clientSession.listMatrixDevices()
+    devices.value = nextDevices
+    if (nextDevices.some(device => device.deviceId === deviceId && device.verified)) return
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+  throw new Error('Verification completed, but device trust has not synchronized yet. Try Refresh.')
+}
+
+async function cancel(flowId: string): Promise<void> {
+  deviceBusy.value = flowId
+  deviceError.value = ''
+  try {
+    await clientSession.cancelVerification(flowId)
+    await refreshVerifications()
   } catch (error) {
     deviceError.value = friendlyCodeverError(error)
   } finally {
@@ -151,19 +176,23 @@ onUnmounted(() => {
           <button v-if="!device.current && !device.verified" class="button" :disabled="deviceBusy === device.deviceId" @click="startVerification(device)">Verify</button>
         </div>
       </div>
-      <article v-for="flow in visibleVerifications" :key="flow.flowId" class="authorization-card">
-        <span class="eyebrow">Device verification</span>
-        <h3>{{ flow.otherDeviceId || 'Incoming device request' }}</h3>
-        <p v-if="flow.stage === 'cancelled'">{{ flow.cancellation?.reason || 'Verification was cancelled.' }}</p>
-        <template v-else-if="flow.stage === 'present_sas'">
-          <div class="verification-emoji" aria-label="Verification emoji">
-            <span v-for="emoji in flow.emojis" :key="emoji.description" :title="emoji.description">{{ emoji.symbol }}</span>
+      <div v-for="flow in visibleVerifications" :key="flow.flowId" class="verification-backdrop">
+        <article class="authorization-card verification-dialog" role="dialog" aria-modal="true" aria-labelledby="verification-title">
+          <span class="eyebrow">Device verification</span>
+          <h3 id="verification-title">{{ flow.otherDeviceId || 'Incoming device request' }}</h3>
+          <template v-if="flow.stage === 'present_sas'">
+            <div class="verification-emoji" aria-label="Verification emoji">
+              <span v-for="emoji in flow.emojis" :key="emoji.description" :title="emoji.description">{{ emoji.symbol }}</span>
+            </div>
+            <p>Confirm only if both devices show these emoji in this order.</p>
+            <div class="form-actions"><button class="button" @click="confirm(flow.flowId, false)">They differ</button><button class="button button--primary" @click="confirm(flow.flowId, true)">They match</button></div>
+          </template>
+          <div v-else class="form-actions">
+            <button class="button" :disabled="deviceBusy === flow.flowId" @click="cancel(flow.flowId)">Cancel verification</button>
+            <button class="button button--primary" :disabled="deviceBusy === flow.flowId" @click="advance(flow.flowId)">Continue verification</button>
           </div>
-          <p>Confirm only if both devices show these emoji in this order.</p>
-          <div class="form-actions"><button class="button" @click="confirm(flow.flowId, false)">They differ</button><button class="button button--primary" @click="confirm(flow.flowId, true)">They match</button></div>
-        </template>
-        <button v-else class="button button--primary" :disabled="deviceBusy === flow.flowId" @click="advance(flow.flowId)">Continue verification</button>
-      </article>
+        </article>
+      </div>
       <details class="machine-details">
         <summary>Technical details</summary>
         <dl>

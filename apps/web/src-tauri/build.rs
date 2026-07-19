@@ -5,29 +5,68 @@ use std::{
 
 fn main() {
     if let Some(project) = env::var_os("TAURI_ANDROID_PROJECT_PATH") {
-        configure_android_keyring(Path::new(&project));
+        configure_android_activity(Path::new(&project));
     }
     tauri_build::build()
 }
 
-fn configure_android_keyring(project: &Path) {
+fn configure_android_activity(project: &Path) {
     let java = project.join("app/src/main/java");
     let activity =
         find_file(&java, "MainActivity.kt").expect("Android MainActivity.kt was not generated");
-    let source = fs::read_to_string(&activity).expect("failed to read Android MainActivity");
-    let source = if source.contains("Keyring.initializeNdkContext(applicationContext)") {
-        source
-    } else {
-        source
-            .replace(
-                "import androidx.activity.enableEdgeToEdge",
-                "import androidx.activity.enableEdgeToEdge\nimport io.crates.keyring.Keyring",
-            )
-            .replace(
-                "  override fun onCreate(savedInstanceState: Bundle?) {",
-                "  override fun onCreate(savedInstanceState: Bundle?) {\n    Keyring.initializeNdkContext(applicationContext)",
-            )
-    };
+    println!("cargo:rerun-if-changed={}", activity.display());
+    let mut source = fs::read_to_string(&activity).expect("failed to read Android MainActivity");
+    source = source
+        .replace("import androidx.activity.enableEdgeToEdge", "")
+        .replace("    enableEdgeToEdge()", "");
+    if !source.contains("import io.crates.keyring.Keyring") {
+        source = source.replace(
+            "import android.os.Bundle",
+            "import android.os.Bundle\nimport io.crates.keyring.Keyring",
+        );
+    }
+    if !source.contains("import androidx.core.view.WindowCompat") {
+        source = source.replace(
+            "import android.os.Bundle",
+            "import android.os.Bundle\nimport androidx.core.view.WindowCompat",
+        );
+    }
+    if !source.contains("import android.view.View") {
+        source = source.replace(
+            "import android.os.Bundle",
+            "import android.os.Bundle\nimport android.view.View\nimport androidx.core.view.ViewCompat\nimport androidx.core.view.WindowInsetsCompat",
+        );
+    }
+    if !source.contains("Keyring.initializeNdkContext(applicationContext)") {
+        source = source.replace(
+            "  override fun onCreate(savedInstanceState: Bundle?) {",
+            "  override fun onCreate(savedInstanceState: Bundle?) {\n    Keyring.initializeNdkContext(applicationContext)",
+        );
+    }
+    if !source.contains("WindowCompat.setDecorFitsSystemWindows") {
+        source = source.replace(
+            "    super.onCreate(savedInstanceState)",
+            "    super.onCreate(savedInstanceState)\n    WindowCompat.setDecorFitsSystemWindows(window, true)\n    WindowCompat.getInsetsController(window, window.decorView).apply {\n      isAppearanceLightStatusBars = false\n      isAppearanceLightNavigationBars = false\n    }",
+        );
+    }
+    if !source.contains("WindowInsetsCompat.Type.systemBars()") {
+        source = source.replace(
+            "    WindowCompat.setDecorFitsSystemWindows(window, true)",
+            "    WindowCompat.setDecorFitsSystemWindows(window, true)\n    val contentView = findViewById<View>(android.R.id.content)\n    ViewCompat.setOnApplyWindowInsetsListener(contentView) { view, insets ->\n      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())\n      view.setPadding(bars.left, bars.top, bars.right, bars.bottom)\n      insets\n    }\n    ViewCompat.requestApplyInsets(contentView)",
+        );
+    }
+    assert!(
+        !source.contains("enableEdgeToEdge()"),
+        "Android edge-to-edge must remain disabled"
+    );
+    assert!(
+        source.contains("WindowCompat.setDecorFitsSystemWindows(window, true)"),
+        "Android fitted system bars were not configured"
+    );
+    assert!(
+        source.contains("WindowInsetsCompat.Type.systemBars()"),
+        "Android system bar insets were not applied"
+    );
     fs::write(activity, source).expect("failed to configure Android MainActivity keyring context");
 
     let bridge = java.join("io/crates/keyring/Keyring.kt");

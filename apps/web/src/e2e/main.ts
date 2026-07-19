@@ -60,7 +60,7 @@ let exportedPath = ''
 let lastConfig: PatchSessionConfigDto | undefined
 let archiveUpdates = 0
 let matrixGatewayVerified = false
-let verificationStage: 'requested' | 'present_sas' | 'done' = 'requested'
+let verificationStage: 'none' | 'requested' | 'present_sas' | 'done' = 'none'
 let approvalVisible = true
 let approvalSubscriber: ((requests: Array<Record<string, unknown>>) => void) | undefined
 const attachments: SessionAttachmentDto[] = []
@@ -75,14 +75,21 @@ clientSession.listMatrixDevices = async () => [
   { deviceId: 'CLIENTDEVICE', displayName: 'Codever Android', verified: true, current: true },
   { deviceId: 'GATEWAYDEVICE', displayName: 'Windows Gateway', verified: matrixGatewayVerified, current: false },
 ]
-clientSession.listVerifications = async () => verificationStage === 'done' ? [] : [{
-  flowId: 'verification-e2e', stage: verificationStage, otherDeviceId: 'GATEWAYDEVICE',
+clientSession.listVerifications = async () => {
+  if (verificationStage === 'none' || verificationStage === 'done') return []
+  const stage = verificationStage
+  return [{
+  flowId: 'verification-e2e', stage, otherDeviceId: 'GATEWAYDEVICE',
   ...(verificationStage === 'present_sas' ? { emojis: [
     { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
     { symbol: '🎸', description: 'Guitar' }, { symbol: '🌙', description: 'Moon' },
   ] } : {}),
-}]
-clientSession.requestVerification = async () => ({ flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'GATEWAYDEVICE' })
+  }]
+}
+clientSession.requestVerification = async () => {
+  verificationStage = 'requested'
+  return { flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'GATEWAYDEVICE' }
+}
 clientSession.advanceVerification = async () => {
   verificationStage = 'present_sas'
   return (await clientSession.listVerifications())[0]!
@@ -280,6 +287,7 @@ declare global {
   interface Window {
     __CODEVER_E2E__: {
       completeTurn(): void
+      completeTurnWithWakeup(): void
       startLongTurn(): void
       finishTurnOffline(text: string): void
       failTurn(message: string): void
@@ -315,6 +323,22 @@ window.__CODEVER_E2E__ = {
     append({ kind: 'assistant_text_delta', text: 'First ', meta: { turnId, source: 'live' } })
     append({ kind: 'assistant_text_delta', text: 'reply.', meta: { turnId, source: 'live' } })
     append({ kind: 'turn_finished', status: 'success', meta: { turnId, source: 'live' } })
+    append({ kind: 'session_state', state: 'idle', reason: 'turn_success', meta: { source: 'synthetic' } })
+    resolve({ commandId: input.clientMessageId, status: 'succeeded' })
+  },
+  completeTurnWithWakeup() {
+    if (!pendingSend) throw new Error('No pending Client message')
+    const { input, resolve } = pendingSend
+    pendingSend = undefined
+    const turnId = `turn-${input.clientMessageId}`
+    append(userMessageEvent(input, turnId), false)
+    append({ kind: 'session_state', state: 'querying', meta: { source: 'synthetic' } })
+    append({ kind: 'turn_started', meta: { turnId, source: 'live' } }, false)
+    append({ kind: 'assistant_text_delta', text: 'Recovered from ', meta: { turnId, source: 'live' } }, false)
+    append({ kind: 'assistant_text_delta', text: 'the durable journal.', meta: { turnId, source: 'live' } }, false)
+    append({ kind: 'turn_finished', status: 'success', meta: { turnId, source: 'live' } }, false)
+    // Only the final durable state crosses Matrix. Its sequence gap tells the
+    // client to fetch all intervening events from the Gateway journal.
     append({ kind: 'session_state', state: 'idle', reason: 'turn_success', meta: { source: 'synthetic' } })
     resolve({ commandId: input.clientMessageId, status: 'succeeded' })
   },

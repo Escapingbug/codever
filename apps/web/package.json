@@ -17,6 +17,8 @@
     "test:desktop:e2e": "pnpm desktop:e2e:build && pnpm test:desktop:e2e:run",
     "test:desktop:e2e:run": "node ./desktop-e2e/run.mjs",
     "test:android:live:login": "node ./android-e2e/first-login.mjs",
+    "test:android:live:verify": "node ./android-e2e/request-gateway-verification.mjs",
+    "test:android:live:business": "node ./android-e2e/business-journey.mjs",
     "android:init": "pnpm dlx @tauri-apps/cli@2.11.4 android init",
     "android:prepare": "node scripts/prepare-android.mjs",
     "android:build": "pnpm android:prepare && pnpm dlx @tauri-apps/cli@2.11.4 android build",

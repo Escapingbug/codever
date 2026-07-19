@@ -29,6 +29,8 @@ export interface ConversationEventPage<T = unknown> {
 export interface ConversationEventStore<T = unknown> {
     /** Append an event, allocating its next per-session sequence number. */
     append(event: NewConversationEvent<T>): Promise<SessionEventEnvelope<T>>
+    /** Append a snapshot with one durability flush when the store supports batching. */
+    appendMany?(events: NewConversationEvent<T>[]): Promise<SessionEventEnvelope<T>[]>
 
     /**
      * Append an already-sequenced event during replay or replication.
@@ -39,4 +41,3 @@ export interface ConversationEventStore<T = unknown> {
     list(sessionId: string, options?: ListConversationEventsOptions): Promise<ConversationEventPage<T>>
     close(): Promise<void>
 }
-

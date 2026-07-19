@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CodeverSession, ProviderSession } from '@codever/protocol'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { clientSession } from '../state/clientSession'
@@ -105,6 +105,7 @@ const runningTasks = computed(() => visibleTasks.value.filter(task => task.state
 const readyTasks = computed(() => visibleTasks.value.filter(task => task.state !== 'querying' && task.state !== 'canceling'))
 
 onMounted(() => state.loadWorkspace())
+onBeforeUnmount(() => { discoveryGeneration += 1 })
 watch(project, value => { if (value) void refreshTasks() }, { immediate: true })
 watch([project, providers], ([nextProject, nextProviders]) => {
   if (!selectedProvider.value || !nextProviders.includes(selectedProvider.value)) {
@@ -131,9 +132,25 @@ async function refreshTasks(): Promise<void> {
     if (generation !== discoveryGeneration) return
     discovering.value = true
     const sessionsRefresh = state.loadSessions(currentProjectId)
-    const attempts = await Promise.allSettled(currentProviders.map(provider =>
-      state.api.discoverProviderSessions(currentProjectId, provider),
-    ))
+    const attempts: PromiseSettledResult<Awaited<ReturnType<typeof state.api.discoverProviderSessions>>>[] = []
+    const orderedProviders = currentProviders.includes(selectedProvider.value)
+      ? [selectedProvider.value, ...currentProviders.filter(provider => provider !== selectedProvider.value)]
+      : [...currentProviders]
+    for (const provider of orderedProviders) {
+      if (generation !== discoveryGeneration) return
+      try {
+        const result = await state.api.discoverProviderSessions(currentProjectId, provider)
+        attempts.push({ status: 'fulfilled', value: result })
+        if (generation === discoveryGeneration) {
+          const completed = attempts.flatMap(value => value.status === 'fulfilled' ? value.value.sessions : [])
+          state.replaceProviderSessions(currentProjectId, completed)
+        }
+      } catch (reason) {
+        attempts.push({ status: 'rejected', reason })
+      }
+      if (generation !== discoveryGeneration) return
+      if (provider !== orderedProviders.at(-1)) await new Promise(resolve => setTimeout(resolve, 1_000))
+    }
     await sessionsRefresh
     if (generation !== discoveryGeneration) return
     const successful = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
@@ -141,7 +158,10 @@ async function refreshTasks(): Promise<void> {
       state.replaceProviderSessions(currentProjectId, successful.flatMap(result => result.sessions))
     }
     if (!successful.length && attempts.some(result => result.status === 'rejected')) {
-      throw new Error('Provider task history could not be loaded')
+      const failures = attempts.flatMap((result, index) => result.status === 'rejected'
+        ? [`${orderedProviders[index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+        : [])
+      throw new Error(`Provider task history could not be loaded (${failures.join('; ')})`)
     }
   } catch (error) {
     if (generation === discoveryGeneration) {
@@ -154,6 +174,10 @@ async function refreshTasks(): Promise<void> {
 
 async function createNewSession(): Promise<void> {
   if (!selectedProvider.value || creating.value) return
+  // Interactive work takes priority over background Provider discovery. The
+  // in-flight request may finish, but no further discovery commands are sent.
+  discoveryGeneration += 1
+  discovering.value = false
   creating.value = true
   createError.value = ''
   try {
@@ -281,7 +305,7 @@ async function openSession(sessionId: string): Promise<void> {
       <template v-if="runningTasks.length">
         <div class="session-group-label"><span>Running</span><small>{{ runningTasks.length }}</small></div>
         <div class="session-table">
-          <article v-for="task in runningTasks" :key="task.key" class="session-row session-row--task" tabindex="0" @click="openTask(task)" @keydown.enter="openTask(task)">
+          <article v-for="task in runningTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)">
             <StatusDot :status="task.state ?? 'idle'" />
             <div><strong>{{ task.title }}</strong><small>{{ task.provider }} · {{ gateway?.name }}</small></div>
             <span class="session-mode">{{ task.state }}</span>
@@ -293,7 +317,7 @@ async function openSession(sessionId: string): Promise<void> {
 
       <div class="session-group-label" :class="{ 'session-group-label--inactive': runningTasks.length }"><span>{{ scopeFilter === 'archived' ? 'Archived' : 'Ready to continue' }}</span><small>{{ readyTasks.length }}</small></div>
       <div v-if="readyTasks.length" class="session-table">
-        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" @click="openTask(task)" @keydown.enter="openTask(task)">
+        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)">
           <StatusDot :status="task.state ?? 'idle'" />
           <div><strong>{{ task.title }}</strong><small>{{ task.firstMessage || `${task.provider} · ${gateway?.name}` }}</small></div>
           <span class="session-mode">{{ task.draft ? 'draft' : task.provider }}</span>

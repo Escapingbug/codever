@@ -42,6 +42,27 @@ export class FileConversationEventStore<T = unknown> implements ConversationEven
         })
     }
 
+    async appendMany(events: NewConversationEvent<T>[]): Promise<SessionEventEnvelope<T>[]> {
+        return this.serializeMutation(async () => {
+            await this.initialize()
+            const results: SessionEventEnvelope<T>[] = []
+            for (const event of events) {
+                const duplicate = findDuplicateNew(this.index, event)
+                if (duplicate) {
+                    results.push(cloneEnvelope(duplicate))
+                    continue
+                }
+                results.push(await this.appendEnvelopeNow({
+                    ...event,
+                    schemaVersion: 1,
+                    seq: (this.index.lastSeq.get(event.sessionId) ?? 0) + 1,
+                }, false))
+            }
+            if (events.length) await this.handle!.sync()
+            return results
+        })
+    }
+
     async appendEnvelope(event: SessionEventEnvelope<T>): Promise<SessionEventEnvelope<T>> {
         return this.serializeMutation(async () => {
             await this.initialize()
@@ -129,7 +150,7 @@ export class FileConversationEventStore<T = unknown> implements ConversationEven
         addToIndex(this.index, envelope)
     }
 
-    private async appendEnvelopeNow(event: SessionEventEnvelope<T>): Promise<SessionEventEnvelope<T>> {
+    private async appendEnvelopeNow(event: SessionEventEnvelope<T>, synchronize = true): Promise<SessionEventEnvelope<T>> {
         const candidate = cloneEnvelope(event)
         assertEnvelope(candidate)
         const duplicate = findDuplicate(this.index, candidate)
@@ -143,7 +164,7 @@ export class FileConversationEventStore<T = unknown> implements ConversationEven
         const envelope = persisted as SessionEventEnvelope<T>
 
         await this.handle!.appendFile(`${serialized}\n`, 'utf8')
-        await this.handle!.sync()
+        if (synchronize) await this.handle!.sync()
         addToIndex(this.index, envelope)
         return cloneEnvelope(envelope)
     }
