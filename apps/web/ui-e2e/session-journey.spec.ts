@@ -26,16 +26,36 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.message--assistant').filter({ hasText: 'First reply.' }).locator('.agent-reply-state')).toContainText('success')
   })
 
-  test('C02 authorizes a second computer without confusing it with the Relay connection', async ({ page }) => {
+  test('C02 separates Matrix device trust from Gateway execution authorization', async ({ page }) => {
     await page.goto('./e2e.html#/machines')
     const secondComputer = page.locator('.machine-card').filter({ hasText: 'Second computer' })
     await expect(secondComputer).toContainText('Authorization required')
     await secondComputer.click()
 
-    await expect(page.getByRole('heading', { name: 'Authorize this client' })).toBeVisible()
-    await page.getByLabel('Device pairing code').fill('PAIR-GATEWAY-123')
-    await page.getByRole('button', { name: 'Authorize computer' }).click()
+    await expect(page.getByRole('heading', { name: 'Approve this client on the computer' })).toBeVisible()
+    await page.getByText('Technical details').click()
+    await expect(page.getByText('SECONDGATEWAY')).toBeVisible()
+    await expect(page.getByText('Matrix device verification protects encrypted sync.')).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.approveSecondComputer())
+    await page.goto('./e2e.html#/machines')
+    await page.locator('.machine-card').filter({ hasText: 'Second computer' }).click()
     await expect(page.getByRole('heading', { name: 'No projects on this computer' })).toBeVisible()
+  })
+
+  test('C01/C02 verifies a Gateway with Matrix SAS and approves a new execution root', async ({ page }) => {
+    await page.goto('./e2e.html#/settings')
+    const gatewayDevice = page.locator('.server-summary').filter({ hasText: 'Windows Gateway' })
+    await expect(gatewayDevice).toContainText('Not verified')
+    await gatewayDevice.getByRole('button', { name: 'Verify' }).click()
+    await page.getByRole('button', { name: 'Continue verification' }).click()
+    await expect(page.getByLabel('Verification emoji')).toContainText('🐶')
+    await page.getByRole('button', { name: 'They match' }).click()
+    await expect(gatewayDevice).toContainText('Verified')
+
+    const approval = page.locator('.authorization-card').filter({ hasText: 'New phone' })
+    await expect(approval).toContainText('execution-new')
+    await approval.getByRole('button', { name: 'Approve this client' }).click()
+    await expect(approval).toHaveCount(0)
   })
 
   test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {
@@ -120,20 +140,20 @@ test.describe('mobile Session business journey', () => {
     await expect(composer).toBeEnabled()
   })
 
-  test('C17 keeps cached work usable across Relay restart and deduplicates backlog redelivery', async ({ page }) => {
-    await page.locator('.composer textarea').fill('Finish while the Relay restarts')
+  test('C17 keeps cached work usable across Matrix sync restart and deduplicates backlog redelivery', async ({ page }) => {
+    await page.locator('.composer textarea').fill('Finish while Matrix sync restarts')
     await page.getByRole('button', { name: 'Send message' }).click()
     await page.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
 
     await page.evaluate(() => window.__CODEVER_E2E__.setConnection('disconnected'))
-    await page.evaluate(() => window.__CODEVER_E2E__.finishTurnOffline('Completed during Relay restart.'))
-    await expect(page.getByText('Completed during Relay restart.')).toHaveCount(0)
-    await expect(page.locator('.message--user').filter({ hasText: 'Finish while the Relay restarts' })).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.finishTurnOffline('Completed during Matrix sync restart.'))
+    await expect(page.getByText('Completed during Matrix sync restart.')).toHaveCount(0)
+    await expect(page.locator('.message--user').filter({ hasText: 'Finish while Matrix sync restarts' })).toBeVisible()
     await expect(page.locator('.connection-banner')).toContainText('Server offline')
 
     await page.evaluate(() => window.__CODEVER_E2E__.setConnection('connected'))
-    const recovered = page.locator('.message--assistant').filter({ hasText: 'Completed during Relay restart.' })
+    const recovered = page.locator('.message--assistant').filter({ hasText: 'Completed during Matrix sync restart.' })
     await expect(recovered).toHaveCount(1)
     await expect(recovered.locator('.agent-reply-state')).toContainText('success')
     await expect(page.getByText('idle', { exact: true })).toBeVisible()

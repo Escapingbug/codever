@@ -8,7 +8,7 @@ RUN corepack enable
 COPY . .
 RUN pnpm install --frozen-lockfile --filter @codever/gateway... \
     && pnpm --filter @codever/protocol build \
-    && pnpm --filter @codever/secure-channel build \
+    && pnpm --filter @codever/execution-auth build \
     && pnpm --filter @codever/gateway build \
     && pnpm store prune
 

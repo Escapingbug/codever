@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+    parseAuthorizedClientGatewayRequestFrame,
     parseClientGatewayEventFrame,
     parseClientGatewayFrame,
     parseClientGatewayRequestFrame,
@@ -38,6 +39,20 @@ const event = {
 }
 
 describe('encrypted Client to Gateway request frames', () => {
+    it('requires a COSE/CWT authorization wrapper for transported commands', () => {
+        const authorized = {
+            version: 1,
+            type: 'client.gateway.authorized-request',
+            request: request({ kind: 'inventory.get' }),
+            authorization: { format: 'cose-sign1-cwt', token: 'cose-token' },
+        }
+        expect(parseAuthorizedClientGatewayRequestFrame(authorized).request.payload.kind).toBe('inventory.get')
+        expect(() => parseAuthorizedClientGatewayRequestFrame({
+            ...authorized,
+            authorization: { format: 'bearer', token: 'server-token' },
+        })).toThrow()
+    })
+
     it('parses every supported request payload', () => {
         const payloads = [
             { kind: 'inventory.get' },
@@ -65,6 +80,11 @@ describe('encrypted Client to Gateway request frames', () => {
             },
             { kind: 'events.list', sessionId: 'session-1', after: 0, limit: 100 },
             { kind: 'events.list', sessionId: 'session-1', before: 101, limit: 100 },
+            {
+                kind: 'execution.root.trust', ownerId: 'tablet-device', label: 'Tablet',
+                publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'key-2', x: 'x', y: 'y' },
+            },
+            { kind: 'execution.root.revoke', keyId: 'key-2' },
         ]
 
         for (const payload of payloads) {
@@ -109,6 +129,10 @@ describe('encrypted Client to Gateway request frames', () => {
             kind: 'events.list', sessionId: 'session-1', limit: 1_001,
         }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({ kind: 'session.archive.set', sessionId: 'session-1' }))).toThrow()
+        expect(() => parseClientGatewayRequestFrame(request({
+            kind: 'execution.root.trust', ownerId: 'attacker', label: 'Attacker',
+            publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'key', x: 'x', y: 'y', d: 'private' },
+        }))).toThrow()
     })
 })
 

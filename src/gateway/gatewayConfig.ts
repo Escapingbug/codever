@@ -1,24 +1,34 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import type { MatrixSessionCredential } from './matrix'
 
-export interface GatewayTlsConfig {
-    certPath?: string
-    keyPath?: string
-    caPath?: string
+export interface GatewayMatrixConfig {
+    homeserver: string
+    userId: string
+    deviceId: string
+    controlRoomId: string
+    credentialPath: string
+    storePath: string
+    transportBinaryPath: string
 }
 
 export interface GatewayConfig {
-    version: 1
+    version: 2
     gatewayId: string
     workspaceId: string
     name: string
-    relayUrl: string
     dataDirectory: string
     providersPath?: string
-    tls?: GatewayTlsConfig
-    secure: { pairingCode?: string }
+    matrix: GatewayMatrixConfig
+}
+
+interface MatrixCredentialSnapshot {
+    version: 1
+    accessToken: string
+    refreshToken?: string
+    storePassphrase: string
 }
 
 export function defaultGatewayConfigPath(): string {
@@ -26,85 +36,116 @@ export function defaultGatewayConfigPath(): string {
 }
 
 export async function loadGatewayConfig(path = defaultGatewayConfigPath()): Promise<GatewayConfig> {
-    let value: unknown
     try {
-        value = JSON.parse(await readFile(resolve(path), 'utf8'))
+        return parseGatewayConfig(JSON.parse(await readFile(resolve(path), 'utf8')))
     } catch (error) {
         throw new Error(`Unable to read Gateway config at ${resolve(path)}`, { cause: error })
     }
-    return parseGatewayConfig(value)
 }
 
 export async function writeGatewayConfig(
-    input: Pick<GatewayConfig, 'name' | 'relayUrl'> & Partial<GatewayConfig>,
+    input: Pick<GatewayConfig, 'name' | 'matrix'> & Partial<GatewayConfig>,
     path = defaultGatewayConfigPath(),
 ): Promise<GatewayConfig> {
     const target = resolve(path)
     const config = parseGatewayConfig({
-        version: 1,
+        version: 2,
         gatewayId: input.gatewayId ?? `gateway_${randomUUID()}`,
         workspaceId: input.workspaceId ?? 'default',
         name: input.name,
-        relayUrl: input.relayUrl,
         dataDirectory: input.dataDirectory ?? join(dirname(target), 'gateway-data'),
         ...(input.providersPath ? { providersPath: input.providersPath } : {}),
-        ...(input.tls ? { tls: input.tls } : {}),
-        secure: input.secure ?? {},
+        matrix: input.matrix,
     })
-    await mkdir(dirname(target), { recursive: true })
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 })
     await writeFile(target, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    await chmod(target, 0o600)
     return config
 }
 
-export function parseGatewayConfig(value: unknown): GatewayConfig {
-    if (!isRecord(value) || value.version !== 1) throw new Error('Gateway config version must be 1')
-    const gatewayId = text(value.gatewayId, 'gatewayId')
-    const workspaceId = text(value.workspaceId, 'workspaceId')
-    const name = text(value.name, 'name')
-    const relayUrl = text(value.relayUrl, 'relayUrl')
-    const relay = new URL(relayUrl)
-    if (value.secure === undefined) throw new Error('secure configuration is required')
-    const secure = parseSecure(value.secure)
-    if (relay.protocol !== 'wss:' && !(relay.protocol === 'ws:' && (isLoopback(relay.hostname) || secure))) {
-        throw new Error('relayUrl must use wss://; public ws:// requires secure OPAQUE transport')
+export async function writeMatrixCredential(
+    path: string,
+    input: Pick<MatrixCredentialSnapshot, 'accessToken' | 'storePassphrase'> & Partial<MatrixCredentialSnapshot>,
+): Promise<void> {
+    const snapshot = parseMatrixCredential({
+        version: 1,
+        accessToken: input.accessToken,
+        ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
+        storePassphrase: input.storePassphrase,
+    })
+    const target = resolve(path)
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 })
+    await writeFile(target, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    await chmod(target, 0o600)
+}
+
+export async function loadMatrixCredential(config: GatewayConfig): Promise<{
+    session: MatrixSessionCredential
+    storePassphrase: string
+}> {
+    let snapshot: MatrixCredentialSnapshot
+    try {
+        snapshot = parseMatrixCredential(JSON.parse(await readFile(config.matrix.credentialPath, 'utf8')))
+        await chmod(config.matrix.credentialPath, 0o600)
+    } catch (error) {
+        throw new Error(`Unable to read Matrix credential at ${config.matrix.credentialPath}`, { cause: error })
     }
-    const dataDirectory = absolute(value.dataDirectory, 'dataDirectory')
-    const providersPath = value.providersPath === undefined ? undefined : absolute(value.providersPath, 'providersPath')
-    const tls = value.tls === undefined ? undefined : parseTls(value.tls)
+    return {
+        session: {
+            homeserver: config.matrix.homeserver,
+            userId: config.matrix.userId,
+            deviceId: config.matrix.deviceId,
+            accessToken: snapshot.accessToken,
+            ...(snapshot.refreshToken ? { refreshToken: snapshot.refreshToken } : {}),
+        },
+        storePassphrase: snapshot.storePassphrase,
+    }
+}
+
+export function parseGatewayConfig(value: unknown): GatewayConfig {
+    if (!isRecord(value) || value.version !== 2) throw new Error('Gateway config version must be 2')
+    const matrix = parseMatrix(value.matrix)
+    return {
+        version: 2,
+        gatewayId: text(value.gatewayId, 'gatewayId'),
+        workspaceId: text(value.workspaceId, 'workspaceId'),
+        name: text(value.name, 'name'),
+        dataDirectory: absolute(value.dataDirectory, 'dataDirectory'),
+        ...(value.providersPath === undefined ? {} : { providersPath: absolute(value.providersPath, 'providersPath') }),
+        matrix,
+    }
+}
+
+function parseMatrix(value: unknown): GatewayMatrixConfig {
+    if (!isRecord(value)) throw new Error('matrix configuration is required')
+    const homeserver = new URL(text(value.homeserver, 'matrix.homeserver'))
+    if (homeserver.protocol !== 'https:' && !(homeserver.protocol === 'http:' && isLoopback(homeserver.hostname))) {
+        throw new Error('Matrix homeserver must use https except on loopback')
+    }
+    const userId = text(value.userId, 'matrix.userId')
+    const deviceId = text(value.deviceId, 'matrix.deviceId')
+    const controlRoomId = text(value.controlRoomId, 'matrix.controlRoomId')
+    if (!/^@[^:]+:.+$/.test(userId)) throw new Error('matrix.userId is invalid')
+    if (!/^![^:]+:.+$/.test(controlRoomId)) throw new Error('matrix.controlRoomId is invalid')
+    return {
+        homeserver: homeserver.toString(),
+        userId,
+        deviceId,
+        controlRoomId,
+        credentialPath: absolute(value.credentialPath, 'matrix.credentialPath'),
+        storePath: absolute(value.storePath, 'matrix.storePath'),
+        transportBinaryPath: absolute(value.transportBinaryPath, 'matrix.transportBinaryPath'),
+    }
+}
+
+function parseMatrixCredential(value: unknown): MatrixCredentialSnapshot {
+    if (!isRecord(value) || value.version !== 1) throw new Error('Matrix credential version must be 1')
     return {
         version: 1,
-        gatewayId,
-        workspaceId,
-        name,
-        relayUrl: relay.toString(),
-        dataDirectory,
-        ...(providersPath ? { providersPath } : {}),
-        ...(tls ? { tls } : {}),
-        secure,
+        accessToken: text(value.accessToken, 'accessToken'),
+        ...(value.refreshToken === undefined ? {} : { refreshToken: text(value.refreshToken, 'refreshToken') }),
+        storePassphrase: text(value.storePassphrase, 'storePassphrase'),
     }
-}
-
-function parseSecure(value: unknown): GatewayConfig['secure'] {
-    if (!isRecord(value)) throw new Error('secure must be an object')
-    if (Object.keys(value).some(key => key !== 'pairingCode')) throw new Error('secure contains an unknown option')
-    if (value.pairingCode === undefined) return {}
-    const pairingCode = text(value.pairingCode, 'secure.pairingCode').toUpperCase()
-    if (!/^[A-HJ-NP-Z2-9]{6}-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$/.test(pairingCode)) {
-        throw new Error('secure.pairingCode is invalid')
-    }
-    return { pairingCode }
-}
-
-function parseTls(value: unknown): GatewayTlsConfig {
-    if (!isRecord(value)) throw new Error('tls must be an object')
-    const result: GatewayTlsConfig = {}
-    if (value.certPath !== undefined) result.certPath = absolute(value.certPath, 'tls.certPath')
-    if (value.keyPath !== undefined) result.keyPath = absolute(value.keyPath, 'tls.keyPath')
-    if (value.caPath !== undefined) result.caPath = absolute(value.caPath, 'tls.caPath')
-    if ((result.certPath === undefined) !== (result.keyPath === undefined)) {
-        throw new Error('tls.certPath and tls.keyPath must be supplied together')
-    }
-    return result
 }
 
 function absolute(value: unknown, field: string): string {

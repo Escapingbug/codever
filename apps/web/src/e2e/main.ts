@@ -9,16 +9,17 @@ import type {
   SessionAttachmentDto,
   SessionEventEnvelope,
 } from '@codever/protocol'
-import { createApp, defineComponent, h } from 'vue'
+import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import App from '../App.vue'
-import { relayApiKey, type RelayApi } from '../api/relayApi'
+import { codeverApiKey, type CodeverApi } from '../api/codeverApi'
 import { clientSession } from '../state/clientSession'
 import ProjectView from '../views/ProjectView.vue'
 import SessionView from '../views/SessionView.vue'
 import GatewayListView from '../views/GatewayListView.vue'
 import GatewayView from '../views/GatewayView.vue'
 import MachineListView from '../views/MachineListView.vue'
+import SettingsView from '../views/SettingsView.vue'
 import { createPlatformSecretStore } from '../security/secretStore'
 import '../styles.css'
 
@@ -29,7 +30,7 @@ const gateway: Gateway = {
 }
 const unpairedGateway: Gateway = {
   id: 'gateway-unpaired-e2e', workspaceId: 'workspace-e2e', name: 'Second computer', platform: 'linux', version: 'e2e',
-  capabilities: { protocolVersions: [1], providers: ['codex'], features: [] },
+  capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'SECONDGATEWAY' } },
   status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
 }
 const project: Project = {
@@ -37,7 +38,7 @@ const project: Project = {
   defaultProvider: 'scripted-agent',
 }
 const projects: Project[] = [project]
-let secondGatewayPaired = false
+let secondGatewayAuthorized = false
 const longHistoryFixture = new URLSearchParams(window.location.search).get('history') === 'long'
 const session: CodeverSession = {
   id: longHistoryFixture ? 'session-long-history-e2e' : 'session-e2e', gatewayId: gateway.id, projectId: project.id, title: 'Build Android client', state: 'idle',
@@ -58,8 +59,41 @@ let lastSentInput: SendMessageDto | undefined
 let exportedPath = ''
 let lastConfig: PatchSessionConfigDto | undefined
 let archiveUpdates = 0
+let matrixGatewayVerified = false
+let verificationStage: 'requested' | 'present_sas' | 'done' = 'requested'
+let approvalVisible = true
+let approvalSubscriber: ((requests: Array<Record<string, unknown>>) => void) | undefined
 const attachments: SessionAttachmentDto[] = []
 const nativeSecrets = createPlatformSecretStore()
+
+clientSession.server.value = { domain: 'matrix.example.test', homeserver: 'https://matrix.example.test' }
+clientSession.identity.value = {
+  session: { homeserver: 'https://matrix.example.test', userId: '@codever:matrix.example.test', deviceId: 'CLIENTDEVICE' },
+  controlRoomId: '!control:matrix.example.test', executionKeyId: 'execution-current', executionPublicKey: {},
+}
+clientSession.listMatrixDevices = async () => [
+  { deviceId: 'CLIENTDEVICE', displayName: 'Codever Android', verified: true, current: true },
+  { deviceId: 'GATEWAYDEVICE', displayName: 'Windows Gateway', verified: matrixGatewayVerified, current: false },
+]
+clientSession.listVerifications = async () => verificationStage === 'done' ? [] : [{
+  flowId: 'verification-e2e', stage: verificationStage, otherDeviceId: 'GATEWAYDEVICE',
+  ...(verificationStage === 'present_sas' ? { emojis: [
+    { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
+    { symbol: '🎸', description: 'Guitar' }, { symbol: '🌙', description: 'Moon' },
+  ] } : {}),
+}]
+clientSession.requestVerification = async () => ({ flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'GATEWAYDEVICE' })
+clientSession.advanceVerification = async () => {
+  verificationStage = 'present_sas'
+  return (await clientSession.listVerifications())[0]!
+}
+clientSession.confirmVerification = async (_flowId: string, matches: boolean) => {
+  if (!matches) throw new Error('E2E verification mismatch')
+  matrixGatewayVerified = true
+  verificationStage = 'done'
+  return { flowId: 'verification-e2e', stage: 'done' as const, otherDeviceId: 'GATEWAYDEVICE' }
+}
+clientSession.cancelVerification = async () => { verificationStage = 'done' }
 
 if (longHistoryFixture) {
   for (let index = 1; index <= 8; index += 1) {
@@ -85,16 +119,27 @@ const api = {
   },
   rememberRoute() {},
   async listGateways() { return [gateway, unpairedGateway] },
+  subscribeExecutionApprovals(callback: (requests: Array<Record<string, unknown>>) => void) {
+    approvalSubscriber = callback
+    callback(approvalVisible ? [{
+      requestId: 'approval-e2e', gatewayId: gateway.id, ownerId: 'NEWCLIENT', label: 'New phone',
+      senderDevice: 'NEWCLIENT', publicKey: {
+        kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'execution-new', x: 'x', y: 'y',
+      },
+    }] : [])
+    return () => undefined
+  },
+  async approveExecutionRoot() {
+    approvalVisible = false
+    approvalSubscriber?.([])
+    return { commandId: 'approval-e2e', status: 'succeeded' }
+  },
   async listProjects(gatewayId: string) {
     if (gatewayId === unpairedGateway.id) {
-      if (!secondGatewayPaired) throw new Error('Gateway pairing is required')
+      if (!secondGatewayAuthorized) throw new Error('Execution signing key is unknown or revoked')
       return []
     }
     return [...projects]
-  },
-  async pairGateway(gatewayId: string, pairingCode: string) {
-    if (gatewayId !== unpairedGateway.id || pairingCode !== 'PAIR-GATEWAY-123') throw new Error('Pairing code rejected')
-    secondGatewayPaired = true
   },
   async createProject(gatewayId: string, input: { name: string; rootPath: string; defaultProvider?: string }) {
     const created: Project = {
@@ -216,9 +261,8 @@ const api = {
     }
     return { commandId: 'delete-attachments', status: 'succeeded' }
   },
-} as unknown as RelayApi
+} as unknown as CodeverApi
 
-const Placeholder = defineComponent({ setup: () => () => h('main', 'Settings') })
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -226,7 +270,7 @@ const router = createRouter({
     { path: '/projects', name: 'projects', component: GatewayListView },
     { path: '/machines', name: 'machines', component: MachineListView },
     { path: '/gateways/:gatewayId', name: 'gateway', component: GatewayView },
-    { path: '/settings', component: Placeholder },
+    { path: '/settings', component: SettingsView },
     { path: '/projects/:gatewayId/:projectId', name: 'project', component: ProjectView },
     { path: '/projects/:gatewayId/:projectId/sessions/:sessionId', name: 'session', component: SessionView },
   ],
@@ -248,11 +292,13 @@ declare global {
       nativeSecretGet(account: string): Promise<string | undefined>
       nativeSecretSet(account: string, value: string): Promise<void>
       nativeSecretDelete(account: string): Promise<void>
+      approveSecondComputer(): void
     }
   }
 }
 
 window.__CODEVER_E2E__ = {
+  approveSecondComputer() { secondGatewayAuthorized = true },
   completeTurn() {
     if (!pendingSend) throw new Error('No pending Client message')
     const { input, resolve } = pendingSend
@@ -306,8 +352,8 @@ window.__CODEVER_E2E__ = {
     if (state === 'connected') {
       const queued = offlineBacklog.splice(0)
       for (const envelope of queued) {
-        // JetStream redelivery may race explicit cursor catch-up. Deliver each
-        // envelope twice so the UI journey enforces sequence-based idempotency.
+        // Matrix timeline replay may race explicit history catch-up. Deliver
+        // each envelope twice so the UI journey enforces event idempotency.
         for (const subscriber of subscribers) {
           subscriber(envelope)
           subscriber(envelope)
@@ -331,7 +377,7 @@ window.__CODEVER_E2E__ = {
 
 clientSession.connectionState.value = 'connected'
 const app = createApp(App)
-app.provide(relayApiKey, api)
+app.provide(codeverApiKey, api)
 app.use(router)
 await router.isReady()
 app.mount('#app')

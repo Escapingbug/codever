@@ -1,4 +1,7 @@
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     if let Some(project) = env::var_os("TAURI_ANDROID_PROJECT_PATH") {
@@ -9,8 +12,8 @@ fn main() {
 
 fn configure_android_keyring(project: &Path) {
     let java = project.join("app/src/main/java");
-    let activity = find_file(&java, "MainActivity.kt")
-        .expect("Android MainActivity.kt was not generated");
+    let activity =
+        find_file(&java, "MainActivity.kt").expect("Android MainActivity.kt was not generated");
     let source = fs::read_to_string(&activity).expect("failed to read Android MainActivity");
     let source = if source.contains("Keyring.initializeNdkContext(applicationContext)") {
         source
@@ -30,7 +33,9 @@ fn configure_android_keyring(project: &Path) {
     let bridge = java.join("io/crates/keyring/Keyring.kt");
     fs::create_dir_all(bridge.parent().expect("keyring bridge parent"))
         .expect("failed to create Android keyring bridge directory");
-    fs::write(bridge, r#"package io.crates.keyring
+    fs::write(
+        bridge,
+        r#"package io.crates.keyring
 
 import android.content.Context
 
@@ -43,14 +48,18 @@ class Keyring {
     external fun initializeNdkContext(context: Context)
   }
 }
-"#).expect("failed to write Android keyring bridge");
+"#,
+    )
+    .expect("failed to write Android keyring bridge");
 }
 
 fn find_file(directory: &Path, name: &str) -> Option<PathBuf> {
     for entry in fs::read_dir(directory).ok()? {
         let path = entry.ok()?.path();
         if path.is_dir() {
-            if let Some(found) = find_file(&path, name) { return Some(found); }
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
         } else if path.file_name().is_some_and(|value| value == name) {
             return Some(path);
         }

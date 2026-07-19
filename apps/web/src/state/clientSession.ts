@@ -1,74 +1,83 @@
 import { computed, ref } from 'vue'
-import { RelayApi, RelayApiError, type RelayConnectionState } from '../api/relayApi'
-import { ClientRelayCredentialStore } from '../security/relayCredentialStore'
-import { createPlatformSecretStore, type SecretStore } from '../security/secretStore'
+import { CodeverApi, CodeverApiError, type ConnectionState } from '../api/codeverApi'
+import {
+  NativeMatrixClient, type ExecutionIdentity, type MatrixPublicSession,
+} from '../api/nativeMatrixClient'
 
-export interface RelayProfile { id: string; name: string; baseUrl: string }
-export interface RelayIdentity { relayId: string; credentialId: string; createdAt: string }
-export const DEFAULT_RELAY_PORT = 8787
-
-interface PersistedState { version: 3; profiles: RelayProfile[]; activeProfileId?: string }
-const STORAGE_KEY = 'codever.client.v1'
-
-export function normalizeRelayUrl(value: string, port = DEFAULT_RELAY_PORT): string {
-  const address = value.trim()
-  if (!address) throw new Error('Relay domain is required')
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('Relay port must be between 1 and 65535')
-  if (address.includes('://')) throw new Error('Enter only the Relay domain, without http:// or https://')
-  if (/[/?#@]/.test(address)) throw new Error('Enter only the Relay domain, without a path')
-  const parsed = new URL(`https://${address}`)
-  if (parsed.port) throw new Error('Change the port in Advanced connection settings')
-  parsed.port = String(port)
-  return parsed.toString().replace(/\/$/, '')
+export interface MatrixServerProfile { homeserver: string; domain: string }
+export interface ClientIdentity {
+  session: MatrixPublicSession
+  controlRoomId: string
+  executionKeyId: string
+  executionPublicKey: Record<string, unknown>
 }
 
-export function relayProfileAddress(baseUrl: string): { domain: string; port: number } {
-  const parsed = new URL(baseUrl)
-  return { domain: parsed.hostname, port: Number(parsed.port || DEFAULT_RELAY_PORT) }
+interface PersistedState {
+  version: 4
+  server?: MatrixServerProfile
+  identity?: ClientIdentity
 }
 
-export function createClientSession(storage: Storage = localStorage, secrets: SecretStore = createPlatformSecretStore()) {
-  const profiles = ref<RelayProfile[]>([])
-  const activeProfileId = ref<string>()
-  const identities = ref<Record<string, RelayIdentity>>({})
+const STORAGE_KEY = 'codever.client.matrix.v1'
+const MATRIX_SECRET_ACCOUNT = 'matrix-primary'
+const EXECUTION_SECRET_ACCOUNT = 'execution-primary'
+
+export function normalizeHomeserver(value: string): MatrixServerProfile {
+  const domain = value.trim()
+  if (!domain) throw new Error('Server domain is required')
+  if (domain.includes('://') || /[/?#@]/.test(domain)) throw new Error('Enter only the server domain')
+  const url = new URL(`https://${domain}`)
+  if (url.port) throw new Error('Codever uses the standard HTTPS port')
+  return { domain: url.hostname, homeserver: url.origin }
+}
+
+export function createClientSession(storage: Storage = localStorage, native = new NativeMatrixClient()) {
+  const server = ref<MatrixServerProfile>()
+  const identity = ref<ClientIdentity>()
   const initialized = ref(false)
   const initializationError = ref('')
-  const connectionState = ref<RelayConnectionState>('disconnected')
+  const connectionState = ref<ConnectionState>('disconnected')
+  const api = new CodeverApi(native)
   let initializePromise: Promise<void> | undefined
-  let disconnectedHandler: (() => void) | undefined
-
-  const activeProfile = computed(() => profiles.value.find(profile => profile.id === activeProfileId.value))
-  const activeAuth = computed(() => activeProfileId.value ? identities.value[activeProfileId.value] : undefined)
-  const api = new RelayApi({
-    baseUrl: () => activeProfile.value?.baseUrl,
-    relayProfileId: () => activeProfileId.value,
-    secrets,
-    onDisconnected: () => disconnectedHandler?.(),
-    onConnectionState: value => { connectionState.value = value },
-  })
-  const credentialStore = new ClientRelayCredentialStore(secrets)
+  let unsubscribeConnection: (() => void) | undefined
 
   function persist(): void {
-    const value: PersistedState = { version: 3, profiles: profiles.value, activeProfileId: activeProfileId.value }
-    storage.setItem(STORAGE_KEY, JSON.stringify(value))
+    storage.setItem(STORAGE_KEY, JSON.stringify({ version: 4, server: server.value, identity: identity.value } satisfies PersistedState))
   }
 
-  async function restore(): Promise<void> {
-    const raw = storage.getItem(STORAGE_KEY)
-    if (!raw) return
+  function configureServer(domain: string): MatrixServerProfile {
+    const next = normalizeHomeserver(domain)
+    if (server.value?.homeserver !== next.homeserver) identity.value = undefined
+    server.value = next
+    persist()
+    return next
+  }
+
+  async function login(username: string, password: string): Promise<void> {
+    if (!server.value) throw new Error('Configure the Codever server first')
+    connectionState.value = 'connecting'
     try {
-      const value = JSON.parse(raw) as Partial<PersistedState>
-      if (!Array.isArray(value.profiles)) return
-      const restored = value.profiles.filter(isRelayProfile)
-      const selected = restored.find(profile => profile.id === value.activeProfileId) ?? restored[0]
-      profiles.value = selected ? [selected] : []
-      activeProfileId.value = selected?.id
-      for (const profile of profiles.value) {
-        const credential = await credentialStore.load(profile.id)
-        if (credential) identities.value[profile.id] = publicIdentity(credential)
-      }
+      const session = await native.login({
+        homeserver: server.value.homeserver,
+        username: required(username, 'Username'),
+        password: required(password, 'Password'),
+        deviceDisplayName: deviceDisplayName(),
+        secretAccount: MATRIX_SECRET_ACCOUNT,
+      })
+      const controlRoomId = await native.ensureControlRoom()
+      const execution = await native.createExecutionIdentity(EXECUTION_SECRET_ACCOUNT)
+      identity.value = toIdentity(session, controlRoomId, execution)
+      api.connect({
+        session, controlRoomId,
+        executionAccount: EXECUTION_SECRET_ACCOUNT,
+        executionKeyId: execution.keyId,
+      })
+      connectionState.value = 'connected'
+      initializationError.value = ''
+      persist()
     } catch (error) {
-      initializationError.value = error instanceof Error ? error.message : 'Unable to restore client state'
+      connectionState.value = 'disconnected'
+      throw error
     }
   }
 
@@ -76,122 +85,81 @@ export function createClientSession(storage: Storage = localStorage, secrets: Se
     if (initialized.value) return
     if (initializePromise) return initializePromise
     initializePromise = (async () => {
-      await restore()
-      if (activeAuth.value) {
-        try { await api.restoreRelay() } catch (error) {
-          initializationError.value = error instanceof Error ? error.message : 'Relay is offline'
+      restoreSnapshot()
+      unsubscribeConnection = api.subscribeConnection(value => { connectionState.value = value })
+      if (identity.value) {
+        try {
+          await native.restore(identity.value.session, MATRIX_SECRET_ACCOUNT)
+          api.connect({
+            session: identity.value.session,
+            controlRoomId: identity.value.controlRoomId,
+            executionAccount: EXECUTION_SECRET_ACCOUNT,
+            executionKeyId: identity.value.executionKeyId,
+          })
+        } catch (error) {
+          initializationError.value = error instanceof Error ? error.message : 'Unable to restore Matrix session'
         }
       }
       initialized.value = true
     })()
-    await initializePromise
-  }
-
-  function saveProfile(input: { id?: string; name: string; domain: string; port?: number }): RelayProfile {
-    const profile: RelayProfile = {
-      id: input.id ?? profiles.value[0]?.id ?? `relay_${crypto.randomUUID()}`,
-      name: required(input.name, 'Relay name'),
-      baseUrl: normalizeRelayUrl(input.domain, input.port),
-    }
-    const existing = profiles.value[0]
-    if (existing) {
-      const changed = existing.baseUrl !== profile.baseUrl
-      if (changed) {
-        void credentialStore.delete(profile.id)
-        const next = { ...identities.value }; delete next[profile.id]; identities.value = next
-        void api.disconnect()
-      }
-    }
-    profiles.value = [profile]
-    activeProfileId.value = profile.id
-    persist()
-    return profile
-  }
-
-  async function selectProfile(id: string): Promise<void> {
-    if (!profiles.value.some(profile => profile.id === id)) throw new Error('Unknown Relay profile')
-    await api.disconnect()
-    activeProfileId.value = id
-    persist()
-    if (identities.value[id]) await api.restoreRelay()
-  }
-
-  function removeProfile(id: string): void {
-    profiles.value = profiles.value.filter(profile => profile.id !== id)
-    void credentialStore.delete(id)
-    const next = { ...identities.value }; delete next[id]; identities.value = next
-    if (activeProfileId.value === id) {
-      void api.disconnect()
-      activeProfileId.value = profiles.value[0]?.id
-    }
-    persist()
-  }
-
-  async function pairRelay(pairingCode: string): Promise<void> {
-    const credential = await api.pairRelay(pairingCode)
-    identities.value = { ...identities.value, [credential.relayProfileId]: publicIdentity(credential) }
-    persist()
+    return initializePromise
   }
 
   async function logout(): Promise<void> {
-    const profileId = activeProfileId.value
-    await api.disconnect(true)
-    if (profileId) {
-      const next = { ...identities.value }; delete next[profileId]; identities.value = next
-    }
+    await api.disconnect()
+    identity.value = undefined
+    initializationError.value = ''
     persist()
   }
-
   function suspend(): void { api.markSuspended() }
-  async function resume(): Promise<void> {
-    if (!activeAuth.value) return
+  async function resume(): Promise<void> { api.resume() }
+
+  function restoreSnapshot(): void {
+    const raw = storage.getItem(STORAGE_KEY)
+    if (!raw) return
     try {
-      await api.resumeDurable()
-      initializationError.value = ''
+      const value = JSON.parse(raw) as Partial<PersistedState>
+      if (value.version !== 4) return
+      if (isServer(value.server)) server.value = value.server
+      if (isIdentity(value.identity)) identity.value = value.identity
     } catch (error) {
-      initializationError.value = error instanceof Error ? error.message : 'Relay reconnection failed'
+      initializationError.value = error instanceof Error ? error.message : 'Unable to read client state'
     }
   }
 
   return {
-    profiles,
-    activeProfileId,
-    activeProfile,
-    activeAuth,
-    initialized,
-    initializationError,
-    connectionState,
-    api,
-    hasProfiles: computed(() => profiles.value.length > 0),
-    isAuthenticated: computed(() => Boolean(activeAuth.value)),
-    initialize,
-    saveProfile,
-    selectProfile,
-    removeProfile,
-    pairRelay,
-    logout,
-    suspend,
-    resume,
-    onUnauthorized(handler: () => void) { disconnectedHandler = handler },
+    server, identity, initialized, initializationError, connectionState, api,
+    hasServer: computed(() => Boolean(server.value)),
+    isAuthenticated: computed(() => Boolean(identity.value)),
+    initialize, configureServer, login, logout, suspend, resume,
+    listMatrixDevices: () => native.listDevices(),
+    listVerifications: () => native.listVerifications(),
+    requestVerification: (deviceId: string) => native.requestVerification(deviceId),
+    advanceVerification: (flowId: string) => native.advanceVerification(flowId),
+    confirmVerification: (flowId: string, matches: boolean) => native.confirmVerification(flowId, matches),
+    cancelVerification: (flowId: string) => native.cancelVerification(flowId),
+    destroy() { unsubscribeConnection?.() },
   }
 }
 
-function publicIdentity(value: { relayId: string; credentialId: string; createdAt: string }): RelayIdentity {
-  return { relayId: value.relayId, credentialId: value.credentialId, createdAt: value.createdAt }
+function toIdentity(session: MatrixPublicSession, controlRoomId: string, execution: ExecutionIdentity): ClientIdentity {
+  return { session, controlRoomId, executionKeyId: execution.keyId, executionPublicKey: execution.publicKey }
 }
-function required(value: string, field: string): string {
-  const normalized = value.trim()
-  if (!normalized) throw new Error(`${field} is required`)
-  return normalized
+function required(value: string, name: string): string { const text = value.trim(); if (!text) throw new Error(`${name} is required`); return text }
+function deviceDisplayName(): string { return /Android/i.test(navigator.userAgent) ? 'Codever Android' : 'Codever Desktop' }
+function isServer(value: unknown): value is MatrixServerProfile {
+  return !!value && typeof value === 'object' && typeof (value as MatrixServerProfile).homeserver === 'string' && typeof (value as MatrixServerProfile).domain === 'string'
 }
-function isRelayProfile(value: unknown): value is RelayProfile {
-  return Boolean(value && typeof value === 'object' && typeof (value as RelayProfile).id === 'string'
-    && typeof (value as RelayProfile).name === 'string' && typeof (value as RelayProfile).baseUrl === 'string')
+function isIdentity(value: unknown): value is ClientIdentity {
+  if (!value || typeof value !== 'object') return false
+  const item = value as ClientIdentity
+  return typeof item.controlRoomId === 'string' && typeof item.executionKeyId === 'string'
+    && !!item.session && typeof item.session.userId === 'string' && typeof item.session.deviceId === 'string'
 }
 
-export function friendlyRelayError(error: unknown): string {
-  if (error instanceof RelayApiError) return error.message
-  return error instanceof Error ? error.message : 'Unable to connect to Relay'
+export function friendlyCodeverError(error: unknown): string {
+  if (error instanceof CodeverApiError) return error.message
+  return error instanceof Error ? error.message : 'Unable to connect to Codever'
 }
 
 export const clientSession = createClientSession()

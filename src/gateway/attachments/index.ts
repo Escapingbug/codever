@@ -1,2 +1,2 @@
 export * from './attachmentStore'
-export * from './natsObjectBlobTransport'
+export * from './fileObjectBlobTransport'

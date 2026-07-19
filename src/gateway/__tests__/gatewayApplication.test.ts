@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION, type InventorySnapshot } from '@codever/protocol'
 import { GATEWAY_FEATURES, handleClientRequest, type ClientRequestContext } from '../gatewayApplication'
 import { ProjectRegistry } from '../projects'
@@ -39,6 +39,7 @@ describe('Gateway project.create request', () => {
             sessions: undefined as never,
             events: undefined as never,
             attachments: undefined as never,
+            executionTrust: undefined as never,
         } satisfies ClientRequestContext
 
         const response = await handleClientRequest({
@@ -84,7 +85,13 @@ describe('Gateway project.create request', () => {
 
     it('advertises project creation as a Gateway capability', () => {
         expect(GATEWAY_FEATURES).toContain('project.create')
-        expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining(['attachment.upload', 'attachment.manage', 'nats-object-storage']))
+        expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining([
+            'attachment.upload',
+            'attachment.manage',
+            'matrix-e2ee',
+            'matrix-durable-sync',
+            'cose-cwt-authorization',
+        ]))
     })
 })
 
@@ -106,6 +113,7 @@ describe('Gateway attachment requests', () => {
                 },
             } as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            executionTrust: undefined as never,
             inventoryChanged: () => undefined,
         } satisfies ClientRequestContext
         const bytes = Buffer.from('attachment body')
@@ -151,6 +159,7 @@ describe('Gateway attachment requests', () => {
             sessions: { get: async () => ({ id: 'session-1', projectId: 'project-1' }) } as never,
             projects: { get: async () => ({ id: 'project-1', canonicalRoot: projectRoot }) } as never,
             inventory: undefined as never, events: undefined as never,
+            executionTrust: undefined as never,
             inventoryChanged: () => undefined,
         } satisfies ClientRequestContext
 
@@ -184,6 +193,34 @@ describe('Gateway attachment requests', () => {
 })
 
 describe('Gateway command liveness', () => {
+    it('lets an existing COSE principal add and revoke a later client root', async () => {
+        const trust = vi.fn(async () => ({ keyId: 'key-2' }))
+        const revoke = vi.fn(async () => true)
+        const context = {
+            credentialId: 'trusted-phone', gatewayId: 'gateway-1',
+            executionTrust: { trust, revoke } as never,
+            sessions: undefined as never, attachments: undefined as never,
+            inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+        const publicKey = {
+            kty: 'EC' as const, crv: 'P-256' as const, alg: 'ES256' as const, use: 'sig' as const,
+            kid: 'key-2', x: 'x-coordinate', y: 'y-coordinate',
+        }
+
+        const added = await handleClientRequest(frame('trust-root', {
+            kind: 'execution.root.trust', ownerId: 'tablet-device', label: 'Tablet', publicKey,
+        }), context)
+        const revoked = await handleClientRequest(frame('revoke-root', {
+            kind: 'execution.root.revoke', keyId: 'key-2',
+        }), context)
+
+        expect(added.status).toBe('completed')
+        expect(revoked.status).toBe('completed')
+        expect(trust).toHaveBeenCalledWith('tablet-device', publicKey, 'Tablet')
+        expect(revoke).toHaveBeenCalledWith('key-2')
+    })
+
     it('acknowledges a message and accepts cancel while the provider turn is still running', async () => {
         const completion = deferred<{ turnId: string; status: 'cancelled' }>()
         let cancelCalls = 0
@@ -199,6 +236,7 @@ describe('Gateway command liveness', () => {
                 releaseParts: async () => undefined,
             } as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            executionTrust: undefined as never,
             inventoryChanged: () => undefined,
         } satisfies ClientRequestContext
 

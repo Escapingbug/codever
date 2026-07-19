@@ -1,17 +1,14 @@
-import { existsSync } from 'node:fs'
-import { readFile, realpath } from 'node:fs/promises'
+import { realpath } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
     PROTOCOL_VERSION,
     type ClientGatewayRequestFrame,
     type ClientGatewayResponseFrame,
     type ClientGatewayCompletedPayload,
-    type GatewayPlatform,
     type Gateway,
     type InventorySnapshot,
     type SessionEventEnvelope as WireEventEnvelope,
 } from '@codever/protocol'
-import { GatewaySecureCredentialStore, RelayLink, type GatewaySecureCredential } from './link'
 import { ProjectRegistry } from './projects'
 import { GatewaySessionService, FileSessionMetadataRepository } from './sessions'
 import { FileConversationEventStore } from '@/platform/storage'
@@ -19,40 +16,33 @@ import type { GatewayConversationEvent } from './runtime'
 import { toWireConversationEvent } from './runtime'
 import { createProviderInstance, listProviders } from '@/providers/registry'
 import { registerConfiguredProviders } from '@/providers/configured'
-import type { GatewayConfig } from './gatewayConfig'
-import {
-    DeviceAuthenticator,
-    DeviceCredentialRepository,
-    type DeviceCredentialRecord,
-} from './security'
-import type { OpaquePairingTicket } from '@codever/secure-channel'
+import { loadMatrixCredential, writeMatrixCredential, type GatewayConfig } from './gatewayConfig'
+import { ExecutionTrustRepository, FileExecutionReplayGuard, type ExecutionTrustRecord } from './security'
+import type { JWK } from '@codever/execution-auth'
 import { GatewayRequestLedger } from './requestLedger'
-import { GatewayAttachmentStore, NatsObjectBlobTransport, SwitchableBlobTransport } from './attachments'
-import { GatewayJetStreamWorker, NatsDevicePairingServer } from './sync'
-import type { NatsConnection } from '@nats-io/transport-node'
+import { FileObjectBlobTransport, GatewayAttachmentStore } from './attachments'
+import { AuthorizedRequestProcessor } from './authorizedRequestProcessor'
+import { MatrixGatewayWorker, NativeMatrixTransport, type MatrixTransport } from './matrix'
 
 export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
-    'attachment.upload', 'attachment.manage', 'nats-object-storage',
-    'file.export', 'attachment.download',
+    'attachment.upload', 'attachment.manage', 'matrix-e2ee', 'cose-cwt-authorization',
+    'file.export', 'attachment.download', 'matrix-durable-sync',
 ]
 
 export interface GatewayApplication {
     readonly config: GatewayConfig
     readonly projects: ProjectRegistry
     readonly sessions: GatewaySessionService
-    readonly relay: RelayLink
-    issueDevicePairing(): OpaquePairingTicket
-    listDevices(): Promise<DeviceCredentialRecord[]>
-    revokeDevice(credentialId: string): Promise<boolean>
-    start(): void
+    trustControlRoot(ownerId: string, publicKey: JWK, label?: string): Promise<ExecutionTrustRecord>
+    listControlRoots(): Promise<ExecutionTrustRecord[]>
+    revokeControlRoot(keyId: string): Promise<boolean>
+    start(): Promise<void>
     close(): Promise<void>
 }
 
 export interface GatewayApplicationOptions {
-    onRelayCredentialSaved?: (credential: GatewaySecureCredential) => Promise<void>
-    natsConnection?: NatsConnection
-    connectNats?: (credential: GatewaySecureCredential) => Promise<NatsConnection>
+    matrixTransport?: MatrixTransport
 }
 
 export async function createGatewayApplication(
@@ -82,25 +72,34 @@ export async function createGatewayApplication(
             return provider
         },
     })
-    const deviceCredentials = await DeviceCredentialRepository.open(
-        join(config.dataDirectory, 'client-device-credentials.json'),
+    const trust = await ExecutionTrustRepository.open(join(config.dataDirectory, 'execution-trust.json'))
+    const replayGuard = await FileExecutionReplayGuard.open(join(config.dataDirectory, 'execution-replay.json'))
+    const attachments = await GatewayAttachmentStore.open(
+        config.dataDirectory,
+        await FileObjectBlobTransport.open(join(config.dataDirectory, 'object-blobs')),
     )
-    const deviceAuthenticator = await DeviceAuthenticator.create({
-        gatewayId: config.gatewayId,
-        serverSetup: deviceCredentials.serverSetup,
-        credentials: deviceCredentials,
-        hpkeKeyPair: deviceCredentials.hpkeKeyPair,
-    })
-    const blobTransport = new SwitchableBlobTransport()
-    let durableWorker: GatewayJetStreamWorker | undefined
-    let pairingServer: NatsDevicePairingServer | undefined
-    let durableConnection: NatsConnection | undefined
-    let ownsDurableConnection = false
-    let presenceTimer: ReturnType<typeof setInterval> | undefined
     let started = false
     let closed = false
+    let heartbeat: ReturnType<typeof setInterval> | undefined
 
     let inventoryRevision = 1
+    const gatewaySnapshot = (): Gateway => ({
+        id: config.gatewayId,
+        workspaceId: config.workspaceId,
+        name: config.name,
+        platform: process.platform === 'win32' ? 'windows'
+            : process.platform === 'darwin' ? 'macos'
+                : process.platform === 'linux' ? 'linux' : 'unknown',
+        version: '0.1.0',
+        capabilities: {
+            protocolVersions: [PROTOCOL_VERSION],
+            providers: listProviders(),
+            features: GATEWAY_FEATURES,
+            metadata: { matrixDeviceId: config.matrix.deviceId },
+        },
+        status: 'online',
+        lastSeenAt: new Date().toISOString(),
+    })
     const inventory = async (): Promise<InventorySnapshot> => ({
         generatedAt: new Date().toISOString(),
         revision: inventoryRevision,
@@ -108,38 +107,6 @@ export async function createGatewayApplication(
             .map(project => toWireProject(project, config.gatewayId)),
         sessions: await metadata.list(),
     })
-
-    const gatewayPlatform = platform()
-    const gatewayPresence = (): Gateway => ({
-        id: config.gatewayId,
-        workspaceId: config.workspaceId,
-        name: config.name,
-        platform: gatewayPlatform,
-        version: '0.1.0',
-        capabilities: {
-            protocolVersions: [PROTOCOL_VERSION],
-            providers: listProviders(),
-            features: GATEWAY_FEATURES,
-        },
-        status: 'online',
-        lastSeenAt: new Date().toISOString(),
-    })
-    const tls = config.tls ? await loadTls(config.tls) : undefined
-    const secureCredentialStore = new GatewaySecureCredentialStore(
-        join(config.dataDirectory, 'secure-relay-credential.json'),
-    )
-    let attachments!: GatewayAttachmentStore
-    const relay = new RelayLink({
-        url: config.relayUrl,
-        gatewayId: config.gatewayId,
-        ...(tls ? { tls } : {}),
-        secure: {
-            credentialStore: secureCredentialStore,
-            ...(config.secure?.pairingCode ? { pairingCode: config.secure.pairingCode } : {}),
-        },
-        onError: (error) => console.error('[gateway:relay]', error.message),
-    })
-    attachments = await GatewayAttachmentStore.open(config.dataDirectory, blobTransport)
 
     const requestContext = (credentialId: string): ClientRequestContext => ({
         credentialId,
@@ -149,123 +116,78 @@ export async function createGatewayApplication(
         sessions,
         events,
         attachments,
+        executionTrust: trust,
         inventoryChanged,
     })
-    const createDurableWorker = (connection: NatsConnection): GatewayJetStreamWorker =>
-        new GatewayJetStreamWorker({
-            connection,
-            gatewayId: config.gatewayId,
-            credentials: deviceCredentials,
-            requestLedger,
-            handleRequest: (request, credentialId) => handleClientRequest(request, requestContext(credentialId)),
-            onError: error => console.error('[gateway:jetstream]', error.message),
-        })
-
-    const createPairingServer = (connection: NatsConnection): NatsDevicePairingServer =>
-        new NatsDevicePairingServer({
-            connection,
-            gatewayId: config.gatewayId,
-            authenticator: deviceAuthenticator,
-            onError: error => console.error('[gateway:pairing]', error.message),
-        })
-
-    const startPresence = async (): Promise<void> => {
-        if (!durableWorker) return
-        await durableWorker.publishPresence(gatewayPresence())
-        if (presenceTimer) return
-        presenceTimer = setInterval(() => {
-            void durableWorker?.publishPresence(gatewayPresence()).catch(error => {
-                console.error('[gateway:presence]', error instanceof Error ? error.message : error)
-            })
-        }, 15_000)
-        presenceTimer.unref?.()
-    }
-
-    const activateDurable = async (credential?: GatewaySecureCredential): Promise<void> => {
-        if (durableWorker || closed) return
-        const connection = options.natsConnection
-            ?? (credential && options.connectNats ? await options.connectNats(credential) : undefined)
-        if (!connection) return
-        ownsDurableConnection = !options.natsConnection
-        durableConnection = connection
-        blobTransport.use(await NatsObjectBlobTransport.open(connection, config.gatewayId))
-        durableWorker = createDurableWorker(connection)
-        pairingServer = createPairingServer(connection)
-        await durableWorker.start()
-        pairingServer.start()
-        await startPresence()
-        await durableWorker.publishInventory(await inventory())
-    }
-
-    if (options.natsConnection) {
-        durableConnection = options.natsConnection
-        blobTransport.use(await NatsObjectBlobTransport.open(options.natsConnection, config.gatewayId))
-        durableWorker = createDurableWorker(options.natsConnection)
-        pairingServer = createPairingServer(options.natsConnection)
-    }
+    const processor = new AuthorizedRequestProcessor({
+        gatewayId: config.gatewayId,
+        trust,
+        replayGuard,
+        requestLedger,
+        handleRequest: (request, principalId) => handleClientRequest(request, requestContext(principalId)),
+    })
+    const matrixCredential = options.matrixTransport ? undefined : await loadMatrixCredential(config)
+    const transport = options.matrixTransport ?? new NativeMatrixTransport({
+        executablePath: config.matrix.transportBinaryPath,
+        session: matrixCredential!.session,
+        storePath: config.matrix.storePath,
+        storePassphrase: matrixCredential!.storePassphrase,
+        onSessionCredential: session => writeMatrixCredential(config.matrix.credentialPath, {
+            accessToken: session.accessToken,
+            ...(session.refreshToken ? { refreshToken: session.refreshToken } : {}),
+            storePassphrase: matrixCredential!.storePassphrase,
+        }),
+        onError: error => console.error('[gateway:matrix]', error.message),
+    })
+    const worker = new MatrixGatewayWorker({
+        gatewayId: config.gatewayId,
+        controlRoomId: config.matrix.controlRoomId,
+        transport,
+        processor,
+        currentGateway: gatewaySnapshot,
+        currentInventory: inventory,
+        onError: error => console.error('[gateway:matrix]', error.message),
+    })
 
     const unsubscribe = sessions.subscribe((envelope) => {
         const event = toWireConversationEvent(envelope.event)
         if (!event) return
         const wireEnvelope = { ...envelope, event }
-        if (durableWorker) {
-            void durableWorker.publishEvent(wireEnvelope).catch(error => {
-                console.error('[gateway:jetstream:event]', error instanceof Error ? error.message : error)
-            })
-        }
+        if (started) void worker.publishConversation(config.matrix.controlRoomId, wireEnvelope).catch(error => {
+            console.error('[gateway:matrix:event]', error instanceof Error ? error.message : error)
+        })
     })
 
     return {
         config,
         projects,
         sessions,
-        relay,
-        issueDevicePairing: () => deviceAuthenticator.issuePairing(),
-        listDevices: () => deviceCredentials.list(),
-        revokeDevice: credentialId => deviceAuthenticator.revoke(credentialId),
-        start() {
+        trustControlRoot: (ownerId, publicKey, label) => trust.trust(ownerId, publicKey, label),
+        listControlRoots: () => trust.list(),
+        revokeControlRoot: keyId => trust.revoke(keyId),
+        async start() {
             if (started || closed) return
             started = true
-            if (durableWorker) {
-                pairingServer?.start()
-                void durableWorker.start().then(startPresence).then(inventory).then(value => durableWorker?.publishInventory(value)).catch(error => {
-                    console.error('[gateway:jetstream]', error instanceof Error ? error.message : error)
-                })
+            try {
+                await worker.start()
+                await worker.publishGateway(gatewaySnapshot())
+                await worker.publishInventory(await inventory())
+                heartbeat = setInterval(() => {
+                    void worker.publishGateway(gatewaySnapshot()).catch(error => {
+                        console.error('[gateway:matrix:presence]', error instanceof Error ? error.message : error)
+                    })
+                }, 30_000)
+            } catch (error) {
+                started = false
+                throw error
             }
-            void (async () => {
-                if (options.connectNats) {
-                    const credential = await secureCredentialStore.load(config.gatewayId)
-                    if (credential) {
-                        await activateDurable(credential)
-                        return
-                    }
-                }
-                while (!closed && relay.state !== 'online') {
-                    try {
-                        await relay.start()
-                        const credential = await secureCredentialStore.load(config.gatewayId)
-                        if (credential) {
-                            await options.onRelayCredentialSaved?.(credential)
-                            await activateDurable(credential)
-                            await relay.stop()
-                            return
-                        }
-                    } catch (error) {
-                        if (!closed) console.error('[gateway:relay]', error instanceof Error ? error.message : error)
-                    }
-                    if (!closed && !relayIsOnline(relay)) await new Promise(resolve => setTimeout(resolve, 30_000))
-                }
-            })()
         },
         async close() {
             if (closed) return
             closed = true
+            if (heartbeat) clearInterval(heartbeat)
             unsubscribe()
-            if (presenceTimer) clearInterval(presenceTimer)
-            await durableWorker?.stop()
-            await pairingServer?.stop()
-            if (ownsDurableConnection && durableConnection) await durableConnection.close()
-            await relay.stop()
+            await worker.stop()
             await sessions.destroy()
             await events.close()
         },
@@ -273,11 +195,9 @@ export async function createGatewayApplication(
 
     function inventoryChanged(): void {
         inventoryRevision += 1
-        if (durableWorker) {
-            void inventory().then(value => durableWorker?.publishInventory(value)).catch(error => {
-                console.error('[gateway:jetstream:inventory]', error instanceof Error ? error.message : error)
-            })
-        }
+        if (started) void inventory().then(value => worker.publishInventory(value)).catch(error => {
+            console.error('[gateway:matrix:inventory]', error instanceof Error ? error.message : error)
+        })
     }
 }
 
@@ -289,6 +209,7 @@ export interface ClientRequestContext {
     sessions: GatewaySessionService
     events: FileConversationEventStore<GatewayConversationEvent>
     attachments: GatewayAttachmentStore
+    executionTrust: ExecutionTrustRepository
     inventoryChanged: () => void
 }
 
@@ -483,6 +404,20 @@ export async function handleClientRequest(
                 }
                 break
             }
+            case 'execution.root.trust':
+                await context.executionTrust.trust(
+                    request.payload.ownerId,
+                    request.payload.publicKey,
+                    request.payload.label,
+                )
+                payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
+            case 'execution.root.revoke':
+                if (!await context.executionTrust.revoke(request.payload.keyId)) {
+                    throw new Error('Execution trust root is unknown or already revoked')
+                }
+                payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
         }
         return { version: PROTOCOL_VERSION, type: 'gateway.client.response', requestId: request.requestId,
             status: 'completed', completedAt, payload }
@@ -569,24 +504,4 @@ async function loadWireEvents(
         cursor = page.cursor
         if (!page.hasMore) return result
     }
-}
-
-async function loadTls(tls: NonNullable<GatewayConfig['tls']>) {
-    return {
-        rejectUnauthorized: true,
-        ...(tls.certPath ? { cert: await readFile(tls.certPath) } : {}),
-        ...(tls.keyPath ? { key: await readFile(tls.keyPath) } : {}),
-        ...(tls.caPath ? { ca: await readFile(tls.caPath) } : {}),
-    }
-}
-
-function platform(): GatewayPlatform {
-    if (process.platform === 'win32') return 'windows'
-    if (process.platform === 'darwin') return 'macos'
-    if (process.platform === 'linux') return existsSync('/.dockerenv') ? 'container' : 'linux'
-    return 'unknown'
-}
-
-function relayIsOnline(relay: RelayLink): boolean {
-    return relay.state === 'online'
 }

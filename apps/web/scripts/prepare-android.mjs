@@ -17,8 +17,8 @@ if (!source.includes(disabled) && !source.includes(enabled)) {
   throw new Error(`Unable to find the Android cleartext manifest placeholder in ${gradlePath}`)
 }
 
-if (source.includes(disabled)) {
-  await writeFile(gradleUrl, source.replace(disabled, enabled), 'utf8')
+if (source.includes(enabled)) {
+  await writeFile(gradleUrl, source.replace(enabled, disabled), 'utf8')
 }
 
 let gradleProperties = await readFile(gradlePropertiesUrl, 'utf8')
@@ -61,4 +61,4 @@ if (!activity.includes('WindowCompat.getInsetsController')) {
   await writeFile(activityUrl, activity, 'utf8')
 }
 
-process.stdout.write('Android native OPAQUE transport and dark system bars enabled for release builds.\n')
+process.stdout.write('Android HTTPS-only Matrix transport and dark system bars enabled for release builds.\n')

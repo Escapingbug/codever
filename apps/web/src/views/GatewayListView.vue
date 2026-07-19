@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayPathHelp, gatewayPathPlaceholder, validateGatewayPath } from '../gatewayPath'
-import { isGatewayPairingError } from '../gatewayAccess'
+import { isGatewayAuthorizationError } from '../gatewayAccess'
 import { useCodeverState } from '../state/codeverState'
 
 const state = useCodeverState()
@@ -12,23 +12,20 @@ const hasLoadedProjects = (id: string) => Object.prototype.hasOwnProperty.call(s
 const projects = computed(() => state.gateways.value.flatMap(gateway =>
   (state.projectsByGateway[gateway.id] ?? []).map(project => ({ project, gateway })),
 ))
-const pairedGateways = computed(() => state.gateways.value.filter(gateway =>
-  hasLoadedProjects(gateway.id) && !isGatewayPairingError(state.errors[`projects:${gateway.id}`]),
+const authorizedGateways = computed(() => state.gateways.value.filter(gateway =>
+  hasLoadedProjects(gateway.id) && !isGatewayAuthorizationError(state.errors[`projects:${gateway.id}`]),
 ))
-const availableGateways = computed(() => pairedGateways.value.filter(gateway => gateway.status === 'online'))
+const availableGateways = computed(() => authorizedGateways.value.filter(gateway => gateway.status === 'online'))
 const authorizationCount = computed(() => state.gateways.value.filter(gateway =>
-  isGatewayPairingError(state.errors[`projects:${gateway.id}`]),
+  isGatewayAuthorizationError(state.errors[`projects:${gateway.id}`]),
 ).length)
 const realFailures = computed(() => state.gateways.value.filter(gateway => {
   const error = state.errors[`projects:${gateway.id}`]
-  return error && !isGatewayPairingError(error) && hasLoadedProjects(gateway.id)
+  return error && !isGatewayAuthorizationError(error) && hasLoadedProjects(gateway.id)
 }))
 const loading = computed(() => state.pending.value.has('gateways') || state.gateways.value.some(gateway =>
   state.pending.value.has(`projects:${gateway.id}`),
 ))
-const selectedGateway = computed(() => availableGateways.value.find(gateway => gateway.id === gatewayId.value))
-const pathPlaceholder = computed(() => gatewayPathPlaceholder(selectedGateway.value?.platform))
-const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform))
 const creating = ref(false)
 const createOpen = ref(false)
 const createError = ref('')
@@ -36,6 +33,9 @@ const gatewayId = ref('')
 const projectName = ref('')
 const rootPath = ref('')
 const defaultProvider = ref('')
+const selectedGateway = computed(() => availableGateways.value.find(gateway => gateway.id === gatewayId.value))
+const pathPlaceholder = computed(() => gatewayPathPlaceholder(selectedGateway.value?.platform))
+const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform))
 
 watch(availableGateways, gateways => {
   if (!gateways.some(gateway => gateway.id === gatewayId.value)) gatewayId.value = gateways[0]?.id ?? ''
@@ -75,8 +75,8 @@ onMounted(() => state.loadWorkspace())
     </header>
 
     <RouterLink v-if="authorizationCount" class="setup-notice" to="/machines">
-      <span class="setup-notice__icon">⌘</span>
-      <span><strong>{{ authorizationCount }} computer{{ authorizationCount === 1 ? '' : 's' }} waiting for authorization</strong><small>Authorize it to use its projects on this client.</small></span>
+      <span class="setup-notice__icon" aria-hidden="true">!</span>
+      <span><strong>{{ authorizationCount }} computer{{ authorizationCount === 1 ? '' : 's' }} waiting for authorization</strong><small>Approve this client before it can run commands.</small></span>
       <span>Open Computers →</span>
     </RouterLink>
     <div v-if="state.errors.gateways" class="error-banner"><strong>Connection unavailable.</strong> {{ state.errors.gateways }}</div>
@@ -87,7 +87,7 @@ onMounted(() => state.loadWorkspace())
     <section v-if="createOpen" class="settings-section project-create-panel">
       <div class="section-heading"><div><span class="eyebrow">On a computer</span><h2>New project</h2></div><button class="icon-button" aria-label="Close" @click="createOpen = false">×</button></div>
       <p class="form-help">Choose a connected computer and register an existing directory.</p>
-      <form class="relay-form" @submit.prevent="createProject">
+      <form class="server-form" @submit.prevent="createProject">
         <label>Computer
           <select v-model="gatewayId" required><option v-for="gateway in availableGateways" :key="gateway.id" :value="gateway.id">{{ gateway.name }} · {{ gateway.platform }}</option></select>
         </label>
@@ -101,18 +101,18 @@ onMounted(() => state.loadWorkspace())
 
     <div v-if="projects.length" class="project-grid">
       <RouterLink v-for="entry in projects" :key="`${entry.gateway.id}:${entry.project.id}`" class="project-card" :to="{ name: 'project', params: { gatewayId: entry.gateway.id, projectId: entry.project.id } }">
-        <span class="folder-icon">▰</span>
+        <span class="folder-icon" aria-hidden="true">▰</span>
         <div><h3>{{ entry.project.name }}</h3><small class="gateway-label"><StatusDot :status="entry.gateway.status" />{{ entry.gateway.name }}<template v-if="entry.gateway.status !== 'online'"> · Offline</template></small></div>
-        <span class="card-arrow">→</span>
+        <span class="card-arrow" aria-hidden="true">→</span>
       </RouterLink>
     </div>
 
     <div v-else-if="loading" class="empty-state"><span class="loader" /><h2>Loading projects</h2><p>Available projects will appear as each computer responds.</p></div>
-    <div v-else-if="!state.gateways.value.length || !pairedGateways.length" class="empty-state">
-      <span class="empty-orbit">⌘</span><h2>Connect your first computer</h2><p>Authorize a computer, then its projects and coding sessions will appear here.</p><RouterLink class="button button--primary" to="/machines">Open Computers</RouterLink>
+    <div v-else-if="!state.gateways.value.length || !authorizedGateways.length" class="empty-state">
+      <span class="empty-orbit" aria-hidden="true">◎</span><h2>Connect your first computer</h2><p>Authorize a computer, then its projects and coding sessions will appear here.</p><RouterLink class="button button--primary" to="/machines">Open Computers</RouterLink>
     </div>
     <div v-else class="empty-state">
-      <span class="empty-orbit">▰</span><h2>No projects yet</h2><p>Add a folder from one of your connected computers.</p><button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = true">Add project</button>
+      <span class="empty-orbit" aria-hidden="true">▰</span><h2>No projects yet</h2><p>Add a folder from one of your connected computers.</p><button class="button button--primary" :disabled="!availableGateways.length" @click="createOpen = true">Add project</button>
     </div>
   </div>
 </template>

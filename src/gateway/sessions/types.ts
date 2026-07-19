@@ -43,7 +43,7 @@ export interface GatewaySessionServiceOptions {
 }
 
 export interface CreateGatewaySessionInput extends CreateSessionDto {
-    /** Relay-assigned stable ID used for idempotent remote creation. */
+    /** Client-assigned stable ID used for idempotent remote creation. */
     sessionId?: string
     idempotencyKey?: string
 }

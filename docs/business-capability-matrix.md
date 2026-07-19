@@ -11,9 +11,10 @@ sanitized ACP transcripts preserve it for normal CI.
   and cancellation are replayed at the `AcpClientManager` boundary. The real
   `AcpProvider`, Gateway runtime, metadata repository, and event store execute.
 - **Client UI**: Playwright drives the mobile viewport against a deterministic
-  Relay API simulation and checks interaction, layout, and rendering behavior.
-- **Durable transport**: NATS/JetStream tests verify idempotency, cursor catch-up,
-  ordering, reconnect, and liveness separately from Provider output.
+  Matrix API simulation and checks interaction, layout, and rendering behavior.
+- **Durable transport**: Matrix timeline/sync tests verify transaction
+  idempotency, backlog catch-up, ordering, reconnect, E2EE trust and liveness
+  separately from Provider output.
 - **Live canary**: the opt-in real Codex journey validates assumptions that a
   recording cannot, then any discovered failure becomes a replay fixture.
 - **Android device**: packaging, WebView lifecycle, secure storage, pairing, and
@@ -26,8 +27,8 @@ sanitized ACP transcripts preserve it for normal CI.
 
 | ID | User journey | ACP replay | Client UI | Durable transport | Live/Android | Current status |
 | --- | --- | --- | --- | --- | --- | --- |
-| C01 | Pair Client with Relay | N/A | partial | full OPAQUE socket integration; slow-device timeout regression | live Node; Android recheck required | Partial |
-| C02 | Pair and list multiple Gateways | N/A | automated | covered components | manual | Covered deterministically |
+| C01 | Log in and verify a Matrix client device | N/A | automated settings flow | official SDK SAS state machine | Android recheck required | Partial |
+| C02 | Verify and list multiple Gateways | N/A | automated | Matrix SAS plus independent COSE authorization | real SAS smoke passed | Covered deterministically |
 | C03 | Create/list Project using Gateway-native paths | N/A | automated (Windows) | command integration | manual | Covered deterministically |
 | C04 | Create Session and send first task | automated | automated | automated | live Codex | Covered |
 | C05 | Stream text/tool output and finish exactly once | automated | automated | automated | live Codex | Covered |
@@ -42,10 +43,10 @@ sanitized ACP transcripts preserve it for normal CI.
 | C14 | Browse/attach an inactive Provider-native Session | automated bridge journey | automated | command integration | manual | Covered deterministically |
 | C15 | Incrementally load old history without moving scroll anchor | N/A | automated | pagination unit | manual | Covered deterministically |
 | C16 | Gateway restart during/after a turn and continue | automated restart/resume | cached UI covered by C07 | pending/completed crash ledger tests | live plan only | Covered deterministically |
-| C17 | Relay restart, duplicate delivery, redelivery, and backlog | N/A | automated reconnect/backlog/dedup | cache retry, ack-loss redelivery, ordering | live process fault injection optional | Covered deterministically |
+| C17 | Matrix sync restart, duplicate delivery, redelivery, and backlog | N/A | automated reconnect/backlog/dedup | transaction-ID convergence, replay guard, ordering | live process fault injection optional | Covered deterministically |
 | C18 | Provider error, unavailable Provider, retry, and recovery | refusal/failure/retry fixture | automated | response tests | replayed in CI | Covered |
 | C19 | Branch/fork/edit/retry Provider history | unsupported | unsupported | unsupported | unsupported | Not implemented |
-| C20 | Android install, pairing, background/resume, network switch | N/A | viewport and lifecycle unit | phase-specific mobile handshake timeout | physical pairing recheck required | Partial |
+| C20 | Android install, login, SAS, background/resume, network switch | N/A | viewport and lifecycle unit | Matrix token refresh and sync resume | physical-device recheck required | Partial |
 | C21 | Windows native shell, credential restart, and core development journey | replay-backed mock | native WebView2 automated | offline recovery exercised | real Credential Manager and process restart | Covered deterministically |
 
 ## Required CI gates
@@ -86,19 +87,19 @@ and business-state regressions that a final-text API mock cannot catch.
 ## Remaining coverage
 
 C20 still needs a repeatable Android instrumentation lane that installs a build,
-pairs against an ephemeral Relay, backgrounds and resumes the WebView, switches
-network state, and verifies cursor catch-up. C01 remains partial until that lane
+pairs against an ephemeral private Matrix server, backgrounds and resumes the
+WebView, switches network state, and verifies sync catch-up. C01 remains partial until that lane
 proves the complete first-device UI journey on Android. C19 is a product gap,
 not a missing test: branch/fork/edit/retry must first be represented by Provider
 capabilities and a stable cross-provider semantic model.
 
 C21 proves the deterministic Windows shell contract, but signed installer
-upgrade/uninstall retention and a live Relay/Gateway process-kill canary remain
+upgrade/uninstall retention and a live Matrix/Gateway process-kill canary remain
 release engineering checks rather than normal deterministic tests. Linux and
 macOS need their own native CI runners before their shells can inherit C21's
 status.
 
-Live Relay/Gateway process-kill canaries remain useful environmental checks for
+Live Matrix/Gateway process-kill canaries remain useful environmental checks for
 C16/C17, but deterministic CI already covers the observable recovery contract:
 uncertain mutations are not repeated, completed commands replay after restart,
 transient cache and acknowledgement failures request redelivery, duplicate

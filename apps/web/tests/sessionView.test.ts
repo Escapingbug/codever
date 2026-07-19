@@ -8,8 +8,8 @@ import type {
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { RelayApi } from '../src/api/relayApi'
-import { relayApiKey } from '../src/api/relayApi'
+import type { CodeverApi } from '../src/api/codeverApi'
+import { codeverApiKey } from '../src/api/codeverApi'
 import ConversationTimeline from '../src/components/timeline/ConversationTimeline.vue'
 import SessionView from '../src/views/SessionView.vue'
 
@@ -178,7 +178,7 @@ function fakeApi(
   sessionId: string,
   events: SessionEventEnvelope[],
   overrides: Record<string, unknown> = {},
-): RelayApi & Record<string, ReturnType<typeof vi.fn>> {
+): CodeverApi & Record<string, ReturnType<typeof vi.fn>> {
   const session: CodeverSession = {
     id: sessionId,
     gatewayId: gateway.id,
@@ -218,10 +218,10 @@ function fakeApi(
     })),
     sendMessage: vi.fn(async () => ({ commandId: 'command-1', status: 'succeeded' })),
     ...overrides,
-  } as unknown as RelayApi & Record<string, ReturnType<typeof vi.fn>>
+  } as unknown as CodeverApi & Record<string, ReturnType<typeof vi.fn>>
 }
 
-async function mountSession(api: RelayApi, sessionId: string, settle = true) {
+async function mountSession(api: CodeverApi, sessionId: string, settle = true) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{
@@ -235,7 +235,7 @@ async function mountSession(api: RelayApi, sessionId: string, settle = true) {
   const wrapper = mount(SessionView, {
     global: {
       plugins: [router],
-      provide: { [relayApiKey as symbol]: api },
+      provide: { [codeverApiKey as symbol]: api },
       stubs: { ConversationTimeline: true, SessionControls: true, StatusDot: true },
     },
   })

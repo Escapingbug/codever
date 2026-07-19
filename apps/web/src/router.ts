@@ -31,8 +31,8 @@ export function createCodeverRouter(session: ClientSession = clientSession): Rou
   })
   router.beforeEach(async (to) => {
     await session.initialize()
-    if (!session.hasProfiles.value) return to.name === 'onboarding' ? true : { name: 'onboarding' }
-    if (session.hasProfiles.value && to.name === 'onboarding') {
+    if (!session.hasServer.value) return to.name === 'onboarding' ? true : { name: 'onboarding' }
+    if (session.hasServer.value && to.name === 'onboarding') {
       if (!session.isAuthenticated.value && to.query.edit === '1') return true
       return session.isAuthenticated.value ? { name: 'projects' } : { name: 'login' }
     }

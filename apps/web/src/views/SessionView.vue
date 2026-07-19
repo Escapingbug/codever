@@ -5,7 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ConversationTimeline from '../components/timeline/ConversationTimeline.vue'
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
-import type { RelayConnectionState } from '../api/relayApi'
+import type { ConnectionState } from '../api/codeverApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
@@ -26,7 +26,7 @@ const session = shallowRef<CodeverSession>()
 const provider = computed(() => session.value?.provider ?? '')
 const providerCapabilities = shallowRef<ProviderSessionListDto>()
 const events = shallowRef<SessionEventEnvelope[]>([])
-const relayConnection = ref<RelayConnectionState>(state.api.connectionState)
+const syncConnection = ref<ConnectionState>(state.api.connectionState)
 const loadError = ref('')
 const liveError = ref('')
 const loading = ref(true)
@@ -71,7 +71,7 @@ const loadingInitialHistory = ref(false)
 let historyGeneration = 0
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
-const liveConnected = computed(() => relayConnection.value === 'connected')
+const liveConnected = computed(() => syncConnection.value === 'connected')
 const canMutate = computed(() => gatewayOnline.value
   && liveConnected.value
   && session.value?.state !== 'closed'
@@ -89,15 +89,15 @@ const canSubmitMessage = computed(() => canSend.value
   && (Boolean(draft.value.trim()) || readyAttachmentIds.value.length > 0))
 const connectionLabel = computed(() => {
   if (!gatewayOnline.value) return 'Computer offline'
-  if (relayConnection.value === 'connected') return 'Live updates on'
-  if (relayConnection.value === 'connecting' || relayConnection.value === 'reconnecting') return 'Reconnecting'
+  if (syncConnection.value === 'connected') return 'Live updates on'
+  if (syncConnection.value === 'connecting' || syncConnection.value === 'reconnecting') return 'Reconnecting'
   return 'Server offline'
 })
 
 onMounted(() => {
   unsubscribeConnection = state.api.subscribeConnection(value => {
-    const recovered = relayConnection.value !== 'connected' && value === 'connected'
-    relayConnection.value = value
+    const recovered = syncConnection.value !== 'connected' && value === 'connected'
+    syncConnection.value = value
     if (recovered && sessionId.value) {
       if (events.value.length) hasMoreBefore.value = true
       void catchUpSessionEvents()
@@ -558,7 +558,7 @@ function toggleCleanupAttachment(attachmentId: string): void {
 
 async function deleteSelectedSessionFiles(): Promise<void> {
   if (!cleanupAttachmentIds.value.length || deletingSessionFiles.value) return
-  if (!window.confirm(`Delete ${cleanupAttachmentIds.value.length} encrypted Session file(s) from Relay storage?`)) return
+  if (!window.confirm(`Delete ${cleanupAttachmentIds.value.length} encrypted Session file(s) from Codever storage?`)) return
   deletingSessionFiles.value = true
   try {
     const deleting = new Set(cleanupAttachmentIds.value)
@@ -644,8 +644,8 @@ function submitOnShortcut(event: KeyboardEvent): void {
       <div>
         <strong>{{ connectionLabel }}</strong>
         <small v-if="!gatewayOnline">The encrypted Gateway channel is offline. Cached messages remain available.</small>
-        <small v-else-if="relayConnection === 'reconnecting' || relayConnection === 'connecting'">Cached messages remain available. New events will synchronize automatically.</small>
-        <small v-else>Cached messages remain available while the Relay connection is restored.</small>
+        <small v-else-if="syncConnection === 'reconnecting' || syncConnection === 'connecting'">Cached messages remain available. New events will synchronize automatically.</small>
+        <small v-else>Cached messages remain available while Matrix sync is restored.</small>
       </div>
     </div>
     <button v-if="liveError" class="inline-alert" @click="liveError = ''">{{ liveError }} <span>×</span></button>
@@ -675,7 +675,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
       <footer class="composer-wrap">
         <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
         <section v-if="showSessionFiles" class="session-files-panel" aria-label="Files stored for this session">
-          <header><div><strong>Session files</strong><small>End-to-end encrypted in Relay storage</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
+          <header><div><strong>Session files</strong><small>End-to-end encrypted Codever storage</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
           <div v-if="!sessionAttachments.length && !loadingSessionFiles" class="session-files-empty">No files are stored for this session.</div>
           <div v-else class="session-files-list">
             <article v-for="attachment in sessionAttachments" :key="attachment.attachmentId" class="session-file-row">
@@ -692,11 +692,11 @@ function submitOnShortcut(event: KeyboardEvent): void {
           </div>
           <div v-if="pendingAttachments.length || selectedStoredAttachmentIds.length" class="composer-attachments">
             <div v-for="attachmentId in selectedStoredAttachmentIds" :key="`stored-${attachmentId}`" class="composer-attachment composer-attachment--ready">
-              <div><strong>{{ sessionAttachments.find(item => item.attachmentId === attachmentId)?.filename ?? 'Session file' }}</strong><small>Stored in Relay</small></div>
+              <div><strong>{{ sessionAttachments.find(item => item.attachmentId === attachmentId)?.filename ?? 'Session file' }}</strong><small>Stored encrypted</small></div>
               <button type="button" aria-label="Remove stored attachment" @click="toggleStoredAttachment(attachmentId)">×</button>
             </div>
             <div v-for="attachment in pendingAttachments" :key="attachment.localId" class="composer-attachment" :class="`composer-attachment--${attachment.status}`">
-              <div><strong>{{ attachment.file.name }}</strong><small>{{ attachment.status === 'uploading' ? attachment.stage === 'storing' ? 'Encrypting into Relay storage…' : `${formatBytes(attachment.receivedBytes)} / ${formatBytes(attachment.file.size)}` : attachment.status === 'ready' ? formatBytes(attachment.file.size) : attachment.error }}</small></div>
+              <div><strong>{{ attachment.file.name }}</strong><small>{{ attachment.status === 'uploading' ? attachment.stage === 'storing' ? 'Encrypting into Codever storage…' : `${formatBytes(attachment.receivedBytes)} / ${formatBytes(attachment.file.size)}` : attachment.status === 'ready' ? formatBytes(attachment.file.size) : attachment.error }}</small></div>
               <progress v-if="attachment.status === 'uploading' && attachment.stage === 'uploading' && attachment.file.size > 0" :value="attachment.receivedBytes" :max="attachment.file.size" />
               <span class="composer-attachment-actions"><button v-if="attachment.status === 'error'" type="button" @click="retryAttachment(attachment)">Retry</button><button type="button" aria-label="Remove attachment" @click="removeAttachment(attachment)">×</button></span>
             </div>

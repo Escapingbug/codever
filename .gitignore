@@ -20,3 +20,7 @@ test-path.cjs
 .build/
 apps/web/test-results/
 apps/web/playwright-report/
+deploy/matrix/data/
+deploy/matrix/secrets/
+/crates/matrix-transport/target/
+/artifacts/

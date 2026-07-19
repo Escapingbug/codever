@@ -1,0 +1,297 @@
+import {
+  PROTOCOL_VERSION,
+  parseClientGatewayResponseFrame,
+  parseGateway,
+  parseInventorySnapshot,
+  parseSessionEventEnvelope,
+  type ClientGatewayRequestFrame,
+  type ClientGatewayRequestPayload,
+  type ClientGatewayResponseFrame,
+  type Gateway,
+  type InventorySnapshot,
+  type SessionEventEnvelope,
+} from '@codever/protocol'
+import {
+  MATRIX_CONVERSATION_EVENT,
+  MATRIX_AUTHORIZATION_EVENT,
+  MATRIX_DISCOVERY_EVENT,
+  MATRIX_GATEWAY_EVENT,
+  MATRIX_INVENTORY_EVENT,
+  MATRIX_RESPONSE_EVENT,
+  type MatrixPublicSession,
+  type MatrixTransportEvent,
+  type SignExecutionInput,
+} from './nativeMatrixClient'
+
+export interface MatrixTransportPort {
+  send(input: { roomId: string; eventType: string; transactionId: string; content: unknown }): Promise<string>
+  signExecution(account: string, input: SignExecutionInput): Promise<string>
+  subscribe(subscriber: (event: MatrixTransportEvent) => void): () => void
+}
+
+export interface MatrixGatewayClientOptions {
+  transport: MatrixTransportPort
+  session: MatrixPublicSession
+  controlRoomId: string
+  executionAccount: string
+  executionKeyId: string
+  timeoutMs?: number
+  onSecurityError?: (message: string) => void
+}
+
+export interface ExecutionRootApprovalRequest {
+  requestId: string
+  gatewayId: string
+  ownerId: string
+  label: string
+  senderDevice?: string
+  publicKey: { kty: 'EC'; crv: 'P-256'; alg: 'ES256'; use: 'sig'; kid: string; x: string; y: string }
+}
+
+interface PendingRequest {
+  resolve: (response: ClientGatewayResponseFrame) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+export class MatrixGatewayClient {
+  private readonly pending = new Map<string, PendingRequest>()
+  private readonly responses = new Map<string, ClientGatewayResponseFrame>()
+  private readonly inventories = new Map<string, InventorySnapshot>()
+  private readonly gateways = new Map<string, Gateway>()
+  private readonly sessionSubscribers = new Map<string, Set<(event: SessionEventEnvelope) => void>>()
+  private readonly seenConversationEvents = new Set<string>()
+  private readonly approvalRequests = new Map<string, ExecutionRootApprovalRequest>()
+  private readonly approvalSubscribers = new Set<(requests: ExecutionRootApprovalRequest[]) => void>()
+  private unsubscribe?: () => void
+  private discovery?: Promise<void>
+  private discoveryLastCompletedAt = 0
+
+  constructor(private readonly options: MatrixGatewayClientOptions) {}
+
+  start(): void {
+    this.unsubscribe ??= this.options.transport.subscribe(event => this.receive(event))
+  }
+
+  close(): void {
+    this.unsubscribe?.()
+    this.unsubscribe = undefined
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('Matrix Gateway client closed'))
+    }
+    this.pending.clear()
+  }
+
+  async listGateways(): Promise<Gateway[]> {
+    await this.discoverGateways()
+    return [...this.gateways.values()]
+  }
+  inventory(gatewayId: string): InventorySnapshot | undefined { return this.inventories.get(gatewayId) }
+
+  subscribeSession(sessionId: string, subscriber: (event: SessionEventEnvelope) => void): () => void {
+    const subscribers = this.sessionSubscribers.get(sessionId) ?? new Set()
+    subscribers.add(subscriber)
+    this.sessionSubscribers.set(sessionId, subscribers)
+    return () => {
+      subscribers.delete(subscriber)
+      if (!subscribers.size) this.sessionSubscribers.delete(sessionId)
+    }
+  }
+
+  subscribeExecutionApprovals(subscriber: (requests: ExecutionRootApprovalRequest[]) => void): () => void {
+    this.approvalSubscribers.add(subscriber)
+    subscriber([...this.approvalRequests.values()])
+    return () => this.approvalSubscribers.delete(subscriber)
+  }
+
+  async requestExecutionApproval(input: Omit<ExecutionRootApprovalRequest, 'requestId' | 'senderDevice'>): Promise<string> {
+    this.start()
+    const requestId = `approval_${crypto.randomUUID()}`
+    await this.options.transport.send({
+      roomId: this.options.controlRoomId,
+      eventType: MATRIX_AUTHORIZATION_EVENT,
+      transactionId: requestId,
+      content: { version: PROTOCOL_VERSION, type: 'execution.root.request', requestId, ...input },
+    })
+    return requestId
+  }
+
+  async approveExecutionRoot(input: ExecutionRootApprovalRequest): Promise<ClientGatewayResponseFrame> {
+    const response = await this.request(input.gatewayId, {
+      kind: 'execution.root.trust', ownerId: input.ownerId, label: input.label, publicKey: input.publicKey,
+    })
+    if (response.status === 'completed') {
+      this.approvalRequests.delete(input.requestId)
+      this.notifyApprovals()
+    }
+    return response
+  }
+
+  async request(gatewayId: string, payload: ClientGatewayRequestPayload): Promise<ClientGatewayResponseFrame> {
+    this.start()
+    const requestId = `req_${crypto.randomUUID()}`
+    const request: ClientGatewayRequestFrame = {
+      version: PROTOCOL_VERSION,
+      type: 'client.gateway.request',
+      requestId,
+      idempotencyKey: `idem_${crypto.randomUUID()}`,
+      payload,
+    }
+    const cached = this.responses.get(requestId)
+    if (cached) return cached
+    const token = await this.options.transport.signExecution(this.options.executionAccount, {
+      request,
+      gatewayId,
+      issuer: `codever-control:${this.options.executionKeyId}`,
+      subject: this.options.session.deviceId,
+      operation: payload.kind,
+      ttlSeconds: 90,
+    })
+    const response = new Promise<ClientGatewayResponseFrame>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId)
+        reject(new Error('Gateway response timed out; the request may still be visible in Matrix history'))
+      }, this.options.timeoutMs ?? 30_000)
+      this.pending.set(requestId, { resolve, reject, timer })
+    })
+    try {
+      await this.options.transport.send({
+        roomId: this.options.controlRoomId,
+        eventType: 'io.codever.command.v1',
+        transactionId: request.idempotencyKey,
+        content: {
+          version: PROTOCOL_VERSION,
+          type: 'client.gateway.authorized-request',
+          request,
+          authorization: { format: 'cose-sign1-cwt', token },
+        },
+      })
+    } catch (error) {
+      const waiting = this.pending.get(requestId)
+      if (waiting) {
+        clearTimeout(waiting.timer)
+        this.pending.delete(requestId)
+      }
+      throw error
+    }
+    return response
+  }
+
+  private async discoverGateways(): Promise<void> {
+    this.start()
+    if (this.gateways.size && Date.now() - this.discoveryLastCompletedAt < 15_000) return
+    if (this.discovery) return this.discovery
+    this.discovery = (async () => {
+      const requestId = `discover_${crypto.randomUUID()}`
+      const before = new Set(this.gateways.keys())
+      await this.options.transport.send({
+        roomId: this.options.controlRoomId,
+        eventType: MATRIX_DISCOVERY_EVENT,
+        transactionId: requestId,
+        content: { version: PROTOCOL_VERSION, requestId },
+      })
+      const startedAt = Date.now()
+      while (Date.now() - startedAt < 4_000) {
+        if ([...this.gateways.keys()].some(id => !before.has(id)) || this.gateways.size) {
+          await delay(350)
+          break
+        }
+        await delay(50)
+      }
+      this.discoveryLastCompletedAt = Date.now()
+    })().finally(() => { this.discovery = undefined })
+    return this.discovery
+  }
+
+  private receive(input: MatrixTransportEvent): void {
+    const eventType = input.event.type
+    if (![MATRIX_RESPONSE_EVENT, MATRIX_CONVERSATION_EVENT, MATRIX_INVENTORY_EVENT, MATRIX_GATEWAY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType ?? '')) return
+    if (!input.encrypted || !input.verifiedDevice) {
+      this.options.onSecurityError?.(`Ignored ${eventType} from an unencrypted or unverified Matrix device`)
+      return
+    }
+    try {
+      const content = record(input.event.content)
+      if (eventType === MATRIX_RESPONSE_EVENT) {
+        const response = parseClientGatewayResponseFrame(content.response)
+        this.rememberResponse(response)
+      } else if (eventType === MATRIX_INVENTORY_EVENT) {
+        const gatewayId = requiredText(content.gatewayId, 'gatewayId')
+        const inventory = parseInventorySnapshot(content.inventory)
+        const current = this.inventories.get(gatewayId)
+        if (!current || inventory.revision >= current.revision) this.inventories.set(gatewayId, inventory)
+      } else if (eventType === MATRIX_GATEWAY_EVENT) {
+        const gateway = parseGateway(content.gateway)
+        const current = this.gateways.get(gateway.id)
+        if (!current || Date.parse(gateway.lastSeenAt ?? '') >= Date.parse(current.lastSeenAt ?? '')) {
+          this.gateways.set(gateway.id, gateway)
+        }
+      } else if (eventType === MATRIX_AUTHORIZATION_EVENT) {
+        const request = parseApprovalRequest(content, input.senderDevice)
+        if (request.publicKey.kid === this.options.executionKeyId) return
+        this.approvalRequests.set(request.requestId, request)
+        this.notifyApprovals()
+      } else {
+        const envelope = parseSessionEventEnvelope(content.event)
+        if (this.seenConversationEvents.has(envelope.eventId)) return
+        this.seenConversationEvents.add(envelope.eventId)
+        if (this.seenConversationEvents.size > 10_000) this.seenConversationEvents.delete(this.seenConversationEvents.values().next().value!)
+        for (const subscriber of this.sessionSubscribers.get(envelope.sessionId) ?? []) subscriber(envelope)
+      }
+    } catch (error) {
+      this.options.onSecurityError?.(`Ignored malformed ${eventType}: ${error instanceof Error ? error.message : error}`)
+    }
+  }
+
+  private notifyApprovals(): void {
+    const snapshot = [...this.approvalRequests.values()]
+    for (const subscriber of this.approvalSubscribers) subscriber(snapshot)
+  }
+
+  private rememberResponse(response: ClientGatewayResponseFrame): void {
+    this.responses.set(response.requestId, response)
+    if (this.responses.size > 2_000) this.responses.delete(this.responses.keys().next().value!)
+    const pending = this.pending.get(response.requestId)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pending.delete(response.requestId)
+    pending.resolve(response)
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds))
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('event content is not an object')
+  return value as Record<string, unknown>
+}
+
+function requiredText(value: unknown, name: string): string {
+  if (typeof value !== 'string' || !value) throw new Error(`${name} is required`)
+  return value
+}
+
+function parseApprovalRequest(content: Record<string, unknown>, senderDevice?: string): ExecutionRootApprovalRequest {
+  if (content.version !== PROTOCOL_VERSION || content.type !== 'execution.root.request') {
+    throw new Error('unsupported execution approval request')
+  }
+  const key = record(content.publicKey)
+  if (key.kty !== 'EC' || key.crv !== 'P-256' || key.alg !== 'ES256' || key.use !== 'sig'
+    || 'd' in key) throw new Error('execution approval key must be a public ES256 P-256 JWK')
+  return {
+    requestId: requiredText(content.requestId, 'requestId'),
+    gatewayId: requiredText(content.gatewayId, 'gatewayId'),
+    ownerId: requiredText(content.ownerId, 'ownerId'),
+    label: requiredText(content.label, 'label'),
+    ...(senderDevice ? { senderDevice } : {}),
+    publicKey: {
+      kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig',
+      kid: requiredText(key.kid, 'publicKey.kid'),
+      x: requiredText(key.x, 'publicKey.x'),
+      y: requiredText(key.y, 'publicKey.y'),
+    },
+  }
+}

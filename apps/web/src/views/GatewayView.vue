@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
-import { gatewayAccessState } from '../gatewayAccess'
+import { clientSession } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
 
 const route = useRoute()
@@ -10,27 +10,29 @@ const state = useCodeverState()
 const gatewayId = computed(() => String(route.params.gatewayId))
 const gateway = computed(() => state.gateways.value.find(item => item.id === gatewayId.value))
 const projects = computed(() => state.projectsByGateway[gatewayId.value] ?? [])
-const projectError = computed(() => state.errors[`projects:${gatewayId.value}`])
-const access = computed(() => gatewayAccessState({
-  loaded: Object.prototype.hasOwnProperty.call(state.projectsByGateway, gatewayId.value),
-  pending: state.pending.value.has(`projects:${gatewayId.value}`),
-  error: projectError.value,
-}))
-const pairingCode = ref('')
-const pairing = ref(false)
-const pairingError = ref('')
+const error = computed(() => state.errors[`projects:${gatewayId.value}`])
+const approvalRequested = ref(false)
+const approvalError = ref('')
 
-async function pairGateway(): Promise<void> {
-  pairing.value = true
-  pairingError.value = ''
+async function requestApproval(): Promise<void> {
+  const identity = clientSession.identity.value
+  if (!identity) return
+  approvalError.value = ''
   try {
-    await state.api.pairGateway(gatewayId.value, pairingCode.value.trim())
-    pairingCode.value = ''
-    await state.loadProjects(gatewayId.value)
-  } catch (error) {
-    pairingError.value = error instanceof Error ? error.message : 'Computer authorization failed'
-  } finally {
-    pairing.value = false
+    const key = identity.executionPublicKey as Record<string, unknown>
+    if (key.kty !== 'EC' || key.crv !== 'P-256' || key.alg !== 'ES256' || key.use !== 'sig'
+      || typeof key.kid !== 'string' || typeof key.x !== 'string' || typeof key.y !== 'string') {
+      throw new Error('The local execution identity is invalid')
+    }
+    await state.api.requestExecutionApproval({
+      gatewayId: gatewayId.value,
+      ownerId: identity.session.deviceId,
+      label: `Codever ${identity.session.deviceId}`,
+      publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: key.kid, x: key.x, y: key.y },
+    })
+    approvalRequested.value = true
+  } catch (requestError) {
+    approvalError.value = requestError instanceof Error ? requestError.message : 'Unable to request approval'
   }
 }
 
@@ -48,39 +50,39 @@ watch(gatewayId, id => { if (id) void state.loadProjects(id) }, { immediate: tru
         <p v-if="gateway"><StatusDot :status="gateway.status" :label="gateway.status" /> · {{ gateway.platform }} · Codever {{ gateway.version }}</p>
       </div>
     </header>
-
-    <section v-if="access === 'checking'" class="empty-state empty-state--compact">
-      <span class="loader" /><h2>Checking authorization</h2><p>Confirming that this client can securely access the computer.</p>
+    <div v-if="error" class="error-banner"><strong>Secure control unavailable.</strong> {{ error }}</div>
+    <section v-if="error?.includes('unknown') || error?.includes('authorization')" class="settings-section authorization-card">
+      <span class="eyebrow">Execution authorization</span>
+      <h2>Approve this client on the computer</h2>
+      <p>Matrix device verification protects encrypted sync. Gateway execution additionally requires this control key to be approved once.</p>
+      <p v-if="approvalRequested">Approval requested. Open Settings on an already authorized Codever client to approve this key, then refresh.</p>
+      <p v-if="approvalError" class="error-banner" role="alert">{{ approvalError }}</p>
+      <button class="button button--primary" :disabled="approvalRequested" @click="requestApproval">Request approval from another client</button>
+      <details class="machine-details">
+        <summary>Control key</summary>
+        <dl>
+          <div><dt>Key ID</dt><dd>{{ clientSession.identity.value?.executionKeyId }}</dd></div>
+          <div><dt>Public JWK</dt><dd>{{ JSON.stringify(clientSession.identity.value?.executionPublicKey) }}</dd></div>
+        </dl>
+      </details>
     </section>
-
-    <section v-else-if="access === 'authorization-required'" class="settings-section authorization-card">
-      <div class="section-heading"><div><span class="eyebrow">One-time setup</span><h2>Authorize this client</h2></div></div>
-      <p>Generate a device code on <strong>{{ gateway?.name ?? 'this computer' }}</strong>, then enter it below within three minutes.</p>
-      <form class="relay-form" @submit.prevent="pairGateway">
-        <label>Device pairing code<input v-model="pairingCode" required autocomplete="one-time-code" autocapitalize="characters" placeholder="ABC234-DEFGH-JKLMN" /></label>
-        <p class="form-help">This code authorizes only this client. It is different from the server connection code.</p>
-        <p v-if="pairingError" class="error-banner" role="alert">{{ pairingError }}</p>
-        <button class="button button--primary" :disabled="pairing || !pairingCode.trim()">{{ pairing ? 'Authorizing…' : 'Authorize computer' }}</button>
-      </form>
+    <section>
+      <div class="section-heading"><div><span class="eyebrow">Available here</span><h2>Projects</h2></div><span>{{ projects.length }}</span></div>
+      <div v-if="projects.length" class="project-grid">
+        <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }">
+          <div><h3>{{ project.name }}</h3><small>{{ project.defaultProvider ?? 'Default provider' }}</small></div><span aria-hidden="true">→</span>
+        </RouterLink>
+      </div>
+      <div v-else-if="state.pending.value.has(`projects:${gatewayId}`)" class="empty-state empty-state--compact"><span class="loader" /><h2>Loading projects</h2></div>
+      <div v-else class="empty-state empty-state--compact"><h2>No projects on this computer</h2><p>Add an existing folder from Projects.</p></div>
     </section>
-
-    <section v-else-if="access === 'error'" class="settings-section authorization-card authorization-card--error">
-      <span class="eyebrow">Needs attention</span><h2>Could not reach this computer securely</h2><p>{{ projectError }}</p>
-      <button class="button" :disabled="state.pending.value.has(`projects:${gatewayId}`)" @click="state.loadProjects(gatewayId)">Try again</button>
-    </section>
-
-    <template v-else>
-      <div v-if="gateway && gateway.status !== 'online'" class="offline-banner"><strong>This computer is {{ gateway.status }}.</strong> Saved projects remain visible, but starting or continuing work requires it to be online.</div>
-      <section>
-        <div class="section-heading"><div><span class="eyebrow">Available here</span><h2>Projects</h2></div><span>{{ projects.length }}</span></div>
-        <div v-if="projects.length" class="project-grid">
-          <RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }">
-            <span class="folder-icon">▰</span><div><h3>{{ project.name }}</h3><small>{{ project.defaultProvider ?? 'Default provider' }}</small></div><span>→</span>
-          </RouterLink>
-        </div>
-        <div v-else class="empty-state empty-state--compact"><span class="empty-orbit">▰</span><h2>No projects on this computer</h2><p>Add a project from the Projects page.</p><RouterLink class="button button--primary" to="/projects">Open Projects</RouterLink></div>
-      </section>
-      <details v-if="gateway" class="machine-details"><summary>Technical details</summary><dl><div><dt>Platform</dt><dd>{{ gateway.platform }}</dd></div><div><dt>Gateway ID</dt><dd>{{ gateway.id }}</dd></div><div><dt>Last seen</dt><dd>{{ gateway.lastSeenAt ? new Date(gateway.lastSeenAt).toLocaleString() : 'Unknown' }}</dd></div></dl></details>
-    </template>
+    <details v-if="gateway" class="machine-details">
+      <summary>Technical details</summary>
+      <dl>
+        <div><dt>Gateway ID</dt><dd>{{ gateway.id }}</dd></div>
+        <div><dt>Matrix device</dt><dd>{{ gateway.capabilities.metadata?.matrixDeviceId ?? 'Unknown' }}</dd></div>
+        <div><dt>Last seen</dt><dd>{{ gateway.lastSeenAt ? new Date(gateway.lastSeenAt).toLocaleString() : 'Unknown' }}</dd></div>
+      </dl>
+    </details>
   </div>
 </template>

@@ -98,7 +98,7 @@ export const ResolveDecisionDtoSchema = z.object({ value: JsonValueSchema }).str
 
 export const MutationReceiptDtoSchema = z.object({
     commandId: OpaqueIdSchema,
-    status: z.union([z.literal('relay_accepted'), z.literal('gateway_accepted'), CommandTerminalStatusSchema]),
+    status: z.union([z.literal('gateway_accepted'), CommandTerminalStatusSchema]),
     acceptedAt: IsoDateTimeSchema.optional(),
     completedAt: IsoDateTimeSchema.optional(),
     error: ProtocolErrorSchema.optional(),

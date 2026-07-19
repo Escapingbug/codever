@@ -7,7 +7,10 @@ import type { RichUserInputPart } from '@/runtime/semantic'
 
 export type { ObjectBlobManifest } from '@codever/protocol'
 
-export const ATTACHMENT_TRANSFER_CHUNK_BYTES = 192 * 1024
+// Commands are encrypted Matrix timeline events. Keep the plaintext chunk small
+// enough for JSON, COSE and Megolm/base64 overhead to remain below the Matrix
+// event-size limit. This limits one transfer frame, not the attachment size.
+export const ATTACHMENT_TRANSFER_CHUNK_BYTES = 24 * 1024
 const OBJECT_PLAINTEXT_CHUNK_BYTES = OBJECT_BLOB_CHUNK_BYTES - 28
 const STALE_UPLOAD_MS = 24 * 60 * 60 * 1000
 
@@ -318,7 +321,7 @@ export class GatewayAttachmentStore {
             OBJECT_BLOB_CHUNK_BYTES,
         )
         if (manifest.chunkCount !== chunkCount || manifest.receivedChunkCount > chunkCount) {
-            throw new Error('Relay Blob resume state does not match the attachment')
+            throw new Error('Encrypted Blob resume state does not match the attachment')
         }
         let index = 0
         for await (const value of createReadStream(record.path, { highWaterMark: OBJECT_PLAINTEXT_CHUNK_BYTES })) {
@@ -336,7 +339,7 @@ export class GatewayAttachmentStore {
         const manifest = await this.blobs.manifest(record.blobId)
         const expectedChunks = Math.ceil(record.sizeBytes / OBJECT_PLAINTEXT_CHUNK_BYTES)
         if (!manifest.complete || manifest.chunkCount !== expectedChunks) {
-            throw new Error(`Relay file is unavailable or incomplete: ${record.filename}`)
+            throw new Error(`Encrypted file is unavailable or incomplete: ${record.filename}`)
         }
         const temporary = `${record.path}.materializing`
         await rm(temporary, { force: true })
@@ -358,7 +361,7 @@ export class GatewayAttachmentStore {
         await handle.close()
         if (received !== record.sizeBytes) {
             await rm(temporary, { force: true })
-            throw new Error(`Relay file size mismatch: expected ${record.sizeBytes}, received ${received}`)
+            throw new Error(`Encrypted file size mismatch: expected ${record.sizeBytes}, received ${received}`)
         }
         await rename(temporary, record.path)
     }
@@ -454,7 +457,7 @@ function encryptChunk(key: Buffer, blobId: string, index: number, plaintext: Buf
 
 function decryptChunk(key: Buffer, blobId: string, index: number, value: string): Buffer {
     const encrypted = Buffer.from(value, 'base64url')
-    if (encrypted.length < 28) throw new Error('Relay file chunk is truncated')
+    if (encrypted.length < 28) throw new Error('Encrypted file chunk is truncated')
     const decipher = createDecipheriv('aes-256-gcm', key, encrypted.subarray(0, 12))
     decipher.setAAD(chunkAad(blobId, index))
     decipher.setAuthTag(encrypted.subarray(12, 28))
@@ -462,7 +465,7 @@ function decryptChunk(key: Buffer, blobId: string, index: number, value: string)
 }
 
 function chunkAad(blobId: string, index: number): Buffer {
-    return Buffer.from(`codever-relay-blob-v1\0${blobId}\0${index}`, 'utf8')
+    return Buffer.from(`codever-object-blob-v1\0${blobId}\0${index}`, 'utf8')
 }
 
 async function exists(path: string): Promise<boolean> {

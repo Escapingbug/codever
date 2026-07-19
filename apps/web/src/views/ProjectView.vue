@@ -174,7 +174,7 @@ async function createNewSession(): Promise<void> {
 async function openTask(task: ProjectTask): Promise<void> {
   if (openingKey.value || archivingKey.value) return
   if (!task.codeverSessionId && !projectMutable.value) {
-    taskError.value = 'Connect to the Relay and Gateway before attaching a provider task'
+    taskError.value = 'Restore Matrix sync and Gateway connectivity before attaching a provider task'
     return
   }
   openingKey.value = task.key

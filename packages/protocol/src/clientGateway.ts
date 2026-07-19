@@ -28,6 +28,16 @@ import { ProtocolErrorSchema } from './commands'
 import { InventorySnapshotSchema } from './inventory'
 import { SessionEventEnvelopeSchema } from './events'
 
+const ExecutionPublicJwkSchema = z.object({
+    kty: z.literal('EC'),
+    crv: z.literal('P-256'),
+    alg: z.literal('ES256'),
+    use: z.literal('sig'),
+    kid: z.string().min(1).max(256),
+    x: z.string().min(1).max(256),
+    y: z.string().min(1).max(256),
+}).strict()
+
 export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('inventory.get') }).strict(),
     z.object({
@@ -119,6 +129,16 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         before: PositiveIntegerSchema.optional(),
         limit: PositiveIntegerSchema.max(1_000).optional(),
     }).strict(),
+    z.object({
+        kind: z.literal('execution.root.trust'),
+        ownerId: OpaqueIdSchema,
+        label: z.string().trim().min(1).max(200),
+        publicKey: ExecutionPublicJwkSchema,
+    }).strict(),
+    z.object({
+        kind: z.literal('execution.root.revoke'),
+        keyId: z.string().min(1).max(256),
+    }).strict(),
 ])
 
 export const ClientGatewayRequestFrameSchema = z.object({
@@ -127,6 +147,16 @@ export const ClientGatewayRequestFrameSchema = z.object({
     requestId: OpaqueIdSchema,
     idempotencyKey: OpaqueIdSchema,
     payload: ClientGatewayRequestPayloadSchema,
+}).strict()
+
+export const AuthorizedClientGatewayRequestFrameSchema = z.object({
+    version: z.literal(PROTOCOL_VERSION),
+    type: z.literal('client.gateway.authorized-request'),
+    request: ClientGatewayRequestFrameSchema,
+    authorization: z.object({
+        format: z.literal('cose-sign1-cwt'),
+        token: z.string().min(1).max(16_384),
+    }).strict(),
 }).strict()
 
 export const ClientGatewayCompletedPayloadSchema = z.union([
@@ -186,6 +216,7 @@ export const ClientGatewayFrameSchema = z.union([
 
 export type ClientGatewayRequestPayload = z.infer<typeof ClientGatewayRequestPayloadSchema>
 export type ClientGatewayRequestFrame = z.infer<typeof ClientGatewayRequestFrameSchema>
+export type AuthorizedClientGatewayRequestFrame = z.infer<typeof AuthorizedClientGatewayRequestFrameSchema>
 export type ClientGatewayCompletedPayload = z.infer<typeof ClientGatewayCompletedPayloadSchema>
 export type ClientGatewayResponseFrame = z.infer<typeof ClientGatewayResponseFrameSchema>
 export type ClientGatewayEventBatch = z.infer<typeof ClientGatewayEventBatchSchema>
@@ -194,6 +225,8 @@ export type ClientGatewayFrame = z.infer<typeof ClientGatewayFrameSchema>
 
 export const parseClientGatewayRequestFrame = (value: unknown): ClientGatewayRequestFrame =>
     parseWithSchema(ClientGatewayRequestFrameSchema, value)
+export const parseAuthorizedClientGatewayRequestFrame = (value: unknown): AuthorizedClientGatewayRequestFrame =>
+    parseWithSchema(AuthorizedClientGatewayRequestFrameSchema, value)
 export const parseClientGatewayResponseFrame = (value: unknown): ClientGatewayResponseFrame =>
     parseWithSchema(ClientGatewayResponseFrameSchema, value)
 export const parseClientGatewayEventFrame = (value: unknown): ClientGatewayEventFrame =>

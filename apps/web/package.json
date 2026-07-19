@@ -25,10 +25,6 @@
   },
   "dependencies": {
     "@codever/protocol": "workspace:*",
-    "@codever/secure-channel": "workspace:*",
-    "@nats-io/jetstream": "^3.4.0",
-    "@nats-io/nats-core": "^3.4.0",
-    "@nats-io/obj": "^3.4.0",
     "@tauri-apps/api": "2.11.1",
     "markdown-it": "^14.3.0",
     "vue": "^3.5.0",

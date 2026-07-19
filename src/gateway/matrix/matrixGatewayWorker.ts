@@ -1,0 +1,101 @@
+import { randomUUID } from 'node:crypto'
+import type { Gateway, InventorySnapshot, SessionEventEnvelope } from '@codever/protocol'
+import { AuthorizedRequestProcessor } from '../authorizedRequestProcessor'
+import type { MatrixTransport, NativeMatrixEvent } from './nativeMatrixTransport'
+
+export const MATRIX_COMMAND_EVENT = 'io.codever.command.v1'
+export const MATRIX_RESPONSE_EVENT = 'io.codever.response.v1'
+export const MATRIX_CONVERSATION_EVENT = 'io.codever.conversation.v1'
+export const MATRIX_INVENTORY_EVENT = 'io.codever.inventory.v1'
+export const MATRIX_GATEWAY_EVENT = 'io.codever.gateway.v1'
+export const MATRIX_DISCOVERY_EVENT = 'io.codever.discovery.v1'
+
+export interface MatrixGatewayWorkerOptions {
+    gatewayId: string
+    controlRoomId: string
+    transport: MatrixTransport
+    processor: AuthorizedRequestProcessor
+    currentGateway?: () => Gateway
+    currentInventory?: () => Promise<InventorySnapshot>
+    onError?: (error: Error) => void
+}
+
+export class MatrixGatewayWorker {
+    private unsubscribe?: () => void
+
+    constructor(private readonly options: MatrixGatewayWorkerOptions) {}
+
+    async start(): Promise<void> {
+        if (this.unsubscribe) return
+        this.unsubscribe = this.options.transport.onEvent(event => {
+            void this.process(event).catch(error => this.report(error))
+        })
+        await this.options.transport.initialize()
+    }
+
+    async stop(): Promise<void> {
+        this.unsubscribe?.()
+        this.unsubscribe = undefined
+        await this.options.transport.close()
+    }
+
+    async publishInventory(inventory: InventorySnapshot): Promise<void> {
+        await this.options.transport.send({
+            roomId: this.options.controlRoomId,
+            eventType: MATRIX_INVENTORY_EVENT,
+            transactionId: `${this.options.gatewayId}-inventory-${inventory.revision}`,
+            content: { gatewayId: this.options.gatewayId, inventory },
+        })
+    }
+
+    async publishGateway(gateway: Gateway): Promise<void> {
+        await this.options.transport.send({
+            roomId: this.options.controlRoomId,
+            eventType: MATRIX_GATEWAY_EVENT,
+            transactionId: `${this.options.gatewayId}-presence-${gateway.lastSeenAt}`,
+            content: { gateway },
+        })
+    }
+
+    async publishConversation(roomId: string, event: SessionEventEnvelope): Promise<void> {
+        await this.options.transport.send({
+            roomId,
+            eventType: MATRIX_CONVERSATION_EVENT,
+            transactionId: event.eventId,
+            content: { gatewayId: this.options.gatewayId, event },
+        })
+    }
+
+    private async process(input: NativeMatrixEvent): Promise<void> {
+        const eventType = input.event.type
+        if (eventType !== MATRIX_COMMAND_EVENT && eventType !== MATRIX_DISCOVERY_EVENT) return
+        if (!input.encrypted || !input.verifiedDevice) {
+            throw new Error('Rejected Matrix control event from an unencrypted or unverified device')
+        }
+        if (eventType === MATRIX_DISCOVERY_EVENT) {
+            if (this.options.currentGateway) await this.publishGateway(this.options.currentGateway())
+            if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
+            return
+        }
+        const content = input.event.content
+        const response = await this.options.processor.process(content)
+        const request = isRecord(content) && isRecord(content.request) ? content.request : undefined
+        const idempotencyKey = request && typeof request.idempotencyKey === 'string'
+            ? request.idempotencyKey
+            : randomUUID()
+        await this.options.transport.send({
+            roomId: input.roomId,
+            eventType: MATRIX_RESPONSE_EVENT,
+            transactionId: `${idempotencyKey}-response`,
+            content: { gatewayId: this.options.gatewayId, response },
+        })
+    }
+
+    private report(value: unknown): void {
+        this.options.onError?.(value instanceof Error ? value : new Error(String(value)))
+    }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value)
+}

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { IsoDateTimeSchema, NonNegativeIntegerSchema } from './common'
+import { IsoDateTimeSchema, NonNegativeIntegerSchema, parseWithSchema } from './common'
 import { CodeverSessionSchema, ProjectSchema } from './domain'
 
 export const InventorySnapshotSchema = z.object({
@@ -10,3 +10,6 @@ export const InventorySnapshotSchema = z.object({
 }).strict()
 
 export type InventorySnapshot = z.infer<typeof InventorySnapshotSchema>
+
+export const parseInventorySnapshot = (value: unknown): InventorySnapshot =>
+    parseWithSchema(InventorySnapshotSchema, value)

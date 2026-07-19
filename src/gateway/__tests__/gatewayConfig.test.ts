@@ -2,7 +2,13 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { loadGatewayConfig, parseGatewayConfig, writeGatewayConfig } from '../gatewayConfig'
+import {
+    loadGatewayConfig,
+    loadMatrixCredential,
+    parseGatewayConfig,
+    writeGatewayConfig,
+    writeMatrixCredential,
+} from '../gatewayConfig'
 
 const paths: string[] = []
 
@@ -10,42 +16,58 @@ afterEach(async () => {
     await Promise.all(paths.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
-describe('Gateway config', () => {
-    it('persists a stable identity without private key material', async () => {
+describe('Gateway Matrix config', () => {
+    it('separates public topology from Matrix tokens and crypto-store secrets', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-config-'))
         paths.push(directory)
         const configPath = join(directory, 'gateway.json')
+        const credentialPath = join(directory, 'matrix-credential.json')
+        await writeMatrixCredential(credentialPath, {
+            accessToken: 'secret-access-token',
+            refreshToken: 'secret-refresh-token',
+            storePassphrase: 'secret-store-passphrase',
+        })
         const written = await writeGatewayConfig({
             name: 'Office PC',
-            relayUrl: 'wss://relay.example.com/connect',
+            matrix: matrixConfig(directory, credentialPath),
         }, configPath)
         const loaded = await loadGatewayConfig(configPath)
+        const credential = await loadMatrixCredential(loaded)
 
         expect(loaded).toEqual(written)
-        expect(loaded.gatewayId).toMatch(/^gateway_/)
-        expect(await readFile(configPath, 'utf8')).not.toContain('PRIVATE KEY')
+        expect(loaded.version).toBe(2)
+        expect(await readFile(configPath, 'utf8')).not.toContain('secret-')
+        expect(credential).toMatchObject({
+            session: { accessToken: 'secret-access-token', refreshToken: 'secret-refresh-token' },
+            storePassphrase: 'secret-store-passphrase',
+        })
     })
 
-    it('requires the OPAQUE application encryption layer on every network', () => {
+    it('rejects old Relay config and public plaintext Matrix transport', () => {
+        expect(() => parseGatewayConfig({ version: 1, relayUrl: 'wss://relay.example' })).toThrow('version must be 2')
+        const directory = resolve('codever-data')
         const base = {
-            version: 1,
-            gatewayId: 'gateway-1',
-            workspaceId: 'workspace-1',
-            name: 'Gateway',
-            dataDirectory: resolve('codever-data'),
+            version: 2, gatewayId: 'gateway-1', workspaceId: 'workspace-1', name: 'Gateway',
+            dataDirectory: directory,
+            matrix: matrixConfig(directory, join(directory, 'credential.json')),
         }
-        expect(() => parseGatewayConfig({ ...base, relayUrl: 'ws://relay.example.com/connect' })).toThrow('secure configuration')
-        expect(parseGatewayConfig({ ...base, relayUrl: 'ws://127.0.0.1:3000/connect', secure: {} }).relayUrl).toContain('127.0.0.1')
+        expect(() => parseGatewayConfig({
+            ...base, matrix: { ...base.matrix, homeserver: 'http://matrix.example.com' },
+        })).toThrow('must use https')
         expect(parseGatewayConfig({
-            ...base,
-            relayUrl: 'ws://relay.example.com/v2/gateway/connect',
-            secure: { pairingCode: 'ABC234-DEFGH-JKLMN' },
-        })).toMatchObject({
-            relayUrl: 'ws://relay.example.com/v2/gateway/connect',
-            secure: { pairingCode: 'ABC234-DEFGH-JKLMN' },
-        })
-        expect(parseGatewayConfig({
-            ...base, relayUrl: 'ws://relay.example.com/v2/gateway/connect', secure: {},
-        }).secure).toEqual({})
+            ...base, matrix: { ...base.matrix, homeserver: 'http://127.0.0.1:8008' },
+        }).matrix.homeserver).toContain('127.0.0.1')
     })
 })
+
+function matrixConfig(directory: string, credentialPath: string) {
+    return {
+        homeserver: 'https://matrix.example.com',
+        userId: '@gateway:example.com',
+        deviceId: 'GATEWAY',
+        controlRoomId: '!control:example.com',
+        credentialPath: resolve(credentialPath),
+        storePath: resolve(directory, 'matrix-store'),
+        transportBinaryPath: resolve(directory, 'codever-matrix-transport.exe'),
+    }
+}

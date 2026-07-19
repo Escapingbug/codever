@@ -1,6 +1,6 @@
 import type { CodeverSession, CreateProjectDto, Gateway, Project, ProviderSession, SessionEventEnvelope } from '@codever/protocol'
 import { computed, inject, reactive, ref, shallowReactive } from 'vue'
-import { RelayApi, relayApiKey } from '../api/relayApi'
+import { CodeverApi, codeverApiKey } from '../api/codeverApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 import type { PendingUserMessage } from '../timeline/pendingMessage'
@@ -17,9 +17,9 @@ let workspaceLoad: Promise<void> | undefined
 let workspaceHydration: Promise<void> | undefined
 
 export function useCodeverState() {
-  const injectedApi = inject(relayApiKey)
-  if (!injectedApi) throw new Error('RelayApi was not provided')
-  const api: RelayApi = injectedApi
+  const injectedApi = inject(codeverApiKey)
+  if (!injectedApi) throw new Error('CodeverApi was not provided')
+  const api: CodeverApi = injectedApi
 
   async function load<T>(key: string, task: () => Promise<T>, apply: (value: T) => void): Promise<void> {
     pending.add(key)
@@ -206,4 +206,4 @@ export function gatewayIsMutable(gateway: Gateway | undefined): boolean {
 }
 
 export type CodeverState = ReturnType<typeof useCodeverState>
-export { RelayApi }
+export { CodeverApi }

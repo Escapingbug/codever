@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    secrets:
+      - postgres_password
+    volumes:
+      - matrix-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  synapse:
+    image: matrixdotorg/synapse:v1.153.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    secrets:
+      - codever_account_password
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8008:8008"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8008/health >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres-password
+  codever_account_password:
+    file: ./secrets/codever-account-password
+
+volumes:
+  matrix-postgres:
