@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -86,17 +86,18 @@ describe('Gateway project.create request', () => {
     it('advertises project creation as a Gateway capability', () => {
         expect(GATEWAY_FEATURES).toContain('project.create')
         expect(GATEWAY_FEATURES).toEqual(expect.arrayContaining([
-            'attachment.upload',
+            'attachment.media',
             'attachment.manage',
             'matrix-e2ee',
             'matrix-durable-sync',
             'cose-cwt-authorization',
+            'matrix-encrypted-media',
         ]))
     })
 })
 
 describe('Gateway attachment requests', () => {
-    it('uploads encrypted-request chunks and delivers the resolved input to the session', async () => {
+    it('imports Matrix encrypted media and delivers the resolved input to the session', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-attachment-'))
         temporaryDirectories.push(directory)
         const attachments = await GatewayAttachmentStore.open(directory, new TestRelayBlobs())
@@ -114,23 +115,25 @@ describe('Gateway attachment requests', () => {
             } as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
             executionTrust: undefined as never,
+            mediaStagingDirectory: join(directory, 'matrix-staging'),
+            matrixMedia: {
+                download: async (encryptedFile, destination) => {
+                    expect(encryptedFile).toEqual({ url: 'mxc://matrix.example/media' })
+                    await writeFile(destination, 'attachment body')
+                },
+            },
             inventoryChanged: () => undefined,
         } satisfies ClientRequestContext
         const bytes = Buffer.from('attachment body')
-        const begin = await handleClientRequest(frame('begin', {
-            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'notes.txt',
+        const imported = await handleClientRequest(frame('import', {
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'notes.txt',
             mimeType: 'text/plain', sizeBytes: bytes.length,
+            encryptedFile: { url: 'mxc://matrix.example/media' },
         }), context)
-        if (begin.status !== 'completed' || !('attachmentId' in begin.payload)) throw new Error('Upload did not begin')
-        const attachmentId = begin.payload.attachmentId
-        const chunk = await handleClientRequest(frame('chunk', {
-            kind: 'attachment.upload.chunk', attachmentId, offset: 0, data: bytes.toString('base64'),
-        }), context)
-        expect(chunk.status).toBe('completed')
-        const complete = await handleClientRequest(frame('complete', {
-            kind: 'attachment.upload.complete', attachmentId,
-        }), context)
-        expect(complete.status).toBe('completed')
+        if (imported.status !== 'completed' || !('attachmentId' in imported.payload)) {
+            throw new Error('Media was not imported')
+        }
+        const attachmentId = imported.payload.attachmentId
         const message = await handleClientRequest(frame('message', {
             kind: 'session.message', sessionId: 'session-1',
             input: { text: 'Please review this.', attachmentIds: [attachmentId] },
@@ -143,6 +146,30 @@ describe('Gateway attachment requests', () => {
         expect(attachments.list('session-1')).toHaveLength(1)
         expect((await attachments.resolveParts('session-1', [attachmentId]))[0]).toMatchObject({ filename: 'notes.txt' })
         await attachments.releaseParts([attachmentId])
+    })
+
+    it('rejects a mismatched Matrix media size and removes the staging file', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-media-mismatch-'))
+        temporaryDirectories.push(directory)
+        const staging = join(directory, 'matrix-staging')
+        const context = {
+            credentialId: 'credential-1', gatewayId: 'gateway-1',
+            attachments: await GatewayAttachmentStore.open(join(directory, 'attachments'), new TestRelayBlobs()),
+            sessions: { get: async () => ({ id: 'session-1' }) } as never,
+            matrixMedia: { download: async (_file, destination) => writeFile(destination, 'short') },
+            mediaStagingDirectory: staging,
+            inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            executionTrust: undefined as never, inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const response = await handleClientRequest(frame('mismatch', {
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'bad.bin',
+            mimeType: 'application/octet-stream', sizeBytes: 100,
+            encryptedFile: { url: 'mxc://matrix.example/bad' },
+        }), context)
+
+        expect(response.status).toBe('failed')
+        expect(await readdir(staging)).toEqual([])
     })
 
     it('exports only files inside the Session Project and returns downloadable chunks', async () => {

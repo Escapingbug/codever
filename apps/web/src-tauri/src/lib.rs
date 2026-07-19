@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-use base64ct::{Base64UrlUnpadded, Encoding};
+use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use codever_matrix_transport::{
     execution_auth::{
         generate_execution_identity, sign_execution_token, ExecutionJwk, SignExecutionInput,
@@ -9,6 +9,13 @@ use codever_matrix_transport::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
 use tauri::{Emitter, Manager};
 use tokio::sync::RwLock;
 
@@ -17,6 +24,15 @@ const MATRIX_EVENT_NAME: &str = "codever://matrix-event";
 
 #[derive(Default)]
 struct MatrixState(RwLock<Option<MatrixTransport>>);
+
+#[derive(Default)]
+struct MediaUploadState(RwLock<HashMap<String, StagedMediaUpload>>);
+
+struct StagedMediaUpload {
+    path: PathBuf,
+    size_bytes: u64,
+    received_bytes: u64,
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -379,6 +395,172 @@ async fn matrix_verification_cancel(
         .map_err(|error| error.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaUploadSnapshot {
+    upload_id: String,
+    size_bytes: u64,
+    received_bytes: u64,
+}
+
+#[tauri::command]
+async fn matrix_media_upload_begin(
+    app: tauri::AppHandle,
+    uploads: tauri::State<'_, MediaUploadState>,
+    size_bytes: u64,
+) -> Result<MediaUploadSnapshot, String> {
+    let mut random = [0_u8; 18];
+    getrandom::fill(&mut random).map_err(|error| error.to_string())?;
+    let upload_id = format!("media_{}", Base64UrlUnpadded::encode_string(&random));
+    let directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("matrix-media-staging");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let active_paths = uploads
+        .0
+        .read()
+        .await
+        .values()
+        .map(|upload| upload.path.clone())
+        .collect();
+    remove_stale_media_staging(&directory, &active_paths);
+    let path = directory.join(&upload_id);
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    uploads.0.write().await.insert(
+        upload_id.clone(),
+        StagedMediaUpload {
+            path,
+            size_bytes,
+            received_bytes: 0,
+        },
+    );
+    Ok(MediaUploadSnapshot {
+        upload_id,
+        size_bytes,
+        received_bytes: 0,
+    })
+}
+
+fn remove_stale_media_staging(directory: &PathBuf, active_paths: &HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if active_paths.contains(&path)
+            || !entry.file_name().to_string_lossy().starts_with("media_")
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| {
+                SystemTime::now()
+                    .duration_since(modified)
+                    .map_err(std::io::Error::other)
+            })
+            .is_ok_and(|age| age > Duration::from_secs(24 * 60 * 60));
+        if stale {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[tauri::command]
+async fn matrix_media_upload_chunk(
+    uploads: tauri::State<'_, MediaUploadState>,
+    upload_id: String,
+    offset: u64,
+    data: String,
+) -> Result<MediaUploadSnapshot, String> {
+    let bytes = Base64::decode_vec(&data).map_err(|_| "invalid Matrix media chunk encoding")?;
+    if bytes.is_empty() || bytes.len() > 512 * 1024 {
+        return Err("Matrix media chunk must be between 1 and 524288 bytes".into());
+    }
+    let mut records = uploads.0.write().await;
+    let upload = records
+        .get_mut(&upload_id)
+        .ok_or("unknown Matrix media upload")?;
+    let end = offset
+        .checked_add(bytes.len() as u64)
+        .ok_or("Matrix media chunk offset overflow")?;
+    if offset > upload.received_bytes || end > upload.size_bytes {
+        return Err("Matrix media chunk offset or size is invalid".into());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&upload.path)
+        .map_err(|error| error.to_string())?;
+    if offset < upload.received_bytes {
+        if end > upload.received_bytes {
+            return Err("Matrix media retry overlaps the received boundary".into());
+        }
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| error.to_string())?;
+        let mut existing = vec![0_u8; bytes.len()];
+        file.read_exact(&mut existing)
+            .map_err(|error| error.to_string())?;
+        if existing != bytes {
+            return Err("Matrix media chunk retry does not match staged bytes".into());
+        }
+    } else {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        upload.received_bytes += bytes.len() as u64;
+    }
+    Ok(MediaUploadSnapshot {
+        upload_id,
+        size_bytes: upload.size_bytes,
+        received_bytes: upload.received_bytes,
+    })
+}
+
+#[tauri::command]
+async fn matrix_media_upload_complete(
+    matrix: tauri::State<'_, MatrixState>,
+    uploads: tauri::State<'_, MediaUploadState>,
+    upload_id: String,
+) -> Result<Value, String> {
+    let upload = uploads
+        .0
+        .write()
+        .await
+        .remove(&upload_id)
+        .ok_or("unknown Matrix media upload")?;
+    if upload.received_bytes != upload.size_bytes {
+        uploads.0.write().await.insert(upload_id, upload);
+        return Err("Matrix media upload is incomplete".into());
+    }
+    let result = matrix_transport(&matrix)
+        .await?
+        .upload_encrypted_file_path(&upload.path)
+        .await
+        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+        .map_err(|error| error.to_string());
+    let _ = std::fs::remove_file(upload.path);
+    result
+}
+
+#[tauri::command]
+async fn matrix_media_upload_cancel(
+    uploads: tauri::State<'_, MediaUploadState>,
+    upload_id: String,
+) -> Result<(), String> {
+    if let Some(upload) = uploads.0.write().await.remove(&upload_id) {
+        std::fs::remove_file(upload.path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 async fn matrix_transport(
     state: &tauri::State<'_, MatrixState>,
 ) -> Result<MatrixTransport, String> {
@@ -457,7 +639,9 @@ pub fn run() {
             .expect("failed to initialize Secret Service"),
     );
 
-    let builder = tauri::Builder::default().manage(MatrixState::default());
+    let builder = tauri::Builder::default()
+        .manage(MatrixState::default())
+        .manage(MediaUploadState::default());
     #[cfg(feature = "desktop-e2e")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
 
@@ -476,6 +660,10 @@ pub fn run() {
             matrix_verification_advance,
             matrix_verification_confirm,
             matrix_verification_cancel,
+            matrix_media_upload_begin,
+            matrix_media_upload_chunk,
+            matrix_media_upload_complete,
+            matrix_media_upload_cancel,
             matrix_close,
             execution_identity_create,
             execution_sign,

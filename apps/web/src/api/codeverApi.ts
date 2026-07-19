@@ -22,6 +22,7 @@ export class CodeverApi {
   private readonly projectGateways = new Map<string, string>()
   private readonly sessionGateways = new Map<string, string>()
   private readonly inventories = new Map<string, InventorySnapshot>()
+  private readonly mediaUploads = new Map<string, AttachmentUploadDto>()
   private readonly connectionSubscribers = new Set<(state: ConnectionState) => void>()
   private connectionStateValue: ConnectionState = 'disconnected'
 
@@ -147,31 +148,56 @@ export class CodeverApi {
     onStage?: (stage: 'uploading' | 'storing') => void; onUpload?: (upload: AttachmentUploadDto) => void
     resume?: AttachmentUploadDto
   } = {}): Promise<AttachmentUploadDto> {
-    let upload = options.resume ?? this.completed(await this.request(this.requireSessionGateway(sessionId), {
-      kind: 'attachment.upload.begin', sessionId, filename: file.name,
-      mimeType: file.type || 'application/octet-stream', sizeBytes: file.size,
-    })) as AttachmentUploadDto
-    options.onUpload?.(upload); options.onStage?.('uploading')
-    while (upload.receivedBytes < file.size) {
-      assertNotAborted(options.signal)
-      // The command is subsequently wrapped in COSE and a Matrix encrypted
-      // event, so leave room for both encodings. File size itself is unlimited.
-      const bytes = new Uint8Array(await file.slice(upload.receivedBytes, upload.receivedBytes + 24 * 1024).arrayBuffer())
-      upload = this.completed(await this.request(this.requireSessionGateway(sessionId), {
-        kind: 'attachment.upload.chunk', attachmentId: upload.attachmentId,
-        offset: upload.receivedBytes, data: bytesToBase64(bytes),
-      })) as AttachmentUploadDto
-      options.onUpload?.(upload); options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
+    if (options.resume) {
+      await this.native.cancelEncryptedMediaUpload(options.resume.attachmentId).catch(() => undefined)
+      this.mediaUploads.delete(options.resume.attachmentId)
     }
-    options.onStage?.('storing')
-    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
-      kind: 'attachment.upload.complete', attachmentId: upload.attachmentId,
-    })) as AttachmentUploadDto
+    const staged = await this.native.beginEncryptedMediaUpload(file.size)
+    let upload: AttachmentUploadDto = {
+      attachmentId: staged.uploadId, sessionId, filename: file.name,
+      mimeType: file.type || 'application/octet-stream', sizeBytes: file.size,
+      receivedBytes: 0, status: 'uploading',
+    }
+    this.mediaUploads.set(staged.uploadId, upload)
+    options.onUpload?.(upload)
+    options.onStage?.('uploading')
+    try {
+      while (upload.receivedBytes < file.size) {
+        assertNotAborted(options.signal)
+        const bytes = new Uint8Array(await file.slice(
+          upload.receivedBytes,
+          upload.receivedBytes + 256 * 1024,
+        ).arrayBuffer())
+        const next = await this.native.appendEncryptedMediaUpload(
+          upload.attachmentId,
+          upload.receivedBytes,
+          bytes,
+        )
+        upload = { ...upload, receivedBytes: next.receivedBytes }
+        this.mediaUploads.set(upload.attachmentId, upload)
+        options.onUpload?.(upload)
+        options.onProgress?.(upload.receivedBytes, upload.sizeBytes)
+      }
+      assertNotAborted(options.signal)
+      options.onStage?.('storing')
+      const encryptedFile = await this.native.completeEncryptedMediaUpload(upload.attachmentId)
+      this.mediaUploads.delete(upload.attachmentId)
+      return this.completed(await this.request(this.requireSessionGateway(sessionId), {
+        kind: 'attachment.media.import', sessionId, filename: file.name,
+        mimeType: upload.mimeType, sizeBytes: file.size, encryptedFile,
+      })) as AttachmentUploadDto
+    } catch (error) {
+      this.mediaUploads.delete(upload.attachmentId)
+      await this.native.cancelEncryptedMediaUpload(upload.attachmentId).catch(() => undefined)
+      throw error
+    }
   }
   async cancelAttachment(sessionId: string, attachmentId: string): Promise<AttachmentUploadDto> {
-    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
-      kind: 'attachment.upload.cancel', attachmentId,
-    })) as AttachmentUploadDto
+    const upload = this.mediaUploads.get(attachmentId)
+    if (!upload || upload.sessionId !== sessionId) throw new CodeverApiError('Unknown active upload')
+    await this.native.cancelEncryptedMediaUpload(attachmentId)
+    this.mediaUploads.delete(attachmentId)
+    return { ...upload, status: 'cancelled' }
   }
   async listSessionAttachments(sessionId: string): Promise<SessionAttachmentListDto> {
     return this.completed(await this.request(this.requireSessionGateway(sessionId), {
@@ -236,9 +262,6 @@ export class CodeverApi {
 }
 
 function assertNotAborted(signal?: AbortSignal): void { if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError') }
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(binary)
-}
 function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value); const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return bytes

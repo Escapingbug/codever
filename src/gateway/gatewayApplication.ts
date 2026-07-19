@@ -1,4 +1,5 @@
-import { realpath } from 'node:fs/promises'
+import { mkdir, realpath, rm, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
     PROTOCOL_VERSION,
@@ -26,8 +27,8 @@ import { MatrixGatewayWorker, NativeMatrixTransport, type MatrixTransport } from
 
 export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
-    'attachment.upload', 'attachment.manage', 'matrix-e2ee', 'cose-cwt-authorization',
-    'file.export', 'attachment.download', 'matrix-durable-sync',
+    'attachment.media', 'attachment.manage', 'matrix-e2ee', 'cose-cwt-authorization',
+    'file.export', 'attachment.download', 'matrix-durable-sync', 'matrix-encrypted-media',
 ]
 
 export interface GatewayApplication {
@@ -108,6 +109,8 @@ export async function createGatewayApplication(
         sessions: await metadata.list(),
     })
 
+    let transport: MatrixTransport
+    const mediaStagingDirectory = join(config.dataDirectory, 'matrix-media-staging')
     const requestContext = (credentialId: string): ClientRequestContext => ({
         credentialId,
         gatewayId: config.gatewayId,
@@ -117,6 +120,10 @@ export async function createGatewayApplication(
         events,
         attachments,
         executionTrust: trust,
+        matrixMedia: transport.downloadEncryptedFile
+            ? { download: (file, path) => transport.downloadEncryptedFile!(file, path) }
+            : undefined,
+        mediaStagingDirectory,
         inventoryChanged,
     })
     const processor = new AuthorizedRequestProcessor({
@@ -127,7 +134,7 @@ export async function createGatewayApplication(
         handleRequest: (request, principalId) => handleClientRequest(request, requestContext(principalId)),
     })
     const matrixCredential = options.matrixTransport ? undefined : await loadMatrixCredential(config)
-    const transport = options.matrixTransport ?? new NativeMatrixTransport({
+    transport = options.matrixTransport ?? new NativeMatrixTransport({
         executablePath: config.matrix.transportBinaryPath,
         session: matrixCredential!.session,
         storePath: config.matrix.storePath,
@@ -210,6 +217,8 @@ export interface ClientRequestContext {
     events: FileConversationEventStore<GatewayConversationEvent>
     attachments: GatewayAttachmentStore
     executionTrust: ExecutionTrustRepository
+    matrixMedia?: { download(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void> }
+    mediaStagingDirectory?: string
     inventoryChanged: () => void
 }
 
@@ -275,33 +284,31 @@ export async function handleClientRequest(
                 }
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
-            case 'attachment.upload.begin':
+            case 'attachment.media.import': {
                 await context.sessions.get(request.payload.sessionId)
-                payload = await context.attachments.begin({
-                    sessionId: request.payload.sessionId,
-                    credentialId: context.credentialId,
-                    filename: request.payload.filename,
-                    mimeType: request.payload.mimeType,
-                    sizeBytes: request.payload.sizeBytes,
-                })
+                if (!context.matrixMedia || !context.mediaStagingDirectory) {
+                    throw new Error('Matrix encrypted media is unavailable on this Gateway')
+                }
+                await mkdir(context.mediaStagingDirectory, { recursive: true, mode: 0o700 })
+                const path = join(context.mediaStagingDirectory, `${randomUUID()}.media`)
+                try {
+                    await context.matrixMedia.download(request.payload.encryptedFile, path)
+                    const downloaded = await stat(path)
+                    if (!downloaded.isFile() || downloaded.size !== request.payload.sizeBytes) {
+                        throw new Error(`Matrix media size mismatch: expected ${request.payload.sizeBytes}, received ${downloaded.size}`)
+                    }
+                    payload = await context.attachments.importLocalFile({
+                        sessionId: request.payload.sessionId,
+                        credentialId: context.credentialId,
+                        path,
+                        filename: request.payload.filename,
+                        mimeType: request.payload.mimeType,
+                    })
+                } finally {
+                    await rm(path, { force: true })
+                }
                 break
-            case 'attachment.upload.chunk':
-                payload = await context.attachments.appendChunk({
-                    attachmentId: request.payload.attachmentId,
-                    credentialId: context.credentialId,
-                    offset: request.payload.offset,
-                    data: request.payload.data,
-                })
-                break
-            case 'attachment.upload.complete':
-                payload = await context.attachments.complete(
-                    request.payload.attachmentId,
-                    context.credentialId,
-                )
-                break
-            case 'attachment.upload.cancel':
-                payload = await context.attachments.cancel(request.payload.attachmentId, context.credentialId)
-                break
+            }
             case 'attachment.list':
                 await context.sessions.get(request.payload.sessionId)
                 payload = {

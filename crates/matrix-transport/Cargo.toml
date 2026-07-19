@@ -11,11 +11,13 @@ ciborium = "0.2"
 coset = "0.4.2"
 matrix-sdk = { version = "0.18.0", features = ["bundled-sqlite"] }
 matrix-sdk-base = "0.18.0"
+matrix-sdk-crypto = "0.18.0"
 p256 = { version = "0.13", features = ["ecdsa"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-tokio = { version = "1.48", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
-
-[dev-dependencies]
+futures-util = "0.3"
 tempfile = "3.23"
+tokio = { version = "1.48", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }

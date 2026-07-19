@@ -55,9 +55,14 @@ user_directory:
 url_preview_enabled: false
 enable_metrics: false
 report_stats: false
-max_upload_size: 2G
+# Codever streams media and imposes no business-size cap. This deliberately
+# high guard is only a protocol/server safety bound; disk capacity is expected
+# to be the practical limit.
+max_upload_size: 1T
 media_retention:
-  local_media_lifetime: null
+  # Codever imports uploaded ciphertext into the Gateway immediately. Matrix
+  # media is transport staging, not the authoritative Session file store.
+  local_media_lifetime: 1d
   remote_media_lifetime: 1d
 
 trusted_key_servers: []

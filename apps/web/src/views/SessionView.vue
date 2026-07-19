@@ -516,7 +516,11 @@ async function removeAttachment(attachment: PendingAttachment): Promise<void> {
 }
 
 function retryAttachment(attachment: PendingAttachment): void {
-  if (attachment.status === 'error') void uploadAttachment(attachment)
+  if (attachment.status === 'error') {
+    attachment.upload = undefined
+    attachment.receivedBytes = 0
+    void uploadAttachment(attachment)
+  }
 }
 
 function disposeAttachments(): void {

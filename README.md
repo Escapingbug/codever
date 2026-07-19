@@ -111,6 +111,9 @@ Client state and recent conversations are cached locally. Matrix sync updates
 them in the background, so cached sessions remain readable during reconnects.
 Provider output is rendered as Markdown; raw ACP lifecycle events are projected
 into concise status, tool and decision UI rather than transcript noise.
+Attachments use standard Matrix encrypted media with disk-streaming encryption
+and download; Codever does not impose a total file-size limit or buffer the
+entire file in memory.
 
 ## Security boundary
 

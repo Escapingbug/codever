@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use codever_matrix_transport::{MatrixTransport, StoredMatrixSession};
-use matrix_sdk::{SessionChange, ruma::OwnedRoomId};
+use matrix_sdk::{
+    SessionChange,
+    ruma::{OwnedRoomId, events::room::EncryptedFile},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -64,6 +67,13 @@ struct VerificationFlowParams {
 struct ConfirmVerificationParams {
     flow_id: String,
     matches: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadMediaParams {
+    encrypted_file: EncryptedFile,
+    destination_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +199,15 @@ async fn handle(
                 )
                 .await?;
             Ok(json!({ "eventId": event_id }))
+        }
+        "media.download" => {
+            let params: DownloadMediaParams = serde_json::from_value(request.params)
+                .context("invalid encrypted media download parameters")?;
+            let transport = require_transport(state).await?;
+            transport
+                .download_encrypted_file(params.encrypted_file, params.destination_path)
+                .await?;
+            Ok(json!({ "downloaded": true }))
         }
         "verification.request" => {
             let params: DeviceVerificationParams = serde_json::from_value(request.params)

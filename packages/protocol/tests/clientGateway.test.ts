@@ -61,12 +61,10 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'session.create', projectId: 'project-1', input: { provider: 'codex', config: {} } },
             { kind: 'session.message', sessionId: 'session-1', input: { text: 'hello' } },
             {
-                kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'notes.txt',
+                kind: 'attachment.media.import', sessionId: 'session-1', filename: 'notes.txt',
                 mimeType: 'text/plain', sizeBytes: 12,
+                encryptedFile: { url: 'mxc://matrix.example/media', key: { kty: 'oct' } },
             },
-            { kind: 'attachment.upload.chunk', attachmentId: 'attachment-1', offset: 0, data: 'aGVsbG8=' },
-            { kind: 'attachment.upload.complete', attachmentId: 'attachment-1' },
-            { kind: 'attachment.upload.cancel', attachmentId: 'attachment-1' },
             { kind: 'attachment.list', sessionId: 'session-1' },
             { kind: 'attachment.delete', sessionId: 'session-1', attachmentIds: ['attachment-1'] },
             { kind: 'file.export', sessionId: 'session-1', path: '/workspace/codever/client.apk' },
@@ -111,19 +109,23 @@ describe('encrypted Client to Gateway request frames', () => {
             kind: 'session.message', sessionId: 'session-1', input: { text: '', attachmentIds: ['attachment-1'] },
         })).payload.kind).toBe('session.message')
         expect(parseClientGatewayRequestFrame(request({
-            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'large.bin',
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'large.bin',
             mimeType: 'application/octet-stream', sizeBytes: Number.MAX_SAFE_INTEGER,
-        })).payload.kind).toBe('attachment.upload.begin')
+            encryptedFile: { url: 'mxc://matrix.example/large' },
+        })).payload.kind).toBe('attachment.media.import')
         expect(parseClientGatewayRequestFrame(request({
-            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'empty.bin',
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'empty.bin',
             mimeType: 'application/octet-stream', sizeBytes: 0,
-        })).payload.kind).toBe('attachment.upload.begin')
+            encryptedFile: { url: 'mxc://matrix.example/empty' },
+        })).payload.kind).toBe('attachment.media.import')
         expect(() => parseClientGatewayRequestFrame(request({
-            kind: 'attachment.upload.begin', sessionId: 'session-1', filename: 'unsafe.bin',
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'unsafe.bin',
             mimeType: 'application/octet-stream', sizeBytes: Number.MAX_SAFE_INTEGER + 1,
+            encryptedFile: { url: 'mxc://matrix.example/unsafe' },
         }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
-            kind: 'attachment.upload.complete', attachmentId: 'attachment-1', sha256: 'a'.repeat(64),
+            kind: 'attachment.media.import', sessionId: 'session-1', filename: 'missing.bin',
+            mimeType: 'application/octet-stream', sizeBytes: 1,
         }))).toThrow()
         expect(() => parseClientGatewayRequestFrame(request({
             kind: 'events.list', sessionId: 'session-1', limit: 1_001,

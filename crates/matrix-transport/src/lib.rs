@@ -1,6 +1,7 @@
 pub mod execution_auth;
 
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
 pub use matrix_sdk::SessionChange;
 use matrix_sdk::{
     Client, LoopCtrl, Room, RoomState, SessionTokens,
@@ -9,30 +10,36 @@ use matrix_sdk::{
     deserialized_responses::{EncryptionInfo, VerificationState},
     encryption::verification::{Verification, VerificationRequest, VerificationRequestState},
     ruma::{
-        OwnedDeviceId, OwnedRoomId, OwnedUserId,
+        OwnedDeviceId, OwnedMxcUri, OwnedRoomId, OwnedUserId,
         api::client::{room::create_room, uiaa},
         assign,
         events::{
             AnySyncTimelineEvent, InitialStateEvent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
-            room::encryption::RoomEncryptionEventContent,
+            room::{EncryptedFile, encryption::RoomEncryptionEventContent},
         },
         serde::Raw,
     },
     store::RoomLoadSettings,
 };
 use matrix_sdk_base::SessionMeta;
+use matrix_sdk_crypto::{AttachmentDecryptor, AttachmentEncryptor, MediaEncryptionInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    path::Path,
+    fs::File,
+    io,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
+use tempfile::NamedTempFile;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, broadcast};
+use tokio_util::io::ReaderStream;
 
 pub const COMMAND_EVENT_TYPE: &str = "io.codever.command.v1";
 pub const RESPONSE_EVENT_TYPE: &str = "io.codever.response.v1";
@@ -42,6 +49,59 @@ pub const SESSION_EVENT_TYPE: &str = "io.codever.session.v1";
 pub const GATEWAY_EVENT_TYPE: &str = "io.codever.gateway.v1";
 pub const DISCOVERY_EVENT_TYPE: &str = "io.codever.discovery.v1";
 pub const AUTHORIZATION_EVENT_TYPE: &str = "io.codever.authorization.v1";
+
+#[derive(Deserialize)]
+struct MatrixMediaUploadResponse {
+    content_uri: OwnedMxcUri,
+}
+
+fn encrypt_to_temporary_file(path: &Path) -> Result<(NamedTempFile, MediaEncryptionInfo)> {
+    let parent = path
+        .parent()
+        .context("Matrix media staging path has no parent")?;
+    let mut input = File::open(path).with_context(|| {
+        format!(
+            "failed to open Matrix media staging file {}",
+            path.display()
+        )
+    })?;
+    let mut encrypted = NamedTempFile::new_in(parent)
+        .context("failed to create encrypted Matrix media staging file")?;
+    let mut encryptor = AttachmentEncryptor::new(&mut input);
+    io::copy(&mut encryptor, encrypted.as_file_mut()).context("failed to encrypt Matrix media")?;
+    let encryption = encryptor.finish();
+    encrypted
+        .as_file_mut()
+        .sync_all()
+        .context("failed to flush encrypted Matrix media")?;
+    Ok((encrypted, encryption))
+}
+
+fn decrypt_to_destination(
+    encrypted: NamedTempFile,
+    file: EncryptedFile,
+    destination: PathBuf,
+) -> Result<()> {
+    let parent = destination
+        .parent()
+        .context("Matrix media destination has no parent")?;
+    let mut encrypted_input =
+        File::open(encrypted.path()).context("failed to reopen downloaded Matrix media")?;
+    let mut decryptor = AttachmentDecryptor::new(&mut encrypted_input, file.into())
+        .context("Matrix media encryption metadata is invalid")?;
+    let mut plaintext = NamedTempFile::new_in(parent)
+        .context("failed to create Matrix media plaintext staging file")?;
+    io::copy(&mut decryptor, plaintext.as_file_mut())
+        .context("Matrix media authentication or decryption failed")?;
+    plaintext
+        .as_file_mut()
+        .sync_all()
+        .context("failed to flush decrypted Matrix media")?;
+    plaintext
+        .persist(&destination)
+        .with_context(|| format!("failed to store Matrix media at {}", destination.display()))?;
+    Ok(())
+}
 pub const CONTROL_ROOM_STATE_TYPE: &str = "io.codever.control.v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -468,6 +528,125 @@ impl MatrixTransport {
         Ok(response.response.event_id.to_string())
     }
 
+    /// Encrypts a local file using the Matrix encrypted-media format and uploads
+    /// only ciphertext to the homeserver. The returned key metadata must travel
+    /// inside an encrypted and independently authorized Codever command.
+    pub async fn upload_encrypted_file_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<EncryptedFile> {
+        let path = path.as_ref().to_owned();
+        let (encrypted, encryption) =
+            tokio::task::spawn_blocking(move || encrypt_to_temporary_file(&path))
+                .await
+                .context("Matrix media encryption worker stopped")??;
+        let size = encrypted
+            .as_file()
+            .metadata()
+            .context("failed to inspect encrypted Matrix media")?
+            .len();
+        let stream = ReaderStream::new(
+            tokio::fs::File::open(encrypted.path())
+                .await
+                .context("failed to open encrypted Matrix media")?,
+        );
+        let access_token = self
+            .client
+            .access_token()
+            .context("Matrix access token is unavailable")?;
+        let upload_url = self
+            .client
+            .homeserver()
+            .join("_matrix/media/v3/upload")
+            .context("failed to construct the Matrix media upload URL")?;
+        let response = reqwest::Client::new()
+            .post(upload_url)
+            .bearer_auth(access_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, size)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+            .context("failed to upload encrypted Matrix media")?
+            .error_for_status()
+            .context("Matrix rejected the encrypted media upload")?
+            .json::<MatrixMediaUploadResponse>()
+            .await
+            .context("Matrix returned an invalid media upload response")?;
+        Ok(EncryptedFile::new(
+            response.content_uri,
+            encryption.encryption_info,
+            encryption.hashes,
+        ))
+    }
+
+    /// Downloads and authenticates standard Matrix encrypted media, then writes
+    /// its plaintext to a caller-owned staging path.
+    pub async fn download_encrypted_file(
+        &self,
+        file: EncryptedFile,
+        destination: impl AsRef<Path>,
+    ) -> Result<()> {
+        let destination = destination.as_ref().to_owned();
+        let staging_directory = destination
+            .parent()
+            .context("Matrix media destination has no parent")?;
+        let (server_name, media_id) = file
+            .url
+            .parts()
+            .context("Matrix encrypted media has an invalid MXC URI")?;
+        let mut download_url = self.client.homeserver();
+        download_url.set_query(None);
+        download_url.set_fragment(None);
+        download_url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Matrix homeserver URL cannot contain media paths"))?
+            .clear()
+            .extend([
+                "_matrix",
+                "client",
+                "v1",
+                "media",
+                "download",
+                server_name.as_str(),
+                media_id,
+            ]);
+        let access_token = self
+            .client
+            .access_token()
+            .context("Matrix access token is unavailable")?;
+        let response = reqwest::Client::new()
+            .get(download_url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("failed to download Matrix encrypted media")?
+            .error_for_status()
+            .context("Matrix rejected the encrypted media download")?;
+        let encrypted = NamedTempFile::new_in(staging_directory)
+            .context("failed to stage Matrix encrypted media")?;
+        let mut encrypted_output = tokio::fs::File::create(encrypted.path())
+            .await
+            .context("failed to open the Matrix media download staging file")?;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            encrypted_output
+                .write_all(&chunk.context("Matrix media download was interrupted")?)
+                .await
+                .context("failed to stage downloaded Matrix media")?;
+        }
+        encrypted_output
+            .flush()
+            .await
+            .context("failed to flush downloaded Matrix media")?;
+        drop(encrypted_output);
+
+        tokio::task::spawn_blocking(move || decrypt_to_destination(encrypted, file, destination))
+            .await
+            .context("Matrix media decryption worker stopped")??;
+        Ok(())
+    }
+
     pub async fn sync(&self) -> Result<()> {
         let stopped = self.stopped.clone();
         self.client
@@ -630,6 +809,7 @@ pub fn validate_event_type(event_type: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     #[test]
     fn only_codever_event_types_cross_the_native_boundary() {
@@ -647,5 +827,52 @@ mod tests {
         }
         assert!(validate_event_type("m.room.message").is_err());
         assert!(validate_event_type("io.attacker.command").is_err());
+    }
+
+    #[test]
+    fn matrix_media_streams_through_disk_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.bin");
+        let destination = directory.path().join("destination.bin");
+        let content = vec![0x5a; 2 * 1024 * 1024 + 17];
+        std::fs::write(&source, &content).unwrap();
+        let (encrypted, encryption) = encrypt_to_temporary_file(&source).unwrap();
+        assert_eq!(
+            encrypted.as_file().metadata().unwrap().len(),
+            content.len() as u64
+        );
+        let file = EncryptedFile::new(
+            "mxc://matrix.example/media".try_into().unwrap(),
+            encryption.encryption_info,
+            encryption.hashes,
+        );
+
+        decrypt_to_destination(encrypted, file, destination.clone()).unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), content);
+    }
+
+    #[test]
+    fn matrix_media_rejects_tampered_ciphertext_without_plaintext_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.bin");
+        let destination = directory.path().join("destination.bin");
+        std::fs::write(&source, b"authenticated attachment").unwrap();
+        let (mut encrypted, encryption) = encrypt_to_temporary_file(&source).unwrap();
+        let mut first = [0_u8; 1];
+        encrypted.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+        encrypted.as_file_mut().read_exact(&mut first).unwrap();
+        first[0] ^= 0xff;
+        encrypted.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+        encrypted.as_file_mut().write_all(&first).unwrap();
+        encrypted.as_file_mut().sync_all().unwrap();
+        let file = EncryptedFile::new(
+            "mxc://matrix.example/tampered".try_into().unwrap(),
+            encryption.encryption_info,
+            encryption.hashes,
+        );
+
+        assert!(decrypt_to_destination(encrypted, file, destination.clone()).is_err());
+        assert!(!destination.exists());
     }
 }

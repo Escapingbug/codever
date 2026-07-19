@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
     IsoDateTimeSchema,
+    JsonObjectSchema,
     NonNegativeIntegerSchema,
     OpaqueIdSchema,
     PROTOCOL_VERSION,
@@ -60,25 +61,12 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         input: SendMessageDtoSchema,
     }).strict(),
     z.object({
-        kind: z.literal('attachment.upload.begin'),
+        kind: z.literal('attachment.media.import'),
         sessionId: OpaqueIdSchema,
         filename: z.string().min(1).max(255),
         mimeType: z.string().min(1).max(255),
         sizeBytes: NonNegativeIntegerSchema.max(Number.MAX_SAFE_INTEGER),
-    }).strict(),
-    z.object({
-        kind: z.literal('attachment.upload.chunk'),
-        attachmentId: OpaqueIdSchema,
-        offset: NonNegativeIntegerSchema,
-        data: z.string().min(1).max(300_000),
-    }).strict(),
-    z.object({
-        kind: z.literal('attachment.upload.complete'),
-        attachmentId: OpaqueIdSchema,
-    }).strict(),
-    z.object({
-        kind: z.literal('attachment.upload.cancel'),
-        attachmentId: OpaqueIdSchema,
+        encryptedFile: JsonObjectSchema,
     }).strict(),
     z.object({
         kind: z.literal('attachment.list'),

@@ -74,12 +74,20 @@ boundary. Gateway command handling still requires valid COSE authorization.
 
 ## Attachments
 
-Attachment commands currently stream 24 KiB plaintext chunks. The small frame
-size leaves room for JSON, COSE and Megolm/base64 overhead under Matrix event
-limits; it does not impose a total file-size limit. The Gateway encrypts each
-stored blob independently and keeps resumable manifests and cleanup state.
+Attachments use standard Matrix encrypted media (`EncryptedFile`). The native
+client stages the selected file on disk, encrypts it with the Matrix attachment
+format and streams ciphertext to the homeserver. The media key, hash and MXC URI
+travel only inside the room-encrypted, COSE-authorized import command. Gateway
+streams the ciphertext to disk, verifies and decrypts it, then imports it into
+the independently encrypted Gateway attachment store. No Codever total-size
+limit or whole-file memory buffer is used; the homeserver may still enforce its
+configured Matrix media limit and available disk space remains a physical bound.
 
-For high-throughput large files, the next storage backend is standard Matrix
-encrypted media (`EncryptedFile`) with an authorized encrypted manifest event.
-Until that backend is active, large files are correct and resumable but create
-many timeline events and are not expected to provide media-upload throughput.
+Deleting a Session attachment immediately removes its Gateway metadata and
+encrypted object. The temporary ciphertext uploaded to Matrix is governed by
+the homeserver's media-retention/purge policy because the standard client media
+API does not provide immediate per-upload deletion. The supplied private
+Synapse template expires this transport staging after one day and sets a 1 TiB
+safety guard so disk capacity is normally the practical bound. Synapse can
+observe upload time and ciphertext size, but cannot recover the filename,
+plaintext or media key from the upload.

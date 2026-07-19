@@ -84,9 +84,16 @@ pnpm test:desktop-e2e
 
 The dedicated build uses the `desktop-e2e` Cargo feature and the
 `dev.codever.client.e2e` identifier. Its automation server and deterministic
-Relay fixture are absent from normal release builds, and its WebView data cannot
+Matrix transport fixture are absent from normal release builds, and its WebView data cannot
 overwrite the production client's cache.
 
 ## Security boundary
 
-The shell grants only `core:default` to the main WebView and does not install filesystem, shell, process, or HTTP plugins. The CSP permits the configured Relay transports and allows WebAssembly compilation for the OPAQUE implementation through the narrow `wasm-unsafe-eval` source; ordinary JavaScript `unsafe-eval` remains disabled. Add native plugins only with a narrowly scoped capability and a concrete UI requirement.
+The shell grants only `core:default` to the main WebView and does not install
+filesystem, shell, process or HTTP plugins. Matrix networking and cryptography
+run in the Rust native boundary. The release WebView can use Tauri IPC but cannot
+open arbitrary HTTP/WebSocket connections or dynamically evaluate WebAssembly
+or JavaScript; the two localhost origins in CSP are only for the fixed Vite
+development server.
+Add native plugins only with a narrowly scoped capability and a concrete UI
+requirement.

@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { JsonObject } from '@codever/protocol'
 
 export const MATRIX_COMMAND_EVENT = 'io.codever.command.v1'
 export const MATRIX_RESPONSE_EVENT = 'io.codever.response.v1'
@@ -42,6 +43,12 @@ export interface MatrixDeviceSnapshot {
   displayName?: string
   verified: boolean
   current: boolean
+}
+
+export interface MatrixMediaUploadSnapshot {
+  uploadId: string
+  sizeBytes: number
+  receivedBytes: number
 }
 
 export interface SignExecutionInput {
@@ -117,6 +124,22 @@ export class NativeMatrixClient {
     return invoke('matrix_verification_cancel', { flowId })
   }
 
+  beginEncryptedMediaUpload(sizeBytes: number): Promise<MatrixMediaUploadSnapshot> {
+    return invoke('matrix_media_upload_begin', { sizeBytes })
+  }
+
+  appendEncryptedMediaUpload(uploadId: string, offset: number, bytes: Uint8Array): Promise<MatrixMediaUploadSnapshot> {
+    return invoke('matrix_media_upload_chunk', { uploadId, offset, data: bytesToBase64(bytes) })
+  }
+
+  completeEncryptedMediaUpload(uploadId: string): Promise<JsonObject> {
+    return invoke('matrix_media_upload_complete', { uploadId })
+  }
+
+  cancelEncryptedMediaUpload(uploadId: string): Promise<void> {
+    return invoke('matrix_media_upload_cancel', { uploadId })
+  }
+
   async signExecution(account: string, input: SignExecutionInput): Promise<string> {
     return invoke<string>('execution_sign', { account, input })
   }
@@ -147,4 +170,12 @@ export class NativeMatrixClient {
   private requireNative(): void {
     if (!isTauri()) throw new Error('The secure Matrix transport requires the Codever native app')
   }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
 }

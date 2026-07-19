@@ -42,6 +42,7 @@ export interface NativeMatrixDevice {
 export interface MatrixTransport {
     initialize(): Promise<void>
     send(input: MatrixSendInput): Promise<string>
+    downloadEncryptedFile?(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void>
     onEvent(listener: (event: NativeMatrixEvent) => void): () => void
     close(): Promise<void>
 }
@@ -118,6 +119,10 @@ export class NativeMatrixTransport implements MatrixTransport {
         const result = await peer.request<{ eventId: string }>('send', input)
         if (!result || typeof result.eventId !== 'string') throw new Error('Matrix transport returned no event ID')
         return result.eventId
+    }
+
+    async downloadEncryptedFile(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void> {
+        await this.requirePeer().request('media.download', { encryptedFile, destinationPath })
     }
 
     async listDevices(): Promise<NativeMatrixDevice[]> {
