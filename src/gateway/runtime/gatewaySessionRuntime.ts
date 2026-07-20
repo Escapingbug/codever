@@ -7,6 +7,8 @@ import type {
     AgentQueryInput,
 } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
+import type { ConversationEvent } from '@/runtime/semantic'
+import type { GatewayToolOutputStore } from '@/gateway/toolOutputs'
 import {
     createProviderSemanticAdapter,
     type ProviderSemanticAdapter,
@@ -35,6 +37,7 @@ export interface GatewaySessionRuntimeConfig {
     now?: () => number
     createId?: () => string
     onSubscriberError?: (error: unknown) => void
+    toolOutputStore?: GatewayToolOutputStore
 }
 
 export interface GatewayRuntimeSettings {
@@ -432,9 +435,40 @@ export class GatewaySessionRuntime {
         await this.record(event)
     }
 
-    private async record(event: GatewayConversationEvent): Promise<void> {
-        const envelope = await this.append(event)
+    private async record(event: GatewayConversationEvent | ConversationEvent): Promise<void> {
+        const envelope = await this.append(await this.prepareForJournal(event))
         this.notify(envelope)
+    }
+
+    private async prepareForJournal(event: GatewayConversationEvent | ConversationEvent): Promise<GatewayConversationEvent> {
+        if (event.kind !== 'tool') return event
+        const { raw: _raw, ...safeMeta } = event.meta
+        const outputValue = 'output' in event ? event.output : undefined
+        const contentValue = 'content' in event ? event.content : undefined
+        const shouldRetain = this.providerSettings.retainToolOutputs === true
+            && this.config.toolOutputStore
+            && (outputValue !== undefined || contentValue !== undefined)
+            && (event.phase === 'completed' || event.phase === 'failed')
+        const outputRef = shouldRetain
+            ? await this.config.toolOutputStore!.retain({
+                sessionId: this.config.sessionId,
+                toolCallId: event.toolCallId,
+                toolName: boundedText(event.toolName, 512),
+                value: jsonSafe({ output: outputValue, content: contentValue }),
+                createdAt: new Date(this.now()).toISOString(),
+            })
+            : undefined
+        return {
+            kind: 'tool',
+            meta: safeMeta,
+            phase: event.phase,
+            toolCallId: event.toolCallId,
+            toolName: boundedText(event.toolName, 512),
+            ...(event.category ? { category: event.category } : {}),
+            ...(event.isError !== undefined ? { isError: event.isError } : {}),
+            ...(event.displayTitle ? { displayTitle: boundedText(event.displayTitle, 1_024) } : {}),
+            ...(outputRef ? { outputRef } : {}),
+        }
     }
 
     private append(event: GatewayConversationEvent): Promise<SessionEventEnvelope<GatewayConversationEvent>> {
@@ -482,6 +516,24 @@ export class GatewaySessionRuntime {
         this.subscribers.clear()
         if (firstError) throw firstError
     }
+}
+
+function boundedText(value: string, maxLength: number): string {
+    return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`
+}
+
+function jsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+    if (typeof value === 'number') return Number.isFinite(value) ? value : String(value)
+    if (typeof value === 'bigint') return value.toString()
+    if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return null
+    if (value instanceof Date) return value.toISOString()
+    if (value instanceof Uint8Array) return Buffer.from(value).toString('base64')
+    if (typeof value !== 'object') return String(value)
+    if (seen.has(value)) return '[Circular]'
+    seen.add(value)
+    if (Array.isArray(value)) return value.map(item => jsonSafe(item, seen))
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonSafe(item, seen)]))
 }
 
 function errorMessage(error: unknown): string {

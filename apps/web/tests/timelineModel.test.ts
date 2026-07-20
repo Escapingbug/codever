@@ -23,7 +23,7 @@ describe('timeline model', () => {
       envelope(2, { kind: 'assistant_text_delta', text: 'world', meta: { source: 'live', turnId: 'turn-1' } }),
       envelope(3, { kind: 'tool', phase: 'started', toolCallId: 'tool-1', toolName: 'read_file' }),
       envelope(4, { kind: 'status', level: 'info', message: 'Still working' }),
-      envelope(5, { kind: 'tool', phase: 'completed', toolCallId: 'tool-1', toolName: 'read_file', output: 'done' }),
+      envelope(5, { kind: 'tool', phase: 'completed', toolCallId: 'tool-1', toolName: 'read_file' }),
     ])
 
     expect(timeline).toHaveLength(2)

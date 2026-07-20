@@ -13,6 +13,7 @@ const props = defineProps<{
   mutable: boolean
   inspectable?: boolean
   inspectHandler?: (event: SessionEventEnvelope) => void
+  sessionId: string
   submittingDecisionId?: string
 }>()
 const emit = defineEmits<{
@@ -68,7 +69,7 @@ function inspectFromTimeline(event: Event): void {
         </div>
       </article>
 
-      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" :data-timeline-key="entry.key" :data-inspect-event-id="entry.events.at(-1)!.eventId" />
+      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" :session-id="sessionId" :data-timeline-key="entry.key" :data-inspect-event-id="entry.events.at(-1)!.eventId" />
 
       <template v-else>
         <article

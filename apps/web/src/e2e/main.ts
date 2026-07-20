@@ -490,7 +490,7 @@ window.__CODEVER_E2E__ = {
     append(userMessageEvent(input, activeTurnId), true, sessionId)
     append({ kind: 'session_state', state: 'querying', meta: { source: 'synthetic' } }, true, sessionId)
     append({ kind: 'turn_started', meta: { turnId: activeTurnId, source: 'live' } }, true, sessionId)
-    append({ kind: 'tool', phase: 'started', toolCallId: 'long-tool', toolName: 'Bash', category: 'execute', input: { command: 'long task' }, meta: { turnId: activeTurnId, source: 'live' } }, true, sessionId)
+    append({ kind: 'tool', phase: 'started', toolCallId: 'long-tool', toolName: 'Bash', category: 'execute', displayTitle: 'long task', meta: { turnId: activeTurnId, source: 'live' } }, true, sessionId)
     resolve({ commandId: input.clientMessageId, status: 'gateway_accepted' })
   },
   finishTurnOffline(text) {

@@ -102,15 +102,7 @@ function toolEvents(
     common: { timestamp: number; rawEvent: ConversationEvent },
 ): AGUIEvent[] {
     if (event.phase === 'started') {
-        return [
-            { ...common, type: EventType.TOOL_CALL_START, toolCallId: event.toolCallId, toolCallName: event.toolName },
-            ...(event.input === undefined ? [] : [{
-                ...common,
-                type: EventType.TOOL_CALL_ARGS as const,
-                toolCallId: event.toolCallId,
-                delta: JSON.stringify(event.input),
-            }]),
-        ]
+        return [{ ...common, type: EventType.TOOL_CALL_START, toolCallId: event.toolCallId, toolCallName: event.toolName }]
     }
     if (event.phase === 'updated') {
         return [{ ...common, type: EventType.CUSTOM, name: 'codever.tool.updated', value: event }]
@@ -122,7 +114,7 @@ function toolEvents(
             type: EventType.TOOL_CALL_RESULT,
             messageId: eventId,
             toolCallId: event.toolCallId,
-            content: JSON.stringify(event.output ?? event.content ?? null),
+            content: JSON.stringify(event.outputRef ?? null),
             role: 'tool',
         },
     ]

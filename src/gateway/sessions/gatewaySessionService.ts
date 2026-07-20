@@ -463,6 +463,7 @@ export class GatewaySessionService {
             ...(session.model ? { model: session.model } : {}),
             providerSettings: session.config,
             onSubscriberError: this.options.onSubscriberError,
+            toolOutputStore: this.options.toolOutputStore,
         })
         const unsubscribe = runtime.subscribe((event) => this.onRuntimeEvent(event))
         return { runtime, provider, unsubscribe }

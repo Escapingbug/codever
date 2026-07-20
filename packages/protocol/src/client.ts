@@ -100,6 +100,26 @@ export const AttachmentDownloadChunkDtoSchema = z.object({
     data: z.string(),
     nextOffset: NonNegativeIntegerSchema.nullable(),
 }).strict()
+export const ToolOutputListItemDtoSchema = z.object({
+    outputId: OpaqueIdSchema,
+    sessionId: OpaqueIdSchema,
+    toolCallId: OpaqueIdSchema,
+    toolName: z.string().min(1),
+    sizeBytes: NonNegativeIntegerSchema,
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    mediaType: z.literal('application/json'),
+    createdAt: IsoDateTimeSchema,
+}).strict()
+export const ToolOutputListDtoSchema = z.object({
+    sessionId: OpaqueIdSchema,
+    outputs: z.array(ToolOutputListItemDtoSchema),
+}).strict()
+export const ToolOutputDownloadChunkDtoSchema = z.object({
+    outputId: OpaqueIdSchema,
+    offset: NonNegativeIntegerSchema,
+    data: z.string(),
+    nextOffset: NonNegativeIntegerSchema.nullable(),
+}).strict()
 export const CancelSessionDtoSchema = z.object({ reason: z.string().min(1).optional() }).strict()
 export const RenameSessionDtoSchema = z.object({ title: z.string().trim().min(1).max(200) }).strict()
 export const PatchSessionConfigDtoSchema = z.object({
@@ -132,6 +152,9 @@ export type AttachmentUploadDto = z.infer<typeof AttachmentUploadDtoSchema>
 export type SessionAttachmentDto = z.infer<typeof SessionAttachmentDtoSchema>
 export type SessionAttachmentListDto = z.infer<typeof SessionAttachmentListDtoSchema>
 export type AttachmentDownloadChunkDto = z.infer<typeof AttachmentDownloadChunkDtoSchema>
+export type ToolOutputListItemDto = z.infer<typeof ToolOutputListItemDtoSchema>
+export type ToolOutputListDto = z.infer<typeof ToolOutputListDtoSchema>
+export type ToolOutputDownloadChunkDto = z.infer<typeof ToolOutputDownloadChunkDtoSchema>
 export type CancelSessionDto = z.infer<typeof CancelSessionDtoSchema>
 export type RenameSessionDto = z.infer<typeof RenameSessionDtoSchema>
 export type PatchSessionConfigDto = z.infer<typeof PatchSessionConfigDtoSchema>

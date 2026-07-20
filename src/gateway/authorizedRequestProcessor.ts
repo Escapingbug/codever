@@ -63,6 +63,8 @@ export function requestUsesDurableLedger(request: ClientGatewayRequestFrame): bo
         && request.payload.kind !== 'provider.sessions.list'
         && request.payload.kind !== 'attachment.list'
         && request.payload.kind !== 'attachment.download'
+        && request.payload.kind !== 'tool.output.list'
+        && request.payload.kind !== 'tool.output.download'
 }
 
 export function authorizedRequest(

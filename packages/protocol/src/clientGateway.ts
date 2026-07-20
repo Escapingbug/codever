@@ -23,6 +23,8 @@ import {
     SessionEventsDtoSchema,
     AttachmentUploadDtoSchema,
     AttachmentDownloadChunkDtoSchema,
+    ToolOutputListDtoSchema,
+    ToolOutputDownloadChunkDtoSchema,
     SessionAttachmentDtoSchema,
     SessionAttachmentListDtoSchema,
 } from './client'
@@ -89,6 +91,26 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         attachmentId: OpaqueIdSchema,
         offset: NonNegativeIntegerSchema,
         limit: PositiveIntegerSchema.max(196_608).optional(),
+    }).strict(),
+    z.object({
+        kind: z.literal('tool.output.list'),
+        sessionId: OpaqueIdSchema,
+    }).strict(),
+    z.object({
+        kind: z.literal('tool.output.download'),
+        sessionId: OpaqueIdSchema,
+        outputId: OpaqueIdSchema,
+        offset: NonNegativeIntegerSchema,
+        limit: PositiveIntegerSchema.max(196_608).optional(),
+    }).strict(),
+    z.object({
+        kind: z.literal('tool.output.delete'),
+        sessionId: OpaqueIdSchema,
+        outputIds: z.array(OpaqueIdSchema).min(1),
+    }).strict(),
+    z.object({
+        kind: z.literal('tool.output.clear'),
+        sessionId: OpaqueIdSchema,
     }).strict(),
     z.object({
         kind: z.literal('session.cancel'),
@@ -163,6 +185,8 @@ export const ClientGatewayCompletedPayloadSchema = z.union([
     SessionAttachmentListDtoSchema,
     SessionAttachmentDtoSchema,
     AttachmentDownloadChunkDtoSchema,
+    ToolOutputListDtoSchema,
+    ToolOutputDownloadChunkDtoSchema,
     MutationReceiptDtoSchema,
 ])
 

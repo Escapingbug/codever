@@ -30,6 +30,13 @@ export const ToolContentSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal('terminal'), terminalId: OpaqueIdSchema, text: z.string().optional() }).strict(),
 ])
 
+export const ToolOutputReferenceSchema = z.object({
+    outputId: OpaqueIdSchema,
+    sizeBytes: NonNegativeIntegerSchema,
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    mediaType: z.literal('application/json'),
+}).strict()
+
 const event = <T extends z.ZodRawShape>(shape: T) => z.object({
     ...shape,
     meta: EventMetaSchema.optional(),
@@ -56,8 +63,7 @@ export const ConversationEventSchema = z.discriminatedUnion('kind', [
         toolCallId: OpaqueIdSchema,
         toolName: z.string().min(1),
         category: z.enum(['read', 'edit', 'write', 'execute', 'search', 'agent', 'unknown']).optional(),
-        input: JsonValueSchema.optional(),
-        output: JsonValueSchema.optional(),
+        outputRef: ToolOutputReferenceSchema.optional(),
         isError: z.boolean().optional(),
         displayTitle: z.string().optional(),
         content: z.array(ToolContentSchema).optional(),
@@ -116,6 +122,7 @@ export type EventSource = z.infer<typeof EventSourceSchema>
 export type EventMeta = z.infer<typeof EventMetaSchema>
 export type DecisionOption = z.infer<typeof DecisionOptionSchema>
 export type ToolContent = z.infer<typeof ToolContentSchema>
+export type ToolOutputReference = z.infer<typeof ToolOutputReferenceSchema>
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>
 export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>
 

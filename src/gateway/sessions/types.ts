@@ -41,6 +41,7 @@ export interface GatewaySessionServiceOptions {
     createId?: () => string
     onSubscriberError?: (error: unknown) => void
     onDiagnostic?: (message: string) => void
+    toolOutputStore?: import('@/gateway/toolOutputs').GatewayToolOutputStore
 }
 
 export interface CreateGatewaySessionInput extends CreateSessionDto {

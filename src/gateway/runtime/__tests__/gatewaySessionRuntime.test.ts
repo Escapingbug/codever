@@ -10,8 +10,56 @@ import type {
 import type { AgentEvent } from '@/providers/types'
 import type { GatewayConversationEvent } from '../events'
 import { GatewaySessionRuntime } from '../gatewaySessionRuntime'
+import { GatewayToolOutputStore } from '@/gateway/toolOutputs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 describe('GatewaySessionRuntime', () => {
+    it('never journals or publishes raw tool input and output by default', async () => {
+        const huge = 'x'.repeat(4 * 1024 * 1024)
+        const provider = new MockProvider(() => iterable(async function* () {
+            yield { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: huge } }
+            yield { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: huge, isError: false }
+            yield { kind: 'result', status: 'success' }
+        }))
+        const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+        await createRuntime(provider, store).startQuery('run')
+
+        const tools = (await store.list('session-1')).events.filter(envelope => envelope.event.kind === 'tool')
+        expect(tools).toHaveLength(2)
+        expect(JSON.stringify(tools)).not.toContain(huge.slice(0, 1_000))
+        expect(Math.max(...tools.map(event => JSON.stringify(event).length))).toBeLessThan(4_096)
+    })
+
+    it('stores opted-in tool output locally and journals only a bounded reference', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-tool-output-'))
+        try {
+            const outputStore = await GatewayToolOutputStore.open(directory)
+            const huge = 'result'.repeat(700_000)
+            const provider = new MockProvider(() => iterable(async function* () {
+                yield { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: huge, isError: false }
+                yield { kind: 'result', status: 'success' }
+            }))
+            const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+            await createRuntime(provider, store, {
+                providerSettings: { retainToolOutputs: true },
+                toolOutputStore: outputStore,
+            }).startQuery('run')
+
+            const retained = await outputStore.list('session-1')
+            expect(retained).toHaveLength(1)
+            expect(retained[0]!.sizeBytes).toBeGreaterThan(4_000_000)
+            const completed = (await store.list('session-1')).events
+                .map(envelope => envelope.event)
+                .find(event => event.kind === 'tool' && event.phase === 'completed')
+            expect(completed).toMatchObject({ kind: 'tool', outputRef: { outputId: retained[0]!.outputId } })
+            expect(JSON.stringify(completed).length).toBeLessThan(2_048)
+        } finally {
+            await rm(directory, { recursive: true, force: true })
+        }
+    })
+
     it('serializes queries and publishes each event only after durable append', async () => {
         const gates = [deferred<void>(), deferred<void>()]
         const provider = new MockProvider((_prompt, _config, index) => iterable(async function* () {

@@ -7,6 +7,7 @@ import { GatewaySessionService, FileSessionMetadataRepository } from '@/gateway/
 import { toWireConversationEvent, type GatewayConversationEvent } from '@/gateway/runtime'
 import { FileConversationEventStore } from '@/platform/storage'
 import { ScriptedAgentProvider } from '../test/support/scriptedAgentProvider'
+import { GatewayToolOutputStore } from '@/gateway/toolOutputs'
 
 const cleanup: string[] = []
 
@@ -65,6 +66,41 @@ describe('C04/C05 scripted Gateway journey', () => {
         expect(wire.filter(event => event.kind === 'assistant_text_delta').map(event =>
             event.kind === 'assistant_text_delta' ? event.text : '')).toEqual(['Building complete.'])
         expect(wire.filter(event => event.kind === 'turn_finished')).toHaveLength(1)
+
+        await service.destroy()
+        await fixture.events.close()
+    })
+
+    it('keeps a multi-megabyte tool result out of the Matrix event path and retains it only when opted in', async () => {
+        const fixture = await createFixture()
+        const provider = new ScriptedAgentProvider()
+        const toolOutputs = await GatewayToolOutputStore.open(fixture.directory)
+        const service = await GatewaySessionService.open({
+            gatewayId: 'gateway-e2e', projects: fixture.projects, repository: fixture.repository,
+            eventStore: fixture.events, providerFactory: () => provider, toolOutputStore: toolOutputs,
+        })
+        const session = await service.create(fixture.project.id, {
+            provider: provider.name, title: 'Large output', config: { retainToolOutputs: true },
+        })
+        const result = service.sendMessage(session.id, 'Run verbose command', 'command-large', 'message-large')
+        const turn = await provider.nextTurn()
+        const body = 'x'.repeat(4 * 1024 * 1024)
+        turn.emit({ kind: 'tool_use', toolUseId: 'tool-large', toolName: 'Bash', input: { command: body } })
+        turn.emit({ kind: 'tool_result', toolUseId: 'tool-large', toolName: 'Bash', output: body, isError: false })
+        turn.finish('success')
+        await result
+
+        const stored = await fixture.events.list(session.id)
+        const wireTools = stored.events.flatMap(envelope => {
+            const event = toWireConversationEvent(envelope.event)
+            return event?.kind === 'tool' ? [event] : []
+        })
+        expect(wireTools).toHaveLength(2)
+        expect(Math.max(...wireTools.map(event => JSON.stringify(event).length))).toBeLessThan(4_096)
+        expect(JSON.stringify(wireTools)).not.toContain(body.slice(0, 1_000))
+        expect(await toolOutputs.list(session.id)).toMatchObject([{
+            toolCallId: 'tool-large', toolName: 'Bash', sizeBytes: expect.any(Number),
+        }])
 
         await service.destroy()
         await fixture.events.close()

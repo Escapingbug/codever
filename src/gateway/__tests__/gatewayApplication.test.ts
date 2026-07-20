@@ -7,6 +7,7 @@ import { GATEWAY_FEATURES, handleClientRequest, type ClientRequestContext } from
 import { ProjectRegistry } from '../projects'
 import { GatewayAttachmentStore, type ObjectBlobManifest, type ObjectBlobTransport } from '../attachments'
 import type { RichUserInput } from '@/runtime/semantic'
+import { GatewayToolOutputStore } from '../toolOutputs'
 
 const temporaryDirectories: string[] = []
 
@@ -33,6 +34,7 @@ describe('Gateway project.create request', () => {
         const context = {
             credentialId: 'credential-1',
             gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             inventory,
             projects,
             inventoryChanged: () => { revision += 1 },
@@ -104,6 +106,7 @@ describe('Gateway attachment requests', () => {
         let received: RichUserInput | undefined
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1', attachments,
+            toolOutputs: undefined as never,
             sessions: {
                 get: async () => ({ id: 'session-1' }),
                 acceptMessage: async (_sessionId: string, input: RichUserInput) => {
@@ -154,6 +157,7 @@ describe('Gateway attachment requests', () => {
         const staging = join(directory, 'matrix-staging')
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             attachments: await GatewayAttachmentStore.open(join(directory, 'attachments'), new TestRelayBlobs()),
             sessions: { get: async () => ({ id: 'session-1' }) } as never,
             matrixMedia: { download: async (_file, destination) => writeFile(destination, 'short') },
@@ -183,6 +187,7 @@ describe('Gateway attachment requests', () => {
         const attachments = await GatewayAttachmentStore.open(join(directory, 'attachments'), new TestRelayBlobs())
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1', attachments,
+            toolOutputs: undefined as never,
             sessions: { get: async () => ({ id: 'session-1', projectId: 'project-1' }) } as never,
             projects: { get: async () => ({ id: 'project-1', canonicalRoot: projectRoot }) } as never,
             inventory: undefined as never, events: undefined as never,
@@ -224,6 +229,7 @@ describe('Gateway command liveness', () => {
         const rename = vi.fn(async () => ({ id: 'session-1', title: 'Renamed task' }))
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             sessions: { rename } as never,
             attachments: undefined as never, inventory: undefined as never,
             projects: undefined as never, events: undefined as never,
@@ -243,6 +249,7 @@ describe('Gateway command liveness', () => {
         const revoke = vi.fn(async () => true)
         const context = {
             credentialId: 'trusted-phone', gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             executionTrust: { trust, revoke } as never,
             sessions: undefined as never, attachments: undefined as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
@@ -271,6 +278,7 @@ describe('Gateway command liveness', () => {
         let cancelCalls = 0
         const context = {
             credentialId: 'credential-1', gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             sessions: {
                 get: async () => ({ id: 'session-1' }),
                 acceptMessage: async () => ({ completion: completion.promise }),
@@ -297,6 +305,46 @@ describe('Gateway command liveness', () => {
         expect(cancelCalls).toBe(1)
         completion.resolve({ turnId: 'turn-1', status: 'cancelled' })
         await completion.promise
+    })
+})
+
+describe('Gateway tool output requests', () => {
+    it('lists, downloads in chunks, and deletes only explicitly retained Gateway-local results', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-gateway-tool-output-'))
+        temporaryDirectories.push(directory)
+        const toolOutputs = await GatewayToolOutputStore.open(directory)
+        const reference = await toolOutputs.retain({
+            sessionId: 'session-1', toolCallId: 'tool-1', toolName: 'Bash',
+            value: { output: 'x'.repeat(300_000) }, createdAt: '2026-07-20T00:00:00.000Z',
+        })
+        const context = {
+            credentialId: 'credential-1', gatewayId: 'gateway-1', toolOutputs,
+            sessions: { get: async () => ({ id: 'session-1' }) } as never,
+            attachments: undefined as never, inventory: undefined as never,
+            projects: undefined as never, events: undefined as never,
+            executionTrust: undefined as never, inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const listed = await handleClientRequest(frame('list-tool-output', {
+            kind: 'tool.output.list', sessionId: 'session-1',
+        }), context)
+        expect(listed.status).toBe('completed')
+        if (listed.status !== 'completed' || !('outputs' in listed.payload)) throw new Error('Expected output list')
+        expect(listed.payload.outputs).toMatchObject([{ outputId: reference.outputId, toolName: 'Bash' }])
+
+        const downloaded = await handleClientRequest(frame('download-tool-output', {
+            kind: 'tool.output.download', sessionId: 'session-1', outputId: reference.outputId,
+            offset: 0, limit: 32 * 1024,
+        }), context)
+        expect(downloaded.status).toBe('completed')
+        if (downloaded.status !== 'completed' || !('data' in downloaded.payload)) throw new Error('Expected output chunk')
+        expect(Buffer.from(downloaded.payload.data, 'base64')).toHaveLength(32 * 1024)
+        expect(downloaded.payload.nextOffset).toBe(32 * 1024)
+
+        expect((await handleClientRequest(frame('delete-tool-output', {
+            kind: 'tool.output.delete', sessionId: 'session-1', outputIds: [reference.outputId],
+        }), context)).status).toBe('completed')
+        expect(await toolOutputs.list('session-1')).toEqual([])
     })
 })
 

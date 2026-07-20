@@ -749,6 +749,27 @@ async function saveControls(patch: PatchSessionConfigDto): Promise<void> {
   }
 }
 
+async function clearToolOutputs(): Promise<void> {
+  if (!canMutate.value) return
+  try {
+    const stored = await state.api.listToolOutputs(sessionId.value)
+    if (!stored.outputs.length) {
+      liveError.value = 'No retained tool results to clear.'
+      return
+    }
+    const total = stored.outputs.reduce((sum, output) => sum + output.sizeBytes, 0)
+    if (!confirm(`Delete ${stored.outputs.length} retained tool results (${formatBytes(total)}) from this Computer?`)) return
+    await state.api.clearToolOutputs(sessionId.value)
+  } catch (error) {
+    liveError.value = error instanceof Error ? error.message : 'Stored tool results could not be cleared'
+  }
+}
+
+function setToolOutputRetention(retain: boolean): void {
+  if (!session.value) return
+  void saveControls({ config: { ...session.value.config, retainToolOutputs: retain } })
+}
+
 async function resolveDecision(decisionId: string, value: JsonValue): Promise<void> {
   if (!canMutate.value) return
   submittingDecisionId.value = decisionId
@@ -804,6 +825,7 @@ function runPrimaryAction(): void {
       <section ref="timelineElement" class="conversation-pane" aria-label="Conversation timeline" @scroll.passive="handleTimelineScroll">
         <div v-if="loadingOlder" class="history-loader"><span class="loader" /> Loading earlier messages…</div>
         <ConversationTimeline
+          :session-id="sessionId"
           :events="events"
           :pending-messages="pendingMessages"
           :mutable="canMutate"
@@ -824,7 +846,8 @@ function runPrimaryAction(): void {
       <footer class="composer-wrap">
         <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
         <section v-if="showSessionFiles" class="session-files-panel" aria-label="Files stored for this session">
-          <header><div><strong>Session files</strong><small>End-to-end encrypted Codever storage</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
+          <header><div><strong>Session storage</strong><small>Files and retained tool results on this Computer</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small" :disabled="!canMutate" @click="clearToolOutputs">Clear tool results…</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
+          <label class="tool-retention-setting"><input type="checkbox" :checked="session?.config.retainToolOutputs === true" :disabled="!canMutate || savingControls" @change="setToolOutputRetention(($event.target as HTMLInputElement).checked)" /><span><strong>Keep future tool results</strong><small>Off by default. Results stay on this Computer and load only when requested.</small></span></label>
           <div v-if="!sessionAttachments.length && !loadingSessionFiles" class="session-files-empty">No files are stored for this session.</div>
           <div v-else class="session-files-list">
             <article v-for="attachment in sessionAttachments" :key="attachment.attachmentId" class="session-file-row">

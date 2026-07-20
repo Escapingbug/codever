@@ -16,9 +16,10 @@ const envelope = {
         toolCallId: 'tool-1',
         toolName: 'shell',
         category: 'execute',
-        input: { command: 'npm test' },
-        output: { exitCode: 0 },
-        content: [{ type: 'terminal', terminalId: 'terminal-1', text: 'ok' }],
+        outputRef: {
+            outputId: 'output-1', sizeBytes: 14,
+            sha256: 'a'.repeat(64), mediaType: 'application/json',
+        },
     },
 } as const
 
@@ -41,11 +42,11 @@ describe('event wire schemas', () => {
         if (parsed.event.kind === 'tool') expect(parsed.event.toolCallId).toBe('tool-1')
     })
 
-    it('rejects unsupported versions and non-JSON provider objects', () => {
+    it('rejects unsupported versions and eager tool output bodies', () => {
         expect(() => parseSessionEventEnvelope({ ...envelope, schemaVersion: 2 })).toThrow()
         expect(() => parseSessionEventEnvelope({
             ...envelope,
-            event: { ...envelope.event, output: { callback: () => undefined } },
+            event: { ...envelope.event, output: { exitCode: 0 } },
         })).toThrow()
     })
 })

@@ -1,7 +1,7 @@
-import type { ConversationEvent as WireConversationEvent, JsonValue, ToolContent } from '@codever/protocol'
-import type { ToolResultContentBlock } from '@/providers/types'
+import type { ConversationEvent as WireConversationEvent, JsonValue } from '@codever/protocol'
 import type { ConversationEvent } from '@/runtime/semantic'
 import type { GatewayConversationEvent, GatewayUserMessageEvent } from './events'
+import type { ToolOutputReference } from '@codever/protocol'
 
 export function toWireConversationEvent(event: GatewayConversationEvent): WireConversationEvent | null {
     if (event.kind === 'user_message') {
@@ -111,11 +111,9 @@ function providerEventToWire(event: ConversationEvent): WireConversationEvent | 
                 toolCallId: event.toolCallId,
                 toolName: event.toolName,
                 ...(event.category ? { category: event.category } : {}),
-                ...(event.input !== undefined ? { input: jsonValue(event.input) } : {}),
-                ...(event.output !== undefined ? { output: jsonValue(event.output) } : {}),
+                ...('outputRef' in event && isToolOutputReference(event.outputRef) ? { outputRef: event.outputRef } : {}),
                 ...(event.isError !== undefined ? { isError: event.isError } : {}),
                 ...(event.displayTitle !== undefined ? { displayTitle: event.displayTitle } : {}),
-                ...(event.content ? { content: event.content.map((content) => wireToolContent(content, event.toolCallId)) } : {}),
                 meta,
             }
         case 'decision_request':
@@ -150,6 +148,15 @@ function providerEventToWire(event: ConversationEvent): WireConversationEvent | 
     }
 }
 
+function isToolOutputReference(value: unknown): value is ToolOutputReference {
+    if (!value || typeof value !== 'object') return false
+    const candidate = value as Partial<ToolOutputReference>
+    return typeof candidate.outputId === 'string'
+        && typeof candidate.sizeBytes === 'number'
+        && typeof candidate.sha256 === 'string'
+        && candidate.mediaType === 'application/json'
+}
+
 function inputText(input: GatewayUserMessageEvent['input']): string {
     if (typeof input === 'string') return input
     return input.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
@@ -166,21 +173,6 @@ function inputAttachments(input: GatewayUserMessageEvent['input']) {
             sizeBytes: part.sizeBytes ?? 0,
         }]
     }).filter(attachment => attachment.sizeBytes > 0)
-}
-
-function wireToolContent(content: ToolResultContentBlock, fallbackTerminalId: string): ToolContent {
-    if (content.type === 'content') {
-        return { type: 'text', text: content.text ?? '', mimeType: content.contentType }
-    }
-    if (content.type === 'diff') {
-        return {
-            type: 'diff',
-            path: content.path ?? '',
-            oldText: content.oldText ?? '',
-            newText: content.newText ?? '',
-        }
-    }
-    return { type: 'terminal', terminalId: content.terminalId ?? fallbackTerminalId }
 }
 
 function jsonObject(value: Record<string, unknown>): Record<string, JsonValue> {

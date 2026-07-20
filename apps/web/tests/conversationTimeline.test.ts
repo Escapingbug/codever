@@ -32,7 +32,7 @@ describe('conversation timeline interactions', () => {
   it('resolves a decision without also opening the event inspector', async () => {
     const onInspect = vi.fn()
     const wrapper = mount(ConversationTimeline, {
-      props: { events: [decision], mutable: true, inspectHandler: onInspect },
+      props: { events: [decision], sessionId: 'session-1', mutable: true, inspectHandler: onInspect },
     })
 
     await wrapper.get('.decision-options button').trigger('click')
@@ -51,7 +51,7 @@ describe('conversation timeline interactions', () => {
   it('selects an assistant event only while inspect mode is enabled', async () => {
     const onInspect = vi.fn()
     const wrapper = mount(ConversationTimeline, {
-      props: { events: [assistant], mutable: true, inspectable: true, inspectHandler: onInspect },
+      props: { events: [assistant], sessionId: 'session-1', mutable: true, inspectable: true, inspectHandler: onInspect },
     })
     await wrapper.get('.message--assistant').trigger('click')
     expect(onInspect).toHaveBeenCalledWith(assistant)

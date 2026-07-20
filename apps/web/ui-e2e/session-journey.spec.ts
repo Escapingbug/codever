@@ -382,6 +382,10 @@ test.describe('mobile Session business journey', () => {
     await page.getByRole('button', { name: /Files 1/ }).click()
     const files = page.getByRole('region', { name: 'Files stored for this session' })
     await expect(files).toContainText('requirements.txt')
+    await files.getByRole('checkbox', { name: 'Keep future tool results' }).check()
+    await expect.poll(() => page.evaluate(() => window.__CODEVER_E2E__.lastConfig())).toMatchObject({
+      config: { retainToolOutputs: true },
+    })
     await files.getByRole('checkbox', { name: 'Select file for deletion' }).check()
     page.once('dialog', dialog => dialog.accept())
     await files.getByRole('button', { name: 'Delete (1)' }).click()

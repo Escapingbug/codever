@@ -4,6 +4,7 @@ import type {
   Gateway, InventorySnapshot, JsonValue, MutationReceiptDto, PatchSessionConfigDto, Project,
   ProviderSessionListDto, RenameSessionDto, SendMessageDto, SessionAttachmentDto, SessionAttachmentListDto,
   SessionEventEnvelope,
+  ToolOutputDownloadChunkDto, ToolOutputListDto, ToolOutputListItemDto,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
 import {
@@ -232,6 +233,34 @@ export class CodeverApi {
       offset = chunk.nextOffset
     }
     return new Blob(chunks, { type: attachment.mimeType })
+  }
+  async listToolOutputs(sessionId: string): Promise<ToolOutputListDto> {
+    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
+      kind: 'tool.output.list', sessionId,
+    })) as ToolOutputListDto
+  }
+  async deleteToolOutputs(sessionId: string, outputIds: string[]): Promise<MutationReceiptDto> {
+    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
+      kind: 'tool.output.delete', sessionId, outputIds,
+    })) as MutationReceiptDto
+  }
+  async clearToolOutputs(sessionId: string): Promise<MutationReceiptDto> {
+    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
+      kind: 'tool.output.clear', sessionId,
+    })) as MutationReceiptDto
+  }
+  async downloadToolOutput(output: ToolOutputListItemDto): Promise<Blob> {
+    const chunks: BlobPart[] = []; let offset = 0
+    while (true) {
+      const chunk = this.completed(await this.request(this.requireSessionGateway(output.sessionId), {
+        kind: 'tool.output.download', sessionId: output.sessionId, outputId: output.outputId, offset,
+      })) as ToolOutputDownloadChunkDto
+      if (chunk.offset !== offset) throw new CodeverApiError('Tool output download returned an unexpected offset')
+      chunks.push(decodeBase64(chunk.data))
+      if (chunk.nextOffset === null) break
+      offset = chunk.nextOffset
+    }
+    return new Blob(chunks, { type: output.mediaType })
   }
 
   private async inventory(gatewayId: string): Promise<InventorySnapshot> {

@@ -1,5 +1,6 @@
 import type { AgentQueryInput } from '@/providers/provider'
 import type { ConversationEvent } from '@/runtime/semantic'
+import type { ToolOutputReference } from '@codever/protocol'
 
 export type GatewaySessionState = 'idle' | 'querying' | 'canceling' | 'error' | 'closed'
 export type GatewayTurnStatus = 'success' | 'error' | 'cancelled' | 'max_turns'
@@ -77,6 +78,10 @@ export interface GatewayDecisionEvent {
     reason?: string
 }
 
+export type GatewayToolEvent = Omit<Extract<ConversationEvent, { kind: 'tool' }>, 'input' | 'output' | 'content'> & {
+    outputRef?: ToolOutputReference
+}
+
 /** Events persisted in the authoritative Gateway conversation journal. */
 export type GatewayConversationEvent =
     | GatewayUserMessageEvent
@@ -86,4 +91,5 @@ export type GatewayConversationEvent =
     | GatewayProviderSessionEvent
     | GatewaySettingsEvent
     | GatewayDecisionEvent
-    | ConversationEvent
+    | Exclude<ConversationEvent, { kind: 'tool' }>
+    | GatewayToolEvent
