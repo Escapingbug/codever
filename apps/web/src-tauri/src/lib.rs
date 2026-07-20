@@ -136,6 +136,35 @@ fn secure_secret_delete(account: String) -> Result<(), String> {
     }
 }
 
+fn persist_matrix_session(
+    secret_account: &str,
+    store_passphrase: &str,
+    session: StoredMatrixSession,
+) -> Result<(), String> {
+    let encoded = serde_json::to_string(&MatrixSecret {
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        store_passphrase: store_passphrase.to_owned(),
+    })
+    .map_err(|error| error.to_string())?;
+    keyring_entry(secret_account)?
+        .set_password(&encoded)
+        .map_err(|error| error.to_string())
+}
+
+fn install_matrix_session_persistence(
+    transport: &MatrixTransport,
+    secret_account: String,
+    store_passphrase: String,
+) -> Result<(), String> {
+    transport
+        .install_session_persistence(move |session| {
+            persist_matrix_session(&secret_account, &store_passphrase, session)
+                .map_err(|error| std::io::Error::other(error).into())
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn matrix_initialize(
     app: tauri::AppHandle,
@@ -177,13 +206,12 @@ async fn matrix_initialize(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let tasks = start_matrix_sync(
-        app,
+    install_matrix_session_persistence(
         &transport,
         secret_account,
         secret.store_passphrase.clone(),
-        connection_id,
-    );
+    )?;
+    let tasks = start_matrix_sync(app, &transport, connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(())
 }
@@ -191,8 +219,6 @@ async fn matrix_initialize(
 fn start_matrix_sync(
     app: tauri::AppHandle,
     transport: &MatrixTransport,
-    secret_account: String,
-    store_passphrase: String,
     connection_id: String,
 ) -> Vec<tauri::async_runtime::JoinHandle<()>> {
     let mut tasks = Vec::with_capacity(4);
@@ -204,25 +230,14 @@ fn start_matrix_sync(
         loop {
             match session_changes.recv().await {
                 Ok(SessionChange::TokensRefreshed) => {
-                    let result = session_transport
-                        .stored_session()
-                        .ok_or_else(|| "Matrix refreshed tokens but returned no session".to_owned())
-                        .and_then(|session| {
-                            let encoded = serde_json::to_string(&MatrixSecret {
-                                access_token: session.access_token,
-                                refresh_token: session.refresh_token,
-                                store_passphrase: store_passphrase.clone(),
-                            })
-                            .map_err(|error| error.to_string())?;
-                            keyring_entry(&secret_account)?
-                                .set_password(&encoded)
-                                .map_err(|error| error.to_string())
-                        });
-                    if let Err(message) = result {
+                    if let Err(error) = session_transport.ensure_session_persisted() {
                         emit_matrix_payload(
                             &session_app,
                             &session_connection_id,
-                            serde_json::json!({ "kind": "session_error", "message": message }),
+                            serde_json::json!({
+                                "kind": "session_error",
+                                "message": format!("Unable to persist refreshed Matrix credentials: {error:#}"),
+                            }),
                         );
                     }
                 }
@@ -349,13 +364,8 @@ async fn matrix_login(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    let tasks = start_matrix_sync(
-        app,
-        &transport,
-        input.secret_account,
-        store_passphrase,
-        input.connection_id,
-    );
+    install_matrix_session_persistence(&transport, input.secret_account, store_passphrase)?;
+    let tasks = start_matrix_sync(app, &transport, input.connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)
 }
@@ -415,13 +425,12 @@ async fn matrix_reauthenticate(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    let tasks = start_matrix_sync(
-        app,
+    install_matrix_session_persistence(
         &transport,
         input.secret_account,
         previous.store_passphrase,
-        input.connection_id,
-    );
+    )?;
+    let tasks = start_matrix_sync(app, &transport, input.connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)
 }
@@ -710,7 +719,18 @@ async fn matrix_transport(
 
 #[tauri::command]
 async fn matrix_close(state: tauri::State<'_, MatrixState>) -> Result<(), String> {
-    if let Some(runtime) = state.0.write().await.take() {
+    let mut state = state.0.write().await;
+    if let Some(runtime) = state.as_ref() {
+        runtime
+            .transport
+            .checkpoint_session()
+            .map_err(|error| format!("could not safely close Matrix session: {error:#}"))?;
+        runtime
+            .transport
+            .ensure_session_persisted()
+            .map_err(|error| format!("could not safely close Matrix session: {error:#}"))?;
+    }
+    if let Some(runtime) = state.take() {
         runtime.transport.stop();
         abort_and_join(runtime.tasks).await;
     }

@@ -276,6 +276,12 @@ async fn handle(
             Ok(json!({ "cancelled": true }))
         }
         "status" => Ok(json!({ "initialized": state.read().await.is_some() })),
+        "session.checkpoint" => {
+            let transport = require_transport(state).await?;
+            Ok(serde_json::to_value(transport.stored_session().context(
+                "Matrix session is unavailable during checkpoint",
+            )?)?)
+        }
         _ => bail!("unknown Matrix transport method"),
     }
 }

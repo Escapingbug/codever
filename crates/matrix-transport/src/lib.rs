@@ -35,7 +35,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock as StdRwLock,
+        Arc, Mutex as StdMutex, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -172,6 +172,26 @@ pub struct MatrixTransport {
     verifications: Arc<RwLock<HashMap<String, VerificationRequest>>>,
     verification_devices: Arc<RwLock<HashMap<String, OwnedDeviceId>>>,
     locally_verified_devices: Arc<StdRwLock<HashSet<OwnedDeviceId>>>,
+    session_persistence: Arc<StdMutex<SessionPersistenceState>>,
+}
+
+type SessionSaver = dyn Fn(StoredMatrixSession) -> Result<()> + Send + Sync;
+
+#[derive(Default)]
+struct SessionPersistenceState {
+    saver: Option<Arc<SessionSaver>>,
+    last_error: Option<String>,
+}
+
+fn stored_session_from_client(client: &Client) -> Option<StoredMatrixSession> {
+    let session = client.matrix_auth().session()?;
+    Some(StoredMatrixSession {
+        homeserver: client.homeserver().to_string(),
+        user_id: session.meta.user_id,
+        device_id: session.meta.device_id,
+        access_token: session.tokens.access_token,
+        refresh_token: session.tokens.refresh_token,
+    })
 }
 
 impl MatrixTransport {
@@ -330,6 +350,7 @@ impl MatrixTransport {
             verifications: Arc::new(RwLock::new(HashMap::new())),
             verification_devices: Arc::new(RwLock::new(HashMap::new())),
             locally_verified_devices: Arc::new(StdRwLock::new(HashSet::new())),
+            session_persistence: Arc::new(StdMutex::new(SessionPersistenceState::default())),
         };
         transport.install_event_handler();
         transport.refresh_locally_verified_devices().await?;
@@ -349,14 +370,91 @@ impl MatrixTransport {
     }
 
     pub fn stored_session(&self) -> Option<StoredMatrixSession> {
-        let session = self.client.matrix_auth().session()?;
-        Some(StoredMatrixSession {
-            homeserver: self.client.homeserver().to_string(),
-            user_id: session.meta.user_id,
-            device_id: session.meta.device_id,
-            access_token: session.tokens.access_token,
-            refresh_token: session.tokens.refresh_token,
-        })
+        stored_session_from_client(&self.client)
+    }
+
+    /// Installs durable token persistence in the synchronous Matrix refresh path.
+    ///
+    /// The SDK currently logs callback errors without failing the refresh request, so
+    /// Codever records failures and requires callers to checkpoint before shutdown.
+    pub fn install_session_persistence<F>(&self, saver: F) -> Result<()>
+    where
+        F: Fn(StoredMatrixSession) -> Result<()> + Send + Sync + 'static,
+    {
+        let saver: Arc<SessionSaver> = Arc::new(saver);
+        {
+            let mut state = self.session_persistence.lock().unwrap();
+            if state.saver.is_some() {
+                bail!("Matrix session persistence is already installed");
+            }
+            state.saver = Some(saver.clone());
+            state.last_error = None;
+        }
+
+        let persistence = self.session_persistence.clone();
+        self.client
+            .set_session_callbacks(
+                Box::new(|client| {
+                    client.session_tokens().ok_or_else(|| {
+                        io::Error::other("Matrix session tokens are unavailable").into()
+                    })
+                }),
+                Box::new(move |client| {
+                    let result = stored_session_from_client(&client)
+                        .context("Matrix refreshed tokens but returned no session")
+                        .and_then(|session| saver(session));
+                    let mut state = persistence.lock().unwrap();
+                    match &result {
+                        Ok(()) => state.last_error = None,
+                        Err(error) => state.last_error = Some(format!("{error:#}")),
+                    }
+                    result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(io::Error::other(format!("{error:#}")))
+                    })
+                }),
+            )
+            .context("failed to install Matrix session persistence callbacks")?;
+        Ok(())
+    }
+
+    pub async fn refresh_access_token(&self) -> Result<()> {
+        self.client
+            .matrix_auth()
+            .refresh_access_token()
+            .await
+            .context("failed to refresh Matrix access token")
+    }
+
+    pub fn checkpoint_session(&self) -> Result<()> {
+        let saver = self
+            .session_persistence
+            .lock()
+            .unwrap()
+            .saver
+            .clone()
+            .context("Matrix session persistence is not installed")?;
+        let result = self
+            .stored_session()
+            .context("Matrix session is unavailable during checkpoint")
+            .and_then(|session| saver(session));
+        let mut state = self.session_persistence.lock().unwrap();
+        match result {
+            Ok(()) => {
+                state.last_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                state.last_error = Some(format!("{error:#}"));
+                Err(error)
+            }
+        }
+    }
+
+    pub fn ensure_session_persisted(&self) -> Result<()> {
+        if let Some(error) = self.session_persistence.lock().unwrap().last_error.clone() {
+            bail!("Matrix session credentials are not durable: {error}");
+        }
+        Ok(())
     }
 
     pub async fn ensure_control_room(&self) -> Result<OwnedRoomId> {

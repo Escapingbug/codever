@@ -14,7 +14,9 @@ sanitized ACP transcripts preserve it for normal CI.
   Matrix API simulation and checks interaction, layout, and rendering behavior.
 - **Durable transport**: Matrix timeline/sync tests verify transaction
   idempotency, backlog catch-up, ordering, reconnect, E2EE trust and liveness
-  separately from Provider output.
+  separately from Provider output. Matrix authentication tests drive the real
+  SDK refresh endpoint and require rotated credentials to become durable before
+  lifecycle shutdown can complete.
 - **Live canary**: the opt-in real Codex journey validates assumptions that a
   recording cannot, then any discovered failure becomes a replay fixture.
 - **Android device**: packaging, WebView lifecycle, secure storage, pairing, and
@@ -47,7 +49,7 @@ sanitized ACP transcripts preserve it for normal CI.
 | C14 | Browse/attach an inactive Provider-native Session | automated bridge journey | automated | command integration | manual | Covered deterministically |
 | C15 | Incrementally load old history without moving scroll anchor | N/A | automated | pagination unit | manual | Covered deterministically |
 | C16 | Gateway restart during/after a turn and continue | automated restart/resume | cached UI covered by C07 | pending/completed crash ledger tests | live plan only | Covered deterministically |
-| C17 | Matrix sync restart, duplicate delivery, redelivery, and backlog | N/A | automated reconnect/backlog/dedup | transaction-ID convergence, replay guard, ordering | live process fault injection optional | Covered deterministically |
+| C17 | Matrix sync restart, token rotation, duplicate delivery, redelivery, and backlog | N/A | automated reconnect/backlog/dedup | SDK refresh, durable checkpoint, concurrent rotation, restart, transaction-ID convergence and ordering | real Synapse refresh/restart smoke passed | Covered deterministically |
 | C18 | Provider error, unavailable Provider, retry, and recovery | refusal/failure/retry fixture | automated | response tests | replayed in CI | Covered |
 | C19 | Branch/fork/edit/retry Provider history | unsupported | unsupported | unsupported | unsupported | Not implemented |
 | C20 | Android install, login, SAS, background/resume, network switch | N/A | viewport and lifecycle unit | Matrix token refresh and sync resume | physical-device recheck required | Partial |
@@ -68,6 +70,10 @@ sanitized ACP transcripts preserve it for normal CI.
 6. An APK is not ready for user trial until the installed-app vertical gate in
    [`android-live-e2e.md`](android-live-e2e.md) passes against real Matrix and a
    real Gateway. Mobile-viewport Playwright does not satisfy this requirement.
+7. Authentication lifecycle tests must cross the native SDK boundary. A UI mock
+   that directly injects `session expired` verifies recovery presentation only;
+   it does not verify token rotation, secure-store persistence, concurrent
+   refresh, process shutdown, or restart from the latest generation.
 
 Run the deterministic business gate with `pnpm test:business-e2e`. It executes
 the ACP/Gateway journeys, Web type checking and unit tests, and all mobile

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { JsonLineRpcPeer } from './jsonLineRpcPeer'
+import { SessionCredentialBarrier } from './sessionCredentialBarrier'
 
 export interface MatrixSessionCredential {
     homeserver: string
@@ -65,7 +66,9 @@ export class NativeMatrixTransport implements MatrixTransport {
     private process?: ChildProcessWithoutNullStreams
     private peer?: JsonLineRpcPeer
     private readonly listeners = new Set<(event: NativeMatrixEvent) => void>()
-    private credentialWrite = Promise.resolve()
+    private readonly credentialBarrier = new SessionCredentialBarrier<MatrixSessionCredential>(
+        session => this.options.onSessionCredential?.(session) ?? Promise.resolve(),
+    )
 
     constructor(private readonly options: NativeMatrixTransportOptions) {}
 
@@ -88,10 +91,10 @@ export class NativeMatrixTransport implements MatrixTransport {
                 this.report(new Error(`Matrix event consumer lagged: ${notificationMessage(notification.params)}`))
             } else if (notification.method === 'session_tokens' && isMatrixSessionCredential(notification.params)) {
                 const session = notification.params
-                this.credentialWrite = this.credentialWrite
-                    .then(() => this.options.onSessionCredential?.(session))
-                    .then(() => undefined)
-                    .catch(error => this.report(new Error('Unable to persist refreshed Matrix credentials', { cause: error })))
+                this.credentialBarrier.enqueue(session)
+                void this.credentialBarrier.flush().catch(error => {
+                    this.report(new Error('Unable to persist refreshed Matrix credentials', { cause: error }))
+                })
             } else if (notification.method === 'session_error') {
                 this.report(new Error(notificationMessage(notification.params)))
             }
@@ -163,15 +166,34 @@ export class NativeMatrixTransport implements MatrixTransport {
 
     async close(): Promise<void> {
         const child = this.process
+        const peer = this.peer
+        let persistenceError: unknown
+        if (peer && this.options.onSessionCredential) {
+            try {
+                const session = await peer.request<MatrixSessionCredential>('session.checkpoint', {})
+                if (!isMatrixSessionCredential(session)) {
+                    throw new Error('Matrix transport returned an invalid session checkpoint')
+                }
+                this.credentialBarrier.enqueue(session)
+                await this.credentialBarrier.flush()
+            } catch (error) {
+                persistenceError = error
+                this.report(new Error('Unable to checkpoint Matrix credentials before shutdown', { cause: error }))
+            }
+        }
         this.process = undefined
         this.peer?.close()
         this.peer = undefined
-        if (!child || child.exitCode !== null) return
-        child.kill()
-        await new Promise<void>(resolve => {
-            const timer = setTimeout(resolve, 5_000)
-            child.once('exit', () => { clearTimeout(timer); resolve() })
-        })
+        if (child && child.exitCode === null) {
+            child.kill()
+            await new Promise<void>(resolve => {
+                const timer = setTimeout(resolve, 5_000)
+                child.once('exit', () => { clearTimeout(timer); resolve() })
+            })
+        }
+        if (persistenceError) {
+            throw new Error('Matrix credentials were not durable at shutdown', { cause: persistenceError })
+        }
     }
 
     private report(error: Error): void {

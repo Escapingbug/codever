@@ -58,6 +58,24 @@ Event transaction IDs are stable Codever request/event IDs, so Matrix retries
 converge on one event. Clients demultiplex decrypted events by Gateway, Project
 and Session ID and persist those streams in their local cache.
 
+## Session credential lifecycle
+
+Synapse refresh tokens rotate. Codever installs Matrix SDK session callbacks so
+each new access/refresh-token pair is synchronously written to the platform
+credential store during refresh. The async `TokensRefreshed` broadcast is used
+for status reporting only; it is not the durability mechanism.
+
+The native client checkpoints the current token generation before closing its
+Matrix runtime. A failed secure-store write remains an explicit lifecycle error
+and prevents the runtime from being reported as cleanly closed. The Gateway's
+parent process similarly requests a final credential checkpoint and drains its
+serialized write queue before terminating the Matrix transport subprocess.
+
+Deterministic tests cover rotation-before-return, failed-write recovery,
+concurrent refresh, enqueue-during-flush and restart from the rotated token. The
+`matrix_refresh_restart_smoke` example repeats the rotation/restart sequence
+against a real Synapse server without printing account credentials.
+
 ## Event types
 
 | Type | Direction | Purpose |
