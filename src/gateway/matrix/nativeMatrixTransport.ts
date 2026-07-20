@@ -121,7 +121,13 @@ export class NativeMatrixTransport implements MatrixTransport {
     async send(input: MatrixSendInput): Promise<string> {
         const peer = this.peer
         if (!peer) throw new Error('Matrix transport is not initialized')
-        const result = await peer.request<{ eventId: string }>('send', input)
+        let result: { eventId: string }
+        try {
+            result = await peer.request<{ eventId: string }>('send', input)
+        } catch (error) {
+            const bytes = Buffer.byteLength(JSON.stringify(input.content), 'utf8')
+            throw new Error(`Matrix send ${input.eventType} failed (${bytes} plaintext bytes)`, { cause: error })
+        }
         if (!result || typeof result.eventId !== 'string') throw new Error('Matrix transport returned no event ID')
         return result.eventId
     }

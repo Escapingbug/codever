@@ -35,9 +35,11 @@ describe('NativeMatrixClient event boundary', () => {
     client.subscribeStatus(status => statuses.push(status))
 
     await client.restore({ homeserver: 'https://matrix.test', userId: '@codever:test', deviceId: 'PHONE' }, 'matrix-primary')
-    tauri.listener?.({ payload: { kind: 'sync_error', message: 'temporary outage' } })
-    tauri.listener?.({ payload: { kind: 'session_error', message: 'token expired' } })
+    const connectionId = activeConnectionId()
+    tauri.listener?.({ payload: { connectionId, kind: 'sync_error', message: 'temporary outage' } })
+    tauri.listener?.({ payload: { connectionId, kind: 'session_error', message: 'token expired' } })
     tauri.listener?.({ payload: {
+      connectionId,
       roomId: '!control:test', encrypted: true, verifiedDevice: true,
       event: { type: 'io.codever.gateway.v1', content: { gateway: {} } },
     } })
@@ -56,7 +58,7 @@ describe('NativeMatrixClient event boundary', () => {
     client.subscribeStatus(status => statuses.push(status))
     await client.restore({ homeserver: 'https://example.test', userId: '@user:test', deviceId: 'PHONE' }, 'matrix-primary')
 
-    tauri.listener?.({ payload: { kind: 'sync_healthy', message: 'Matrix sync is active' } })
+    tauri.listener?.({ payload: { connectionId: activeConnectionId(), kind: 'sync_healthy', message: 'Matrix sync is active' } })
 
     expect(statuses).toEqual([{ kind: 'sync_healthy', message: 'Matrix sync is active' }])
   })
@@ -67,12 +69,60 @@ describe('NativeMatrixClient event boundary', () => {
     await client.restore({ homeserver: 'https://matrix.test', userId: '@codever:test', deviceId: 'PHONE' }, 'matrix-primary')
 
     tauri.listener?.({ payload: undefined })
-    tauri.listener?.({ payload: { roomId: '!control:test' } })
+    tauri.listener?.({ payload: { connectionId: activeConnectionId(), roomId: '!control:test' } })
     const replayed: unknown[] = []
     client.subscribe(event => replayed.push(event))
 
     expect(replayed).toEqual([])
-    expect(error).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledOnce()
     error.mockRestore()
   })
+
+  it('drops late status and timeline events emitted by a retired native connection', async () => {
+    const client = new NativeMatrixClient()
+    const statuses: unknown[] = []
+    const events: unknown[] = []
+    client.subscribeStatus(status => statuses.push(status))
+    client.subscribe(event => events.push(event))
+    const session = { homeserver: 'https://matrix.test', userId: '@codever:test', deviceId: 'PHONE' }
+
+    await client.restore(session, 'matrix-primary')
+    const firstInitialize = invokeCalls().find(call => call[0] === 'matrix_initialize')
+    const firstConnectionId = firstInitialize?.[1].connectionId
+    expect(firstConnectionId).toEqual(expect.any(String))
+
+    await client.close()
+    await client.restore(session, 'matrix-primary')
+    const initializeCalls = invokeCalls().filter(call => call[0] === 'matrix_initialize')
+    const secondConnectionId = initializeCalls.at(-1)?.[1].connectionId
+    expect(secondConnectionId).toEqual(expect.any(String))
+    expect(secondConnectionId).not.toBe(firstConnectionId)
+
+    tauri.listener?.({ payload: {
+      connectionId: firstConnectionId, kind: 'session_error',
+      message: "[403 / M_FORBIDDEN] refresh token isn't valid anymore",
+    } })
+    tauri.listener?.({ payload: {
+      connectionId: firstConnectionId,
+      roomId: '!control:test', encrypted: true, verifiedDevice: true,
+      event: { type: 'io.codever.gateway.v1', content: { gateway: {} } },
+    } })
+    tauri.listener?.({ payload: {
+      connectionId: secondConnectionId, kind: 'sync_healthy', message: 'Matrix sync is active',
+    } })
+
+    expect(statuses).toEqual([{ kind: 'sync_healthy', message: 'Matrix sync is active' }])
+    expect(events).toEqual([])
+  })
 })
+
+function activeConnectionId(): string {
+  const calls = invokeCalls().filter(call => call[0] === 'matrix_initialize')
+  const value = calls.at(-1)?.[1].connectionId
+  if (typeof value !== 'string') throw new Error('matrix_initialize did not receive a connectionId')
+  return value
+}
+
+function invokeCalls(): Array<[string, Record<string, unknown>]> {
+  return tauri.invoke.mock.calls as unknown as Array<[string, Record<string, unknown>]>
+}

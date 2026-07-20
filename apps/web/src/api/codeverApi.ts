@@ -36,14 +36,17 @@ export class CodeverApi {
     executionAccount: string
     executionKeyId: string
   }): void {
-    this.matrix?.close()
-    this.matrix = new MatrixGatewayClient({
-      transport: this.native,
-      ...input,
+    this.matrix ??= new MatrixGatewayClient({
+      transport: this.native, ...input,
       onSecurityError: message => console.error(`[matrix-security] ${message}`),
     })
     this.matrix.start()
     this.setConnectionState('connected')
+  }
+
+  async suspendTransport(): Promise<void> {
+    await this.native.close()
+    this.setConnectionState('disconnected')
   }
 
   async disconnect(): Promise<void> {

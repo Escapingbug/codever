@@ -87,7 +87,7 @@ describe('Matrix client session', () => {
     }
   })
 
-  it('marks a silent weak-network sync as reconnecting after the liveness deadline', async () => {
+  it('does not tear down a healthy SDK session merely because the room is quiet', async () => {
     vi.useFakeTimers()
     try {
       const storage = memoryStorage()
@@ -102,8 +102,9 @@ describe('Matrix client session', () => {
 
       await vi.advanceTimersByTimeAsync(MATRIX_SYNC_STALE_MS)
 
-      expect(restored.connectionState.value).toBe('reconnecting')
-      expect(restored.initializationError.value).toContain('not responding')
+      expect(restored.connectionState.value).toBe('connected')
+      expect(restored.initializationError.value).toBe('')
+      expect(second.restore).toHaveBeenCalledOnce()
       restored.destroy()
     } finally {
       vi.useRealTimers()

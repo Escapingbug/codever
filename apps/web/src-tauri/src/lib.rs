@@ -23,7 +23,12 @@ const KEYRING_SERVICE: &str = "id.my.anciety.codever";
 const MATRIX_EVENT_NAME: &str = "codever://matrix-event";
 
 #[derive(Default)]
-struct MatrixState(RwLock<Option<MatrixTransport>>);
+struct MatrixState(RwLock<Option<MatrixRuntime>>);
+
+struct MatrixRuntime {
+    transport: MatrixTransport,
+    tasks: Vec<tauri::async_runtime::JoinHandle<()>>,
+}
 
 #[derive(Default)]
 struct MediaUploadState(RwLock<HashMap<String, StagedMediaUpload>>);
@@ -58,6 +63,7 @@ struct MatrixLoginInput {
     password: String,
     device_display_name: String,
     secret_account: String,
+    connection_id: String,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +73,7 @@ struct MatrixReauthenticateInput {
     password: String,
     device_display_name: String,
     secret_account: String,
+    connection_id: String,
 }
 
 fn keyring_entry(account: &str) -> Result<keyring_core::Entry, String> {
@@ -135,7 +142,9 @@ async fn matrix_initialize(
     state: tauri::State<'_, MatrixState>,
     session: MatrixPublicSession,
     secret_account: String,
+    connection_id: String,
 ) -> Result<(), String> {
+    validate_connection_id(&connection_id)?;
     if state.0.read().await.is_some() {
         return Ok(());
     }
@@ -168,13 +177,14 @@ async fn matrix_initialize(
     )
     .await
     .map_err(|error| error.to_string())?;
-    start_matrix_sync(
+    let tasks = start_matrix_sync(
         app,
         &transport,
         secret_account,
         secret.store_passphrase.clone(),
+        connection_id,
     );
-    *state.0.write().await = Some(transport);
+    *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(())
 }
 
@@ -183,11 +193,14 @@ fn start_matrix_sync(
     transport: &MatrixTransport,
     secret_account: String,
     store_passphrase: String,
-) {
+    connection_id: String,
+) -> Vec<tauri::async_runtime::JoinHandle<()>> {
+    let mut tasks = Vec::with_capacity(4);
     let mut session_changes = transport.subscribe_to_session_changes();
     let session_transport = transport.clone();
     let session_app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let session_connection_id = connection_id.clone();
+    tasks.push(tauri::async_runtime::spawn(async move {
         loop {
             match session_changes.recv().await {
                 Ok(SessionChange::TokensRefreshed) => {
@@ -206,15 +219,17 @@ fn start_matrix_sync(
                                 .map_err(|error| error.to_string())
                         });
                     if let Err(message) = result {
-                        let _ = session_app.emit(
-                            MATRIX_EVENT_NAME,
+                        emit_matrix_payload(
+                            &session_app,
+                            &session_connection_id,
                             serde_json::json!({ "kind": "session_error", "message": message }),
                         );
                     }
                 }
                 Ok(SessionChange::UnknownToken(error)) => {
-                    let _ = session_app.emit(
-                        MATRIX_EVENT_NAME,
+                    emit_matrix_payload(
+                        &session_app,
+                        &session_connection_id,
                         serde_json::json!({
                             "kind": "session_error",
                             "message": format!("Matrix session is no longer valid: {error:?}"),
@@ -225,42 +240,70 @@ fn start_matrix_sync(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    }));
     let mut events = transport.subscribe();
     let event_app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let event_connection_id = connection_id.clone();
+    tasks.push(tauri::async_runtime::spawn(async move {
         while let Ok(event) = events.recv().await {
-            let _ = event_app.emit(MATRIX_EVENT_NAME, event);
+            emit_matrix_payload(&event_app, &event_connection_id, event);
         }
-    });
+    }));
     let mut sync_activity = transport.subscribe_to_sync_activity();
     let sync_app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let sync_connection_id = connection_id.clone();
+    tasks.push(tauri::async_runtime::spawn(async move {
         loop {
             match sync_activity.recv().await {
                 Ok(()) => {
-                    let _ = sync_app.emit(
-                        MATRIX_EVENT_NAME,
-                        serde_json::json!({ "kind": "sync_healthy", "message": "Matrix sync is active" }),
-                    );
+                    emit_matrix_payload(&sync_app, &sync_connection_id,
+                        serde_json::json!({ "kind": "sync_healthy", "message": "Matrix sync is active" }));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    }));
     let sync_transport = transport.clone();
-    tauri::async_runtime::spawn(async move {
+    tasks.push(tauri::async_runtime::spawn(async move {
         if let Err(error) = sync_transport.sync().await {
-            let _ = app.emit(
-                MATRIX_EVENT_NAME,
+            emit_matrix_payload(
+                &app,
+                &connection_id,
                 serde_json::json!({
                     "kind": "sync_error",
                     "message": error.to_string(),
                 }),
             );
         }
-    });
+    }));
+    tasks
+}
+
+fn validate_connection_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("invalid Matrix connection ID".into());
+    }
+    Ok(())
+}
+
+fn emit_matrix_payload(app: &tauri::AppHandle, connection_id: &str, payload: impl Serialize) {
+    let Ok(mut value) = serde_json::to_value(payload) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "connectionId".into(),
+        Value::String(connection_id.to_owned()),
+    );
+    let _ = app.emit(MATRIX_EVENT_NAME, value);
 }
 
 #[tauri::command]
@@ -269,6 +312,7 @@ async fn matrix_login(
     state: tauri::State<'_, MatrixState>,
     input: MatrixLoginInput,
 ) -> Result<MatrixPublicSession, String> {
+    validate_connection_id(&input.connection_id)?;
     if state.0.read().await.is_some() {
         return Err("Matrix transport is already initialized".into());
     }
@@ -305,8 +349,14 @@ async fn matrix_login(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    start_matrix_sync(app, &transport, input.secret_account, store_passphrase);
-    *state.0.write().await = Some(transport);
+    let tasks = start_matrix_sync(
+        app,
+        &transport,
+        input.secret_account,
+        store_passphrase,
+        input.connection_id,
+    );
+    *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)
 }
 
@@ -316,6 +366,7 @@ async fn matrix_reauthenticate(
     state: tauri::State<'_, MatrixState>,
     input: MatrixReauthenticateInput,
 ) -> Result<MatrixPublicSession, String> {
+    validate_connection_id(&input.connection_id)?;
     if state.0.read().await.is_some() {
         return Err("Matrix transport is already initialized".into());
     }
@@ -364,13 +415,14 @@ async fn matrix_reauthenticate(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    start_matrix_sync(
+    let tasks = start_matrix_sync(
         app,
         &transport,
         input.secret_account,
         previous.store_passphrase,
+        input.connection_id,
     );
-    *state.0.write().await = Some(transport);
+    *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)
 }
 
@@ -382,12 +434,7 @@ async fn matrix_send(
     transaction_id: String,
     content: Value,
 ) -> Result<String, String> {
-    let transport = state
-        .0
-        .read()
-        .await
-        .clone()
-        .ok_or("Matrix transport is not initialized")?;
+    let transport = matrix_transport(&state).await?;
     transport
         .send_raw(
             &room_id.parse().map_err(|_| "invalid Matrix room ID")?,
@@ -403,12 +450,7 @@ async fn matrix_send(
 async fn matrix_ensure_control_room(
     state: tauri::State<'_, MatrixState>,
 ) -> Result<String, String> {
-    let transport = state
-        .0
-        .read()
-        .await
-        .clone()
-        .ok_or("Matrix transport is not initialized")?;
+    let transport = matrix_transport(&state).await?;
     transport
         .ensure_control_room()
         .await
@@ -661,16 +703,27 @@ async fn matrix_transport(
         .0
         .read()
         .await
-        .clone()
+        .as_ref()
+        .map(|runtime| runtime.transport.clone())
         .ok_or_else(|| "Matrix transport is not initialized".to_owned())
 }
 
 #[tauri::command]
 async fn matrix_close(state: tauri::State<'_, MatrixState>) -> Result<(), String> {
-    if let Some(transport) = state.0.write().await.take() {
-        transport.stop();
+    if let Some(runtime) = state.0.write().await.take() {
+        runtime.transport.stop();
+        abort_and_join(runtime.tasks).await;
     }
     Ok(())
+}
+
+async fn abort_and_join(tasks: Vec<tauri::async_runtime::JoinHandle<()>>) {
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
 }
 
 #[tauri::command]
@@ -764,4 +817,34 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Codever");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::abort_and_join;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_waits_until_retired_matrix_tasks_release_their_resources() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let task = tauri::async_runtime::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        abort_and_join(vec![task]).await;
+
+        assert!(dropped.load(Ordering::Acquire));
+    }
 }

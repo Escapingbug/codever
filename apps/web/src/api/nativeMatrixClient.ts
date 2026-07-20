@@ -30,6 +30,8 @@ export interface MatrixTransportStatus {
   message: string
 }
 
+type NativeMatrixPayload = (MatrixTransportEvent | MatrixTransportStatus) & { connectionId: string }
+
 export interface ExecutionIdentity {
   keyId: string
   publicKey: Record<string, unknown>
@@ -69,6 +71,7 @@ export interface SignExecutionInput {
 
 export class NativeMatrixClient {
   private unlisten?: UnlistenFn
+  private connectionId?: string
   private readonly subscribers = new Set<(event: MatrixTransportEvent) => void>()
   private readonly statusSubscribers = new Set<(status: MatrixTransportStatus) => void>()
   private readonly backlog: MatrixTransportEvent[] = []
@@ -82,13 +85,15 @@ export class NativeMatrixClient {
   }): Promise<MatrixPublicSession> {
     this.requireNative()
     await this.listen()
-    return invoke<MatrixPublicSession>('matrix_login', { input })
+    const connectionId = this.beginConnection()
+    return invoke<MatrixPublicSession>('matrix_login', { input: { ...input, connectionId } })
   }
 
   async restore(session: MatrixPublicSession, secretAccount: string): Promise<void> {
     this.requireNative()
     await this.listen()
-    await invoke('matrix_initialize', { session, secretAccount })
+    const connectionId = this.beginConnection()
+    await invoke('matrix_initialize', { session, secretAccount, connectionId })
   }
 
   async reauthenticate(input: {
@@ -99,7 +104,8 @@ export class NativeMatrixClient {
   }): Promise<MatrixPublicSession> {
     this.requireNative()
     await this.listen()
-    return invoke<MatrixPublicSession>('matrix_reauthenticate', { input })
+    const connectionId = this.beginConnection()
+    return invoke<MatrixPublicSession>('matrix_reauthenticate', { input: { ...input, connectionId } })
   }
 
   async ensureControlRoom(): Promise<string> {
@@ -175,9 +181,9 @@ export class NativeMatrixClient {
   }
 
   async close(): Promise<void> {
+    this.connectionId = undefined
     this.unlisten?.()
     this.unlisten = undefined
-    this.subscribers.clear()
     this.backlog.length = 0
     if (isTauri()) await invoke('matrix_close')
   }
@@ -185,23 +191,37 @@ export class NativeMatrixClient {
   private async listen(): Promise<void> {
     if (this.unlisten) return
     this.unlisten = await listen<unknown>(MATRIX_EVENT_NAME, ({ payload }) => {
+      if (!isCurrentConnectionPayload(payload, this.connectionId)) return
       if (isMatrixTransportStatus(payload)) {
-        for (const subscriber of this.statusSubscribers) subscriber(payload)
+        const { connectionId: _, ...status } = payload as NativeMatrixPayload
+        for (const subscriber of this.statusSubscribers) subscriber(status as MatrixTransportStatus)
         return
       }
       if (!isMatrixTransportEvent(payload)) {
         console.error('[matrix] Ignored malformed native Matrix payload')
         return
       }
-      this.backlog.push(payload)
+      const { connectionId: _, ...event } = payload as NativeMatrixPayload
+      this.backlog.push(event as MatrixTransportEvent)
       if (this.backlog.length > 2_000) this.backlog.splice(0, this.backlog.length - 2_000)
-      for (const subscriber of this.subscribers) subscriber(payload)
+      for (const subscriber of this.subscribers) subscriber(event as MatrixTransportEvent)
     })
+  }
+
+  private beginConnection(): string {
+    const connectionId = crypto.randomUUID()
+    this.connectionId = connectionId
+    return connectionId
   }
 
   private requireNative(): void {
     if (!isTauri()) throw new Error('The secure Matrix transport requires the Codever native app')
   }
+}
+
+function isCurrentConnectionPayload(value: unknown, connectionId: string | undefined): boolean {
+  return !!connectionId && !!value && typeof value === 'object' && !Array.isArray(value)
+    && (value as { connectionId?: unknown }).connectionId === connectionId
 }
 
 export function isMatrixTransportEvent(value: unknown): value is MatrixTransportEvent {

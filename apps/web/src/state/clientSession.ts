@@ -21,6 +21,7 @@ interface PersistedState {
 const STORAGE_KEY = 'codever.client.matrix.v1'
 const MATRIX_SECRET_ACCOUNT = 'matrix-primary'
 const EXECUTION_SECRET_ACCOUNT = 'execution-primary'
+/** Quiet Matrix rooms are valid; this is retained only as a reliability-test duration. */
 export const MATRIX_SYNC_STALE_MS = 45_000
 
 export function normalizeHomeserver(value: string): MatrixServerProfile {
@@ -46,7 +47,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   let unsubscribeStatus: (() => void) | undefined
   let reconnectPromise: Promise<void> | undefined
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
-  let syncWatchdogTimer: ReturnType<typeof setTimeout> | undefined
   let reconnectAttempt = 0
   let destroyed = false
 
@@ -82,7 +82,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
         executionKeyId: execution.keyId,
       })
       connectionState.value = 'connected'
-      armSyncWatchdog()
       initializationError.value = ''
       persist()
     } catch (error) {
@@ -98,8 +97,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
       restoreSnapshot()
       unsubscribeConnection = api.subscribeConnection(value => {
         connectionState.value = value
-        if (value === 'connected') armSyncWatchdog()
-        else clearSyncWatchdog()
       })
       unsubscribeStatus = native.subscribeStatus(status => {
         if (status.kind === 'sync_healthy') {
@@ -107,12 +104,10 @@ export function createClientSession(storage: Storage = localStorage, native = ne
           reconnectAttempt = 0
           clearReconnectTimer()
           api.resume()
-          armSyncWatchdog()
           return
         }
         initializationError.value = status.message
         if (!identity.value || destroyed) return
-        clearSyncWatchdog()
         api.markSuspended()
         if (isReauthenticationError(status.message)) {
           connectionState.value = 'disconnected'
@@ -134,7 +129,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
 
   async function logout(): Promise<void> {
     clearReconnectTimer()
-    clearSyncWatchdog()
     await api.disconnect()
     identity.value = undefined
     initializationError.value = ''
@@ -157,7 +151,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
     clearReconnectTimer()
     reconnectPromise = (async () => {
       try {
-        await api.disconnect()
+        await api.suspendTransport()
         connectionState.value = phase
         const current = identity.value
         if (!current) return
@@ -168,7 +162,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
           executionAccount: EXECUTION_SECRET_ACCOUNT,
           executionKeyId: current.executionKeyId,
         })
-        armSyncWatchdog()
         initializationError.value = ''
         reconnectAttempt = 0
         clearReconnectTimer()
@@ -188,7 +181,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
     const current = identity.value
     if (!current) throw new Error('No Matrix session is available to reauthenticate')
     clearReconnectTimer()
-    await api.disconnect()
+    await api.suspendTransport()
     connectionState.value = 'connecting'
     try {
       const session = await native.reauthenticate({
@@ -204,7 +197,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
         executionAccount: EXECUTION_SECRET_ACCOUNT,
         executionKeyId: current.executionKeyId,
       })
-      armSyncWatchdog()
       initializationError.value = ''
       reconnectAttempt = 0
       persist()
@@ -228,23 +220,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   function clearReconnectTimer(): void {
     if (reconnectTimer) clearTimeout(reconnectTimer)
     reconnectTimer = undefined
-  }
-
-  function armSyncWatchdog(): void {
-    clearSyncWatchdog()
-    if (!identity.value || destroyed) return
-    syncWatchdogTimer = setTimeout(() => {
-      syncWatchdogTimer = undefined
-      if (!identity.value || destroyed || api.connectionState !== 'connected') return
-      initializationError.value = 'Matrix synchronization is not responding; reconnecting'
-      api.markSuspended()
-      scheduleReconnect()
-    }, MATRIX_SYNC_STALE_MS)
-  }
-
-  function clearSyncWatchdog(): void {
-    if (syncWatchdogTimer) clearTimeout(syncWatchdogTimer)
-    syncWatchdogTimer = undefined
   }
 
   function restoreSnapshot(): void {
@@ -274,7 +249,6 @@ export function createClientSession(storage: Storage = localStorage, native = ne
     destroy() {
       destroyed = true
       clearReconnectTimer()
-      clearSyncWatchdog()
       unsubscribeConnection?.()
       unsubscribeStatus?.()
     },

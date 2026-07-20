@@ -28,6 +28,7 @@ import {
     gatewayVerificationDirectory, type MatrixTransport,
 } from './matrix'
 import { ConversationWakeupPublisher } from './matrix/conversationWakeupPublisher'
+import { selectWireEventPage } from './matrix/wireEventPage'
 import { GatewayToolOutputStore } from './toolOutputs'
 
 export const GATEWAY_FEATURES = [
@@ -453,14 +454,7 @@ export async function handleClientRequest(
                     0,
                 )
                 const limit = requestedLimit ?? 100
-                const eligible = before !== undefined
-                    ? all.filter(event => event.seq < before)
-                    : after !== undefined
-                        ? all.filter(event => event.seq > after)
-                        : all
-                const selected = after !== undefined
-                    ? eligible.slice(0, limit)
-                    : eligible.slice(-limit)
+                const selected = selectWireEventPage(all, { after, before, limit })
                 const firstSeq = selected.at(0)?.seq
                 const lastSeq = selected.at(-1)?.seq
                 payload = {

@@ -281,6 +281,7 @@ describe('Gateway command liveness', () => {
         const trust = vi.fn(async () => ({ keyId: 'key-2' }))
         const context = {
             credentialId: 'trusted-phone', gatewayId: 'gateway-1',
+            toolOutputs: undefined as never,
             executionTrust: { trust } as never,
             matrixDeviceTrust: { trust: vi.fn(async () => { throw new Error('Matrix device was not found') }) },
             sessions: undefined as never, attachments: undefined as never,
