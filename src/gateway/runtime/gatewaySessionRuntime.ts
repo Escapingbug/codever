@@ -40,6 +40,8 @@ export interface GatewaySessionRuntimeConfig {
     toolOutputStore?: GatewayToolOutputStore
 }
 
+const PROVIDER_TEXT_FLUSH_INTERVAL_MS = 250
+
 export interface GatewayRuntimeSettings {
     model?: string
     providerSettings: Record<string, unknown>
@@ -232,10 +234,12 @@ export class GatewaySessionRuntime {
                 })
                 this.activeHandle = handle
                 let pendingText: Extract<AgentEvent, { kind: 'text' }> | undefined
+                let textFlushDeadline = 0
                 const flushText = async () => {
                     if (!pendingText) return
                     const event = pendingText
                     pendingText = undefined
+                    textFlushDeadline = 0
                     const result = await this.recordProviderEvent(event, turnId)
                     if (result) {
                         status = result.status
@@ -243,28 +247,49 @@ export class GatewaySessionRuntime {
                     }
                 }
 
-                for await (const providerEvent of handle.events) {
-                    if (this.activeAbortController.signal.aborted) {
+                const iterator = handle.events[Symbol.asyncIterator]()
+                let nextEvent = iterator.next()
+                let iteratorCompleted = false
+                try {
+                    while (true) {
+                        const pending = pendingText
+                            ? await waitForProviderEvent(nextEvent, textFlushDeadline - Date.now())
+                            : { kind: 'event' as const, result: await nextEvent }
+                        if (pending.kind === 'flush') {
+                            await flushText()
+                            continue
+                        }
+                        if (pending.result.done) {
+                            iteratorCompleted = true
+                            break
+                        }
+                        const providerEvent = pending.result.value
+                        if (this.activeAbortController.signal.aborted) {
+                            status = 'cancelled'
+                            break
+                        }
+                        if (providerEvent.kind === 'text') {
+                            if (!pendingText) textFlushDeadline = Date.now() + PROVIDER_TEXT_FLUSH_INTERVAL_MS
+                            pendingText = pendingText
+                                ? { ...pendingText, text: pendingText.text + providerEvent.text }
+                                : providerEvent
+                            nextEvent = iterator.next()
+                            if (pendingText.text.length < 256) continue
+                            await flushText()
+                            continue
+                        }
                         await flushText()
-                        status = 'cancelled'
-                        break
+                        const result = await this.recordProviderEvent(providerEvent, turnId)
+                        if (result) {
+                            status = result.status
+                            summary = result.summary
+                        }
+                        nextEvent = iterator.next()
                     }
-                    if (providerEvent.kind === 'text') {
-                        pendingText = pendingText
-                            ? { ...pendingText, text: pendingText.text + providerEvent.text }
-                            : providerEvent
-                        if (pendingText.text.length < 256) continue
-                        await flushText()
-                        continue
-                    }
+                } finally {
                     await flushText()
-                    const result = await this.recordProviderEvent(providerEvent, turnId)
-                    if (result) {
-                        status = result.status
-                        summary = result.summary
-                    }
+                    if (!iteratorCompleted) await iterator.return?.()
                 }
-                await flushText()
             }
             if (this.activeAbortController.signal.aborted) status = 'cancelled'
         } catch (error) {
@@ -516,6 +541,26 @@ export class GatewaySessionRuntime {
         this.subscribers.clear()
         if (firstError) throw firstError
     }
+}
+
+function waitForProviderEvent<T>(
+    nextEvent: Promise<IteratorResult<T>>,
+    timeoutMs: number,
+): Promise<{ kind: 'event'; result: IteratorResult<T> } | { kind: 'flush' }> {
+    if (timeoutMs <= 0) return Promise.resolve({ kind: 'flush' })
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ kind: 'flush' }), timeoutMs)
+        void nextEvent.then(
+            result => {
+                clearTimeout(timer)
+                resolve({ kind: 'event', result })
+            },
+            error => {
+                clearTimeout(timer)
+                reject(error)
+            },
+        )
+    })
 }
 
 function boundedText(value: string, maxLength: number): string {

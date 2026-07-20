@@ -305,7 +305,54 @@ describe('GatewaySessionRuntime', () => {
         expect(text).toHaveLength(4)
         expect(text.map(event => event.text).join('')).toBe('x'.repeat(1_000))
     })
+
+    it('flushes a short text delta while the Provider stream remains open', async () => {
+        vi.useFakeTimers()
+        try {
+            const waiting = deferred<void>()
+            const release = deferred<void>()
+            const provider = new MockProvider(() => iterable(async function* () {
+                yield { kind: 'text', text: 'visible before the next Provider event' }
+                waiting.resolve()
+                await release.promise
+                yield { kind: 'result', status: 'success' }
+            }))
+            const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+            const runtime = createRuntime(provider, store)
+
+            const execution = await runtime.beginQuery('stream text promptly')
+            await waiting.promise
+            expect(textEvents(await store.list('session-1'))).toHaveLength(0)
+
+            await vi.advanceTimersByTimeAsync(250)
+            expect(textEvents(await store.list('session-1')).map(event => event.text))
+                .toEqual(['visible before the next Provider event'])
+
+            release.resolve()
+            await execution.completion
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('flushes the buffered text tail when the Provider stream fails', async () => {
+        const provider = new MockProvider(() => iterable(async function* () {
+            yield { kind: 'text', text: 'keep this tail' }
+            throw new Error('simulated Provider disconnect')
+        }))
+        const store = new MemoryConversationEventStore<GatewayConversationEvent>()
+        const runtime = createRuntime(provider, store)
+
+        await expect(runtime.startQuery('preserve failure tail')).resolves.toMatchObject({ status: 'error' })
+        expect(textEvents(await store.list('session-1')).map(event => event.text)).toEqual(['keep this tail'])
+    })
 })
+
+function textEvents(page: Awaited<ReturnType<MemoryConversationEventStore<GatewayConversationEvent>['list']>>) {
+    return page.events.map(value => value.event)
+        .filter((event): event is Extract<GatewayConversationEvent, { kind: 'assistant_text_delta' }> =>
+            event.kind === 'assistant_text_delta')
+}
 
 class TrackingStore extends MemoryConversationEventStore<GatewayConversationEvent> {
     readonly appendedEventIds = new Set<string>()
