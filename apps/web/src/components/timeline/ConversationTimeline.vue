@@ -11,11 +11,12 @@ const props = defineProps<{
   events: SessionEventEnvelope[]
   pendingMessages?: PendingUserMessage[]
   mutable: boolean
+  inspectable?: boolean
+  inspectHandler?: (event: SessionEventEnvelope) => void
   submittingDecisionId?: string
 }>()
 const emit = defineEmits<{
   resolveDecision: [decisionId: string, value: JsonValue]
-  select: [event: SessionEventEnvelope]
   openLocalFile: [path: string]
 }>()
 const entries = computed(() => buildTimeline(props.events))
@@ -24,10 +25,15 @@ const time = (timestamp: string) => new Intl.DateTimeFormat(undefined, {
   hour: '2-digit', minute: '2-digit',
 }).format(new Date(timestamp))
 
-function select(event: Event, envelope: SessionEventEnvelope): void {
+function inspectFromTimeline(event: Event): void {
+  if (!props.inspectable) return
   const target = event.target
-  if (target instanceof Element && target.closest('button, a, input, select, textarea, summary, [role="button"]')) return
-  emit('select', envelope)
+  if (!(target instanceof Element)) return
+  if (target.closest('button, a, input, select, textarea, summary, [role="button"]')) return
+  const item = target.closest<HTMLElement>('[data-inspect-event-id]')
+  const eventId = item?.dataset.inspectEventId
+  const envelope = props.events.find(value => value.eventId === eventId)
+  if (envelope) props.inspectHandler?.(envelope)
 }
 </script>
 
@@ -35,19 +41,21 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
   <div
     v-if="entries.length || pendingMessages?.length"
     class="timeline"
+    :class="{ 'timeline--inspectable': inspectable }"
     role="log"
     aria-live="polite"
     aria-relevant="additions text"
+    @click.capture="inspectFromTimeline"
   >
     <template v-for="entry in entries" :key="entry.key">
       <article
         v-if="entry.type === 'assistant'"
         class="message message--assistant"
         :data-timeline-key="entry.key"
+        :data-inspect-event-id="entry.events[0]!.eventId"
         :aria-label="`Agent response (${entry.status}): ${entry.text}`"
         role="article"
-        tabindex="0"
-        @click="select($event, entry.events[0]!)"
+        :tabindex="inspectable ? 0 : undefined"
       >
         <div class="message-body">
           <div class="message-meta message-meta--agent">
@@ -60,17 +68,17 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         </div>
       </article>
 
-      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" :data-timeline-key="entry.key" @click="select($event, entry.events.at(-1)!)" />
+      <ToolEventCard v-else-if="entry.type === 'tool'" :entry="entry" :data-timeline-key="entry.key" :data-inspect-event-id="entry.events.at(-1)!.eventId" />
 
       <template v-else>
         <article
           v-if="entry.envelope.event.kind === 'user_message'"
           class="message message--user"
           :data-timeline-key="entry.key"
+          :data-inspect-event-id="entry.envelope.eventId"
           :aria-label="`Your message: ${entry.envelope.event.text}`"
           role="article"
-          tabindex="0"
-          @click="select($event, entry.envelope)"
+          :tabindex="inspectable ? 0 : undefined"
         >
           <div class="message-body">
             <div class="message-meta"><strong>You</strong><span>{{ time(entry.envelope.timestamp) }}</span></div>
@@ -86,20 +94,20 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
         <DecisionEventCard
           v-else-if="entry.envelope.event.kind === 'decision_request'"
           :data-timeline-key="entry.key"
+          :data-inspect-event-id="entry.envelope.eventId"
           :request="entry.envelope.event"
           :resolution="decisionResolution(events, entry.envelope.event.decisionId)"
           :disabled="!mutable"
           :submitting="submittingDecisionId === entry.envelope.event.decisionId"
           @resolve="emit('resolveDecision', entry.envelope.event.decisionId, $event)"
-          @click="select($event, entry.envelope)"
         />
 
         <article
           v-else-if="entry.envelope.event.kind === 'status'"
           class="event-card status-event"
           :data-timeline-key="entry.key"
+          :data-inspect-event-id="entry.envelope.eventId"
           :class="`status-event--${entry.envelope.event.level}`"
-          @click="select($event, entry.envelope)"
         >
           <span>{{ entry.envelope.event.level === 'error' ? '!' : 'i' }}</span>
           <p>{{ entry.envelope.event.message }}</p>
@@ -109,7 +117,7 @@ function select(event: Event, envelope: SessionEventEnvelope): void {
           v-else-if="entry.envelope.event.kind !== 'decision_resolved'"
           class="system-event"
           :data-timeline-key="entry.key"
-          @click="select($event, entry.envelope)"
+          :data-inspect-event-id="entry.envelope.eventId"
         >
           <span />
           <strong>{{ entry.envelope.event.kind.replaceAll('_', ' ') }}</strong>

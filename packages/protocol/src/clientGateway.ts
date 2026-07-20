@@ -13,6 +13,7 @@ import {
     CreateProjectDtoSchema,
     CreateSessionDtoSchema,
     MutationReceiptDtoSchema,
+    RenameSessionDtoSchema,
     PatchSessionConfigDtoSchema,
     ProjectDtoSchema,
     ProviderSessionListDtoSchema,
@@ -98,6 +99,11 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
         kind: z.literal('session.archive.set'),
         sessionId: OpaqueIdSchema,
         archived: z.boolean(),
+    }).strict(),
+    z.object({
+        kind: z.literal('session.rename'),
+        sessionId: OpaqueIdSchema,
+        input: RenameSessionDtoSchema,
     }).strict(),
     z.object({
         kind: z.literal('session.config.patch'),

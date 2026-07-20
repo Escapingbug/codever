@@ -39,6 +39,7 @@ describe('GatewaySessionService', () => {
             discoverySupported: true,
             models: [{ id: 'model-a', name: 'Model A' }],
             permissionModes: ['default', 'bypassPermissions'],
+            controls: [],
             capabilities: {
                 resume: true,
                 cancel: true,
@@ -181,6 +182,10 @@ describe('GatewaySessionService', () => {
             mode: 'plan',
             config: { reasoning: 'low' },
         })
+
+        const renamed = await service.rename(firstCreate.id, '  Renamed task  ', 'rename-1')
+        expect(renamed.title).toBe('Renamed task')
+        expect((await service.rename(firstCreate.id, 'ignored duplicate', 'rename-1')).title).toBe('Renamed task')
 
         await service.destroy()
         await fixture.events.close()

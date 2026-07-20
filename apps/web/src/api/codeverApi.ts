@@ -2,7 +2,7 @@ import type {
   AttachmentDownloadChunkDto, AttachmentUploadDto, CancelSessionDto, CodeverSession,
   ClientGatewayRequestPayload, ClientGatewayResponseFrame, CreateProjectDto, CreateSessionDto,
   Gateway, InventorySnapshot, JsonValue, MutationReceiptDto, PatchSessionConfigDto, Project,
-  ProviderSessionListDto, SendMessageDto, SessionAttachmentDto, SessionAttachmentListDto,
+  ProviderSessionListDto, RenameSessionDto, SendMessageDto, SessionAttachmentDto, SessionAttachmentListDto,
   SessionEventEnvelope,
 } from '@codever/protocol'
 import type { InjectionKey } from 'vue'
@@ -108,6 +108,11 @@ export class CodeverApi {
   async setSessionArchived(sessionId: string, archived: boolean): Promise<MutationReceiptDto> {
     return this.completed(await this.request(this.requireSessionGateway(sessionId), {
       kind: 'session.archive.set', sessionId, archived,
+    })) as MutationReceiptDto
+  }
+  async renameSession(sessionId: string, input: RenameSessionDto): Promise<MutationReceiptDto> {
+    return this.completed(await this.request(this.requireSessionGateway(sessionId), {
+      kind: 'session.rename', sessionId, input,
     })) as MutationReceiptDto
   }
   async patchSessionConfig(sessionId: string, input: PatchSessionConfigDto): Promise<MutationReceiptDto> {

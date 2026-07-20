@@ -151,6 +151,9 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .session-row { display: grid; grid-template-columns: 12px minmax(180px, 1fr) auto 160px 20px; align-items: center; gap: 14px; min-height: 66px; padding: 10px 16px; border-bottom: 1px solid var(--line-soft); background: var(--panel); }
 .session-row--button { width: 100%; color: inherit; text-align: left; border-top: 0; border-right: 0; border-left: 0; cursor: pointer; }
 .session-row--task { grid-template-columns: 12px minmax(180px, 1fr) auto 160px auto; cursor: pointer; }
+.dialog-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(7, 9, 6, .72); }
+.rename-dialog { width: min(440px, 100%); box-shadow: 0 24px 80px rgba(0, 0, 0, .55); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .task-archive { padding: 6px 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: transparent; cursor: pointer; }
 .task-archive:hover { color: var(--text); background: var(--panel-2); }
 .session-row:last-child { border-bottom: 0; }
@@ -313,6 +316,8 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .inspector > pre { max-height: none; padding: 16px; font-size: .6rem; }
 .inspector-empty { display: grid; min-height: 70%; place-items: center; align-content: center; padding: 20px; color: var(--muted); text-align: center; font-size: .72rem; }
 .inspector-empty span { font-size: 1.5rem; color: #4e5746; }
+.session-header-actions { display: flex; align-items: center; gap: 8px; }
+.timeline:not(.timeline--inspectable) .message, .timeline:not(.timeline--inspectable) .event-card, .timeline:not(.timeline--inspectable) .system-event { cursor: default; }
 .composer-wrap { grid-column: 1; position: relative; padding: 8px 24px 16px; background: linear-gradient(transparent, var(--bg) 22%); }
 .composer { max-width: 760px; margin: 0 auto; padding: 10px 12px 8px; border: 1px solid #414839; border-radius: 12px; background: #1c2019; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
 .composer:focus-within { border-color: #617a3c; }
@@ -356,6 +361,9 @@ pre, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-3); font-size: .52rem; }
 .send-button { display: grid; width: 30px; height: 30px; place-items: center; color: #12150d; border: 0; border-radius: 8px; background: var(--accent); font-size: 1rem; font-weight: 800; cursor: pointer; }
 .send-button:disabled { color: var(--muted); background: #30352b; cursor: not-allowed; }
+.send-button--stop { color: white; background: var(--danger); }
+.session-controls-loading, .session-controls-unavailable { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; color: var(--muted); font-size: .68rem; }
+.session-controls-loading .loader { width: 13px; height: 13px; }
 .queue-option { display: block; max-width: 760px; margin: 0 auto 5px; color: var(--warning); font-size: .65rem; }
 .session-load-state { grid-column: 1 / 3; display: grid; min-height: 50vh; place-items: center; align-content: center; gap: 12px; color: var(--muted); }
 .loader { width: 24px; height: 24px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }

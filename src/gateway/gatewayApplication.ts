@@ -375,6 +375,14 @@ export async function handleClientRequest(
                 )
                 payload = mutationCompleted(request.idempotencyKey, completedAt)
                 break
+            case 'session.rename':
+                await context.sessions.rename(
+                    request.payload.sessionId,
+                    request.payload.input.title,
+                    request.idempotencyKey,
+                )
+                payload = mutationCompleted(request.idempotencyKey, completedAt)
+                break
             case 'session.config.patch':
                 await context.sessions.patchConfig(request.payload.sessionId, {
                     ...request.payload.input,

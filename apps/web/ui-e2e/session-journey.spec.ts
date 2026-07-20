@@ -409,6 +409,39 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.inspector')).not.toHaveClass(/inspector--open/)
   })
 
+  test('C10 opens event details only in Inspect mode and Back closes details first', async ({ page }) => {
+    const reply = page.locator('.message--assistant').filter({ hasText: 'Build ready.' })
+    await reply.click()
+    await expect(page.locator('.inspector')).not.toHaveClass(/inspector--open/)
+
+    await page.getByRole('button', { name: 'Inspect events' }).click()
+    await expect(page.getByRole('button', { name: 'Done inspecting' })).toBeVisible()
+    await expect(page.locator('.timeline')).toHaveClass(/timeline--inspectable/)
+    await expect(reply).toHaveAttribute('data-inspect-event-id')
+    await reply.locator('.message-meta').click()
+    await expect(page.locator('.inspector')).toHaveClass(/inspector--open/)
+
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: 'Build Android client' })).toBeVisible()
+    await expect(page.locator('.inspector')).not.toHaveClass(/inspector--open/)
+  })
+
+  test('C14 renames a linked task by long press without opening it', async ({ page }) => {
+    await page.goto('./e2e.html#/projects/gateway-e2e/project-e2e')
+    const task = page.getByRole('button', { name: 'Open task Build Android client' })
+    await task.dispatchEvent('pointerdown', { pointerType: 'touch', clientX: 30, clientY: 30 })
+    await page.waitForTimeout(600)
+    await task.dispatchEvent('pointerup', { pointerType: 'touch', clientX: 30, clientY: 30 })
+
+    const dialog = page.getByRole('dialog', { name: 'Rename task' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('textbox', { name: 'Title' }).fill('Android release task')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(page.getByRole('button', { name: 'Open task Android release task' })).toBeVisible()
+    await expect(page).toHaveURL(/#\/projects\/gateway-e2e\/project-e2e$/)
+  })
+
   test('C13 archives and restores a task without treating page visits as activity', async ({ page }) => {
     await page.getByRole('button', { name: 'Archive' }).click()
     await expect(page.getByRole('heading', { name: 'Tasks' })).toBeVisible()

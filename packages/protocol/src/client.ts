@@ -9,12 +9,24 @@ export const ProjectListDtoSchema = z.object({ gatewayId: OpaqueIdSchema, projec
 export const ProjectDtoSchema = z.object({ project: ProjectSchema }).strict()
 export const SessionListDtoSchema = z.object({ projectId: OpaqueIdSchema, sessions: z.array(CodeverSessionSchema) }).strict()
 export const SessionDtoSchema = z.object({ session: CodeverSessionSchema }).strict()
+export const ProviderSessionControlDtoSchema = z.discriminatedUnion('kind', [
+    z.object({
+        kind: z.literal('toggle'), id: z.string().min(1), label: z.string().min(1),
+        configKey: z.string().min(1), description: z.string().optional(),
+    }).strict(),
+    z.object({
+        kind: z.literal('select'), id: z.string().min(1), label: z.string().min(1),
+        configKey: z.string().min(1), description: z.string().optional(),
+        options: z.array(z.object({ value: z.string(), label: z.string().min(1) }).strict()).min(1),
+    }).strict(),
+])
 export const ProviderSessionListDtoSchema = z.object({
     projectId: OpaqueIdSchema,
     provider: z.string().min(1),
     discoverySupported: z.boolean(),
     models: z.array(ProviderModelSchema),
     permissionModes: z.array(z.string().min(1)),
+    controls: z.array(ProviderSessionControlDtoSchema),
     capabilities: z.object({
         resume: z.boolean(),
         cancel: z.boolean(),
@@ -89,6 +101,7 @@ export const AttachmentDownloadChunkDtoSchema = z.object({
     nextOffset: NonNegativeIntegerSchema.nullable(),
 }).strict()
 export const CancelSessionDtoSchema = z.object({ reason: z.string().min(1).optional() }).strict()
+export const RenameSessionDtoSchema = z.object({ title: z.string().trim().min(1).max(200) }).strict()
 export const PatchSessionConfigDtoSchema = z.object({
     config: JsonObjectSchema,
     model: z.string().min(1).nullable().optional(),
@@ -110,6 +123,7 @@ export type ProjectDto = z.infer<typeof ProjectDtoSchema>
 export type SessionListDto = z.infer<typeof SessionListDtoSchema>
 export type SessionDto = z.infer<typeof SessionDtoSchema>
 export type ProviderSessionListDto = z.infer<typeof ProviderSessionListDtoSchema>
+export type ProviderSessionControlDto = z.infer<typeof ProviderSessionControlDtoSchema>
 export type SessionEventsDto = z.infer<typeof SessionEventsDtoSchema>
 export type CreateSessionDto = z.infer<typeof CreateSessionDtoSchema>
 export type CreateProjectDto = z.infer<typeof CreateProjectDtoSchema>
@@ -119,6 +133,7 @@ export type SessionAttachmentDto = z.infer<typeof SessionAttachmentDtoSchema>
 export type SessionAttachmentListDto = z.infer<typeof SessionAttachmentListDtoSchema>
 export type AttachmentDownloadChunkDto = z.infer<typeof AttachmentDownloadChunkDtoSchema>
 export type CancelSessionDto = z.infer<typeof CancelSessionDtoSchema>
+export type RenameSessionDto = z.infer<typeof RenameSessionDtoSchema>
 export type PatchSessionConfigDto = z.infer<typeof PatchSessionConfigDtoSchema>
 export type ResolveDecisionDto = z.infer<typeof ResolveDecisionDtoSchema>
 export type MutationReceiptDto = z.infer<typeof MutationReceiptDtoSchema>
@@ -138,6 +153,7 @@ export const parseSessionAttachmentDto = (value: unknown): SessionAttachmentDto 
 export const parseSessionAttachmentListDto = (value: unknown): SessionAttachmentListDto => parseWithSchema(SessionAttachmentListDtoSchema, value)
 export const parseAttachmentDownloadChunkDto = (value: unknown): AttachmentDownloadChunkDto => parseWithSchema(AttachmentDownloadChunkDtoSchema, value)
 export const parseCancelSessionDto = (value: unknown): CancelSessionDto => parseWithSchema(CancelSessionDtoSchema, value)
+export const parseRenameSessionDto = (value: unknown): RenameSessionDto => parseWithSchema(RenameSessionDtoSchema, value)
 export const parsePatchSessionConfigDto = (value: unknown): PatchSessionConfigDto => parseWithSchema(PatchSessionConfigDtoSchema, value)
 export const parseResolveDecisionDto = (value: unknown): ResolveDecisionDto => parseWithSchema(ResolveDecisionDtoSchema, value)
 export const parseMutationReceiptDto = (value: unknown): MutationReceiptDto => parseWithSchema(MutationReceiptDtoSchema, value)

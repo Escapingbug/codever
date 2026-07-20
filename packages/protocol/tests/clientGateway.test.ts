@@ -71,6 +71,7 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'attachment.download', sessionId: 'session-1', attachmentId: 'attachment-1', offset: 0 },
             { kind: 'session.cancel', sessionId: 'session-1', input: { reason: 'stop' } },
             { kind: 'session.archive.set', sessionId: 'session-1', archived: true },
+            { kind: 'session.rename', sessionId: 'session-1', input: { title: 'Renamed task' } },
             { kind: 'session.config.patch', sessionId: 'session-1', input: { config: {}, model: null } },
             {
                 kind: 'decision.respond', sessionId: 'session-1', decisionId: 'decision-1',

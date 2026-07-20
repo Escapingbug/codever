@@ -214,7 +214,7 @@ describe('session view', () => {
       getSessionEvents: vi.fn(async () => ({ events: [staleIdle], nextAfter: null, previousBefore: null })),
     }), sessionId)
 
-    expect(wrapper.get('.button--danger').text()).toBe('Stop')
+    expect(wrapper.get('[aria-label="Stop"]').classes()).toContain('send-button--stop')
     wrapper.unmount()
   })
 
@@ -226,7 +226,7 @@ describe('session view', () => {
     await wrapper.get('.send-button').trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('.button--danger').text()).toBe('Stop')
+    expect(wrapper.get('[aria-label="Stop"]').classes()).toContain('send-button--stop')
     wrapper.unmount()
   })
 
@@ -299,6 +299,7 @@ function fakeApi(
       discoverySupported: false,
       models: [],
       permissionModes: [],
+      controls: [],
       capabilities: {
         resume: false, cancel: true, changeModel: false, changeMode: false,
         fork: false, retry: false, editHistory: false, listBranches: false, attachFiles: false,

@@ -25,6 +25,8 @@ const project = computed(() => (state.projectsByGateway[gatewayId.value] ?? []).
 const session = shallowRef<CodeverSession>()
 const provider = computed(() => session.value?.provider ?? '')
 const providerCapabilities = shallowRef<ProviderSessionListDto>()
+const loadingProviderCapabilities = ref(false)
+const providerCapabilitiesError = ref('')
 const events = shallowRef<SessionEventEnvelope[]>([])
 const syncConnection = ref<ConnectionState>(state.api.connectionState)
 const loadError = ref('')
@@ -59,6 +61,7 @@ const downloadingAttachmentId = ref('')
 const exportingFile = ref('')
 const submittingDecisionId = ref<string>()
 const selectedEvent = shallowRef<SessionEventEnvelope>()
+const inspectMode = ref(typeof route.query.inspect === 'string')
 const timelineElement = ref<HTMLElement>()
 let unsubscribeEvents: (() => void) | undefined
 let unsubscribeConnection: (() => void) | undefined
@@ -99,6 +102,7 @@ const canSubmitMessage = computed(() => canSend.value
   && !sending.value
   && !attachmentsUploading.value
   && (Boolean(draft.value.trim()) || readyAttachmentIds.value.length > 0))
+const isRunning = computed(() => effectiveSessionState.value === 'querying' || effectiveSessionState.value === 'canceling')
 const connectionLabel = computed(() => {
   if (!gatewayOnline.value) return 'Computer offline'
   if (syncConnection.value === 'connected') return 'Live updates on'
@@ -124,6 +128,15 @@ watch(sessionId, (next, previous) => {
   void loadSession()
 }, { immediate: true })
 watch([projectId, provider], () => void loadProviderCapabilities(), { immediate: true })
+watch([() => route.query.inspect, events], ([eventId]) => {
+  if (typeof eventId !== 'string') {
+    selectedEvent.value = undefined
+    inspectMode.value = false
+    return
+  }
+  inspectMode.value = true
+  selectedEvent.value = events.value.find(event => event.eventId === eventId)
+}, { immediate: true })
 onBeforeUnmount(() => {
   disposed = true
   if (tailSyncTimer) clearTimeout(tailSyncTimer)
@@ -152,7 +165,7 @@ async function loadSession(): Promise<void> {
   loading.value = events.value.length === 0
   loadError.value = ''
   liveError.value = ''
-  selectedEvent.value = undefined
+  if (!route.query.inspect) selectedEvent.value = undefined
   try {
     await state.hydrateProject(projectId.value)
     await state.loadCachedPendingMessages(requestedId)
@@ -208,10 +221,37 @@ async function loadSession(): Promise<void> {
 
 async function loadProviderCapabilities(): Promise<void> {
   if (!provider.value) return
+  const requestedProvider = provider.value
+  loadingProviderCapabilities.value = true
+  providerCapabilitiesError.value = ''
   try {
-    providerCapabilities.value = await state.api.discoverProviderSessions(projectId.value, provider.value)
-  } catch {
+    const result = await state.api.discoverProviderSessions(projectId.value, requestedProvider)
+    if (provider.value === requestedProvider) providerCapabilities.value = result
+  } catch (error) {
     providerCapabilities.value = undefined
+    providerCapabilitiesError.value = error instanceof Error ? error.message : 'Provider controls could not be loaded'
+  } finally {
+    if (provider.value === requestedProvider) loadingProviderCapabilities.value = false
+  }
+}
+
+function toggleInspectMode(): void {
+  inspectMode.value = !inspectMode.value
+  if (!inspectMode.value) void closeInspector()
+}
+
+function inspectEvent(event: SessionEventEnvelope): void {
+  if (!inspectMode.value) return
+  selectedEvent.value = event
+  void router.push({ query: { ...route.query, inspect: event.eventId } })
+}
+
+async function closeInspector(): Promise<void> {
+  selectedEvent.value = undefined
+  if ('inspect' in route.query) {
+    const query = { ...route.query }
+    delete query.inspect
+    await router.replace({ query })
   }
 }
 
@@ -727,6 +767,11 @@ function submitOnShortcut(event: KeyboardEvent): void {
     void sendMessage()
   }
 }
+
+function runPrimaryAction(): void {
+  if (isRunning.value) void cancel()
+  else void sendMessage()
+}
 </script>
 
 <template>
@@ -736,8 +781,10 @@ function submitOnShortcut(event: KeyboardEvent): void {
         <small>{{ gateway?.name }} / {{ project?.name }}</small>
         <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="effectiveSessionState" :status="effectiveSessionState" :label="effectiveSessionState" /></div>
       </div>
-      <button v-if="effectiveSessionState === 'querying' || effectiveSessionState === 'canceling'" class="button button--danger" :disabled="!canMutate || effectiveSessionState === 'canceling'" @click="cancel">{{ effectiveSessionState === 'canceling' ? 'Stopping…' : 'Stop' }}</button>
-      <button v-else-if="session" class="button" :disabled="!canMutate || updatingArchive" @click="toggleArchive">{{ session.archivedAt ? 'Restore' : 'Archive' }}</button>
+      <div class="session-header-actions">
+        <button class="button button--compact" :class="{ 'button--selected': inspectMode }" @click="toggleInspectMode">{{ inspectMode ? 'Done inspecting' : 'Inspect events' }}</button>
+        <button v-if="session" class="button" :disabled="!canMutate || updatingArchive || isRunning" @click="toggleArchive">{{ session.archivedAt ? 'Restore' : 'Archive' }}</button>
+      </div>
     </header>
 
     <div v-if="!gatewayOnline || !liveConnected" class="connection-banner" :class="{ 'connection-banner--offline': !gatewayOnline }">
@@ -760,15 +807,16 @@ function submitOnShortcut(event: KeyboardEvent): void {
           :events="events"
           :pending-messages="pendingMessages"
           :mutable="canMutate"
+          :inspectable="inspectMode"
+          :inspect-handler="inspectEvent"
           :submitting-decision-id="submittingDecisionId"
           @resolve-decision="resolveDecision"
-          @select="selectedEvent = $event"
           @open-local-file="openLocalFile"
         />
       </section>
 
       <aside class="inspector" :class="{ 'inspector--open': selectedEvent }">
-        <div class="inspector-heading"><div><span class="eyebrow">Event inspector</span><h2>{{ selectedEvent?.event.kind.replaceAll('_', ' ') ?? 'Details' }}</h2></div><button class="icon-button" aria-label="Close inspector" @click="selectedEvent = undefined">×</button></div>
+        <div class="inspector-heading"><div><span class="eyebrow">Event inspector</span><h2>{{ selectedEvent?.event.kind.replaceAll('_', ' ') ?? 'Details' }}</h2></div><button class="icon-button" aria-label="Close inspector" @click="closeInspector">×</button></div>
         <template v-if="selectedEvent"><dl><dt>Sequence</dt><dd>{{ selectedEvent.seq }}</dd><dt>Event ID</dt><dd>{{ selectedEvent.eventId }}</dd><dt>Source</dt><dd>{{ selectedEvent.event.meta?.source ?? 'live' }}</dd><dt>Time</dt><dd>{{ new Date(selectedEvent.timestamp).toLocaleString() }}</dd></dl><pre>{{ JSON.stringify(selectedEvent.event, null, 2) }}</pre></template>
         <div v-else class="inspector-empty"><span>◇</span><p>Select an event to inspect its structured payload.</p></div>
       </aside>
@@ -789,7 +837,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
         </section>
         <div class="composer" :class="{ 'composer--disabled': !canSend }">
           <div v-if="session" class="composer-context" aria-label="Model and session behavior">
-            <SessionControls compact :session="session" :capabilities="providerCapabilities" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
+            <SessionControls compact :session="session" :capabilities="providerCapabilities" :loading="loadingProviderCapabilities" :error="providerCapabilitiesError" :disabled="!canMutate" :saving="savingControls" @save="saveControls" />
           </div>
           <div v-if="pendingAttachments.length || selectedStoredAttachmentIds.length" class="composer-attachments">
             <div v-for="attachmentId in selectedStoredAttachmentIds" :key="`stored-${attachmentId}`" class="composer-attachment composer-attachment--ready">
@@ -803,7 +851,7 @@ function submitOnShortcut(event: KeyboardEvent): void {
             </div>
           </div>
           <textarea v-model="draft" rows="2" :disabled="!canSend" :placeholder="canSend ? 'Message agent…' : 'Reconnect to send a message'" @keydown="submitOnShortcut" />
-          <div class="composer-footer"><div class="composer-actions"><input ref="fileInput" type="file" multiple hidden @change="addAttachments" /><button class="attachment-button" type="button" :disabled="!canMutate" aria-label="Upload files" @click="chooseAttachments">＋ Upload</button><button class="attachment-button" type="button" :class="{ 'attachment-button--active': showSessionFiles }" @click="showSessionFiles = !showSessionFiles">Files {{ sessionAttachments.length }}</button><span class="composer-shortcut"><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span></div><button class="send-button" :disabled="!canSubmitMessage" aria-label="Send message" @click="sendMessage">{{ sending ? '…' : '↑' }}</button></div>
+          <div class="composer-footer"><div class="composer-actions"><input ref="fileInput" type="file" multiple hidden @change="addAttachments" /><button class="attachment-button" type="button" :disabled="!canMutate" aria-label="Upload files" @click="chooseAttachments">＋ Upload</button><button class="attachment-button" type="button" :class="{ 'attachment-button--active': showSessionFiles }" @click="showSessionFiles = !showSessionFiles">Files {{ sessionAttachments.length }}</button><span class="composer-shortcut"><kbd>Ctrl</kbd> <kbd>Enter</kbd> to send</span></div><button class="send-button" :class="{ 'send-button--stop': isRunning }" :disabled="isRunning ? (!canMutate || canceling) : !canSubmitMessage" :aria-label="isRunning ? 'Stop' : 'Send message'" @click="runPrimaryAction">{{ isRunning ? (canceling ? '…' : '■') : (sending ? '…' : '↑') }}</button></div>
         </div>
       </footer>
     </template>

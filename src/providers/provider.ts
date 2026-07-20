@@ -1,6 +1,7 @@
 import type { AgentEvent } from './types'
 import type { DecisionRequest, DecisionResponse } from '@/runtime/decision'
 import type { RichUserInput } from '@/runtime/semantic'
+import type { ProviderSessionControlDto } from '@codever/protocol'
 
 export class ProviderNotReadyError extends Error {
     constructor(providerName: string, reason: string) {
@@ -105,6 +106,8 @@ export interface AgentProvider {
      */
     resolveModel?(model: string): string | undefined
     getAvailablePermissionModes(): string[]
+    /** Provider-owned controls rendered only after discovery has completed. */
+    getSessionControls?(): ProviderSessionControlDto[]
 
     /** List available sessions for a given cwd */
     listSessions?(cwd: string): Promise<SessionEntry[]>

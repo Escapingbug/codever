@@ -5,6 +5,8 @@ import { computed, reactive, watch } from 'vue'
 const props = defineProps<{
   session: CodeverSession
   capabilities?: ProviderSessionListDto
+  loading?: boolean
+  error?: string
   disabled?: boolean
   saving?: boolean
   compact?: boolean
@@ -36,18 +38,28 @@ function save(): void {
     },
   })
 }
+
+function saveProviderControl(configKey: string, value: string | boolean): void {
+  emit('save', {
+    model: form.model || null,
+    mode: form.mode || null,
+    config: { ...props.session.config, [configKey]: value },
+  })
+}
 </script>
 
 <template>
   <div class="session-controls" :class="{ 'session-controls--compact': compact }">
     <label class="session-control session-control--provider"><span>Provider</span><strong class="control-value">{{ session.provider }}</strong></label>
-    <label class="session-control session-control--model">
+    <div v-if="loading" class="session-controls-loading" role="status"><span class="loader" /><span>Loading provider controls…</span></div>
+    <span v-else-if="error" class="session-controls-unavailable" role="status">Provider controls unavailable</span>
+    <template v-else-if="capabilities">
+    <label v-if="capabilities.capabilities.changeModel" class="session-control session-control--model">
       <span>Model</span>
-      <select v-if="models.length" v-model="form.model" :disabled="disabled" @change="save">
+      <select v-model="form.model" :disabled="disabled || !models.length" @change="save">
         <option value="">Provider default</option>
         <option v-for="model in models" :key="model.id" :value="model.id">{{ model.name }}</option>
       </select>
-      <input v-else v-model="form.model" :disabled="disabled" placeholder="Provider default" @change="save" />
     </label>
     <label v-if="reasoningLevels.length" class="session-control session-control--reasoning">
       <span>Reasoning</span>
@@ -56,7 +68,7 @@ function save(): void {
         <option v-for="level in reasoningLevels" :key="level.effort" :value="level.effort">{{ level.effort }}</option>
       </select>
     </label>
-    <label class="session-control session-control--mode">
+    <label v-if="capabilities.capabilities.changeMode" class="session-control session-control--mode">
       <span>Mode</span>
       <select v-model="form.mode" :disabled="disabled" @change="save">
         <option value="">Default</option><option value="agent">Agent</option><option value="ask">Ask</option><option value="plan">Plan</option>
@@ -69,6 +81,15 @@ function save(): void {
         <option v-for="permission in capabilities.permissionModes" :key="permission" :value="permission">{{ permission }}</option>
       </select>
     </label>
+    <label v-for="control in capabilities.controls" :key="control.id" class="session-control session-control--provider-setting" :title="control.description">
+      <span>{{ control.label }}</span>
+      <input v-if="control.kind === 'toggle'" type="checkbox" :checked="session.config[control.configKey] === true" :disabled="disabled" @change="saveProviderControl(control.configKey, ($event.target as HTMLInputElement).checked)" />
+      <select v-else :value="typeof session.config[control.configKey] === 'string' ? session.config[control.configKey] : ''" :disabled="disabled" @change="saveProviderControl(control.configKey, ($event.target as HTMLSelectElement).value)">
+        <option value="">Provider default</option>
+        <option v-for="option in control.options" :key="option.value" :value="option.value">{{ option.label }}</option>
+      </select>
+    </label>
+    </template>
     <span v-if="saving" class="control-saving">Saving…</span>
   </div>
 </template>

@@ -102,7 +102,7 @@ export class GatewaySessionService {
         const bridgeByProviderId = new Map(bridges.map(session => [session.providerSessionId!, session]))
         const factory = this.options.providerDiscoveryFactory
         if (!factory) return {
-            projectId, provider, discoverySupported: false, models: [], permissionModes: [],
+            projectId, provider, discoverySupported: false, models: [], permissionModes: [], controls: [],
             capabilities: providerCapabilities(false, false, false), sessions: [],
         }
 
@@ -110,9 +110,10 @@ export class GatewaySessionService {
         try {
             const models = discoveryProvider.getAvailableModels()
             const permissionModes = discoveryProvider.getAvailablePermissionModes()
+            const controls = discoveryProvider.getSessionControls?.() ?? []
             const capabilities = providerCapabilities(Boolean(discoveryProvider.listSessions), models.length > 0, permissionModes.length > 0)
             if (!discoveryProvider.listSessions) {
-                return { projectId, provider, discoverySupported: false, models, permissionModes, capabilities, sessions: [] }
+                return { projectId, provider, discoverySupported: false, models, permissionModes, controls, capabilities, sessions: [] }
             }
             const discovered = await discoveryProvider.listSessions(project.canonicalRoot)
             const latestByProviderSessionId = new Map<string, (typeof discovered)[number]>()
@@ -138,7 +139,7 @@ export class GatewaySessionService {
                     } : {}),
                 }
             })
-            return { projectId, provider, discoverySupported: true, models, permissionModes, capabilities, sessions }
+            return { projectId, provider, discoverySupported: true, models, permissionModes, controls, capabilities, sessions }
         } finally {
             await discoveryProvider.destroy?.().catch(() => undefined)
         }
@@ -297,6 +298,17 @@ export class GatewaySessionService {
                 ...session,
                 ...(archived ? { archivedAt: updatedAt } : { archivedAt: undefined }),
                 updatedAt,
+            })
+        }))
+    }
+
+    rename(sessionId: string, title: string, idempotencyKey?: string): Promise<CodeverSession> {
+        return this.idempotent(`${sessionId}:rename`, idempotencyKey, () => this.serialize(sessionId, async () => {
+            const session = await this.requireOpenSession(sessionId)
+            return this.options.repository.save({
+                ...session,
+                title: requireText(title, 'title'),
+                updatedAt: new Date(this.now()).toISOString(),
             })
         }))
     }

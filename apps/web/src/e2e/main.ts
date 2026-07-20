@@ -273,13 +273,14 @@ const api = {
         projectId, provider, discoverySupported: true,
         models: [{ id: 'codex-default', name: 'Codex default', supportedReasoningLevels: [] }],
         permissionModes: ['default'],
+        controls: [],
         capabilities: { resume: true, cancel: true, changeModel: true, changeMode: true, fork: false, retry: false, editHistory: false, listBranches: false, attachFiles: true },
         sessions: [],
       }
     }
     return {
       projectId: project.id, provider: session.provider, discoverySupported: true,
-      models: [{ id: 'scripted-model', name: 'Scripted model', supportedReasoningLevels: [{ effort: 'medium' }, { effort: 'high' }] }], permissionModes: ['default', 'bypassPermissions'],
+      models: [{ id: 'scripted-model', name: 'Scripted model', supportedReasoningLevels: [{ effort: 'medium' }, { effort: 'high' }] }], permissionModes: ['default', 'bypassPermissions'], controls: [],
       capabilities: { resume: true, cancel: true, changeModel: true, changeMode: true, fork: false, retry: false, editHistory: false, listBranches: false, attachFiles: true },
       sessions: [
         { provider: session.provider, providerSessionId: 'provider-session-e2e', title: session.title!, updatedAt: session.updatedAt, codeverSessionId: session.id, state: session.state },
@@ -332,6 +333,11 @@ const api = {
     archiveUpdates += 1
     if (archived) session.archivedAt = new Date().toISOString()
     else delete session.archivedAt
+  },
+  async renameSession(_id: string, input: { title: string }) {
+    session.title = input.title
+    session.updatedAt = new Date().toISOString()
+    return { commandId: 'rename-session', status: 'succeeded' }
   },
   async patchSessionConfig(_id: string, patch: PatchSessionConfigDto) {
     lastConfig = patch

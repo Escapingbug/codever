@@ -43,8 +43,14 @@ const taskError = ref('')
 const createError = ref('')
 const openingKey = ref('')
 const archivingKey = ref('')
+const renamingTask = ref<ProjectTask>()
+const renameTitle = ref('')
+const renaming = ref(false)
 const creatorElement = ref<HTMLElement>()
 let discoveryGeneration = 0
+let longPressTimer: ReturnType<typeof setTimeout> | undefined
+let longPressOrigin: { x: number; y: number } | undefined
+let suppressTaskClick = false
 
 const tasks = computed<ProjectTask[]>(() => {
   const result = new Map<string, ProjectTask>()
@@ -67,6 +73,7 @@ const tasks = computed<ProjectTask[]>(() => {
   for (const bridge of bridges.value) {
     const linked = [...result.values()].find(task => task.codeverSessionId === bridge.id)
     if (linked) {
+      linked.title = bridge.title ?? linked.title
       linked.state = bridge.state
       linked.updatedAt = bridge.updatedAt > linked.updatedAt ? bridge.updatedAt : linked.updatedAt
       linked.archivedAt = bridge.archivedAt
@@ -198,6 +205,10 @@ async function createNewSession(): Promise<void> {
 }
 
 async function openTask(task: ProjectTask): Promise<void> {
+  if (suppressTaskClick) {
+    suppressTaskClick = false
+    return
+  }
   // A linked Codever Session is already a complete navigation target. Opening
   // it must not wait behind Provider discovery or another attach operation.
   if (task.codeverSessionId) {
@@ -225,6 +236,62 @@ async function openTask(task: ProjectTask): Promise<void> {
     taskError.value = error instanceof Error ? error.message : 'Could not open the task'
   } finally {
     openingKey.value = ''
+  }
+}
+
+function beginLongPress(event: PointerEvent, task: ProjectTask): void {
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+  cancelLongPress()
+  longPressOrigin = { x: event.clientX, y: event.clientY }
+  longPressTimer = setTimeout(() => {
+    suppressTaskClick = true
+    openRename(task)
+  }, 550)
+}
+
+function moveLongPress(event: PointerEvent): void {
+  if (!longPressOrigin) return
+  if (Math.hypot(event.clientX - longPressOrigin.x, event.clientY - longPressOrigin.y) > 10) cancelLongPress()
+}
+
+function cancelLongPress(): void {
+  if (longPressTimer) clearTimeout(longPressTimer)
+  longPressTimer = undefined
+  longPressOrigin = undefined
+}
+
+function openRename(task: ProjectTask): void {
+  cancelLongPress()
+  if (!task.codeverSessionId) {
+    taskError.value = 'Open this provider task once before renaming it in Codever'
+    return
+  }
+  renamingTask.value = task
+  renameTitle.value = task.title
+}
+
+function closeRename(): void {
+  if (renaming.value) return
+  renamingTask.value = undefined
+  renameTitle.value = ''
+}
+
+async function renameSession(): Promise<void> {
+  const task = renamingTask.value
+  const nextTitle = renameTitle.value.trim()
+  if (!task?.codeverSessionId || !nextTitle || renaming.value) return
+  renaming.value = true
+  taskError.value = ''
+  try {
+    await state.api.renameSession(task.codeverSessionId, { title: nextTitle })
+    const existing = bridges.value.find(item => item.id === task.codeverSessionId)
+    if (existing) state.replaceSession({ ...existing, title: nextTitle, updatedAt: new Date().toISOString() })
+    closeRename()
+  } catch (error) {
+    taskError.value = error instanceof Error ? error.message : 'Could not rename the task'
+  } finally {
+    renaming.value = false
+    if (renamingTask.value === task && !taskError.value) closeRename()
   }
 }
 
@@ -310,7 +377,7 @@ async function openSession(sessionId: string): Promise<void> {
       <template v-if="runningTasks.length">
         <div class="session-group-label"><span>Running</span><small>{{ runningTasks.length }}</small></div>
         <div class="session-table">
-          <article v-for="task in runningTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)">
+          <article v-for="task in runningTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @contextmenu.prevent="openRename(task)" @pointerdown="beginLongPress($event, task)" @pointermove="moveLongPress" @pointerup="cancelLongPress" @pointercancel="cancelLongPress">
             <StatusDot :status="task.state ?? 'idle'" />
             <div><strong>{{ task.title }}</strong><small>{{ task.provider }} · {{ gateway?.name }}</small></div>
             <span class="session-mode">{{ task.state }}</span>
@@ -322,7 +389,7 @@ async function openSession(sessionId: string): Promise<void> {
 
       <div class="session-group-label" :class="{ 'session-group-label--inactive': runningTasks.length }"><span>{{ scopeFilter === 'archived' ? 'Archived' : 'Ready to continue' }}</span><small>{{ readyTasks.length }}</small></div>
       <div v-if="readyTasks.length" class="session-table">
-        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)">
+        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @contextmenu.prevent="openRename(task)" @pointerdown="beginLongPress($event, task)" @pointermove="moveLongPress" @pointerup="cancelLongPress" @pointercancel="cancelLongPress">
           <StatusDot :status="task.state ?? 'idle'" />
           <div><strong>{{ task.title }}</strong><small>{{ task.firstMessage || `${task.provider} · ${gateway?.name}` }}</small></div>
           <span class="session-mode">{{ task.draft ? 'draft' : task.provider }}</span>
@@ -334,5 +401,15 @@ async function openSession(sessionId: string): Promise<void> {
       <p v-else class="session-group-empty">No tasks match these filters.</p>
 
     </section>
+
+    <div v-if="renamingTask" class="dialog-backdrop" @click.self="closeRename">
+      <section class="settings-card rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-task-title">
+        <div class="session-creator__heading"><div><span class="eyebrow">Task</span><h2 id="rename-task-title">Rename task</h2></div><button class="icon-button" aria-label="Close rename dialog" @click="closeRename">×</button></div>
+        <form class="fresh-session-form" @submit.prevent="renameSession">
+          <label><span>Title</span><input v-model="renameTitle" autofocus maxlength="200" /></label>
+          <div class="dialog-actions"><button type="button" class="button" :disabled="renaming" @click="closeRename">Cancel</button><button class="button button--primary" :disabled="renaming || !renameTitle.trim()">{{ renaming ? 'Saving…' : 'Save' }}</button></div>
+        </form>
+      </section>
+    </div>
   </div>
 </template>

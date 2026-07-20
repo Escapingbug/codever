@@ -220,6 +220,24 @@ describe('Gateway attachment requests', () => {
 })
 
 describe('Gateway command liveness', () => {
+    it('routes a Session rename through the authenticated Gateway command handler', async () => {
+        const rename = vi.fn(async () => ({ id: 'session-1', title: 'Renamed task' }))
+        const context = {
+            credentialId: 'credential-1', gatewayId: 'gateway-1',
+            sessions: { rename } as never,
+            attachments: undefined as never, inventory: undefined as never,
+            projects: undefined as never, events: undefined as never,
+            executionTrust: undefined as never, inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const response = await handleClientRequest(frame('rename-session', {
+            kind: 'session.rename', sessionId: 'session-1', input: { title: 'Renamed task' },
+        }), context)
+
+        expect(response.status).toBe('completed')
+        expect(rename).toHaveBeenCalledWith('session-1', 'Renamed task', 'idempotency-rename-session')
+    })
+
     it('lets an existing COSE principal add and revoke a later client root', async () => {
         const trust = vi.fn(async () => ({ keyId: 'key-2' }))
         const revoke = vi.fn(async () => true)

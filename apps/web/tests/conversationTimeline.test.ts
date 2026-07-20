@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { SessionEventEnvelope } from '@codever/protocol'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import ConversationTimeline from '../src/components/timeline/ConversationTimeline.vue'
 
 const decision: SessionEventEnvelope = {
@@ -22,18 +22,38 @@ const decision: SessionEventEnvelope = {
   },
 }
 
+const assistant: SessionEventEnvelope = {
+  ...decision,
+  eventId: 'assistant-1',
+  event: { kind: 'assistant_text_delta', text: 'Ready', meta: { source: 'replay', turnId: 'turn-1' } },
+}
+
 describe('conversation timeline interactions', () => {
   it('resolves a decision without also opening the event inspector', async () => {
+    const onInspect = vi.fn()
     const wrapper = mount(ConversationTimeline, {
-      props: { events: [decision], mutable: true },
+      props: { events: [decision], mutable: true, inspectHandler: onInspect },
     })
 
     await wrapper.get('.decision-options button').trigger('click')
 
     expect(wrapper.emitted('resolveDecision')).toEqual([['decision-1', true]])
-    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(onInspect).not.toHaveBeenCalled()
 
     await wrapper.get('.decision-card').trigger('click')
-    expect(wrapper.emitted('select')).toEqual([[decision]])
+    expect(onInspect).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ inspectable: true })
+    await wrapper.get('.decision-card').trigger('click')
+    expect(onInspect).toHaveBeenCalledWith(decision)
+  })
+
+  it('selects an assistant event only while inspect mode is enabled', async () => {
+    const onInspect = vi.fn()
+    const wrapper = mount(ConversationTimeline, {
+      props: { events: [assistant], mutable: true, inspectable: true, inspectHandler: onInspect },
+    })
+    await wrapper.get('.message--assistant').trigger('click')
+    expect(onInspect).toHaveBeenCalledWith(assistant)
   })
 })
