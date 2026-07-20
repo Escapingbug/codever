@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayPathHelp, gatewayPathPlaceholder, validateGatewayPath } from '../gatewayPath'
 import { isGatewayAuthorizationError } from '../gatewayAccess'
+import { clientSession } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
 
 const state = useCodeverState()
@@ -36,6 +37,7 @@ const defaultProvider = ref('')
 const selectedGateway = computed(() => availableGateways.value.find(gateway => gateway.id === gatewayId.value))
 const pathPlaceholder = computed(() => gatewayPathPlaceholder(selectedGateway.value?.platform))
 const pathHelp = computed(() => gatewayPathHelp(selectedGateway.value?.platform))
+const connectionError = computed(() => clientSession.initializationError.value || state.errors.gateways)
 
 function resetProjectForm(): void {
   createOpen.value = false
@@ -89,7 +91,7 @@ onMounted(() => state.loadWorkspace())
       <span><strong>{{ authorizationCount }} computer{{ authorizationCount === 1 ? '' : 's' }} waiting for authorization</strong><small>Approve this client before it can run commands.</small></span>
       <span>Open Computers →</span>
     </RouterLink>
-    <div v-if="state.errors.gateways" class="error-banner"><strong>Connection unavailable.</strong> {{ state.errors.gateways }}</div>
+    <div v-if="connectionError" class="error-banner"><strong>Connection unavailable.</strong> {{ connectionError }}</div>
     <RouterLink v-for="gateway in realFailures" :key="gateway.id" class="error-banner error-banner--link" :to="{ name: 'gateway', params: { gatewayId: gateway.id } }">
       <strong>{{ gateway.name }} needs attention.</strong> {{ state.errors[`projects:${gateway.id}`] }}
     </RouterLink>

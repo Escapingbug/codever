@@ -293,6 +293,7 @@ declare global {
       failTurn(message: string): void
       exportedPath(): string
       setConnection(state: 'connected' | 'disconnected'): void
+      setConnectionError(message: string): void
       requestDecision(): void
       lastConfig(): PatchSessionConfigDto | undefined
       archiveUpdates(): number
@@ -390,6 +391,12 @@ window.__CODEVER_E2E__ = {
       }
     }
   },
+  setConnectionError(message) {
+    mockConnectionState = 'disconnected'
+    clientSession.connectionState.value = 'disconnected'
+    clientSession.initializationError.value = message
+    for (const callback of connectionSubscribers) callback('disconnected')
+  },
   requestDecision() {
     append({
       kind: 'decision_request', decisionId: 'decision-e2e', title: 'Install the APK?', body: 'Continue on the connected phone?',
@@ -404,6 +411,12 @@ window.__CODEVER_E2E__ = {
   nativeSecretDelete: account => nativeSecrets.delete(account),
 }
 
+clientSession.reconnect = async () => {
+  mockConnectionState = 'connected'
+  clientSession.connectionState.value = 'connected'
+  clientSession.initializationError.value = ''
+  for (const callback of connectionSubscribers) callback('connected')
+}
 clientSession.connectionState.value = 'connected'
 const app = createApp(App)
 app.provide(codeverApiKey, api)

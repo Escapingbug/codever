@@ -105,6 +105,21 @@ test.describe('mobile Session business journey', () => {
     await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
   })
 
+  test('C17 exposes a failed Matrix restore and lets the user reconnect', async ({ page }) => {
+    await page.goto('./e2e.html#/projects')
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnectionError('Temporary Matrix restore failure'))
+
+    await expect(page.getByText('Temporary Matrix restore failure')).toBeVisible()
+    await page.goto('./e2e.html#/settings')
+    await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
+    await expect(page.getByRole('alert')).toContainText('Temporary Matrix restore failure')
+    await page.getByRole('button', { name: 'Retry connection' }).click()
+
+    await expect(page.getByText('Encrypted sync connected')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry connection' })).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
   test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {
     await page.goto('./e2e.html#/projects')
     await page.getByRole('button', { name: 'New project' }).click()

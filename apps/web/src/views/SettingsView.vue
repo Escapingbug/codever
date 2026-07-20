@@ -16,6 +16,7 @@ const deviceError = ref('')
 const deviceBusy = ref('')
 const approvalRequests = ref<ExecutionRootApprovalRequest[]>([])
 const approvalBusy = ref('')
+const connectionBusy = ref(false)
 let verificationTimer: ReturnType<typeof setInterval> | undefined
 let unsubscribeApprovals: (() => void) | undefined
 
@@ -39,6 +40,18 @@ async function refreshDevices(): Promise<void> {
     verifications.value = nextVerifications
   } catch (error) {
     deviceError.value = friendlyCodeverError(error)
+  }
+}
+
+async function retryConnection(): Promise<void> {
+  connectionBusy.value = true
+  deviceError.value = ''
+  try {
+    await clientSession.reconnect()
+  } catch (error) {
+    deviceError.value = friendlyCodeverError(error)
+  } finally {
+    connectionBusy.value = false
   }
 }
 
@@ -146,13 +159,17 @@ onUnmounted(() => {
     <section class="settings-section settings-card">
       <div class="section-heading">
         <div><span class="eyebrow">Connection</span><h2>Private server</h2></div>
-        <button v-if="!editing" class="button" @click="editing = true">Change</button>
+        <div v-if="!editing" class="form-actions">
+          <button v-if="clientSession.connectionState.value !== 'connected' && clientSession.identity.value" class="button button--primary" :disabled="connectionBusy" @click="retryConnection">{{ connectionBusy ? 'Connecting…' : 'Retry connection' }}</button>
+          <button class="button" @click="editing = true">Change</button>
+        </div>
       </div>
       <ServerForm v-if="editing && clientSession.server.value" :domain="clientSession.server.value.domain" submit-label="Save server" @saved="editing = false" @cancel="editing = false" />
       <div v-else-if="clientSession.server.value" class="server-summary">
         <span class="status-dot" :class="clientSession.connectionState.value === 'connected' ? 'status-dot--connected' : 'status-dot--offline'" />
         <div><strong>{{ clientSession.server.value.domain }}</strong><small>{{ clientSession.connectionState.value === 'connected' ? 'Encrypted sync connected' : 'Offline — cached data remains available' }}</small></div>
       </div>
+      <p v-if="clientSession.initializationError.value" class="error-banner" role="alert">{{ clientSession.initializationError.value }}</p>
     </section>
 
     <section v-if="clientSession.identity.value" class="settings-section settings-card">

@@ -40,6 +40,11 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   const api = new CodeverApi(native)
   let initializePromise: Promise<void> | undefined
   let unsubscribeConnection: (() => void) | undefined
+  let unsubscribeStatus: (() => void) | undefined
+  let reconnectPromise: Promise<void> | undefined
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let reconnectAttempt = 0
+  let destroyed = false
 
   function persist(): void {
     storage.setItem(STORAGE_KEY, JSON.stringify({ version: 4, server: server.value, identity: identity.value } satisfies PersistedState))
@@ -87,18 +92,17 @@ export function createClientSession(storage: Storage = localStorage, native = ne
     initializePromise = (async () => {
       restoreSnapshot()
       unsubscribeConnection = api.subscribeConnection(value => { connectionState.value = value })
+      unsubscribeStatus = native.subscribeStatus(status => {
+        initializationError.value = status.message
+        if (!identity.value || destroyed) return
+        api.markSuspended()
+        connectionState.value = 'reconnecting'
+        scheduleReconnect()
+      })
       if (identity.value) {
         try {
-          await native.restore(identity.value.session, MATRIX_SECRET_ACCOUNT)
-          api.connect({
-            session: identity.value.session,
-            controlRoomId: identity.value.controlRoomId,
-            executionAccount: EXECUTION_SECRET_ACCOUNT,
-            executionKeyId: identity.value.executionKeyId,
-          })
-        } catch (error) {
-          initializationError.value = error instanceof Error ? error.message : 'Unable to restore Matrix session'
-        }
+          await reconnect('connecting')
+        } catch { /* reconnect keeps the actionable error and schedules another attempt */ }
       }
       initialized.value = true
     })()
@@ -106,13 +110,68 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   }
 
   async function logout(): Promise<void> {
+    clearReconnectTimer()
     await api.disconnect()
     identity.value = undefined
     initializationError.value = ''
     persist()
   }
   function suspend(): void { api.markSuspended() }
-  async function resume(): Promise<void> { api.resume() }
+  async function resume(): Promise<void> {
+    if (identity.value && initializationError.value) {
+      await reconnect('reconnecting')
+      return
+    }
+    api.resume()
+    if (identity.value && api.connectionState !== 'connected') await reconnect('reconnecting')
+  }
+
+  async function reconnect(phase: 'connecting' | 'reconnecting' = 'reconnecting'): Promise<void> {
+    if (!identity.value) return
+    if (reconnectPromise) return reconnectPromise
+    clearReconnectTimer()
+    reconnectPromise = (async () => {
+      try {
+        await api.disconnect()
+        connectionState.value = phase
+        const current = identity.value
+        if (!current) return
+        await native.restore(current.session, MATRIX_SECRET_ACCOUNT)
+        api.connect({
+          session: current.session,
+          controlRoomId: current.controlRoomId,
+          executionAccount: EXECUTION_SECRET_ACCOUNT,
+          executionKeyId: current.executionKeyId,
+        })
+        initializationError.value = ''
+        reconnectAttempt = 0
+        clearReconnectTimer()
+      } catch (error) {
+        initializationError.value = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unable to restore Matrix session'
+        connectionState.value = 'disconnected'
+        scheduleReconnect()
+        throw error
+      } finally {
+        reconnectPromise = undefined
+      }
+    })()
+    return reconnectPromise
+  }
+
+  function scheduleReconnect(): void {
+    if (reconnectTimer || !identity.value || destroyed) return
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempt, 5))
+    reconnectAttempt += 1
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined
+      void reconnect('reconnecting').catch(() => undefined)
+    }, delay)
+  }
+
+  function clearReconnectTimer(): void {
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = undefined
+  }
 
   function restoreSnapshot(): void {
     const raw = storage.getItem(STORAGE_KEY)
@@ -131,14 +190,19 @@ export function createClientSession(storage: Storage = localStorage, native = ne
     server, identity, initialized, initializationError, connectionState, api,
     hasServer: computed(() => Boolean(server.value)),
     isAuthenticated: computed(() => Boolean(identity.value)),
-    initialize, configureServer, login, logout, suspend, resume,
+    initialize, configureServer, login, logout, suspend, resume, reconnect,
     listMatrixDevices: () => native.listDevices(),
     listVerifications: () => native.listVerifications(),
     requestVerification: (deviceId: string) => native.requestVerification(deviceId),
     advanceVerification: (flowId: string) => native.advanceVerification(flowId),
     confirmVerification: (flowId: string, matches: boolean) => native.confirmVerification(flowId, matches),
     cancelVerification: (flowId: string) => native.cancelVerification(flowId),
-    destroy() { unsubscribeConnection?.() },
+    destroy() {
+      destroyed = true
+      clearReconnectTimer()
+      unsubscribeConnection?.()
+      unsubscribeStatus?.()
+    },
   }
 }
 
