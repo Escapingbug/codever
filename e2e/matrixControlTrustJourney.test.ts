@@ -41,22 +41,20 @@ describe('C02 Matrix control trust and delivery lifecycle', () => {
         await fixture.close()
     })
 
-    it('returns a prompt protocol failure instead of timing out an untrusted client command', async () => {
+    it('blocks an untrusted client command locally after discovery', async () => {
         const fixture = createFixture({ clientTrustsGateway: true, gatewayTrustsClient: false })
+        await fixture.client.listGateways()
 
-        const response = await fixture.client.request('gateway-e2e', { kind: 'inventory.get' })
-
-        expect(response).toMatchObject({
-            status: 'failed',
-            error: { code: 'matrix_device_verification_required', retryable: false },
-        })
+        await expect(fixture.client.request('gateway-e2e', { kind: 'inventory.get' }))
+            .rejects.toThrow('not verified by the Gateway')
         expect(fixture.process).not.toHaveBeenCalled()
-        expect(fixture.harness.responses()).toHaveLength(1)
+        expect(fixture.harness.traffic.filter(event => event.eventType === 'io.codever.command.v1')).toHaveLength(0)
         await fixture.close()
     })
 
     it('survives delayed duplicate Matrix delivery once trust is bilateral', async () => {
         const fixture = createFixture({ clientTrustsGateway: true, gatewayTrustsClient: true })
+        await fixture.client.listGateways()
         fixture.harness.gatewayToClient = { delayMs: 10, duplicate: true }
 
         await expect(fixture.client.request('gateway-e2e', { kind: 'inventory.get' }))
@@ -67,6 +65,7 @@ describe('C02 Matrix control trust and delivery lifecycle', () => {
 
     it('recovers on a fresh request after Matrix drops a command before Gateway delivery', async () => {
         const fixture = createFixture({ clientTrustsGateway: true, gatewayTrustsClient: true })
+        await fixture.client.listGateways()
         fixture.harness.clientToGateway = { drop: true }
 
         await expect(fixture.client.request('gateway-e2e', { kind: 'inventory.get' }))

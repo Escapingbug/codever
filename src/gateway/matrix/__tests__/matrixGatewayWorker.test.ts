@@ -25,7 +25,7 @@ describe('MatrixGatewayWorker', () => {
         await worker.start()
         transport.emit({
             roomId: '!control:test', encrypted: true, verifiedDevice: true, senderDevice: 'PHONE',
-            event: { type: MATRIX_DISCOVERY_EVENT, content: { version: 1, requestId: 'discover-1' } },
+            event: { type: MATRIX_DISCOVERY_EVENT, content: discoveryContent() },
         })
         await vi.waitFor(() => expect(transport.sent).toHaveLength(2))
         expect(transport.sent.map(value => value.eventType)).toEqual([MATRIX_GATEWAY_EVENT, MATRIX_INVENTORY_EVENT])
@@ -49,7 +49,7 @@ describe('MatrixGatewayWorker', () => {
         await worker.start()
         transport.emit({
             roomId: '!control:test', encrypted: true, verifiedDevice: false, senderDevice: 'PHONE',
-            event: { type: MATRIX_DISCOVERY_EVENT, content: { version: 1, requestId: 'discover-1' } },
+            event: { type: MATRIX_DISCOVERY_EVENT, content: discoveryContent() },
         })
         await vi.waitFor(() => expect(transport.sent).toHaveLength(1))
         expect(transport.sent[0].eventType).toBe(MATRIX_GATEWAY_EVENT)
@@ -65,6 +65,7 @@ describe('MatrixGatewayWorker', () => {
             processor: { process } as unknown as AuthorizedRequestProcessor,
         })
         await worker.start()
+        negotiate(transport)
         transport.emit(commandEvent(true, true))
         await vi.waitFor(() => expect(transport.sent).toHaveLength(1))
 
@@ -85,6 +86,7 @@ describe('MatrixGatewayWorker', () => {
             trustVerifiedDeviceRoot,
         })
         await worker.start()
+        negotiate(transport)
         transport.emit(authorizationEvent('PHONE', 'PHONE'))
         await vi.waitFor(() => expect(trustVerifiedDeviceRoot).toHaveBeenCalledTimes(1))
         expect(trustVerifiedDeviceRoot).toHaveBeenCalledWith('PHONE', expect.objectContaining({ kid: 'client-key' }), 'Codever PHONE')
@@ -100,6 +102,7 @@ describe('MatrixGatewayWorker', () => {
             trustVerifiedDeviceRoot, onError,
         })
         await worker.start()
+        negotiate(transport)
         transport.emit(authorizationEvent('PHONE', 'ATTACKER'))
         await vi.waitFor(() => expect(onError).toHaveBeenCalled())
         expect(trustVerifiedDeviceRoot).not.toHaveBeenCalled()
@@ -139,6 +142,23 @@ describe('MatrixGatewayWorker', () => {
             } },
         })
     })
+
+    it('rejects a verified legacy client that did not negotiate a compatible control version', async () => {
+        const transport = new FakeTransport()
+        const process = vi.fn()
+        const worker = new MatrixGatewayWorker({
+            gatewayId: 'gateway-1', controlRoomId: '!control:test', transport,
+            processor: { process } as unknown as AuthorizedRequestProcessor,
+        })
+        await worker.start()
+        negotiate(transport, false)
+        transport.emit(commandEvent(true, true))
+        await vi.waitFor(() => expect(transport.sent).toHaveLength(1))
+        expect(process).not.toHaveBeenCalled()
+        expect(transport.sent[0].content).toMatchObject({ response: {
+            status: 'failed', error: { code: 'matrix_control_protocol_unsupported', retryable: false },
+        } })
+    })
 })
 
 class FakeTransport implements MatrixTransport {
@@ -169,6 +189,21 @@ function commandEvent(encrypted: boolean, verifiedDevice: boolean): NativeMatrix
             },
         },
     }
+}
+
+function discoveryContent(compatible = true) {
+    return {
+        version: 1,
+        requestId: 'discover-1',
+        ...(compatible ? { matrixControl: { minVersion: 2, maxVersion: 2 } } : {}),
+    }
+}
+
+function negotiate(transport: FakeTransport, compatible = true): void {
+    transport.emit({
+        roomId: '!control:test', encrypted: true, verifiedDevice: true, senderDevice: 'PHONE',
+        event: { type: MATRIX_DISCOVERY_EVENT, content: discoveryContent(compatible) },
+    })
 }
 
 function authorizationEvent(senderDevice: string, ownerId: string): NativeMatrixEvent {

@@ -41,7 +41,8 @@ class DelayedDiscoveryTransport implements MatrixTransportPort {
       roomId: '!control:example.test', encrypted: true, verifiedDevice,
       senderDevice: 'GATEWAYDEVICE',
       event: { type: MATRIX_GATEWAY_EVENT, content: {
-        gateway, recipientDeviceId: 'CLIENTDEVICE', clientDeviceVerified: verifiedDevice, discoveryRequestId,
+        gateway, recipientDeviceId: 'CLIENTDEVICE', clientDeviceVerified: verifiedDevice,
+        matrixControlCompatible: true, matrixControl: { minVersion: 2, maxVersion: 2 }, discoveryRequestId,
       } },
     })
   }

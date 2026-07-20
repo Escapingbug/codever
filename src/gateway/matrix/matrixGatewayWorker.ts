@@ -1,6 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import type { JWK } from '@codever/execution-auth'
-import { PROTOCOL_VERSION, type ClientGatewayResponseFrame, type Gateway, type InventorySnapshot, type SessionEventEnvelope } from '@codever/protocol'
+import {
+    CURRENT_MATRIX_CONTROL_RANGE,
+    PROTOCOL_VERSION,
+    matrixControlRangesOverlap,
+    parseMatrixControlVersionRange,
+    type ClientGatewayResponseFrame,
+    type Gateway,
+    type InventorySnapshot,
+    type SessionEventEnvelope,
+} from '@codever/protocol'
 import { AuthorizedRequestProcessor } from '../authorizedRequestProcessor'
 import type { MatrixTransport, NativeMatrixEvent } from './nativeMatrixTransport'
 
@@ -25,6 +34,7 @@ export interface MatrixGatewayWorkerOptions {
 
 export class MatrixGatewayWorker {
     private unsubscribe?: () => void
+    private readonly negotiatedDevices = new Map<string, boolean>()
 
     constructor(private readonly options: MatrixGatewayWorkerOptions) {}
 
@@ -54,6 +64,7 @@ export class MatrixGatewayWorker {
     async publishGateway(gateway: Gateway, target?: {
         recipientDeviceId: string
         clientDeviceVerified: boolean
+        matrixControlCompatible: boolean
         discoveryRequestId?: string
     }): Promise<void> {
         const transactionSuffix = target?.discoveryRequestId ?? target?.recipientDeviceId ?? gateway.lastSeenAt ?? randomUUID()
@@ -61,7 +72,7 @@ export class MatrixGatewayWorker {
             roomId: this.options.controlRoomId,
             eventType: MATRIX_GATEWAY_EVENT,
             transactionId: `${this.options.gatewayId}-presence-${transactionSuffix}`,
-            content: { gateway, ...target },
+            content: { gateway, matrixControl: CURRENT_MATRIX_CONTROL_RANGE, ...target },
         })
     }
 
@@ -81,17 +92,21 @@ export class MatrixGatewayWorker {
         if (!input.encrypted) throw new Error('Rejected unencrypted Matrix control event')
         if (eventType === MATRIX_DISCOVERY_EVENT) {
             const discovery = parseDiscovery(input.event.content, input.senderDevice)
+            const compatible = discovery.matrixControl !== undefined
+                && matrixControlRangesOverlap(CURRENT_MATRIX_CONTROL_RANGE, discovery.matrixControl)
+            this.negotiatedDevices.set(discovery.senderDevice, compatible)
             if (this.options.currentGateway) {
                 const gateway = this.options.currentGateway()
-                await this.publishGateway(input.verifiedDevice ? gateway : setupCandidate(gateway), {
+                await this.publishGateway(input.verifiedDevice && compatible ? gateway : setupCandidate(gateway), {
                     recipientDeviceId: discovery.senderDevice,
                     clientDeviceVerified: input.verifiedDevice,
+                    matrixControlCompatible: compatible,
                     discoveryRequestId: discovery.requestId,
                 })
             }
             // An encrypted but unverified client may learn only that this Gateway exists so
             // the user can start SAS verification. Projects, sessions and control remain hidden.
-            if (input.verifiedDevice && this.options.currentInventory) {
+            if (input.verifiedDevice && compatible && this.options.currentInventory) {
                 await this.publishInventory(await this.options.currentInventory())
             }
             return
@@ -103,12 +118,32 @@ export class MatrixGatewayWorker {
                     await this.publishGateway(setupCandidate(this.options.currentGateway()), {
                         recipientDeviceId: input.senderDevice,
                         clientDeviceVerified: false,
+                        matrixControlCompatible: this.negotiatedDevices.get(input.senderDevice) === true,
                     })
                 }
                 await this.sendResponse(input.roomId, rejected.idempotencyKey, rejected.response)
                 return
             }
             throw new Error('Rejected Matrix control event from an unverified device')
+        }
+        const negotiation = input.senderDevice ? this.negotiatedDevices.get(input.senderDevice) : undefined
+        if (negotiation !== true) {
+            if (eventType === MATRIX_COMMAND_EVENT) {
+                const rejected = rejectedCommand(input.event.content, negotiation === false
+                    ? {
+                        code: 'matrix_control_protocol_unsupported',
+                        message: 'This client and Gateway use incompatible secure-control protocol versions. Update Codever on the older device.',
+                        retryable: false,
+                    }
+                    : {
+                        code: 'matrix_control_negotiation_required',
+                        message: 'Secure-control protocol negotiation is required. Refresh computers and try again.',
+                        retryable: true,
+                    })
+                await this.sendResponse(input.roomId, rejected.idempotencyKey, rejected.response)
+                return
+            }
+            throw new Error('Rejected Matrix control event before compatible protocol negotiation')
         }
         if (eventType === MATRIX_AUTHORIZATION_EVENT) {
             if (!this.options.trustVerifiedDeviceRoot) return
@@ -117,6 +152,7 @@ export class MatrixGatewayWorker {
             if (this.options.currentGateway && input.senderDevice) await this.publishGateway(this.options.currentGateway(), {
                 recipientDeviceId: input.senderDevice,
                 clientDeviceVerified: true,
+                matrixControlCompatible: true,
             })
             if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
             return
@@ -162,15 +198,31 @@ function setupCandidate(gateway: Gateway): Gateway {
     }
 }
 
-function parseDiscovery(value: unknown, senderDevice: string | undefined): { requestId: string; senderDevice: string } {
-    if (!isRecord(value) || value.version !== PROTOCOL_VERSION || typeof value.requestId !== 'string' || !value.requestId) {
+function parseDiscovery(value: unknown, senderDevice: string | undefined): {
+    requestId: string
+    senderDevice: string
+    matrixControl?: ReturnType<typeof parseMatrixControlVersionRange>
+} {
+    if (!isRecord(value) || typeof value.requestId !== 'string' || !value.requestId) {
         throw new Error('Rejected malformed Matrix discovery request')
     }
     if (!senderDevice) throw new Error('Rejected Matrix discovery without a sender device')
-    return { requestId: value.requestId, senderDevice }
+    let matrixControl: ReturnType<typeof parseMatrixControlVersionRange> | undefined
+    if (value.matrixControl !== undefined) {
+        try { matrixControl = parseMatrixControlVersionRange(value.matrixControl) } catch { /* incompatible declaration */ }
+    }
+    return { requestId: value.requestId, senderDevice, ...(matrixControl ? { matrixControl } : {}) }
 }
 
-function rejectedCommand(value: unknown): { idempotencyKey: string; response: ClientGatewayResponseFrame } {
+function rejectedCommand(value: unknown, error: {
+    code: string
+    message: string
+    retryable: boolean
+} = {
+    code: 'matrix_device_verification_required',
+    message: 'This client device is not verified by the Gateway. Verify this computer again.',
+    retryable: false,
+}): { idempotencyKey: string; response: ClientGatewayResponseFrame } {
     const request = isRecord(value) && isRecord(value.request) ? value.request : undefined
     if (!request || typeof request.requestId !== 'string' || !request.requestId) {
         throw new Error('Rejected malformed Matrix command from an unverified device')
@@ -186,11 +238,7 @@ function rejectedCommand(value: unknown): { idempotencyKey: string; response: Cl
             requestId: request.requestId,
             status: 'failed',
             failedAt: new Date().toISOString(),
-            error: {
-                code: 'matrix_device_verification_required',
-                message: 'This client device is not verified by the Gateway. Verify this computer again.',
-                retryable: false,
-            },
+            error,
         },
     }
 }

@@ -4,7 +4,7 @@ import { CodeverApi, codeverApiKey } from '../api/codeverApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 import type { PendingUserMessage } from '../timeline/pendingMessage'
-import { gatewayNeedsVerification } from '../gatewayAccess'
+import { gatewayCanControl } from '../gatewayAccess'
 
 const gateways = ref<Gateway[]>([])
 const projectsByGateway = reactive<Record<string, Project[]>>({})
@@ -39,7 +39,7 @@ export function useCodeverState() {
     workspaceLoad = (async () => {
       await hydrateWorkspace()
       await loadGateways()
-      await Promise.all(gateways.value.filter(gateway => !gatewayNeedsVerification(gateway)).map((gateway) => load(
+      await Promise.all(gateways.value.filter(gatewayCanControl).map((gateway) => load(
         `projects:${gateway.id}`,
         () => api.listProjects(gateway.id),
         (value) => {
@@ -59,7 +59,7 @@ export function useCodeverState() {
     if (workspaceHydration) return workspaceHydration
     workspaceHydration = (async () => {
       const cachedGateways = await readCached<Gateway[]>('gateways') ?? []
-      if (cachedGateways.length && !gateways.value.length) gateways.value = cachedGateways
+      if (cachedGateways.length && !gateways.value.length) gateways.value = cachedGateways.map(markGatewayNegotiationStale)
       await Promise.all(cachedGateways.map(async gateway => {
         if (projectsByGateway[gateway.id]) return
         projectsByGateway[gateway.id] = await readCached<Project[]>(`projects:${gateway.id}`) ?? []
@@ -214,6 +214,13 @@ export function useCodeverState() {
 
 export function gatewayIsMutable(gateway: Gateway | undefined): boolean {
   return gateway?.status === 'online'
+}
+
+function markGatewayNegotiationStale(gateway: Gateway): Gateway {
+  const metadata = { ...gateway.capabilities.metadata }
+  delete metadata.matrixControlNegotiated
+  delete metadata.matrixVerified
+  return { ...gateway, capabilities: { ...gateway.capabilities, metadata } }
 }
 
 export type CodeverState = ReturnType<typeof useCodeverState>

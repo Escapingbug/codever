@@ -30,12 +30,16 @@ const onboardingFixture = fixtureParameters.get('journey') === 'onboarding'
 
 const gateway: Gateway = {
   id: 'gateway-e2e', workspaceId: 'workspace-e2e', name: 'My computer', platform: 'windows', version: 'e2e',
-  capabilities: { protocolVersions: [1], providers: ['scripted-agent'], features: ['file.export', 'attachment.download'] },
+  capabilities: { protocolVersions: [1], providers: ['scripted-agent'], features: ['file.export', 'attachment.download'], metadata: {
+    matrixDeviceId: 'GATEWAYDEVICE', matrixControlNegotiated: true, matrixControlCompatible: true, matrixVerified: true,
+  } },
   status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
 }
 const unpairedGateway: Gateway = {
   id: 'gateway-unpaired-e2e', workspaceId: 'workspace-e2e', name: 'Windows Computer', platform: 'windows', version: 'e2e',
-  capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'SECONDGATEWAY', matrixVerified: false } },
+  capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: {
+    matrixDeviceId: 'SECONDGATEWAY', matrixControlNegotiated: true, matrixControlCompatible: true, matrixVerified: false,
+  } },
   status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
 }
 const project: Project = {

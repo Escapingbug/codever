@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayPathHelp, gatewayPathPlaceholder, validateGatewayPath } from '../gatewayPath'
-import { isGatewayAuthorizationError } from '../gatewayAccess'
+import { gatewayCanControl, isGatewayAuthorizationError } from '../gatewayAccess'
 import { clientSession } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
 
@@ -14,7 +14,7 @@ const projects = computed(() => state.gateways.value.flatMap(gateway =>
   (state.projectsByGateway[gateway.id] ?? []).map(project => ({ project, gateway })),
 ))
 const authorizedGateways = computed(() => state.gateways.value.filter(gateway =>
-  hasLoadedProjects(gateway.id) && !isGatewayAuthorizationError(state.errors[`projects:${gateway.id}`]),
+  gatewayCanControl(gateway) && hasLoadedProjects(gateway.id) && !isGatewayAuthorizationError(state.errors[`projects:${gateway.id}`]),
 ))
 const availableGateways = computed(() => authorizedGateways.value.filter(gateway => gateway.status === 'online'))
 const authorizationCount = computed(() => state.gateways.value.filter(gateway =>

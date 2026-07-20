@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import type { MatrixVerificationSnapshot } from '../api/nativeMatrixClient'
 import StatusDot from '../components/StatusDot.vue'
-import { gatewayNeedsVerification, isGatewayAuthorizationError } from '../gatewayAccess'
+import { gatewayCanControl, gatewayNeedsVerification, gatewayRequiresUpgrade, isGatewayAuthorizationError } from '../gatewayAccess'
 import { MatrixVerificationCancelledError, MatrixVerificationTimeoutError, waitForBilateralVerification } from '../matrixVerification'
 import { clientSession, friendlyCodeverError } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
@@ -15,6 +15,8 @@ const gateway = computed(() => state.gateways.value.find(item => item.id === gat
 const projects = computed(() => state.projectsByGateway[gatewayId.value] ?? [])
 const error = computed(() => state.errors[`projects:${gatewayId.value}`])
 const needsVerification = computed(() => gatewayNeedsVerification(gateway.value))
+const needsUpgrade = computed(() => gatewayRequiresUpgrade(gateway.value))
+const controlReady = computed(() => gatewayCanControl(gateway.value))
 const matrixDeviceId = computed(() => {
   const value = gateway.value?.capabilities.metadata?.matrixDeviceId
   return typeof value === 'string' ? value : ''
@@ -135,7 +137,7 @@ async function requestApproval(): Promise<void> {
 }
 
 onMounted(async () => { await state.loadGateways() })
-watch(gateway, value => { if (value && !gatewayNeedsVerification(value)) void state.loadProjects(value.id) }, { immediate: true })
+watch(gateway, value => { if (value && gatewayCanControl(value)) void state.loadProjects(value.id) }, { immediate: true })
 onUnmounted(stopVerificationPolling)
 </script>
 
@@ -145,7 +147,13 @@ onUnmounted(stopVerificationPolling)
       <div><RouterLink class="mobile-breadcrumb" to="/machines">Computers /</RouterLink><span class="eyebrow">Computer</span><h1>{{ gateway?.name ?? 'Computer' }}</h1><p v-if="gateway"><StatusDot :status="gateway.status" :label="gateway.status" /> · {{ gateway.platform }} · Codever {{ gateway.version }}</p></div>
     </header>
 
-    <section v-if="needsVerification" class="settings-section authorization-card">
+    <section v-if="needsUpgrade" class="settings-section authorization-card">
+      <span class="eyebrow">Update required</span><h2>Gateway software is incompatible</h2>
+      <p>This client and computer do not share a secure-control protocol version. Update and restart Codever Gateway on this computer before continuing.</p>
+      <p class="form-help">No project or control command was sent over the incompatible connection.</p>
+    </section>
+
+    <section v-else-if="needsVerification" class="settings-section authorization-card">
       <span class="eyebrow">Step 1 of 2 · Identity</span><h2>Verify this computer</h2>
       <p>Compare the emoji shown here with the computer. Until they match, Codever cannot see its projects or send it commands.</p>
       <p class="form-help">On this computer, run <code>codever verify</code> in a terminal. Then confirm the same emoji on both devices.</p>
@@ -161,13 +169,14 @@ onUnmounted(stopVerificationPolling)
     </section>
 
     <div v-else-if="error && !isGatewayAuthorizationError(error)" class="error-banner"><strong>Secure control unavailable.</strong> {{ error }}</div>
-    <section v-if="!needsVerification && isGatewayAuthorizationError(error)" class="settings-section authorization-card">
+    <div v-else-if="gateway && !controlReady" class="setup-notice"><span class="loader" /><span>Checking secure-control compatibility…</span></div>
+    <section v-if="!needsUpgrade && !needsVerification && isGatewayAuthorizationError(error)" class="settings-section authorization-card">
       <span class="eyebrow">Step 2 of 2 · Permission</span><h2>Authorize this client</h2><p>This computer is verified. Now allow this client’s signed control key to execute coding tasks.</p>
       <p v-if="approvalRequested">Waiting for authorization…</p><p v-if="approvalError" class="error-banner" role="alert">{{ approvalError }}</p>
       <button class="button button--primary" :disabled="approvalRequested" @click="requestApproval">Request authorization</button>
     </section>
 
-    <section v-if="!needsVerification && !error">
+    <section v-if="!needsUpgrade && !error">
       <div class="section-heading"><div><span class="eyebrow">Available here</span><h2>Projects</h2></div><span>{{ projects.length }}</span></div>
       <div v-if="projects.length" class="project-grid"><RouterLink v-for="project in projects" :key="project.id" class="project-card" :to="{ name: 'project', params: { gatewayId, projectId: project.id } }"><div><h3>{{ project.name }}</h3><small>{{ project.defaultProvider ?? 'Default provider' }}</small></div><span aria-hidden="true">→</span></RouterLink></div>
       <div v-else-if="state.pending.value.has(`projects:${gatewayId}`)" class="empty-state empty-state--compact"><span class="loader" /><h2>Loading projects</h2></div>

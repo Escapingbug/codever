@@ -89,6 +89,7 @@ describe('MatrixGatewayClient', () => {
     const transport = new FakeTransport()
     const { value } = client(transport)
     value.start()
+    announceCompatibleGateway(transport)
     const request = {
       requestId: 'approval-2', gatewayId: 'gateway-1', ownerId: 'PHONE-2', label: 'Phone 2',
       publicKey: { kty: 'EC' as const, crv: 'P-256' as const, alg: 'ES256' as const, use: 'sig' as const, kid: 'phone-2', x: 'x', y: 'y' },
@@ -114,7 +115,8 @@ describe('MatrixGatewayClient', () => {
     transport.onSend = sent => {
       if (sent.eventType !== 'io.codever.discovery.v1') return
       transport.emit('io.codever.gateway.v1', {
-        recipientDeviceId: 'PHONE', clientDeviceVerified: true,
+        recipientDeviceId: 'PHONE', clientDeviceVerified: true, matrixControlCompatible: true,
+        matrixControl: { minVersion: 2, maxVersion: 2 },
         discoveryRequestId: (sent.content as { requestId: string }).requestId,
         gateway: {
         id: 'gateway-1', workspaceId: 'default', name: 'Windows Computer', platform: 'windows',
@@ -138,7 +140,8 @@ describe('MatrixGatewayClient', () => {
         capabilities: { protocolVersions: [1], providers: ['codex'], features: ['sessions'], metadata: { matrixDeviceId: 'NEWGATEWAY' } },
       }
       transport.emit('io.codever.gateway.v1', {
-        gateway, recipientDeviceId: 'PHONE', clientDeviceVerified: false,
+        gateway, recipientDeviceId: 'PHONE', clientDeviceVerified: false, matrixControlCompatible: true,
+        matrixControl: { minVersion: 2, maxVersion: 2 },
         discoveryRequestId: (sent.content as { requestId: string }).requestId,
       }, { encrypted: true, verifiedDevice: false, senderDevice: 'NEWGATEWAY' })
     }
@@ -146,7 +149,9 @@ describe('MatrixGatewayClient', () => {
       id: 'candidate', capabilities: { providers: [], features: [], metadata: { matrixVerified: false } },
     }])
 
-    transport.emit('io.codever.gateway.v1', { recipientDeviceId: 'PHONE', clientDeviceVerified: false, gateway: {
+    transport.emit('io.codever.gateway.v1', {
+      recipientDeviceId: 'PHONE', clientDeviceVerified: false, matrixControlCompatible: true,
+      matrixControl: { minVersion: 2, maxVersion: 2 }, gateway: {
       id: 'forged', workspaceId: 'default', name: 'Forged', platform: 'linux', version: '1', status: 'online',
       capabilities: { protocolVersions: [1], providers: [], features: [], metadata: { matrixDeviceId: 'SOMEONEELSE' } },
     } }, { encrypted: true, verifiedDevice: false, senderDevice: 'ATTACKER' })
@@ -156,6 +161,8 @@ describe('MatrixGatewayClient', () => {
   it('binds a COSE token to the exact request and correlates the encrypted response', async () => {
     const transport = new FakeTransport()
     const { value } = client(transport)
+    value.start()
+    announceCompatibleGateway(transport)
     transport.onSend = sent => {
       const authorized = sent.content as { request: { requestId: string } }
       transport.emit('io.codever.response.v1', {
@@ -182,6 +189,8 @@ describe('MatrixGatewayClient', () => {
   it('rejects a response from an unverified Matrix device', async () => {
     const transport = new FakeTransport()
     const { value, onSecurityError } = client(transport)
+    value.start()
+    announceCompatibleGateway(transport)
     transport.onSend = sent => {
       const requestId = (sent.content as { request: { requestId: string } }).request.requestId
       transport.emit('io.codever.response.v1', { gatewayId: 'gateway-1', response: {
@@ -205,4 +214,34 @@ describe('MatrixGatewayClient', () => {
     transport.emit('io.codever.inventory.v1', snapshot(3))
     expect(value.inventory('gateway-1')?.revision).toBe(7)
   })
+
+  it('identifies a legacy Gateway as update-required before sending a command', async () => {
+    const transport = new FakeTransport()
+    const { value } = client(transport)
+    transport.onSend = sent => {
+      if (sent.eventType !== 'io.codever.discovery.v1') return
+      transport.emit('io.codever.gateway.v1', { gateway: gatewaySnapshot() })
+    }
+    const gateways = await value.listGateways()
+    expect(gateways[0]?.capabilities.metadata).toMatchObject({
+      matrixControlNegotiated: true, matrixControlCompatible: false, matrixVerified: false,
+    })
+    await expect(value.request('gateway-1', { kind: 'inventory.get' })).rejects.toThrow('incompatible')
+    expect(transport.sends.filter(sent => sent.eventType === 'io.codever.command.v1')).toHaveLength(0)
+  })
 })
+
+function gatewaySnapshot() {
+  return {
+    id: 'gateway-1', workspaceId: 'default', name: 'Windows Computer', platform: 'windows' as const,
+    version: '0.1.0', status: 'online' as const, lastSeenAt: new Date().toISOString(),
+    capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'GATEWAY' } },
+  }
+}
+
+function announceCompatibleGateway(transport: FakeTransport): void {
+  transport.emit('io.codever.gateway.v1', {
+    gateway: gatewaySnapshot(), recipientDeviceId: 'PHONE', clientDeviceVerified: true,
+    matrixControlCompatible: true, matrixControl: { minVersion: 2, maxVersion: 2 },
+  })
+}

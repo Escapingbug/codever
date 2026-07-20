@@ -1,5 +1,8 @@
 import {
+  CURRENT_MATRIX_CONTROL_RANGE,
   PROTOCOL_VERSION,
+  matrixControlRangesOverlap,
+  parseMatrixControlVersionRange,
   parseClientGatewayResponseFrame,
   parseGateway,
   parseInventorySnapshot,
@@ -133,6 +136,16 @@ export class MatrixGatewayClient {
 
   async request(gatewayId: string, payload: ClientGatewayRequestPayload): Promise<ClientGatewayResponseFrame> {
     this.start()
+    const gateway = this.gateways.get(gatewayId)
+    if (!gateway || gateway.capabilities.metadata?.matrixControlNegotiated !== true) {
+      throw new Error('Secure-control protocol negotiation has not completed. Refresh computers and try again.')
+    }
+    if (gateway.capabilities.metadata?.matrixControlCompatible !== true) {
+      throw new Error('This Gateway uses an incompatible secure-control protocol. Update Codever Gateway.')
+    }
+    if (gateway.capabilities.metadata?.matrixVerified !== true) {
+      throw new Error('This client device is not verified by the Gateway. Verify this computer again.')
+    }
     const requestId = `req_${crypto.randomUUID()}`
     const request: ClientGatewayRequestFrame = {
       version: PROTOCOL_VERSION,
@@ -198,7 +211,7 @@ export class MatrixGatewayClient {
         roomId: this.options.controlRoomId,
         eventType: MATRIX_DISCOVERY_EVENT,
         transactionId: requestId,
-        content: { version: PROTOCOL_VERSION, requestId },
+        content: { version: PROTOCOL_VERSION, requestId, matrixControl: CURRENT_MATRIX_CONTROL_RANGE },
       })
       const startedAt = Date.now()
       while (Date.now() - startedAt < 8_000) {
@@ -246,15 +259,30 @@ export class MatrixGatewayClient {
         const current = this.inventories.get(gatewayId)
         if (!current || inventory.revision >= current.revision) this.inventories.set(gatewayId, inventory)
       } else if (eventType === MATRIX_GATEWAY_EVENT) {
-        const recipientDeviceId = requiredText(content.recipientDeviceId, 'recipientDeviceId')
-        if (recipientDeviceId !== this.options.session.deviceId) return
-        const discoveryRequestId = typeof content.discoveryRequestId === 'string' ? content.discoveryRequestId : undefined
-        if (discoveryRequestId && discoveryRequestId !== this.activeDiscoveryRequestId) return
-        if (typeof content.clientDeviceVerified !== 'boolean') throw new Error('clientDeviceVerified is required')
         const parsed = parseGateway(content.gateway)
         const announcedDevice = parsed.capabilities.metadata?.matrixDeviceId
         if (typeof announcedDevice !== 'string' || !input.senderDevice || announcedDevice !== input.senderDevice) {
           throw new Error('Gateway Matrix device does not match the encrypted sender')
+        }
+        let compatible = false
+        try {
+          compatible = matrixControlRangesOverlap(
+            CURRENT_MATRIX_CONTROL_RANGE,
+            parseMatrixControlVersionRange(content.matrixControl),
+          )
+        } catch { /* A missing declaration identifies a pre-negotiation Gateway. */ }
+        if (!compatible) {
+          this.rememberGatewayCompatibility(parsed, input.verifiedDevice, false)
+          return
+        }
+        // Current-version untargeted announcements are presence wakeups only.
+        if (typeof content.recipientDeviceId !== 'string') return
+        if (content.recipientDeviceId !== this.options.session.deviceId) return
+        const discoveryRequestId = typeof content.discoveryRequestId === 'string' ? content.discoveryRequestId : undefined
+        if (discoveryRequestId && discoveryRequestId !== this.activeDiscoveryRequestId) return
+        if (typeof content.clientDeviceVerified !== 'boolean' || content.matrixControlCompatible !== true) {
+          this.rememberGatewayCompatibility(parsed, input.verifiedDevice, false)
+          return
         }
         const matrixVerified = input.verifiedDevice && content.clientDeviceVerified
         const gateway: Gateway = {
@@ -267,6 +295,8 @@ export class MatrixGatewayClient {
               ...parsed.capabilities.metadata,
               gatewayDeviceVerified: input.verifiedDevice,
               clientDeviceVerified: content.clientDeviceVerified,
+              matrixControlNegotiated: true,
+              matrixControlCompatible: true,
               matrixVerified,
             },
           },
@@ -298,6 +328,26 @@ export class MatrixGatewayClient {
     for (const subscriber of this.approvalSubscribers) subscriber(snapshot)
   }
 
+  private rememberGatewayCompatibility(parsed: Gateway, gatewayDeviceVerified: boolean, compatible: boolean): void {
+    const gateway: Gateway = {
+      ...parsed,
+      capabilities: {
+        ...parsed.capabilities,
+        providers: [],
+        features: [],
+        metadata: {
+          ...parsed.capabilities.metadata,
+          gatewayDeviceVerified,
+          matrixControlNegotiated: true,
+          matrixControlCompatible: compatible,
+          matrixVerified: false,
+        },
+      },
+    }
+    this.gateways.set(gateway.id, gateway)
+    this.gatewayAnnouncementRevision += 1
+  }
+
   private rememberResponse(gatewayId: string, response: ClientGatewayResponseFrame): void {
     this.responses.set(response.requestId, response)
     if (this.responses.size > 2_000) this.responses.delete(this.responses.keys().next().value!)
@@ -319,6 +369,24 @@ export class MatrixGatewayClient {
           },
         })
         this.gatewayAnnouncementRevision += 1
+      }
+    }
+    if (response.status === 'failed' && response.error.code === 'matrix_control_protocol_unsupported') {
+      const gateway = this.gateways.get(gatewayId)
+      if (gateway) this.rememberGatewayCompatibility(gateway, true, false)
+    }
+    if (response.status === 'failed' && response.error.code === 'matrix_control_negotiation_required') {
+      const gateway = this.gateways.get(gatewayId)
+      if (gateway) {
+        this.gateways.set(gatewayId, {
+          ...gateway,
+          capabilities: { ...gateway.capabilities, metadata: {
+            ...gateway.capabilities.metadata,
+            matrixControlNegotiated: false,
+            matrixVerified: false,
+          } },
+        })
+        this.discoveryLastCompletedAt = 0
       }
     }
     if (!pending) return

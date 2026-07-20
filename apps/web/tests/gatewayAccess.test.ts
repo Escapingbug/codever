@@ -6,7 +6,9 @@ describe('gateway access presentation', () => {
   it('keeps Matrix verification ahead of project loading and execution authorization', () => {
     const gateway: Gateway = {
       id: 'gateway-1', workspaceId: 'default', name: 'Computer', platform: 'windows', version: '1', status: 'online',
-      capabilities: { protocolVersions: [1], providers: [], features: [], metadata: { matrixDeviceId: 'DEVICE', matrixVerified: false } },
+      capabilities: { protocolVersions: [1], providers: [], features: [], metadata: {
+        matrixDeviceId: 'DEVICE', matrixControlNegotiated: true, matrixControlCompatible: true, matrixVerified: false,
+      } },
     }
     expect(gatewayNeedsVerification(gateway)).toBe(true)
     expect(gatewayAccessState({ gateway, loaded: false, pending: false })).toBe('verification-required')
@@ -20,10 +22,25 @@ describe('gateway access presentation', () => {
   it('keeps real failures distinct from setup', () => {
     expect(gatewayAccessState({ loaded: false, pending: false, error: 'Matrix synchronization timed out' }))
       .toBe('error')
-    expect(gatewayAccessState({ loaded: true, pending: false })).toBe('ready')
+    expect(gatewayAccessState({ gateway: readyGateway(), loaded: true, pending: false })).toBe('ready')
   })
 
   it('does not present stale cached projects as a completed refresh', () => {
-    expect(gatewayAccessState({ loaded: true, pending: true })).toBe('checking')
+    expect(gatewayAccessState({ gateway: readyGateway(), loaded: true, pending: true })).toBe('checking')
+  })
+
+  it('presents an incompatible Gateway as an update instead of verification or timeout', () => {
+    const gateway = readyGateway()
+    gateway.capabilities.metadata = { ...gateway.capabilities.metadata, matrixControlCompatible: false, matrixVerified: false }
+    expect(gatewayAccessState({ gateway, loaded: true, pending: false })).toBe('upgrade-required')
   })
 })
+
+function readyGateway(): Gateway {
+  return {
+    id: 'gateway-ready', workspaceId: 'default', name: 'Computer', platform: 'windows', version: '1', status: 'online',
+    capabilities: { protocolVersions: [1], providers: [], features: [], metadata: {
+      matrixControlNegotiated: true, matrixControlCompatible: true, matrixVerified: true,
+    } },
+  }
+}
