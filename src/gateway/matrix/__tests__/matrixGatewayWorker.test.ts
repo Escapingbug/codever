@@ -29,6 +29,9 @@ describe('MatrixGatewayWorker', () => {
         })
         await vi.waitFor(() => expect(transport.sent).toHaveLength(2))
         expect(transport.sent.map(value => value.eventType)).toEqual([MATRIX_GATEWAY_EVENT, MATRIX_INVENTORY_EVENT])
+        expect(transport.sent[0].content).toMatchObject({
+            recipientDeviceId: 'PHONE', clientDeviceVerified: true, discoveryRequestId: 'discover-1',
+        })
         expect(process).not.toHaveBeenCalled()
     })
 
@@ -102,10 +105,7 @@ describe('MatrixGatewayWorker', () => {
         expect(trustVerifiedDeviceRoot).not.toHaveBeenCalled()
     })
 
-    it.each([
-        ['unencrypted', false, true],
-        ['unverified', true, false],
-    ])('rejects %s Matrix commands before COSE processing', async (_name, encrypted, verifiedDevice) => {
+    it('rejects unencrypted Matrix commands before COSE processing', async () => {
         const transport = new FakeTransport()
         const process = vi.fn()
         const onError = vi.fn()
@@ -114,10 +114,30 @@ describe('MatrixGatewayWorker', () => {
             processor: { process } as unknown as AuthorizedRequestProcessor, onError,
         })
         await worker.start()
-        transport.emit(commandEvent(encrypted, verifiedDevice))
+        transport.emit(commandEvent(false, true))
         await vi.waitFor(() => expect(onError).toHaveBeenCalled())
         expect(process).not.toHaveBeenCalled()
         expect(transport.sent).toHaveLength(0)
+    })
+
+    it('answers an encrypted unverified command with an immediate setup failure', async () => {
+        const transport = new FakeTransport()
+        const process = vi.fn()
+        const worker = new MatrixGatewayWorker({
+            gatewayId: 'gateway-1', controlRoomId: '!control:test', transport,
+            processor: { process } as unknown as AuthorizedRequestProcessor,
+        })
+        await worker.start()
+        transport.emit(commandEvent(true, false))
+        await vi.waitFor(() => expect(transport.sent).toHaveLength(1))
+        expect(process).not.toHaveBeenCalled()
+        expect(transport.sent[0]).toMatchObject({
+            eventType: MATRIX_RESPONSE_EVENT,
+            content: { response: {
+                requestId: 'request-1', status: 'failed',
+                error: { code: 'matrix_device_verification_required', retryable: false },
+            } },
+        })
     })
 })
 

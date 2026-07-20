@@ -68,6 +68,7 @@ export class MatrixGatewayClient {
   private discovery?: Promise<void>
   private discoveryLastCompletedAt = 0
   private gatewayAnnouncementRevision = 0
+  private activeDiscoveryRequestId?: string
 
   constructor(private readonly options: MatrixGatewayClientOptions) {}
 
@@ -191,6 +192,7 @@ export class MatrixGatewayClient {
     if (this.discovery) return this.discovery
     this.discovery = (async () => {
       const requestId = `discover_${crypto.randomUUID()}`
+      this.activeDiscoveryRequestId = requestId
       const announcementRevision = this.gatewayAnnouncementRevision
       await this.options.transport.send({
         roomId: this.options.controlRoomId,
@@ -210,7 +212,10 @@ export class MatrixGatewayClient {
         await delay(50)
       }
       this.discoveryLastCompletedAt = Date.now()
-    })().finally(() => { this.discovery = undefined })
+    })().finally(() => {
+      this.activeDiscoveryRequestId = undefined
+      this.discovery = undefined
+    })
     return this.discovery
   }
 
@@ -232,26 +237,38 @@ export class MatrixGatewayClient {
     try {
       const content = record(input.event.content)
       if (eventType === MATRIX_RESPONSE_EVENT) {
+        const gatewayId = requiredText(content.gatewayId, 'gatewayId')
         const response = parseClientGatewayResponseFrame(content.response)
-        this.rememberResponse(response)
+        this.rememberResponse(gatewayId, response)
       } else if (eventType === MATRIX_INVENTORY_EVENT) {
         const gatewayId = requiredText(content.gatewayId, 'gatewayId')
         const inventory = parseInventorySnapshot(content.inventory)
         const current = this.inventories.get(gatewayId)
         if (!current || inventory.revision >= current.revision) this.inventories.set(gatewayId, inventory)
       } else if (eventType === MATRIX_GATEWAY_EVENT) {
+        const recipientDeviceId = requiredText(content.recipientDeviceId, 'recipientDeviceId')
+        if (recipientDeviceId !== this.options.session.deviceId) return
+        const discoveryRequestId = typeof content.discoveryRequestId === 'string' ? content.discoveryRequestId : undefined
+        if (discoveryRequestId && discoveryRequestId !== this.activeDiscoveryRequestId) return
+        if (typeof content.clientDeviceVerified !== 'boolean') throw new Error('clientDeviceVerified is required')
         const parsed = parseGateway(content.gateway)
         const announcedDevice = parsed.capabilities.metadata?.matrixDeviceId
         if (typeof announcedDevice !== 'string' || !input.senderDevice || announcedDevice !== input.senderDevice) {
           throw new Error('Gateway Matrix device does not match the encrypted sender')
         }
+        const matrixVerified = input.verifiedDevice && content.clientDeviceVerified
         const gateway: Gateway = {
           ...parsed,
           capabilities: {
             ...parsed.capabilities,
-            providers: input.verifiedDevice ? parsed.capabilities.providers : [],
-            features: input.verifiedDevice ? parsed.capabilities.features : [],
-            metadata: { ...parsed.capabilities.metadata, matrixVerified: input.verifiedDevice },
+            providers: matrixVerified ? parsed.capabilities.providers : [],
+            features: matrixVerified ? parsed.capabilities.features : [],
+            metadata: {
+              ...parsed.capabilities.metadata,
+              gatewayDeviceVerified: input.verifiedDevice,
+              clientDeviceVerified: content.clientDeviceVerified,
+              matrixVerified,
+            },
           },
         }
         const current = this.gateways.get(gateway.id)
@@ -281,10 +298,29 @@ export class MatrixGatewayClient {
     for (const subscriber of this.approvalSubscribers) subscriber(snapshot)
   }
 
-  private rememberResponse(response: ClientGatewayResponseFrame): void {
+  private rememberResponse(gatewayId: string, response: ClientGatewayResponseFrame): void {
     this.responses.set(response.requestId, response)
     if (this.responses.size > 2_000) this.responses.delete(this.responses.keys().next().value!)
     const pending = this.pending.get(response.requestId)
+    if (response.status === 'failed' && response.error.code === 'matrix_device_verification_required') {
+      const gateway = this.gateways.get(gatewayId)
+      if (gateway) {
+        this.gateways.set(gatewayId, {
+          ...gateway,
+          capabilities: {
+            ...gateway.capabilities,
+            providers: [],
+            features: [],
+            metadata: {
+              ...gateway.capabilities.metadata,
+              clientDeviceVerified: false,
+              matrixVerified: false,
+            },
+          },
+        })
+        this.gatewayAnnouncementRevision += 1
+      }
+    }
     if (!pending) return
     if (pending.timer) clearTimeout(pending.timer)
     this.pending.delete(response.requestId)

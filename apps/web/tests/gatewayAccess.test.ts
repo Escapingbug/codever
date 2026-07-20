@@ -22,4 +22,8 @@ describe('gateway access presentation', () => {
       .toBe('error')
     expect(gatewayAccessState({ loaded: true, pending: false })).toBe('ready')
   })
+
+  it('does not present stale cached projects as a completed refresh', () => {
+    expect(gatewayAccessState({ loaded: true, pending: true })).toBe('checking')
+  })
 })

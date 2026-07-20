@@ -97,7 +97,7 @@ describe('MatrixGatewayClient', () => {
     transport.onSend = sent => {
       if (sent.eventType !== 'io.codever.command.v1') return
       const requestId = (sent.content as { request: { requestId: string } }).request.requestId
-      transport.emit('io.codever.response.v1', { response: {
+      transport.emit('io.codever.response.v1', { gatewayId: 'gateway-1', response: {
         version: 1, type: 'gateway.client.response', requestId, status: 'completed',
         completedAt: new Date().toISOString(),
         payload: { commandId: 'trust-root', status: 'completed', completedAt: new Date().toISOString() },
@@ -113,11 +113,15 @@ describe('MatrixGatewayClient', () => {
     const { value } = client(transport)
     transport.onSend = sent => {
       if (sent.eventType !== 'io.codever.discovery.v1') return
-      transport.emit('io.codever.gateway.v1', { gateway: {
+      transport.emit('io.codever.gateway.v1', {
+        recipientDeviceId: 'PHONE', clientDeviceVerified: true,
+        discoveryRequestId: (sent.content as { requestId: string }).requestId,
+        gateway: {
         id: 'gateway-1', workspaceId: 'default', name: 'Windows Computer', platform: 'windows',
         version: '0.1.0', status: 'online', lastSeenAt: new Date().toISOString(),
         capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'GATEWAY' } },
-      } })
+        },
+      })
     }
 
     await expect(value.listGateways()).resolves.toMatchObject([{ id: 'gateway-1' }])
@@ -133,13 +137,16 @@ describe('MatrixGatewayClient', () => {
         id: 'candidate', workspaceId: 'default', name: 'New computer', platform: 'windows', version: '0.1.0', status: 'online',
         capabilities: { protocolVersions: [1], providers: ['codex'], features: ['sessions'], metadata: { matrixDeviceId: 'NEWGATEWAY' } },
       }
-      transport.emit('io.codever.gateway.v1', { gateway }, { encrypted: true, verifiedDevice: false, senderDevice: 'NEWGATEWAY' })
+      transport.emit('io.codever.gateway.v1', {
+        gateway, recipientDeviceId: 'PHONE', clientDeviceVerified: false,
+        discoveryRequestId: (sent.content as { requestId: string }).requestId,
+      }, { encrypted: true, verifiedDevice: false, senderDevice: 'NEWGATEWAY' })
     }
     await expect(value.listGateways()).resolves.toMatchObject([{
       id: 'candidate', capabilities: { providers: [], features: [], metadata: { matrixVerified: false } },
     }])
 
-    transport.emit('io.codever.gateway.v1', { gateway: {
+    transport.emit('io.codever.gateway.v1', { recipientDeviceId: 'PHONE', clientDeviceVerified: false, gateway: {
       id: 'forged', workspaceId: 'default', name: 'Forged', platform: 'linux', version: '1', status: 'online',
       capabilities: { protocolVersions: [1], providers: [], features: [], metadata: { matrixDeviceId: 'SOMEONEELSE' } },
     } }, { encrypted: true, verifiedDevice: false, senderDevice: 'ATTACKER' })
@@ -177,7 +184,7 @@ describe('MatrixGatewayClient', () => {
     const { value, onSecurityError } = client(transport)
     transport.onSend = sent => {
       const requestId = (sent.content as { request: { requestId: string } }).request.requestId
-      transport.emit('io.codever.response.v1', { response: {
+      transport.emit('io.codever.response.v1', { gatewayId: 'gateway-1', response: {
         version: 1, type: 'gateway.client.response', requestId, status: 'failed',
         failedAt: new Date().toISOString(), error: { code: 'forged', message: 'forged', retryable: false },
       } }, { encrypted: true, verifiedDevice: false })

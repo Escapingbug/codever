@@ -45,6 +45,8 @@ const project: Project = {
 const projects: Project[] = [project]
 let secondGatewayAuthorized = false
 let projectAccessCalls = 0
+let projectAccessMode: 'normal' | 'pending' | 'reject' = 'normal'
+const pendingProjectAccess: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
 const longHistoryFixture = fixtureParameters.get('history') === 'long'
 const session: CodeverSession = {
   id: longHistoryFixture ? 'session-long-history-e2e' : 'session-e2e', gatewayId: gateway.id, projectId: project.id, title: 'Build Android client', state: 'idle',
@@ -190,6 +192,11 @@ const api = {
   },
   async listProjects(gatewayId: string) {
     projectAccessCalls += 1
+    if (projectAccessMode === 'pending') {
+      await new Promise<void>((resolve, reject) => pendingProjectAccess.push({ resolve, reject }))
+    } else if (projectAccessMode === 'reject') {
+      throw new Error('Gateway response timed out; the request may still be visible in Matrix history')
+    }
     if (gatewayId === unpairedGateway.id) {
       if (!matrixGatewayVerified || verificationStage !== 'done') {
         throw new Error('Project access was attempted before bilateral Matrix verification')
@@ -382,6 +389,8 @@ declare global {
       confirmGatewayVerification(): void
       cancelGatewayVerification(reason?: string): void
       projectAccessCalls(): number
+      setProjectAccessMode(mode: 'normal' | 'pending' | 'reject'): void
+      releaseProjectAccess(outcome?: 'success' | 'reject'): void
       clientVerificationConfirmed(): boolean
       reportRuntimeError(): void
     }
@@ -407,6 +416,14 @@ window.__CODEVER_E2E__ = {
     unpairedGateway.capabilities.metadata = { ...unpairedGateway.capabilities.metadata, matrixVerified: false }
   },
   projectAccessCalls() { return projectAccessCalls },
+  setProjectAccessMode(mode) { projectAccessMode = mode },
+  releaseProjectAccess(outcome = 'success') {
+    projectAccessMode = 'normal'
+    for (const pending of pendingProjectAccess.splice(0)) {
+      if (outcome === 'success') pending.resolve()
+      else pending.reject(new Error('Gateway response timed out; the request may still be visible in Matrix history'))
+    }
+  },
   clientVerificationConfirmed() { return clientVerificationConfirmed },
   completeTurn() {
     if (!pendingSend) throw new Error('No pending Client message')

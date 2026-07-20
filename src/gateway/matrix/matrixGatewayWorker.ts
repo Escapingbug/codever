@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { JWK } from '@codever/execution-auth'
-import type { Gateway, InventorySnapshot, SessionEventEnvelope } from '@codever/protocol'
+import { PROTOCOL_VERSION, type ClientGatewayResponseFrame, type Gateway, type InventorySnapshot, type SessionEventEnvelope } from '@codever/protocol'
 import { AuthorizedRequestProcessor } from '../authorizedRequestProcessor'
 import type { MatrixTransport, NativeMatrixEvent } from './nativeMatrixTransport'
 
@@ -51,12 +51,17 @@ export class MatrixGatewayWorker {
         })
     }
 
-    async publishGateway(gateway: Gateway): Promise<void> {
+    async publishGateway(gateway: Gateway, target?: {
+        recipientDeviceId: string
+        clientDeviceVerified: boolean
+        discoveryRequestId?: string
+    }): Promise<void> {
+        const transactionSuffix = target?.discoveryRequestId ?? target?.recipientDeviceId ?? gateway.lastSeenAt ?? randomUUID()
         await this.options.transport.send({
             roomId: this.options.controlRoomId,
             eventType: MATRIX_GATEWAY_EVENT,
-            transactionId: `${this.options.gatewayId}-presence-${gateway.lastSeenAt}`,
-            content: { gateway },
+            transactionId: `${this.options.gatewayId}-presence-${transactionSuffix}`,
+            content: { gateway, ...target },
         })
     }
 
@@ -75,9 +80,14 @@ export class MatrixGatewayWorker {
             || ![MATRIX_COMMAND_EVENT, MATRIX_DISCOVERY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType)) return
         if (!input.encrypted) throw new Error('Rejected unencrypted Matrix control event')
         if (eventType === MATRIX_DISCOVERY_EVENT) {
+            const discovery = parseDiscovery(input.event.content, input.senderDevice)
             if (this.options.currentGateway) {
                 const gateway = this.options.currentGateway()
-                await this.publishGateway(input.verifiedDevice ? gateway : setupCandidate(gateway))
+                await this.publishGateway(input.verifiedDevice ? gateway : setupCandidate(gateway), {
+                    recipientDeviceId: discovery.senderDevice,
+                    clientDeviceVerified: input.verifiedDevice,
+                    discoveryRequestId: discovery.requestId,
+                })
             }
             // An encrypted but unverified client may learn only that this Gateway exists so
             // the user can start SAS verification. Projects, sessions and control remain hidden.
@@ -87,13 +97,27 @@ export class MatrixGatewayWorker {
             return
         }
         if (!input.verifiedDevice) {
+            if (eventType === MATRIX_COMMAND_EVENT) {
+                const rejected = rejectedCommand(input.event.content)
+                if (this.options.currentGateway && input.senderDevice) {
+                    await this.publishGateway(setupCandidate(this.options.currentGateway()), {
+                        recipientDeviceId: input.senderDevice,
+                        clientDeviceVerified: false,
+                    })
+                }
+                await this.sendResponse(input.roomId, rejected.idempotencyKey, rejected.response)
+                return
+            }
             throw new Error('Rejected Matrix control event from an unverified device')
         }
         if (eventType === MATRIX_AUTHORIZATION_EVENT) {
             if (!this.options.trustVerifiedDeviceRoot) return
             const request = parseVerifiedDeviceAuthorization(input.event.content, input.senderDevice, this.options.gatewayId)
             await this.options.trustVerifiedDeviceRoot(request.ownerId, request.publicKey, request.label)
-            if (this.options.currentGateway) await this.publishGateway(this.options.currentGateway())
+            if (this.options.currentGateway && input.senderDevice) await this.publishGateway(this.options.currentGateway(), {
+                recipientDeviceId: input.senderDevice,
+                clientDeviceVerified: true,
+            })
             if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
             return
         }
@@ -108,8 +132,12 @@ export class MatrixGatewayWorker {
                 ? request.payload.kind : 'unknown'
             this.report(new Error(`Gateway request ${kind} failed: ${response.error.code}: ${response.error.message}`))
         }
+        await this.sendResponse(input.roomId, idempotencyKey, response)
+    }
+
+    private async sendResponse(roomId: string, idempotencyKey: string, response: ClientGatewayResponseFrame): Promise<void> {
         await this.options.transport.send({
-            roomId: input.roomId,
+            roomId,
             eventType: MATRIX_RESPONSE_EVENT,
             transactionId: `${idempotencyKey}-response`,
             content: { gatewayId: this.options.gatewayId, response },
@@ -130,6 +158,39 @@ function setupCandidate(gateway: Gateway): Gateway {
             providers: [],
             features: [],
             ...(typeof matrixDeviceId === 'string' ? { metadata: { matrixDeviceId } } : {}),
+        },
+    }
+}
+
+function parseDiscovery(value: unknown, senderDevice: string | undefined): { requestId: string; senderDevice: string } {
+    if (!isRecord(value) || value.version !== PROTOCOL_VERSION || typeof value.requestId !== 'string' || !value.requestId) {
+        throw new Error('Rejected malformed Matrix discovery request')
+    }
+    if (!senderDevice) throw new Error('Rejected Matrix discovery without a sender device')
+    return { requestId: value.requestId, senderDevice }
+}
+
+function rejectedCommand(value: unknown): { idempotencyKey: string; response: ClientGatewayResponseFrame } {
+    const request = isRecord(value) && isRecord(value.request) ? value.request : undefined
+    if (!request || typeof request.requestId !== 'string' || !request.requestId) {
+        throw new Error('Rejected malformed Matrix command from an unverified device')
+    }
+    const idempotencyKey = typeof request.idempotencyKey === 'string' && request.idempotencyKey
+        ? request.idempotencyKey
+        : request.requestId
+    return {
+        idempotencyKey,
+        response: {
+            version: PROTOCOL_VERSION,
+            type: 'gateway.client.response',
+            requestId: request.requestId,
+            status: 'failed',
+            failedAt: new Date().toISOString(),
+            error: {
+                code: 'matrix_device_verification_required',
+                message: 'This client device is not verified by the Gateway. Verify this computer again.',
+                retryable: false,
+            },
         },
     }
 }

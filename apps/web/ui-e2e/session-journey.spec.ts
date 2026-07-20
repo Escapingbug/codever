@@ -76,6 +76,22 @@ test.describe('mobile Session business journey', () => {
     await expect(page.getByRole('heading', { name: 'No projects on this computer' })).toBeVisible()
   })
 
+  test('C02 keeps cached Computer data visibly refreshing while a Gateway command is delayed', async ({ page }) => {
+    await page.goto('./e2e.html#/projects')
+    await expect(page.getByRole('link', { name: 'Codever My computer' })).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.setProjectAccessMode('pending'))
+
+    await page.goto('./e2e.html#/machines')
+    const computer = page.locator('.machine-card').filter({ hasText: 'My computer' })
+    await expect(computer).toContainText('Loading projects')
+    await expect(computer).not.toContainText('0 projects')
+
+    await computer.click()
+    await expect(page.getByRole('heading', { name: 'My computer' })).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.releaseProjectAccess())
+    await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
+  })
+
   test('C02 keeps commands blocked when the Gateway cancels SAS', async ({ page }) => {
     await page.goto('./e2e.html#/machines')
     await page.locator('.machine-card').filter({ hasText: 'Windows Computer' }).click()

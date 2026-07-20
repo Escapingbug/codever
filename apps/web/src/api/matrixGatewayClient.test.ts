@@ -18,15 +18,16 @@ class DelayedDiscoveryTransport implements MatrixTransportPort {
 
   signExecution(): Promise<string> { return Promise.resolve('token') }
 
-  async send(input: { eventType: string }): Promise<string> {
+  async send(input: { eventType: string; content: unknown }): Promise<string> {
     if (input.eventType === MATRIX_DISCOVERY_EVENT) {
       const verified = this.verified
-      setTimeout(() => this.announce(verified), 150)
+      const requestId = (input.content as { requestId: string }).requestId
+      setTimeout(() => this.announce(verified, requestId), 150)
     }
     return '$event'
   }
 
-  private announce(verifiedDevice: boolean): void {
+  private announce(verifiedDevice: boolean, discoveryRequestId: string): void {
     const gateway: Gateway = {
       id: 'gateway-1', workspaceId: 'workspace-1', name: 'Windows Computer',
       platform: 'windows', version: '0.1.0', status: 'online',
@@ -39,7 +40,9 @@ class DelayedDiscoveryTransport implements MatrixTransportPort {
     this.subscriber?.({
       roomId: '!control:example.test', encrypted: true, verifiedDevice,
       senderDevice: 'GATEWAYDEVICE',
-      event: { type: MATRIX_GATEWAY_EVENT, content: { gateway } },
+      event: { type: MATRIX_GATEWAY_EVENT, content: {
+        gateway, recipientDeviceId: 'CLIENTDEVICE', clientDeviceVerified: verifiedDevice, discoveryRequestId,
+      } },
     })
   }
 }

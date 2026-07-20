@@ -18,6 +18,7 @@ export function gatewayAccessState(input: {
 }): GatewayAccessState {
   if (gatewayNeedsVerification(input.gateway)) return 'verification-required'
   if (isGatewayAuthorizationError(input.error)) return 'authorization-required'
+  if (input.pending) return 'checking'
   if (input.error) return 'error'
   if (input.loaded) return 'ready'
   return 'checking'
