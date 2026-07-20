@@ -54,33 +54,30 @@ test.describe('mobile Session business journey', () => {
   test('C02 separates Matrix device trust from Gateway execution authorization', async ({ page }) => {
     await page.goto('./e2e.html#/machines')
     const secondComputer = page.locator('.machine-card').filter({ hasText: 'Second computer' })
-    await expect(secondComputer).toContainText('Authorization required')
+    await expect(secondComputer).toContainText('Verify this computer')
     await secondComputer.click()
 
+    await expect(page.getByRole('heading', { name: 'Verify this computer' })).toBeVisible()
+    await page.getByRole('button', { name: 'Start secure verification' }).click()
+    await page.getByRole('button', { name: 'Continue' }).click()
+    await expect(page.getByLabel('Verification emoji')).toBeVisible()
+    await page.getByRole('button', { name: 'They match' }).click()
     await expect(page.getByRole('heading', { name: 'Authorize this client' })).toBeVisible()
     await page.getByText('Technical details').click()
     await expect(page.getByText('SECONDGATEWAY')).toBeVisible()
-    await expect(page.getByText('The computer will bind this control key to the Matrix device you just verified. Unverified devices cannot add control keys.')).toBeVisible()
     await page.evaluate(() => window.__CODEVER_E2E__.approveSecondComputer())
     await page.goto('./e2e.html#/machines')
     await page.locator('.machine-card').filter({ hasText: 'Second computer' }).click()
     await expect(page.getByRole('heading', { name: 'No projects on this computer' })).toBeVisible()
   })
 
-  test('C01/C02 verifies a Gateway with Matrix SAS and approves a new execution root', async ({ page }) => {
+  test('C01 manages client approvals without mixing them with Computer verification', async ({ page }) => {
     await page.goto('./e2e.html#/settings')
-    const gatewayDevice = page.locator('.server-summary').filter({ hasText: 'Windows Gateway' })
-    await expect(gatewayDevice).toContainText('Not verified')
-    await gatewayDevice.getByRole('button', { name: 'Verify' }).click()
-    await expect(page.getByRole('button', { name: 'Cancel verification' })).toBeVisible()
-    await page.getByRole('button', { name: 'Continue verification' }).click()
-    await expect(page.getByLabel('Verification emoji')).toContainText('🐶')
-    await page.getByRole('button', { name: 'They match' }).click()
-    await expect(gatewayDevice).toContainText('Verified')
-
+    await expect(page.getByText('Computer setup now belongs in')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Verify' })).toHaveCount(0)
     const approval = page.locator('.authorization-card').filter({ hasText: 'New phone' })
     await expect(approval).toContainText('execution-new')
-    await approval.getByRole('button', { name: 'Approve this client' }).click()
+    await approval.getByRole('button', { name: 'Approve client' }).click()
     await expect(approval).toHaveCount(0)
   })
 

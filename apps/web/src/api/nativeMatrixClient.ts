@@ -48,6 +48,7 @@ export interface MatrixDeviceSnapshot {
   displayName?: string
   verified: boolean
   current: boolean
+  verifiable: boolean
 }
 
 export interface MatrixMediaUploadSnapshot {

@@ -184,7 +184,9 @@ export class MatrixGatewayClient {
 
   private async discoverGateways(): Promise<void> {
     this.start()
-    if (this.gateways.size && Date.now() - this.discoveryLastCompletedAt < 15_000) return
+    const hasSetupCandidate = [...this.gateways.values()]
+      .some(gateway => gateway.capabilities.metadata?.matrixVerified === false)
+    if (this.gateways.size && !hasSetupCandidate && Date.now() - this.discoveryLastCompletedAt < 15_000) return
     if (this.discovery) return this.discovery
     this.discovery = (async () => {
       const requestId = `discover_${crypto.randomUUID()}`
@@ -215,8 +217,12 @@ export class MatrixGatewayClient {
     }
     const eventType = input.event.type
     if (![MATRIX_RESPONSE_EVENT, MATRIX_CONVERSATION_EVENT, MATRIX_INVENTORY_EVENT, MATRIX_GATEWAY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType ?? '')) return
-    if (!input.encrypted || !input.verifiedDevice) {
-      this.options.onSecurityError?.(`Ignored ${eventType} from an unencrypted or unverified Matrix device`)
+    if (!input.encrypted) {
+      this.options.onSecurityError?.(`Ignored unencrypted ${eventType}`)
+      return
+    }
+    if (!input.verifiedDevice && eventType !== MATRIX_GATEWAY_EVENT) {
+      this.options.onSecurityError?.(`Ignored ${eventType} from an unverified Matrix device`)
       return
     }
     try {
@@ -230,7 +236,20 @@ export class MatrixGatewayClient {
         const current = this.inventories.get(gatewayId)
         if (!current || inventory.revision >= current.revision) this.inventories.set(gatewayId, inventory)
       } else if (eventType === MATRIX_GATEWAY_EVENT) {
-        const gateway = parseGateway(content.gateway)
+        const parsed = parseGateway(content.gateway)
+        const announcedDevice = parsed.capabilities.metadata?.matrixDeviceId
+        if (typeof announcedDevice !== 'string' || !input.senderDevice || announcedDevice !== input.senderDevice) {
+          throw new Error('Gateway Matrix device does not match the encrypted sender')
+        }
+        const gateway: Gateway = {
+          ...parsed,
+          capabilities: {
+            ...parsed.capabilities,
+            providers: input.verifiedDevice ? parsed.capabilities.providers : [],
+            features: input.verifiedDevice ? parsed.capabilities.features : [],
+            metadata: { ...parsed.capabilities.metadata, matrixVerified: input.verifiedDevice },
+          },
+        }
         const current = this.gateways.get(gateway.id)
         if (!current || Date.parse(gateway.lastSeenAt ?? '') >= Date.parse(current.lastSeenAt ?? '')) {
           this.gateways.set(gateway.id, gateway)

@@ -30,7 +30,7 @@ const gateway: Gateway = {
 }
 const unpairedGateway: Gateway = {
   id: 'gateway-unpaired-e2e', workspaceId: 'workspace-e2e', name: 'Second computer', platform: 'linux', version: 'e2e',
-  capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'SECONDGATEWAY' } },
+  capabilities: { protocolVersions: [1], providers: ['codex'], features: [], metadata: { matrixDeviceId: 'SECONDGATEWAY', matrixVerified: false } },
   status: 'online', lastSeenAt: '2026-07-18T08:00:00.000Z',
 }
 const project: Project = {
@@ -72,14 +72,14 @@ clientSession.identity.value = {
   controlRoomId: '!control:matrix.example.test', executionKeyId: 'execution-current', executionPublicKey: {},
 }
 clientSession.listMatrixDevices = async () => [
-  { deviceId: 'CLIENTDEVICE', displayName: 'Codever Android', verified: true, current: true },
-  { deviceId: 'GATEWAYDEVICE', displayName: 'Windows Gateway', verified: matrixGatewayVerified, current: false },
+  { deviceId: 'CLIENTDEVICE', displayName: 'Codever Android', verified: true, current: true, verifiable: true },
+  { deviceId: 'SECONDGATEWAY', displayName: 'Windows Gateway', verified: matrixGatewayVerified, current: false, verifiable: true },
 ]
 clientSession.listVerifications = async () => {
   if (verificationStage === 'none' || verificationStage === 'done') return []
   const stage = verificationStage
   return [{
-  flowId: 'verification-e2e', stage, otherDeviceId: 'GATEWAYDEVICE',
+  flowId: 'verification-e2e', stage, otherDeviceId: 'SECONDGATEWAY',
   ...(verificationStage === 'present_sas' ? { emojis: [
     { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
     { symbol: '🎸', description: 'Guitar' }, { symbol: '🌙', description: 'Moon' },
@@ -88,7 +88,7 @@ clientSession.listVerifications = async () => {
 }
 clientSession.requestVerification = async () => {
   verificationStage = 'requested'
-  return { flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'GATEWAYDEVICE' }
+  return { flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'SECONDGATEWAY' }
 }
 clientSession.advanceVerification = async () => {
   verificationStage = 'present_sas'
@@ -97,8 +97,9 @@ clientSession.advanceVerification = async () => {
 clientSession.confirmVerification = async (_flowId: string, matches: boolean) => {
   if (!matches) throw new Error('E2E verification mismatch')
   matrixGatewayVerified = true
+  unpairedGateway.capabilities.metadata = { ...unpairedGateway.capabilities.metadata, matrixVerified: true }
   verificationStage = 'done'
-  return { flowId: 'verification-e2e', stage: 'done' as const, otherDeviceId: 'GATEWAYDEVICE' }
+  return { flowId: 'verification-e2e', stage: 'done' as const, otherDeviceId: 'SECONDGATEWAY' }
 }
 clientSession.cancelVerification = async () => { verificationStage = 'done' }
 

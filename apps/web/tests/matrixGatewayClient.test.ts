@@ -21,7 +21,7 @@ class FakeTransport implements MatrixTransportPort {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }
-  emit(type: string, content: unknown, security = { encrypted: true, verifiedDevice: true }): void {
+  emit(type: string, content: unknown, security: { encrypted: boolean; verifiedDevice: boolean; senderDevice?: string } = { encrypted: true, verifiedDevice: true, senderDevice: 'GATEWAY' }): void {
     for (const listener of this.listeners) listener({
       roomId: '!control:test', event: { type, content }, ...security,
     })
@@ -122,6 +122,28 @@ describe('MatrixGatewayClient', () => {
 
     await expect(value.listGateways()).resolves.toMatchObject([{ id: 'gateway-1' }])
     expect(transport.sends[0]).toMatchObject({ eventType: 'io.codever.discovery.v1' })
+  })
+
+  it('accepts only a sender-bound Gateway candidate from an encrypted unverified device', async () => {
+    const transport = new FakeTransport()
+    const { value, onSecurityError } = client(transport)
+    transport.onSend = sent => {
+      if (sent.eventType !== 'io.codever.discovery.v1') return
+      const gateway = {
+        id: 'candidate', workspaceId: 'default', name: 'New computer', platform: 'windows', version: '0.1.0', status: 'online',
+        capabilities: { protocolVersions: [1], providers: ['codex'], features: ['sessions'], metadata: { matrixDeviceId: 'NEWGATEWAY' } },
+      }
+      transport.emit('io.codever.gateway.v1', { gateway }, { encrypted: true, verifiedDevice: false, senderDevice: 'NEWGATEWAY' })
+    }
+    await expect(value.listGateways()).resolves.toMatchObject([{
+      id: 'candidate', capabilities: { providers: [], features: [], metadata: { matrixVerified: false } },
+    }])
+
+    transport.emit('io.codever.gateway.v1', { gateway: {
+      id: 'forged', workspaceId: 'default', name: 'Forged', platform: 'linux', version: '1', status: 'online',
+      capabilities: { protocolVersions: [1], providers: [], features: [], metadata: { matrixDeviceId: 'SOMEONEELSE' } },
+    } }, { encrypted: true, verifiedDevice: false, senderDevice: 'ATTACKER' })
+    expect(onSecurityError).toHaveBeenCalledWith(expect.stringContaining('does not match'))
   })
 
   it('binds a COSE token to the exact request and correlates the encrypted response', async () => {

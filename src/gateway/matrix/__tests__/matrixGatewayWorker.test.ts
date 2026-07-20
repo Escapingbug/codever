@@ -32,6 +32,27 @@ describe('MatrixGatewayWorker', () => {
         expect(process).not.toHaveBeenCalled()
     })
 
+    it('reveals only Gateway identity to encrypted unverified discovery', async () => {
+        const transport = new FakeTransport()
+        const worker = new MatrixGatewayWorker({
+            gatewayId: 'gateway-1', controlRoomId: '!control:test', transport,
+            processor: { process: vi.fn() } as unknown as AuthorizedRequestProcessor,
+            currentGateway: () => ({
+                id: 'gateway-1', workspaceId: 'default', name: 'Computer', platform: 'windows',
+                version: '0.1.0', status: 'online', capabilities: { protocolVersions: [1], providers: ['codex'], features: [] },
+            }),
+            currentInventory: async () => ({ generatedAt: '2026-07-19T05:00:00.000Z', revision: 4, projects: [], sessions: [] }),
+        })
+        await worker.start()
+        transport.emit({
+            roomId: '!control:test', encrypted: true, verifiedDevice: false, senderDevice: 'PHONE',
+            event: { type: MATRIX_DISCOVERY_EVENT, content: { version: 1, requestId: 'discover-1' } },
+        })
+        await vi.waitFor(() => expect(transport.sent).toHaveLength(1))
+        expect(transport.sent[0].eventType).toBe(MATRIX_GATEWAY_EVENT)
+        expect(transport.sent[0].content).toMatchObject({ gateway: { capabilities: { providers: [], features: [] } } })
+    })
+
     it('passes verified encrypted commands through authorization and publishes a stable response', async () => {
         const transport = new FakeTransport()
         const response = completed()

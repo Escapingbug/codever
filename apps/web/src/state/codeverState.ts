@@ -4,6 +4,7 @@ import { CodeverApi, codeverApiKey } from '../api/codeverApi'
 import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 import type { PendingUserMessage } from '../timeline/pendingMessage'
+import { gatewayNeedsVerification } from '../gatewayAccess'
 
 const gateways = ref<Gateway[]>([])
 const projectsByGateway = reactive<Record<string, Project[]>>({})
@@ -38,7 +39,7 @@ export function useCodeverState() {
     workspaceLoad = (async () => {
       await hydrateWorkspace()
       await loadGateways()
-      await Promise.all(gateways.value.map((gateway) => load(
+      await Promise.all(gateways.value.filter(gateway => !gatewayNeedsVerification(gateway)).map((gateway) => load(
         `projects:${gateway.id}`,
         () => api.listProjects(gateway.id),
         (value) => {
@@ -123,6 +124,16 @@ export function useCodeverState() {
     hydrateProject,
     createProject,
     loadGateways,
+    markGatewayMatrixVerified: (gatewayId: string) => {
+      gateways.value = gateways.value.map(gateway => gateway.id !== gatewayId ? gateway : ({
+        ...gateway,
+        capabilities: {
+          ...gateway.capabilities,
+          metadata: { ...gateway.capabilities.metadata, matrixVerified: true },
+        },
+      }))
+      writeCached('gateways', gateways.value)
+    },
     loadProjects: (gatewayId: string) => load(
       `projects:${gatewayId}`,
       () => api.listProjects(gatewayId),

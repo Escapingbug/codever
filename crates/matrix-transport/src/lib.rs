@@ -159,6 +159,7 @@ pub struct MatrixDeviceSnapshot {
     pub display_name: Option<String>,
     pub verified: bool,
     pub current: bool,
+    pub verifiable: bool,
 }
 
 #[derive(Clone)]
@@ -411,6 +412,11 @@ impl MatrixTransport {
             .client
             .user_id()
             .context("Matrix client is not logged in")?;
+        self.client
+            .encryption()
+            .request_user_identity(user_id)
+            .await
+            .context("failed to refresh Matrix device keys")?;
         let device = self
             .client
             .encryption()
@@ -432,6 +438,11 @@ impl MatrixTransport {
             .user_id()
             .context("Matrix client is not logged in")?;
         let current_device = self.client.device_id();
+        self.client
+            .encryption()
+            .request_user_identity(user_id)
+            .await
+            .context("failed to refresh Matrix device keys")?;
         let response = self.client.devices().await?;
         let mut devices = Vec::with_capacity(response.devices.len());
         for item in response.devices {
@@ -444,7 +455,8 @@ impl MatrixTransport {
                 current: current_device == Some(item.device_id.as_ref()),
                 device_id: item.device_id.to_string(),
                 display_name: item.display_name,
-                verified: crypto_device.is_some_and(|value| value.is_verified()),
+                verified: crypto_device.as_ref().is_some_and(|value| value.is_verified()),
+                verifiable: crypto_device.is_some(),
             });
         }
         Ok(devices)

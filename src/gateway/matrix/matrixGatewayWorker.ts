@@ -73,13 +73,21 @@ export class MatrixGatewayWorker {
         const eventType = input.event.type
         if (typeof eventType !== 'string'
             || ![MATRIX_COMMAND_EVENT, MATRIX_DISCOVERY_EVENT, MATRIX_AUTHORIZATION_EVENT].includes(eventType)) return
-        if (!input.encrypted || !input.verifiedDevice) {
-            throw new Error('Rejected Matrix control event from an unencrypted or unverified device')
-        }
+        if (!input.encrypted) throw new Error('Rejected unencrypted Matrix control event')
         if (eventType === MATRIX_DISCOVERY_EVENT) {
-            if (this.options.currentGateway) await this.publishGateway(this.options.currentGateway())
-            if (this.options.currentInventory) await this.publishInventory(await this.options.currentInventory())
+            if (this.options.currentGateway) {
+                const gateway = this.options.currentGateway()
+                await this.publishGateway(input.verifiedDevice ? gateway : setupCandidate(gateway))
+            }
+            // An encrypted but unverified client may learn only that this Gateway exists so
+            // the user can start SAS verification. Projects, sessions and control remain hidden.
+            if (input.verifiedDevice && this.options.currentInventory) {
+                await this.publishInventory(await this.options.currentInventory())
+            }
             return
+        }
+        if (!input.verifiedDevice) {
+            throw new Error('Rejected Matrix control event from an unverified device')
         }
         if (eventType === MATRIX_AUTHORIZATION_EVENT) {
             if (!this.options.trustVerifiedDeviceRoot) return
@@ -110,6 +118,19 @@ export class MatrixGatewayWorker {
 
     private report(value: unknown): void {
         this.options.onError?.(value instanceof Error ? value : new Error(String(value)))
+    }
+}
+
+function setupCandidate(gateway: Gateway): Gateway {
+    const matrixDeviceId = gateway.capabilities.metadata?.matrixDeviceId
+    return {
+        ...gateway,
+        capabilities: {
+            protocolVersions: gateway.capabilities.protocolVersions,
+            providers: [],
+            features: [],
+            ...(typeof matrixDeviceId === 'string' ? { metadata: { matrixDeviceId } } : {}),
+        },
     }
 }
 
