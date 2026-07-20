@@ -18,6 +18,7 @@
     "test:desktop:e2e:run": "node ./desktop-e2e/run.mjs",
     "test:android:live:login": "node ./android-e2e/first-login.mjs",
     "test:android:live:verify": "node ./android-e2e/request-gateway-verification.mjs",
+    "test:android:live:upgrade": "node ./android-e2e/retained-upgrade.mjs",
     "test:android:live:business": "node ./android-e2e/business-journey.mjs",
     "android:init": "pnpm dlx @tauri-apps/cli@2.11.4 android init",
     "android:prepare": "node scripts/prepare-android.mjs",

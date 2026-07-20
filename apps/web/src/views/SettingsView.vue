@@ -15,7 +15,6 @@ const deviceError = ref('')
 const approvalRequests = ref<ExecutionRootApprovalRequest[]>([])
 const approvalBusy = ref('')
 const connectionBusy = ref(false)
-const reauthenticationPassword = ref('')
 let unsubscribeApprovals: (() => void) | undefined
 
 const currentDevice = computed(() => devices.value.find(device => device.current))
@@ -30,12 +29,6 @@ async function refreshDevices(): Promise<void> {
 async function retryConnection(): Promise<void> {
   connectionBusy.value = true; deviceError.value = ''
   try { await clientSession.reconnect() }
-  catch (error) { deviceError.value = friendlyCodeverError(error) }
-  finally { connectionBusy.value = false }
-}
-async function reauthenticate(): Promise<void> {
-  connectionBusy.value = true; deviceError.value = ''
-  try { await clientSession.reauthenticate(reauthenticationPassword.value); reauthenticationPassword.value = '' }
   catch (error) { deviceError.value = friendlyCodeverError(error) }
   finally { connectionBusy.value = false }
 }
@@ -63,7 +56,6 @@ onUnmounted(() => unsubscribeApprovals?.())
       <ServerForm v-if="editing && clientSession.server.value" :domain="clientSession.server.value.domain" submit-label="Save server" @saved="editing = false" @cancel="editing = false" />
       <div v-else-if="clientSession.server.value" class="server-summary"><span class="status-dot" :class="clientSession.connectionState.value === 'connected' ? 'status-dot--connected' : 'status-dot--offline'" /><div><strong>{{ clientSession.server.value.domain }}</strong><small>{{ clientSession.connectionState.value === 'connected' ? 'Encrypted sync connected' : 'Offline · cached data remains available' }}</small></div></div>
       <p v-if="clientSession.initializationError.value" class="error-banner" role="alert">{{ clientSession.initializationError.value }}</p>
-      <form v-if="clientSession.reauthenticationRequired.value" class="server-form reauthentication-form" @submit.prevent="reauthenticate"><p class="form-help">This client session expired. Enter the Matrix password once to renew this same device without losing Gateway trust.</p><label>Matrix password<input v-model="reauthenticationPassword" type="password" required autocomplete="current-password" /></label><button class="button button--primary" :disabled="connectionBusy">{{ connectionBusy ? 'Renewing…' : 'Renew session' }}</button></form>
     </section>
 
     <section v-if="clientSession.identity.value" class="settings-section settings-card">

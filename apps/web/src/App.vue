@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNavigation from './components/AppNavigation.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
+import ConnectionRecovery from './components/ConnectionRecovery.vue'
 import { navigateToParent } from './navigation'
 import { clientSession } from './state/clientSession'
 import { installLifecycleRecovery } from './lifecycleRecovery'
@@ -17,6 +18,7 @@ const syncLabel = computed(() => clientSession.connectionState.value === 'connec
   : clientSession.connectionState.value === 'connecting' ? 'Connecting'
     : clientSession.connectionState.value === 'reconnecting' ? 'Reconnecting' : 'Offline')
 let removeLifecycleRecovery: (() => void) | undefined
+const recoveryEpoch = ref(0)
 onMounted(() => {
   removeLifecycleRecovery = installLifecycleRecovery({
     document,
@@ -38,11 +40,12 @@ onBeforeUnmount(() => removeLifecycleRecovery?.())
       <span class="client-status"><span class="status-dot" :class="syncConnected ? 'status-dot--connected' : 'status-dot--offline'" />{{ syncLabel }}</span>
     </header>
     <AppNavigation v-if="!isPublicEntry" />
-    <main class="main-stage"><RouterView /></main>
+    <main class="main-stage"><RouterView :key="`${route.fullPath}:${recoveryEpoch}`" /></main>
     <nav v-if="!isPublicEntry" class="mobile-tabs" aria-label="Primary navigation">
       <RouterLink to="/projects"><span>▣</span><strong>Projects</strong></RouterLink>
       <RouterLink to="/machines"><span>⌘</span><strong>Computers</strong></RouterLink>
       <RouterLink to="/settings"><span>⚙</span><strong>Settings</strong></RouterLink>
     </nav>
+    <ConnectionRecovery @recovered="recoveryEpoch += 1" />
   </div>
 </template>

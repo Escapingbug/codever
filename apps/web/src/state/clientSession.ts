@@ -37,6 +37,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   const initialized = ref(false)
   const initializationError = ref('')
   const reauthenticationRequired = computed(() => isReauthenticationError(initializationError.value))
+  const credentialResetRequired = computed(() => isMissingCredentialError(initializationError.value))
   const connectionState = ref<ConnectionState>('disconnected')
   const api = new CodeverApi(native)
   let initializePromise: Promise<void> | undefined
@@ -224,7 +225,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   }
 
   return {
-    server, identity, initialized, initializationError, reauthenticationRequired, connectionState, api,
+    server, identity, initialized, initializationError, reauthenticationRequired, credentialResetRequired, connectionState, api,
     hasServer: computed(() => Boolean(server.value)),
     isAuthenticated: computed(() => Boolean(identity.value)),
     initialize, configureServer, login, logout, suspend, resume, reconnect, reauthenticate,
@@ -267,6 +268,10 @@ export function friendlyCodeverError(error: unknown): string {
 export const clientSession = createClientSession()
 export type ClientSession = ReturnType<typeof createClientSession>
 
-function isReauthenticationError(message: string): boolean {
-  return /refresh token.*(?:invalid|valid anymore)|unknown token|M_UNKNOWN_TOKEN/i.test(message)
+export function isReauthenticationError(message: string): boolean {
+  return /refresh token.*(?:invalid|valid anymore)|unknown token|M_UNKNOWN_TOKEN|session is no longer valid|soft[ _-]?logout/i.test(message)
+}
+
+export function isMissingCredentialError(message: string): boolean {
+  return /(?:no entry|not found).*(?:credential|keyring|secure storage)|matrix secret (?:is incomplete|in platform credential store)|invalid matrix secret/i.test(message)
 }

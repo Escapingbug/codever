@@ -147,7 +147,8 @@ test.describe('mobile Session business journey', () => {
     await page.goto('./e2e.html#/projects')
     await page.evaluate(() => window.__CODEVER_E2E__.setConnectionError('Temporary Matrix restore failure'))
 
-    await expect(page.getByText('Temporary Matrix restore failure')).toBeVisible()
+    await expect(page.getByText('Temporary Matrix restore failure', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry secure sync' })).toBeVisible()
     await page.goto('./e2e.html#/settings')
     await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
     await expect(page.getByRole('alert')).toContainText('Temporary Matrix restore failure')
@@ -169,6 +170,32 @@ test.describe('mobile Session business journey', () => {
 
     await expect(page.getByText('Encrypted sync connected')).toBeVisible()
     await expect(page.getByLabel('Matrix password')).toHaveCount(0)
+  })
+
+  test('C17 recovers an expired retained session in place and resumes Computer setup', async ({ page }) => {
+    await page.goto('./e2e.html#/gateways/gateway-unpaired-e2e')
+    await expect(page.getByRole('heading', { name: 'Verify this computer' })).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnectionError('Matrix session is no longer valid: UnknownToken'))
+
+    const recovery = page.getByRole('dialog', { name: 'Reconnect Codever' })
+    await expect(recovery).toBeVisible()
+    await recovery.getByLabel('Matrix password').fill('renew-secret')
+    await recovery.getByRole('button', { name: 'Renew session' }).click()
+
+    await expect(page).toHaveURL(/#\/gateways\/gateway-unpaired-e2e$/)
+    await expect(page.getByText('Connected')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Verify this computer' })).toBeVisible()
+  })
+
+  test('C17 explains a partial Android backup restore instead of retrying forever', async ({ page }) => {
+    await page.goto('./e2e.html#/machines')
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnectionError('No entry found in secure storage for Matrix credential'))
+
+    const recovery = page.getByRole('dialog', { name: 'Sign in again' })
+    await expect(recovery).toBeVisible()
+    await expect(recovery).toContainText('restored app data without the matching secure credential')
+    await expect(recovery.getByRole('button', { name: 'Continue to sign in' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry connection' })).toHaveCount(0)
   })
 
   test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {

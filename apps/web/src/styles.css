@@ -391,6 +391,11 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
 .authorization-card--error { border-color: #59322e; }
 .verification-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: calc(20px + var(--safe-top)) calc(16px + var(--safe-right)) calc(20px + var(--safe-bottom)) calc(16px + var(--safe-left)); background: rgba(8, 9, 7, .78); backdrop-filter: blur(5px); }
 .verification-dialog { width: min(520px, 100%); max-height: 100%; overflow-y: auto; box-shadow: 0 24px 80px rgba(0, 0, 0, .55); }
+.connection-recovery { z-index: 80; }
+.connection-retry { position: fixed; z-index: 70; right: calc(16px + var(--safe-right)); bottom: calc(16px + var(--safe-bottom)); left: auto; display: flex; width: min(460px, calc(100vw - 32px - var(--safe-left) - var(--safe-right))); align-items: center; justify-content: space-between; gap: 18px; padding: 13px 14px; border: 1px solid #5b4930; border-radius: 12px; background: #211d16; box-shadow: 0 18px 50px rgba(0, 0, 0, .4); }
+.connection-retry > div { display: grid; min-width: 0; gap: 3px; }
+.connection-retry small { overflow-wrap: anywhere; color: var(--muted); font-size: .66rem; line-height: 1.4; }
+.connection-retry .button { flex: 0 0 auto; }
 .server-summary { display: flex; align-items: center; gap: 12px; padding: 14px 0; }
 .server-summary > div { display: grid; gap: 3px; }
 .server-summary small { color: var(--muted); }
