@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 const gradleUrl = new URL('../src-tauri/gen/android/app/build.gradle.kts', import.meta.url)
 const gradlePath = fileURLToPath(gradleUrl)
 const gradlePropertiesUrl = new URL('../src-tauri/gen/android/gradle.properties', import.meta.url)
+const mainActivityTemplateUrl = new URL('./templates/MainActivity.kt', import.meta.url)
+const mainActivityUrl = new URL('../src-tauri/gen/android/app/src/main/java/dev/codever/client/MainActivity.kt', import.meta.url)
 const themeUrls = [
   new URL('../src-tauri/gen/android/app/src/main/res/values/themes.xml', import.meta.url),
   new URL('../src-tauri/gen/android/app/src/main/res/values-night/themes.xml', import.meta.url),
@@ -32,18 +34,24 @@ for (const setting of stableKotlinSettings) {
 }
 await writeFile(gradlePropertiesUrl, gradleProperties, 'utf8')
 
-const statusBarItems = `        <item name="android:statusBarColor">#11130F</item>
-        <item name="android:navigationBarColor">#11130F</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>`
+await writeFile(mainActivityUrl, await readFile(mainActivityTemplateUrl, 'utf8'), 'utf8')
+
+const systemBarThemeItems = [
+  '        <item name="android:statusBarColor">#11130F</item>',
+  '        <item name="android:navigationBarColor">#11130F</item>',
+  '        <item name="android:windowBackground">#11130F</item>',
+  '        <item name="android:colorBackground">#11130F</item>',
+  '        <item name="android:windowLightStatusBar">false</item>',
+  '        <item name="android:windowLightNavigationBar">false</item>',
+]
 for (const themeUrl of themeUrls) {
   const themePath = fileURLToPath(themeUrl)
-  const theme = await readFile(themeUrl, 'utf8')
-  if (!theme.includes('android:windowLightStatusBar')) {
-    const closingStyle = '    </style>'
-    if (!theme.includes(closingStyle)) throw new Error(`Unable to find the Android theme in ${themePath}`)
-    await writeFile(themeUrl, theme.replace(closingStyle, `${statusBarItems}\n${closingStyle}`), 'utf8')
-  }
+  let theme = await readFile(themeUrl, 'utf8')
+  const closingStyle = '    </style>'
+  if (!theme.includes(closingStyle)) throw new Error(`Unable to find the Android theme in ${themePath}`)
+  const missingItems = systemBarThemeItems.filter(item => !theme.includes(item.trim()))
+  if (missingItems.length > 0) theme = theme.replace(closingStyle, `${missingItems.join('\n')}\n${closingStyle}`)
+  await writeFile(themeUrl, theme, 'utf8')
 }
 
 process.stdout.write('Android HTTPS-only Matrix transport and dark system-bar theme enabled for release builds.\n')

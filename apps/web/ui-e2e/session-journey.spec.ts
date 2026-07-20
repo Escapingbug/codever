@@ -84,6 +84,27 @@ test.describe('mobile Session business journey', () => {
     await expect(approval).toHaveCount(0)
   })
 
+  test('C01 keeps the mobile Settings page independently scrollable', async ({ page }) => {
+    await page.setViewportSize({ width: 412, height: 600 })
+    await page.goto('./e2e.html#/settings')
+
+    const settings = page.locator('.settings-page')
+    await expect(settings).toBeVisible()
+    await expect.poll(() => settings.evaluate(element => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))).toEqual(expect.objectContaining({ clientHeight: expect.any(Number), scrollHeight: expect.any(Number) }))
+
+    const dimensions = await settings.evaluate(element => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))
+    expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
+    await settings.evaluate(element => { element.scrollTop = element.scrollHeight })
+    await expect.poll(() => settings.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  })
+
   test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {
     await page.goto('./e2e.html#/projects')
     await page.getByRole('button', { name: 'New project' }).click()

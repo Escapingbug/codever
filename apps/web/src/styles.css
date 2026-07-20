@@ -493,7 +493,14 @@ kbd { padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; backg
   .mobile-breadcrumb { display: inline; color: var(--muted); font-size: .68rem; }
   .entry-page { min-height: 100dvh; padding: 16px; }
   .entry-card { padding: 24px 18px; }
-  .settings-page { padding-top: 26px; }
+  .settings-page {
+    height: calc(100dvh - 112px - var(--safe-top) - var(--safe-bottom));
+    min-height: 0;
+    padding-top: 26px;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
   .profile-card, .account-card { align-items: stretch; flex-direction: column; }
   .profile-actions { flex-wrap: wrap; }
   .profile-actions .button { flex: 1; }
