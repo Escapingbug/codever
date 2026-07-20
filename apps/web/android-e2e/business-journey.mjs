@@ -57,8 +57,11 @@ await clickTaskByName([title, message], 30_000)
 await waitForSessionEditor([title, message], 60_000)
 await waitForAgentReply(replyToken, 15_000)
 stage('cached task reopened')
+await tapAccessibleWhenReady(/^Archive$/, 10_000)
+await waitForText('Tasks', 30_000)
+stage('test task archived')
 devtools.close()
-process.stdout.write(`PASS Android Gateway authorization, Project, real Codex reply, and cached Session reopen (${replyToken})\n`)
+process.stdout.write(`PASS Android Gateway authorization, Project, real Codex reply, cached Session reopen, and cleanup (${replyToken})\n`)
 
 async function tapAccessibleWhenReady(pattern, timeout = 15_000) {
   const deadline = Date.now() + timeout

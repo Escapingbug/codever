@@ -33,6 +33,7 @@ const loading = ref(true)
 const draft = ref('')
 const sendWhenOnline = ref(false)
 const sending = ref(false)
+const canceling = ref(false)
 const savingControls = ref(false)
 const updatingArchive = ref(false)
 const fileInput = ref<HTMLInputElement>()
@@ -72,7 +73,7 @@ let historyGeneration = 0
 let liveEventQueue: Promise<void> = Promise.resolve()
 let tailSyncTimer: ReturnType<typeof setTimeout> | undefined
 let tailSyncRunning = false
-let tailSyncAfterSeq: number | undefined
+const tailSyncAfterSeq = ref<number>()
 let disposed = false
 
 const gatewayOnline = computed(() => gatewayIsMutable(gateway.value))
@@ -88,6 +89,12 @@ const readyAttachmentIds = computed(() => [...new Set([
   ...pendingAttachments.value.flatMap(item => item.status === 'ready' && item.upload ? [item.upload.attachmentId] : []),
 ])])
 const pendingMessages = computed(() => state.pendingMessagesBySession[sessionId.value] ?? [])
+const effectiveSessionState = computed<CodeverSession['state'] | undefined>(() => {
+  if (canceling.value || session.value?.state === 'canceling') return 'canceling'
+  if (session.value?.state === 'querying' || sending.value || tailSyncAfterSeq.value !== undefined
+    || pendingMessages.value.some(message => message.status === 'sending' || message.status === 'accepted')) return 'querying'
+  return session.value?.state
+})
 const canSubmitMessage = computed(() => canSend.value
   && !sending.value
   && !attachmentsUploading.value
@@ -139,7 +146,10 @@ async function loadSession(): Promise<void> {
   hasMoreBefore.value = hasCachedEventsBefore(requestedId, events.value.at(0)?.seq) || liveConnected.value
   loadingOlder.value = false
   loadingInitialHistory.value = true
-  loading.value = events.value.length === 0 && !session.value
+  // Session metadata is enough to render the title, but it is not conversation
+  // content. Keep an explicit loading state until the first history page proves
+  // that the Session is either populated or genuinely empty.
+  loading.value = events.value.length === 0
   loadError.value = ''
   liveError.value = ''
   selectedEvent.value = undefined
@@ -158,8 +168,7 @@ async function loadSession(): Promise<void> {
     state.reconcilePendingMessages(requestedId, events.value)
     void refreshSessionAttachments()
     const remoteSession = await state.api.getSession(requestedId)
-    session.value = remoteSession
-    state.replaceSession(remoteSession)
+    session.value = state.replaceSession(remoteSession)
     let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
     let fetchedRemoteEvents = page.events
     let pageCount = 1
@@ -235,10 +244,6 @@ async function receiveLiveEvent(
   }
   if (id !== sessionId.value || generation !== historyGeneration) return
   appendEvents([event])
-  if (event.event.kind === 'session_state' && session.value) {
-    session.value = { ...session.value, state: event.event.state, updatedAt: event.timestamp, lastEventSeq: event.seq }
-    state.replaceSession(session.value)
-  }
   if (event.event.kind === 'session_state' && event.event.state === 'querying') scheduleTailSync(0)
   if (nearBottom) await scrollToLatest()
 }
@@ -252,7 +257,8 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
   state.mergeSessionEvents(sessionId.value, additions)
   state.reconcilePendingMessages(sessionId.value, additions)
   const latestState = [...additions].reverse().find(event => event.event.kind === 'session_state')
-  if (latestState?.event.kind === 'session_state' && session.value) {
+  if (latestState?.event.kind === 'session_state' && session.value
+    && latestState.seq >= (session.value.lastEventSeq ?? 0)) {
     session.value = {
       ...session.value,
       state: latestState.event.state,
@@ -260,6 +266,10 @@ function appendEvents(incoming: SessionEventEnvelope[]): void {
       lastEventSeq: Math.max(session.value.lastEventSeq ?? 0, latestState.seq),
     }
     state.replaceSession(session.value)
+  }
+  if (latestState?.event.kind === 'session_state' && latestState.event.state !== 'querying'
+    && tailSyncAfterSeq.value !== undefined && latestState.seq > tailSyncAfterSeq.value) {
+    tailSyncAfterSeq.value = undefined
   }
 }
 
@@ -279,19 +289,19 @@ async function runTailSync(): Promise<void> {
   tailSyncRunning = true
   try {
     await catchUpSessionEvents()
-    if (tailSyncAfterSeq !== undefined) {
-      const afterSeq = tailSyncAfterSeq
+    if (tailSyncAfterSeq.value !== undefined) {
+      const afterSeq = tailSyncAfterSeq.value
       const terminal = [...events.value].reverse().find(envelope => envelope.seq > afterSeq
         && envelope.event.kind === 'session_state'
         && envelope.event.state !== 'querying')
-      if (terminal) tailSyncAfterSeq = undefined
+      if (terminal) tailSyncAfterSeq.value = undefined
     }
   } catch {
     // catchUpSessionEvents records a user-visible synchronization error when
     // there is no usable cached conversation. The next poll retries it.
   } finally {
     tailSyncRunning = false
-    const activelyFollowing = tailSyncAfterSeq !== undefined || session.value?.state === 'querying'
+    const activelyFollowing = tailSyncAfterSeq.value !== undefined || session.value?.state === 'querying'
     scheduleTailSync(activelyFollowing ? 1_500 : 15_000)
   }
 }
@@ -451,7 +461,7 @@ async function sendMessage(): Promise<void> {
     sending.value = false
   }
   if (accepted) {
-    tailSyncAfterSeq = events.value.at(-1)?.seq ?? 0
+    tailSyncAfterSeq.value = events.value.at(-1)?.seq ?? 0
     scheduleTailSync(0)
     void refreshSessionAttachments()
   }
@@ -668,11 +678,15 @@ function formatBytes(value: number): string {
 }
 
 async function cancel(): Promise<void> {
-  if (!canMutate.value) return
+  if (!canMutate.value || canceling.value) return
+  canceling.value = true
   try {
     await state.api.cancelSession(sessionId.value, { reason: 'Cancelled from web client' })
+    scheduleTailSync(0)
   } catch (error) {
     liveError.value = error instanceof Error ? error.message : 'Cancel was not accepted'
+  } finally {
+    canceling.value = false
   }
 }
 
@@ -720,9 +734,9 @@ function submitOnShortcut(event: KeyboardEvent): void {
     <header class="session-header">
       <div class="session-identity">
         <small>{{ gateway?.name }} / {{ project?.name }}</small>
-        <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="session" :status="session.state" :label="session.state" /></div>
+        <div><h1>{{ session?.title ?? 'Untitled session' }}</h1><StatusDot v-if="effectiveSessionState" :status="effectiveSessionState" :label="effectiveSessionState" /></div>
       </div>
-      <button v-if="session?.state === 'querying'" class="button button--danger" :disabled="!canMutate" @click="cancel">Stop</button>
+      <button v-if="effectiveSessionState === 'querying' || effectiveSessionState === 'canceling'" class="button button--danger" :disabled="!canMutate || effectiveSessionState === 'canceling'" @click="cancel">{{ effectiveSessionState === 'canceling' ? 'Stopping…' : 'Stop' }}</button>
       <button v-else-if="session" class="button" :disabled="!canMutate || updatingArchive" @click="toggleArchive">{{ session.archivedAt ? 'Restore' : 'Archive' }}</button>
     </header>
 

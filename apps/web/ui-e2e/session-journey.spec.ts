@@ -255,6 +255,27 @@ test.describe('mobile Session business journey', () => {
     await expect(page.getByRole('heading', { name: 'Fresh remote task' })).toBeVisible()
   })
 
+  test('C14 opens a cached task while Provider discovery is still pending', async ({ page }) => {
+    await page.goto('./e2e.html?provider=pending#/projects/gateway-e2e/project-e2e')
+    await expect(page.getByText('Refreshing tasks')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Open task Build Android client' }).click()
+
+    await expect(page.getByRole('heading', { name: 'Build Android client' })).toBeVisible()
+  })
+
+  test('C01 scrolls a long cached task list to its final item on mobile', async ({ page }) => {
+    await page.goto('./e2e.html?tasks=many#/projects/gateway-e2e/project-e2e')
+    const stage = page.locator('.main-stage')
+    await expect(page.getByRole('button', { name: 'Open task Cached task 36' })).toBeVisible()
+
+    const dimensions = await stage.evaluate(element => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }))
+    expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
+    await stage.evaluate(element => { element.scrollTop = element.scrollHeight })
+    await expect.poll(() => stage.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+    await expect(page.getByRole('button', { name: 'Open task Cached task 01' })).toBeVisible()
+  })
+
   test('C06 reopens completed history as a stable snapshot', async ({ page }) => {
     const historic = page.locator('.message--assistant').filter({ hasText: 'Build ready.' })
     await expect(historic).toBeVisible()
@@ -433,7 +454,77 @@ test.describe('mobile Session business journey', () => {
     }))
     expect(dimensions.document).toBeLessThanOrEqual(dimensions.viewport)
     expect(dimensions.sessionRight).toBeLessThanOrEqual(dimensions.viewport + 0.5)
-    await expect(page).toHaveScreenshot('session-mobile.png', { animations: 'disabled', fullPage: true })
+    // Allow sub-pixel text rasterization differences between installed Edge
+    // patch versions while retaining the explicit overflow geometry checks.
+    await expect(page).toHaveScreenshot('session-mobile.png', {
+      animations: 'disabled', fullPage: true, maxDiffPixelRatio: 0.001,
+    })
+  })
+})
+
+test.describe('multi-client Session synchronization', () => {
+  test('M01 synchronizes A send, B progress, B Stop, and the terminal state', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 412, height: 915 } })
+    const clientA = await context.newPage()
+    const clientB = await context.newPage()
+    const url = './e2e.html?multi=1#/projects/gateway-e2e/project-e2e/sessions/session-e2e'
+    await Promise.all([clientA.goto(url), clientB.goto(url)])
+    await Promise.all([
+      expect(clientA.getByRole('heading', { name: 'Build Android client' })).toBeVisible(),
+      expect(clientB.getByRole('heading', { name: 'Build Android client' })).toBeVisible(),
+    ])
+
+    await clientA.locator('.composer textarea').fill('Shared work from client A')
+    await clientA.getByRole('button', { name: 'Send message' }).click()
+    await clientA.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
+
+    await expect(clientB.locator('.message--user').filter({ hasText: 'Shared work from client A' })).toBeVisible()
+    await expect(clientB.getByRole('button', { name: 'Stop' })).toBeVisible()
+    await clientB.getByRole('button', { name: 'Stop' }).click()
+
+    await expect(clientA.getByRole('button', { name: 'Archive' })).toBeVisible()
+    await expect(clientB.getByRole('button', { name: 'Archive' })).toBeVisible()
+    await context.close()
+  })
+
+  test('M02 synchronizes A messages and final agent replies to B', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 412, height: 915 } })
+    const clientA = await context.newPage()
+    const clientB = await context.newPage()
+    const url = './e2e.html?multi=1#/projects/gateway-e2e/project-e2e/sessions/session-e2e'
+    await Promise.all([clientA.goto(url), clientB.goto(url)])
+
+    await clientA.locator('.composer textarea').fill('Build from client A')
+    await clientA.getByRole('button', { name: 'Send message' }).click()
+    await clientA.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
+    await expect(clientB.getByRole('button', { name: 'Stop' })).toBeVisible()
+
+    await clientA.evaluate(() => window.__CODEVER_E2E__.finishTurnOffline('Shared final reply from the agent.'))
+
+    await expect(clientB.locator('.message--assistant').filter({ hasText: 'Shared final reply from the agent.' })).toBeVisible()
+    await expect(clientB.getByRole('button', { name: 'Archive' })).toBeVisible()
+    await context.close()
+  })
+
+  test('M03 catches B up after it misses the live Matrix wake-ups', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 412, height: 915 } })
+    const clientA = await context.newPage()
+    const clientB = await context.newPage()
+    const url = './e2e.html?multi=1#/projects/gateway-e2e/project-e2e/sessions/session-e2e'
+    await Promise.all([clientA.goto(url), clientB.goto(url)])
+    await clientB.evaluate(() => window.__CODEVER_E2E__.setConnection('disconnected'))
+
+    await clientA.locator('.composer textarea').fill('Work while client B is offline')
+    await clientA.getByRole('button', { name: 'Send message' }).click()
+    await clientA.evaluate(() => window.__CODEVER_E2E__.startLongTurn())
+    await clientA.evaluate(() => window.__CODEVER_E2E__.finishTurnOffline('Reply recovered by client B.'))
+    await expect(clientB.getByText('Server offline')).toBeVisible()
+
+    await clientB.evaluate(() => window.__CODEVER_E2E__.setConnection('connected'))
+
+    await expect(clientB.locator('.message--user').filter({ hasText: 'Work while client B is offline' })).toBeVisible()
+    await expect(clientB.locator('.message--assistant').filter({ hasText: 'Reply recovered by client B.' })).toBeVisible()
+    await context.close()
   })
 })
 

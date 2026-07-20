@@ -40,6 +40,21 @@ afterEach(() => {
 })
 
 describe('session view', () => {
+  it('shows a conversation loader when only cached Session metadata is available', async () => {
+    const sessionId = 'session-metadata-only'
+    const seed = await mountSession(fakeApi(sessionId, []), sessionId)
+    seed.unmount()
+
+    const pendingSession = deferred<CodeverSession>()
+    const wrapper = await mountSession(fakeApi(sessionId, [], {
+      getSession: vi.fn(() => pendingSession.promise),
+    }), sessionId, false)
+    await flushPromises()
+
+    expect(wrapper.find('.session-load-state').text()).toContain('Loading conversation')
+    wrapper.unmount()
+  })
+
   it('shows a cached conversation while the remote refresh is still pending', async () => {
     const sessionId = 'session-offline-first'
     const cachedEvents = [assistantEvent(sessionId, 1, 'turn-1')]
@@ -185,6 +200,36 @@ describe('session view', () => {
     wrapper.unmount()
   })
 
+  it('does not let an older idle history event overwrite authoritative querying state', async () => {
+    const sessionId = 'session-authoritative-querying'
+    const staleIdle = {
+      ...event(sessionId, 2),
+      event: { kind: 'session_state' as const, state: 'idle' as const, reason: 'old_turn_finished' },
+    }
+    const querying: CodeverSession = {
+      ...sessionRecord(sessionId, []), state: 'querying', lastEventSeq: 3,
+    }
+    const wrapper = await mountSession(fakeApi(sessionId, [], {
+      getSession: vi.fn(async () => querying),
+      getSessionEvents: vi.fn(async () => ({ events: [staleIdle], nextAfter: null, previousBefore: null })),
+    }), sessionId)
+
+    expect(wrapper.get('.button--danger').text()).toBe('Stop')
+    wrapper.unmount()
+  })
+
+  it('offers Stop as soon as the Gateway accepts a message', async () => {
+    const sessionId = 'session-stop-after-acceptance'
+    const wrapper = await mountSession(fakeApi(sessionId, []), sessionId)
+
+    await wrapper.get<HTMLTextAreaElement>('.composer textarea').setValue('keep working')
+    await wrapper.get('.send-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.button--danger').text()).toBe('Stop')
+    wrapper.unmount()
+  })
+
   it('does not start an older-page request while the initial history refresh is pending', async () => {
     const sessionId = 'session-history-race'
     const cachedEvents = Array.from({ length: 6 }, (_, index) => assistantEvent(sessionId, index + 1, `turn-${index + 1}`))
@@ -234,18 +279,7 @@ function fakeApi(
   events: SessionEventEnvelope[],
   overrides: Record<string, unknown> = {},
 ): CodeverApi & Record<string, ReturnType<typeof vi.fn>> {
-  const session: CodeverSession = {
-    id: sessionId,
-    gatewayId: gateway.id,
-    projectId: project.id,
-    title: 'Session',
-    state: 'idle',
-    provider: 'codex',
-    config: {},
-    createdAt: '2026-07-17T00:00:00.000Z',
-    updatedAt: '2026-07-17T00:00:00.000Z',
-    lastEventSeq: events.at(-1)?.seq ?? 0,
-  }
+  const session = sessionRecord(sessionId, events)
   return {
     connectionState: 'connected',
     subscribeConnection: vi.fn((subscriber: (state: string) => void) => {
@@ -272,8 +306,24 @@ function fakeApi(
       sessions: [],
     })),
     sendMessage: vi.fn(async () => ({ commandId: 'command-1', status: 'succeeded' })),
+    cancelSession: vi.fn(async () => ({ commandId: 'cancel-1', status: 'succeeded' })),
     ...overrides,
   } as unknown as CodeverApi & Record<string, ReturnType<typeof vi.fn>>
+}
+
+function sessionRecord(sessionId: string, events: SessionEventEnvelope[]): CodeverSession {
+  return {
+    id: sessionId,
+    gatewayId: gateway.id,
+    projectId: project.id,
+    title: 'Session',
+    state: 'idle',
+    provider: 'codex',
+    config: {},
+    createdAt: '2026-07-17T00:00:00.000Z',
+    updatedAt: '2026-07-17T00:00:00.000Z',
+    lastEventSeq: events.at(-1)?.seq ?? 0,
+  }
 }
 
 async function mountSession(api: CodeverApi, sessionId: string, settle = true) {

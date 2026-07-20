@@ -27,6 +27,9 @@ import '../styles.css'
 
 const fixtureParameters = new URLSearchParams(window.location.search)
 const onboardingFixture = fixtureParameters.get('journey') === 'onboarding'
+const denseTaskFixture = fixtureParameters.get('tasks') === 'many'
+const pendingProviderFixture = fixtureParameters.get('provider') === 'pending'
+const multiClientFixture = fixtureParameters.get('multi') === '1'
 
 const gateway: Gateway = {
   id: 'gateway-e2e', workspaceId: 'workspace-e2e', name: 'My computer', platform: 'windows', version: 'e2e',
@@ -57,7 +60,16 @@ const session: CodeverSession = {
   provider: 'scripted-agent', config: {}, createdAt: '2026-07-18T08:00:00.000Z',
   updatedAt: '2026-07-18T08:01:00.000Z', lastEventSeq: 4,
 }
-const sessions: CodeverSession[] = [session]
+const sessions: CodeverSession[] = [
+  session,
+  ...(denseTaskFixture ? Array.from({ length: 36 }, (_, index): CodeverSession => ({
+    ...session,
+    id: `session-dense-${index + 1}`,
+    title: `Cached task ${String(index + 1).padStart(2, '0')}`,
+    providerSessionId: `provider-dense-${index + 1}`,
+    updatedAt: `2026-07-18T07:${String(index).padStart(2, '0')}:00.000Z`,
+  })) : []),
+]
 
 let sequence = 0
 const events: SessionEventEnvelope[] = []
@@ -68,6 +80,7 @@ const offlineBacklog: SessionEventEnvelope[] = []
 let pendingSend: { sessionId: string; input: SendMessageDto; resolve: (value: unknown) => void } | undefined
 let activeTurnId = ''
 let activeSessionId = ''
+let sharedActiveTurnId = ''
 let lastSentInput: SendMessageDto | undefined
 let exportedPath = ''
 let lastConfig: PatchSessionConfigDto | undefined
@@ -254,6 +267,7 @@ const api = {
     return () => { current.delete(callback); if (!current.size) subscribers.delete(id) }
   },
   async discoverProviderSessions(projectId: string, provider: string) {
+    if (pendingProviderFixture) await new Promise<never>(() => undefined)
     if (onboardingFixture) {
       return {
         projectId, provider, discoverySupported: true,
@@ -327,10 +341,12 @@ const api = {
     return session
   },
   async cancelSession(sessionId: string) {
-    if (!activeTurnId) return
-    append({ kind: 'turn_finished', status: 'cancelled', meta: { turnId: activeTurnId, source: 'live' } }, true, sessionId)
+    const turnId = activeTurnId || sharedActiveTurnId
+    if (!turnId) return
+    append({ kind: 'turn_finished', status: 'cancelled', meta: { turnId, source: 'live' } }, true, sessionId)
     append({ kind: 'session_state', state: 'idle', reason: 'turn_cancelled', meta: { source: 'synthetic' } }, true, sessionId)
     activeTurnId = ''
+    sharedActiveTurnId = ''
     activeSessionId = ''
   },
   async resolveDecision(id: string, decisionId: string, value: unknown) {
@@ -542,6 +558,10 @@ clientSession.reauthenticate = async () => {
   for (const callback of connectionSubscribers) callback('connected')
 }
 clientSession.connectionState.value = 'connected'
+const multiClientChannel = multiClientFixture ? new BroadcastChannel('codever-e2e-shared-gateway-v1') : undefined
+if (multiClientChannel) {
+  multiClientChannel.onmessage = message => receiveSharedEnvelope(message.data as SessionEventEnvelope)
+}
 const app = createApp(App)
 app.provide(codeverApiKey, api)
 app.use(router)
@@ -558,11 +578,38 @@ function append(event: SessionEventEnvelope['event'], publish = true, targetSess
   }
   events.push(envelope)
   targetSession.lastEventSeq = sequence
+  applySessionState(targetSession, envelope)
   if (publish && mockConnectionState === 'connected') {
     for (const subscriber of subscribers.get(targetSession.id) ?? []) subscriber(envelope)
   } else if (publish) {
     offlineBacklog.push(envelope)
   }
+  if (publish) multiClientChannel?.postMessage(envelope)
+}
+
+function receiveSharedEnvelope(envelope: SessionEventEnvelope): void {
+  if (events.some(event => event.eventId === envelope.eventId)) return
+  sequence = Math.max(sequence, envelope.seq)
+  events.push(envelope)
+  events.sort((left, right) => left.seq - right.seq)
+  const targetSession = sessions.find(value => value.id === envelope.sessionId)
+  if (targetSession) {
+    targetSession.lastEventSeq = Math.max(targetSession.lastEventSeq ?? 0, envelope.seq)
+    applySessionState(targetSession, envelope)
+  }
+  if (envelope.event.kind === 'turn_started') sharedActiveTurnId = envelope.event.meta?.turnId ?? ''
+  if (envelope.event.kind === 'turn_finished') sharedActiveTurnId = ''
+  if (mockConnectionState === 'connected') {
+    for (const subscriber of subscribers.get(envelope.sessionId) ?? []) subscriber(envelope)
+  } else {
+    offlineBacklog.push(envelope)
+  }
+}
+
+function applySessionState(targetSession: CodeverSession, envelope: SessionEventEnvelope): void {
+  if (envelope.event.kind !== 'session_state') return
+  targetSession.state = envelope.event.state
+  targetSession.updatedAt = envelope.timestamp
 }
 
 function userMessageEvent(input: SendMessageDto, turnId: string): SessionEventEnvelope['event'] {

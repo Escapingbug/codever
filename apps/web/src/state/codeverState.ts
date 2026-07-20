@@ -5,6 +5,7 @@ import { mergeSessionEvents } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 import type { PendingUserMessage } from '../timeline/pendingMessage'
 import { gatewayCanControl } from '../gatewayAccess'
+import { mergeSessionSnapshot } from './sessionSnapshot'
 
 const gateways = ref<Gateway[]>([])
 const projectsByGateway = reactive<Record<string, Project[]>>({})
@@ -143,13 +144,15 @@ export function useCodeverState() {
       },
     ),
     loadSessions,
-    replaceSession: (session: CodeverSession) => {
+    replaceSession: (session: CodeverSession): CodeverSession => {
       const sessions = sessionsByProject[session.projectId] ?? []
       if (!sessionsByProject[session.projectId]) sessionsByProject[session.projectId] = sessions
       const index = sessions.findIndex((item) => item.id === session.id)
-      if (index >= 0) sessions[index] = session
-      else sessions.unshift(session)
+      const merged = mergeSessionSnapshot(index >= 0 ? sessions[index] : undefined, session)
+      if (index >= 0) sessions[index] = merged
+      else sessions.unshift(merged)
       writeCached(`sessions:${session.projectId}`, [...sessions])
+      return merged
     },
     loadCachedProviderSessions: async (projectId: string) => {
       if (providerSessionsByProject[projectId]) return providerSessionsByProject[projectId]

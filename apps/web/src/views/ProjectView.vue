@@ -142,8 +142,12 @@ async function refreshTasks(): Promise<void> {
         const result = await state.api.discoverProviderSessions(currentProjectId, provider)
         attempts.push({ status: 'fulfilled', value: result })
         if (generation === discoveryGeneration) {
-          const completed = attempts.flatMap(value => value.status === 'fulfilled' ? value.value.sessions : [])
-          state.replaceProviderSessions(currentProjectId, completed)
+          // Replace only the Provider that answered. Cached rows from slow or
+          // failed Providers remain navigable throughout the refresh.
+          state.replaceProviderSessions(currentProjectId, [
+            ...providerSessions.value.filter(session => session.provider !== result.provider),
+            ...result.sessions,
+          ])
         }
       } catch (reason) {
         attempts.push({ status: 'rejected', reason })
@@ -154,9 +158,7 @@ async function refreshTasks(): Promise<void> {
     await sessionsRefresh
     if (generation !== discoveryGeneration) return
     const successful = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-    if (successful.length || currentProviders.length === 0) {
-      state.replaceProviderSessions(currentProjectId, successful.flatMap(result => result.sessions))
-    }
+    if (currentProviders.length === 0) state.replaceProviderSessions(currentProjectId, [])
     if (!successful.length && attempts.some(result => result.status === 'rejected')) {
       const failures = attempts.flatMap((result, index) => result.status === 'rejected'
         ? [`${orderedProviders[index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
@@ -196,6 +198,12 @@ async function createNewSession(): Promise<void> {
 }
 
 async function openTask(task: ProjectTask): Promise<void> {
+  // A linked Codever Session is already a complete navigation target. Opening
+  // it must not wait behind Provider discovery or another attach operation.
+  if (task.codeverSessionId) {
+    await openSession(task.codeverSessionId)
+    return
+  }
   if (openingKey.value || archivingKey.value) return
   if (!task.codeverSessionId && !projectMutable.value) {
     taskError.value = 'Restore Matrix sync and Gateway connectivity before attaching a provider task'
@@ -204,17 +212,14 @@ async function openTask(task: ProjectTask): Promise<void> {
   openingKey.value = task.key
   taskError.value = ''
   try {
-    let sessionId = task.codeverSessionId
-    if (!sessionId) {
-      const session = await state.api.createSession(projectId.value, {
-        provider: task.provider,
-        providerSessionId: task.providerSessionId,
-        title: task.title,
-        config: {},
-      })
-      state.replaceSession(session)
-      sessionId = session.id
-    }
+    const session = await state.api.createSession(projectId.value, {
+      provider: task.provider,
+      providerSessionId: task.providerSessionId,
+      title: task.title,
+      config: {},
+    })
+    state.replaceSession(session)
+    const sessionId = session.id
     await openSession(sessionId)
   } catch (error) {
     taskError.value = error instanceof Error ? error.message : 'Could not open the task'
