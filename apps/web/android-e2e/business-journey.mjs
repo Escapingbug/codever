@@ -20,8 +20,8 @@ if (!isSessionEditor()) {
   stage('computer discovered')
   tapNode(nodes(hierarchy()).find(node => node.text === gatewayName && visible(node.bounds)), gatewayName)
 
-  const gatewayAction = await waitForAccessibleAction([/^Authorize this client$/, /^Codever codex$/], 30_000)
-  if (gatewayAction.text === 'Authorize this client') {
+  const gatewayAction = await waitForAccessibleAction([/^Request authorization$/, /^Codever codex$/], 30_000)
+  if (gatewayAction.text === 'Request authorization') {
     tapNode(gatewayAction, 'Authorize this client')
     await tapAccessibleWhenReady(/^Codever codex$/, 30_000)
   } else {

@@ -26,8 +26,16 @@ await delay(750)
 tap(signIn.bounds)
 
 const page = await waitForResult(30_000)
-if (page !== 'Computers') throw new Error(page)
-process.stdout.write('PASS Android fresh install and real Matrix login\n')
+if (page !== 'Connected') throw new Error(page)
+await waitForText('Connected', 30_000)
+await tapDescription(/Computers$/)
+await waitForText('Your coding computers and their setup status.', 15_000)
+await waitForText('Windows Computer', 30_000)
+await waitForText('Verify this computer', 30_000)
+const connectedPage = nodes(hierarchy()).filter(node => node.password !== 'true').map(node => node.text)
+const connectionFailure = connectedPage.find(text => /secure matrix synchronization is not connected|connection unavailable/i.test(text))
+if (connectionFailure) throw new Error(connectionFailure)
+process.stdout.write('PASS Android fresh install, real Matrix sync, and Gateway candidate discovery\n')
 
 async function fillSafeField(index, value) {
   let document = hierarchy()
@@ -66,12 +74,18 @@ async function waitForResult(timeout) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     const visible = nodes(hierarchy()).filter(node => node.password !== 'true' && node.class !== 'android.widget.EditText').map(node => node.text)
-    if (visible.includes('Computers')) return 'Computers'
+    if (visible.includes('Connected')) return 'Connected'
     const error = visible.find(text => /unable|failed|error|invalid/i.test(text))
     if (error) return error
     await delay(500)
   }
   return 'Login did not leave the credential form within 30 seconds'
+}
+
+async function tapDescription(pattern) {
+  const node = nodes(hierarchy()).find(value => pattern.test(value['content-desc'] ?? ''))
+  if (!node) throw new Error(`Could not find a control matching ${pattern}`)
+  tap(node.bounds)
 }
 
 function delay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)) }

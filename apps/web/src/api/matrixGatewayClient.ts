@@ -67,6 +67,7 @@ export class MatrixGatewayClient {
   private unsubscribe?: () => void
   private discovery?: Promise<void>
   private discoveryLastCompletedAt = 0
+  private gatewayAnnouncementRevision = 0
 
   constructor(private readonly options: MatrixGatewayClientOptions) {}
 
@@ -190,7 +191,7 @@ export class MatrixGatewayClient {
     if (this.discovery) return this.discovery
     this.discovery = (async () => {
       const requestId = `discover_${crypto.randomUUID()}`
-      const before = new Set(this.gateways.keys())
+      const announcementRevision = this.gatewayAnnouncementRevision
       await this.options.transport.send({
         roomId: this.options.controlRoomId,
         eventType: MATRIX_DISCOVERY_EVENT,
@@ -198,9 +199,12 @@ export class MatrixGatewayClient {
         content: { version: PROTOCOL_VERSION, requestId },
       })
       const startedAt = Date.now()
-      while (Date.now() - startedAt < 4_000) {
-        if ([...this.gateways.keys()].some(id => !before.has(id)) || this.gateways.size) {
-          await delay(350)
+      while (Date.now() - startedAt < 8_000) {
+        // Cached candidates are deliberately not sufficient here. In particular, the
+        // announcement that follows SAS completion changes matrixVerified for the same
+        // Gateway id. Returning the cached candidate would roll the UI back to setup.
+        if (this.gatewayAnnouncementRevision > announcementRevision) {
+          await delay(100)
           break
         }
         await delay(50)
@@ -253,6 +257,7 @@ export class MatrixGatewayClient {
         const current = this.gateways.get(gateway.id)
         if (!current || Date.parse(gateway.lastSeenAt ?? '') >= Date.parse(current.lastSeenAt ?? '')) {
           this.gateways.set(gateway.id, gateway)
+          this.gatewayAnnouncementRevision += 1
         }
       } else if (eventType === MATRIX_AUTHORIZATION_EVENT) {
         const request = parseApprovalRequest(content, input.senderDevice)
