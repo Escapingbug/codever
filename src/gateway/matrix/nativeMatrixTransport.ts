@@ -27,6 +27,7 @@ export interface MatrixSendInput {
 export interface NativeMatrixVerification {
     flowId: string
     stage: 'created' | 'requested' | 'ready' | 'sas' | 'present_sas' | 'done' | 'cancelled' | 'unsupported'
+    weStarted?: boolean
     otherDeviceId?: string
     emojis?: Array<{ symbol: string; description: string }>
     cancellation?: { code: string; reason: string; cancelledByUs: boolean }
@@ -43,6 +44,7 @@ export interface MatrixTransport {
     initialize(): Promise<void>
     send(input: MatrixSendInput): Promise<string>
     downloadEncryptedFile?(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void>
+    trustDevice?(deviceId: string): Promise<void>
     listVerifications?(): Promise<NativeMatrixVerification[]>
     advanceVerification?(flowId: string): Promise<NativeMatrixVerification>
     confirmVerification?(flowId: string, matches: boolean): Promise<NativeMatrixVerification>
@@ -130,6 +132,10 @@ export class NativeMatrixTransport implements MatrixTransport {
 
     async listDevices(): Promise<NativeMatrixDevice[]> {
         return this.requirePeer().request('devices.list', {})
+    }
+
+    async trustDevice(deviceId: string): Promise<void> {
+        await this.requirePeer().request('device.trust', { deviceId })
     }
 
     async listVerifications(): Promise<NativeMatrixVerification[]> {

@@ -48,7 +48,7 @@ export interface ExecutionRootApprovalRequest {
   gatewayId: string
   ownerId: string
   label: string
-  senderDevice?: string
+  senderDevice: string
   publicKey: { kty: 'EC'; crv: 'P-256'; alg: 'ES256'; use: 'sig'; kid: string; x: string; y: string }
 }
 
@@ -125,7 +125,9 @@ export class MatrixGatewayClient {
 
   async approveExecutionRoot(input: ExecutionRootApprovalRequest): Promise<ClientGatewayResponseFrame> {
     const response = await this.request(input.gatewayId, {
-      kind: 'execution.root.trust', ownerId: input.ownerId, label: input.label, publicKey: input.publicKey,
+      kind: 'execution.root.trust', ownerId: input.ownerId,
+      matrixDeviceId: input.senderDevice,
+      label: input.label, publicKey: input.publicKey,
     })
     if (response.status === 'completed') {
       this.approvalRequests.delete(input.requestId)
@@ -417,12 +419,16 @@ function parseApprovalRequest(content: Record<string, unknown>, senderDevice?: s
   const key = record(content.publicKey)
   if (key.kty !== 'EC' || key.crv !== 'P-256' || key.alg !== 'ES256' || key.use !== 'sig'
     || 'd' in key) throw new Error('execution approval key must be a public ES256 P-256 JWK')
+  const ownerId = requiredText(content.ownerId, 'ownerId')
+  if (!senderDevice || ownerId !== senderDevice) {
+    throw new Error('execution approval owner must match the verified Matrix sender device')
+  }
   return {
     requestId: requiredText(content.requestId, 'requestId'),
     gatewayId: requiredText(content.gatewayId, 'gatewayId'),
-    ownerId: requiredText(content.ownerId, 'ownerId'),
+    ownerId,
     label: requiredText(content.label, 'label'),
-    ...(senderDevice ? { senderDevice } : {}),
+    senderDevice,
     publicKey: {
       kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig',
       kid: requiredText(key.kid, 'publicKey.kid'),

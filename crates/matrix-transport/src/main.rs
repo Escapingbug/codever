@@ -237,6 +237,13 @@ async fn handle(
             let transport = require_transport(state).await?;
             Ok(serde_json::to_value(transport.devices().await?)?)
         }
+        "device.trust" => {
+            let params: DeviceVerificationParams = serde_json::from_value(request.params)
+                .context("invalid Matrix device trust parameters")?;
+            let transport = require_transport(state).await?;
+            transport.trust_device(&params.device_id).await?;
+            Ok(json!({ "trusted": true }))
+        }
         "verification.list" => {
             let transport = require_transport(state).await?;
             Ok(serde_json::to_value(

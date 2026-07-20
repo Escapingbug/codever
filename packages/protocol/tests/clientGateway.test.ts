@@ -80,7 +80,7 @@ describe('encrypted Client to Gateway request frames', () => {
             { kind: 'events.list', sessionId: 'session-1', after: 0, limit: 100 },
             { kind: 'events.list', sessionId: 'session-1', before: 101, limit: 100 },
             {
-                kind: 'execution.root.trust', ownerId: 'tablet-device', label: 'Tablet',
+                kind: 'execution.root.trust', ownerId: 'tablet-device', matrixDeviceId: 'TABLETDEVICE', label: 'Tablet',
                 publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'key-2', x: 'x', y: 'y' },
             },
             { kind: 'execution.root.revoke', keyId: 'key-2' },

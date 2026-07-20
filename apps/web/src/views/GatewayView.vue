@@ -30,6 +30,7 @@ const approvalRequested = ref(false)
 const approvalError = ref('')
 let verificationTimer: ReturnType<typeof setInterval> | undefined
 let verificationAbort: AbortController | undefined
+let approvalPolling = true
 
 async function startVerification(): Promise<void> {
   if (!matrixDeviceId.value) return
@@ -126,8 +127,10 @@ async function requestApproval(): Promise<void> {
       publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: key.kid, x: key.x, y: key.y },
     })
     approvalRequested.value = true
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 360 && approvalPolling; attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 500))
+      await state.loadGateways()
+      if (!gatewayCanControl(gateway.value)) continue
       await state.loadProjects(gatewayId.value)
       if (!state.errors[`projects:${gatewayId.value}`]) return
     }
@@ -138,7 +141,7 @@ async function requestApproval(): Promise<void> {
 
 onMounted(async () => { await state.loadGateways() })
 watch(gateway, value => { if (value && gatewayCanControl(value)) void state.loadProjects(value.id) }, { immediate: true })
-onUnmounted(stopVerificationPolling)
+onUnmounted(() => { approvalPolling = false; stopVerificationPolling() })
 </script>
 
 <template>
@@ -166,6 +169,12 @@ onUnmounted(stopVerificationPolling)
       </template>
       <div v-else-if="waitingForComputer" class="verification-wait" role="status"><span class="loader" /><p><strong>Waiting for confirmation on the computer</strong><br />No project or control request will be sent until the computer confirms the same emoji.</p><button class="button" @click="cancelVerification">Cancel verification</button></div>
       <div v-else class="form-actions"><button class="button" :disabled="setupBusy" @click="cancelVerification">Cancel</button><button class="button button--primary" :disabled="setupBusy" @click="advanceVerification">{{ setupBusy ? 'Waiting…' : 'Continue' }}</button></div>
+      <div class="authorization-card">
+        <h3>Already verified by another client?</h3>
+        <p>Ask an authorized Codever client to approve this device. No command needs to run on this computer.</p>
+        <p v-if="approvalRequested">Waiting for authorization…</p><p v-if="approvalError" class="error-banner" role="alert">{{ approvalError }}</p>
+        <button class="button button--primary" :disabled="approvalRequested" @click="requestApproval">Request access from verified client</button>
+      </div>
     </section>
 
     <div v-else-if="error && !isGatewayAuthorizationError(error)" class="error-banner"><strong>Secure control unavailable.</strong> {{ error }}</div>

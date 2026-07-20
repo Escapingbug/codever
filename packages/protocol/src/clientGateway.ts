@@ -148,6 +148,7 @@ export const ClientGatewayRequestPayloadSchema = z.discriminatedUnion('kind', [
     z.object({
         kind: z.literal('execution.root.trust'),
         ownerId: OpaqueIdSchema,
+        matrixDeviceId: OpaqueIdSchema.optional(),
         label: z.string().trim().min(1).max(200),
         publicKey: ExecutionPublicJwkSchema,
     }).strict(),

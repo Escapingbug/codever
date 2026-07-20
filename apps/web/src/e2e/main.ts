@@ -13,6 +13,7 @@ import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import App from '../App.vue'
 import { codeverApiKey, type CodeverApi } from '../api/codeverApi'
+import type { MatrixVerificationSnapshot } from '../api/nativeMatrixClient'
 import { clientSession } from '../state/clientSession'
 import ProjectView from '../views/ProjectView.vue'
 import SessionView from '../views/SessionView.vue'
@@ -89,6 +90,7 @@ let matrixGatewayVerified = false
 let clientVerificationConfirmed = false
 let verificationStage: 'none' | 'requested' | 'present_sas' | 'done' | 'cancelled' = 'none'
 let verificationCancellationReason = ''
+let peerVerificationStage: 'none' | 'requested' | 'ready' | 'present_sas' | 'done' | 'cancelled' = 'none'
 let approvalVisible = true
 let approvalSubscriber: ((requests: Array<Record<string, unknown>>) => void) | undefined
 const attachments: SessionAttachmentDto[] = []
@@ -119,12 +121,12 @@ if (onboardingFixture) {
 clientSession.listMatrixDevices = async () => [
   { deviceId: 'CLIENTDEVICE', displayName: 'Codever Android', verified: true, current: true, verifiable: true },
   { deviceId: 'SECONDGATEWAY', displayName: 'Windows Gateway', verified: matrixGatewayVerified, current: false, verifiable: true },
+  { deviceId: 'NEWCLIENT', displayName: 'New phone', verified: peerVerificationStage === 'done', current: false, verifiable: true },
 ]
 clientSession.listVerifications = async () => {
-  if (verificationStage === 'none') return []
-  const stage = verificationStage
-  return [{
-  flowId: 'verification-e2e', stage, otherDeviceId: 'SECONDGATEWAY',
+  if (verificationStage === 'none' && peerVerificationStage === 'none') return []
+  const flows: MatrixVerificationSnapshot[] = verificationStage === 'none' ? [] : [{
+  flowId: 'verification-e2e', stage: verificationStage, weStarted: true, otherDeviceId: 'SECONDGATEWAY',
   ...(verificationStage === 'present_sas' ? { emojis: [
     { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
     { symbol: '🎸', description: 'Guitar' }, { symbol: '🌙', description: 'Moon' },
@@ -133,18 +135,38 @@ clientSession.listVerifications = async () => {
     code: 'm.user', reason: verificationCancellationReason || 'Verification cancelled', cancelledByUs: false,
   } } : {}),
   }]
+  if (peerVerificationStage !== 'none') flows.push({
+    flowId: 'peer-verification-e2e', stage: peerVerificationStage, weStarted: true, otherDeviceId: 'NEWCLIENT',
+    ...(peerVerificationStage === 'present_sas' ? { emojis: [
+      { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
+      { symbol: '🎸', description: 'Guitar' }, { symbol: '🌙', description: 'Moon' },
+    ] } : {}),
+  })
+  return flows
 }
-clientSession.requestVerification = async () => {
+clientSession.requestVerification = async (deviceId: string) => {
+  if (deviceId === 'NEWCLIENT') {
+    peerVerificationStage = 'requested'
+    return { flowId: 'peer-verification-e2e', stage: 'requested' as const, weStarted: true, otherDeviceId: 'NEWCLIENT' }
+  }
   clientVerificationConfirmed = false
   verificationCancellationReason = ''
   verificationStage = 'requested'
   return { flowId: 'verification-e2e', stage: 'requested', otherDeviceId: 'SECONDGATEWAY' }
 }
-clientSession.advanceVerification = async () => {
+clientSession.advanceVerification = async (flowId: string) => {
+  if (flowId === 'peer-verification-e2e') {
+    peerVerificationStage = 'present_sas'
+    return (await clientSession.listVerifications()).find(flow => flow.flowId === flowId)!
+  }
   verificationStage = 'present_sas'
-  return (await clientSession.listVerifications())[0]!
+  return (await clientSession.listVerifications()).find(flow => flow.flowId === flowId)!
 }
-clientSession.confirmVerification = async (_flowId: string, matches: boolean) => {
+clientSession.confirmVerification = async (flowId: string, matches: boolean) => {
+  if (flowId === 'peer-verification-e2e') {
+    peerVerificationStage = matches ? 'done' : 'cancelled'
+    return { flowId, stage: peerVerificationStage, weStarted: true, otherDeviceId: 'NEWCLIENT' }
+  }
   if (!matches) {
     verificationStage = 'cancelled'
     verificationCancellationReason = 'Emoji differ'
@@ -157,7 +179,10 @@ clientSession.confirmVerification = async (_flowId: string, matches: boolean) =>
     { symbol: '🐶', description: 'Dog' }, { symbol: '🚀', description: 'Rocket' },
   ] }
 }
-clientSession.cancelVerification = async () => { verificationStage = 'cancelled'; verificationCancellationReason = 'Cancelled on this client' }
+clientSession.cancelVerification = async (flowId: string) => {
+  if (flowId === 'peer-verification-e2e') peerVerificationStage = 'cancelled'
+  else { verificationStage = 'cancelled'; verificationCancellationReason = 'Cancelled on this client' }
+}
 
 if (!onboardingFixture && longHistoryFixture) {
   for (let index = 1; index <= 8; index += 1) {
@@ -201,9 +226,9 @@ const api = {
     return { commandId: 'approval-e2e', status: 'succeeded' }
   },
   async requestExecutionApproval() {
-    if (!matrixGatewayVerified || verificationStage !== 'done') {
-      throw new Error('Execution authorization was attempted before bilateral Matrix verification')
-    }
+    matrixGatewayVerified = true
+    verificationStage = 'done'
+    unpairedGateway.capabilities.metadata = { ...unpairedGateway.capabilities.metadata, matrixVerified: true }
     secondGatewayAuthorized = true
     return 'approval-second-gateway'
   },
@@ -413,6 +438,7 @@ declare global {
       nativeSecretDelete(account: string): Promise<void>
       approveSecondComputer(): void
       confirmGatewayVerification(): void
+      acceptClientVerification(): void
       cancelGatewayVerification(reason?: string): void
       projectAccessCalls(): number
       setProjectAccessMode(mode: 'normal' | 'pending' | 'reject'): void
@@ -435,6 +461,7 @@ window.__CODEVER_E2E__ = {
     verificationStage = 'done'
     unpairedGateway.capabilities.metadata = { ...unpairedGateway.capabilities.metadata, matrixVerified: true }
   },
+  acceptClientVerification() { peerVerificationStage = 'ready' },
   cancelGatewayVerification(reason = 'The Gateway rejected verification') {
     verificationStage = 'cancelled'
     verificationCancellationReason = reason

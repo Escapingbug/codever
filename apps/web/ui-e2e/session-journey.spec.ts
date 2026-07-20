@@ -112,6 +112,16 @@ test.describe('mobile Session business journey', () => {
     await expect(page.getByRole('heading', { name: 'Authorize this client' })).toBeVisible()
   })
 
+  test('C02 delegates new client access without running Gateway verification', async ({ page }) => {
+    await page.goto('./e2e.html#/gateways/gateway-unpaired-e2e')
+    await expect(page.getByRole('heading', { name: 'Verify this computer' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Request access from verified client' }).click()
+
+    await expect(page.getByRole('heading', { name: 'No projects on this computer' })).toBeVisible()
+    expect(await page.evaluate(() => window.__CODEVER_E2E__.clientVerificationConfirmed())).toBe(false)
+  })
+
   test('C02 times out bilateral verification without leaking a Gateway command', async ({ page }) => {
     await page.clock.install()
     await page.goto('./e2e.html#/machines')
@@ -128,10 +138,18 @@ test.describe('mobile Session business journey', () => {
     expect(await page.evaluate(() => window.__CODEVER_E2E__.projectAccessCalls())).toBe(accessCalls)
   })
 
-  test('C01 manages client approvals without mixing them with Computer verification', async ({ page }) => {
+  test('C01 verifies and authorizes a new client without opening the Gateway', async ({ page }) => {
     await page.goto('./e2e.html#/settings')
-    await expect(page.getByText('Computer setup now belongs in')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Verify' })).toHaveCount(0)
+    const newClient = page.locator('.server-summary').filter({ hasText: 'NEWCLIENT' })
+    await newClient.getByRole('button', { name: 'Verify' }).click()
+    const verification = page.locator('.client-verification-card').filter({ hasText: 'NEWCLIENT' })
+    await expect(verification.getByText('Waiting for the other client…')).toBeVisible()
+    await page.evaluate(() => window.__CODEVER_E2E__.acceptClientVerification())
+    await verification.getByRole('button', { name: 'Continue verification' }).click()
+    await expect(verification.getByLabel('Client verification emoji')).toBeVisible()
+    await verification.getByRole('button', { name: 'They match' }).click()
+    await expect(newClient).toContainText('Verified')
+
     const approval = page.locator('.authorization-card').filter({ hasText: 'New phone' })
     await expect(approval).toContainText('execution-new')
     await approval.getByRole('button', { name: 'Approve client' }).click()

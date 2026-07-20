@@ -20,6 +20,14 @@ The release E2E suite must prove complete user journeys, not only isolated scree
 - A timeout sends no project or execution command and offers a fresh verification attempt.
 - A completed bilateral verification survives navigation and refresh.
 
+## J02a: later client enrollment
+
+1. An authorized client opens Settings and starts SAS verification for a new signed-in client.
+2. Both clients compare and confirm the same ordered emoji without opening the Gateway.
+3. The new client requests access to a Gateway.
+4. The authorized client approves the request with its existing COSE execution root.
+5. The Gateway records the new Matrix Device ID and execution public key, and the new client can control it.
+
 ## J03: interruption and durable recovery
 
 - Cached projects, tasks, and history remain readable during Matrix interruption.

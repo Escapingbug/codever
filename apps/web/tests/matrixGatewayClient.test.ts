@@ -71,7 +71,7 @@ describe('MatrixGatewayClient', () => {
     }
     transport.emit('io.codever.authorization.v1', content, { encrypted: true, verifiedDevice: false })
     expect(approvals.at(-1)).toEqual([])
-    transport.emit('io.codever.authorization.v1', content)
+    transport.emit('io.codever.authorization.v1', content, { encrypted: true, verifiedDevice: true, senderDevice: 'TABLET' })
     expect(approvals.at(-1)).toMatchObject([{ requestId: 'approval-1' }])
     expect(onSecurityError).toHaveBeenCalledWith(expect.stringContaining('unverified'))
 
@@ -91,10 +91,11 @@ describe('MatrixGatewayClient', () => {
     value.start()
     announceCompatibleGateway(transport)
     const request = {
-      requestId: 'approval-2', gatewayId: 'gateway-1', ownerId: 'PHONE-2', label: 'Phone 2',
+      requestId: 'approval-2', gatewayId: 'gateway-1', ownerId: 'PHONE-2', senderDevice: 'PHONE-2', label: 'Phone 2',
       publicKey: { kty: 'EC' as const, crv: 'P-256' as const, alg: 'ES256' as const, use: 'sig' as const, kid: 'phone-2', x: 'x', y: 'y' },
     }
-    transport.emit('io.codever.authorization.v1', { version: 1, type: 'execution.root.request', ...request })
+    transport.emit('io.codever.authorization.v1', { version: 1, type: 'execution.root.request', ...request },
+      { encrypted: true, verifiedDevice: true, senderDevice: 'PHONE-2' })
     transport.onSend = sent => {
       if (sent.eventType !== 'io.codever.command.v1') return
       const requestId = (sent.content as { request: { requestId: string } }).request.requestId

@@ -38,6 +38,7 @@ export interface ExecutionIdentity {
 export interface MatrixVerificationSnapshot {
   flowId: string
   stage: 'created' | 'requested' | 'ready' | 'sas' | 'present_sas' | 'done' | 'cancelled' | 'unsupported'
+  weStarted?: boolean
   otherDeviceId?: string
   emojis?: Array<{ symbol: string; description: string }>
   cancellation?: { code: string; reason: string; cancelledByUs: boolean }

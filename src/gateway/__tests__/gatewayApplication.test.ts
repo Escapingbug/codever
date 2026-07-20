@@ -246,11 +246,13 @@ describe('Gateway command liveness', () => {
 
     it('lets an existing COSE principal add and revoke a later client root', async () => {
         const trust = vi.fn(async () => ({ keyId: 'key-2' }))
+        const trustDevice = vi.fn(async () => undefined)
         const revoke = vi.fn(async () => true)
         const context = {
             credentialId: 'trusted-phone', gatewayId: 'gateway-1',
             toolOutputs: undefined as never,
             executionTrust: { trust, revoke } as never,
+            matrixDeviceTrust: { trust: trustDevice },
             sessions: undefined as never, attachments: undefined as never,
             inventory: undefined as never, projects: undefined as never, events: undefined as never,
             inventoryChanged: () => undefined,
@@ -261,7 +263,7 @@ describe('Gateway command liveness', () => {
         }
 
         const added = await handleClientRequest(frame('trust-root', {
-            kind: 'execution.root.trust', ownerId: 'tablet-device', label: 'Tablet', publicKey,
+            kind: 'execution.root.trust', ownerId: 'tablet-device', matrixDeviceId: 'TABLETDEVICE', label: 'Tablet', publicKey,
         }), context)
         const revoked = await handleClientRequest(frame('revoke-root', {
             kind: 'execution.root.revoke', keyId: 'key-2',
@@ -270,7 +272,29 @@ describe('Gateway command liveness', () => {
         expect(added.status).toBe('completed')
         expect(revoked.status).toBe('completed')
         expect(trust).toHaveBeenCalledWith('tablet-device', publicKey, 'Tablet')
+        expect(trustDevice).toHaveBeenCalledWith('TABLETDEVICE')
+        expect(trustDevice.mock.invocationCallOrder[0]).toBeLessThan(trust.mock.invocationCallOrder[0])
         expect(revoke).toHaveBeenCalledWith('key-2')
+    })
+
+    it('does not add an execution root when delegated Matrix device trust fails', async () => {
+        const trust = vi.fn(async () => ({ keyId: 'key-2' }))
+        const context = {
+            credentialId: 'trusted-phone', gatewayId: 'gateway-1',
+            executionTrust: { trust } as never,
+            matrixDeviceTrust: { trust: vi.fn(async () => { throw new Error('Matrix device was not found') }) },
+            sessions: undefined as never, attachments: undefined as never,
+            inventory: undefined as never, projects: undefined as never, events: undefined as never,
+            inventoryChanged: () => undefined,
+        } satisfies ClientRequestContext
+
+        const response = await handleClientRequest(frame('trust-missing-device', {
+            kind: 'execution.root.trust', ownerId: 'missing-device', matrixDeviceId: 'MISSINGDEVICE', label: 'Missing',
+            publicKey: { kty: 'EC', crv: 'P-256', alg: 'ES256', use: 'sig', kid: 'key-2', x: 'x', y: 'y' },
+        }), context)
+
+        expect(response.status).toBe('failed')
+        expect(trust).not.toHaveBeenCalled()
     })
 
     it('acknowledges a message and accepts cancel while the provider turn is still running', async () => {

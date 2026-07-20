@@ -34,6 +34,7 @@ export const GATEWAY_FEATURES = [
     'sessions', 'events', 'tools', 'decisions', 'cancel', 'project.create', 'durable-idempotency',
     'attachment.media', 'attachment.manage', 'matrix-e2ee', 'cose-cwt-authorization',
     'file.export', 'attachment.download', 'matrix-durable-sync', 'matrix-encrypted-media',
+    'client-mediated-device-trust',
 ]
 
 export interface GatewayApplication {
@@ -129,6 +130,9 @@ export async function createGatewayApplication(
         attachments,
         toolOutputs,
         executionTrust: trust,
+        matrixDeviceTrust: transport.trustDevice
+            ? { trust: deviceId => transport.trustDevice!(deviceId) }
+            : undefined,
         matrixMedia: transport.downloadEncryptedFile
             ? { download: (file, path) => transport.downloadEncryptedFile!(file, path) }
             : undefined,
@@ -238,6 +242,7 @@ export interface ClientRequestContext {
     attachments: GatewayAttachmentStore
     toolOutputs: GatewayToolOutputStore
     executionTrust: ExecutionTrustRepository
+    matrixDeviceTrust?: { trust(deviceId: string): Promise<void> }
     matrixMedia?: { download(encryptedFile: Record<string, unknown>, destinationPath: string): Promise<void> }
     mediaStagingDirectory?: string
     inventoryChanged: () => void
@@ -467,6 +472,10 @@ export async function handleClientRequest(
                 break
             }
             case 'execution.root.trust':
+                if (request.payload.matrixDeviceId) {
+                    if (!context.matrixDeviceTrust) throw new Error('Matrix device trust is unavailable on this Gateway')
+                    await context.matrixDeviceTrust.trust(request.payload.matrixDeviceId)
+                }
                 await context.executionTrust.trust(
                     request.payload.ownerId,
                     request.payload.publicKey,

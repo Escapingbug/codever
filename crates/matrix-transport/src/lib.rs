@@ -132,6 +132,7 @@ pub struct TransportEvent {
 pub struct VerificationSnapshot {
     pub flow_id: String,
     pub stage: String,
+    pub we_started: bool,
     pub other_device_id: Option<String>,
     pub emojis: Option<Vec<VerificationEmoji>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -458,11 +459,38 @@ impl MatrixTransport {
                 current: current_device == Some(item.device_id.as_ref()),
                 device_id: item.device_id.to_string(),
                 display_name: item.display_name,
-                verified: crypto_device.as_ref().is_some_and(|value| value.is_verified()),
+                verified: crypto_device
+                    .as_ref()
+                    .is_some_and(|value| value.is_verified()),
                 verifiable: crypto_device.is_some(),
             });
         }
         Ok(devices)
+    }
+
+    pub async fn trust_device(&self, device_id: &str) -> Result<()> {
+        let user_id = self
+            .client
+            .user_id()
+            .context("Matrix client is not logged in")?;
+        let device_id: OwnedDeviceId = device_id.into();
+        self.client
+            .encryption()
+            .request_user_identity(user_id)
+            .await
+            .context("failed to refresh Matrix device keys")?;
+        self.client
+            .encryption()
+            .get_device(user_id, &device_id)
+            .await?
+            .context("Matrix device was not found")?
+            .set_local_trust(LocalTrust::Verified)
+            .await?;
+        self.locally_verified_devices
+            .write()
+            .expect("local trust lock poisoned")
+            .insert(device_id);
+        Ok(())
     }
 
     async fn refresh_locally_verified_devices(&self) -> Result<()> {
@@ -491,12 +519,7 @@ impl MatrixTransport {
     }
 
     pub async fn verification_requests(&self) -> Result<Vec<VerificationSnapshot>> {
-        let requests: Vec<_> = self.verifications
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
+        let requests: Vec<_> = self.verifications.read().await.values().cloned().collect();
         let mut snapshots = Vec::with_capacity(requests.len());
         for request in requests {
             self.remember_verification_device(&request).await;
@@ -919,6 +942,7 @@ fn verification_snapshot(request: &VerificationRequest) -> VerificationSnapshot 
     VerificationSnapshot {
         flow_id: request.flow_id().to_owned(),
         stage: stage.to_owned(),
+        we_started: request.we_started(),
         other_device_id,
         emojis,
         cancellation,
@@ -927,10 +951,12 @@ fn verification_snapshot(request: &VerificationRequest) -> VerificationSnapshot 
 
 fn verification_device_id(request: &VerificationRequest) -> Option<OwnedDeviceId> {
     match request.state() {
-        VerificationRequestState::Requested { other_device_data, .. }
-        | VerificationRequestState::Ready { other_device_data, .. } => {
-            Some(other_device_data.device_id().to_owned())
+        VerificationRequestState::Requested {
+            other_device_data, ..
         }
+        | VerificationRequestState::Ready {
+            other_device_data, ..
+        } => Some(other_device_data.device_id().to_owned()),
         VerificationRequestState::Transitioned {
             verification: Verification::SasV1(sas),
         } => Some(sas.other_device().device_id().to_owned()),
@@ -1012,8 +1038,18 @@ mod tests {
 
     #[test]
     fn local_trust_requires_bilateral_verification_completion() {
-        for stage in ["created", "requested", "ready", "sas", "present_sas", "cancelled"] {
-            assert!(!verification_stage_allows_trust(stage), "stage {stage} must not persist trust");
+        for stage in [
+            "created",
+            "requested",
+            "ready",
+            "sas",
+            "present_sas",
+            "cancelled",
+        ] {
+            assert!(
+                !verification_stage_allows_trust(stage),
+                "stage {stage} must not persist trust"
+            );
         }
         assert!(verification_stage_allows_trust("done"));
     }

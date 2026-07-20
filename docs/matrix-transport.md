@@ -35,12 +35,14 @@ against a Gateway-local control-root key before an ACP operation can run.
    with `codever control trust --owner <client-id> --key <public-jwk>`.
 7. Restart `codever start`. The client can now discover and control the Gateway.
 
-The local trust command is needed only for the first execution root. A later
-client first completes Matrix SAS with an existing device, then publishes an
-approval request. An already authorized client signs `execution.root.trust`;
-the Gateway accepts that mutation only because it is itself a valid authorized
-COSE request. Reinstallation therefore does not require logging into the
-homeserver host.
+The local trust command is needed only for the first execution root. For a later
+client, open Settings on both clients and complete Matrix SAS directly between
+them. The later client then publishes an approval request for each Gateway it
+needs to control. An already authorized client signs `execution.root.trust`,
+including the SAS-verified Matrix Device ID; the Gateway accepts that mutation
+only because it is itself a valid authorized COSE request. It records both the
+new Matrix device and its execution public key. Later client enrollment therefore
+does not require a terminal or verification command on the Gateway.
 
 ## Room model
 
