@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import type { MatrixVerificationSnapshot } from '../api/nativeMatrixClient'
 import StatusDot from '../components/StatusDot.vue'
 import { gatewayNeedsVerification, isGatewayAuthorizationError } from '../gatewayAccess'
+import { MatrixVerificationCancelledError, MatrixVerificationTimeoutError, waitForBilateralVerification } from '../matrixVerification'
 import { clientSession, friendlyCodeverError } from '../state/clientSession'
 import { useCodeverState } from '../state/codeverState'
 
@@ -21,15 +22,19 @@ const matrixDeviceId = computed(() => {
 const flow = ref<MatrixVerificationSnapshot>()
 const setupBusy = ref(false)
 const setupError = ref('')
+const clientConfirmed = ref(false)
+const waitingForComputer = ref(false)
 const approvalRequested = ref(false)
 const approvalError = ref('')
 let verificationTimer: ReturnType<typeof setInterval> | undefined
+let verificationAbort: AbortController | undefined
 
 async function startVerification(): Promise<void> {
   if (!matrixDeviceId.value) return
   setupBusy.value = true
   setupError.value = ''
   try {
+    clientConfirmed.value = false
     flow.value = await clientSession.requestVerification(matrixDeviceId.value)
     startVerificationPolling()
   } catch (verificationError) {
@@ -51,35 +56,47 @@ async function confirmVerification(matches: boolean): Promise<void> {
   setupBusy.value = true
   setupError.value = ''
   try {
-    flow.value = await clientSession.confirmVerification(flow.value.flowId, matches)
+    const flowId = flow.value.flowId
+    flow.value = await clientSession.confirmVerification(flowId, matches)
     if (!matches) return
-    let verifiedLocally = false
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const devices = await clientSession.listMatrixDevices()
-      if (devices.some(device => device.deviceId === matrixDeviceId.value && device.verified)) {
-        verifiedLocally = true
-        break
-      }
-      await new Promise(resolve => setTimeout(resolve, 500))
-    }
-    if (!verifiedLocally) throw new Error('Verification completed, but Matrix device trust has not synchronized yet.')
-    // Native SAS trust is authoritative locally; the Gateway still independently
-    // rejects requests until its own Matrix crypto store confirms the same trust.
+    clientConfirmed.value = true
+    waitingForComputer.value = true
+    setupBusy.value = false
+    stopVerificationPolling()
+    verificationAbort = new AbortController()
+    flow.value = await waitForBilateralVerification({
+      flowId,
+      read: () => clientSession.listVerifications(),
+      onUpdate: current => { flow.value = current },
+      signal: verificationAbort.signal,
+    })
+    // Only bilateral Matrix `done` may unlock Gateway commands.
     state.markGatewayMatrixVerified(gatewayId.value)
     await state.loadProjects(gatewayId.value)
     void state.loadGateways()
-    stopVerificationPolling()
   } catch (verificationError) {
-    setupError.value = friendlyCodeverError(verificationError)
-  } finally { setupBusy.value = false }
+    if (!(verificationError instanceof MatrixVerificationCancelledError && verificationAbort?.signal.aborted)) {
+      setupError.value = friendlyCodeverError(verificationError)
+    }
+    clientConfirmed.value = false
+    if (verificationError instanceof MatrixVerificationTimeoutError) {
+      try { if (flow.value) await clientSession.cancelVerification(flow.value.flowId) } catch { /* preserve timeout */ }
+      flow.value = undefined
+    }
+  } finally {
+    setupBusy.value = false
+    waitingForComputer.value = false
+    verificationAbort = undefined
+  }
 }
 
 async function cancelVerification(): Promise<void> {
   if (!flow.value) return
+  verificationAbort?.abort()
   setupBusy.value = true
   try { await clientSession.cancelVerification(flow.value.flowId); flow.value = undefined; stopVerificationPolling() }
   catch (verificationError) { setupError.value = friendlyCodeverError(verificationError) }
-  finally { setupBusy.value = false }
+  finally { setupBusy.value = false; clientConfirmed.value = false; waitingForComputer.value = false }
 }
 
 function startVerificationPolling(): void {
@@ -133,12 +150,13 @@ onUnmounted(stopVerificationPolling)
       <p>Compare the emoji shown here with the computer. Until they match, Codever cannot see its projects or send it commands.</p>
       <p class="form-help">On this computer, run <code>codever verify</code> in a terminal. Then confirm the same emoji on both devices.</p>
       <p v-if="setupError" class="error-banner" role="alert">{{ setupError }}</p>
-      <button v-if="!flow" class="button button--primary" :disabled="setupBusy || !matrixDeviceId" @click="startVerification">Start secure verification</button>
-      <template v-else-if="flow.stage === 'present_sas'">
+      <button v-if="!flow || flow.stage === 'cancelled'" class="button button--primary" :disabled="setupBusy || !matrixDeviceId" @click="startVerification">{{ flow ? 'Try verification again' : 'Start secure verification' }}</button>
+      <template v-else-if="flow.stage === 'present_sas' && !clientConfirmed">
         <div class="verification-emoji" aria-label="Verification emoji"><span v-for="emoji in flow.emojis" :key="emoji.description" :title="emoji.description">{{ emoji.symbol }}</span></div>
         <p>Confirm only when the computer shows these emoji in this exact order.</p>
         <div class="form-actions"><button class="button" :disabled="setupBusy" @click="confirmVerification(false)">They differ</button><button class="button button--primary" :disabled="setupBusy" @click="confirmVerification(true)">They match</button></div>
       </template>
+      <div v-else-if="waitingForComputer" class="verification-wait" role="status"><span class="loader" /><p><strong>Waiting for confirmation on the computer</strong><br />No project or control request will be sent until the computer confirms the same emoji.</p><button class="button" @click="cancelVerification">Cancel verification</button></div>
       <div v-else class="form-actions"><button class="button" :disabled="setupBusy" @click="cancelVerification">Cancel</button><button class="button button--primary" :disabled="setupBusy" @click="advanceVerification">{{ setupBusy ? 'Waiting…' : 'Continue' }}</button></div>
     </section>
 

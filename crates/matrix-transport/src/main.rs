@@ -240,7 +240,7 @@ async fn handle(
         "verification.list" => {
             let transport = require_transport(state).await?;
             Ok(serde_json::to_value(
-                transport.verification_requests().await,
+                transport.verification_requests().await?,
             )?)
         }
         "verification.advance" => {

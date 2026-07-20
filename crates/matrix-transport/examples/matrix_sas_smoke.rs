@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     let mut previous = String::new();
     for attempt in 0..60 {
         let left = trusted.advance_verification(&flow_id).await?;
-        let gateway_requests = gateway.verification_requests().await;
+        let gateway_requests = gateway.verification_requests().await?;
         let right = if gateway_requests
             .iter()
             .any(|value| value.flow_id == flow_id)

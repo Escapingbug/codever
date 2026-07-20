@@ -426,7 +426,11 @@ async fn matrix_devices(state: tauri::State<'_, MatrixState>) -> Result<Value, S
 #[tauri::command]
 async fn matrix_verification_list(state: tauri::State<'_, MatrixState>) -> Result<Value, String> {
     let transport = matrix_transport(&state).await?;
-    serde_json::to_value(transport.verification_requests().await).map_err(|error| error.to_string())
+    transport
+        .verification_requests()
+        .await
+        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

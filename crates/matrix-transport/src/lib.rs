@@ -168,6 +168,7 @@ pub struct MatrixTransport {
     events: broadcast::Sender<TransportEvent>,
     stopped: Arc<AtomicBool>,
     verifications: Arc<RwLock<HashMap<String, VerificationRequest>>>,
+    verification_devices: Arc<RwLock<HashMap<String, OwnedDeviceId>>>,
     locally_verified_devices: Arc<StdRwLock<HashSet<OwnedDeviceId>>>,
 }
 
@@ -323,6 +324,7 @@ impl MatrixTransport {
             events,
             stopped: Arc::new(AtomicBool::new(false)),
             verifications: Arc::new(RwLock::new(HashMap::new())),
+            verification_devices: Arc::new(RwLock::new(HashMap::new())),
             locally_verified_devices: Arc::new(StdRwLock::new(HashSet::new())),
         };
         transport.install_event_handler();
@@ -429,6 +431,7 @@ impl MatrixTransport {
             .write()
             .await
             .insert(flow_id, request.clone());
+        self.remember_verification_device(&request).await;
         Ok(verification_snapshot(&request))
     }
 
@@ -487,13 +490,20 @@ impl MatrixTransport {
         Ok(())
     }
 
-    pub async fn verification_requests(&self) -> Vec<VerificationSnapshot> {
-        self.verifications
+    pub async fn verification_requests(&self) -> Result<Vec<VerificationSnapshot>> {
+        let requests: Vec<_> = self.verifications
             .read()
             .await
             .values()
-            .map(verification_snapshot)
-            .collect()
+            .cloned()
+            .collect();
+        let mut snapshots = Vec::with_capacity(requests.len());
+        for request in requests {
+            self.remember_verification_device(&request).await;
+            self.persist_completed_verification_trust(&request).await?;
+            snapshots.push(verification_snapshot(&request));
+        }
+        Ok(snapshots)
     }
 
     pub async fn advance_verification(&self, flow_id: &str) -> Result<VerificationSnapshot> {
@@ -504,6 +514,7 @@ impl MatrixTransport {
             .get(flow_id)
             .cloned()
             .context("Matrix verification request was not found")?;
+        self.remember_verification_device(&request).await;
         match request.state() {
             VerificationRequestState::Requested { .. } => request.accept().await?,
             VerificationRequestState::Ready { .. } if request.we_started() => {
@@ -517,6 +528,7 @@ impl MatrixTransport {
             } if !sas.we_started() && !sas.can_be_presented() => sas.accept().await?,
             _ => {}
         }
+        self.persist_completed_verification_trust(&request).await?;
         Ok(verification_snapshot(&request))
     }
 
@@ -532,6 +544,7 @@ impl MatrixTransport {
             .get(flow_id)
             .cloned()
             .context("Matrix verification request was not found")?;
+        self.remember_verification_device(&request).await;
         let sas = match request.state() {
             VerificationRequestState::Transitioned {
                 verification: Verification::SasV1(sas),
@@ -542,30 +555,64 @@ impl MatrixTransport {
             bail!("SAS verification has no short authentication string yet");
         }
         if matches {
-            let other_device_id = sas.other_device().device_id().to_owned();
             sas.confirm().await?;
-            // A Gateway intentionally does not hold the account's cross-signing
-            // private keys. Persist the trust established by SAS in the Matrix
-            // crypto store so it survives native transport and Gateway restarts.
-            let user_id = self
-                .client
-                .user_id()
-                .context("Matrix client is not logged in")?;
-            self.client
-                .encryption()
-                .get_device(user_id, &other_device_id)
-                .await?
-                .context("Verified Matrix device disappeared before trust was persisted")?
-                .set_local_trust(LocalTrust::Verified)
-                .await?;
-            self.locally_verified_devices
-                .write()
-                .expect("local trust lock poisoned")
-                .insert(other_device_id);
         } else {
             sas.mismatch().await?
         }
+        self.persist_completed_verification_trust(&request).await?;
         Ok(verification_snapshot(&request))
+    }
+
+    async fn remember_verification_device(&self, request: &VerificationRequest) {
+        if let Some(device_id) = verification_device_id(request) {
+            self.verification_devices
+                .write()
+                .await
+                .insert(request.flow_id().to_owned(), device_id);
+        }
+    }
+
+    async fn persist_completed_verification_trust(
+        &self,
+        request: &VerificationRequest,
+    ) -> Result<()> {
+        let snapshot = verification_snapshot(request);
+        if !verification_stage_allows_trust(&snapshot.stage) {
+            return Ok(());
+        }
+        let device_id = self
+            .verification_devices
+            .read()
+            .await
+            .get(request.flow_id())
+            .cloned()
+            .context("Completed Matrix verification has no peer device")?;
+        if self
+            .locally_verified_devices
+            .read()
+            .expect("local trust lock poisoned")
+            .contains(&device_id)
+        {
+            return Ok(());
+        }
+        // A Gateway intentionally does not hold the account's cross-signing
+        // private keys. Persist SAS trust only after both devices completed it.
+        let user_id = self
+            .client
+            .user_id()
+            .context("Matrix client is not logged in")?;
+        self.client
+            .encryption()
+            .get_device(user_id, &device_id)
+            .await?
+            .context("Verified Matrix device disappeared before trust was persisted")?
+            .set_local_trust(LocalTrust::Verified)
+            .await?;
+        self.locally_verified_devices
+            .write()
+            .expect("local trust lock poisoned")
+            .insert(device_id);
+        Ok(())
     }
 
     pub async fn cancel_verification(&self, flow_id: &str) -> Result<()> {
@@ -878,6 +925,23 @@ fn verification_snapshot(request: &VerificationRequest) -> VerificationSnapshot 
     }
 }
 
+fn verification_device_id(request: &VerificationRequest) -> Option<OwnedDeviceId> {
+    match request.state() {
+        VerificationRequestState::Requested { other_device_data, .. }
+        | VerificationRequestState::Ready { other_device_data, .. } => {
+            Some(other_device_data.device_id().to_owned())
+        }
+        VerificationRequestState::Transitioned {
+            verification: Verification::SasV1(sas),
+        } => Some(sas.other_device().device_id().to_owned()),
+        _ => None,
+    }
+}
+
+fn verification_stage_allows_trust(stage: &str) -> bool {
+    stage == "done"
+}
+
 pub fn validate_event_type(event_type: &str) -> Result<()> {
     if matches!(
         event_type,
@@ -944,6 +1008,14 @@ mod tests {
             &locally_verified
         ));
         assert!(!sender_is_verified(false, None, &locally_verified));
+    }
+
+    #[test]
+    fn local_trust_requires_bilateral_verification_completion() {
+        for stage in ["created", "requested", "ready", "sas", "present_sas", "cancelled"] {
+            assert!(!verification_stage_allows_trust(stage), "stage {stage} must not persist trust");
+        }
+        assert!(verification_stage_allows_trust("done"));
     }
 
     #[test]
