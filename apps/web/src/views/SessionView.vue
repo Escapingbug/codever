@@ -6,6 +6,7 @@ import ConversationTimeline from '../components/timeline/ConversationTimeline.vu
 import SessionControls from '../components/SessionControls.vue'
 import StatusDot from '../components/StatusDot.vue'
 import type { ConnectionState } from '../api/codeverApi'
+import { isMatrixGatewayClientClosedError } from '../api/matrixGatewayClient'
 import { mergeSessionEvents } from '../sessionEvents'
 import { gatewayIsMutable, useCodeverState } from '../state/codeverState'
 import { buildTimeline, type AssistantTimelineEntry } from '../timeline/model'
@@ -73,6 +74,7 @@ const hasMoreBefore = ref(false)
 const loadingOlder = ref(false)
 const loadingInitialHistory = ref(false)
 let historyGeneration = 0
+let providerCapabilitiesGeneration = 0
 let liveEventQueue: Promise<void> = Promise.resolve()
 let tailSyncTimer: ReturnType<typeof setTimeout> | undefined
 let tailSyncRunning = false
@@ -116,7 +118,10 @@ onMounted(() => {
     syncConnection.value = value
     if (recovered && sessionId.value) {
       if (events.value.length) hasMoreBefore.value = true
-      scheduleTailSync(0)
+      // Rebind the live subscription owned by the replaced Matrix client and
+      // refresh every request that may have been cancelled during reconnect.
+      void loadSession()
+      void loadProviderCapabilities()
     }
   })
   void state.loadGateways()
@@ -208,6 +213,7 @@ async function loadSession(): Promise<void> {
       || (earliestVisible !== undefined && fetchedRemoteEvents.some(event => event.seq < earliestVisible))
     if (followLatest) await scrollToLatest(false)
   } catch (error) {
+    if (isMatrixGatewayClientClosedError(error)) return
     const message = error instanceof Error ? error.message : 'Could not load the session'
     if (events.value.length || session.value) liveError.value = `Could not refresh this cached conversation: ${message}`
     else loadError.value = message
@@ -220,18 +226,31 @@ async function loadSession(): Promise<void> {
 }
 
 async function loadProviderCapabilities(): Promise<void> {
-  if (!provider.value) return
+  const generation = ++providerCapabilitiesGeneration
+  if (!provider.value) {
+    providerCapabilities.value = undefined
+    providerCapabilitiesError.value = ''
+    loadingProviderCapabilities.value = false
+    return
+  }
   const requestedProvider = provider.value
   loadingProviderCapabilities.value = true
   providerCapabilitiesError.value = ''
   try {
     const result = await state.api.discoverProviderSessions(projectId.value, requestedProvider)
-    if (provider.value === requestedProvider) providerCapabilities.value = result
+    if (provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
+      providerCapabilities.value = result
+    }
   } catch (error) {
+    if (provider.value !== requestedProvider
+      || generation !== providerCapabilitiesGeneration
+      || isMatrixGatewayClientClosedError(error)) return
     providerCapabilities.value = undefined
     providerCapabilitiesError.value = error instanceof Error ? error.message : 'Provider controls could not be loaded'
   } finally {
-    if (provider.value === requestedProvider) loadingProviderCapabilities.value = false
+    if (provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
+      loadingProviderCapabilities.value = false
+    }
   }
 }
 

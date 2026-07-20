@@ -87,6 +87,55 @@ describe('Matrix client session', () => {
     }
   })
 
+  it('coalesces repeated sync errors into one transport rebuild', async () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const first = fakeNative()
+      const session = createClientSession(storage, first.value)
+      session.configureServer('rd.anciety.my.id')
+      await session.login('codever', 'secret')
+
+      const second = fakeNative()
+      const restored = createClientSession(storage, second.value)
+      await restored.initialize()
+      second.emitStatus({ kind: 'sync_error', message: 'network changed' })
+      second.emitStatus({ kind: 'sync_error', message: 'request timed out' })
+      second.emitStatus({ kind: 'sync_error', message: 'connection reset' })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      expect(second.restore).toHaveBeenCalledTimes(2)
+      expect((second.value.close as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2)
+      expect(restored.connectionState.value).toBe('connected')
+      restored.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels a queued reconnect after the client session is destroyed', async () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const first = fakeNative()
+      const session = createClientSession(storage, first.value)
+      session.configureServer('rd.anciety.my.id')
+      await session.login('codever', 'secret')
+
+      const second = fakeNative()
+      const restored = createClientSession(storage, second.value)
+      await restored.initialize()
+      second.emitStatus({ kind: 'sync_error', message: 'temporary outage' })
+      restored.destroy()
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      expect(second.restore).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stops retrying an invalid refresh token and renews the same Matrix device', async () => {
     vi.useFakeTimers()
     try {

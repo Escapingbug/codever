@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MatrixGatewayClient, type MatrixTransportPort } from '../src/api/matrixGatewayClient'
+import {
+  MatrixGatewayClient,
+  MatrixGatewayClientClosedError,
+  type MatrixTransportPort,
+} from '../src/api/matrixGatewayClient'
 import type { MatrixTransportEvent, SignExecutionInput } from '../src/api/nativeMatrixClient'
 
 class FakeTransport implements MatrixTransportPort {
@@ -31,7 +35,7 @@ class FakeTransport implements MatrixTransportPort {
   }
 }
 
-function client(transport: FakeTransport, onSecurityError = vi.fn()) {
+function client(transport: FakeTransport, onSecurityError = vi.fn(), timeoutMs = 20) {
   return {
     value: new MatrixGatewayClient({
       transport,
@@ -39,7 +43,7 @@ function client(transport: FakeTransport, onSecurityError = vi.fn()) {
       controlRoomId: '!control:test',
       executionAccount: 'execution-root',
       executionKeyId: 'root-key-id',
-      timeoutMs: 20,
+      timeoutMs,
       onSecurityError,
     }),
     onSecurityError,
@@ -184,6 +188,24 @@ describe('MatrixGatewayClient', () => {
     expect(transport.sends[0].content).toMatchObject({
       type: 'client.gateway.authorized-request',
       authorization: { format: 'cose-sign1-cwt', token: 'signed-cose-token' },
+    })
+  })
+
+  it('classifies in-flight requests cancelled by client replacement as expected reconnect work', async () => {
+    const transport = new FakeTransport()
+    const { value } = client(transport, vi.fn(), 1_000)
+    value.start()
+    announceCompatibleGateway(transport)
+
+    const pending = value.request('gateway-1', { kind: 'inventory.get' })
+    await vi.waitFor(() => expect(transport.sends).toHaveLength(1))
+    const observed = pending.then(() => undefined, error => error as unknown)
+    value.close()
+    const error = await observed
+
+    expect(error).toBeInstanceOf(MatrixGatewayClientClosedError)
+    expect(error).toMatchObject({
+      name: 'MatrixGatewayClientClosedError', code: 'matrix_gateway_client_closed',
     })
   })
 

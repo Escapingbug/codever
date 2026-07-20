@@ -58,6 +58,19 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>
 }
 
+export class MatrixGatewayClientClosedError extends Error {
+  readonly code = 'matrix_gateway_client_closed'
+
+  constructor() {
+    super('Matrix Gateway client closed')
+    this.name = 'MatrixGatewayClientClosedError'
+  }
+}
+
+export function isMatrixGatewayClientClosedError(value: unknown): value is MatrixGatewayClientClosedError {
+  return value instanceof MatrixGatewayClientClosedError
+}
+
 export class MatrixGatewayClient {
   private readonly pending = new Map<string, PendingRequest>()
   private readonly responses = new Map<string, ClientGatewayResponseFrame>()
@@ -84,7 +97,7 @@ export class MatrixGatewayClient {
     this.unsubscribe = undefined
     for (const pending of this.pending.values()) {
       if (pending.timer) clearTimeout(pending.timer)
-      pending.reject(new Error('Matrix Gateway client closed'))
+      pending.reject(new MatrixGatewayClientClosedError())
     }
     this.pending.clear()
   }

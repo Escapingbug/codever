@@ -10,7 +10,9 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CodeverApi } from '../src/api/codeverApi'
 import { codeverApiKey } from '../src/api/codeverApi'
+import { MatrixGatewayClientClosedError } from '../src/api/matrixGatewayClient'
 import ConversationTimeline from '../src/components/timeline/ConversationTimeline.vue'
+import SessionControls from '../src/components/SessionControls.vue'
 import SessionView from '../src/views/SessionView.vue'
 
 const gateway: Gateway = {
@@ -71,6 +73,66 @@ describe('session view', () => {
 
     expect(wrapper.find('.session-load-state').exists()).toBe(false)
     expect(wrapper.getComponent(ConversationTimeline).props('events')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('rebinds and refreshes cached session state without surfacing cancellation from a replaced client', async () => {
+    const sessionId = 'session-reconnect-race'
+    const cached = assistantEvent(sessionId, 1, 'cached-turn')
+    const recovered = assistantEvent(sessionId, 2, 'recovered-turn')
+    const seed = await mountSession(fakeApi(sessionId, [cached]), sessionId)
+    seed.unmount()
+
+    const staleSession = deferred<CodeverSession>()
+    const staleControls = deferred<never>()
+    let notifyConnection: ((state: 'connected' | 'reconnecting') => void) | undefined
+    const subscribeSession = vi.fn(() => () => undefined)
+    const getSession = vi.fn()
+      .mockImplementationOnce(() => staleSession.promise)
+      .mockResolvedValue(sessionRecord(sessionId, [cached, recovered]))
+    const discoverProviderSessions = vi.fn()
+      .mockImplementationOnce(() => staleControls.promise)
+      .mockResolvedValue({
+        projectId: project.id, provider: 'codex', discoverySupported: false,
+        models: [], permissionModes: [], controls: [], sessions: [],
+        capabilities: {
+          resume: false, cancel: true, changeModel: false, changeMode: false,
+          fork: false, retry: false, editHistory: false, listBranches: false, attachFiles: false,
+        },
+      })
+    const api = fakeApi(sessionId, [cached], {
+      getSession,
+      getSessionEvents: vi.fn(async () => ({
+        events: [cached, recovered], nextAfter: null, previousBefore: null,
+      })),
+      discoverProviderSessions,
+      subscribeSession,
+      subscribeConnection: vi.fn((subscriber: (state: 'connected' | 'reconnecting') => void) => {
+        notifyConnection = subscriber
+        subscriber('connected')
+        return () => undefined
+      }),
+    })
+    const wrapper = await mountSession(api, sessionId, false)
+    await flushPromises()
+
+    expect(getSession).toHaveBeenCalledOnce()
+    expect(discoverProviderSessions).toHaveBeenCalledOnce()
+    expect(subscribeSession).toHaveBeenCalledOnce()
+
+    notifyConnection?.('reconnecting')
+    notifyConnection?.('connected')
+    await flushPromises()
+    staleSession.reject(new MatrixGatewayClientClosedError())
+    staleControls.reject(new MatrixGatewayClientClosedError())
+    await flushPromises()
+
+    expect(getSession).toHaveBeenCalledTimes(2)
+    expect(discoverProviderSessions).toHaveBeenCalledTimes(2)
+    expect(subscribeSession).toHaveBeenCalledTimes(2)
+    expect(wrapper.getComponent(ConversationTimeline).props('events')).toEqual([cached, recovered])
+    expect(wrapper.getComponent(SessionControls).props('error')).toBe('')
+    expect(wrapper.find('.inline-alert').exists()).toBe(false)
     wrapper.unmount()
   })
 
