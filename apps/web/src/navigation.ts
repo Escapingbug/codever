@@ -32,7 +32,7 @@ export async function navigateToParent(router: Router): Promise<boolean> {
 }
 
 export async function installAndroidBackHandler(router: Router): Promise<void> {
-  if (!isTauri()) return
+  if (!isTauri() || !/Android/i.test(navigator.userAgent)) return
 
   let handlingBack = false
   await onBackButtonPress(() => {

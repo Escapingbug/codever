@@ -1,5 +1,26 @@
-import { describe, expect, it, vi } from 'vitest'
-import { navigateToParent, parentRoute } from '../src/navigation'
+import type { Router } from 'vue-router'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const tauri = vi.hoisted(() => ({
+  isTauri: true,
+  onBackButtonPress: vi.fn(async () => undefined),
+  invoke: vi.fn(async () => undefined),
+}))
+
+vi.mock('@tauri-apps/api/app', () => ({
+  onBackButtonPress: tauri.onBackButtonPress,
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: tauri.invoke,
+  isTauri: () => tauri.isTauri,
+}))
+
+import { installAndroidBackHandler, navigateToParent, parentRoute } from '../src/navigation'
+
+function setUserAgent(value: string): void {
+  Object.defineProperty(window.navigator, 'userAgent', { configurable: true, value })
+}
 
 describe('client navigation', () => {
   it('maps nested business pages to their parent', () => {
@@ -28,5 +49,30 @@ describe('client navigation', () => {
 
     await expect(navigateToParent(router as never)).resolves.toBe(true)
     expect(push).toHaveBeenCalledWith({ name: 'projects' })
+  })
+})
+
+describe('Android back navigation', () => {
+  beforeEach(() => {
+    tauri.isTauri = true
+    tauri.onBackButtonPress.mockClear()
+    tauri.invoke.mockClear()
+  })
+
+  it('does not register the Android listener in the desktop shell', async () => {
+    setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+
+    await installAndroidBackHandler({} as Router)
+
+    expect(tauri.onBackButtonPress).not.toHaveBeenCalled()
+  })
+
+  it('registers the listener in the Android shell', async () => {
+    setUserAgent('Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36')
+
+    await installAndroidBackHandler({} as Router)
+
+    expect(tauri.onBackButtonPress).toHaveBeenCalledOnce()
+    expect(tauri.onBackButtonPress).toHaveBeenCalledWith(expect.any(Function))
   })
 })
