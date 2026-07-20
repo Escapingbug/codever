@@ -121,6 +121,9 @@ describe('session view', () => {
     expect(subscribeSession).toHaveBeenCalledOnce()
 
     notifyConnection?.('reconnecting')
+    await flushPromises()
+    expect(wrapper.get('.connection-banner strong').text()).toBe('Reconnecting')
+    expect(wrapper.get('.connection-banner').text()).toContain('Cached messages remain available')
     notifyConnection?.('connected')
     await flushPromises()
     staleSession.reject(new MatrixGatewayClientClosedError())

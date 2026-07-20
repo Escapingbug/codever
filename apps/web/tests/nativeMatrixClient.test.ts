@@ -50,6 +50,17 @@ describe('NativeMatrixClient event boundary', () => {
     expect(events[0]).toMatchObject({ event: { type: 'io.codever.gateway.v1' } })
   })
 
+  it('accepts successful sync activity as a transport status', async () => {
+    const client = new NativeMatrixClient()
+    const statuses: unknown[] = []
+    client.subscribeStatus(status => statuses.push(status))
+    await client.restore({ homeserver: 'https://example.test', userId: '@user:test', deviceId: 'PHONE' }, 'matrix-primary')
+
+    tauri.listener?.({ payload: { kind: 'sync_healthy', message: 'Matrix sync is active' } })
+
+    expect(statuses).toEqual([{ kind: 'sync_healthy', message: 'Matrix sync is active' }])
+  })
+
   it('drops undefined and malformed native payloads without poisoning the event backlog', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const client = new NativeMatrixClient()

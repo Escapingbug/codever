@@ -233,6 +233,22 @@ fn start_matrix_sync(
             let _ = event_app.emit(MATRIX_EVENT_NAME, event);
         }
     });
+    let mut sync_activity = transport.subscribe_to_sync_activity();
+    let sync_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match sync_activity.recv().await {
+                Ok(()) => {
+                    let _ = sync_app.emit(
+                        MATRIX_EVENT_NAME,
+                        serde_json::json!({ "kind": "sync_healthy", "message": "Matrix sync is active" }),
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     let sync_transport = transport.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = sync_transport.sync().await {

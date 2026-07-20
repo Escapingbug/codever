@@ -26,44 +26,51 @@ export type TimelineEntry = AssistantTimelineEntry | ToolTimelineEntry | EventTi
 export function buildTimeline(envelopes: SessionEventEnvelope[]): TimelineEntry[] {
   const entries: TimelineEntry[] = []
   const tools = new Map<string, ToolTimelineEntry>()
-  const assistants = new Map<string, AssistantTimelineEntry>()
+  const assistantSegments = new Map<string, AssistantTimelineEntry[]>()
+  const activeAssistants = new Map<string, AssistantTimelineEntry>()
+
+  const createAssistant = (envelope: SessionEventEnvelope, text = ''): AssistantTimelineEntry => {
+    const entry: AssistantTimelineEntry = {
+      type: 'assistant', key: envelope.eventId, text, events: [envelope], status: 'working',
+    }
+    const turnId = envelope.event.meta?.turnId
+    if (turnId) {
+      const segments = assistantSegments.get(turnId) ?? []
+      segments.push(entry)
+      assistantSegments.set(turnId, segments)
+      activeAssistants.set(turnId, entry)
+    }
+    entries.push(entry)
+    return entry
+  }
 
   for (const envelope of [...envelopes].sort((a, b) => a.seq - b.seq)) {
     const event = envelope.event
     if (event.kind === 'turn_started') {
       const turnId = event.meta?.turnId
-      if (turnId && !assistants.has(turnId)) {
-        const entry: AssistantTimelineEntry = {
-          type: 'assistant', key: envelope.eventId, text: '', events: [envelope], status: 'working',
-        }
-        assistants.set(turnId, entry)
-        entries.push(entry)
-      }
+      if (turnId && !assistantSegments.has(turnId)) createAssistant(envelope)
       continue
     }
 
     if (event.kind === 'assistant_text_delta') {
       const turnId = event.meta?.turnId
-      const existing = turnId ? assistants.get(turnId) : undefined
+      const existing = turnId ? activeAssistants.get(turnId) : undefined
       if (existing) {
         existing.text += event.text
         existing.events.push(envelope)
       } else {
-        const entry: AssistantTimelineEntry = {
-          type: 'assistant', key: envelope.eventId, text: event.text, events: [envelope],
-          status: event.meta?.source === 'replay' ? 'success' : 'working',
-        }
-        if (turnId) assistants.set(turnId, entry)
-        entries.push(entry)
+        const entry = createAssistant(envelope, event.text)
+        if (event.meta?.source === 'replay') entry.status = 'success'
       }
       continue
     }
 
     if (event.kind === 'turn_finished') {
-      const assistant = event.meta?.turnId ? assistants.get(event.meta.turnId) : undefined
-      if (assistant) {
-        assistant.status = event.status
-        assistant.events.push(envelope)
+      const turnId = event.meta?.turnId
+      const segments = turnId ? assistantSegments.get(turnId) : undefined
+      if (segments?.length) {
+        for (const assistant of segments) assistant.status = event.status
+        segments.at(-1)!.events.push(envelope)
       }
       continue
     }
@@ -82,6 +89,11 @@ export function buildTimeline(envelopes: SessionEventEnvelope[]): TimelineEntry[
         }
         tools.set(event.toolCallId, entry)
         entries.push(entry)
+        // Text emitted after a newly inserted tool belongs after that tool in
+        // the visual timeline. Later lifecycle updates still edit the original
+        // tool card in place and do not create another split.
+        const turnId = event.meta?.turnId
+        if (turnId) activeAssistants.delete(turnId)
       }
       continue
     }

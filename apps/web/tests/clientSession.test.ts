@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createClientSession, friendlyCodeverError, normalizeHomeserver } from '../src/state/clientSession'
+import { createClientSession, friendlyCodeverError, MATRIX_SYNC_STALE_MS, normalizeHomeserver } from '../src/state/clientSession'
 import type { NativeMatrixClient } from '../src/api/nativeMatrixClient'
 
 describe('Matrix client session', () => {
@@ -81,6 +81,53 @@ describe('Matrix client session', () => {
       expect(second.restore).toHaveBeenCalledTimes(2)
       expect(restored.connectionState.value).toBe('connected')
       expect(restored.initializationError.value).toBe('')
+      restored.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks a silent weak-network sync as reconnecting after the liveness deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const first = fakeNative()
+      const session = createClientSession(storage, first.value)
+      session.configureServer('rd.anciety.my.id')
+      await session.login('codever', 'secret')
+      session.destroy()
+      const second = fakeNative()
+      const restored = createClientSession(storage, second.value)
+      await restored.initialize()
+
+      await vi.advanceTimersByTimeAsync(MATRIX_SYNC_STALE_MS)
+
+      expect(restored.connectionState.value).toBe('reconnecting')
+      expect(restored.initializationError.value).toContain('not responding')
+      restored.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the connection live while native sync completions arrive', async () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const first = fakeNative()
+      const session = createClientSession(storage, first.value)
+      session.configureServer('rd.anciety.my.id')
+      await session.login('codever', 'secret')
+      session.destroy()
+      const second = fakeNative()
+      const restored = createClientSession(storage, second.value)
+      await restored.initialize()
+
+      await vi.advanceTimersByTimeAsync(MATRIX_SYNC_STALE_MS - 1_000)
+      second.emitStatus({ kind: 'sync_healthy', message: 'Matrix sync is active' })
+      await vi.advanceTimersByTimeAsync(MATRIX_SYNC_STALE_MS - 1_000)
+
+      expect(restored.connectionState.value).toBe('connected')
       restored.destroy()
     } finally {
       vi.useRealTimers()

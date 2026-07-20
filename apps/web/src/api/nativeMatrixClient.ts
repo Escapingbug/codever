@@ -26,7 +26,7 @@ export interface MatrixTransportEvent {
 }
 
 export interface MatrixTransportStatus {
-  kind: 'sync_error' | 'session_error'
+  kind: 'sync_healthy' | 'sync_error' | 'session_error'
   message: string
 }
 
@@ -216,7 +216,7 @@ export function isMatrixTransportEvent(value: unknown): value is MatrixTransport
 export function isMatrixTransportStatus(value: unknown): value is MatrixTransportStatus {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const input = value as Partial<MatrixTransportStatus>
-  return (input.kind === 'sync_error' || input.kind === 'session_error')
+  return (input.kind === 'sync_healthy' || input.kind === 'sync_error' || input.kind === 'session_error')
     && typeof input.message === 'string'
 }
 

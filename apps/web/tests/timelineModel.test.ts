@@ -31,6 +31,22 @@ describe('timeline model', () => {
     expect(timeline[1]).toMatchObject({ type: 'tool', latest: { phase: 'completed' } })
   })
 
+  it('keeps assistant text emitted after a tool in chronological order', () => {
+    const timeline = buildTimeline([
+      envelope(1, { kind: 'turn_started', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(2, { kind: 'assistant_text_delta', text: 'Before tool', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(3, { kind: 'tool', phase: 'started', toolCallId: 'tool-1', toolName: 'bash', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(4, { kind: 'assistant_text_delta', text: 'After tool', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(5, { kind: 'tool', phase: 'completed', toolCallId: 'tool-1', toolName: 'bash', meta: { source: 'live', turnId: 'turn-1' } }),
+      envelope(6, { kind: 'turn_finished', status: 'success', meta: { source: 'live', turnId: 'turn-1' } }),
+    ])
+
+    expect(timeline.map(entry => entry.type)).toEqual(['assistant', 'tool', 'assistant'])
+    expect(timeline[0]).toMatchObject({ type: 'assistant', text: 'Before tool', status: 'success' })
+    expect(timeline[1]).toMatchObject({ type: 'tool', latest: { phase: 'completed' } })
+    expect(timeline[2]).toMatchObject({ type: 'assistant', text: 'After tool', status: 'success' })
+  })
+
   it('projects lifecycle events into assistant state and hides transport details', () => {
     const timeline = buildTimeline([
       envelope(1, { kind: 'session_state', state: 'querying' }),

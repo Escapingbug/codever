@@ -167,6 +167,7 @@ pub struct MatrixDeviceSnapshot {
 pub struct MatrixTransport {
     client: Client,
     events: broadcast::Sender<TransportEvent>,
+    sync_activity: broadcast::Sender<()>,
     stopped: Arc<AtomicBool>,
     verifications: Arc<RwLock<HashMap<String, VerificationRequest>>>,
     verification_devices: Arc<RwLock<HashMap<String, OwnedDeviceId>>>,
@@ -320,9 +321,11 @@ impl MatrixTransport {
 
     async fn from_client(client: Client) -> Result<Self> {
         let (events, _) = broadcast::channel(1_024);
+        let (sync_activity, _) = broadcast::channel(32);
         let transport = Self {
             client,
             events,
+            sync_activity,
             stopped: Arc::new(AtomicBool::new(false)),
             verifications: Arc::new(RwLock::new(HashMap::new())),
             verification_devices: Arc::new(RwLock::new(HashMap::new())),
@@ -339,6 +342,10 @@ impl MatrixTransport {
 
     pub fn subscribe_to_session_changes(&self) -> broadcast::Receiver<SessionChange> {
         self.client.subscribe_to_session_changes()
+    }
+
+    pub fn subscribe_to_sync_activity(&self) -> broadcast::Receiver<()> {
+        self.sync_activity.subscribe()
     }
 
     pub fn stored_session(&self) -> Option<StoredMatrixSession> {
@@ -800,10 +807,13 @@ impl MatrixTransport {
 
     pub async fn sync(&self) -> Result<()> {
         let stopped = self.stopped.clone();
+        let sync_activity = self.sync_activity.clone();
         self.client
             .sync_with_callback(Default::default(), move |_| {
                 let stopped = stopped.clone();
+                let sync_activity = sync_activity.clone();
                 async move {
+                    let _ = sync_activity.send(());
                     if stopped.load(Ordering::Acquire) {
                         LoopCtrl::Break
                     } else {
