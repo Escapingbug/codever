@@ -60,6 +60,15 @@ struct MatrixLoginInput {
     secret_account: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MatrixReauthenticateInput {
+    session: MatrixPublicSession,
+    password: String,
+    device_display_name: String,
+    secret_account: String,
+}
+
 fn keyring_entry(account: &str) -> Result<keyring_core::Entry, String> {
     if account.is_empty()
         || account.len() > 240
@@ -281,6 +290,70 @@ async fn matrix_login(
         device_id: session.device_id.to_string(),
     };
     start_matrix_sync(app, &transport, input.secret_account, store_passphrase);
+    *state.0.write().await = Some(transport);
+    Ok(public)
+}
+
+#[tauri::command]
+async fn matrix_reauthenticate(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MatrixState>,
+    input: MatrixReauthenticateInput,
+) -> Result<MatrixPublicSession, String> {
+    if state.0.read().await.is_some() {
+        return Err("Matrix transport is already initialized".into());
+    }
+    if input.password.is_empty() {
+        return Err("Matrix password is required".into());
+    }
+    let encoded = keyring_entry(&input.secret_account)?
+        .get_password()
+        .map_err(|error| error.to_string())?;
+    let previous: MatrixSecret = serde_json::from_str(&encoded)
+        .map_err(|_| "invalid Matrix secret in platform credential store".to_owned())?;
+    if previous.store_passphrase.is_empty() {
+        return Err("Matrix secret is incomplete".into());
+    }
+    let store_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("matrix-store");
+    let (transport, session) = MatrixTransport::relogin_password(
+        &input.session.homeserver,
+        &input.session.user_id,
+        &input.password,
+        &input.device_display_name,
+        &input.session.device_id,
+        store_path,
+        &previous.store_passphrase,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if session.device_id.as_str() != input.session.device_id.as_str() {
+        return Err("Matrix reauthentication returned a different device ID".into());
+    }
+    keyring_entry(&input.secret_account)?
+        .set_password(
+            &serde_json::to_string(&MatrixSecret {
+                access_token: session.access_token.clone(),
+                refresh_token: session.refresh_token.clone(),
+                store_passphrase: previous.store_passphrase.clone(),
+            })
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let public = MatrixPublicSession {
+        homeserver: session.homeserver,
+        user_id: session.user_id.to_string(),
+        device_id: session.device_id.to_string(),
+    };
+    start_matrix_sync(
+        app,
+        &transport,
+        input.secret_account,
+        previous.store_passphrase,
+    );
     *state.0.write().await = Some(transport);
     Ok(public)
 }
@@ -652,6 +725,7 @@ pub fn run() {
             secure_secret_delete,
             matrix_initialize,
             matrix_login,
+            matrix_reauthenticate,
             matrix_send,
             matrix_ensure_control_room,
             matrix_devices,

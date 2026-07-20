@@ -87,6 +87,39 @@ describe('Matrix client session', () => {
     }
   })
 
+  it('stops retrying an invalid refresh token and renews the same Matrix device', async () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const first = fakeNative()
+      const session = createClientSession(storage, first.value)
+      session.configureServer('rd.anciety.my.id')
+      await session.login('codever', 'secret')
+
+      const second = fakeNative()
+      const restored = createClientSession(storage, second.value)
+      await restored.initialize()
+      second.emitStatus({ kind: 'session_error', message: "[403 / M_FORBIDDEN] refresh token isn't valid anymore" })
+
+      expect(restored.reauthenticationRequired.value).toBe(true)
+      expect(restored.connectionState.value).toBe('disconnected')
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(second.restore).toHaveBeenCalledTimes(1)
+
+      await restored.reauthenticate('renew-secret')
+      expect(second.reauthenticate).toHaveBeenCalledWith(expect.objectContaining({
+        password: 'renew-secret',
+        session: expect.objectContaining({ deviceId: 'PHONE' }),
+      }))
+      expect(restored.identity.value?.session.deviceId).toBe('PHONE')
+      expect(restored.reauthenticationRequired.value).toBe(false)
+      expect(restored.connectionState.value).toBe('connected')
+      restored.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('restores after native status notifications were queued before the API subscribes', async () => {
     const storage = memoryStorage()
     const first = fakeNative()
@@ -113,8 +146,9 @@ function fakeNative(backlog: unknown[] = []) {
   const statusListeners = new Set<(value: unknown) => void>()
   const login = vi.fn(async () => ({ homeserver: 'https://rd.anciety.my.id', userId: '@codever:test', deviceId: 'PHONE' }))
   const restore = vi.fn(async () => undefined)
+  const reauthenticate = vi.fn(async (input: { session: unknown }) => input.session)
   const value = {
-    login, restore,
+    login, restore, reauthenticate,
     ensureControlRoom: vi.fn(async () => '!control:test'),
     createExecutionIdentity: vi.fn(async () => ({ keyId: 'key-1', publicKey: { kty: 'EC' } })),
     close: vi.fn(async () => undefined),
@@ -132,7 +166,7 @@ function fakeNative(backlog: unknown[] = []) {
     send: vi.fn(async () => '$event'),
   } as unknown as NativeMatrixClient
   return {
-    value, login, restore,
+    value, login, restore, reauthenticate,
     emitStatus(value: unknown) { for (const listener of statusListeners) listener(value) },
   }
 }

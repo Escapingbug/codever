@@ -120,6 +120,19 @@ test.describe('mobile Session business journey', () => {
     await expect(page.getByRole('alert')).toHaveCount(0)
   })
 
+  test('C17 renews an expired refresh token without signing out the device', async ({ page }) => {
+    await page.goto('./e2e.html#/settings')
+    await page.evaluate(() => window.__CODEVER_E2E__.setConnectionError("[403 / M_FORBIDDEN] refresh token isn't valid anymore"))
+
+    await expect(page.getByRole('button', { name: 'Retry connection' })).toHaveCount(0)
+    await expect(page.getByText(/renew this same device/)).toBeVisible()
+    await page.getByLabel('Matrix password').fill('renew-secret')
+    await page.getByRole('button', { name: 'Renew session' }).click()
+
+    await expect(page.getByText('Encrypted sync connected')).toBeVisible()
+    await expect(page.getByLabel('Matrix password')).toHaveCount(0)
+  })
+
   test('C03 creates a Windows Project using a Gateway-native path', async ({ page }) => {
     await page.goto('./e2e.html#/projects')
     await page.getByRole('button', { name: 'New project' }).click()

@@ -417,6 +417,12 @@ clientSession.reconnect = async () => {
   clientSession.initializationError.value = ''
   for (const callback of connectionSubscribers) callback('connected')
 }
+clientSession.reauthenticate = async () => {
+  mockConnectionState = 'connected'
+  clientSession.connectionState.value = 'connected'
+  clientSession.initializationError.value = ''
+  for (const callback of connectionSubscribers) callback('connected')
+}
 clientSession.connectionState.value = 'connected'
 const app = createApp(App)
 app.provide(codeverApiKey, api)

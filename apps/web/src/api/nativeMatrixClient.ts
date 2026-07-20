@@ -89,6 +89,17 @@ export class NativeMatrixClient {
     await invoke('matrix_initialize', { session, secretAccount })
   }
 
+  async reauthenticate(input: {
+    session: MatrixPublicSession
+    password: string
+    deviceDisplayName: string
+    secretAccount: string
+  }): Promise<MatrixPublicSession> {
+    this.requireNative()
+    await this.listen()
+    return invoke<MatrixPublicSession>('matrix_reauthenticate', { input })
+  }
+
   async ensureControlRoom(): Promise<string> {
     return invoke<string>('matrix_ensure_control_room')
   }

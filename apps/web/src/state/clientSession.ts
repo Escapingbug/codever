@@ -36,6 +36,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   const identity = ref<ClientIdentity>()
   const initialized = ref(false)
   const initializationError = ref('')
+  const reauthenticationRequired = computed(() => isReauthenticationError(initializationError.value))
   const connectionState = ref<ConnectionState>('disconnected')
   const api = new CodeverApi(native)
   let initializePromise: Promise<void> | undefined
@@ -96,8 +97,13 @@ export function createClientSession(storage: Storage = localStorage, native = ne
         initializationError.value = status.message
         if (!identity.value || destroyed) return
         api.markSuspended()
-        connectionState.value = 'reconnecting'
-        scheduleReconnect()
+        if (isReauthenticationError(status.message)) {
+          connectionState.value = 'disconnected'
+          clearReconnectTimer()
+        } else {
+          connectionState.value = 'reconnecting'
+          scheduleReconnect()
+        }
       })
       if (identity.value) {
         try {
@@ -118,6 +124,7 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   }
   function suspend(): void { api.markSuspended() }
   async function resume(): Promise<void> {
+    if (reauthenticationRequired.value) return
     if (identity.value && initializationError.value) {
       await reconnect('reconnecting')
       return
@@ -149,13 +156,43 @@ export function createClientSession(storage: Storage = localStorage, native = ne
       } catch (error) {
         initializationError.value = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unable to restore Matrix session'
         connectionState.value = 'disconnected'
-        scheduleReconnect()
+        if (!isReauthenticationError(initializationError.value)) scheduleReconnect()
         throw error
       } finally {
         reconnectPromise = undefined
       }
     })()
     return reconnectPromise
+  }
+
+  async function reauthenticate(password: string): Promise<void> {
+    const current = identity.value
+    if (!current) throw new Error('No Matrix session is available to reauthenticate')
+    clearReconnectTimer()
+    await api.disconnect()
+    connectionState.value = 'connecting'
+    try {
+      const session = await native.reauthenticate({
+        session: current.session,
+        password: required(password, 'Password'),
+        deviceDisplayName: deviceDisplayName(),
+        secretAccount: MATRIX_SECRET_ACCOUNT,
+      })
+      identity.value = { ...current, session }
+      api.connect({
+        session,
+        controlRoomId: current.controlRoomId,
+        executionAccount: EXECUTION_SECRET_ACCOUNT,
+        executionKeyId: current.executionKeyId,
+      })
+      initializationError.value = ''
+      reconnectAttempt = 0
+      persist()
+    } catch (error) {
+      initializationError.value = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Matrix reauthentication failed'
+      connectionState.value = 'disconnected'
+      throw error
+    }
   }
 
   function scheduleReconnect(): void {
@@ -187,10 +224,10 @@ export function createClientSession(storage: Storage = localStorage, native = ne
   }
 
   return {
-    server, identity, initialized, initializationError, connectionState, api,
+    server, identity, initialized, initializationError, reauthenticationRequired, connectionState, api,
     hasServer: computed(() => Boolean(server.value)),
     isAuthenticated: computed(() => Boolean(identity.value)),
-    initialize, configureServer, login, logout, suspend, resume, reconnect,
+    initialize, configureServer, login, logout, suspend, resume, reconnect, reauthenticate,
     listMatrixDevices: () => native.listDevices(),
     listVerifications: () => native.listVerifications(),
     requestVerification: (deviceId: string) => native.requestVerification(deviceId),
@@ -229,3 +266,7 @@ export function friendlyCodeverError(error: unknown): string {
 
 export const clientSession = createClientSession()
 export type ClientSession = ReturnType<typeof createClientSession>
+
+function isReauthenticationError(message: string): boolean {
+  return /refresh token.*(?:invalid|valid anymore)|unknown token|M_UNKNOWN_TOKEN/i.test(message)
+}
