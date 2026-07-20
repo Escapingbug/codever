@@ -152,19 +152,6 @@ fn persist_matrix_session(
         .map_err(|error| error.to_string())
 }
 
-fn install_matrix_session_persistence(
-    transport: &MatrixTransport,
-    secret_account: String,
-    store_passphrase: String,
-) -> Result<(), String> {
-    transport
-        .install_session_persistence(move |session| {
-            persist_matrix_session(&secret_account, &store_passphrase, session)
-                .map_err(|error| std::io::Error::other(error).into())
-        })
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 async fn matrix_initialize(
     app: tauri::AppHandle,
@@ -190,7 +177,9 @@ async fn matrix_initialize(
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("matrix-store");
-    let transport = MatrixTransport::restore(
+    let persistence_account = secret_account.clone();
+    let persistence_passphrase = secret.store_passphrase.clone();
+    let transport = MatrixTransport::restore_with_session_persistence(
         StoredMatrixSession {
             homeserver: session.homeserver,
             user_id: session
@@ -203,14 +192,13 @@ async fn matrix_initialize(
         },
         store_path,
         &secret.store_passphrase,
+        move |session| {
+            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
+                .map_err(|error| std::io::Error::other(error).into())
+        },
     )
     .await
     .map_err(|error| error.to_string())?;
-    install_matrix_session_persistence(
-        &transport,
-        secret_account,
-        secret.store_passphrase.clone(),
-    )?;
     let tasks = start_matrix_sync(app, &transport, connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(())
@@ -339,13 +327,19 @@ async fn matrix_login(
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("matrix-store");
-    let (transport, session) = MatrixTransport::login_password(
+    let persistence_account = input.secret_account.clone();
+    let persistence_passphrase = store_passphrase.clone();
+    let (transport, session) = MatrixTransport::login_password_with_session_persistence(
         &input.homeserver,
         &input.username,
         &input.password,
         &input.device_display_name,
         store_path,
         &store_passphrase,
+        move |session| {
+            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
+                .map_err(|error| std::io::Error::other(error).into())
+        },
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -364,7 +358,6 @@ async fn matrix_login(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    install_matrix_session_persistence(&transport, input.secret_account, store_passphrase)?;
     let tasks = start_matrix_sync(app, &transport, input.connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)
@@ -396,7 +389,9 @@ async fn matrix_reauthenticate(
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("matrix-store");
-    let (transport, session) = MatrixTransport::relogin_password(
+    let persistence_account = input.secret_account.clone();
+    let persistence_passphrase = previous.store_passphrase.clone();
+    let (transport, session) = MatrixTransport::relogin_password_with_session_persistence(
         &input.session.homeserver,
         &input.session.user_id,
         &input.password,
@@ -404,6 +399,10 @@ async fn matrix_reauthenticate(
         &input.session.device_id,
         store_path,
         &previous.store_passphrase,
+        move |session| {
+            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
+                .map_err(|error| std::io::Error::other(error).into())
+        },
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -425,11 +424,6 @@ async fn matrix_reauthenticate(
         user_id: session.user_id.to_string(),
         device_id: session.device_id.to_string(),
     };
-    install_matrix_session_persistence(
-        &transport,
-        input.secret_account,
-        previous.store_passphrase,
-    )?;
     let tasks = start_matrix_sync(app, &transport, input.connection_id);
     *state.0.write().await = Some(MatrixRuntime { transport, tasks });
     Ok(public)

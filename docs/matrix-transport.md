@@ -65,16 +65,25 @@ each new access/refresh-token pair is synchronously written to the platform
 credential store during refresh. The async `TokensRefreshed` broadcast is used
 for status reporting only; it is not the durability mechanism.
 
+Those callbacks are installed before session restore, password login, or any
+authenticated initialization request. This matters because the SDK may refresh
+an expired access token while `restore` is still loading device and secret-store
+state. Construction finishes with a mandatory credential checkpoint, so an
+automatic startup refresh remains durable even if Android kills the process
+without running the normal close path.
+
 The native client checkpoints the current token generation before closing its
 Matrix runtime. A failed secure-store write remains an explicit lifecycle error
 and prevents the runtime from being reported as cleanly closed. The Gateway's
 parent process similarly requests a final credential checkpoint and drains its
 serialized write queue before terminating the Matrix transport subprocess.
 
-Deterministic tests cover rotation-before-return, failed-write recovery,
-concurrent refresh, enqueue-during-flush and restart from the rotated token. The
-`matrix_refresh_restart_smoke` example repeats the rotation/restart sequence
-against a real Synapse server without printing account credentials.
+Deterministic tests cover automatic refresh during restore, abrupt process exit,
+rotation-before-return, failed-write recovery, concurrent refresh,
+enqueue-during-flush and restart from the rotated token. The
+`matrix_refresh_restart_smoke` example repeats the startup refresh/abrupt-exit/
+restart sequence against a real Synapse server without printing account
+credentials.
 
 ## Event types
 

@@ -194,6 +194,44 @@ fn stored_session_from_client(client: &Client) -> Option<StoredMatrixSession> {
     })
 }
 
+fn install_session_persistence_callbacks(
+    client: &Client,
+    persistence: &Arc<StdMutex<SessionPersistenceState>>,
+    saver: Arc<SessionSaver>,
+) -> Result<()> {
+    let mut state = persistence.lock().unwrap();
+    if state.saver.is_some() {
+        bail!("Matrix session persistence is already installed");
+    }
+    let callback_persistence = persistence.clone();
+    let callback_saver = saver.clone();
+    client
+        .set_session_callbacks(
+            Box::new(|client| {
+                client
+                    .session_tokens()
+                    .ok_or_else(|| io::Error::other("Matrix session tokens are unavailable").into())
+            }),
+            Box::new(move |client| {
+                let result = stored_session_from_client(&client)
+                    .context("Matrix refreshed tokens but returned no session")
+                    .and_then(|session| callback_saver(session));
+                let mut state = callback_persistence.lock().unwrap();
+                match &result {
+                    Ok(()) => state.last_error = None,
+                    Err(error) => state.last_error = Some(format!("{error:#}")),
+                }
+                result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                    Box::new(io::Error::other(format!("{error:#}")))
+                })
+            }),
+        )
+        .context("failed to install Matrix session persistence callbacks")?;
+    state.saver = Some(saver);
+    state.last_error = None;
+    Ok(())
+}
+
 impl MatrixTransport {
     pub async fn login_password(
         homeserver: &str,
@@ -211,6 +249,32 @@ impl MatrixTransport {
             None,
             store_path,
             store_passphrase,
+            None,
+        )
+        .await
+    }
+
+    pub async fn login_password_with_session_persistence<F>(
+        homeserver: &str,
+        username: &str,
+        password: &str,
+        device_display_name: &str,
+        store_path: impl AsRef<Path>,
+        store_passphrase: &str,
+        saver: F,
+    ) -> Result<(Self, StoredMatrixSession)>
+    where
+        F: Fn(StoredMatrixSession) -> Result<()> + Send + Sync + 'static,
+    {
+        Self::login_password_for_device(
+            homeserver,
+            username,
+            password,
+            device_display_name,
+            None,
+            store_path,
+            store_passphrase,
+            Some(Arc::new(saver)),
         )
         .await
     }
@@ -232,6 +296,33 @@ impl MatrixTransport {
             Some(device_id),
             store_path,
             store_passphrase,
+            None,
+        )
+        .await
+    }
+
+    pub async fn relogin_password_with_session_persistence<F>(
+        homeserver: &str,
+        username: &str,
+        password: &str,
+        device_display_name: &str,
+        device_id: &str,
+        store_path: impl AsRef<Path>,
+        store_passphrase: &str,
+        saver: F,
+    ) -> Result<(Self, StoredMatrixSession)>
+    where
+        F: Fn(StoredMatrixSession) -> Result<()> + Send + Sync + 'static,
+    {
+        Self::login_password_for_device(
+            homeserver,
+            username,
+            password,
+            device_display_name,
+            Some(device_id),
+            store_path,
+            store_passphrase,
+            Some(Arc::new(saver)),
         )
         .await
     }
@@ -244,6 +335,7 @@ impl MatrixTransport {
         device_id: Option<&str>,
         store_path: impl AsRef<Path>,
         store_passphrase: &str,
+        saver: Option<Arc<SessionSaver>>,
     ) -> Result<(Self, StoredMatrixSession)> {
         if username.is_empty() || password.is_empty() {
             bail!("Matrix username and password are required");
@@ -258,6 +350,11 @@ impl MatrixTransport {
             .build()
             .await
             .context("failed to open the persistent Matrix client")?;
+        let persistence = Arc::new(StdMutex::new(SessionPersistenceState::default()));
+        let persistence_installed = saver.is_some();
+        if let Some(saver) = saver {
+            install_session_persistence_callbacks(&client, &persistence, saver)?;
+        }
         let login = client.matrix_auth().login_username(username, password);
         let login = if let Some(device_id) = device_id {
             login.device_id(device_id)
@@ -289,24 +386,44 @@ impl MatrixTransport {
                 .await
                 .context("Matrix rejected cross-signing bootstrap")?;
         }
-        let session = client
-            .matrix_auth()
-            .session()
+        let transport = Self::from_client(client, persistence).await?;
+        if persistence_installed {
+            transport
+                .checkpoint_session()
+                .context("failed to checkpoint Matrix session after login")?;
+            transport.ensure_session_persisted()?;
+        }
+        let stored = transport
+            .stored_session()
             .context("Matrix login returned no session")?;
-        let stored = StoredMatrixSession {
-            homeserver: homeserver.to_owned(),
-            user_id: session.meta.user_id,
-            device_id: session.meta.device_id,
-            access_token: session.tokens.access_token,
-            refresh_token: session.tokens.refresh_token,
-        };
-        Ok((Self::from_client(client).await?, stored))
+        Ok((transport, stored))
     }
 
     pub async fn restore(
         session: StoredMatrixSession,
         store_path: impl AsRef<Path>,
         store_passphrase: &str,
+    ) -> Result<Self> {
+        Self::restore_inner(session, store_path, store_passphrase, None).await
+    }
+
+    pub async fn restore_with_session_persistence<F>(
+        session: StoredMatrixSession,
+        store_path: impl AsRef<Path>,
+        store_passphrase: &str,
+        saver: F,
+    ) -> Result<Self>
+    where
+        F: Fn(StoredMatrixSession) -> Result<()> + Send + Sync + 'static,
+    {
+        Self::restore_inner(session, store_path, store_passphrase, Some(Arc::new(saver))).await
+    }
+
+    async fn restore_inner(
+        session: StoredMatrixSession,
+        store_path: impl AsRef<Path>,
+        store_passphrase: &str,
+        saver: Option<Arc<SessionSaver>>,
     ) -> Result<Self> {
         if store_passphrase.is_empty() {
             bail!("Matrix store passphrase is required");
@@ -318,6 +435,11 @@ impl MatrixTransport {
             .build()
             .await
             .context("failed to open the persistent Matrix client")?;
+        let persistence = Arc::new(StdMutex::new(SessionPersistenceState::default()));
+        let persistence_installed = saver.is_some();
+        if let Some(saver) = saver {
+            install_session_persistence_callbacks(&client, &persistence, saver)?;
+        }
         client
             .matrix_auth()
             .restore_session(
@@ -336,10 +458,20 @@ impl MatrixTransport {
             .await
             .context("failed to restore the Matrix session")?;
 
-        Self::from_client(client).await
+        let transport = Self::from_client(client, persistence).await?;
+        if persistence_installed {
+            transport
+                .checkpoint_session()
+                .context("failed to checkpoint Matrix session after restore")?;
+            transport.ensure_session_persisted()?;
+        }
+        Ok(transport)
     }
 
-    async fn from_client(client: Client) -> Result<Self> {
+    async fn from_client(
+        client: Client,
+        session_persistence: Arc<StdMutex<SessionPersistenceState>>,
+    ) -> Result<Self> {
         let (events, _) = broadcast::channel(1_024);
         let (sync_activity, _) = broadcast::channel(32);
         let transport = Self {
@@ -350,7 +482,7 @@ impl MatrixTransport {
             verifications: Arc::new(RwLock::new(HashMap::new())),
             verification_devices: Arc::new(RwLock::new(HashMap::new())),
             locally_verified_devices: Arc::new(StdRwLock::new(HashSet::new())),
-            session_persistence: Arc::new(StdMutex::new(SessionPersistenceState::default())),
+            session_persistence,
         };
         transport.install_event_handler();
         transport.refresh_locally_verified_devices().await?;
@@ -381,40 +513,11 @@ impl MatrixTransport {
     where
         F: Fn(StoredMatrixSession) -> Result<()> + Send + Sync + 'static,
     {
-        let saver: Arc<SessionSaver> = Arc::new(saver);
-        {
-            let mut state = self.session_persistence.lock().unwrap();
-            if state.saver.is_some() {
-                bail!("Matrix session persistence is already installed");
-            }
-            state.saver = Some(saver.clone());
-            state.last_error = None;
-        }
-
-        let persistence = self.session_persistence.clone();
-        self.client
-            .set_session_callbacks(
-                Box::new(|client| {
-                    client.session_tokens().ok_or_else(|| {
-                        io::Error::other("Matrix session tokens are unavailable").into()
-                    })
-                }),
-                Box::new(move |client| {
-                    let result = stored_session_from_client(&client)
-                        .context("Matrix refreshed tokens but returned no session")
-                        .and_then(|session| saver(session));
-                    let mut state = persistence.lock().unwrap();
-                    match &result {
-                        Ok(()) => state.last_error = None,
-                        Err(error) => state.last_error = Some(format!("{error:#}")),
-                    }
-                    result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(io::Error::other(format!("{error:#}")))
-                    })
-                }),
-            )
-            .context("failed to install Matrix session persistence callbacks")?;
-        Ok(())
+        install_session_persistence_callbacks(
+            &self.client,
+            &self.session_persistence,
+            Arc::new(saver),
+        )
     }
 
     pub async fn refresh_access_token(&self) -> Result<()> {

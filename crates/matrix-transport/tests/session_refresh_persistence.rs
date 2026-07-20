@@ -7,9 +7,28 @@ use std::sync::{
 };
 use tempfile::tempdir;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{body_json, method, path},
 };
+
+#[derive(Clone)]
+struct ExpiredThenHealthyDevices {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for ExpiredThenHealthyDevices {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "errcode": "M_UNKNOWN_TOKEN",
+                "error": "Access token expired",
+                "soft_logout": false
+            }))
+        } else {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "devices": [] }))
+        }
+    }
+}
 
 fn session(homeserver: String) -> StoredMatrixSession {
     StoredMatrixSession {
@@ -187,6 +206,98 @@ async fn process_restart_restores_the_rotated_refresh_token_not_the_install_toke
     let store = tempdir()?;
     let restarted =
         MatrixTransport::restore(restarted_session, store.keep(), "restart-passphrase").await?;
+    restarted.install_session_persistence(|_| Ok(()))?;
+    restarted.refresh_access_token().await?;
+    assert_eq!(
+        restarted.stored_session().unwrap().refresh_token.as_deref(),
+        Some("newer-refresh")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_refresh_during_restore_is_durable_before_an_abrupt_process_exit() -> Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "versions": ["v1.11"],
+            "unstable_features": {}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/v3/devices"))
+        .respond_with(ExpiredThenHealthyDevices {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/v3/user/@codever:example.test/account_data/m.secret_storage.default_key"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "errcode": "M_NOT_FOUND",
+            "error": "No secret storage key"
+        })))
+        .mount(&server)
+        .await;
+    mount_rotated_tokens(&server).await;
+
+    let persisted = Arc::new(Mutex::new(None));
+    let persistence_attempts = Arc::new(AtomicUsize::new(0));
+    let store = tempdir()?;
+    let transport = MatrixTransport::restore_with_session_persistence(
+        session(server.uri()),
+        store.keep(),
+        "restore-refresh-passphrase",
+        {
+            let persisted = persisted.clone();
+            let persistence_attempts = persistence_attempts.clone();
+            move |session| {
+                if persistence_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    bail!("simulated KeyStore interruption during automatic refresh");
+                }
+                *persisted.lock().unwrap() = Some(session);
+                Ok(())
+            }
+        },
+    )
+    .await?;
+    assert_eq!(persistence_attempts.load(Ordering::SeqCst), 2);
+    let restarted_session = persisted
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("automatic refresh during restore was persisted");
+    assert_eq!(restarted_session.access_token, "new-access");
+    assert_eq!(
+        restarted_session.refresh_token.as_deref(),
+        Some("new-refresh")
+    );
+
+    // Simulate Android killing the process without invoking matrix_close.
+    drop(transport);
+
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/refresh"))
+        .and(body_json(
+            serde_json::json!({ "refresh_token": "new-refresh" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "newer-access",
+            "refresh_token": "newer-refresh",
+            "expires_in_ms": 300_000
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let restarted_store = tempdir()?;
+    let restarted = MatrixTransport::restore(
+        restarted_session,
+        restarted_store.keep(),
+        "restart-after-kill-passphrase",
+    )
+    .await?;
     restarted.install_session_persistence(|_| Ok(()))?;
     restarted.refresh_access_token().await?;
     assert_eq!(

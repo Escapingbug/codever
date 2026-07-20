@@ -26,16 +26,23 @@ async fn main() -> Result<()> {
         &passphrase,
     )
     .await?;
+    drop(transport);
+
+    // Force the same path as an expired access token at application startup while
+    // retaining a valid refresh token.
+    let mut expired = initial.clone();
+    expired.access_token = "deliberately-expired-access-token".into();
     let persisted = Arc::new(Mutex::new(None::<StoredMatrixSession>));
-    transport.install_session_persistence({
-        let persisted = persisted.clone();
-        move |session| {
-            *persisted.lock().unwrap() = Some(session);
-            Ok(())
-        }
-    })?;
-    transport.refresh_access_token().await?;
-    transport.ensure_session_persisted()?;
+    let restored_during_refresh =
+        MatrixTransport::restore_with_session_persistence(expired, &store, &passphrase, {
+            let persisted = persisted.clone();
+            move |session| {
+                *persisted.lock().unwrap() = Some(session);
+                Ok(())
+            }
+        })
+        .await?;
+    restored_during_refresh.ensure_session_persisted()?;
     let rotated = persisted
         .lock()
         .unwrap()
@@ -45,7 +52,8 @@ async fn main() -> Result<()> {
         rotated.refresh_token != initial.refresh_token,
         "refresh token did not rotate"
     );
-    drop(transport);
+    // Simulate an abrupt app exit without a close checkpoint.
+    drop(restored_during_refresh);
 
     let restored = MatrixTransport::restore(rotated.clone(), &store, &passphrase).await?;
     let persisted_again = Arc::new(Mutex::new(None::<StoredMatrixSession>));
@@ -74,7 +82,8 @@ async fn main() -> Result<()> {
         "{}",
         json!({
             "deviceId": initial.device_id,
-            "firstRotationPersisted": true,
+            "automaticStartupRotationPersisted": true,
+            "abruptExitSurvived": true,
             "restartUsedRotatedToken": true,
             "secondRotationPersisted": true
         })
