@@ -144,11 +144,20 @@ watch([() => route.query.inspect, events], ([eventId]) => {
 }, { immediate: true })
 onBeforeUnmount(() => {
   disposed = true
+  historyGeneration += 1
+  providerCapabilitiesGeneration += 1
   if (tailSyncTimer) clearTimeout(tailSyncTimer)
+  tailSyncTimer = undefined
   unsubscribeEvents?.()
+  unsubscribeEvents = undefined
   unsubscribeConnection?.()
+  unsubscribeConnection = undefined
   disposeAttachments()
 })
+
+function isCurrentSessionLoad(requestedId: string, generation: number): boolean {
+  return !disposed && requestedId === sessionId.value && generation === historyGeneration
+}
 
 async function loadSession(): Promise<void> {
   const generation = ++historyGeneration
@@ -173,21 +182,26 @@ async function loadSession(): Promise<void> {
   if (!route.query.inspect) selectedEvent.value = undefined
   try {
     await state.hydrateProject(projectId.value)
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     await state.loadCachedPendingMessages(requestedId)
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     session.value ??= (state.sessionsByProject[projectId.value] ?? []).find(item => item.id === requestedId)
     const persisted = await state.loadCachedSessionEvents(requestedId)
-    if (requestedId !== sessionId.value) return
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     if (persisted.length) {
       events.value = recentConversation(mergeSessionEvents(events.value, persisted))
       hasMoreBefore.value = hasCachedEventsBefore(requestedId, events.value.at(0)?.seq) || liveConnected.value
       loading.value = false
       await scrollToLatest(false)
+      if (!isCurrentSessionLoad(requestedId, generation)) return
     }
     state.reconcilePendingMessages(requestedId, events.value)
-    void refreshSessionAttachments()
+    void refreshSessionAttachments(requestedId, generation)
     const remoteSession = await state.api.getSession(requestedId)
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     session.value = state.replaceSession(remoteSession)
     let page = await state.api.getSessionEvents(requestedId, { limit: HISTORY_PAGE_SIZE })
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     let fetchedRemoteEvents = page.events
     let pageCount = 1
     while (
@@ -199,10 +213,11 @@ async function loadSession(): Promise<void> {
         before: page.previousBefore,
         limit: HISTORY_PAGE_SIZE,
       })
+      if (!isCurrentSessionLoad(requestedId, generation)) return
       fetchedRemoteEvents = mergeSessionEvents(page.events, fetchedRemoteEvents)
       pageCount += 1
     }
-    if (requestedId !== sessionId.value || generation !== historyGeneration) return
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     const remoteEvents = recentConversation(fetchedRemoteEvents)
     const followLatest = isNearTimelineBottom()
     events.value = mergeSessionEvents(events.value, remoteEvents)
@@ -213,12 +228,13 @@ async function loadSession(): Promise<void> {
       || (earliestVisible !== undefined && fetchedRemoteEvents.some(event => event.seq < earliestVisible))
     if (followLatest) await scrollToLatest(false)
   } catch (error) {
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     if (isMatrixGatewayClientClosedError(error)) return
     const message = error instanceof Error ? error.message : 'Could not load the session'
     if (events.value.length || session.value) liveError.value = `Could not refresh this cached conversation: ${message}`
     else loadError.value = message
   } finally {
-    if (requestedId === sessionId.value && generation === historyGeneration) {
+    if (isCurrentSessionLoad(requestedId, generation)) {
       loading.value = false
       loadingInitialHistory.value = false
     }
@@ -238,17 +254,18 @@ async function loadProviderCapabilities(): Promise<void> {
   providerCapabilitiesError.value = ''
   try {
     const result = await state.api.discoverProviderSessions(projectId.value, requestedProvider)
-    if (provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
+    if (!disposed && provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
       providerCapabilities.value = result
     }
   } catch (error) {
-    if (provider.value !== requestedProvider
+    if (disposed
+      || provider.value !== requestedProvider
       || generation !== providerCapabilitiesGeneration
       || isMatrixGatewayClientClosedError(error)) return
     providerCapabilities.value = undefined
     providerCapabilitiesError.value = error instanceof Error ? error.message : 'Provider controls could not be loaded'
   } finally {
-    if (provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
+    if (!disposed && provider.value === requestedProvider && generation === providerCapabilitiesGeneration) {
       loadingProviderCapabilities.value = false
     }
   }
@@ -276,12 +293,13 @@ async function closeInspector(): Promise<void> {
 
 function startLiveConnection(id: string): void {
   unsubscribeEvents = state.api.subscribeSession(id, event => {
+    if (disposed || id !== sessionId.value) return
     const nearBottom = isNearTimelineBottom()
     const generation = historyGeneration
     liveEventQueue = liveEventQueue
       .then(() => receiveLiveEvent(id, event, generation, nearBottom))
       .catch(error => {
-        if (id === sessionId.value && generation === historyGeneration) {
+        if (!disposed && id === sessionId.value && generation === historyGeneration) {
           liveError.value = error instanceof Error ? error.message : 'Live updates could not be synchronized'
         }
       })
@@ -294,20 +312,21 @@ async function receiveLiveEvent(
   generation: number,
   nearBottom: boolean,
 ): Promise<void> {
-  if (id !== sessionId.value || generation !== historyGeneration) return
+  if (!isCurrentSessionLoad(id, generation)) return
   const latest = events.value.at(-1)?.seq ?? 0
   // Matrix carries durable wake-up events rather than every Provider delta.
   // Fill any sequence gap from the Gateway journal before rendering the wake-up.
   if (event.seq > latest + 1) {
     await catchUpSessionEvents(latest, id, generation)
   }
-  if (id !== sessionId.value || generation !== historyGeneration) return
+  if (!isCurrentSessionLoad(id, generation)) return
   appendEvents([event])
   if (event.event.kind === 'session_state' && event.event.state === 'querying') scheduleTailSync(0)
   if (nearBottom) await scrollToLatest()
 }
 
 function appendEvents(incoming: SessionEventEnvelope[]): void {
+  if (disposed) return
   const additions = incoming.filter(event => event.sessionId === sessionId.value)
   const merged = mergeSessionEvents(events.value, additions)
   if (merged.length === events.value.length
@@ -374,14 +393,14 @@ async function catchUpSessionEvents(
   try {
     for (let pageCount = 0; pageCount < 100; pageCount += 1) {
       const page = await state.api.getSessionEvents(requestedId, { after, limit: 256 })
-      if (requestedId !== sessionId.value || generation !== historyGeneration) return
+      if (!isCurrentSessionLoad(requestedId, generation)) return
       appendEvents(page.events)
       if (page.nextAfter === null || page.nextAfter <= after) return
       after = page.nextAfter
     }
     throw new Error('Live update catch-up exceeded the safety page limit')
   } catch (error) {
-    if (requestedId === sessionId.value && generation === historyGeneration && events.value.length === 0) {
+    if (isCurrentSessionLoad(requestedId, generation) && events.value.length === 0) {
       liveError.value = error instanceof Error ? error.message : 'Live updates could not be synchronized'
     }
     throw error
@@ -447,13 +466,15 @@ async function loadOlderEvents(): Promise<void> {
     }
     if (loadingInitialHistory.value) return
     const page = await state.api.getSessionEvents(requestedId, { before: earliest, limit: HISTORY_PAGE_SIZE })
-    if (requestedId !== sessionId.value || generation !== historyGeneration) return
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     appendEvents(page.events)
     hasMoreBefore.value = page.events.length > 0 && page.previousBefore !== null
   } catch (error) {
-    liveError.value = error instanceof Error ? error.message : 'Earlier messages could not be loaded'
+    if (isCurrentSessionLoad(requestedId, generation)) {
+      liveError.value = error instanceof Error ? error.message : 'Earlier messages could not be loaded'
+    }
   } finally {
-    if (requestedId === sessionId.value && generation === historyGeneration) {
+    if (isCurrentSessionLoad(requestedId, generation)) {
       loadingOlder.value = false
       await nextTick()
       restoreScrollAnchor(element, anchor)
@@ -683,20 +704,23 @@ function disposeAttachments(): void {
   }
 }
 
-async function refreshSessionAttachments(): Promise<void> {
-  const requestedId = sessionId.value
+async function refreshSessionAttachments(
+  requestedId = sessionId.value,
+  generation = historyGeneration,
+): Promise<void> {
+  if (!isCurrentSessionLoad(requestedId, generation)) return
   loadingSessionFiles.value = true
   try {
     const result = await state.api.listSessionAttachments(requestedId)
-    if (requestedId !== sessionId.value) return
+    if (!isCurrentSessionLoad(requestedId, generation)) return
     sessionAttachments.value = result.attachments
     const available = new Set(result.attachments.map(item => item.attachmentId))
     selectedStoredAttachmentIds.value = selectedStoredAttachmentIds.value.filter(id => available.has(id))
     cleanupAttachmentIds.value = cleanupAttachmentIds.value.filter(id => available.has(id))
   } catch (error) {
-    if (requestedId === sessionId.value) liveError.value = error instanceof Error ? error.message : 'Session files could not be loaded'
+    if (isCurrentSessionLoad(requestedId, generation)) liveError.value = error instanceof Error ? error.message : 'Session files could not be loaded'
   } finally {
-    if (requestedId === sessionId.value) loadingSessionFiles.value = false
+    if (isCurrentSessionLoad(requestedId, generation)) loadingSessionFiles.value = false
   }
 }
 
@@ -865,7 +889,7 @@ function runPrimaryAction(): void {
       <footer class="composer-wrap">
         <label v-if="!gatewayOnline" class="queue-option"><input v-model="sendWhenOnline" type="checkbox" /> Send when Gateway reconnects</label>
         <section v-if="showSessionFiles" class="session-files-panel" aria-label="Files stored for this session">
-          <header><div><strong>Session storage</strong><small>Files and retained tool results on this Computer</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="refreshSessionAttachments">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small" :disabled="!canMutate" @click="clearToolOutputs">Clear tool results…</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
+          <header><div><strong>Session storage</strong><small>Files and retained tool results on this Computer</small></div><div><button class="button button--small" :disabled="loadingSessionFiles" @click="() => refreshSessionAttachments()">{{ loadingSessionFiles ? 'Refreshing…' : 'Refresh' }}</button><button class="button button--small" :disabled="!canMutate" @click="clearToolOutputs">Clear tool results…</button><button class="button button--small button--danger" :disabled="!cleanupAttachmentIds.length || deletingSessionFiles" @click="deleteSelectedSessionFiles">{{ deletingSessionFiles ? 'Deleting…' : `Delete (${cleanupAttachmentIds.length})` }}</button></div></header>
           <label class="tool-retention-setting"><input type="checkbox" :checked="session?.config.retainToolOutputs === true" :disabled="!canMutate || savingControls" @change="setToolOutputRetention(($event.target as HTMLInputElement).checked)" /><span><strong>Keep future tool results</strong><small>Off by default. Results stay on this Computer and load only when requested.</small></span></label>
           <div v-if="!sessionAttachments.length && !loadingSessionFiles" class="session-files-empty">No files are stored for this session.</div>
           <div v-else class="session-files-list">

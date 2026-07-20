@@ -63,12 +63,12 @@ const session: CodeverSession = {
 }
 const sessions: CodeverSession[] = [
   session,
-  ...(denseTaskFixture ? Array.from({ length: 36 }, (_, index): CodeverSession => ({
+  ...(denseTaskFixture ? Array.from({ length: 96 }, (_, index): CodeverSession => ({
     ...session,
     id: `session-dense-${index + 1}`,
     title: `Cached task ${String(index + 1).padStart(2, '0')}`,
     providerSessionId: `provider-dense-${index + 1}`,
-    updatedAt: `2026-07-18T07:${String(index).padStart(2, '0')}:00.000Z`,
+    updatedAt: new Date(Date.UTC(2026, 6, 18, 7, index)).toISOString(),
   })) : []),
 ]
 
@@ -445,11 +445,15 @@ declare global {
       releaseProjectAccess(outcome?: 'success' | 'reject'): void
       clientVerificationConfirmed(): boolean
       reportRuntimeError(): void
+      activeSessionSubscriptions(): number
     }
   }
 }
 
 window.__CODEVER_E2E__ = {
+  activeSessionSubscriptions() {
+    return [...subscribers.values()].reduce((total, group) => total + group.size, 0)
+  },
   reportRuntimeError() {
     const error = new Error('Synthetic native listener failure')
     window.dispatchEvent(new ErrorEvent('error', { error, message: error.message }))

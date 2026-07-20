@@ -47,6 +47,10 @@ const renamingTask = ref<ProjectTask>()
 const renameTitle = ref('')
 const renaming = ref(false)
 const creatorElement = ref<HTMLElement>()
+const taskLoadSentinel = ref<HTMLElement>()
+const TASK_RENDER_BATCH = 40
+const readyRenderLimit = ref(TASK_RENDER_BATCH)
+let taskLoadObserver: IntersectionObserver | undefined
 let discoveryGeneration = 0
 let longPressTimer: ReturnType<typeof setTimeout> | undefined
 let longPressOrigin: { x: number; y: number } | undefined
@@ -110,10 +114,25 @@ const visibleTasks = computed(() => tasks.value.filter(task => {
 
 const runningTasks = computed(() => visibleTasks.value.filter(task => task.state === 'querying' || task.state === 'canceling'))
 const readyTasks = computed(() => visibleTasks.value.filter(task => task.state !== 'querying' && task.state !== 'canceling'))
+const renderedReadyTasks = computed(() => readyTasks.value.slice(0, readyRenderLimit.value))
+const hiddenReadyTaskCount = computed(() => Math.max(0, readyTasks.value.length - renderedReadyTasks.value.length))
 
-onMounted(() => state.loadWorkspace())
-onBeforeUnmount(() => { discoveryGeneration += 1 })
+onMounted(() => {
+  state.loadWorkspace()
+  taskLoadObserver = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting)) loadMoreTasks()
+  }, { rootMargin: '320px 0px' })
+  watch(taskLoadSentinel, (next, previous) => {
+    if (previous) taskLoadObserver?.unobserve(previous)
+    if (next) taskLoadObserver?.observe(next)
+  }, { immediate: true })
+})
+onBeforeUnmount(() => {
+  discoveryGeneration += 1
+  taskLoadObserver?.disconnect()
+})
 watch(project, value => { if (value) void refreshTasks() }, { immediate: true })
+watch([providerFilter, scopeFilter, searchQuery], () => { readyRenderLimit.value = TASK_RENDER_BATCH })
 watch([project, providers], ([nextProject, nextProviders]) => {
   if (!selectedProvider.value || !nextProviders.includes(selectedProvider.value)) {
     selectedProvider.value = nextProject?.defaultProvider ?? nextProviders[0] ?? ''
@@ -124,6 +143,10 @@ function openCreate(): void {
   createError.value = ''
   showCreate.value = true
   void nextTick(() => creatorElement.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+function loadMoreTasks(): void {
+  readyRenderLimit.value = Math.min(readyTasks.value.length, readyRenderLimit.value + TASK_RENDER_BATCH)
 }
 
 async function refreshTasks(): Promise<void> {
@@ -389,7 +412,7 @@ async function openSession(sessionId: string): Promise<void> {
 
       <div class="session-group-label" :class="{ 'session-group-label--inactive': runningTasks.length }"><span>{{ scopeFilter === 'archived' ? 'Archived' : 'Ready to continue' }}</span><small>{{ readyTasks.length }}</small></div>
       <div v-if="readyTasks.length" class="session-table">
-        <article v-for="task in readyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @contextmenu.prevent="openRename(task)" @pointerdown="beginLongPress($event, task)" @pointermove="moveLongPress" @pointerup="cancelLongPress" @pointercancel="cancelLongPress">
+        <article v-for="task in renderedReadyTasks" :key="task.key" class="session-row session-row--task" tabindex="0" role="button" :aria-label="`Open task ${task.title}`" :data-session-id="task.codeverSessionId || undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @contextmenu.prevent="openRename(task)" @pointerdown="beginLongPress($event, task)" @pointermove="moveLongPress" @pointerup="cancelLongPress" @pointercancel="cancelLongPress">
           <StatusDot :status="task.state ?? 'idle'" />
           <div><strong>{{ task.title }}</strong><small>{{ task.firstMessage || `${task.provider} · ${gateway?.name}` }}</small></div>
           <span class="session-mode">{{ task.draft ? 'draft' : task.provider }}</span>
@@ -397,6 +420,9 @@ async function openSession(sessionId: string): Promise<void> {
           <button class="task-archive" :disabled="!projectMutable || archivingKey === task.key" @click.stop="toggleArchive(task)">{{ task.archivedAt ? 'Restore' : 'Archive' }}</button>
         </article>
       </div>
+      <button v-if="hiddenReadyTaskCount" ref="taskLoadSentinel" class="session-load-more" @click="loadMoreTasks">
+        Load more tasks <small>{{ hiddenReadyTaskCount }} remaining</small>
+      </button>
       <div v-else-if="discovering" class="session-group-empty">Waiting for the first provider tasks…</div>
       <p v-else class="session-group-empty">No tasks match these filters.</p>
 

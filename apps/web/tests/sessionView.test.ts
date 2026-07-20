@@ -76,6 +76,27 @@ describe('session view', () => {
     wrapper.unmount()
   })
 
+  it('stops an abandoned Session load before it requests history', async () => {
+    const sessionId = 'session-abandoned-navigation'
+    const pendingSession = deferred<CodeverSession>()
+    const getSessionEvents = vi.fn(async () => ({
+      events: [], nextAfter: null, previousBefore: null,
+    }))
+    const api = fakeApi(sessionId, [], {
+      getSession: vi.fn(() => pendingSession.promise),
+      getSessionEvents,
+    })
+    const wrapper = await mountSession(api, sessionId, false)
+    await flushPromises()
+
+    expect(api.getSession).toHaveBeenCalledOnce()
+    wrapper.unmount()
+    pendingSession.resolve(sessionRecord(sessionId, []))
+    await flushPromises()
+
+    expect(getSessionEvents).not.toHaveBeenCalled()
+  })
+
   it('rebinds and refreshes cached session state without surfacing cancellation from a replaced client', async () => {
     const sessionId = 'session-reconnect-race'
     const cached = assistantEvent(sessionId, 1, 'cached-turn')

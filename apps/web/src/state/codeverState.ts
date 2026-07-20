@@ -1,7 +1,7 @@
 import type { CodeverSession, CreateProjectDto, Gateway, Project, ProviderSession, SessionEventEnvelope } from '@codever/protocol'
 import { computed, inject, reactive, ref, shallowReactive } from 'vue'
 import { CodeverApi, codeverApiKey } from '../api/codeverApi'
-import { mergeSessionEvents } from '../sessionEvents'
+import { mergeSessionEvents, recentSessionEventCache } from '../sessionEvents'
 import { readCached, writeCached } from './localCache'
 import type { PendingUserMessage } from '../timeline/pendingMessage'
 import { gatewayCanControl } from '../gatewayAccess'
@@ -17,6 +17,21 @@ const pending = reactive(new Set<string>())
 const errors = reactive<Record<string, string | undefined>>({})
 let workspaceLoad: Promise<void> | undefined
 let workspaceHydration: Promise<void> | undefined
+const MAX_MEMORY_SESSION_CACHES = 8
+const sessionEventCacheRecency = new Map<string, true>()
+
+function retainSessionEventCache(sessionId: string, events: SessionEventEnvelope[]): SessionEventEnvelope[] {
+  const retained = recentSessionEventCache(events)
+  sessionEventCacheRecency.delete(sessionId)
+  sessionEventCacheRecency.set(sessionId, true)
+  while (sessionEventCacheRecency.size > MAX_MEMORY_SESSION_CACHES) {
+    const oldest = sessionEventCacheRecency.keys().next().value
+    if (oldest === undefined) break
+    sessionEventCacheRecency.delete(oldest)
+    delete eventsBySession[oldest]
+  }
+  return retained
+}
 
 export function useCodeverState() {
   const injectedApi = inject(codeverApiKey)
@@ -165,10 +180,16 @@ export function useCodeverState() {
       writeCached(`provider-sessions:${projectId}`, sessions)
     },
     loadCachedSessionEvents: async (sessionId: string) => {
-      if (eventsBySession[sessionId]) return eventsBySession[sessionId]
+      if (eventsBySession[sessionId]) {
+        const retained = retainSessionEventCache(sessionId, eventsBySession[sessionId])
+        eventsBySession[sessionId] = retained
+        return retained
+      }
       const cached = await readCached<SessionEventEnvelope[]>(`session-events:${sessionId}`) ?? []
-      eventsBySession[sessionId] = cached
-      return cached
+      const retained = retainSessionEventCache(sessionId, cached)
+      eventsBySession[sessionId] = retained
+      if (retained.length !== cached.length) writeCached(`session-events:${sessionId}`, retained)
+      return retained
     },
     loadCachedPendingMessages: async (sessionId: string) => {
       if (pendingMessagesBySession[sessionId]) return pendingMessagesBySession[sessionId]
@@ -208,7 +229,7 @@ export function useCodeverState() {
       writeCached(`pending-messages:${sessionId}`, messages)
     },
     mergeSessionEvents: (sessionId: string, events: SessionEventEnvelope[]) => {
-      const snapshot = mergeSessionEvents(eventsBySession[sessionId] ?? [], events)
+      const snapshot = retainSessionEventCache(sessionId, mergeSessionEvents(eventsBySession[sessionId] ?? [], events))
       eventsBySession[sessionId] = snapshot
       writeCached(`session-events:${sessionId}`, snapshot)
     },

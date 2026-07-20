@@ -51,6 +51,23 @@ test.describe('mobile Session business journey', () => {
     await expect(page.locator('.composer textarea')).toBeEnabled()
   })
 
+  test('C01 repeatedly enters and leaves a Session without leaking subscriptions or crashing', async ({ page }) => {
+    const pageErrors: Error[] = []
+    page.on('pageerror', error => pageErrors.push(error))
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await expect.poll(() => page.evaluate(() => window.__CODEVER_E2E__.activeSessionSubscriptions())).toBe(1)
+      await page.getByRole('button', { name: 'Go back' }).click()
+      await expect(page.getByRole('heading', { name: 'Tasks' })).toBeVisible()
+      await expect.poll(() => page.evaluate(() => window.__CODEVER_E2E__.activeSessionSubscriptions())).toBe(0)
+      await page.getByRole('button', { name: 'Open task Build Android client' }).click()
+      await expect(page.getByRole('heading', { name: 'Build Android client' })).toBeVisible()
+    }
+
+    expect(pageErrors).toEqual([])
+    await expect.poll(() => page.evaluate(() => window.__CODEVER_E2E__.activeSessionSubscriptions())).toBe(1)
+  })
+
   test('C02 separates Matrix device trust from Gateway execution authorization', async ({ page }) => {
     await page.goto('./e2e.html#/machines')
     const secondComputer = page.locator('.machine-card').filter({ hasText: 'Windows Computer' })
@@ -285,10 +302,14 @@ test.describe('mobile Session business journey', () => {
   test('C01 scrolls a long cached task list to its final item on mobile', async ({ page }) => {
     await page.goto('./e2e.html?tasks=many#/projects/gateway-e2e/project-e2e')
     const stage = page.locator('.main-stage')
-    await expect(page.getByRole('button', { name: 'Open task Cached task 36' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Open task Cached task 96' })).toBeVisible()
+    await expect(page.locator('.session-row')).toHaveCount(40)
 
     const dimensions = await stage.evaluate(element => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }))
     expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
+    while (await page.getByRole('button', { name: /Load more tasks/ }).count()) {
+      await page.getByRole('button', { name: /Load more tasks/ }).click()
+    }
     await stage.evaluate(element => { element.scrollTop = element.scrollHeight })
     await expect.poll(() => stage.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
     await expect(page.getByRole('button', { name: 'Open task Cached task 01' })).toBeVisible()

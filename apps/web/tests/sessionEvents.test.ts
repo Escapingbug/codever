@@ -1,6 +1,6 @@
 import type { ConversationEvent, SessionEventEnvelope } from '@codever/protocol'
 import { describe, expect, it } from 'vitest'
-import { mergeSessionEvents } from '../src/sessionEvents'
+import { MAX_CACHED_SESSION_EVENTS, mergeSessionEvents, recentSessionEventCache } from '../src/sessionEvents'
 
 function envelope(seq: number, eventId = `event-${seq}`): SessionEventEnvelope {
   return {
@@ -26,5 +26,15 @@ describe('session event merging', () => {
 
     expect(merged).toHaveLength(1)
     expect(merged[0]?.eventId).toBe('gateway-id')
+  })
+
+  it('bounds the recent mobile cache without changing event order', () => {
+    const source = Array.from({ length: MAX_CACHED_SESSION_EVENTS + 10 }, (_, index) => envelope(index + 1))
+
+    const retained = recentSessionEventCache(source)
+
+    expect(retained).toHaveLength(MAX_CACHED_SESSION_EVENTS)
+    expect(retained.at(0)?.seq).toBe(11)
+    expect(retained.at(-1)?.seq).toBe(MAX_CACHED_SESSION_EVENTS + 10)
   })
 })
