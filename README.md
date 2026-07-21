@@ -126,3 +126,9 @@ entire file in memory.
 
 The deterministic business coverage is tracked in
 [`docs/business-capability-matrix.md`](docs/business-capability-matrix.md).
+
+The approved next-stage product/UI architecture is documented in
+[`docs/product-design-next.md`](docs/product-design-next.md). For moving the
+repository to another machine or rebuilding an agent session, use
+[`docs/migration-handoff-2026-07-21.md`](docs/migration-handoff-2026-07-21.md)
+as the handoff checklist and context summary.

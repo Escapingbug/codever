@@ -1,5 +1,12 @@
 # Codever architecture
 
+> This document describes the currently implemented Matrix/Gateway runtime.
+> The approved next-stage product model, UI journeys, Task workspaces and plugin
+> boundaries are specified in
+> [`product-design-next.md`](./product-design-next.md). Machine migration and
+> session reconstruction should start with
+> [`migration-handoff-2026-07-21.md`](./migration-handoff-2026-07-21.md).
+
 ## Purpose
 
 Codever lets native mobile and desktop clients continue ACP-compatible coding
