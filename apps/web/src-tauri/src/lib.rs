@@ -45,6 +45,8 @@ struct MatrixSecret {
     access_token: String,
     refresh_token: Option<String>,
     store_passphrase: String,
+    #[serde(default = "legacy_matrix_store_directory")]
+    store_directory: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -139,16 +141,44 @@ fn secure_secret_delete(account: String) -> Result<(), String> {
 fn persist_matrix_session(
     secret_account: &str,
     store_passphrase: &str,
+    store_directory: &str,
     session: StoredMatrixSession,
 ) -> Result<(), String> {
     let encoded = serde_json::to_string(&MatrixSecret {
         access_token: session.access_token,
         refresh_token: session.refresh_token,
         store_passphrase: store_passphrase.to_owned(),
+        store_directory: store_directory.to_owned(),
     })
     .map_err(|error| error.to_string())?;
     keyring_entry(secret_account)?
         .set_password(&encoded)
+        .map_err(|error| error.to_string())
+}
+
+fn legacy_matrix_store_directory() -> String {
+    "matrix-store".to_owned()
+}
+
+fn validate_matrix_store_directory(value: &str) -> Result<(), String> {
+    if !value.starts_with("matrix-store-") && value != "matrix-store" {
+        return Err("invalid Matrix store directory".into());
+    }
+    if value.len() > 80
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("invalid Matrix store directory".into());
+    }
+    Ok(())
+}
+
+fn matrix_store_path(app: &tauri::AppHandle, directory: &str) -> Result<PathBuf, String> {
+    validate_matrix_store_directory(directory)?;
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join(directory))
         .map_err(|error| error.to_string())
 }
 
@@ -172,13 +202,10 @@ async fn matrix_initialize(
     if secret.access_token.is_empty() || secret.store_passphrase.is_empty() {
         return Err("Matrix secret is incomplete".into());
     }
-    let store_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("matrix-store");
+    let store_path = matrix_store_path(&app, &secret.store_directory)?;
     let persistence_account = secret_account.clone();
     let persistence_passphrase = secret.store_passphrase.clone();
+    let persistence_directory = secret.store_directory.clone();
     let transport = MatrixTransport::restore_with_session_persistence(
         StoredMatrixSession {
             homeserver: session.homeserver,
@@ -193,8 +220,13 @@ async fn matrix_initialize(
         store_path,
         &secret.store_passphrase,
         move |session| {
-            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
-                .map_err(|error| std::io::Error::other(error).into())
+            persist_matrix_session(
+                &persistence_account,
+                &persistence_passphrase,
+                &persistence_directory,
+                session,
+            )
+            .map_err(|error| std::io::Error::other(error).into())
         },
     )
     .await
@@ -322,13 +354,11 @@ async fn matrix_login(
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random).map_err(|error| error.to_string())?;
     let store_passphrase = Base64UrlUnpadded::encode_string(&random);
-    let store_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("matrix-store");
+    let store_directory = format!("matrix-store-{}", &store_passphrase[..16]);
+    let store_path = matrix_store_path(&app, &store_directory)?;
     let persistence_account = input.secret_account.clone();
     let persistence_passphrase = store_passphrase.clone();
+    let persistence_directory = store_directory.clone();
     let (transport, session) = MatrixTransport::login_password_with_session_persistence(
         &input.homeserver,
         &input.username,
@@ -337,8 +367,13 @@ async fn matrix_login(
         store_path,
         &store_passphrase,
         move |session| {
-            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
-                .map_err(|error| std::io::Error::other(error).into())
+            persist_matrix_session(
+                &persistence_account,
+                &persistence_passphrase,
+                &persistence_directory,
+                session,
+            )
+            .map_err(|error| std::io::Error::other(error).into())
         },
     )
     .await
@@ -349,6 +384,7 @@ async fn matrix_login(
                 access_token: session.access_token.clone(),
                 refresh_token: session.refresh_token.clone(),
                 store_passphrase: store_passphrase.clone(),
+                store_directory,
             })
             .map_err(|error| error.to_string())?,
         )
@@ -384,13 +420,10 @@ async fn matrix_reauthenticate(
     if previous.store_passphrase.is_empty() {
         return Err("Matrix secret is incomplete".into());
     }
-    let store_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("matrix-store");
+    let store_path = matrix_store_path(&app, &previous.store_directory)?;
     let persistence_account = input.secret_account.clone();
     let persistence_passphrase = previous.store_passphrase.clone();
+    let persistence_directory = previous.store_directory.clone();
     let (transport, session) = MatrixTransport::relogin_password_with_session_persistence(
         &input.session.homeserver,
         &input.session.user_id,
@@ -400,8 +433,13 @@ async fn matrix_reauthenticate(
         store_path,
         &previous.store_passphrase,
         move |session| {
-            persist_matrix_session(&persistence_account, &persistence_passphrase, session)
-                .map_err(|error| std::io::Error::other(error).into())
+            persist_matrix_session(
+                &persistence_account,
+                &persistence_passphrase,
+                &persistence_directory,
+                session,
+            )
+            .map_err(|error| std::io::Error::other(error).into())
         },
     )
     .await
@@ -415,6 +453,7 @@ async fn matrix_reauthenticate(
                 access_token: session.access_token.clone(),
                 refresh_token: session.refresh_token.clone(),
                 store_passphrase: previous.store_passphrase.clone(),
+                store_directory: previous.store_directory.clone(),
             })
             .map_err(|error| error.to_string())?,
         )
@@ -835,7 +874,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::abort_and_join;
+    use super::{abort_and_join, validate_matrix_store_directory, MatrixSecret};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -860,5 +899,23 @@ mod tests {
         abort_and_join(vec![task]).await;
 
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn legacy_matrix_secret_keeps_its_original_store() {
+        let secret: MatrixSecret = serde_json::from_str(
+            r#"{"accessToken":"access","refreshToken":"refresh","storePassphrase":"passphrase"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(secret.store_directory, "matrix-store");
+    }
+
+    #[test]
+    fn matrix_store_directory_cannot_escape_app_data() {
+        assert!(validate_matrix_store_directory("matrix-store-random123").is_ok());
+        assert!(validate_matrix_store_directory("matrix-store").is_ok());
+        assert!(validate_matrix_store_directory("../matrix-store-other").is_err());
+        assert!(validate_matrix_store_directory("matrix-store/other").is_err());
     }
 }

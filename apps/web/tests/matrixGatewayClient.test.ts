@@ -163,6 +163,29 @@ describe('MatrixGatewayClient', () => {
     expect(onSecurityError).toHaveBeenCalledWith(expect.stringContaining('does not match'))
   })
 
+  it('keeps an encrypted presence heartbeat as a setup candidate for a fresh client device', () => {
+    const transport = new FakeTransport()
+    const { value } = client(transport)
+    value.start()
+
+    transport.emit('io.codever.gateway.v1', {
+      matrixControl: { minVersion: 2, maxVersion: 2 },
+      gateway: gatewaySnapshot(),
+    }, { encrypted: true, verifiedDevice: false, senderDevice: 'GATEWAY' })
+
+    expect(value.knownGateways()).toMatchObject([{
+      id: 'gateway-1',
+      capabilities: {
+        providers: [], features: [],
+        metadata: {
+          matrixControlNegotiated: true,
+          matrixControlCompatible: true,
+          matrixVerified: false,
+        },
+      },
+    }])
+  })
+
   it('binds a COSE token to the exact request and correlates the encrypted response', async () => {
     const transport = new FakeTransport()
     const { value } = client(transport)

@@ -104,8 +104,9 @@ export class MatrixGatewayClient {
 
   async listGateways(): Promise<Gateway[]> {
     await this.discoverGateways()
-    return [...this.gateways.values()]
+    return this.knownGateways()
   }
+  knownGateways(): Gateway[] { return [...this.gateways.values()] }
   inventory(gatewayId: string): InventorySnapshot | undefined { return this.inventories.get(gatewayId) }
 
   subscribeSession(sessionId: string, subscriber: (event: SessionEventEnvelope) => void): () => void {
@@ -290,8 +291,14 @@ export class MatrixGatewayClient {
           this.rememberGatewayCompatibility(parsed, input.verifiedDevice, false)
           return
         }
-        // Current-version untargeted announcements are presence wakeups only.
-        if (typeof content.recipientDeviceId !== 'string') return
+        // A fresh Matrix device may need one key-share round trip before the Gateway
+        // can decrypt its targeted discovery. Keep the encrypted, sender-bound
+        // heartbeat as a setup candidate so the Computer never disappears while
+        // that bootstrap converges. No project or execution capability is exposed.
+        if (typeof content.recipientDeviceId !== 'string') {
+          this.rememberGatewayCompatibility(parsed, input.verifiedDevice, true)
+          return
+        }
         if (content.recipientDeviceId !== this.options.session.deviceId) return
         const discoveryRequestId = typeof content.discoveryRequestId === 'string' ? content.discoveryRequestId : undefined
         if (discoveryRequestId && discoveryRequestId !== this.activeDiscoveryRequestId) return

@@ -95,8 +95,8 @@ export function useCodeverState() {
 
   async function loadGateways(): Promise<void> {
     await load('gateways', () => api.listGateways(), value => {
-      gateways.value = value
-      writeCached('gateways', value)
+      gateways.value = reconcileGatewayDiscovery(gateways.value, value)
+      writeCached('gateways', gateways.value)
     })
   }
 
@@ -244,7 +244,21 @@ function markGatewayNegotiationStale(gateway: Gateway): Gateway {
   const metadata = { ...gateway.capabilities.metadata }
   delete metadata.matrixControlNegotiated
   delete metadata.matrixVerified
-  return { ...gateway, capabilities: { ...gateway.capabilities, metadata } }
+  return { ...gateway, status: 'offline', capabilities: { ...gateway.capabilities, metadata } }
+}
+
+/**
+ * Matrix discovery is presence, not an authoritative deletion snapshot. A quiet,
+ * reconnecting, or newly key-sharing Gateway must therefore remain visible until
+ * an explicit removal event exists. Fresh responses replace cached snapshots;
+ * missing responses become offline setup candidates instead of disappearing.
+ */
+export function reconcileGatewayDiscovery(current: Gateway[], discovered: Gateway[]): Gateway[] {
+  const discoveredIds = new Set(discovered.map(gateway => gateway.id))
+  return [
+    ...discovered,
+    ...current.filter(gateway => !discoveredIds.has(gateway.id)).map(markGatewayNegotiationStale),
+  ]
 }
 
 export type CodeverState = ReturnType<typeof useCodeverState>
