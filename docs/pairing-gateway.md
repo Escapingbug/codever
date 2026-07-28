@@ -62,6 +62,13 @@ certificate verification.
   persistent replay store before a certificate is issued.
 - The trusted-device registry and Gateway P-256 key survive restarts.
 - Revoked devices are rejected by a live registry check before every command.
+- Multiple active devices may share a conversation, but never an application
+  private key. Reusing one P-256 public key under a second device ID is rejected.
+- Gateway output is sealed separately for every active device. Certificates,
+  command sequences, acknowledgements and revocation remain device-scoped.
+- Durable undelivered copies remain bound to the exact certificate and
+  application-key generation that authorized them. Reusing a revoked device ID
+  with a new key does not inherit old queued content.
 - A new ephemeral Gateway Matrix device can be announced with a rotation
   statement signed by the persistent Gateway P-256 key. The PWA therefore does
   not need to pair again after a Gateway Matrix crypto restart.
@@ -104,3 +111,7 @@ It prints a copyable `codever://pair` link without printing private key
 material. State defaults outside the repository under `~/.codever/pairing`.
 `list` shows active devices and `revoke --device DEVICE_ID` revokes one locally
 trusted application device.
+
+For the local integrated Gateway, set `CODEVER_PAIR_NEW_DEVICE=1` before
+starting it to print a short-lived **Add another Codever device** invitation
+while existing devices remain active.

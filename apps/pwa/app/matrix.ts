@@ -30,12 +30,26 @@ import {
 } from "./pairing";
 import {
   signedGatewayDeviceRotationSchema,
+  signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
   type SignedPairingOffer,
   type SignedPairingRequest,
   type SignedPairingResponse,
 } from "@codever/protocol";
 import { IndexedDbReplayStore } from "./IndexedDbReplayStore";
+import {
+  CommandLifecycle,
+  type CommandCompletion,
+} from "./commandLifecycle";
+import {
+  acquireMatrixCryptoLock,
+  checkpointAndReleaseMatrixSyncStore,
+  checkpointMatrixSyncStore,
+  destroyAndReleaseMatrixSyncStore,
+  matrixCryptoLockName,
+  matrixSyncDatabaseName,
+  waitForMatrixSyncStoreClose,
+} from "./matrixSyncStore";
 
 export const MATRIX_CONFIG_STORAGE_KEY = "codever.matrix.connection.v1";
 const DEVICE_DATABASE = "codever-pwa-identity";
@@ -68,6 +82,7 @@ export type DeviceIdentity = {
 type CommandReservation = {
   commandId: string;
   sequence: number;
+  baseRevision: number;
 };
 
 type PendingOutboundCommand = CommandReservation & {
@@ -78,6 +93,7 @@ type PendingOutboundCommand = CommandReservation & {
 
 type CommandSequenceState = {
   lastAcknowledged: number;
+  lastRevision: number;
   pending?: PendingOutboundCommand;
 };
 
@@ -86,8 +102,13 @@ export type IncomingCodeverMessage = {
   sender: string;
   timestamp: number;
   encrypted: boolean;
-  kind: "agent" | "tool" | "permission" | "notice" | "error";
+  kind: "agent" | "user" | "tool" | "permission" | "notice" | "error";
   text: string;
+  commandId?: string;
+  revision?: number;
+  originDeviceId?: string;
+  originDeviceName?: string;
+  activeDeviceCount?: number;
   requestId?: string;
   streamId?: string;
   replacesEventId?: string;
@@ -100,6 +121,44 @@ export type MatrixConnectionStatus =
   | "reconnecting"
   | "offline"
   | "error";
+
+export type CollaborationState = {
+  activeDeviceCount?: number;
+  revision?: number;
+};
+
+export type CommandResultState = CommandCompletion;
+
+export type CommandSendResult = {
+  eventId: string;
+  commandId: string;
+  sequence: number;
+  revision: number;
+  completion: Promise<CommandCompletion>;
+};
+
+class RevisionConflictError extends Error {
+  constructor(
+    readonly commandId: string,
+    readonly expectedRevision: number,
+  ) {
+    super("The room changed on another device; rebasing this command.");
+    this.name = "RevisionConflictError";
+  }
+}
+
+export class CommandRevisionConflictError extends Error {
+  constructor(
+    readonly commandId: string,
+    readonly expectedRevision: number,
+    readonly payload: CommandPayload,
+  ) {
+    super(
+      "Another device updated this session. Review this action before sending it again.",
+    );
+    this.name = "CommandRevisionConflictError";
+  }
+}
 
 export type MatrixConnection = {
   readonly identity: DeviceIdentity;
@@ -114,7 +173,9 @@ export type MatrixConnection = {
     deviceName: string,
     signal?: AbortSignal,
   ): Promise<TrustedGateway>;
-  send(payload: CommandPayload): Promise<string>;
+  send(payload: CommandPayload): Promise<CommandSendResult>;
+  confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
+  discardRevisionConflict(commandId: string): Promise<void>;
   stop(): void;
 };
 
@@ -273,6 +334,7 @@ async function createSignedCommand(
     deviceId: identity.keyId,
     conversationId: config.conversationId,
     sequence: reservation.sequence,
+    baseRevision: reservation.baseRevision,
     operation: payload.operation,
     issuedAt: now,
     expiresAt: now + COMMAND_TTL_MS,
@@ -288,6 +350,8 @@ export async function connectMatrix(
     onMessage(message: IncomingCodeverMessage): void;
     onStatus(status: MatrixConnectionStatus, detail?: string): void;
     onTrustUpdated?(trust: TrustedGateway): void;
+    onCollaborationState?(state: CollaborationState): void;
+    onCommandResult?(result: CommandResultState): void;
   },
 ): Promise<MatrixConnection> {
   const config = normalizeMatrixConfig(configInput);
@@ -295,25 +359,63 @@ export async function connectMatrix(
   let activeTrust = await loadTrustedGateway(identity);
   const replayStore = new IndexedDbReplayStore();
   const sdk = await import("matrix-js-sdk");
+  const syncStoreDatabaseName = await matrixSyncDatabaseName(config);
+  await waitForMatrixSyncStoreClose(syncStoreDatabaseName);
+  const syncStore = new sdk.IndexedDBStore({
+    indexedDB: window.indexedDB,
+    dbName: syncStoreDatabaseName,
+  });
   const client = sdk.createClient({
     baseUrl: config.homeserver,
     userId: config.userId,
     accessToken: config.accessToken,
     deviceId: config.matrixDeviceId,
     timelineSupport: true,
+    store: syncStore,
   });
+  const cryptoStoreScope = await matrixCryptoLockName(config);
+  const cryptoLock = await acquireMatrixCryptoLock(cryptoStoreScope);
 
   let stopped = false;
+  let persistenceFailure: string | null = null;
+  const failPersistence = (detail: string) => {
+    if (persistenceFailure) return;
+    persistenceFailure = detail;
+    handlers.onStatus(
+      "error",
+      `${detail} Log in as a new Matrix device and pair this browser again.`,
+    );
+  };
+  const assertPersistenceHealthy = () => {
+    if (persistenceFailure) {
+      throw new Error(
+        `${persistenceFailure} Sending is locked until this browser is rebuilt as a new Matrix device and paired again.`,
+      );
+    }
+  };
+  syncStore.on("degraded", (error: Error) => {
+    if (!stopped) {
+      failPersistence(
+        `Matrix sync persistence degraded to memory: ${formatError(error)}.`,
+      );
+    }
+  });
+  syncStore.on("closed", () => {
+    if (!stopped) {
+      failPersistence(
+        "Matrix sync persistence closed unexpectedly; device-list freshness can no longer be trusted.",
+      );
+    }
+  });
   let matrixDeviceKeys: { ed25519: string; curve25519: string } | null = null;
   const seen = new Set<string>();
-  const acknowledgedCommands = new Map<string, number>();
-  const acknowledgementWaiters = new Map<
-    string,
-    { sequence: number; resolve(): void }
-  >();
+  const commandLifecycle = new CommandLifecycle();
+  const revisionConflicts = new Map<string, number>();
   const onCommandAcknowledged = async (
     commandId: string,
     sequence: number,
+    revision: number,
+    activeDeviceCount?: number,
   ): Promise<void> => {
     const trust = activeTrust;
     if (!trust) return;
@@ -321,14 +423,75 @@ export async function connectMatrix(
       config,
       identity,
       trust.certificate.certificate.certificateId,
-      { commandId, sequence },
+      { commandId, sequence, baseRevision: revision },
+      revision,
     );
-    acknowledgedCommands.set(commandId, sequence);
-    const waiter = acknowledgementWaiters.get(commandId);
-    if (waiter?.sequence === sequence) {
-      acknowledgementWaiters.delete(commandId);
-      waiter.resolve();
+    commandLifecycle.recordAcknowledgement(commandId, sequence, revision);
+    handlers.onCollaborationState?.({
+      revision,
+      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+    });
+  };
+  const onRevisionConflict = async (
+    commandId: string,
+    expectedRevision: number,
+    activeDeviceCount?: number,
+  ): Promise<void> => {
+    const trust = activeTrust;
+    if (!trust) return;
+    await recordKnownRevision(
+      config,
+      identity,
+      trust.certificate.certificate.certificateId,
+      expectedRevision,
+    );
+    revisionConflicts.set(commandId, expectedRevision);
+    handlers.onCollaborationState?.({
+      revision: expectedRevision,
+      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+    });
+    if (
+      commandLifecycle.rejectAcknowledgement(
+        commandId,
+        new RevisionConflictError(commandId, expectedRevision),
+      )
+    ) {
+      revisionConflicts.delete(commandId);
     }
+  };
+  const onAuthenticatedCommandResult = async (
+    result: CommandResultState,
+    activeDeviceCount?: number,
+  ): Promise<void> => {
+    // Persist the implicit acknowledgement before waking either sender waiter.
+    // This single IndexedDB transaction clears pending and advances both
+    // device sequence and Gateway revision even if the explicit ack is lost.
+    await onCommandAcknowledged(
+      result.commandId,
+      result.sequence,
+      result.revision,
+      activeDeviceCount,
+    );
+    commandLifecycle.recordResult(result);
+    handlers.onCommandResult?.(result);
+  };
+  const onKnownRevision = async (
+    revision: number,
+    activeDeviceCount?: number,
+  ): Promise<void> => {
+    const trust = activeTrust;
+    if (trust) {
+      await recordKnownRevision(
+        config,
+        identity,
+        trust.certificate.certificate.certificateId,
+        revision,
+      );
+    }
+    handlers.onCollaborationState?.({
+      revision,
+      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+    });
   };
   const onTimeline = (
     event: MatrixEvent,
@@ -352,13 +515,35 @@ export async function connectMatrix(
       () => activeTrust,
       replayStore,
       onCommandAcknowledged,
+      onRevisionConflict,
+      onKnownRevision,
+      onAuthenticatedCommandResult,
     ).catch((error) => {
       handlers.onStatus("error", formatError(error));
     });
   };
   const onSync = (state: string) => {
     if (stopped) return;
+    if (persistenceFailure) {
+      handlers.onStatus("error", persistenceFailure);
+      return;
+    }
     if (state === "SYNCING" || state === "PREPARED") {
+      // Do not close this IndexedDB connection synchronously: MatrixClient
+      // still finishes background stop work after stopClient() returns, and
+      // closing here can make an immediate post-pairing reconnect degrade to
+      // memory. The forced checkpoint is serialized before the next client
+      // opens the same database; the stopped client no longer writes to it.
+      void checkpointMatrixSyncStore(
+        syncStoreDatabaseName,
+        syncStore,
+      ).catch((error) => {
+        if (!stopped) {
+          failPersistence(
+            `Matrix sync state could not be checkpointed: ${formatError(error)}.`,
+          );
+        }
+      });
       handlers.onStatus("connected");
     } else if (state === "RECONNECTING" || state === "CATCHUP") {
       handlers.onStatus("reconnecting");
@@ -371,9 +556,18 @@ export async function connectMatrix(
 
   handlers.onStatus("connecting", "Opening the encrypted device store…");
   try {
+    // SDK 41 assigns the store's user factory during createClient, so startup
+    // must happen after createClient({ store }) and before the first /sync.
+    await syncStore.startup();
+    if (activeTrust && !(await syncStore.getSavedSyncToken())) {
+      throw new Error(
+        "This trusted browser has no persisted Matrix sync checkpoint, so its device list may be stale. Log in as a new Matrix device and pair this browser again.",
+      );
+    }
+    assertPersistenceHealthy();
     await client.initRustCrypto({
       useIndexedDB: true,
-      cryptoDatabasePrefix: cryptoDatabasePrefix(config),
+      cryptoDatabasePrefix: cryptoStoreScope,
     });
     const cryptoApi = client.getCrypto();
     if (!cryptoApi) {
@@ -385,6 +579,9 @@ export async function connectMatrix(
     cryptoApi.globalBlacklistUnverifiedDevices = true;
     cryptoApi.setDeviceIsolationMode(new AllDevicesIsolationMode(false));
     matrixDeviceKeys = await cryptoApi.getOwnDeviceKeys();
+    if (!matrixDeviceKeys) {
+      throw new Error("Matrix device keys were not initialized.");
+    }
     client.on(sdk.RoomEvent.Timeline, onTimeline);
     client.on(sdk.ClientEvent.Sync, onSync);
     await client.startClient({ initialSyncLimit: 30 });
@@ -420,52 +617,84 @@ export async function connectMatrix(
         () => activeTrust,
         replayStore,
         onCommandAcknowledged,
+        onRevisionConflict,
+        onKnownRevision,
+        onAuthenticatedCommandResult,
       );
     }
+    assertPersistenceHealthy();
     handlers.onStatus("connected");
   } catch (error) {
     stopped = true;
     client.off(sdk.RoomEvent.Timeline, onTimeline);
     client.off(sdk.ClientEvent.Sync, onSync);
     client.stopClient();
+    await destroyAndReleaseMatrixSyncStore(
+      syncStoreDatabaseName,
+      syncStore,
+      cryptoLock,
+    );
     handlers.onStatus("error", formatError(error));
     throw error;
   }
-
   if (!matrixDeviceKeys) {
+    await destroyAndReleaseMatrixSyncStore(
+      syncStoreDatabaseName,
+      syncStore,
+      cryptoLock,
+    );
     throw new Error("Matrix device keys were not initialized.");
   }
   const waitForCommandAcknowledgement = (
     reservation: CommandReservation,
     timeoutMs = 30_000,
-  ): Promise<void> => {
-    if (acknowledgedCommands.get(reservation.commandId) === reservation.sequence) {
-      return Promise.resolve();
+  ): Promise<number> => {
+    const conflict = revisionConflicts.get(reservation.commandId);
+    if (conflict !== undefined) {
+      revisionConflicts.delete(reservation.commandId);
+      return Promise.reject(
+        new RevisionConflictError(reservation.commandId, conflict),
+      );
     }
-    return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        if (acknowledgementWaiters.get(reservation.commandId)?.resolve === accept) {
-          acknowledgementWaiters.delete(reservation.commandId);
-        }
-        reject(
-          new Error(
-            "The Gateway did not confirm this command. It remains queued for a safe retry.",
-          ),
-        );
-      }, timeoutMs);
-      const accept = () => {
-        window.clearTimeout(timeout);
-        resolve();
-      };
-      acknowledgementWaiters.set(reservation.commandId, {
-        sequence: reservation.sequence,
-        resolve: accept,
-      });
-    });
+    return commandLifecycle.waitForAcknowledgement(
+      reservation.commandId,
+      reservation.sequence,
+      timeoutMs,
+    );
   };
   let outboundChain: Promise<unknown> = Promise.resolve();
-  const sendPayload = async (payload: CommandPayload): Promise<string> => {
+  let pendingRevisionConflict: {
+    reservation: CommandReservation;
+    payload: CommandPayload;
+    sequenceEpoch: string;
+    trust: TrustedGateway;
+    expectedRevision: number;
+  } | null = null;
+  const holdRevisionConflict = (
+    error: RevisionConflictError,
+    reservation: CommandReservation,
+    payload: CommandPayload,
+    sequenceEpoch: string,
+    trust: TrustedGateway,
+  ): never => {
+    pendingRevisionConflict = {
+      reservation,
+      payload: structuredClone(payload),
+      sequenceEpoch,
+      trust,
+      expectedRevision: error.expectedRevision,
+    };
+    throw new CommandRevisionConflictError(
+      error.commandId,
+      error.expectedRevision,
+      payload,
+    );
+  };
+  const sendPayload = async (
+    payload: CommandPayload,
+  ): Promise<CommandSendResult> => {
     if (stopped) throw new Error("Matrix connection is closed.");
+    assertPersistenceHealthy();
     const trust = activeTrust;
     if (!trust) {
       throw new Error(
@@ -474,6 +703,13 @@ export async function connectMatrix(
     }
     if (!client.isRoomEncrypted(config.roomId)) {
       throw new Error("Refusing to send to an unencrypted Matrix room.");
+    }
+    if (pendingRevisionConflict) {
+      throw new CommandRevisionConflictError(
+        pendingRevisionConflict.reservation.commandId,
+        pendingRevisionConflict.expectedRevision,
+        pendingRevisionConflict.payload,
+      );
     }
     const sequenceEpoch = trust.certificate.certificate.certificateId;
     const recovered = await retryPendingCommand(
@@ -484,9 +720,30 @@ export async function connectMatrix(
       trust,
     );
     if (recovered) {
-      await waitForCommandAcknowledgement(recovered.reservation);
-      if (JSON.stringify(recovered.payload) === JSON.stringify(payload)) {
-        return recovered.eventId;
+      try {
+        const revision = await waitForCommandAcknowledgement(
+          recovered.reservation,
+        );
+        if (JSON.stringify(recovered.payload) === JSON.stringify(payload)) {
+          return {
+            eventId: recovered.eventId,
+            commandId: recovered.reservation.commandId,
+            sequence: recovered.reservation.sequence,
+            revision,
+            completion: commandLifecycle.waitForCompletion(
+              recovered.reservation.commandId,
+            ),
+          };
+        }
+      } catch (error) {
+        if (!(error instanceof RevisionConflictError)) throw error;
+        holdRevisionConflict(
+          error,
+          recovered.reservation,
+          recovered.payload,
+          sequenceEpoch,
+          trust,
+        );
       }
     }
 
@@ -496,6 +753,49 @@ export async function connectMatrix(
       sequenceEpoch,
       payload,
     );
+    return transmitOnce(reservation, payload, sequenceEpoch, trust);
+  };
+  const transmitOnce = async (
+    reservation: CommandReservation,
+    payload: CommandPayload,
+    sequenceEpoch: string,
+    trust: TrustedGateway,
+  ): Promise<CommandSendResult> => {
+    try {
+      const eventId = await transmitReservation(
+        reservation,
+        payload,
+        sequenceEpoch,
+        trust,
+      );
+      const revision = await waitForCommandAcknowledgement(reservation);
+      return {
+        eventId,
+        commandId: reservation.commandId,
+        sequence: reservation.sequence,
+        revision,
+        completion: commandLifecycle.waitForCompletion(
+          reservation.commandId,
+        ),
+      };
+    } catch (error) {
+      if (!(error instanceof RevisionConflictError)) throw error;
+      return holdRevisionConflict(
+        error,
+        reservation,
+        payload,
+        sequenceEpoch,
+        trust,
+      );
+    }
+  };
+  const transmitReservation = async (
+    reservation: CommandReservation,
+    payload: CommandPayload,
+    sequenceEpoch: string,
+    trust: TrustedGateway,
+  ): Promise<string> => {
+    assertPersistenceHealthy();
     let content: Record<string, unknown>;
     try {
       const envelope = await createSignedCommand(
@@ -557,7 +857,6 @@ export async function connectMatrix(
       content,
       `codever.${reservation.commandId}`,
     );
-    await waitForCommandAcknowledgement(reservation);
     return response.event_id;
   };
   return {
@@ -573,6 +872,7 @@ export async function connectMatrix(
     client,
     async pair(preview, deviceName, signal) {
       if (stopped) throw new Error("Matrix connection is closed.");
+      assertPersistenceHealthy();
       const offerTransport = preview.transport;
       assertMatchingPairingRoute(config, offerTransport);
       await verifyAndPinGatewayDevice(client, offerTransport);
@@ -608,6 +908,52 @@ export async function connectMatrix(
       );
       return operation;
     },
+    confirmRevisionRetry(commandId) {
+      const operation = outboundChain.then(async () => {
+        assertPersistenceHealthy();
+        const conflict = pendingRevisionConflict;
+        if (!conflict || conflict.reservation.commandId !== commandId) {
+          throw new Error("This conflicted command is no longer pending.");
+        }
+        const reservation = await rebasePendingCommand(
+          config,
+          identity,
+          conflict.sequenceEpoch,
+          conflict.reservation,
+          conflict.expectedRevision,
+        );
+        pendingRevisionConflict = null;
+        return transmitOnce(
+          reservation,
+          conflict.payload,
+          conflict.sequenceEpoch,
+          conflict.trust,
+        );
+      });
+      outboundChain = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    },
+    discardRevisionConflict(commandId) {
+      const operation = outboundChain.then(async () => {
+        const conflict = pendingRevisionConflict;
+        if (!conflict || conflict.reservation.commandId !== commandId) return;
+        await discardPendingCommand(
+          config,
+          identity,
+          conflict.sequenceEpoch,
+          commandId,
+        );
+        pendingRevisionConflict = null;
+      });
+      outboundChain = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    },
     stop() {
       if (stopped) return;
       stopped = true;
@@ -615,6 +961,16 @@ export async function connectMatrix(
       client.off(sdk.ClientEvent.Sync, onSync);
       client.stopClient();
       handlers.onStatus("offline");
+      void checkpointAndReleaseMatrixSyncStore(
+        syncStoreDatabaseName,
+        syncStore,
+        cryptoLock,
+      ).catch((error) => {
+        handlers.onStatus(
+          "error",
+          `Matrix sync state could not be saved: ${formatError(error)}`,
+        );
+      });
     },
   };
 }
@@ -773,12 +1129,9 @@ async function verifyAndPinGatewayDevice(
     await new Promise((resolve) => window.setTimeout(resolve, 250));
   } while (Date.now() < deadline);
   if (!device) {
-    // The SDK's cached device map can remain stale for tracked users even
-    // after a successful keys query. Matrix device verification is only a
-    // transport-layer enhancement: the signed offer, hidden challenge, exact
-    // event sender/device binding and P-256 response signature remain the
-    // application trust root, so a stale SDK cache must not block pairing.
-    return;
+    throw new Error(
+      "The signed Gateway Matrix device is not present in the trusted device list. Log in the Gateway as a new Matrix device, then pair this browser again.",
+    );
   }
   if (device.getFingerprint() !== gateway.ed25519) {
     throw new Error("The Gateway device fingerprint does not match the invitation.");
@@ -815,8 +1168,43 @@ export function parseCodeverEvent(
     asRecord(effectiveContent["io.codever"]) ?? extension;
   const body =
     typeof effectiveContent.body === "string" ? effectiveContent.body : "";
+  const collaborationMetadata = {
+    ...(isPositiveInteger(effectiveExtension.revision)
+      ? { revision: effectiveExtension.revision }
+      : {}),
+    ...(isPositiveInteger(effectiveExtension.active_device_count)
+      ? { activeDeviceCount: effectiveExtension.active_device_count }
+      : {}),
+  };
 
   if (effectiveExtension.kind === "signed_command") return null;
+  if (
+    effectiveExtension.kind === "collaboration_command" &&
+    effectiveExtension.operation === "prompt" &&
+    typeof effectiveExtension.command_id === "string" &&
+    typeof effectiveExtension.text === "string" &&
+    isPositiveInteger(effectiveExtension.revision) &&
+    typeof effectiveExtension.origin_device_id === "string" &&
+    typeof effectiveExtension.origin_device_name === "string"
+  ) {
+    return {
+      eventId,
+      sender,
+      timestamp,
+      encrypted,
+      ...collaborationMetadata,
+      kind: "user",
+      text: effectiveExtension.text,
+      commandId: effectiveExtension.command_id,
+      revision: effectiveExtension.revision,
+      originDeviceId: effectiveExtension.origin_device_id,
+      originDeviceName: effectiveExtension.origin_device_name,
+      ...(isPositiveInteger(effectiveExtension.active_device_count)
+        ? { activeDeviceCount: effectiveExtension.active_device_count }
+        : {}),
+      raw: effectiveExtension,
+    };
+  }
   if (effectiveExtension.kind === "message") {
     const ui = asRecord(effectiveExtension.ui);
     return {
@@ -824,6 +1212,7 @@ export function parseCodeverEvent(
       sender,
       timestamp,
       encrypted,
+      ...collaborationMetadata,
       kind: ui?.kind === "tool_card" ? "tool" : "agent",
       text: body,
       ...(typeof relation?.event_id === "string"
@@ -838,6 +1227,7 @@ export function parseCodeverEvent(
       sender,
       timestamp,
       encrypted,
+      ...collaborationMetadata,
       kind: "permission",
       text:
         typeof effectiveExtension.title === "string"
@@ -855,6 +1245,7 @@ export function parseCodeverEvent(
       sender,
       timestamp,
       encrypted,
+      ...collaborationMetadata,
       kind: "notice",
       text: body || "Gateway status updated.",
       raw: effectiveExtension,
@@ -868,7 +1259,14 @@ export function parseCodeverEvent(
   const event = asRecord(envelope?.event);
   const payload = asRecord(event?.payload);
   if (!payload || typeof payload.type !== "string") return null;
-  const common = { eventId, sender, timestamp, encrypted, raw: payload };
+  const common = {
+    eventId,
+    sender,
+    timestamp,
+    encrypted,
+    ...collaborationMetadata,
+    raw: payload,
+  };
 
   switch (payload.type) {
     case "agent.text.delta":
@@ -936,6 +1334,21 @@ async function forwardEvent(
   onCommandAcknowledged?: (
     commandId: string,
     sequence: number,
+    revision: number,
+    activeDeviceCount?: number,
+  ) => Promise<void>,
+  onRevisionConflict?: (
+    commandId: string,
+    expectedRevision: number,
+    activeDeviceCount?: number,
+  ) => Promise<void>,
+  onKnownRevision?: (
+    revision: number,
+    activeDeviceCount?: number,
+  ) => Promise<void>,
+  onCommandResult?: (
+    result: CommandResultState,
+    activeDeviceCount?: number,
   ) => Promise<void>,
 ): Promise<void> {
   const eventId = event.getId();
@@ -993,6 +1406,22 @@ async function forwardEvent(
     seen.add(eventId);
     return;
   }
+  const routedEnvelope = signedSecureEnvelopeSchema.safeParse(
+    extension.secure_envelope,
+  );
+  if (
+    routedEnvelope.success &&
+    (routedEnvelope.data.envelope.recipientDeviceId !==
+      trust.certificate.certificate.deviceId ||
+      routedEnvelope.data.envelope.recipientKeyId !== identity.keyId)
+  ) {
+    // A shared room contains one independently encrypted copy per paired
+    // browser. The authenticated open below remains mandatory for messages
+    // addressed to us; this untrusted header is used only to route away
+    // another device's ciphertext without turning the connection red.
+    seen.add(eventId);
+    return;
+  }
   let opened;
   try {
     opened = await openSecureEnvelope(extension.secure_envelope, {
@@ -1030,12 +1459,73 @@ async function forwardEvent(
     typeof decryptedExtension.command_id === "string" &&
     typeof decryptedExtension.sequence === "number" &&
     Number.isSafeInteger(decryptedExtension.sequence) &&
-    decryptedExtension.sequence > 0
+    decryptedExtension.sequence > 0 &&
+    isPositiveInteger(decryptedExtension.revision)
   ) {
     await onCommandAcknowledged?.(
       decryptedExtension.command_id,
       decryptedExtension.sequence,
+      decryptedExtension.revision,
+      isPositiveInteger(decryptedExtension.active_device_count)
+        ? decryptedExtension.active_device_count
+        : undefined,
     );
+    seen.add(eventId);
+    return;
+  }
+  if (
+    decryptedExtension?.kind === "revision_conflict" &&
+    typeof decryptedExtension.command_id === "string" &&
+    isNonnegativeInteger(decryptedExtension.expected_revision)
+  ) {
+    await onRevisionConflict?.(
+      decryptedExtension.command_id,
+      decryptedExtension.expected_revision,
+      isPositiveInteger(decryptedExtension.active_device_count)
+        ? decryptedExtension.active_device_count
+        : undefined,
+    );
+    seen.add(eventId);
+    return;
+  }
+  if (
+    decryptedExtension?.kind === "command_result" &&
+    typeof decryptedExtension.command_id === "string" &&
+    isPositiveInteger(decryptedExtension.sequence) &&
+    isPositiveInteger(decryptedExtension.revision) &&
+    (decryptedExtension.outcome === "succeeded" ||
+      decryptedExtension.outcome === "failed")
+  ) {
+    const activeDeviceCount = isPositiveInteger(
+      decryptedExtension.active_device_count,
+    )
+      ? decryptedExtension.active_device_count
+      : undefined;
+    await onCommandResult?.(
+      {
+        commandId: decryptedExtension.command_id,
+        sequence: decryptedExtension.sequence,
+        revision: decryptedExtension.revision,
+        outcome: decryptedExtension.outcome,
+      },
+      activeDeviceCount,
+    );
+    if (decryptedExtension.outcome === "failed") {
+      onMessage({
+        eventId,
+        sender: trust.gatewayId,
+        timestamp: event.getTs(),
+        encrypted: true,
+        kind: "error",
+        text:
+          typeof decryptedExtension.error === "string"
+            ? decryptedExtension.error
+            : "The Gateway accepted the command but could not complete it.",
+        commandId: decryptedExtension.command_id,
+        revision: decryptedExtension.revision,
+        raw: decryptedExtension,
+      });
+    }
     seen.add(eventId);
     return;
   }
@@ -1048,6 +1538,9 @@ async function forwardEvent(
   );
   seen.add(eventId);
   if (!parsed) return;
+  if (parsed.revision) {
+    await onKnownRevision?.(parsed.revision, parsed.activeDeviceCount);
+  }
   onMessage(parsed);
 }
 
@@ -1244,6 +1737,7 @@ async function reserveCommandSequence(
         reservation = {
           commandId: crypto.randomUUID(),
           sequence: state.lastAcknowledged + 1,
+          baseRevision: state.lastRevision,
         };
         store.put(
           {
@@ -1312,25 +1806,88 @@ async function acknowledgePendingCommand(
   identity: DeviceIdentity,
   sequenceEpoch: string,
   reservation: CommandReservation,
+  revision: number,
 ): Promise<void> {
   await updateCommandSequenceState(
     commandSequenceScope(config, identity, sequenceEpoch),
     (state) => {
-      if (state.lastAcknowledged >= reservation.sequence) return state;
+      if (state.lastAcknowledged >= reservation.sequence) {
+        return {
+          ...state,
+          lastRevision: Math.max(state.lastRevision, revision),
+        };
+      }
       if (!state.pending) {
-        return { lastAcknowledged: reservation.sequence };
+        return {
+          lastAcknowledged: reservation.sequence,
+          lastRevision: Math.max(state.lastRevision, revision),
+        };
       }
       if (
         state.pending.commandId === reservation.commandId &&
         state.pending.sequence === reservation.sequence
       ) {
-        return { lastAcknowledged: reservation.sequence };
+        return {
+          lastAcknowledged: reservation.sequence,
+          lastRevision: Math.max(state.lastRevision, revision),
+        };
       }
       // A historical acknowledgement for a different command must not clear
       // the current outbox reservation.
       return state;
     },
   );
+}
+
+async function recordKnownRevision(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  revision: number,
+): Promise<void> {
+  await updateCommandSequenceState(
+    commandSequenceScope(config, identity, sequenceEpoch),
+    (state) => ({
+      ...state,
+      lastRevision: Math.max(state.lastRevision, revision),
+    }),
+  );
+}
+
+async function rebasePendingCommand(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  reservation: CommandReservation,
+  expectedRevision: number,
+): Promise<CommandReservation> {
+  const next: CommandReservation = {
+    commandId: crypto.randomUUID(),
+    sequence: reservation.sequence,
+    baseRevision: expectedRevision,
+  };
+  await updateCommandSequenceState(
+    commandSequenceScope(config, identity, sequenceEpoch),
+    (state) => {
+      if (
+        state.pending?.commandId !== reservation.commandId ||
+        state.pending.sequence !== reservation.sequence
+      ) {
+        throw new Error("The command changed before it could be safely rebased.");
+      }
+      return {
+        ...state,
+        lastRevision: Math.max(state.lastRevision, expectedRevision),
+        pending: {
+          ...state.pending,
+          ...next,
+          createdAt: Date.now(),
+          plaintext: undefined,
+        },
+      };
+    },
+  );
+  return next;
 }
 
 async function abandonIncompleteCommand(
@@ -1343,7 +1900,28 @@ async function abandonIncompleteCommand(
     commandSequenceScope(config, identity, sequenceEpoch),
     (state) =>
       state.pending?.commandId === commandId && !state.pending.plaintext
-        ? { lastAcknowledged: state.lastAcknowledged }
+        ? {
+            lastAcknowledged: state.lastAcknowledged,
+            lastRevision: state.lastRevision,
+          }
+        : state,
+  );
+}
+
+async function discardPendingCommand(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  commandId: string,
+): Promise<void> {
+  await updateCommandSequenceState(
+    commandSequenceScope(config, identity, sequenceEpoch),
+    (state) =>
+      state.pending?.commandId === commandId
+        ? {
+            lastAcknowledged: state.lastAcknowledged,
+            lastRevision: state.lastRevision,
+          }
         : state,
   );
 }
@@ -1369,7 +1947,10 @@ async function retryPendingCommand(
     }
     await updateCommandSequenceState(scope, (current) =>
       current.pending?.commandId === pending.commandId
-        ? { lastAcknowledged: current.lastAcknowledged }
+        ? {
+            lastAcknowledged: current.lastAcknowledged,
+            lastRevision: current.lastRevision,
+          }
         : current,
     );
     return null;
@@ -1489,7 +2070,7 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     Number.isSafeInteger(value) &&
     value >= 0
   ) {
-    return { lastAcknowledged: value };
+    return { lastAcknowledged: value, lastRevision: 0 };
   }
   const record = asRecord(value);
   const lastAcknowledged = record?.lastAcknowledged;
@@ -1498,10 +2079,16 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     !Number.isSafeInteger(lastAcknowledged) ||
     lastAcknowledged < 0
   ) {
-    return { lastAcknowledged: 0 };
+    return { lastAcknowledged: 0, lastRevision: 0 };
   }
-  const pending = asRecord(record.pending);
-  if (!pending) return { lastAcknowledged };
+  const lastRevision =
+    typeof record?.lastRevision === "number" &&
+    Number.isSafeInteger(record.lastRevision) &&
+    record.lastRevision >= 0
+      ? record.lastRevision
+      : 0;
+  const pending = asRecord(record?.pending);
+  if (!pending) return { lastAcknowledged, lastRevision };
   if (
     typeof pending.commandId !== "string" ||
     typeof pending.sequence !== "number" ||
@@ -1514,9 +2101,16 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
   }
   return {
     lastAcknowledged,
+    lastRevision,
     pending: {
       commandId: pending.commandId,
       sequence: pending.sequence,
+      baseRevision:
+        typeof pending.baseRevision === "number" &&
+        Number.isSafeInteger(pending.baseRevision) &&
+        pending.baseRevision >= 0
+          ? pending.baseRevision
+          : lastRevision,
       createdAt: pending.createdAt,
       payload: pending.payload as CommandPayload,
       ...(asRecord(pending.plaintext)
@@ -1552,14 +2146,6 @@ function writeIdentity(
   });
 }
 
-function cryptoDatabasePrefix(config: MatrixConnectionConfig): string {
-  const safeIdentity = `${config.userId}-${config.matrixDeviceId}`.replace(
-    /[^A-Za-z0-9_-]/g,
-    "_",
-  );
-  return `codever-matrix-${safeIdentity}`;
-}
-
 function fallbackBody(payload: CommandPayload): string {
   switch (payload.operation) {
     case "prompt":
@@ -1587,6 +2173,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+  );
+}
+
+function isNonnegativeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  );
 }
 
 function humanizeField(value: string): string {

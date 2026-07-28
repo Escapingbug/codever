@@ -80,17 +80,58 @@ that passes local validation.
 - Replaying one ciphertext or command ID executes at most once across restart.
 - Reordering device-to-Gateway commands produces a sequence gap and zero
   execution for the out-of-order command.
+- Concurrent commands from different devices carry a Gateway conversation
+  revision. Only a command based on the current revision is accepted; a stale
+  writer receives an application-encrypted conflict. The PWA shows the
+  conflicting action and requires the user to review it before creating a new
+  command ID and signature against the current revision.
 - The PWA advances its durable outbox only after a Gateway-signed secure
   acknowledgement, never from a Matrix transaction acknowledgement.
+- A valid Gateway-signed final result also completes the matching durable
+  reservation atomically. This covers result-before-ack and permanently
+  missing-ack delivery without permitting a sequence to be reused.
 - A forged Gateway response is rejected by the PWA.
+- Every Gateway reply is independently encrypted for each active application
+  device. Revoking one device removes only that recipient from future fan-out.
+- Collaboration prompts, command results and per-device edit targets use a
+  durable local recipient outbox. Missing copies retain stable Matrix
+  transaction IDs and are retried without duplicating successful recipients.
 
 ## Current product boundary
 
-- Protocol v1 intentionally allows one paired application device per room.
-  The local Gateway refuses to open a second enrollment flow while one active
-  device exists; multi-recipient reply fan-out is a later protocol version.
+- Protocol v1 supports multiple paired application devices in one room. Each
+  device has its own P-256 identity, certificate, command sequence and Matrix
+  transaction stream. The Gateway never shares an application group key.
+- Matrix can observe fan-out traffic metadata, including the number and timing
+  of opaque events. It cannot identify their plaintext, forge a recipient
+  envelope, or silently reorder accepted cross-device mutations because the
+  Gateway conversation revision is checked locally.
+- Physical Matrix event IDs differ by recipient. The Gateway persists the
+  per-recipient mapping used by later edits. A device added after the original
+  message has no historical target, so its first edit is safely delivered as a
+  standalone message.
+- Pending recipient copies are bound to the original application certificate
+  and public-key generation. Revocation or re-pairing the same device ID cannot
+  transfer old queued plaintext to a new key.
+- The durable recipient outbox contains plaintext on the trusted Gateway disk
+  until its recipient copies are delivered. Protect it with the same operating
+  system account and storage controls as the Gateway identity and session data.
 - The local Gateway checks the trusted-device registry for every command, so a
   CLI revocation blocks new Agent operations without relying on Matrix state.
 - If a queued command exceeds its signed validity window before the Gateway
   acknowledges it, the PWA fails closed and asks the user to re-pair. A new
   certificate generation starts a fresh ordered-command epoch.
+- Matrix sync tokens are persisted per homeserver, user, Matrix device and
+  room. They are availability state, not trust state: an observed device-list
+  change is accepted only when the persistent Gateway application key signs
+  the exact replacement transport identity.
+- The PWA holds an exclusive Web Lock for the full lifetime of each Matrix
+  crypto database. A second tab, or a browser without Web Locks, fails closed
+  instead of sharing Rust crypto state.
+- An IndexedDB degradation, unexpected close or failed forced checkpoint
+  permanently disables mutations for that connection. Later sync callbacks
+  cannot restore an online state; the device must be rebuilt and re-paired.
+- The first upgrade from a build without a persisted sync token cannot
+  reconstruct device-list changes already omitted by an initial sync. If the
+  signed Gateway Matrix device is absent from the local crypto store, the PWA
+  fails closed and requires a new Matrix device plus application re-pairing.

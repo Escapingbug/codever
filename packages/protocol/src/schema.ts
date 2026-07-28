@@ -83,6 +83,8 @@ export const commandSchema = z
     deviceId: opaqueId,
     conversationId: opaqueId,
     sequence: z.number().int().positive(),
+    /** Last Gateway-assigned conversation revision observed by this device. */
+    baseRevision: z.number().int().nonnegative(),
     operation: z.enum(['prompt', 'cancel', 'decision', 'session.settings']),
     issuedAt: timestamp,
     expiresAt: timestamp,

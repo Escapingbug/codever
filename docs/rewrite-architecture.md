@@ -68,6 +68,20 @@ display data from encrypted Codever events.
    enrolled device, Gateway and conversation.
 5. Stable envelope/command IDs and persistent replay ledgers make redelivery
    idempotent.
+6. A room may contain multiple independently enrolled PWA devices. Gateway
+   output is fanned out as one P-256 envelope per recipient; there is no shared
+   application decryption key.
+7. Each device owns an independent command sequence, while a durable
+   conversation revision provides cross-device compare-and-swap ordering.
+   Stale concurrent mutations are rejected and shown for user review; only an
+   explicit confirmation creates a new signature against the revision returned
+   by the Gateway.
+8. Gateway fan-out is staged in a durable, certificate-bound per-recipient
+   outbox. Missing copies are retried with stable Matrix transactions, while
+   already delivered devices never receive a logical duplicate.
+9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
+   device-list changes can therefore be caught up before a Gateway-signed
+   transport rotation is pinned; the sync checkpoint itself grants no trust.
 
 ## Compatibility modes
 

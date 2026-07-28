@@ -236,6 +236,7 @@ export class GatewayPairingService {
       requestId: request.request.requestId,
       requestDigest: await pairingRequestDigest(request),
       gatewayId: this.identity.gatewayId,
+      activeDeviceCount: (await this.registry.listActive(now)).length + 1,
       certificate,
       issuedAt: now,
       // The offer is already atomically consumed. Keep the exact persisted

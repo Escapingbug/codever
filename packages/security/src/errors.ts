@@ -7,6 +7,7 @@ export type SecurityErrorCode =
   | 'lifetime_exceeded'
   | 'replay'
   | 'sequence'
+  | 'revision_conflict'
   | 'idempotency_conflict'
   | 'idempotency_state'
 

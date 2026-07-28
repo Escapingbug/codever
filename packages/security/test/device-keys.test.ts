@@ -22,6 +22,7 @@ function command(): CodeverCommand {
     deviceId: 'device-1',
     conversationId: 'conversation-1',
     sequence: 1,
+    baseRevision: 0,
     operation: 'prompt',
     issuedAt: now - 1,
     expiresAt: now + 60_000,

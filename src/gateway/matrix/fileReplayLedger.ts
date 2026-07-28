@@ -10,6 +10,29 @@ interface PersistedClaimBatch {
         scope: string
         value: number
     }
+    revision?: {
+        scope: string
+        value: number
+        commandKey: string
+    }
+}
+
+export interface CommandClaimResult {
+    status: 'accepted' | 'duplicate'
+    revision: number
+}
+
+export class RevisionConflictError extends SecurityError {
+    constructor(
+        readonly expectedRevision: number,
+        readonly receivedBaseRevision: number,
+    ) {
+        super(
+            'revision_conflict',
+            `Expected base revision ${expectedRevision}, received ${receivedBaseRevision}`,
+        )
+        this.name = 'RevisionConflictError'
+    }
 }
 
 /**
@@ -21,6 +44,8 @@ interface PersistedClaimBatch {
 export class FileCommandReplayStore implements ReplayStore {
     private readonly claims = new Map<string, number>()
     private readonly sequences = new Map<string, number>()
+    private readonly revisions = new Map<string, number>()
+    private readonly commandRevisions = new Map<string, number>()
     private initialized = false
     private chain: Promise<unknown> = Promise.resolve()
 
@@ -60,7 +85,7 @@ export class FileCommandReplayStore implements ReplayStore {
         command: CodeverCommand,
         now: number,
         sequenceEpoch = 'legacy-v1',
-    ): Promise<'accepted' | 'duplicate'> {
+    ): Promise<CommandClaimResult> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
             await this.pruneInternal(now)
@@ -74,6 +99,10 @@ export class FileCommandReplayStore implements ReplayStore {
                 command.conversationId,
                 sequenceEpoch,
             ])
+            const revisionScope = canonicalJson([
+                command.gatewayId,
+                command.conversationId,
+            ])
             const nextClaims: ReplayClaim[] = [
                 { key: `${scope}:nonce:${command.nonce}`, expiresAt: command.expiresAt },
                 { key: `${scope}:command:${command.commandId}`, expiresAt: command.expiresAt },
@@ -81,7 +110,11 @@ export class FileCommandReplayStore implements ReplayStore {
             const existingClaims = nextClaims.filter(claim => this.claims.has(claim.key)).length
             const lastSequence = this.sequences.get(scope) ?? 0
             if (existingClaims === nextClaims.length && command.sequence <= lastSequence) {
-                return 'duplicate' as const
+                const revision = this.commandRevisions.get(nextClaims[1]?.key ?? '')
+                if (revision === undefined) {
+                    throw new Error('Accepted command is missing its persisted conversation revision')
+                }
+                return { status: 'duplicate' as const, revision }
             }
             if (existingClaims > 0) {
                 throw new SecurityError('replay', 'Command nonce or command id has already been used')
@@ -93,16 +126,26 @@ export class FileCommandReplayStore implements ReplayStore {
                     `Expected command sequence ${expected}, received ${command.sequence}`,
                 )
             }
+            const currentRevision = this.revisions.get(revisionScope) ?? 0
+            if (command.baseRevision !== currentRevision) {
+                throw new RevisionConflictError(currentRevision, command.baseRevision)
+            }
+            const revision = currentRevision + 1
+            const commandKey = nextClaims[1]?.key
+            if (!commandKey) throw new Error('Command replay claim is missing')
 
             const record: PersistedClaimBatch = {
                 version: 1,
                 claims: nextClaims,
                 sequence: { scope, value: command.sequence },
+                revision: { scope: revisionScope, value: revision, commandKey },
             }
             await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             this.sequences.set(scope, command.sequence)
-            return 'accepted' as const
+            this.revisions.set(revisionScope, revision)
+            this.commandRevisions.set(commandKey, revision)
+            return { status: 'accepted' as const, revision }
         })
         this.chain = operation.then(() => undefined, () => undefined)
         return operation
@@ -153,6 +196,14 @@ export class FileCommandReplayStore implements ReplayStore {
                 }
                 this.sequences.set(value.sequence.scope, value.sequence.value)
             }
+            if (value.revision) {
+                const existing = this.revisions.get(value.revision.scope) ?? 0
+                if (value.revision.value !== existing + 1) {
+                    throw new Error(`Non-contiguous conversation revision at line ${index + 1}`)
+                }
+                this.revisions.set(value.revision.scope, value.revision.value)
+                this.commandRevisions.set(value.revision.commandKey, value.revision.value)
+            }
         }
         this.initialized = true
     }
@@ -183,14 +234,27 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
             && item.expiresAt >= 0
     })
     if (!validClaims) return false
-    if (record.sequence === undefined) return true
-    if (!record.sequence || typeof record.sequence !== 'object') return false
-    const sequence = record.sequence as Record<string, unknown>
-    return typeof sequence.scope === 'string'
+    if (record.sequence !== undefined) {
+        if (!record.sequence || typeof record.sequence !== 'object') return false
+        const sequence = record.sequence as Record<string, unknown>
+        if (!(typeof sequence.scope === 'string'
         && sequence.scope.length > 0
         && typeof sequence.value === 'number'
         && Number.isSafeInteger(sequence.value)
-        && sequence.value > 0
+        && sequence.value > 0)) return false
+    }
+    if (record.revision !== undefined) {
+        if (!record.revision || typeof record.revision !== 'object') return false
+        const revision = record.revision as Record<string, unknown>
+        if (!(typeof revision.scope === 'string'
+            && revision.scope.length > 0
+            && typeof revision.value === 'number'
+            && Number.isSafeInteger(revision.value)
+            && revision.value > 0
+            && typeof revision.commandKey === 'string'
+            && revision.commandKey.length > 0)) return false
+    }
+    return true
 }
 
 function isMissingFile(error: unknown): boolean {

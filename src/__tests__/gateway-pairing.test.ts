@@ -157,6 +157,47 @@ describe('Gateway pairing', () => {
     })
   })
 
+  it('rejects a second active device ID that reuses an application key', async () => {
+    const fixture = await pairingFixture()
+    const sharedKeys = await generateDeviceKeyPair()
+    const firstOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now,
+    })
+    const first = await createSignedPairingRequest({
+      signedOffer: firstOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Alice phone',
+      deviceKeys: sharedKeys,
+      deviceTransport: deviceTransport(),
+      now: now + 1_000,
+    })
+    await fixture.service.receiveRequest(first.signedRequest, now + 2_000)
+
+    const secondOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now: now + 3_000,
+    })
+    const second = await createSignedPairingRequest({
+      signedOffer: secondOffer.signedOffer,
+      deviceId: 'laptop-two',
+      deviceName: 'Alice laptop',
+      deviceKeys: sharedKeys,
+      deviceTransport: {
+        ...deviceTransport(),
+        deviceId: 'PWA_DEVICE_TWO',
+        ed25519: 'device-ed25519-second-key',
+      },
+      now: now + 4_000,
+    })
+
+    await expect(
+      fixture.service.receiveRequest(second.signedRequest, now + 5_000),
+    ).rejects.toThrow('already uses this application key')
+  })
+
   it('signs a Matrix device rotation with the stable Gateway key', async () => {
     const fixture = await pairingFixture()
     const previousTransport = gatewayTransport()

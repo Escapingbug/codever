@@ -105,6 +105,7 @@ const currentTransport = {
 }
 
 let active = await registry.listActive()
+let acceptNewOffers = false
 if (active.length === 0) {
     const created = await pairingService.createOffer({
         gatewayName: 'Codever local Gateway',
@@ -149,6 +150,26 @@ if (active.length === 0) {
     if (rotated) {
         process.stdout.write('Gateway Matrix transport key rotated and signed automatically.\n')
     }
+    if (process.env.CODEVER_PAIR_NEW_DEVICE === '1') {
+        const created = await pairingService.createOffer({
+            gatewayName: 'Codever local Gateway',
+            gatewayTransport: currentTransport,
+        })
+        const invitationCode = await pairingVerificationCode(
+            created.signedOffer.offer.offerId,
+            created.signedOffer.offer.challenge,
+            created.signedOffer.offer.gatewayKey.keyId,
+        )
+        process.stdout.write('\nAdd another Codever device:\n\n')
+        process.stdout.write(await QRCode.toString(created.link, {
+            type: 'terminal',
+            small: true,
+            errorCorrectionLevel: 'L',
+        }))
+        process.stdout.write(`\nInvitation code: ${formatCode(invitationCode)}\n`)
+        process.stdout.write(`Pairing link (paste fallback):\n${created.link}\n\n`)
+        acceptNewOffers = true
+    }
 }
 
 const trustedDevices = active.map(trustedDeviceFromRecord)
@@ -157,6 +178,10 @@ const stopPairingRecovery = listenForMatrixPairingRequests({
     service: pairingService,
     registry,
     gatewayTransport: currentTransport,
+    acceptNewOffers,
+    onAccepted: record => {
+        process.stdout.write(`Device ${record.certificate.certificate.deviceName} is now active.\n`)
+    },
     onRejected: error => {
         process.stderr.write(`[matrix-pairing-recovery] rejected: ${formatError(error)}\n`)
     },
@@ -191,6 +216,8 @@ const config: MatrixGatewayConfig = {
 }
 const runner = new MatrixGatewayRunner(config, {
     client,
+    listTrustedDevices: async () =>
+        (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
         (await registry.get(deviceId))?.status === 'active',
     onRejected: (event, error) => {

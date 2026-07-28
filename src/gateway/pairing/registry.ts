@@ -128,6 +128,15 @@ export class FileTrustedDeviceRegistry {
       const deviceId = certificate.certificate.deviceId
       const existing = state.trustedDevices[deviceId]
       if (existing?.status === 'active') throw new Error(`Device is already trusted: ${deviceId}`)
+      const keyId = certificate.certificate.deviceKey.keyId
+      const duplicateKey = Object.values(state.trustedDevices).find(record =>
+        record.status === 'active'
+        && record.certificate.certificate.deviceId !== deviceId
+        && record.certificate.certificate.deviceKey.keyId === keyId,
+      )
+      if (duplicateKey) {
+        throw new Error('An active device already uses this application key')
+      }
       const record: TrustedDeviceRecord = {
         status: 'active',
         certificate: structuredClone(certificate),

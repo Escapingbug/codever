@@ -88,6 +88,33 @@ and starts the configured provider without a restart.
 Send a prompt in the chat. It should appear in the Gateway terminal's provider
 session, and the encrypted response should appear in the PWA.
 
+### Add a second collaborating device
+
+Keep the first PWA paired. Restart the local Gateway with an explicit local
+enrollment window:
+
+```powershell
+$env:CODEVER_PAIR_NEW_DEVICE = '1'
+npm run dev:matrix-gateway
+```
+
+The persistent Gateway identity signs its new Matrix transport device and
+prints an **Add another Codever device** QR/link. Open the PWA in another
+browser profile, device, or origin so it receives an independent application
+key, then pair with a fresh Matrix device access token.
+
+Both PWAs should show two active devices. A prompt from either PWA appears in
+the other with its originating device name and Gateway revision. Agent replies,
+streaming edits and permission requests are independently encrypted to both
+devices. Concurrent writes produce a visible review card on the stale device;
+the action is discarded or re-signed only after the user reviews the latest
+messages and confirms it.
+
+Use the pairing CLI `list` and `revoke --device DEVICE_ID` commands from
+[pairing-gateway.md](pairing-gateway.md) to revoke one device. The remaining
+PWA continues receiving replies; the revoked device receives no future
+application-layer copies and cannot execute new commands.
+
 To select another built-in or configured provider:
 
 ```powershell
@@ -104,12 +131,25 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
 
 ## Current test boundary
 
-- Browser crypto is persisted in IndexedDB.
+- Browser crypto and the Matrix `/sync` checkpoint are persisted in
+  device-scoped IndexedDB databases. The PWA forces a checkpoint after initial
+  sync and on explicit disconnect so a later reconnect can consume device-list
+  changes that happened while it was offline.
+- Keep only one Codever tab open for a given Matrix device. The PWA enforces
+  this with a full-lifetime Web Lock and rejects a second tab before either
+  instance can share the Rust crypto database.
+- If a previously signed Gateway Matrix device is not visible to the Matrix
+  crypto store, the PWA fails closed instead of trusting room state. This can
+  occur on the first upgrade from an older build that never persisted a sync
+  token; sign in as a new Matrix device and pair it again.
 - The localhost Gateway intentionally uses an in-memory Matrix crypto store and
   a fresh Matrix device on every start. This is allowed only by the explicit
   local-test flag. The fresh device is signed by the persistent Gateway P-256
   application key, so the PWA updates its Matrix pin automatically without
   another user pairing action.
+- The local Gateway's application delivery outbox is durable. Restart and
+  short Matrix outages should recover only missing recipient copies, using
+  their original stable transactions and certificate generation.
 - An already paired PWA follows that signed rotation. A pairing request that
   has not yet received its first certificate cannot survive this local
   Gateway's fresh Matrix-device restart; rescan the new QR. Production desktop
@@ -117,5 +157,8 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
 - The Gateway application identity, trusted devices, one-time offer replay
   ledger and current rotation head are persisted independently of Matrix.
   The local fixture stores them in ignored `dev/matrix/gateway-data`.
+- Per-recipient live-edit event mappings are currently process-local. After a
+  restart, an edit for an older message is delivered as a new independently
+  encrypted message rather than referencing another device's Matrix event ID.
 - The hosted PWA requires an HTTPS Matrix homeserver. Browsers will block its
   connection to this HTTP localhost fixture as mixed content.

@@ -178,6 +178,7 @@ describe('MatrixIncomingRouter', () => {
             deviceId: 'phone-1',
             conversationId: '!room:example.org',
             sequence: 1,
+            baseRevision: 0,
             operation: 'prompt',
             issuedAt: 1_000,
             expiresAt: 61_000,

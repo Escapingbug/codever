@@ -23,6 +23,8 @@ export interface MatrixPairingWaitOptions {
 
 export interface MatrixPairingListenerOptions extends MatrixPairingWaitOptions {
   onAccepted?: (record: TrustedDeviceRecord) => void | Promise<void>
+  /** Accepts a new request only when its explicit offer is still open. */
+  acceptNewOffers?: boolean
 }
 
 export async function announceMatrixDeviceRotation(options: {
@@ -118,7 +120,11 @@ export function listenForMatrixPairingRequests(
         const extension = asRecord(event.content[CODEVER_MATRIX_EXTENSION])
         const request = signedPairingRequestSchema.parse(extension?.pairing_request)
         const persisted = await options.registry.getPending(request.request.requestId)
-        if (persisted?.status !== 'approved' || !persisted.response) return
+        const recoverable = persisted?.status === 'approved' && persisted.response
+        const openOffer = options.acceptNewOffers
+          ? await options.registry.getOffer(request.request.offerId)
+          : undefined
+        if (!recoverable && !openOffer) return
         const record = await acceptMatrixPairing(options, event)
         await options.onAccepted?.(record)
       })
@@ -173,6 +179,7 @@ export function trustedDeviceFromRecord(
   const certificate = record.certificate.certificate
   return {
     deviceId: certificate.deviceId,
+    deviceName: certificate.deviceName,
     publicKey: certificate.deviceKey.publicKey,
     allowedRoomIds: [certificate.deviceTransport.roomId],
     allowedOperations: certificate.allowedOperations,
@@ -189,6 +196,7 @@ function trustedDeviceFromRequest(
 ): MatrixGatewayTrustedDevice {
   return {
     deviceId: request.request.deviceId,
+    deviceName: request.request.deviceName,
     publicKey: request.request.deviceKey.publicKey,
     allowedRoomIds: [request.request.deviceTransport.roomId],
     allowedOperations: request.request.requestedOperations,

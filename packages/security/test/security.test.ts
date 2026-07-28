@@ -22,6 +22,7 @@ function command(overrides: Partial<CodeverCommand> = {}): CodeverCommand {
     deviceId: 'device-1',
     conversationId: 'conversation-1',
     sequence: 1,
+    baseRevision: 0,
     operation: 'prompt',
     issuedAt: now - 1_000,
     expiresAt: now + 60_000,

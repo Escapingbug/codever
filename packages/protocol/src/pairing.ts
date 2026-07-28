@@ -215,6 +215,8 @@ export const pairingResponseSchema = z
     requestId: opaqueId,
     requestDigest: sha256Base64Url,
     gatewayId: opaqueId,
+    /** Signed snapshot after this certificate becomes active. */
+    activeDeviceCount: z.number().int().positive().optional(),
     certificate: signedPairingCertificateSchema,
     issuedAt: timestamp,
     expiresAt: timestamp,

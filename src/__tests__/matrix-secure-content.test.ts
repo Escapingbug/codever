@@ -42,6 +42,7 @@ describe('Gateway application-layer Matrix content', () => {
             matrixDeviceId: 'PHONE_MATRIX',
             matrixDeviceKeys: ['phone-matrix-ed25519'],
             certificateExpiresAt: now + 60_000,
+            sequenceEpoch: 'certificate-phone-1',
         }
         const layer = new GatewaySecureContentLayer(
             'gateway-1',
@@ -100,6 +101,7 @@ describe('Gateway application-layer Matrix content', () => {
             room,
             'phone-1',
             'command-1',
+            1,
             1,
             matrix,
         )
@@ -195,6 +197,6 @@ describe('Gateway application-layer Matrix content', () => {
             conversationId: 'conversation-1',
             cwd: 'C:\\repo',
             providerName: 'test',
-        }, now)).rejects.toThrow('certificate has expired')
+        }, now)).rejects.toThrow(/certificate has expired|not trusted/)
     })
 })

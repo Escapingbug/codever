@@ -36,6 +36,7 @@ export interface MatrixGatewayRoomConfig {
 export interface MatrixGatewayTrustedDevice {
     /** Codever application-layer device ID carried inside the signed command. */
     deviceId: string
+    deviceName?: string
     publicKey: JsonWebKey
     allowedRoomIds: string[]
     allowedOperations?: CommandOperation[]
@@ -107,6 +108,10 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
     assertUnique(config.rooms.map(room => room.roomId), 'room ID')
     assertUnique(config.rooms.map(room => room.conversationId), 'conversation ID')
     assertUnique(config.trustedDevices.map(device => device.deviceId), 'trusted device ID')
+    assertUnique(
+        config.trustedDevices.map(device => applicationPublicKeyFingerprint(device.publicKey)),
+        'trusted application public key',
+    )
 
     const roomIds = new Set(config.rooms.map(room => room.roomId))
     for (const room of config.rooms) {
@@ -136,20 +141,12 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
         if (config.applicationSecurity && device.certificateExpiresAt === undefined) {
             throw new Error(`Trusted device ${device.deviceId} requires certificateExpiresAt for application security`)
         }
+        if (config.applicationSecurity && device.sequenceEpoch === undefined) {
+            throw new Error(`Trusted device ${device.deviceId} requires sequenceEpoch for application security`)
+        }
         for (const roomId of device.allowedRoomIds) {
             if (!roomIds.has(roomId)) {
                 throw new Error(`Trusted device ${device.deviceId} references unknown room ${roomId}`)
-            }
-        }
-    }
-
-    if (config.applicationSecurity) {
-        for (const room of config.rooms) {
-            const recipients = config.trustedDevices.filter(device =>
-                device.allowedRoomIds.includes(room.roomId),
-            )
-            if (recipients.length !== 1) {
-                throw new Error(`Application-layer security v1 requires exactly one trusted device for room ${room.roomId}`)
             }
         }
     }
@@ -169,4 +166,11 @@ function assertUnique(values: string[], label: string): void {
         if (seen.has(value)) throw new Error(`Duplicate ${label}: ${value}`)
         seen.add(value)
     }
+}
+
+function applicationPublicKeyFingerprint(key: JsonWebKey): string {
+    if (key.kty !== 'EC' || key.crv !== 'P-256' || !key.x || !key.y) {
+        throw new Error('Trusted application public key must be a P-256 public JWK')
+    }
+    return JSON.stringify([key.kty, key.crv, key.x, key.y])
 }

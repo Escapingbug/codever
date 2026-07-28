@@ -140,6 +140,32 @@ describe('long-lived Matrix pairing recovery', () => {
       .resolves.toBeDefined()
 
     stop()
+    const stopNewPairing = listenForMatrixPairingRequests({
+      client,
+      service,
+      registry,
+      gatewayTransport,
+      acceptNewOffers: true,
+    })
+    client.emit({
+      roomId: gatewayTransport.roomId,
+      eventId: '$new-request-approved',
+      eventType: 'm.room.message',
+      sender: newRequest.signedRequest.request.deviceTransport.userId,
+      senderDeviceId: newRequest.signedRequest.request.deviceTransport.ed25519,
+      encrypted: true,
+      content: {
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 1,
+          kind: 'pairing_request',
+          pairing_request: newRequest.signedRequest,
+        },
+      },
+    })
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+    await expect(registry.listActive()).resolves.toHaveLength(2)
+    stopNewPairing()
+
     client.emit({
       roomId: gatewayTransport.roomId,
       eventId: '$request-after-stop',
@@ -156,7 +182,7 @@ describe('long-lived Matrix pairing recovery', () => {
       },
     })
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(client.sent).toHaveLength(1)
+    expect(client.sent).toHaveLength(2)
   })
 })
 

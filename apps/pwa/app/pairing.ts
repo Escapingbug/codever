@@ -45,6 +45,7 @@ export type TrustedGateway = {
   version: 1;
   gatewayId: string;
   gatewayName: string;
+  activeDeviceCount?: number;
   gatewayKey: PairingPublicKey;
   gatewayTransport: MatrixTransportBinding;
   offer: SignedPairingOffer;
@@ -164,6 +165,7 @@ export async function completePairing(
     version: 1,
     gatewayId: preview.gatewayId,
     gatewayName: preview.gatewayName,
+    ...activeDeviceCountField(signedResponse.response),
     gatewayKey: preview.signedOffer.offer.gatewayKey,
     gatewayTransport: certificate.certificate.gatewayTransport,
     offer: preview.signedOffer,
@@ -175,6 +177,18 @@ export async function completePairing(
   clearPendingPairing();
   saveTrustedGateway(trust);
   return trust;
+}
+
+function activeDeviceCountField(
+  input: unknown,
+): { activeDeviceCount: number } | Record<string, never> {
+  if (!input || typeof input !== "object") return {};
+  const candidate = (input as Record<string, unknown>).activeDeviceCount;
+  return typeof candidate === "number" &&
+    Number.isSafeInteger(candidate) &&
+    candidate > 0
+    ? { activeDeviceCount: candidate }
+    : {};
 }
 
 export async function loadPendingPairingRecovery(

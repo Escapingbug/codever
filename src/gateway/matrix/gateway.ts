@@ -20,7 +20,7 @@ import {
     createMatrixJsSdkGatewayClient,
     type MatrixGatewayClient,
 } from './client'
-import { FileCommandReplayStore } from './fileReplayLedger'
+import { FileCommandReplayStore, RevisionConflictError } from './fileReplayLedger'
 import { GatewaySecureContentLayer } from './secureContent'
 
 interface RoomRuntime {
@@ -38,6 +38,8 @@ export interface MatrixGatewayDependencies {
     onRejected?: (event: MatrixIncomingEvent, error: unknown) => void
     /** Optional live authorization source used for immediate local revocation. */
     isTrustedDeviceActive?: (deviceId: string) => Promise<boolean>
+    /** Supplies newly paired and currently active devices without a restart. */
+    listTrustedDevices?: () => Promise<readonly import('./config').MatrixGatewayTrustedDevice[]>
 }
 
 export type MatrixGatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
@@ -75,6 +77,7 @@ export class MatrixGatewayRunner {
                 config.gatewayId,
                 config.applicationSecurity,
                 config.trustedDevices,
+                dependencies.listTrustedDevices,
             )
             : null
     }
@@ -99,6 +102,15 @@ export class MatrixGatewayRunner {
             await this.client.pinTrustedDevices?.(this.config.trustedDevices)
             for (const room of this.config.rooms) {
                 await this.client.assertRoomEncrypted(room.roomId)
+            }
+            for (const room of this.config.rooms) {
+                void this.secureContent?.retryPendingForRoom(room, this.client).catch(error => {
+                    this.log(
+                        `[matrix-gateway] pending delivery recovery failed for ${room.roomId}: `
+                        + formatError(error),
+                    )
+                    this.secureContent?.scheduleRecoveryForRoom(room, this.client)
+                })
             }
             if (this.startupFailure) throw this.startupFailure
             this.state = 'running'
@@ -170,6 +182,7 @@ export class MatrixGatewayRunner {
             (opened?.content ?? event.content)[CODEVER_MATRIX_EXTENSION],
         )
         if (!extension || extension.version !== 1 || extension.kind !== 'signed_command') return
+        if (opened) this.authorizer.trustDevice(opened.trustedDevice)
         const signedCommand = asRecord(extension.signed_command)
         const candidateCommand = asRecord(signedCommand?.command)
         const candidateDeviceId = candidateCommand?.deviceId
@@ -180,14 +193,74 @@ export class MatrixGatewayRunner {
         ) {
             throw new Error(`Codever device ${candidateDeviceId} has been revoked`)
         }
-        const authorized = await this.authorizer.authorizeDelivery(extension.signed_command, {
-            roomId: event.roomId,
-            conversationId: runtime.config.conversationId,
-            matrixSender: event.sender,
-            matrixDeviceKey: event.senderDeviceId,
-            ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
-        }, this.now())
-        if (!authorized.duplicate) this.scheduleExecution(event, runtime, authorized.command)
+        let authorized
+        try {
+            authorized = await this.authorizer.authorizeDelivery(extension.signed_command, {
+                roomId: event.roomId,
+                conversationId: runtime.config.conversationId,
+                matrixSender: event.sender,
+                matrixDeviceKey: event.senderDeviceId,
+                ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
+            }, this.now())
+        } catch (error) {
+            if (
+                error instanceof RevisionConflictError
+                && this.secureContent
+                && typeof candidateDeviceId === 'string'
+                && typeof candidateCommand?.commandId === 'string'
+            ) {
+                await this.secureContent.sendRevisionConflict(
+                    runtime.config,
+                    candidateDeviceId,
+                    candidateCommand.commandId,
+                    error.expectedRevision,
+                    error.receivedBaseRevision,
+                    this.client,
+                )
+                return
+            }
+            throw error
+        }
+        if (!authorized.duplicate) {
+            let collaborationDelivery: Promise<unknown> | undefined
+            if (
+                this.secureContent
+                && authorized.command.payload.operation === 'prompt'
+            ) {
+                collaborationDelivery = this.secureContent.sendCollaborationPrompt(runtime.config, {
+                    commandId: authorized.command.commandId,
+                    revision: authorized.revision,
+                    originDeviceId: authorized.command.deviceId,
+                    originDeviceName: opened?.trustedDevice.deviceName
+                        ?? opened?.trustedDevice.deviceId
+                        ?? authorized.command.deviceId,
+                    text: authorized.command.payload.text,
+                }, this.client).catch(error => {
+                    this.log(`[matrix-gateway] collaboration broadcast failed: ${formatError(error)}`)
+                })
+            }
+            this.scheduleExecution(
+                event,
+                runtime,
+                authorized.command,
+                authorized.revision,
+                collaborationDelivery,
+            )
+        } else if (this.secureContent) {
+            // A retried signed command is never executed twice, but it is also
+            // an explicit recovery opportunity for this command's missing
+            // collaboration/result recipient copies.
+            void this.secureContent.retryPendingForRoom(
+                runtime.config,
+                this.client,
+                authorized.command.commandId,
+            ).catch(error => {
+                this.log(
+                    `[matrix-gateway] command ${authorized.command.commandId} delivery recovery failed: `
+                    + formatError(error),
+                )
+            })
+        }
         if (this.secureContent) {
             // Matrix delivery is deliberately off the authorization lane. A
             // stalled homeserver must not delay execution, cancel, or decisions.
@@ -196,6 +269,7 @@ export class MatrixGatewayRunner {
                 authorized.command.deviceId,
                 authorized.command.commandId,
                 authorized.command.sequence,
+                authorized.revision,
                 this.client,
             ).catch(error => {
                 this.log(
@@ -210,15 +284,44 @@ export class MatrixGatewayRunner {
         event: MatrixIncomingEvent,
         runtime: RoomRuntime,
         command: CodeverCommand,
+        revision: number,
+        beforeExecute?: Promise<unknown>,
     ): void {
         // Authorization and acknowledgement remain strictly ordered on
-        // eventChain, while the session runtime owns execution ordering. This
-        // keeps cancel and permission decisions responsive during a long turn.
-        const task = this.execute(runtime, command)
-            .catch(error => {
+        // eventChain, while the session runtime owns execution ordering. A
+        // prompt's background task waits for its collaboration event's first
+        // fan-out attempt so remote devices see the user intent before Agent
+        // status. The event chain itself stays free for cancel and decisions.
+        const task = (async () => {
+            let outcome: 'succeeded' | 'failed' = 'succeeded'
+            let executionError: unknown
+            try {
+                await beforeExecute
+                await this.execute(runtime, command)
+            } catch (error) {
+                outcome = 'failed'
+                executionError = error
                 this.dependencies.onRejected?.(event, error)
                 this.log(`[matrix-gateway] command ${command.commandId} failed: ${formatError(error)}`)
-            })
+            }
+
+            try {
+                await this.secureContent?.sendCommandResult(
+                    runtime.config,
+                    command.deviceId,
+                    command.commandId,
+                    command.sequence,
+                    revision,
+                    outcome,
+                    this.client,
+                    executionError === undefined ? undefined : formatError(executionError),
+                )
+            } catch (deliveryError) {
+                this.log(
+                    `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
+                )
+            }
+        })()
             .finally(() => {
                 this.executionTasks.delete(task)
             })
@@ -305,6 +408,7 @@ export class MatrixGatewayRunner {
         this.unsubscribe?.()
         this.unsubscribe = null
         this.startupEvents = []
+        this.secureContent?.stopRetries()
         await this.client.stop().catch(error => this.log(`[matrix-gateway] client stop failed: ${formatError(error)}`))
         const runtimes = [...this.rooms.values()]
         this.rooms.clear()

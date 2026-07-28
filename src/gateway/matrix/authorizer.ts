@@ -27,6 +27,10 @@ export class StrictMatrixCommandAuthorizer {
         return this.replayStore.initialize(now)
     }
 
+    trustDevice(device: MatrixGatewayTrustedDevice): void {
+        this.devices.set(device.deviceId, device)
+    }
+
     async authorize(input: unknown, context: MatrixCommandContext, now = Date.now()): Promise<CodeverCommand> {
         const result = await this.authorizeDelivery(input, context, now)
         if (result.duplicate) {
@@ -39,7 +43,7 @@ export class StrictMatrixCommandAuthorizer {
         input: unknown,
         context: MatrixCommandContext,
         now = Date.now(),
-    ): Promise<{ command: CodeverCommand; duplicate: boolean }> {
+    ): Promise<{ command: CodeverCommand; duplicate: boolean; revision: number }> {
         const signed = signedCommandSchema.parse(input) as SignedCommand
         const policy = this.devices.get(signed.command.deviceId)
         if (!policy) throw new MatrixAuthorizationError('untrusted-device', 'Codever device is not locally trusted')
@@ -70,7 +74,7 @@ export class StrictMatrixCommandAuthorizer {
             now,
             policy.sequenceEpoch ?? this.sequenceEpoch,
         )
-        return { command, duplicate: claim === 'duplicate' }
+        return { command, duplicate: claim.status === 'duplicate', revision: claim.revision }
     }
 }
 

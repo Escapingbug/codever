@@ -154,7 +154,7 @@ describe('strict Matrix command authorization', () => {
         )
         await replacementGatewayIdentity.initialize(fixture.now)
         await expect(replacementGatewayIdentity.authorize(
-            await signedPrompt(fixture.keys, fixture.now, 1),
+            await signedPrompt(fixture.keys, fixture.now, 1, 3),
             context,
             fixture.now,
         )).resolves.toMatchObject({ sequence: 1 })
@@ -258,6 +258,104 @@ describe('MatrixGatewayRunner', () => {
         expect(dispatched[1]).toMatchObject({ kind: 'cancel', reason: 'user' })
         finishPrompt()
         await runner.stop()
+    })
+
+    it('never turns a successful execution into a failed result when result delivery fails', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const rejected: unknown[] = []
+        const logs: string[] = []
+        const session = fakeTopicSession(dispatched)
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => session,
+            onRejected: (_event, error) => rejected.push(error),
+            onLog: message => logs.push(message),
+        })
+        const sendCommandResult = vi.fn(async (
+            _room: MatrixGatewayConfig['rooms'][number],
+            _deviceId: string,
+            _commandId: string,
+            _sequence: number,
+            _revision: number,
+            _outcome: 'succeeded' | 'failed',
+            _transport: MatrixGatewayClient,
+            _error?: string,
+        ) => {
+            throw new Error('homeserver unavailable after execution')
+        })
+        Reflect.set(runner, 'secureContent', { sendCommandResult })
+        const signed = await signedPrompt(fixture.keys, fixture.now)
+        const internals = runner as unknown as {
+            scheduleExecution(
+                event: MatrixIncomingEvent,
+                runtime: {
+                    config: MatrixGatewayConfig['rooms'][number]
+                    session: TopicSession
+                },
+                command: CodeverCommand,
+                revision: number,
+            ): void
+        }
+
+        internals.scheduleExecution(
+            incomingSigned(signed),
+            { config: fixture.config.rooms[0]!, session },
+            signed.command,
+            1,
+        )
+
+        await vi.waitFor(() => expect(sendCommandResult).toHaveBeenCalledOnce())
+        expect(sendCommandResult.mock.calls[0]?.[3]).toBe(signed.command.sequence)
+        expect(sendCommandResult.mock.calls[0]?.[5]).toBe('succeeded')
+        expect(dispatched).toHaveLength(1)
+        expect(rejected).toEqual([])
+        expect(logs).toContainEqual(expect.stringContaining('succeeded result delivery failed'))
+    })
+
+    it('does not start prompt execution before its collaboration fan-out attempt completes', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const session = fakeTopicSession(dispatched)
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => session,
+        })
+        Reflect.set(runner, 'secureContent', {
+            sendCommandResult: vi.fn(async () => ({ eventId: '$result' })),
+        })
+        let releaseFanOut!: () => void
+        const fanOutAttempt = new Promise<void>(resolve => {
+            releaseFanOut = resolve
+        })
+        const signed = await signedPrompt(fixture.keys, fixture.now)
+        const internals = runner as unknown as {
+            scheduleExecution(
+                event: MatrixIncomingEvent,
+                runtime: {
+                    config: MatrixGatewayConfig['rooms'][number]
+                    session: TopicSession
+                },
+                command: CodeverCommand,
+                revision: number,
+                beforeExecute?: Promise<unknown>,
+            ): void
+        }
+
+        internals.scheduleExecution(
+            incomingSigned(signed),
+            { config: fixture.config.rooms[0]!, session },
+            signed.command,
+            1,
+            fanOutAttempt,
+        )
+
+        await Promise.resolve()
+        expect(dispatched).toHaveLength(0)
+        releaseFanOut()
+        await vi.waitFor(() => expect(dispatched).toHaveLength(1))
     })
 
     it('rejects clear-text and tampered commands without invoking a session', async () => {
@@ -489,6 +587,21 @@ describe('Matrix gateway configuration', () => {
 
         expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow('In-memory Matrix crypto is forbidden')
     })
+
+    it('rejects two application device IDs backed by the same public key', async () => {
+        const fixture = await securityFixture()
+        const original = fixture.config.trustedDevices[0]!
+        fixture.config.trustedDevices.push({
+            ...structuredClone(original),
+            deviceId: 'pwa-device-2',
+            matrixDeviceId: 'PWA2',
+            matrixDeviceKeys: ['matrix-ed25519-key-2'],
+        })
+
+        expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow(
+            'Duplicate trusted application public key',
+        )
+    })
 })
 
 class FakeMatrixGatewayClient implements MatrixGatewayClient {
@@ -581,6 +694,7 @@ async function signedPrompt(
     keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     now: number,
     sequence = 1,
+    baseRevision = sequence - 1,
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -590,6 +704,7 @@ async function signedPrompt(
         deviceId: 'pwa-device-1',
         conversationId: 'conversation-1',
         sequence,
+        baseRevision,
         operation: 'prompt',
         issuedAt: now,
         expiresAt: now + 60_000,
@@ -612,6 +727,7 @@ async function signedCancel(
         deviceId: 'pwa-device-1',
         conversationId: 'conversation-1',
         sequence,
+        baseRevision: sequence - 1,
         operation: 'cancel',
         issuedAt: now,
         expiresAt: now + 60_000,

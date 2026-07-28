@@ -11,6 +11,7 @@ import {
 import type { CommandPayload } from "@codever/protocol";
 import { MatrixSettings } from "./MatrixSettings";
 import {
+  CommandRevisionConflictError,
   clearMatrixConfig,
   connectMatrix,
   getOrCreateDeviceIdentity,
@@ -19,6 +20,7 @@ import {
   resolveMatrixSession,
   saveMatrixConfig,
   type IncomingCodeverMessage,
+  type CommandSendResult,
   type MatrixConnection,
   type MatrixConnectionConfig,
   type MatrixConnectionStatus,
@@ -58,7 +60,19 @@ type ChatMessage = {
   eventId?: string;
   requestId?: string;
   streamId?: string;
+  commandId?: string;
+  revision?: number;
+  originDeviceId?: string;
+  originDeviceName?: string;
   raw?: Record<string, unknown>;
+};
+
+type RevisionConflictNotice = {
+  commandId: string;
+  expectedRevision: number;
+  payload: CommandPayload;
+  optimisticMessageId?: string;
+  busy: boolean;
 };
 
 const emptyMatrixConfig: MatrixConnectionConfig = {
@@ -220,6 +234,12 @@ export function CodeverApp() {
     useState<MatrixConnectionStatus>("offline");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
+  const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
+    null,
+  );
+  const [gatewayRevision, setGatewayRevision] = useState(0);
+  const [revisionConflict, setRevisionConflict] =
+    useState<RevisionConflictNotice | null>(null);
   const [pairingPreview, setPairingPreview] =
     useState<PairingPreview | null>(null);
   const [trustedGateway, setTrustedGateway] =
@@ -239,6 +259,9 @@ export function CodeverApp() {
       config: MatrixConnectionConfig,
     ) => Promise<void>
   >(async () => {});
+  const revisionConflictRef = useRef<RevisionConflictNotice | null>(null);
+  const activePromptCommandIdRef = useRef<string | null>(null);
+  const completedCommandResultsRef = useRef(new Set<string>());
 
   const selected =
     sessions.find((session) => session.id === selectedId) ?? sessions[0];
@@ -292,6 +315,7 @@ export function CodeverApp() {
       if (trust) {
         clearPendingPairing();
         setTrustedGateway(trust);
+        setActiveDeviceCount(trust.activeDeviceCount ?? null);
         setDeviceKeyId(identity.keyId);
         setMatrixConfig((current) => ({
           ...bindCredentialsToHomeserver(
@@ -353,6 +377,20 @@ export function CodeverApp() {
   );
 
   function receiveMatrixMessage(incoming: IncomingCodeverMessage) {
+    if (incoming.activeDeviceCount) {
+      setActiveDeviceCount(incoming.activeDeviceCount);
+    }
+    if (incoming.revision) {
+      setGatewayRevision((current) => Math.max(current, incoming.revision ?? 0));
+    }
+    if (
+      incoming.kind === "user" &&
+      incoming.originDeviceId &&
+      incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId
+    ) {
+      // The local composer already rendered this prompt optimistically.
+      return;
+    }
     const message: ChatMessage = {
       id: incoming.eventId,
       eventId: incoming.eventId,
@@ -361,6 +399,10 @@ export function CodeverApp() {
       time: formatMessageTime(incoming.timestamp),
       requestId: incoming.requestId,
       streamId: incoming.streamId,
+      commandId: incoming.commandId,
+      revision: incoming.revision,
+      originDeviceId: incoming.originDeviceId,
+      originDeviceName: incoming.originDeviceName,
       raw: incoming.raw,
     };
     if (incoming.requestId) {
@@ -370,6 +412,12 @@ export function CodeverApp() {
       }));
     }
     setMessages((current) => {
+      if (
+        incoming.commandId &&
+        current.some((entry) => entry.commandId === incoming.commandId)
+      ) {
+        return current;
+      }
       const eventType =
         typeof incoming.raw.type === "string" ? incoming.raw.type : "";
       const replaceIndex = incoming.replacesEventId
@@ -383,7 +431,22 @@ export function CodeverApp() {
         ? current.findIndex((entry) => entry.streamId === incoming.streamId)
         : -1;
       const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
-      if (targetIndex < 0) return [...current, message];
+      if (targetIndex < 0) {
+        if (incoming.kind === "user" && incoming.revision) {
+          const laterRevision = current.findIndex(
+            (entry) =>
+              entry.kind === "user" &&
+              typeof entry.revision === "number" &&
+              entry.revision > incoming.revision!,
+          );
+          if (laterRevision >= 0) {
+            const ordered = [...current];
+            ordered.splice(laterRevision, 0, message);
+            return ordered;
+          }
+        }
+        return [...current, message];
+      }
 
       const next = [...current];
       if (
@@ -403,7 +466,8 @@ export function CodeverApp() {
     if (
       incoming.raw.type === "agent.text.completed" ||
       incoming.raw.type === "command.completed" ||
-      incoming.kind === "error"
+      (incoming.kind === "error" &&
+        incoming.raw.kind !== "command_result")
     ) {
       setIsStreaming(false);
     }
@@ -415,6 +479,8 @@ export function CodeverApp() {
   ): Promise<MatrixConnection | null> {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
+    revisionConflictRef.current = null;
+    setRevisionConflict(null);
     setConnectionError(null);
     setConnectionStatus("connecting");
     setMessages([]);
@@ -434,6 +500,24 @@ export function CodeverApp() {
             ...current,
             ...trustedGatewayConfig(trust),
           }));
+        },
+        onCollaborationState(state) {
+          if (state.activeDeviceCount) {
+            setActiveDeviceCount(state.activeDeviceCount);
+          }
+          if (state.revision) {
+            setGatewayRevision((current) =>
+              Math.max(current, state.revision ?? 0),
+            );
+          }
+        },
+        onCommandResult(result) {
+          completedCommandResultsRef.current.add(result.commandId);
+          if (activePromptCommandIdRef.current === result.commandId) {
+            activePromptCommandIdRef.current = null;
+            completedCommandResultsRef.current.delete(result.commandId);
+            setIsStreaming(false);
+          }
         },
       });
       matrixConnectionRef.current = connection;
@@ -460,6 +544,10 @@ export function CodeverApp() {
   function disconnectMatrix(showDemo = true) {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
+    revisionConflictRef.current = null;
+    activePromptCommandIdRef.current = null;
+    completedCommandResultsRef.current.clear();
+    setRevisionConflict(null);
     setConnectionStatus("offline");
     setIsStreaming(false);
     if (showDemo) {
@@ -477,6 +565,8 @@ export function CodeverApp() {
     clearTrustedGateway();
     setMatrixConfig(emptyMatrixConfig);
     setTrustedGateway(null);
+    setActiveDeviceCount(null);
+    setGatewayRevision(0);
     setPairingPreview(null);
     setConnectionError(null);
   }
@@ -540,6 +630,7 @@ export function CodeverApp() {
       saveTrustedGateway(trust);
       saveMatrixConfig(trustedConfig);
       setTrustedGateway(trust);
+      setActiveDeviceCount(trust.activeDeviceCount ?? null);
       setMatrixConfig(trustedConfig);
       setPairingPreview(null);
       setSettingsOpen(false);
@@ -563,21 +654,139 @@ export function CodeverApp() {
   }
   pairingRecoveryRef.current = confirmPairing;
 
-  async function sendRealCommand(payload: CommandPayload): Promise<boolean> {
+  async function sendRealCommand(
+    payload: CommandPayload,
+  ): Promise<CommandSendResult | null> {
     const connection = matrixConnectionRef.current;
     if (!connection || connectionStatus !== "connected") {
       setConnectionError(
         "Real Matrix is not connected. Open connection settings and reconnect.",
       );
       setSettingsOpen(true);
-      return false;
+      return null;
     }
     try {
-      await connection.send(payload);
-      return true;
+      const result = await connection.send(payload);
+      revisionConflictRef.current = null;
+      return result;
     } catch (error) {
+      if (error instanceof CommandRevisionConflictError) {
+        const notice: RevisionConflictNotice = {
+          commandId: error.commandId,
+          expectedRevision: error.expectedRevision,
+          payload: error.payload,
+          busy: false,
+        };
+        revisionConflictRef.current = notice;
+        setRevisionConflict(notice);
+        setConnectionError(null);
+        return null;
+      }
       setConnectionError(formatUiError(error));
-      return false;
+      return null;
+    }
+  }
+
+  async function confirmRevisionRetry() {
+    const conflict = revisionConflictRef.current;
+    const connection = matrixConnectionRef.current;
+    if (!conflict || !connection || conflict.busy) return;
+    const busyConflict = { ...conflict, busy: true };
+    revisionConflictRef.current = busyConflict;
+    setRevisionConflict(busyConflict);
+    try {
+      const result = await connection.confirmRevisionRetry(conflict.commandId);
+      setGatewayRevision((current) => Math.max(current, result.revision));
+      if (conflict.optimisticMessageId) {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === conflict.optimisticMessageId
+              ? {
+                  ...message,
+                  commandId: result.commandId,
+                  revision: result.revision,
+                }
+              : message,
+          ),
+        );
+      }
+      const completion =
+        conflict.payload.operation === "prompt"
+          ? null
+          : await result.completion;
+      if (completion?.outcome === "succeeded" &&
+          conflict.payload.operation === "cancel") {
+        setIsStreaming(false);
+      } else if (
+        completion?.outcome === "succeeded" &&
+        conflict.payload.operation === "decision"
+      ) {
+        const requestId = conflict.payload.requestId;
+        const decision = conflict.payload.decision;
+        const request = messages.find(
+          (message) => message.requestId === requestId,
+        );
+        if (request) {
+          setDecisionStates((current) => ({
+            ...current,
+            [request.id]:
+              decision === "deny" ? "denied" : "approved",
+          }));
+        }
+      } else if (
+        completion?.outcome === "succeeded" &&
+        conflict.payload.operation === "session.settings"
+      ) {
+        if (conflict.payload.model) setModel(conflict.payload.model);
+        if (conflict.payload.permissionMode) {
+          setMode(
+            conflict.payload.permissionMode === "plan" ? "Plan" : "Agent",
+          );
+        }
+      }
+      revisionConflictRef.current = null;
+      setRevisionConflict(null);
+    } catch (error) {
+      if (error instanceof CommandRevisionConflictError) {
+        const next: RevisionConflictNotice = {
+          commandId: error.commandId,
+          expectedRevision: error.expectedRevision,
+          payload: error.payload,
+          optimisticMessageId: conflict.optimisticMessageId,
+          busy: false,
+        };
+        revisionConflictRef.current = next;
+        setRevisionConflict(next);
+        return;
+      }
+      revisionConflictRef.current = { ...conflict, busy: false };
+      setRevisionConflict({ ...conflict, busy: false });
+      setConnectionError(formatUiError(error));
+    }
+  }
+
+  async function discardRevisionConflict() {
+    const conflict = revisionConflictRef.current;
+    const connection = matrixConnectionRef.current;
+    if (!conflict || !connection || conflict.busy) return;
+    const busyConflict = { ...conflict, busy: true };
+    revisionConflictRef.current = busyConflict;
+    setRevisionConflict(busyConflict);
+    try {
+      await connection.discardRevisionConflict(conflict.commandId);
+      if (conflict.optimisticMessageId) {
+        setMessages((current) =>
+          current.filter(
+            (message) => message.id !== conflict.optimisticMessageId,
+          ),
+        );
+      }
+      revisionConflictRef.current = null;
+      setRevisionConflict(null);
+    } catch (error) {
+      revisionConflictRef.current = { ...conflict, busy: false };
+      setRevisionConflict({ ...conflict, busy: false });
+      setConnectionError(formatUiError(error));
     }
   }
 
@@ -648,25 +857,69 @@ export function CodeverApp() {
     event?.preventDefault();
     const value = draft.trim();
     if (!value || isStreaming) return;
+    const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
     setMessages((current) => [
       ...current,
-      { id: `user-${Date.now()}`, kind: "user", text: value, time: "now" },
+      { id: optimisticId, kind: "user", text: value, time: "now" },
     ]);
     setDraft("");
     setIsStreaming(true);
     if (appMode === "matrix") {
-      const sent = await sendRealCommand({ operation: "prompt", text: value });
-      if (!sent) {
+      const result = await sendRealCommand({
+        operation: "prompt",
+        text: value,
+      });
+      if (!result) {
+        activePromptCommandIdRef.current = null;
         setIsStreaming(false);
-        setMessages((current) => [
-          ...current,
-          {
-            id: `matrix-error-${Date.now()}`,
-            kind: "error",
-            text: "The signed command was not sent. Check Matrix connection settings.",
-            time: "now",
-          },
-        ]);
+        if (revisionConflictRef.current) {
+          const conflict = revisionConflictRef.current;
+          const matchesCurrentPrompt =
+            conflict.payload.operation === "prompt" &&
+            conflict.payload.text === value;
+          const next = matchesCurrentPrompt
+            ? { ...conflict, optimisticMessageId: optimisticId }
+            : conflict;
+          revisionConflictRef.current = next;
+          setRevisionConflict(next);
+          if (!matchesCurrentPrompt) {
+            setMessages((current) =>
+              current.filter((message) => message.id !== optimisticId),
+            );
+            setDraft(value);
+          }
+        } else {
+          setMessages((current) => [
+            ...current,
+            {
+              id: `matrix-error-${Date.now()}`,
+              kind: "error",
+              text: "The signed command was not sent. Check Matrix connection settings.",
+              time: "now",
+            },
+          ]);
+        }
+      } else {
+        if (completedCommandResultsRef.current.delete(result.commandId)) {
+          activePromptCommandIdRef.current = null;
+          setIsStreaming(false);
+        } else {
+          activePromptCommandIdRef.current = result.commandId;
+        }
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === optimisticId
+              ? {
+                  ...message,
+                  commandId: result.commandId,
+                  revision: result.revision,
+                  originDeviceId: deviceKeyId ?? undefined,
+                  originDeviceName:
+                    trustedGateway?.certificate.certificate.deviceName,
+                }
+              : message,
+          ),
+        );
       }
       return;
     }
@@ -683,7 +936,9 @@ export function CodeverApp() {
   async function stopStreaming() {
     if (appMode === "matrix") {
       const sent = await sendRealCommand({ operation: "cancel" });
-      if (sent) setIsStreaming(false);
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setIsStreaming(false);
+      }
       return;
     }
     if (timerRef.current) clearInterval(timerRef.current);
@@ -722,7 +977,7 @@ export function CodeverApp() {
       requestId: message.requestId,
       decision,
     });
-    if (sent) {
+    if (sent && (await sent.completion).outcome === "succeeded") {
       setDecisionStates((current) => ({
         ...current,
         [message.id]: decision === "allow_once" ? "approved" : "denied",
@@ -731,23 +986,31 @@ export function CodeverApp() {
   }
 
   async function changeModel(nextModel: string) {
-    setModel(nextModel);
     if (appMode === "matrix") {
-      await sendRealCommand({
+      const sent = await sendRealCommand({
         operation: "session.settings",
         model: nextModel,
       });
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setModel(nextModel);
+      }
+      return;
     }
+    setModel(nextModel);
   }
 
   async function changeMode(nextMode: string) {
-    setMode(nextMode);
     if (appMode === "matrix" && nextMode !== "Ask") {
-      await sendRealCommand({
+      const sent = await sendRealCommand({
         operation: "session.settings",
         permissionMode: nextMode === "Plan" ? "plan" : "default",
       });
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setMode(nextMode);
+      }
+      return;
     }
+    setMode(nextMode);
   }
 
   return (
@@ -912,7 +1175,13 @@ export function CodeverApp() {
             <small>
               {appMode === "matrix"
                 ? deviceKeyId
-                  ? `Device key ${deviceKeyId.slice(0, 10)}…`
+                  ? `${matrixConnected ? "This device online" : "This device offline"} · ${
+                      activeDeviceCount === null
+                        ? "device count pending"
+                        : `${activeDeviceCount} active ${
+                            activeDeviceCount === 1 ? "device" : "devices"
+                          }`
+                    } · r${gatewayRevision}`
                   : "Local device key not loaded"
                 : "4 trusted devices"}
             </small>
@@ -1019,9 +1288,18 @@ export function CodeverApp() {
               return (
                 <div className="message-row user-row" key={message.id}>
                   <div className="bubble user-bubble">
+                    {message.originDeviceName &&
+                      message.originDeviceId !== deviceKeyId && (
+                        <span className="collaborator-label">
+                          {message.originDeviceName}
+                        </span>
+                      )}
                     <p>{message.text}</p>
                     <time>
-                      {message.time} <span>✓✓</span>
+                      {message.revision
+                        ? `r${message.revision} · ${message.time ?? ""}`
+                        : message.time}{" "}
+                      <span>✓✓</span>
                     </time>
                   </div>
                 </div>
@@ -1170,6 +1448,36 @@ export function CodeverApp() {
             <span className="token-state">18k / 128k</span>
           </div>
 
+          {revisionConflict && (
+            <section className="revision-conflict-card" role="alert">
+              <div>
+                <strong>Another device updated this session</strong>
+                <p>
+                  {describeConflictedAction(revisionConflict.payload)} was not
+                  replayed. Review the latest messages, then choose whether to
+                  sign and send it against revision{" "}
+                  {revisionConflict.expectedRevision}.
+                </p>
+              </div>
+              <div className="revision-conflict-actions">
+                <button
+                  type="button"
+                  disabled={revisionConflict.busy}
+                  onClick={() => void discardRevisionConflict()}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  disabled={revisionConflict.busy}
+                  onClick={() => void confirmRevisionRetry()}
+                >
+                  {revisionConflict.busy ? "Checking…" : "Review complete · send"}
+                </button>
+              </div>
+            </section>
+          )}
+
           <form
             className="composer"
             onSubmit={(event) => void sendMessage(event)}
@@ -1298,6 +1606,21 @@ function formatMessageTime(timestamp: number): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(timestamp));
+}
+
+function describeConflictedAction(payload: CommandPayload): string {
+  switch (payload.operation) {
+    case "prompt":
+      return `Your prompt “${payload.text.slice(0, 80)}${
+        payload.text.length > 80 ? "…" : ""
+      }”`;
+    case "cancel":
+      return "The cancel action";
+    case "decision":
+      return `The ${payload.decision.replaceAll("_", " ")} permission decision`;
+    case "session.settings":
+      return "The session settings change";
+  }
 }
 
 function formatUiError(error: unknown): string {

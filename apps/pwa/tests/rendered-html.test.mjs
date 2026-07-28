@@ -80,6 +80,20 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
   assert.match(packageJson, /"@codever\/security"/);
   assert.match(matrix, /initRustCrypto\(\{/);
+  assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
+  assert.match(matrix, /store: syncStore/);
+  assert.match(
+    matrix,
+    /createClient\([\s\S]*await syncStore\.startup\(\)[\s\S]*initRustCrypto/,
+  );
+  assert.match(matrix, /checkpointMatrixSyncStore/);
+  assert.match(matrix, /checkpointAndReleaseMatrixSyncStore/);
+  assert.match(matrix, /acquireMatrixCryptoLock/);
+  assert.match(matrix, /getSavedSyncToken\(\)/);
+  assert.match(matrix, /assertPersistenceHealthy\(\)/);
+  assert.match(matrix, /persistence degraded to memory/);
+  assert.match(matrix, /state === "SYNCING" \|\| state === "PREPARED"/);
+  assert.match(matrix, /signed Gateway Matrix device is not present/i);
   assert.match(matrix, /useIndexedDB: true/);
   assert.match(matrix, /cryptoDatabasePrefix:/);
   assert.match(matrix, /indexedDB\.open\(DEVICE_DATABASE/);
@@ -92,12 +106,43 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /kind: "secure_envelope"/);
   assert.match(matrix, /body: "Encrypted Codever message"/);
   assert.match(matrix, /kind === "command_ack"/);
+  assert.match(matrix, /baseRevision: reservation\.baseRevision/);
+  assert.match(matrix, /kind === "revision_conflict"/);
+  assert.match(matrix, /rebasePendingCommand/);
+  assert.match(matrix, /confirmRevisionRetry\(commandId\)/);
+  assert.match(matrix, /discardRevisionConflict\(commandId\)/);
+  assert.match(matrix, /CommandRevisionConflictError/);
+  assert.doesNotMatch(matrix, /transmitWithConflictRetry/);
+  assert.match(
+    matrix,
+    /confirmRevisionRetry\(commandId\)[\s\S]*rebasePendingCommand/,
+  );
+  assert.match(
+    matrix,
+    /sequence: reservation\.sequence,[\s\S]*baseRevision: expectedRevision/,
+  );
+  assert.match(matrix, /kind === "collaboration_command"/);
+  assert.match(matrix, /kind === "command_result"/);
+  assert.match(matrix, /isPositiveInteger\(decryptedExtension\.sequence\)/);
+  assert.match(matrix, /onAuthenticatedCommandResult/);
+  assert.match(
+    matrix,
+    /await onCommandAcknowledged\([\s\S]*commandLifecycle\.recordResult\(result\)/,
+  );
+  assert.match(matrix, /completion: commandLifecycle\.waitForCompletion/);
+  assert.match(matrix, /origin_device_name/);
   assert.match(matrix, /waitForCommandAcknowledgement/);
   assert.match(matrix, /lastAcknowledged/);
   assert.match(matrix, /retryPendingCommand/);
   assert.match(matrix, /certificate\.certificate\.certificateId/);
   assert.match(matrix, /direction: "device_to_gateway"/);
   assert.match(matrix, /direction: "gateway_to_device"/);
+  assert.match(matrix, /signedSecureEnvelopeSchema\.safeParse/);
+  assert.match(
+    matrix,
+    /recipientDeviceId !==[\s\S]*certificate\.certificate\.deviceId/,
+  );
+  assert.match(matrix, /recipientKeyId !== identity\.keyId/);
   assert.match(matrix, /senderPublicKey: trust\.gatewayKey\.publicKey/);
   assert.match(matrix, /replayStore/);
   assert.match(
@@ -141,6 +186,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /event\.isDecryptionFailure\(\)[\s\S]*seen\.add\(eventId\);[\s\S]*return;/,
   );
   assert.match(matrix, /localStorage\.setItem/);
+  assert.match(
+    matrix,
+    /config\.gatewayId,[\s\S]*identity\.keyId,[\s\S]*config\.conversationId,[\s\S]*sequenceEpoch/,
+  );
+  assert.doesNotMatch(
+    matrix,
+    /getClaimedEd25519Key\(\) !== gateway\.ed25519[\s\S]{0,600}pairing_response/,
+  );
   assert.doesNotMatch(matrix, /fetch\(["'`]\/api|server action|use server/i);
   assert.match(pairing, /verifyPairingOffer/);
   assert.match(pairing, /signPairingRequest/);
@@ -205,4 +258,17 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /`codever\.pair\.\$\{request\.request\.requestId\}\.\$\{crypto\.randomUUID\(\)\}`/,
   );
   assert.match(app, /sendRealCommand/);
+  assert.match(app, /entry\.commandId === incoming\.commandId/);
+  assert.match(app, /message\.originDeviceName/);
+  assert.match(app, /Another device updated this session/);
+  assert.match(app, /Review complete · send/);
+  assert.match(app, /discardRevisionConflict/);
+  assert.match(app, /error instanceof CommandRevisionConflictError/);
+  assert.match(app, /completedCommandResultsRef/);
+  assert.match(app, /await sent\.completion/);
+  assert.match(app, /completion\?\.outcome === "succeeded"/);
+  assert.match(
+    app,
+    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setIsStreaming\(false\)/,
+  );
 });
