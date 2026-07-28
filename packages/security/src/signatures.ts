@@ -12,6 +12,7 @@ import {
 import {
   base64UrlDecode,
   base64UrlEncode,
+  isCryptoKey,
   publicKeyId,
   toArrayBuffer,
   webCrypto,
@@ -43,7 +44,7 @@ export async function generateDeviceKeyPair(): Promise<DeviceKeyPair> {
 }
 
 async function importPublicKey(key: CryptoKey | JsonWebKey): Promise<CryptoKey> {
-  if (key instanceof CryptoKey) return key
+  if (isCryptoKey(key)) return key
   return webCrypto().subtle.importKey(
     'jwk',
     key,

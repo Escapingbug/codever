@@ -16,3 +16,6 @@ filter-sessions.js
 nul
 test-path.cjs
 .worktrees/
+dev/matrix/data/
+dev/matrix/local-test.json
+dev/matrix/pairing.json

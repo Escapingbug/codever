@@ -201,6 +201,56 @@ select:focus-visible {
   letter-spacing: -0.04em;
 }
 
+.mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr 32px;
+  gap: 3px;
+  margin: 0 17px 11px;
+  padding: 3px;
+  border: 1px solid #e4e6ed;
+  border-radius: 11px;
+  background: #f0f1f5;
+}
+
+.mode-switch button {
+  display: flex;
+  height: 29px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  background: transparent;
+  color: #858c9c;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.mode-switch button:hover {
+  color: #4d566a;
+}
+
+.mode-switch button.active {
+  background: white;
+  box-shadow: 0 2px 7px rgb(38 45 67 / 8%);
+  color: #4f45ae;
+}
+
+.mode-switch button > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a4a9b5;
+}
+
+.mode-switch button > span.online {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgb(40 175 119 / 10%);
+}
+
+.mode-switch .mode-settings {
+  font-size: 13px;
+}
+
 .round-button {
   display: grid;
   width: 38px;
@@ -276,6 +326,29 @@ select:focus-visible {
   box-shadow: 0 3px 12px rgb(30 40 70 / 4%);
 }
 
+.gateway-card-button {
+  width: auto;
+  color: inherit;
+  text-align: left;
+}
+
+.gateway-card-button:hover {
+  border-color: #d7d3f2;
+  box-shadow: 0 4px 15px rgb(64 52 145 / 8%);
+}
+
+.gateway-card-button.offline i {
+  background: #a7acb8;
+  box-shadow: none;
+}
+
+.gateway-more {
+  align-self: flex-start;
+  color: #9ba1af;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
 .gateway-icon {
   display: grid;
   width: 37px;
@@ -317,6 +390,11 @@ select:focus-visible {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 3px rgb(40 175 119 / 10%);
+}
+
+.conversation-heading i.offline-dot {
+  background: #9fa5b2;
+  box-shadow: none;
 }
 
 .gateway-card button {
@@ -799,6 +877,20 @@ select:focus-visible {
   color: #3f485b;
 }
 
+.error-mark {
+  background: #9a4049;
+  color: white;
+}
+
+.error-bubble {
+  border-color: #f0d4d6;
+  background: #fff7f7;
+}
+
+.error-bubble .agent-label {
+  color: #b64a54;
+}
+
 .agent-label {
   display: block;
   margin-bottom: 4px;
@@ -1223,6 +1315,305 @@ select:focus-visible {
   text-align: center;
 }
 
+.connection-toast {
+  position: fixed;
+  z-index: 45;
+  right: 22px;
+  bottom: 22px;
+  display: flex;
+  width: min(390px, calc(100vw - 32px));
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid #f0d7d9;
+  border-radius: 12px;
+  background: #fffafa;
+  box-shadow: 0 12px 34px rgb(55 37 45 / 17%);
+  color: #5d4045;
+  text-align: left;
+}
+
+.connection-toast > span:first-child {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #fbe6e7;
+  color: #b44e58;
+  font-weight: 800;
+}
+
+.connection-toast > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.connection-toast strong {
+  font-size: 10px;
+}
+
+.connection-toast small {
+  overflow: hidden;
+  color: #8f7478;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-toast b {
+  color: #795de0;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.settings-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgb(20 22 35 / 53%);
+  backdrop-filter: blur(6px);
+}
+
+.matrix-settings {
+  width: min(680px, 100%);
+  max-height: calc(100dvh - 44px);
+  overflow: auto;
+  border: 1px solid rgb(255 255 255 / 55%);
+  border-radius: 20px;
+  background: #fbfbfd;
+  box-shadow: 0 28px 90px rgb(10 12 28 / 30%);
+}
+
+.matrix-settings > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 21px 23px 16px;
+  border-bottom: 1px solid var(--line);
+  background: white;
+}
+
+.matrix-settings h2 {
+  margin: 2px 0 0;
+  color: #242a3b;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+
+.matrix-settings > header button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: #f1f2f6;
+  color: #70798b;
+  font-size: 21px;
+}
+
+.settings-security-note {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 16px 22px 4px;
+  padding: 11px 13px;
+  border: 1px solid #d7eee5;
+  border-radius: 11px;
+  background: #f0faf6;
+}
+
+.settings-security-note > span {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #dff4eb;
+  color: #288b69;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.settings-security-note p {
+  margin: 0;
+  color: #587366;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.matrix-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+  padding: 16px 22px;
+}
+
+.matrix-form-grid label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.matrix-form-grid .wide-field {
+  grid-column: 1 / -1;
+}
+
+.matrix-form-grid label > span {
+  color: #636c7e;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.matrix-form-grid input {
+  width: 100%;
+  height: 39px;
+  border: 1px solid #dfe2e9;
+  border-radius: 9px;
+  outline: 0;
+  background: white;
+  padding: 0 11px;
+  color: #384154;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+}
+
+.matrix-form-grid input:focus {
+  border-color: #a69bed;
+  box-shadow: 0 0 0 3px rgb(105 87 229 / 9%);
+}
+
+.matrix-form-grid input::placeholder {
+  color: #b1b5bf;
+}
+
+.identity-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 22px 14px;
+  padding: 11px 12px;
+  border: 1px solid #e2e3ec;
+  border-radius: 11px;
+  background: white;
+}
+
+.identity-mark {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border-radius: 9px;
+  background: #eeebff;
+  color: #6452d9;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.identity-card div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.identity-card .copy-pairing-button {
+  margin-left: auto;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #efedff;
+  color: #5f4dd3;
+  font-size: 8px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.identity-card strong {
+  color: #41495c;
+  font-size: 10px;
+}
+
+.identity-card small {
+  overflow: hidden;
+  color: #8d95a6;
+  font-family: var(--font-geist-mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-error {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 22px 14px;
+  padding: 10px 12px;
+  border: 1px solid #f0d7d9;
+  border-radius: 10px;
+  background: #fff3f4;
+  color: #96505a;
+}
+
+.connection-error strong {
+  font-size: 10px;
+}
+
+.connection-error span {
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.matrix-settings > footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 22px 18px;
+  border-top: 1px solid var(--line);
+  background: white;
+}
+
+.matrix-settings > footer button {
+  min-height: 36px;
+  padding: 0 13px;
+  border-radius: 9px;
+  font-size: 9px;
+  font-weight: 670;
+}
+
+.settings-spacer {
+  flex: 1;
+}
+
+.forget-button {
+  background: transparent;
+  color: #9b5960;
+}
+
+.disconnect-button {
+  border: 1px solid #e0e2e8;
+  background: white;
+  color: #687184;
+}
+
+.connect-button {
+  background: var(--violet);
+  color: white;
+}
+
+.connect-button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 @media (max-width: 1050px) {
   .app-shell {
     grid-template-columns: 68px 310px minmax(420px, 1fr);
@@ -1353,6 +1744,22 @@ select:focus-visible {
   .composer-hint {
     display: none;
   }
+
+  .settings-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .matrix-settings {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: 20px 20px 0 0;
+  }
+
+  .connection-toast {
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
 }
 
 @media (max-width: 420px) {
@@ -1374,6 +1781,32 @@ select:focus-visible {
 
   .context-item b {
     max-width: 165px;
+  }
+
+  .matrix-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .matrix-form-grid .wide-field {
+    grid-column: auto;
+  }
+
+  .matrix-settings > footer {
+    flex-wrap: wrap;
+  }
+
+  .settings-spacer {
+    display: none;
+  }
+
+  .forget-button {
+    width: 100%;
+    order: 3;
+  }
+
+  .disconnect-button,
+  .connect-button {
+    flex: 1;
   }
 }
 

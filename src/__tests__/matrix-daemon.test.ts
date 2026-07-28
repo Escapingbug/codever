@@ -1,0 +1,505 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ClientEvent, SyncState, type MatrixClient, type MatrixEvent } from 'matrix-js-sdk'
+import type { CodeverCommand, SignedCommand } from '@codever/protocol'
+import { generateDeviceKeyPair, signCommand } from '@codever/security'
+import type { AgentProvider, AgentQueryHandle } from '@/providers/provider'
+import type { TopicSession } from '@/bridge/channelPort'
+import type { SessionInput } from '@/runtime/semantic'
+import {
+    CODEVER_MATRIX_EXTENSION,
+    type MatrixIncomingEvent,
+    type MatrixSendEventRequest,
+    type MatrixSendEventResult,
+} from '@/channel/matrix'
+import {
+    FileCommandReplayStore,
+    MatrixGatewayRunner,
+    MatrixJsSdkGatewayClient,
+    StrictMatrixCommandAuthorizer,
+    validateMatrixGatewayConfig,
+    type MatrixGatewayClient,
+    type MatrixGatewayConfig,
+    type MatrixGatewayCryptoConfig,
+    type MatrixGatewayEventListener,
+} from '@/gateway/matrix'
+import { startMatrixDaemon } from '@/matrix-daemon'
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+    await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+describe('strict Matrix command authorization', () => {
+    it('requires the app signature, conversation binding, Matrix sender pin, and durable nonce claim', async () => {
+        const fixture = await securityFixture()
+        const signed = await signedPrompt(fixture.keys, fixture.now)
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await authorizer.initialize(fixture.now)
+
+        await expect(authorizer.authorize(signed, {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            matrixSender: '@alice:example.org',
+            matrixDeviceKey: 'matrix-ed25519-key',
+        }, fixture.now)).resolves.toMatchObject({
+            operation: 'prompt',
+            payload: { text: 'hello from PWA' },
+        })
+
+        const restarted = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await restarted.initialize(fixture.now)
+        await expect(restarted.authorize(signed, {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            matrixSender: '@alice:example.org',
+            matrixDeviceKey: 'matrix-ed25519-key',
+        }, fixture.now)).rejects.toMatchObject({ code: 'replay' })
+    })
+
+    it('rejects a valid app signature arriving through a non-pinned Matrix device', async () => {
+        const fixture = await securityFixture()
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await authorizer.initialize(fixture.now)
+
+        await expect(authorizer.authorize(
+            await signedPrompt(fixture.keys, fixture.now),
+            {
+                roomId: '!room:example.org',
+                conversationId: 'conversation-1',
+                matrixSender: '@alice:example.org',
+                matrixDeviceKey: 'server-substituted-key',
+            },
+            fixture.now,
+        )).rejects.toMatchObject({ code: 'matrix-device-mismatch' })
+    })
+
+    it('fails closed when the persisted replay ledger is corrupt', async () => {
+        const directory = await temporaryDirectory()
+        const path = join(directory, 'replay.jsonl')
+        await writeFile(path, '{"version":1,"claims":', 'utf8')
+
+        await expect(new FileCommandReplayStore(path).initialize()).rejects.toThrow(
+            'Corrupt command replay ledger at line 1',
+        )
+    })
+})
+
+describe('MatrixGatewayRunner', () => {
+    it('initializes crypto before sync, verifies room encryption, and routes a signed prompt to TopicSession', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const session = fakeTopicSession(dispatched)
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => session,
+        })
+
+        await runner.start()
+        expect(runner.getState()).toBe('running')
+        expect(client.lifecycle).toEqual([
+            'crypto',
+            'start',
+            'ready',
+            'encrypted:!room:example.org',
+        ])
+
+        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+        await vi.waitFor(() => expect(dispatched).toHaveLength(1))
+        expect(dispatched[0]).toMatchObject({
+            kind: 'user_message',
+            text: 'hello from PWA',
+            source: 'channel',
+            user: { id: 'pwa-device-1' },
+        })
+
+        await runner.stop()
+        expect(runner.getState()).toBe('stopped')
+        expect(client.lifecycle.at(-1)).toBe('stop')
+        expect(session.destroy).toHaveBeenCalledOnce()
+    })
+
+    it('queues initial-sync commands until crypto and room encryption checks complete', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        client.onStartEvent = incomingSigned(await signedPrompt(fixture.keys, fixture.now))
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession(dispatched),
+        })
+
+        await runner.start()
+
+        expect(dispatched).toHaveLength(1)
+        expect(client.lifecycle).toEqual([
+            'crypto',
+            'start',
+            'ready',
+            'encrypted:!room:example.org',
+        ])
+        await runner.stop()
+    })
+
+    it('rejects clear-text and tampered commands without invoking a session', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const rejected: unknown[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession(dispatched),
+            onRejected: (_event, error) => rejected.push(error),
+        })
+        await runner.start()
+
+        const signed = await signedPrompt(fixture.keys, fixture.now)
+        const tampered = structuredClone(signed)
+        tampered.command.payload = { operation: 'prompt', text: 'malicious' }
+        client.emit(incomingSigned(tampered))
+        client.emit({ ...incomingSigned(signed, 'clear-event'), encrypted: false })
+
+        await vi.waitFor(() => expect(rejected).toHaveLength(2))
+        expect(dispatched).toHaveLength(0)
+        await runner.stop()
+    })
+
+    it('wires the default TopicSession and SemanticSessionRuntime to a provider and MatrixPort', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const provider = fakeProvider()
+        const runner = await startMatrixDaemon(fixture.config, {
+            client,
+            now: () => fixture.now,
+            providerFactory: () => provider,
+        })
+
+        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+
+        await vi.waitFor(() => expect(provider.startQuery).toHaveBeenCalledOnce())
+        expect(provider.startQuery).toHaveBeenCalledWith(
+            'hello from PWA',
+            expect.objectContaining({ cwd: 'C:\\repo' }),
+        )
+        await vi.waitFor(() => expect(client.sent.length).toBeGreaterThan(0))
+        expect(client.sent.some(request =>
+            request.content[CODEVER_MATRIX_EXTENSION] !== undefined
+            && request.content.msgtype === 'm.notice',
+        )).toBe(true)
+        await runner.stop()
+    })
+
+    it('fails startup and destroys room sessions if a configured room is not encrypted', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        client.encryptedRooms.clear()
+        const session = fakeTopicSession([])
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => session,
+        })
+
+        await expect(runner.start()).rejects.toThrow('is not encrypted')
+
+        expect(runner.getState()).toBe('stopped')
+        expect(client.lifecycle).toContain('stop')
+        expect(session.destroy).toHaveBeenCalledOnce()
+    })
+})
+
+describe('MatrixJsSdkGatewayClient', () => {
+    it('enforces crypto-before-sync and maps the v41 SDK send/decrypt surface', async () => {
+        let sdkEventListener: ((event: MatrixEvent) => void) | undefined
+        const crypto = {
+            isEncryptionEnabledInRoom: vi.fn(async () => true),
+            setDeviceIsolationMode: vi.fn(),
+            getUserDeviceInfo: vi.fn(async () => new Map([
+                ['@alice:example.org', new Map([
+                    ['PWA1', { getFingerprint: () => 'matrix-ed25519-key' }],
+                ])],
+            ])),
+            setDeviceVerified: vi.fn(async () => undefined),
+        }
+        const sdk = {
+            initRustCrypto: vi.fn(async () => undefined),
+            getCrypto: vi.fn(() => crypto),
+            on: vi.fn((event: ClientEvent, listener: (event: MatrixEvent) => void) => {
+                if (event === ClientEvent.Event) sdkEventListener = listener
+            }),
+            off: vi.fn(),
+            startClient: vi.fn(async () => undefined),
+            stopClient: vi.fn(),
+            getSyncState: vi.fn(() => SyncState.Prepared),
+            sendMessage: vi.fn(async () => ({ event_id: '$sent' })),
+            sendTyping: vi.fn(async () => ({})),
+            decryptEventIfNeeded: vi.fn(async () => undefined),
+        } as unknown as MatrixClient
+        const client = new MatrixJsSdkGatewayClient(sdk)
+
+        await expect(client.start()).rejects.toThrow('crypto must be initialized')
+        await client.initializeCrypto({
+            useIndexedDB: true,
+            databasePrefix: 'codever-device',
+            storageKey: new Uint8Array(32),
+        })
+        await client.start()
+        await client.waitUntilReady()
+        await client.assertRoomEncrypted('!room:example.org')
+        await client.pinTrustedDevices([{
+            deviceId: 'pwa-device-1',
+            publicKey: {},
+            allowedRoomIds: ['!room:example.org'],
+            matrixUserId: '@alice:example.org',
+            matrixDeviceId: 'PWA1',
+            matrixDeviceKeys: ['matrix-ed25519-key'],
+        }])
+        expect(crypto.setDeviceVerified).toHaveBeenCalledWith(
+            '@alice:example.org',
+            'PWA1',
+            true,
+        )
+
+        const mapped: MatrixIncomingEvent[] = []
+        client.onRoomEvent(event => mapped.push(event))
+        sdkEventListener?.({
+            getRoomId: () => '!room:example.org',
+            getId: () => '$incoming',
+            getSender: () => '@alice:example.org',
+            getType: () => 'm.room.message',
+            getTs: () => 123,
+            isEncrypted: () => true,
+            getWireContent: () => ({ algorithm: 'm.megolm.v1.aes-sha2', ciphertext: 'cipher' }),
+            getClaimedEd25519Key: () => 'matrix-ed25519-key',
+            getSenderKey: () => 'curve25519-key',
+            getContent: () => ({ msgtype: 'm.text', body: 'hello' }),
+        } as unknown as MatrixEvent)
+        await vi.waitFor(() => expect(mapped).toHaveLength(1))
+
+        expect(sdk.initRustCrypto).toHaveBeenCalledWith(expect.objectContaining({
+            useIndexedDB: true,
+            cryptoDatabasePrefix: 'codever-device',
+        }))
+        expect(mapped[0]).toMatchObject({
+            encrypted: true,
+            senderDeviceId: 'matrix-ed25519-key',
+            eventType: 'm.room.message',
+            content: { body: 'hello' },
+        })
+        expect(mapped[0].encryptedPayloadFingerprint).toMatch(/^[a-f0-9]{64}$/)
+
+        await client.sendEncryptedRoomEvent({
+            roomId: '!room:example.org',
+            eventType: 'm.room.message',
+            content: { msgtype: 'm.text', body: 'outgoing' },
+            transactionId: 'txn-1',
+        })
+        expect(sdk.sendMessage).toHaveBeenCalledWith(
+            '!room:example.org',
+            expect.objectContaining({ body: 'outgoing' }),
+            'txn-1',
+        )
+        await client.stop()
+        expect(sdk.stopClient).toHaveBeenCalledOnce()
+    })
+})
+
+describe('Matrix gateway configuration', () => {
+    it('forbids accidental in-memory production crypto', async () => {
+        const fixture = await securityFixture()
+        fixture.config.crypto = {
+            ...fixture.config.crypto,
+            useIndexedDB: false,
+            allowInMemoryForTesting: false,
+        }
+
+        expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow('In-memory Matrix crypto is forbidden')
+    })
+})
+
+class FakeMatrixGatewayClient implements MatrixGatewayClient {
+    readonly lifecycle: string[] = []
+    readonly sent: MatrixSendEventRequest[] = []
+    readonly encryptedRooms = new Set(['!room:example.org'])
+    onStartEvent?: MatrixIncomingEvent
+    private listener: MatrixGatewayEventListener | null = null
+    private nextEventId = 0
+
+    async initializeCrypto(_config: MatrixGatewayCryptoConfig): Promise<void> {
+        this.lifecycle.push('crypto')
+    }
+
+    onRoomEvent(listener: MatrixGatewayEventListener): () => void {
+        this.listener = listener
+        return () => {
+            if (this.listener === listener) this.listener = null
+        }
+    }
+
+    async start(): Promise<void> {
+        this.lifecycle.push('start')
+        if (this.onStartEvent) this.emit(this.onStartEvent)
+    }
+
+    async waitUntilReady(): Promise<void> {
+        this.lifecycle.push('ready')
+    }
+
+    async assertRoomEncrypted(roomId: string): Promise<void> {
+        this.lifecycle.push(`encrypted:${roomId}`)
+        if (!this.encryptedRooms.has(roomId)) throw new Error(`Matrix room ${roomId} is not encrypted`)
+    }
+
+    async stop(): Promise<void> {
+        this.lifecycle.push('stop')
+    }
+
+    async sendEncryptedRoomEvent(request: MatrixSendEventRequest): Promise<MatrixSendEventResult> {
+        this.sent.push(structuredClone(request))
+        return { eventId: `$outgoing-${++this.nextEventId}` }
+    }
+
+    async setTyping(): Promise<void> {}
+
+    emit(event: MatrixIncomingEvent): void {
+        this.listener?.(event)
+    }
+}
+
+async function securityFixture() {
+    const keys = await generateDeviceKeyPair()
+    const directory = await temporaryDirectory()
+    const now = 2_000_000
+    const config: MatrixGatewayConfig = {
+        gatewayId: 'gateway-1',
+        connection: {
+            baseUrl: 'https://matrix.example.org',
+            accessToken: 'secret-token',
+            userId: '@gateway:example.org',
+            deviceId: 'GATEWAY1',
+        },
+        crypto: {
+            useIndexedDB: false,
+            databasePrefix: 'codever-test',
+            allowInMemoryForTesting: true,
+        },
+        rooms: [{
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'mock-provider',
+        }],
+        trustedDevices: [{
+            deviceId: 'pwa-device-1',
+            publicKey: keys.publicJwk,
+            allowedRoomIds: ['!room:example.org'],
+            allowedOperations: ['prompt', 'cancel', 'decision', 'session.settings'],
+            matrixUserId: '@alice:example.org',
+            matrixDeviceKeys: ['matrix-ed25519-key'],
+        }],
+        replayLedgerPath: join(directory, 'replay.jsonl'),
+    }
+    return { keys, config, now }
+}
+
+async function signedPrompt(
+    keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    now: number,
+): Promise<SignedCommand> {
+    const command: CodeverCommand = {
+        kind: 'codever.command',
+        version: 1,
+        commandId: `command-${Math.random()}`,
+        gatewayId: 'gateway-1',
+        deviceId: 'pwa-device-1',
+        conversationId: 'conversation-1',
+        operation: 'prompt',
+        issuedAt: now,
+        expiresAt: now + 60_000,
+        nonce: `0123456789abcdef-${Math.random()}`,
+        payload: { operation: 'prompt', text: 'hello from PWA' },
+    }
+    return signCommand(command, keys.privateKey, keys.keyId)
+}
+
+function incomingSigned(signedCommand: SignedCommand, suffix = 'event'): MatrixIncomingEvent {
+    return {
+        roomId: '!room:example.org',
+        eventId: `$${suffix}`,
+        eventType: 'm.room.message',
+        sender: '@alice:example.org',
+        senderDeviceId: 'matrix-ed25519-key',
+        encrypted: true,
+        encryptedPayloadFingerprint: `ciphertext-${suffix}`,
+        content: {
+            msgtype: 'm.text',
+            body: 'Codever command',
+            [CODEVER_MATRIX_EXTENSION]: {
+                version: 1,
+                kind: 'signed_command',
+                signed_command: signedCommand,
+            },
+        },
+    }
+}
+
+function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
+    return {
+        dispatch: vi.fn(async (input: SessionInput) => {
+            dispatched.push(input)
+        }),
+        receiveInput: vi.fn(),
+        destroy: vi.fn(async () => undefined),
+        state: 'idle',
+        sessionRecord: {} as TopicSession['sessionRecord'],
+        channelPort: {} as TopicSession['channelPort'],
+        getProgress: vi.fn(() => null),
+        getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
+        retryDelivery: vi.fn(async deliveryId => ({
+            status: 'not_found' as const,
+            deliveryId,
+            message: 'not found',
+        })),
+    }
+}
+
+function fakeProvider(): AgentProvider {
+    return {
+        name: 'mock-provider',
+        startQuery: vi.fn((): AgentQueryHandle => ({
+            events: (async function* () {
+                yield { kind: 'text' as const, text: 'agent response' }
+                yield { kind: 'result' as const, status: 'success' as const }
+            })(),
+            interrupt: vi.fn(async () => undefined),
+        })),
+        isReady: vi.fn(() => true),
+        getInitError: vi.fn(() => null),
+        getAvailableModels: vi.fn(() => []),
+        getAvailablePermissionModes: vi.fn(() => []),
+    }
+}
+
+async function temporaryDirectory(): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-matrix-daemon-'))
+    temporaryDirectories.push(directory)
+    return directory
+}

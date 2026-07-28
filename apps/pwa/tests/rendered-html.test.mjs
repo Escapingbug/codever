@@ -38,6 +38,8 @@ test("server-renders the Codever agent workspace", async () => {
   assert.match(html, /Permission required/);
   assert.match(html, /Allow once/);
   assert.match(html, /Message Codex/);
+  assert.match(html, /Real Matrix/);
+  assert.match(html, /Connection mode/);
   assert.doesNotMatch(html, /Your site is taking shape|codex-preview/i);
 });
 
@@ -62,4 +64,35 @@ test("ships a complete installable offline shell", async () => {
   assert.match(styles, /@media \(max-width: 760px\)/);
   assert.match(styles, /\.mobile-chat-open \.conversation-panel/);
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
+});
+
+test("keeps Real Matrix credentials local and signs strict command envelopes", async () => {
+  const [matrix, settings, app, packageJson] = await Promise.all([
+    readFile(new URL("app/matrix.ts", appRoot), "utf8"),
+    readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
+    readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+    readFile(new URL("package.json", appRoot), "utf8"),
+  ]);
+
+  assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
+  assert.match(packageJson, /"@codever\/security"/);
+  assert.match(matrix, /initRustCrypto\(\{/);
+  assert.match(matrix, /useIndexedDB: true/);
+  assert.match(matrix, /cryptoDatabasePrefix:/);
+  assert.match(matrix, /indexedDB\.open\(DEVICE_DATABASE/);
+  assert.match(matrix, /signCommand\(command, identity\.privateKey/);
+  assert.match(matrix, /kind: "signed_command"/);
+  assert.match(matrix, /signed_command: envelope/);
+  assert.match(matrix, /globalBlacklistUnverifiedDevices = true/);
+  assert.match(matrix, /AllDevicesIsolationMode/);
+  assert.match(matrix, /gatewayMatrixEd25519/);
+  assert.match(matrix, /setDeviceVerified/);
+  assert.match(matrix, /getOwnDeviceKeys\(\)/);
+  assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
+  assert.match(matrix, /localStorage\.setItem/);
+  assert.doesNotMatch(matrix, /fetch\(["'`]\/api|server action|use server/i);
+  assert.match(settings, /Credentials stay in this browser/);
+  assert.match(app, /appMode.*"demo".*"matrix"/s);
+  assert.match(app, /connectRealMatrix/);
+  assert.match(app, /sendRealCommand/);
 });

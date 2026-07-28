@@ -8,6 +8,19 @@ import {
   useRef,
   useState,
 } from "react";
+import type { CommandPayload } from "@codever/protocol";
+import { MatrixSettings } from "./MatrixSettings";
+import {
+  clearMatrixConfig,
+  connectMatrix,
+  loadMatrixConfig,
+  normalizeMatrixConfig,
+  saveMatrixConfig,
+  type IncomingCodeverMessage,
+  type MatrixConnection,
+  type MatrixConnectionConfig,
+  type MatrixConnectionStatus,
+} from "./matrix";
 
 type Session = {
   id: string;
@@ -26,9 +39,26 @@ type Session = {
 
 type ChatMessage = {
   id: string;
-  kind: "notice" | "user" | "agent" | "tool" | "permission";
+  kind: "notice" | "user" | "agent" | "tool" | "permission" | "error";
   text?: string;
   time?: string;
+  eventId?: string;
+  requestId?: string;
+  streamId?: string;
+  raw?: Record<string, unknown>;
+};
+
+const emptyMatrixConfig: MatrixConnectionConfig = {
+  homeserver: "",
+  userId: "",
+  accessToken: "",
+  matrixDeviceId: "",
+  roomId: "",
+  gatewayId: "",
+  conversationId: "",
+  gatewayMatrixUserId: "",
+  gatewayMatrixDeviceId: "",
+  gatewayMatrixEd25519: "",
 };
 
 const sessions: Session[] = [
@@ -134,6 +164,7 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 export function CodeverApp() {
+  const [appMode, setAppMode] = useState<"demo" | "matrix">("demo");
   const [selectedId, setSelectedId] = useState(sessions[0].id);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -147,9 +178,24 @@ export function CodeverApp() {
   const [model, setModel] = useState(sessions[0].model);
   const [mode, setMode] = useState("Agent");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
+    () => loadMatrixConfig() ?? emptyMatrixConfig,
+  );
+  const [connectionStatus, setConnectionStatus] =
+    useState<MatrixConnectionStatus>("offline");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
+  const [devicePublicJwk, setDevicePublicJwk] =
+    useState<JsonWebKey | null>(null);
+  const [matrixDeviceKeys, setMatrixDeviceKeys] = useState<string[]>([]);
+  const [decisionStates, setDecisionStates] = useState<
+    Record<string, "pending" | "approved" | "denied">
+  >({});
   const feedRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const responseDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const matrixConnectionRef = useRef<MatrixConnection | null>(null);
 
   const selected =
     sessions.find((session) => session.id === selectedId) ?? sessions[0];
@@ -162,6 +208,13 @@ export function CodeverApp() {
       ),
     [search],
   );
+  const matrixConnected =
+    connectionStatus === "connected" || connectionStatus === "reconnecting";
+  const conversationTitle =
+    appMode === "matrix"
+      ? matrixConfig.roomId || "Encrypted Matrix room"
+      : selected.title;
+  const activeProvider = appMode === "matrix" ? "Gateway agent" : selected.provider;
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => {
@@ -180,11 +233,149 @@ export function CodeverApp() {
     () => () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
+      matrixConnectionRef.current?.stop();
     },
     [],
   );
 
+  function receiveMatrixMessage(incoming: IncomingCodeverMessage) {
+    const message: ChatMessage = {
+      id: incoming.eventId,
+      eventId: incoming.eventId,
+      kind: incoming.kind === "error" ? "error" : incoming.kind,
+      text: incoming.text,
+      time: formatMessageTime(incoming.timestamp),
+      requestId: incoming.requestId,
+      streamId: incoming.streamId,
+      raw: incoming.raw,
+    };
+    if (incoming.requestId) {
+      setDecisionStates((current) => ({
+        ...current,
+        [incoming.eventId]: "pending",
+      }));
+    }
+    setMessages((current) => {
+      const eventType =
+        typeof incoming.raw.type === "string" ? incoming.raw.type : "";
+      const replaceIndex = incoming.replacesEventId
+        ? current.findIndex(
+            (entry) =>
+              entry.eventId === incoming.replacesEventId ||
+              entry.id === incoming.replacesEventId,
+          )
+        : -1;
+      const streamIndex = incoming.streamId
+        ? current.findIndex((entry) => entry.streamId === incoming.streamId)
+        : -1;
+      const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
+      if (targetIndex < 0) return [...current, message];
+
+      const next = [...current];
+      if (
+        eventType === "agent.text.delta" &&
+        next[targetIndex].text !== incoming.text
+      ) {
+        next[targetIndex] = {
+          ...message,
+          id: next[targetIndex].id,
+          text: `${next[targetIndex].text ?? ""}${incoming.text}`,
+        };
+      } else {
+        next[targetIndex] = { ...message, id: next[targetIndex].id };
+      }
+      return next;
+    });
+    if (
+      incoming.raw.type === "agent.text.completed" ||
+      incoming.raw.type === "command.completed" ||
+      incoming.kind === "error"
+    ) {
+      setIsStreaming(false);
+    }
+  }
+
+  async function connectRealMatrix() {
+    matrixConnectionRef.current?.stop();
+    matrixConnectionRef.current = null;
+    setConnectionError(null);
+    setConnectionStatus("connecting");
+    setMessages([]);
+    try {
+      const normalized = normalizeMatrixConfig(matrixConfig);
+      setMatrixConfig(normalized);
+      saveMatrixConfig(normalized);
+      const connection = await connectMatrix(normalized, {
+        onMessage: receiveMatrixMessage,
+        onStatus(status, detail) {
+          setConnectionStatus(status);
+          if (status === "error" && detail) setConnectionError(detail);
+        },
+      });
+      matrixConnectionRef.current = connection;
+      setDeviceKeyId(connection.identity.keyId);
+      setDevicePublicJwk(connection.identity.publicJwk);
+      setMatrixDeviceKeys([connection.matrixDeviceKeys.ed25519]);
+      setAppMode("matrix");
+      setSettingsOpen(false);
+      setMessages((current) => [
+        {
+          id: `matrix-connected-${Date.now()}`,
+          kind: "notice",
+          text: "Connected directly to an encrypted Matrix room. Commands are signed by this browser’s P-256 device key.",
+          time: "now",
+        },
+        ...current,
+      ]);
+    } catch (error) {
+      setConnectionStatus("error");
+      setConnectionError(formatUiError(error));
+    }
+  }
+
+  function disconnectMatrix(showDemo = true) {
+    matrixConnectionRef.current?.stop();
+    matrixConnectionRef.current = null;
+    setConnectionStatus("offline");
+    setMatrixDeviceKeys([]);
+    setIsStreaming(false);
+    if (showDemo) {
+      setAppMode("demo");
+      setMessages(initialMessages);
+      setPermission("pending");
+    }
+  }
+
+  function forgetMatrixConfig() {
+    disconnectMatrix();
+    clearMatrixConfig();
+    setMatrixConfig(emptyMatrixConfig);
+    setConnectionError(null);
+  }
+
+  async function sendRealCommand(payload: CommandPayload): Promise<boolean> {
+    const connection = matrixConnectionRef.current;
+    if (!connection || connectionStatus !== "connected") {
+      setConnectionError(
+        "Real Matrix is not connected. Open connection settings and reconnect.",
+      );
+      setSettingsOpen(true);
+      return false;
+    }
+    try {
+      await connection.send(payload);
+      return true;
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+      return false;
+    }
+  }
+
   function chooseSession(id: string) {
+    if (appMode === "matrix") {
+      setMobileChatOpen(true);
+      return;
+    }
     const next = sessions.find((session) => session.id === id);
     if (timerRef.current) clearInterval(timerRef.current);
     if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
@@ -243,7 +434,7 @@ export function CodeverApp() {
     }, 28);
   }
 
-  function sendMessage(event?: FormEvent) {
+  async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
     if (!value || isStreaming) return;
@@ -253,17 +444,38 @@ export function CodeverApp() {
     ]);
     setDraft("");
     setIsStreaming(true);
+    if (appMode === "matrix") {
+      const sent = await sendRealCommand({ operation: "prompt", text: value });
+      if (!sent) {
+        setIsStreaming(false);
+        setMessages((current) => [
+          ...current,
+          {
+            id: `matrix-error-${Date.now()}`,
+            kind: "error",
+            text: "The signed command was not sent. Check Matrix connection settings.",
+            time: "now",
+          },
+        ]);
+      }
+      return;
+    }
     responseDelayRef.current = window.setTimeout(startMockResponse, 350);
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   }
 
-  function stopStreaming() {
+  async function stopStreaming() {
+    if (appMode === "matrix") {
+      const sent = await sendRealCommand({ operation: "cancel" });
+      if (sent) setIsStreaming(false);
+      return;
+    }
     if (timerRef.current) clearInterval(timerRef.current);
     if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
     timerRef.current = null;
@@ -281,6 +493,51 @@ export function CodeverApp() {
     }
     setStreamText("");
     setIsStreaming(false);
+  }
+
+  async function decidePermission(
+    message: ChatMessage,
+    decision: "allow_once" | "deny",
+  ) {
+    if (appMode === "demo") {
+      setPermission(decision === "allow_once" ? "approved" : "denied");
+      return;
+    }
+    if (!message.requestId) {
+      setConnectionError("This permission request has no signed request ID.");
+      return;
+    }
+    const sent = await sendRealCommand({
+      operation: "decision",
+      requestId: message.requestId,
+      decision,
+    });
+    if (sent) {
+      setDecisionStates((current) => ({
+        ...current,
+        [message.id]: decision === "allow_once" ? "approved" : "denied",
+      }));
+    }
+  }
+
+  async function changeModel(nextModel: string) {
+    setModel(nextModel);
+    if (appMode === "matrix") {
+      await sendRealCommand({
+        operation: "session.settings",
+        model: nextModel,
+      });
+    }
+  }
+
+  async function changeMode(nextMode: string) {
+    setMode(nextMode);
+    if (appMode === "matrix" && nextMode !== "Ask") {
+      await sendRealCommand({
+        operation: "session.settings",
+        permissionMode: nextMode === "Plan" ? "plan" : "default",
+      });
+    }
   }
 
   return (
@@ -325,6 +582,35 @@ export function CodeverApp() {
           </button>
         </header>
 
+        <div className="mode-switch" aria-label="Connection mode">
+          <button
+            className={appMode === "demo" ? "active" : ""}
+            onClick={() => {
+              if (appMode === "matrix") disconnectMatrix();
+              else setAppMode("demo");
+            }}
+          >
+            Demo
+          </button>
+          <button
+            className={appMode === "matrix" ? "active" : ""}
+            onClick={() => {
+              if (matrixConnected) setAppMode("matrix");
+              else setSettingsOpen(true);
+            }}
+          >
+            <span className={matrixConnected ? "online" : ""} />
+            Real Matrix
+          </button>
+          <button
+            className="mode-settings"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open Matrix connection settings"
+          >
+            ⚙
+          </button>
+        </div>
+
         <label className="search-box">
           <span aria-hidden="true">⌕</span>
           <input
@@ -336,16 +622,30 @@ export function CodeverApp() {
           <kbd>⌘ K</kbd>
         </label>
 
-        <div className="gateway-card">
+        <button
+          className={`gateway-card gateway-card-button ${matrixConnected ? "" : "offline"}`}
+          onClick={() => setSettingsOpen(true)}
+        >
           <span className="gateway-icon">G</span>
           <div>
-            <strong>Studio Mac</strong>
+            <strong>
+              {appMode === "matrix"
+                ? matrixConfig.gatewayId || "Matrix gateway"
+                : "Studio Mac"}
+            </strong>
             <span>
-              <i /> Gateway online · 12 ms
+              <i />{" "}
+              {appMode === "matrix"
+                ? connectionStatus === "connected"
+                  ? "Matrix E2EE connected"
+                  : connectionStatus === "reconnecting"
+                    ? "Matrix reconnecting"
+                    : "Configure real Matrix"
+                : "Gateway online · 12 ms"}
             </span>
           </div>
-          <button aria-label="Gateway options">•••</button>
-        </div>
+          <span className="gateway-more" aria-hidden="true">•••</span>
+        </button>
 
         <div className="session-section-label">
           <span>Recent</span>
@@ -353,7 +653,7 @@ export function CodeverApp() {
         </div>
 
         <div className="session-list">
-          {filteredSessions.map((session) => (
+          {(appMode === "matrix" ? sessions.slice(0, 1) : filteredSessions).map((session) => (
             <button
               key={session.id}
               className={`session-row ${
@@ -367,17 +667,25 @@ export function CodeverApp() {
               </span>
               <span className="session-copy">
                 <span className="session-title-line">
-                  <strong>{session.title}</strong>
+                  <strong>
+                    {appMode === "matrix"
+                      ? matrixConfig.roomId || "Encrypted Matrix room"
+                      : session.title}
+                  </strong>
                   <time>{session.time}</time>
                 </span>
                 <span className="session-preview-line">
-                  <span>{session.preview}</span>
+                  <span>
+                    {appMode === "matrix"
+                      ? "Live encrypted session · signed commands"
+                      : session.preview}
+                  </span>
                   {session.unread && <b>{session.unread}</b>}
                 </span>
               </span>
             </button>
           ))}
-          {filteredSessions.length === 0 && (
+          {appMode === "demo" && filteredSessions.length === 0 && (
             <div className="empty-search">
               <span>⌕</span>
               No matching conversations
@@ -388,14 +696,27 @@ export function CodeverApp() {
         <footer className="trust-footer">
           <span className="shield">✓</span>
           <span>
-            <strong>Encryption active</strong>
-            <small>4 trusted devices</small>
+            <strong>
+              {appMode === "matrix" ? "Matrix E2EE + P-256" : "Encryption active"}
+            </strong>
+            <small>
+              {appMode === "matrix"
+                ? deviceKeyId
+                  ? `Device key ${deviceKeyId.slice(0, 10)}…`
+                  : "Local device key not loaded"
+                : "4 trusted devices"}
+            </small>
           </span>
-          <button aria-label="View trusted devices">›</button>
+          <button
+            aria-label="View trusted devices"
+            onClick={() => setSettingsOpen(true)}
+          >
+            ›
+          </button>
         </footer>
       </section>
 
-      <section className="conversation-panel" aria-label={selected.title}>
+      <section className="conversation-panel" aria-label={conversationTitle}>
         <header className="conversation-header">
           <button
             className="mobile-back"
@@ -408,9 +729,14 @@ export function CodeverApp() {
             {selected.initials}
           </span>
           <div className="conversation-heading">
-            <h2>{selected.title}</h2>
+            <h2>{conversationTitle}</h2>
             <span>
-              <i /> {selected.provider} is ready
+              <i className={matrixConnected ? "" : "offline-dot"} />{" "}
+              {appMode === "matrix"
+                ? connectionStatus === "connected"
+                  ? "Encrypted sync active"
+                  : connectionStatus
+                : `${selected.provider} is ready`}
             </span>
           </div>
           <div className="header-actions">
@@ -429,12 +755,27 @@ export function CodeverApp() {
 
         {detailsOpen && (
           <div className="details-popover">
-            <span className="mini-label">Repository</span>
-            <strong>{selected.repository}</strong>
-            <span className="mini-label">Branch</span>
-            <code>{selected.branch}</code>
+            <span className="mini-label">
+              {appMode === "matrix" ? "Homeserver" : "Repository"}
+            </span>
+            <strong>
+              {appMode === "matrix"
+                ? matrixConfig.homeserver
+                : selected.repository}
+            </strong>
+            <span className="mini-label">
+              {appMode === "matrix" ? "Device" : "Branch"}
+            </span>
+            <code>
+              {appMode === "matrix"
+                ? matrixConfig.matrixDeviceId
+                : selected.branch}
+            </code>
             <span className="verified-line">
-              <b>✓</b> Gateway identity verified
+              <b>✓</b>{" "}
+              {appMode === "matrix"
+                ? "Commands signed locally"
+                : "Gateway identity verified"}
             </span>
           </div>
         )}
@@ -449,6 +790,18 @@ export function CodeverApp() {
                 <div className="encryption-notice" key={message.id}>
                   <span className="shield">✓</span>
                   <span>{message.text}</span>
+                </div>
+              );
+            }
+            if (message.kind === "error") {
+              return (
+                <div className="message-row agent-row" key={message.id}>
+                  <div className="agent-mark error-mark">!</div>
+                  <div className="bubble agent-bubble error-bubble">
+                    <span className="agent-label">CONNECTION ERROR</span>
+                    <p>{message.text}</p>
+                    <time>{message.time}</time>
+                  </div>
                 </div>
               );
             }
@@ -472,20 +825,34 @@ export function CodeverApp() {
                     <div className="tool-heading">
                       <span className="terminal-mark">&gt;_</span>
                       <span>
-                        <strong>Inspect workspace</strong>
-                        <small>Completed in 1.8s</small>
+                        <strong>{message.text || "Agent tool"}</strong>
+                        <small>
+                          {appMode === "matrix"
+                            ? "Received from encrypted room"
+                            : "Completed in 1.8s"}
+                        </small>
                       </span>
                       <b>✓</b>
                     </div>
                     <div className="tool-command">
-                      <code>rg --files apps/pwa</code>
+                      <code>
+                        {appMode === "matrix"
+                          ? JSON.stringify(message.raw ?? {}).slice(0, 180)
+                          : "rg --files apps/pwa"}
+                      </code>
                     </div>
-                    <button>View 24 files</button>
+                    <button>
+                      {appMode === "matrix" ? "Encrypted event details" : "View 24 files"}
+                    </button>
                   </div>
                 </div>
               );
             }
             if (message.kind === "permission") {
+              const decisionState =
+                appMode === "matrix"
+                  ? decisionStates[message.id] ?? "pending"
+                  : permission;
               return (
                 <div className="message-row agent-row" key={message.id}>
                   <div className="agent-mark">C</div>
@@ -493,37 +860,46 @@ export function CodeverApp() {
                     <div className="permission-title">
                       <span>!</span>
                       <div>
-                        <strong>Permission required</strong>
-                        <small>Write access · 3 files</small>
+                        <strong>{message.text || "Permission required"}</strong>
+                        <small>
+                          {appMode === "matrix"
+                            ? "Signed response required"
+                            : "Write access · 3 files"}
+                        </small>
                       </div>
                     </div>
                     <p>
-                      Allow Codex to update the PWA screen, metadata, and offline
-                      shell?
+                      {appMode === "matrix"
+                        ? "This decision will be signed by your local Codever key and sent through the encrypted room."
+                        : "Allow Codex to update the PWA screen, metadata, and offline shell?"}
                     </p>
-                    <div className="file-list">
-                      <code>app/CodeverApp.tsx</code>
-                      <code>app/globals.css</code>
-                      <code>public/sw.js</code>
-                    </div>
-                    {permission === "pending" ? (
+                    {appMode === "demo" && (
+                      <div className="file-list">
+                        <code>app/CodeverApp.tsx</code>
+                        <code>app/globals.css</code>
+                        <code>public/sw.js</code>
+                      </div>
+                    )}
+                    {decisionState === "pending" ? (
                       <div className="permission-actions">
                         <button
                           className="approve-button"
-                          onClick={() => setPermission("approved")}
+                          onClick={() => void decidePermission(message, "allow_once")}
                         >
                           Allow once
                         </button>
                         <button
                           className="deny-button"
-                          onClick={() => setPermission("denied")}
+                          onClick={() => void decidePermission(message, "deny")}
                         >
                           Deny
                         </button>
                       </div>
                     ) : (
-                      <div className={`decision-state ${permission}`}>
-                        {permission === "approved" ? "✓ Allowed once" : "× Denied"}
+                      <div className={`decision-state ${decisionState}`}>
+                        {decisionState === "approved"
+                          ? "✓ Allowed once"
+                          : "× Denied"}
                       </div>
                     )}
                     <time>{message.time}</time>
@@ -543,7 +919,7 @@ export function CodeverApp() {
             );
           })}
 
-          {isStreaming && (
+          {isStreaming && appMode === "demo" && (
             <div className="message-row agent-row streaming-row">
               <div className="agent-mark live">C</div>
               <div className="bubble agent-bubble">
@@ -564,25 +940,36 @@ export function CodeverApp() {
             <div className="context-item">
               <span className="context-icon">⌘</span>
               <span>
-                <small>Repository</small>
-                <b>{selected.repository}</b>
+                <small>{appMode === "matrix" ? "Encrypted room" : "Repository"}</small>
+                <b>
+                  {appMode === "matrix"
+                    ? matrixConfig.roomId || "Not connected"
+                    : selected.repository}
+                </b>
               </span>
             </div>
             <div className="context-item branch-item">
               <span className="branch-mark">⑂</span>
-              <code>{selected.branch}</code>
+              <code>
+                {appMode === "matrix"
+                  ? matrixConfig.gatewayId || "Gateway"
+                  : selected.branch}
+              </code>
             </div>
             <span className="context-spacer" />
             <span className="token-state">18k / 128k</span>
           </div>
 
-          <form className="composer" onSubmit={sendMessage}>
+          <form
+            className="composer"
+            onSubmit={(event) => void sendMessage(event)}
+          >
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}
-              placeholder={`Message ${selected.provider}…`}
-              aria-label={`Message ${selected.provider}`}
+              placeholder={`Message ${activeProvider}…`}
+              aria-label={`Message ${activeProvider}`}
               rows={1}
             />
             <div className="composer-actions">
@@ -590,6 +977,13 @@ export function CodeverApp() {
                 type="button"
                 className="attachment-button"
                 aria-label="Attach a file"
+                onClick={() =>
+                  setConnectionError(
+                    appMode === "matrix"
+                      ? "Encrypted attachment upload is not available in this milestone."
+                      : "Attach a file in the connected Gateway app."
+                  )
+                }
               >
                 +
               </button>
@@ -598,7 +992,7 @@ export function CodeverApp() {
                   <span className="status-spark" />
                   <select
                     value={model}
-                    onChange={(event) => setModel(event.target.value)}
+                    onChange={(event) => void changeModel(event.target.value)}
                     aria-label="Agent model"
                   >
                     <option>GPT-5.2 Codex</option>
@@ -611,7 +1005,7 @@ export function CodeverApp() {
                 <label>
                   <select
                     value={mode}
-                    onChange={(event) => setMode(event.target.value)}
+                    onChange={(event) => void changeMode(event.target.value)}
                     aria-label="Agent mode"
                   >
                     <option>Agent</option>
@@ -624,7 +1018,7 @@ export function CodeverApp() {
                 <button
                   type="button"
                   className="send-button stop-button"
-                  onClick={stopStreaming}
+                  onClick={() => void stopStreaming()}
                   aria-label="Stop agent"
                 >
                   ■
@@ -642,10 +1036,53 @@ export function CodeverApp() {
             </div>
           </form>
           <p className="composer-hint">
-            Enter to send · Shift + Enter for a new line
+            {appMode === "matrix"
+              ? "Signed locally · Matrix E2EE transport · Enter to send"
+              : "Enter to send · Shift + Enter for a new line"}
           </p>
         </div>
       </section>
+
+      {connectionError && !settingsOpen && (
+        <button
+          className="connection-toast"
+          role="alert"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <span>!</span>
+          <span>
+            <strong>Matrix needs attention</strong>
+            <small>{connectionError}</small>
+          </span>
+          <b>Open settings</b>
+        </button>
+      )}
+
+      <MatrixSettings
+        open={settingsOpen}
+        config={matrixConfig}
+        status={connectionStatus}
+        error={connectionError}
+        keyId={deviceKeyId}
+        publicJwk={devicePublicJwk}
+        matrixDeviceKeys={matrixDeviceKeys}
+        onChange={setMatrixConfig}
+        onClose={() => setSettingsOpen(false)}
+        onConnect={() => void connectRealMatrix()}
+        onDisconnect={() => disconnectMatrix()}
+        onForget={forgetMatrixConfig}
+      />
     </main>
   );
+}
+
+function formatMessageTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function formatUiError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -13,10 +13,12 @@
     "build": "tsup",
     "build:rewrite": "pnpm --recursive --if-present build",
     "dev": "tsx src/index.ts",
+    "dev:matrix-gateway": "tsx scripts/matrix-local-gateway.ts",
     "test": "vitest run && vitest run --config vitest.e2e.config.ts",
     "test:rewrite": "pnpm --recursive --if-present test",
     "test:unit": "vitest run",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:matrix-live": "tsx scripts/matrix-live-smoke.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:rewrite": "pnpm --recursive --if-present typecheck"
   },
@@ -31,7 +33,7 @@
     "conf": "^12.0.0",
     "grammy": "^1.30.0",
     "https-proxy-agent": "^9.0.0",
-    "matrix-js-sdk": "^42.0.0",
+    "matrix-js-sdk": "^41.0.0",
     "undici": "^8.3.0",
     "zod": "^4.4.3"
   },

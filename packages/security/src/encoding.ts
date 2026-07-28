@@ -41,11 +41,21 @@ export async function sha256(value: string | Uint8Array): Promise<string> {
 
 export async function publicKeyId(publicKey: CryptoKey | JsonWebKey): Promise<string> {
   const jwk =
-    publicKey instanceof CryptoKey
+    isCryptoKey(publicKey)
       ? await getCrypto().subtle.exportKey('jwk', publicKey)
       : publicKey
   if (jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !jwk.x || !jwk.y) {
     throw new TypeError('Expected a P-256 public key')
   }
   return sha256(canonicalJson({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y }))
+}
+
+export function isCryptoKey(value: CryptoKey | JsonWebKey): value is CryptoKey {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    'algorithm' in value &&
+    'usages' in value
+  )
 }

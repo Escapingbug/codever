@@ -1,0 +1,18 @@
+services:
+  synapse:
+    image: matrixdotorg/synapse:latest
+    container_name: codever-matrix-local
+    restart: unless-stopped
+    environment:
+      SYNAPSE_SERVER_NAME: localhost
+      SYNAPSE_REPORT_STATS: "no"
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fSs", "http://localhost:8008/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s

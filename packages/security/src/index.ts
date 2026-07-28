@@ -1,3 +1,4 @@
+export * from './device-keys.js'
 export * from './encoding.js'
 export * from './errors.js'
 export * from './idempotency.js'

@@ -1,4 +1,4 @@
-const CACHE_NAME = "codever-shell-v1";
+const CACHE_NAME = "codever-shell-v2";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {

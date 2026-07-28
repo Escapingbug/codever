@@ -14,7 +14,10 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@codever/protocol": "file:../../packages/protocol",
+    "@codever/security": "file:../../packages/security",
     "drizzle-orm": "0.45.2",
+    "matrix-js-sdk": "41.0.0",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6"
