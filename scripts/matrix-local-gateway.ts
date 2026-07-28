@@ -1,11 +1,24 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createClient } from 'matrix-js-sdk'
+import type { Logger } from 'matrix-js-sdk/lib/logger.js'
+import QRCode from 'qrcode'
+import { PairingOfferGuard } from '@codever/security'
+import { FileReplayStore } from '@codever/security/node'
+import {
+    FileGatewayIdentityStore,
+    FileTrustedDeviceRegistry,
+    GatewayPairingService,
+    listenForMatrixPairingRequests,
+    announceMatrixDeviceRotation,
+    pairingVerificationCode,
+    trustedDeviceFromRecord,
+    waitForMatrixPairing,
+} from '../src/gateway/pairing/index.js'
 import {
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
     type MatrixGatewayConfig,
-    type MatrixGatewayTrustedDevice,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
 
@@ -22,16 +35,23 @@ interface LoginResult {
     device_id: string
 }
 
+const quietLogger: Logger = {
+    trace() {},
+    debug() {},
+    info() {},
+    warn(message) {
+        process.stderr.write(`[matrix] ${String(message)}\n`)
+    },
+    error(message) {
+        process.stderr.write(`[matrix] ${String(message)}\n`)
+    },
+    getChild: () => quietLogger,
+}
+
 const fixture = await readJson<LocalMatrixFixture>(
     join(process.cwd(), 'dev', 'matrix', 'local-test.json'),
 )
 assertLocalHomeserver(fixture.homeserver)
-const pairingPath = process.env.CODEVER_MATRIX_PAIRING
-    ?? join(process.cwd(), 'dev', 'matrix', 'pairing.json')
-const trustedDevice = await readJson<MatrixGatewayTrustedDevice>(pairingPath)
-if (!trustedDevice.allowedRoomIds.includes(fixture.roomId)) {
-    throw new Error(`Pairing record does not allow local room ${fixture.roomId}`)
-}
 
 const registered = registerConfiguredProviders()
 const providerName = process.env.CODEVER_PROVIDER
@@ -39,18 +59,110 @@ const providerName = process.env.CODEVER_PROVIDER
     ?? 'codex'
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
 const runId = Date.now().toString(36).toUpperCase()
-const login = await loginGateway(
-    fixture.homeserver,
-    `CODEVER_GATEWAY_${runId}`,
-)
+const login = await loginGateway(fixture.homeserver, `CODEVER_GATEWAY_${runId}`)
 const sdkClient = createClient({
     baseUrl: fixture.homeserver,
     accessToken: login.access_token,
     userId: login.user_id,
     deviceId: login.device_id,
+    logger: quietLogger,
+})
+const client = new MatrixJsSdkGatewayClient(sdkClient, 30_000, message => {
+    process.stderr.write(`${message}\n`)
+})
+const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
+    ?? join(process.cwd(), 'dev', 'matrix', 'gateway-data')
+const identity = await new FileGatewayIdentityStore(
+    join(dataDirectory, 'gateway-identity.json'),
+).loadOrCreate(fixture.gatewayId)
+const registry = new FileTrustedDeviceRegistry(
+    join(dataDirectory, 'trusted-devices.json'),
+)
+const pairingService = new GatewayPairingService(
+    identity,
+    registry,
+    new PairingOfferGuard(
+        new FileReplayStore(join(dataDirectory, 'pairing-replay.json')),
+    ),
+)
+
+await client.initializeCrypto({
+    useIndexedDB: false,
+    databasePrefix: `codever-local-gateway-${runId}`,
+    allowInMemoryForTesting: true,
+})
+await client.start()
+await client.waitUntilReady()
+await client.assertRoomEncrypted(fixture.roomId)
+const ownKeys = await sdkClient.getCrypto()?.getOwnDeviceKeys()
+if (!ownKeys) throw new Error('Gateway Matrix device keys are unavailable')
+const currentTransport = {
+    homeserver: fixture.homeserver,
+    roomId: fixture.roomId,
+    userId: login.user_id,
+    deviceId: login.device_id,
+    ed25519: ownKeys.ed25519,
+}
+
+let active = await registry.listActive()
+if (active.length === 0) {
+    const created = await pairingService.createOffer({
+        gatewayName: 'Codever local Gateway',
+        gatewayTransport: currentTransport,
+    })
+    const invitationCode = await pairingVerificationCode(
+        created.signedOffer.offer.offerId,
+        created.signedOffer.offer.challenge,
+        created.signedOffer.offer.gatewayKey.keyId,
+    )
+    process.stdout.write('\nPair this Gateway from Codever:\n\n')
+    process.stdout.write(await QRCode.toString(created.link, {
+        type: 'terminal',
+        small: true,
+        errorCorrectionLevel: 'L',
+    }))
+    process.stdout.write(`\nInvitation code: ${formatCode(invitationCode)}\n`)
+    process.stdout.write(`Pairing link (paste fallback):\n${created.link}\n\n`)
+    process.stdout.write('Waiting for one encrypted pairing request…\n')
+    const paired = await waitForMatrixPairing({
+        client,
+        service: pairingService,
+        registry,
+        gatewayTransport: currentTransport,
+        timeoutMs: Math.max(1, created.signedOffer.offer.expiresAt - Date.now()),
+        onRejected: error => {
+            process.stderr.write(`[matrix-pairing] rejected: ${formatError(error)}\n`)
+        },
+    })
+    process.stdout.write(
+        `Paired ${paired.certificate.certificate.deviceName}. Starting the agent…\n`,
+    )
+    active = await registry.listActive()
+} else {
+    const rotated = await announceMatrixDeviceRotation({
+        client,
+        service: pairingService,
+        registry,
+        nextTransport: currentTransport,
+        trustedDevices: active,
+    })
+    if (rotated) {
+        process.stdout.write('Gateway Matrix transport key rotated and signed automatically.\n')
+    }
+}
+
+const trustedDevices = active.map(trustedDeviceFromRecord)
+const stopPairingRecovery = listenForMatrixPairingRequests({
+    client,
+    service: pairingService,
+    registry,
+    gatewayTransport: currentTransport,
+    onRejected: error => {
+        process.stderr.write(`[matrix-pairing-recovery] rejected: ${formatError(error)}\n`)
+    },
 })
 const config: MatrixGatewayConfig = {
-    gatewayId: fixture.gatewayId,
+    gatewayId: identity.gatewayId,
     connection: {
         baseUrl: fixture.homeserver,
         accessToken: login.access_token,
@@ -69,36 +181,27 @@ const config: MatrixGatewayConfig = {
         cwd,
         providerName,
     }],
-    trustedDevices: [trustedDevice],
-    replayLedgerPath: join(
-        process.cwd(),
-        'dev',
-        'matrix',
-        'data',
-        'gateway-replay.jsonl',
-    ),
+    trustedDevices,
+    replayLedgerPath: join(dataDirectory, 'gateway-replay.jsonl'),
+    applicationSecurity: {
+        gatewayDeviceId: identity.gatewayId,
+        gatewayKeyPair: identity.serialized,
+        envelopeReplayLedgerPath: join(dataDirectory, 'envelope-replay.json'),
+    },
 }
 const runner = new MatrixGatewayRunner(config, {
-    client: new MatrixJsSdkGatewayClient(
-        sdkClient,
-        config.connection.initialSyncTimeoutMs,
-    ),
+    client,
+    isTrustedDeviceActive: async deviceId =>
+        (await registry.get(deviceId))?.status === 'active',
     onRejected: (event, error) => {
-        const reason = error instanceof Error ? error.message : String(error)
-        process.stderr.write(`[matrix-gateway] rejected ${event.eventId}: ${reason}\n`)
+        process.stderr.write(
+            `[matrix-gateway] rejected ${event.eventId}: ${formatError(error)}\n`,
+        )
     },
 })
 
 await runner.start()
-const ownKeys = await sdkClient.getCrypto()?.getOwnDeviceKeys()
-if (!ownKeys) throw new Error('Gateway Matrix device keys are unavailable')
-
-process.stdout.write('\nGateway is ready. Pin these exact values in the PWA settings:\n')
-process.stdout.write(`${JSON.stringify({
-    gatewayMatrixUserId: login.user_id,
-    gatewayMatrixDeviceId: login.device_id,
-    gatewayMatrixEd25519: ownKeys.ed25519,
-}, null, 2)}\n\n`)
+process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)
 process.stdout.write(`Provider: ${providerName}\nWorking directory: ${cwd}\n`)
 process.stdout.write('Press Ctrl+C to stop the Gateway.\n')
 
@@ -112,15 +215,14 @@ await new Promise<void>(resolve => {
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
 })
+stopPairingRecovery()
 
 async function readJson<T>(path: string): Promise<T> {
     try {
-        const text = (await readFile(path, 'utf8')).replace(/^\uFEFF/, '')
+        const text = (await readFile(path, 'utf8')).replace(/^\uFEFF/u, '')
         return JSON.parse(text) as T
     } catch (error) {
-        throw new Error(
-            `Could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        )
+        throw new Error(`Could not read ${path}: ${formatError(error)}`)
     }
 }
 
@@ -161,4 +263,12 @@ function assertLocalHomeserver(homeserver: string): void {
     ) {
         throw new Error('This helper only accepts the disposable localhost Synapse fixture')
     }
+}
+
+function formatCode(code: string): string {
+    return code.replace(/(\d{3})(\d{3})/u, '$1 $2')
+}
+
+function formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
 }

@@ -34,11 +34,13 @@
     "grammy": "^1.30.0",
     "https-proxy-agent": "^9.0.0",
     "matrix-js-sdk": "^41.0.0",
+    "qrcode": "^1.5.4",
     "undici": "^8.3.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": ">=20",
+    "@types/qrcode": "^1.5.6",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.3.0",

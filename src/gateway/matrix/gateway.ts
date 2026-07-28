@@ -21,6 +21,7 @@ import {
     type MatrixGatewayClient,
 } from './client'
 import { FileCommandReplayStore } from './fileReplayLedger'
+import { GatewaySecureContentLayer } from './secureContent'
 
 interface RoomRuntime {
     config: MatrixGatewayRoomConfig
@@ -35,6 +36,8 @@ export interface MatrixGatewayDependencies {
     now?: () => number
     onLog?: (message: string) => void
     onRejected?: (event: MatrixIncomingEvent, error: unknown) => void
+    /** Optional live authorization source used for immediate local revocation. */
+    isTrustedDeviceActive?: (deviceId: string) => Promise<boolean>
 }
 
 export type MatrixGatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
@@ -42,12 +45,14 @@ export type MatrixGatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
 export class MatrixGatewayRunner {
     private readonly client: MatrixGatewayClient
     private readonly authorizer: StrictMatrixCommandAuthorizer
+    private readonly secureContent: GatewaySecureContentLayer | null
     private readonly roomTargets = new MatrixRoomSessionRegistry()
     private readonly rooms = new Map<string, RoomRuntime>()
     private state: MatrixGatewayState = 'stopped'
     private unsubscribe: (() => void) | null = null
     private startupEvents: MatrixIncomingEvent[] = []
     private eventChain: Promise<void> = Promise.resolve()
+    private readonly executionTasks = new Set<Promise<void>>()
     private startupFailure: Error | null = null
     private stopPromise: Promise<void> | null = null
 
@@ -63,7 +68,15 @@ export class MatrixGatewayRunner {
             config.gatewayId,
             config.trustedDevices,
             replayStore,
+            config.applicationSecurity?.gatewayKeyPair.keyId ?? 'legacy-v1',
         )
+        this.secureContent = config.applicationSecurity
+            ? new GatewaySecureContentLayer(
+                config.gatewayId,
+                config.applicationSecurity,
+                config.trustedDevices,
+            )
+            : null
     }
 
     getState(): MatrixGatewayState {
@@ -77,6 +90,7 @@ export class MatrixGatewayRunner {
         this.startupFailure = null
         try {
             await this.authorizer.initialize(this.now())
+            await this.secureContent?.initialize(this.now())
             await this.createRoomRuntimes()
             this.unsubscribe = this.client.onRoomEvent(event => this.receiveEvent(event))
             await this.client.initializeCrypto(this.config.crypto)
@@ -113,6 +127,9 @@ export class MatrixGatewayRunner {
     }
 
     private receiveEvent(event: MatrixIncomingEvent): void {
+        // Matrix echoes the Gateway's own outbound timeline events. They are
+        // gateway_to_device envelopes and must never enter the command queue.
+        if (event.sender === this.config.connection.userId) return
         if (this.state === 'starting') {
             const limit = this.config.startupEventQueueLimit ?? 1_000
             if (this.startupEvents.length >= limit) {
@@ -136,20 +153,76 @@ export class MatrixGatewayRunner {
 
     private async handleEvent(event: MatrixIncomingEvent): Promise<void> {
         if (event.eventType !== 'm.room.message') return
+        if (isMatrixGatewayControlEvent(event.content)) return
         if (!event.encrypted) throw new Error('Clear-text Matrix events cannot execute gateway commands')
         if (!event.senderDeviceId) throw new Error('Encrypted Matrix event has no cryptographic sender device key')
         const runtime = this.rooms.get(event.roomId)
         if (!runtime) return
 
-        const extension = asRecord(event.content[CODEVER_MATRIX_EXTENSION])
+        const opened = this.secureContent
+            ? await this.secureContent.openIncoming(
+                event.content[CODEVER_MATRIX_EXTENSION],
+                runtime.config,
+                this.now(),
+            )
+            : null
+        const extension = asRecord(
+            (opened?.content ?? event.content)[CODEVER_MATRIX_EXTENSION],
+        )
         if (!extension || extension.version !== 1 || extension.kind !== 'signed_command') return
-        const command = await this.authorizer.authorize(extension.signed_command, {
+        const signedCommand = asRecord(extension.signed_command)
+        const candidateCommand = asRecord(signedCommand?.command)
+        const candidateDeviceId = candidateCommand?.deviceId
+        if (
+            typeof candidateDeviceId === 'string'
+            && this.dependencies.isTrustedDeviceActive
+            && !(await this.dependencies.isTrustedDeviceActive(candidateDeviceId))
+        ) {
+            throw new Error(`Codever device ${candidateDeviceId} has been revoked`)
+        }
+        const authorized = await this.authorizer.authorizeDelivery(extension.signed_command, {
             roomId: event.roomId,
             conversationId: runtime.config.conversationId,
             matrixSender: event.sender,
             matrixDeviceKey: event.senderDeviceId,
+            ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
         }, this.now())
-        await this.execute(runtime, command)
+        if (!authorized.duplicate) this.scheduleExecution(event, runtime, authorized.command)
+        if (this.secureContent) {
+            // Matrix delivery is deliberately off the authorization lane. A
+            // stalled homeserver must not delay execution, cancel, or decisions.
+            void this.secureContent.sendCommandAccepted(
+                runtime.config,
+                authorized.command.deviceId,
+                authorized.command.commandId,
+                authorized.command.sequence,
+                this.client,
+            ).catch(error => {
+                this.log(
+                    `[matrix-gateway] command acknowledgement ${authorized.command.commandId} failed: `
+                    + formatError(error),
+                )
+            })
+        }
+    }
+
+    private scheduleExecution(
+        event: MatrixIncomingEvent,
+        runtime: RoomRuntime,
+        command: CodeverCommand,
+    ): void {
+        // Authorization and acknowledgement remain strictly ordered on
+        // eventChain, while the session runtime owns execution ordering. This
+        // keeps cancel and permission decisions responsive during a long turn.
+        const task = this.execute(runtime, command)
+            .catch(error => {
+                this.dependencies.onRejected?.(event, error)
+                this.log(`[matrix-gateway] command ${command.commandId} failed: ${formatError(error)}`)
+            })
+            .finally(() => {
+                this.executionTasks.delete(task)
+            })
+        this.executionTasks.add(task)
     }
 
     private async execute(runtime: RoomRuntime, command: CodeverCommand): Promise<void> {
@@ -193,7 +266,9 @@ export class MatrixGatewayRunner {
     private async createRoomRuntimes(): Promise<void> {
         for (const room of this.config.rooms) {
             const port = new MatrixPort({
-                transport: this.client,
+                transport: this.secureContent
+                    ? this.secureContent.transportForRoom(room, this.client)
+                    : this.client,
                 roomId: room.roomId,
                 gatewayId: this.config.gatewayId,
                 onLog: this.dependencies.onLog,
@@ -240,6 +315,8 @@ export class MatrixGatewayRunner {
                 this.log(`[matrix-gateway] session destroy failed for ${runtime.config.roomId}: ${formatError(error)}`)
             })
         }
+        await Promise.allSettled([...this.executionTasks])
+        this.executionTasks.clear()
     }
 
     private now(): number {
@@ -275,6 +352,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null
+}
+
+const MATRIX_GATEWAY_CONTROL_KINDS = new Set([
+    'pairing_request',
+    'pairing_response',
+    'gateway_device_rotation',
+])
+
+export function isMatrixGatewayControlEvent(content: Record<string, unknown>): boolean {
+    const extension = asRecord(content[CODEVER_MATRIX_EXTENSION])
+    return extension?.version === 1
+        && typeof extension.kind === 'string'
+        && MATRIX_GATEWAY_CONTROL_KINDS.has(extension.kind)
 }
 
 function formatError(error: unknown): string {

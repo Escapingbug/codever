@@ -1,14 +1,15 @@
 # Real Matrix testing
 
-The rewrite now has two real test paths. The automated path proves the complete
-wire protocol without depending on an installed agent CLI. The manual path
-uses the PWA and a real configured Codever provider.
+The rewrite has two real test paths. The automated path is a legacy Matrix
+transport smoke test. The manual path exercises pairing, the application
+envelope, secure command acknowledgement, key rotation and a real configured
+Codever provider.
 
 ## Prerequisites
 
 - Docker Desktop is running.
 - Node.js 22 or newer is installed.
-- Root and PWA dependencies have been installed with `npm ci`.
+- Workspace dependencies have been installed with `pnpm install`.
 - For the manual agent test, the selected provider CLI is installed and signed
   in. The local Gateway defaults to the built-in `codex` provider.
 
@@ -17,7 +18,7 @@ The local environment uses the official Synapse container, binds it only to
 `dev/matrix/data` directory. Its deliberately relaxed login rate limit is not
 safe for a public server.
 
-## Automated real-protocol smoke test
+## Automated legacy transport smoke test
 
 From the repository root:
 
@@ -36,10 +37,12 @@ That run exercises:
 
 1. Separate PWA and Gateway Matrix accounts and fresh devices.
 2. Matrix Rust crypto and an encrypted Megolm room.
-3. A separate P-256 Codever device identity and signed command.
-4. Gateway room, sender, Ed25519 fingerprint, expiry and replay checks.
-5. Provider execution and an encrypted reply decrypted by the tester.
-6. Verified-device-only room-key sharing in both directions.
+3. Signed command validation, replay checks and provider execution.
+4. A reply delivered through the real Matrix room.
+
+This script explicitly enables `allowInsecureLegacyForTesting`; it does **not**
+prove the PWA pairing certificate or ECDH/HKDF/AES-GCM application envelope.
+Use the manual path below for that security boundary.
 
 ## Manual PWA-to-agent test
 
@@ -51,42 +54,36 @@ npm run dev
 ```
 
 Open the localhost URL printed by the development server. Switch the app from
-**Demo** to **Real Matrix**, open Matrix settings, and copy the following
-values from the ignored `dev/matrix/local-test.json` file:
+**Demo** to **Real Matrix**.
 
-| PWA field | Local test value |
-| --- | --- |
-| Homeserver | `homeserver` |
-| Matrix user | `tester.userId` |
-| Access token | `tester.accessToken` |
-| Device ID | `tester.deviceId` |
-| Encrypted room | `roomId` |
-| Gateway ID | `gatewayId` |
-| Conversation ID | `roomId` |
-
-Leave the three **Gateway Matrix** identity fields empty on the first
-connection. Click **Connect securely**. This first connection creates the local
-P-256 identity, starts persistent browser Matrix crypto and makes **Copy pairing
-record** available. Save that copied JSON as the ignored file
-`dev/matrix/pairing.json`.
-
-Start the real local Gateway from the repository root in a second terminal:
+Start the real local Gateway from the repository root in another terminal:
 
 ```powershell
 npm run dev:matrix-gateway
 ```
 
-The Gateway creates a fresh Matrix device, starts the configured `codex`
-provider and prints three exact values:
+On first launch the Gateway displays a terminal QR code, invitation code, and
+pasteable fallback link. Scan the QR code in the PWA or paste the link. The PWA
+shows the Gateway name and the same invitation code; no Matrix fingerprints or
+JSON files are exposed.
 
-- `gatewayMatrixUserId`
-- `gatewayMatrixDeviceId`
-- `gatewayMatrixEd25519`
+For this disposable local fixture only, expand **Matrix connection** and copy
+one value from `dev/matrix/local-test.json`:
 
-Paste those into the matching PWA fields and click **Reconnect**. The PWA checks
-the device fingerprint locally, marks only that device verified and refuses to
-send until the pin is complete. The Gateway performs the same check against the
-PWA pairing record before it can send agent output.
+| PWA field | Local test value |
+| --- | --- |
+| Access token | `tester.accessToken` |
+
+The PWA asks the QR-provided homeserver who the token belongs to and fills the
+Matrix account and device automatically. Changing the invitation to a
+different homeserver clears the saved token before any request is made.
+
+The QR invitation supplies the homeserver, encrypted room and complete signed
+Gateway route. Confirm **Trust Codever local Gateway and pair** once. The PWA
+pins the offered Matrix device, sends an encrypted hidden-challenge-bound
+request, verifies the signed response and certificate, and stores the
+persistent Gateway application key. The Gateway stores the trusted PWA device
+and starts the configured provider without a restart.
 
 Send a prompt in the chat. It should appear in the Gateway terminal's provider
 session, and the encrypted response should appear in the PWA.
@@ -110,7 +107,15 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
 - Browser crypto is persisted in IndexedDB.
 - The localhost Gateway intentionally uses an in-memory Matrix crypto store and
   a fresh Matrix device on every start. This is allowed only by the explicit
-  local-test flag.
-- A packaged desktop Gateway still needs a durable native crypto-store design.
+  local-test flag. The fresh device is signed by the persistent Gateway P-256
+  application key, so the PWA updates its Matrix pin automatically without
+  another user pairing action.
+- An already paired PWA follows that signed rotation. A pairing request that
+  has not yet received its first certificate cannot survive this local
+  Gateway's fresh Matrix-device restart; rescan the new QR. Production desktop
+  packaging must persist the Gateway Matrix crypto device.
+- The Gateway application identity, trusted devices, one-time offer replay
+  ledger and current rotation head are persisted independently of Matrix.
+  The local fixture stores them in ignored `dev/matrix/gateway-data`.
 - The hosted PWA requires an HTTPS Matrix homeserver. Browsers will block its
   connection to this HTTP localhost fixture as mixed content.

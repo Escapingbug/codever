@@ -89,7 +89,7 @@ describe('MatrixPort', () => {
         expect(transport.attempts[2].transactionId).not.toBe(transport.attempts[0].transactionId)
     })
 
-    it('edits using Matrix replacement relations and stable content-based IDs', async () => {
+    it('edits using Matrix replacement relations without plaintext-derived transaction IDs', async () => {
         const transport = new InMemoryMatrixTransport()
         const port = createPort(transport)
 
@@ -108,8 +108,8 @@ describe('MatrixPort', () => {
                 },
             },
         })
-        expect(transport.attempts[0].transactionId).toBe(transport.attempts[1].transactionId)
-        expect(transport.delivered).toHaveLength(1)
+        expect(transport.attempts[0].transactionId).not.toBe(transport.attempts[1].transactionId)
+        expect(transport.delivered).toHaveLength(2)
     })
 
     it('publishes structured decisions with text fallback and resolves only allowed options', async () => {
@@ -177,6 +177,7 @@ describe('MatrixIncomingRouter', () => {
             gatewayId: 'gateway-1',
             deviceId: 'phone-1',
             conversationId: '!room:example.org',
+            sequence: 1,
             operation: 'prompt',
             issuedAt: 1_000,
             expiresAt: 61_000,

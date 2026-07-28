@@ -6,6 +6,7 @@ export default defineConfig({
         exclude: [
             ...configDefaults.exclude,
             '.worktrees/**',
+            'apps/pwa/tests/**',
             'e2e/**',
         ],
         globals: true,

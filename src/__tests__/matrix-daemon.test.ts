@@ -66,6 +66,15 @@ describe('strict Matrix command authorization', () => {
             matrixSender: '@alice:example.org',
             matrixDeviceKey: 'matrix-ed25519-key',
         }, fixture.now)).rejects.toMatchObject({ code: 'replay' })
+        await expect(restarted.authorizeDelivery(signed, {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            matrixSender: '@alice:example.org',
+            matrixDeviceKey: 'matrix-ed25519-key',
+        }, fixture.now)).resolves.toMatchObject({
+            duplicate: true,
+            command: { commandId: signed.command.commandId },
+        })
     })
 
     it('rejects a valid app signature arriving through a non-pinned Matrix device', async () => {
@@ -87,6 +96,68 @@ describe('strict Matrix command authorization', () => {
             },
             fixture.now,
         )).rejects.toMatchObject({ code: 'matrix-device-mismatch' })
+    })
+
+    it('rejects command gaps and persists the next sequence across restarts', async () => {
+        const fixture = await securityFixture()
+        const context = {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            matrixSender: '@alice:example.org',
+            matrixDeviceKey: 'matrix-ed25519-key',
+        }
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await authorizer.initialize(fixture.now)
+
+        await expect(authorizer.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 2),
+            context,
+            fixture.now,
+        )).rejects.toMatchObject({ code: 'sequence' })
+        await expect(authorizer.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 1),
+            context,
+            fixture.now,
+        )).resolves.toMatchObject({ sequence: 1 })
+        await expect(authorizer.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 2),
+            context,
+            fixture.now,
+        )).resolves.toMatchObject({ sequence: 2 })
+
+        const restarted = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await restarted.initialize(fixture.now)
+        await expect(restarted.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 4),
+            context,
+            fixture.now,
+        )).rejects.toMatchObject({ code: 'sequence' })
+        await expect(restarted.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 3),
+            context,
+            fixture.now,
+        )).resolves.toMatchObject({ sequence: 3 })
+
+        const replacementGatewayIdentity = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+            'replacement-gateway-key',
+        )
+        await replacementGatewayIdentity.initialize(fixture.now)
+        await expect(replacementGatewayIdentity.authorize(
+            await signedPrompt(fixture.keys, fixture.now, 1),
+            context,
+            fixture.now,
+        )).resolves.toMatchObject({ sequence: 1 })
     })
 
     it('fails closed when the persisted replay ledger is corrupt', async () => {
@@ -159,6 +230,36 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
+    it('keeps cancel responsive while a previously accepted prompt is still running', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        let finishPrompt!: () => void
+        const promptFinished = new Promise<void>(resolve => {
+            finishPrompt = resolve
+        })
+        const session = fakeTopicSession(dispatched)
+        session.dispatch = vi.fn(async (input: SessionInput) => {
+            dispatched.push(input)
+            if (input.kind === 'user_message') await promptFinished
+        })
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => session,
+        })
+        await runner.start()
+
+        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now, 1), 'prompt'))
+        await vi.waitFor(() => expect(dispatched).toHaveLength(1))
+        client.emit(incomingSigned(await signedCancel(fixture.keys, fixture.now, 2), 'cancel'))
+
+        await vi.waitFor(() => expect(dispatched).toHaveLength(2))
+        expect(dispatched[1]).toMatchObject({ kind: 'cancel', reason: 'user' })
+        finishPrompt()
+        await runner.stop()
+    })
+
     it('rejects clear-text and tampered commands without invoking a session', async () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
@@ -180,6 +281,52 @@ describe('MatrixGatewayRunner', () => {
 
         await vi.waitFor(() => expect(rejected).toHaveLength(2))
         expect(dispatched).toHaveLength(0)
+        await runner.stop()
+    })
+
+    it('ignores the Gateway Matrix account own timeline echoes', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const rejected: unknown[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession(dispatched),
+            onRejected: (_event, error) => rejected.push(error),
+        })
+        await runner.start()
+
+        client.emit({
+            ...incomingSigned(await signedPrompt(fixture.keys, fixture.now)),
+            sender: fixture.config.connection.userId,
+        })
+        await runner.stop()
+
+        expect(dispatched).toEqual([])
+        expect(rejected).toEqual([])
+    })
+
+    it('consults the live registry before a previously trusted device can execute', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const rejected: unknown[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession(dispatched),
+            isTrustedDeviceActive: async () => false,
+            onRejected: (_event, error) => rejected.push(error),
+        })
+        await runner.start()
+
+        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+        await vi.waitFor(() => expect(rejected).toHaveLength(1))
+        expect(dispatched).toEqual([])
+        expect(rejected[0]).toEqual(expect.objectContaining({
+            message: expect.stringContaining('has been revoked'),
+        }))
         await runner.stop()
     })
 
@@ -323,6 +470,15 @@ describe('MatrixJsSdkGatewayClient', () => {
 })
 
 describe('Matrix gateway configuration', () => {
+    it('requires application-layer security unless a test explicitly opts out', async () => {
+        const fixture = await securityFixture()
+        fixture.config.allowInsecureLegacyForTesting = false
+
+        expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow(
+            'Application-layer Matrix security is required',
+        )
+    })
+
     it('forbids accidental in-memory production crypto', async () => {
         const fixture = await securityFixture()
         fixture.config.crypto = {
@@ -416,6 +572,7 @@ async function securityFixture() {
             matrixDeviceKeys: ['matrix-ed25519-key'],
         }],
         replayLedgerPath: join(directory, 'replay.jsonl'),
+        allowInsecureLegacyForTesting: true,
     }
     return { keys, config, now }
 }
@@ -423,19 +580,43 @@ async function securityFixture() {
 async function signedPrompt(
     keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     now: number,
+    sequence = 1,
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
         version: 1,
-        commandId: `command-${Math.random()}`,
+        commandId: `command-${sequence}-${Math.random()}`,
         gatewayId: 'gateway-1',
         deviceId: 'pwa-device-1',
         conversationId: 'conversation-1',
+        sequence,
         operation: 'prompt',
         issuedAt: now,
         expiresAt: now + 60_000,
-        nonce: `0123456789abcdef-${Math.random()}`,
+        nonce: `0123456789abcdef-${sequence}-${Math.random()}`,
         payload: { operation: 'prompt', text: 'hello from PWA' },
+    }
+    return signCommand(command, keys.privateKey, keys.keyId)
+}
+
+async function signedCancel(
+    keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    now: number,
+    sequence: number,
+): Promise<SignedCommand> {
+    const command: CodeverCommand = {
+        kind: 'codever.command',
+        version: 1,
+        commandId: `cancel-${sequence}-${Math.random()}`,
+        gatewayId: 'gateway-1',
+        deviceId: 'pwa-device-1',
+        conversationId: 'conversation-1',
+        sequence,
+        operation: 'cancel',
+        issuedAt: now,
+        expiresAt: now + 60_000,
+        nonce: `fedcba9876543210-${sequence}-${Math.random()}`,
+        payload: { operation: 'cancel' },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }

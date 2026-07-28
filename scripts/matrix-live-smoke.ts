@@ -128,6 +128,7 @@ try {
             matrixDeviceKeys: [testerMatrixKeys.ed25519],
         }],
         replayLedgerPath: join(replayDirectory, 'replay.jsonl'),
+        allowInsecureLegacyForTesting: true,
     }
 
     process.stdout.write('[3/5] Starting the real Matrix Gateway and Rust crypto...\n')
@@ -174,6 +175,7 @@ try {
         gatewayId: fixture.gatewayId,
         deviceId: testerLogin.device_id,
         conversationId: fixture.roomId,
+        sequence: 1,
         operation: 'prompt',
         issuedAt: now,
         expiresAt: now + 120_000,

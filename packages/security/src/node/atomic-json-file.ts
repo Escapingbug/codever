@@ -19,6 +19,10 @@ export interface FileStoreOptions {
    */
   lockTimeoutMs?: number
   retryDelayMs?: number
+  /** Unix permissions applied at creation time, before sensitive bytes exist. */
+  fileMode?: number
+  /** Unix permissions for newly-created state and lock directories. */
+  directoryMode?: number
 }
 
 function isNotFound(error: unknown): boolean {
@@ -47,6 +51,8 @@ class CrossProcessFileLock {
   private readonly lockPath: string
   private readonly timeoutMs: number
   private readonly retryDelayMs: number
+  private readonly fileMode: number
+  private readonly directoryMode: number
 
   constructor(
     statePath: string,
@@ -55,15 +61,17 @@ class CrossProcessFileLock {
     this.lockPath = `${statePath}.lock`
     this.timeoutMs = options.lockTimeoutMs ?? 5_000
     this.retryDelayMs = options.retryDelayMs ?? 10
+    this.fileMode = options.fileMode ?? 0o600
+    this.directoryMode = options.directoryMode ?? 0o700
   }
 
   async acquire(): Promise<() => Promise<void>> {
     const deadline = Date.now() + this.timeoutMs
-    await mkdir(dirname(this.lockPath), { recursive: true })
+    await mkdir(dirname(this.lockPath), { recursive: true, mode: this.directoryMode })
 
     for (;;) {
       try {
-        await mkdir(this.lockPath)
+        await mkdir(this.lockPath, { mode: this.directoryMode })
         try {
           await writeFile(
             `${this.lockPath}/owner.json`,
@@ -72,7 +80,7 @@ class CrossProcessFileLock {
               acquiredAt: Date.now(),
               token: randomUUID(),
             }),
-            { encoding: 'utf8', flag: 'wx' },
+            { encoding: 'utf8', flag: 'wx', mode: this.fileMode },
           )
         } catch (error) {
           await rmdir(this.lockPath).catch(() => undefined)
@@ -124,6 +132,8 @@ export class AtomicJsonFile<TState> {
   private readonly lock: CrossProcessFileLock
   private readonly nextPath: string
   private readonly previousPath: string
+  private readonly fileMode: number
+  private readonly directoryMode: number
 
   constructor(
     private readonly path: string,
@@ -132,6 +142,8 @@ export class AtomicJsonFile<TState> {
     this.lock = new CrossProcessFileLock(path, options)
     this.nextPath = `${path}.next`
     this.previousPath = `${path}.previous`
+    this.fileMode = options.fileMode ?? 0o600
+    this.directoryMode = options.directoryMode ?? 0o700
   }
 
   async transaction<TResult>(
@@ -163,10 +175,10 @@ export class AtomicJsonFile<TState> {
   }
 
   private async write(state: TState): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true })
+    await mkdir(dirname(this.path), { recursive: true, mode: this.directoryMode })
     await rm(this.nextPath, { force: true })
 
-    const handle = await open(this.nextPath, 'wx')
+    const handle = await open(this.nextPath, 'wx', this.fileMode)
     try {
       await handle.writeFile(`${JSON.stringify(state)}\n`, 'utf8')
       await handle.sync()

@@ -1,10 +1,15 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { ReplayClaim, ReplayStore } from '@codever/security'
+import { canonicalJson, type CodeverCommand } from '@codever/protocol'
+import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
 interface PersistedClaimBatch {
     version: 1
     claims: ReplayClaim[]
+    sequence?: {
+        scope: string
+        value: number
+    }
 }
 
 /**
@@ -15,6 +20,7 @@ interface PersistedClaimBatch {
  */
 export class FileCommandReplayStore implements ReplayStore {
     private readonly claims = new Map<string, number>()
+    private readonly sequences = new Map<string, number>()
     private initialized = false
     private chain: Promise<unknown> = Promise.resolve()
 
@@ -45,6 +51,58 @@ export class FileCommandReplayStore implements ReplayStore {
             await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8')
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             return true
+        })
+        this.chain = operation.then(() => undefined, () => undefined)
+        return operation
+    }
+
+    claimCommandInOrder(
+        command: CodeverCommand,
+        now: number,
+        sequenceEpoch = 'legacy-v1',
+    ): Promise<'accepted' | 'duplicate'> {
+        const operation = this.chain.then(async () => {
+            if (!this.initialized) await this.load()
+            await this.pruneInternal(now)
+            if (command.expiresAt <= now) {
+                throw new SecurityError('expired', 'Expired commands cannot enter the replay store')
+            }
+
+            const scope = canonicalJson([
+                command.gatewayId,
+                command.deviceId,
+                command.conversationId,
+                sequenceEpoch,
+            ])
+            const nextClaims: ReplayClaim[] = [
+                { key: `${scope}:nonce:${command.nonce}`, expiresAt: command.expiresAt },
+                { key: `${scope}:command:${command.commandId}`, expiresAt: command.expiresAt },
+            ]
+            const existingClaims = nextClaims.filter(claim => this.claims.has(claim.key)).length
+            const lastSequence = this.sequences.get(scope) ?? 0
+            if (existingClaims === nextClaims.length && command.sequence <= lastSequence) {
+                return 'duplicate' as const
+            }
+            if (existingClaims > 0) {
+                throw new SecurityError('replay', 'Command nonce or command id has already been used')
+            }
+            const expected = lastSequence + 1
+            if (command.sequence !== expected) {
+                throw new SecurityError(
+                    'sequence',
+                    `Expected command sequence ${expected}, received ${command.sequence}`,
+                )
+            }
+
+            const record: PersistedClaimBatch = {
+                version: 1,
+                claims: nextClaims,
+                sequence: { scope, value: command.sequence },
+            }
+            await this.append(record)
+            for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
+            this.sequences.set(scope, command.sequence)
+            return 'accepted' as const
         })
         this.chain = operation.then(() => undefined, () => undefined)
         return operation
@@ -88,6 +146,13 @@ export class FileCommandReplayStore implements ReplayStore {
                 const existing = this.claims.get(claim.key)
                 this.claims.set(claim.key, Math.max(existing ?? 0, claim.expiresAt))
             }
+            if (value.sequence) {
+                const existing = this.sequences.get(value.sequence.scope) ?? 0
+                if (value.sequence.value <= existing) {
+                    throw new Error(`Non-monotonic command sequence at line ${index + 1}`)
+                }
+                this.sequences.set(value.sequence.scope, value.sequence.value)
+            }
         }
         this.initialized = true
     }
@@ -97,13 +162,18 @@ export class FileCommandReplayStore implements ReplayStore {
             if (expiresAt <= now) this.claims.delete(key)
         }
     }
+
+    private async append(record: PersistedClaimBatch): Promise<void> {
+        await mkdir(dirname(this.filePath), { recursive: true })
+        await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8')
+    }
 }
 
 function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
     if (!value || typeof value !== 'object') return false
     const record = value as Record<string, unknown>
     if (record.version !== 1 || !Array.isArray(record.claims)) return false
-    return record.claims.every((claim) => {
+    const validClaims = record.claims.every((claim) => {
         if (!claim || typeof claim !== 'object') return false
         const item = claim as Record<string, unknown>
         return typeof item.key === 'string'
@@ -112,6 +182,15 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
             && Number.isSafeInteger(item.expiresAt)
             && item.expiresAt >= 0
     })
+    if (!validClaims) return false
+    if (record.sequence === undefined) return true
+    if (!record.sequence || typeof record.sequence !== 'object') return false
+    const sequence = record.sequence as Record<string, unknown>
+    return typeof sequence.scope === 'string'
+        && sequence.scope.length > 0
+        && typeof sequence.value === 'number'
+        && Number.isSafeInteger(sequence.value)
+        && sequence.value > 0
 }
 
 function isMissingFile(error: unknown): boolean {

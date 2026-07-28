@@ -21,6 +21,7 @@ function command(overrides: Partial<CodeverCommand> = {}): CodeverCommand {
     gatewayId: 'gateway-1',
     deviceId: 'device-1',
     conversationId: 'conversation-1',
+    sequence: 1,
     operation: 'prompt',
     issuedAt: now - 1_000,
     expiresAt: now + 60_000,

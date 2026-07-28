@@ -72,8 +72,7 @@ export class MatrixPort implements ChannelPort {
     async edit(messageId: string | number, message: ChannelMessage): Promise<void> {
         const targetEventId = String(messageId)
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
-        const operationId = messageOptions.idempotencyKey
-            ?? hashJson({ targetEventId, text: message.text, format: message.format, attachments: message.attachments })
+        const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const replacement = buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
@@ -274,9 +273,6 @@ function htmlToPlainText(value: string): string {
         .trim()
 }
 
-function hashJson(value: unknown): string {
-    return createHash('sha256').update(JSON.stringify(value)).digest('hex')
-}
 
 function formatError(error: unknown): string {
     return error instanceof Error ? error.message : String(error)

@@ -12,7 +12,8 @@ authority and it is not the source of truth for local agent state.
 - Desktop installs the same web UI together with a local Gateway service.
 - A Gateway can also be installed independently on a headless machine.
 - One private encrypted Matrix room maps to one Codever conversation.
-- Existing Matrix clients receive standard `m.room.message` fallbacks.
+- Existing Matrix clients can transport the room events, but only Codever
+  clients can decrypt application content.
 - Codever-specific fields add tool cards, decisions, streaming state and
   session controls for the PWA.
 
@@ -20,16 +21,17 @@ authority and it is not the source of truth for local agent state.
 
 ```text
 Codever PWA / enrolled Matrix client
-  -> encrypted Matrix room event
+  -> signed Codever command
+  -> ECDH/HKDF/AES-GCM secure envelope
+  -> Matrix-encrypted room event containing only ciphertext
   -> MatrixTransport
-  -> MatrixIncomingRouter
-  -> local device pin + replay check
+  -> application signature + AEAD + replay check
   -> Codever execution authorization
   -> SemanticSessionRuntime
   -> AgentProvider / ACP
   -> ConversationEvent
-  -> MatrixPort
-  -> encrypted Matrix room event
+  -> signed application secure envelope
+  -> MatrixPort / encrypted Matrix room event
 ```
 
 Matrix delivery is append-only from the Gateway's perspective. Edits,
@@ -58,11 +60,13 @@ display data from encrypted Codever events.
 
 ## Protocol layers
 
-1. Standard Matrix content provides readable fallbacks for ordinary clients.
-2. `io.codever.*` extension content provides structured PWA rendering.
-3. A Codever authorization envelope binds an exact mutation to a locally
+1. Standard Matrix content contains only a non-sensitive placeholder.
+2. A signed Codever secure envelope encrypts the complete message content with
+   a key derived from the paired P-256 application identities.
+3. The decrypted `io.codever.*` content provides structured PWA rendering.
+4. A Codever authorization envelope binds an exact mutation to a locally
    enrolled device, Gateway and conversation.
-4. Stable command IDs and a persistent request ledger make Matrix redelivery
+5. Stable envelope/command IDs and persistent replay ledgers make redelivery
    idempotent.
 
 ## Compatibility modes
@@ -81,4 +85,3 @@ The existing ACP providers and semantic event normalization remain reusable.
 Telegram handlers, Telegram persistence keys, Telegram rendering and bot
 pairing are outside the new runtime. They remain on `master` until the Matrix
 vertical slice reaches feature parity.
-

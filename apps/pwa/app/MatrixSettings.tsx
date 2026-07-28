@@ -1,82 +1,41 @@
 "use client";
 
-import { useState } from "react";
 import type {
   MatrixConnectionConfig,
   MatrixConnectionStatus,
 } from "./matrix";
+import { PairingWizard } from "./PairingWizard";
+import type { PairingPreview, TrustedGateway } from "./pairing";
 
 type Props = {
   open: boolean;
   config: MatrixConnectionConfig;
   status: MatrixConnectionStatus;
   error: string | null;
-  keyId: string | null;
-  publicJwk: JsonWebKey | null;
-  matrixDeviceKeys: string[];
+  pairingPreview: PairingPreview | null;
+  trustedGateway: TrustedGateway | null;
+  pairingBusy: boolean;
   onChange(config: MatrixConnectionConfig): void;
+  onPairingLink(link: string): void;
+  onClearPairing(): void;
+  onConfirmPairing(): void;
   onClose(): void;
   onConnect(): void;
   onDisconnect(): void;
   onForget(): void;
 };
 
-const fields: Array<{
-  key: keyof MatrixConnectionConfig;
+const accountFields: Array<{
+  key: "accessToken";
   label: string;
   placeholder: string;
   type?: string;
 }> = [
   {
-    key: "homeserver",
-    label: "Homeserver",
-    placeholder: "https://matrix.example.org",
-  },
-  {
-    key: "userId",
-    label: "Matrix user",
-    placeholder: "@you:example.org",
-  },
-  {
     key: "accessToken",
     label: "Access token",
     placeholder: "syt_••••••••••••",
     type: "password",
-  },
-  {
-    key: "matrixDeviceId",
-    label: "Device ID",
-    placeholder: "CODEVER_WEB_01",
-  },
-  {
-    key: "roomId",
-    label: "Encrypted room",
-    placeholder: "!room:example.org",
-  },
-  {
-    key: "gatewayId",
-    label: "Gateway ID",
-    placeholder: "studio-mac",
-  },
-  {
-    key: "conversationId",
-    label: "Conversation ID",
-    placeholder: "Defaults to the room ID",
-  },
-  {
-    key: "gatewayMatrixUserId",
-    label: "Gateway Matrix user",
-    placeholder: "@gateway:example.org",
-  },
-  {
-    key: "gatewayMatrixDeviceId",
-    label: "Gateway Matrix device",
-    placeholder: "CODEVER_GATEWAY_01",
-  },
-  {
-    key: "gatewayMatrixEd25519",
-    label: "Gateway Ed25519 fingerprint",
-    placeholder: "Pinned fingerprint shown by the Gateway",
   },
 ];
 
@@ -85,24 +44,27 @@ export function MatrixSettings({
   config,
   status,
   error,
-  keyId,
-  publicJwk,
-  matrixDeviceKeys,
+  pairingPreview,
+  trustedGateway,
+  pairingBusy,
   onChange,
+  onPairingLink,
+  onClearPairing,
+  onConfirmPairing,
   onClose,
   onConnect,
   onDisconnect,
   onForget,
 }: Props) {
-  const [copied, setCopied] = useState(false);
   if (!open) return null;
   const connected = status === "connected" || status === "reconnecting";
-  const busy = status === "connecting";
+  const busy = status === "connecting" || pairingBusy;
+  const needsAccount = Boolean(pairingPreview) && !trustedGateway;
 
   return (
     <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
       <section
-        className="matrix-settings"
+        className="matrix-settings pairing-settings"
         role="dialog"
         aria-modal="true"
         aria-labelledby="matrix-settings-title"
@@ -110,10 +72,12 @@ export function MatrixSettings({
       >
         <header>
           <div>
-            <span className="eyebrow">Local connection</span>
-            <h2 id="matrix-settings-title">Real Matrix</h2>
+            <span className="eyebrow">Secure devices</span>
+            <h2 id="matrix-settings-title">
+              {trustedGateway ? "Gateway connection" : "Add a Gateway"}
+            </h2>
           </div>
-          <button onClick={onClose} aria-label="Close Matrix settings">
+          <button onClick={onClose} aria-label="Close Gateway settings">
             ×
           </button>
         </header>
@@ -121,95 +85,101 @@ export function MatrixSettings({
         <div className="settings-security-note">
           <span>✓</span>
           <p>
-            Credentials stay in this browser. Codever connects directly to your
-            homeserver and never sends them to the hosted app. Room keys are
-            shared only with verified Matrix devices. You can connect once
-            without a Gateway pin to export the PWA pairing record; sending is
-            enabled after all three Gateway identity fields are pinned.
+            The six-digit code confirms the Gateway directly. Matrix carries
+            encrypted messages, but never decides which device Codever trusts.
           </p>
         </div>
 
-        <div className="matrix-form-grid">
-          {fields.map((field) => (
-            <label
-              key={field.key}
-              className={
-                field.key === "homeserver" || field.key === "accessToken"
-                  ? "wide-field"
-                  : ""
-              }
-            >
-              <span>{field.label}</span>
-              <input
-                type={field.type ?? "text"}
-                value={config[field.key]}
-                placeholder={field.placeholder}
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) =>
-                  onChange({ ...config, [field.key]: event.target.value })
-                }
-              />
-            </label>
-          ))}
-        </div>
+        <PairingWizard
+          preview={pairingPreview}
+          trustedGateway={trustedGateway}
+          busy={busy}
+          onLink={onPairingLink}
+          onClear={onClearPairing}
+          onConfirm={onConfirmPairing}
+        />
 
-        <div className="identity-card">
-          <span className="identity-mark">K</span>
-          <div>
-            <strong>Codever command identity</strong>
-            <small>
-              {keyId
-                ? `P-256 · ${keyId.slice(0, 18)}…`
-                : "Created on first connect and saved in IndexedDB"}
-            </small>
-          </div>
-          {keyId && publicJwk && matrixDeviceKeys.length > 0 && (
-            <button
-              className="copy-pairing-button"
-              onClick={() => {
-                void navigator.clipboard
-                  .writeText(
-                    JSON.stringify(
-                      {
-                        deviceId: config.matrixDeviceId,
-                        publicKey: publicJwk,
-                        allowedRoomIds: [config.roomId],
-                        allowedOperations: [
-                          "prompt",
-                          "cancel",
-                          "decision",
-                          "session.settings",
-                        ],
-                        matrixUserId: config.userId,
-                        matrixDeviceId: config.matrixDeviceId,
-                        matrixDeviceKeys,
-                      },
-                      null,
-                      2,
-                    ),
-                  )
-                  .then(() => {
-                    setCopied(true);
-                    window.setTimeout(() => setCopied(false), 1800);
-                  });
-              }}
-            >
-              {copied ? "Copied" : "Copy pairing record"}
-            </button>
-          )}
-        </div>
+        {(needsAccount || trustedGateway) && (
+          <details className="connection-details" open={needsAccount}>
+            <summary>
+              <span>
+                <strong>Matrix connection</strong>
+                <small>
+                  {needsAccount
+                    ? "Sign in once to complete encrypted pairing"
+                    : connected
+                      ? "Connected and end-to-end encrypted"
+                      : "Saved on this device"}
+                </small>
+              </span>
+              <b>{connected ? "Online" : needsAccount ? "Required" : "Details"}</b>
+            </summary>
+
+            <div className="matrix-form-grid compact-matrix-form">
+              <label className="wide-field">
+                <span>Homeserver</span>
+                <input
+                  value={config.homeserver}
+                  readOnly={Boolean(pairingPreview || trustedGateway)}
+                  placeholder="Provided by the Gateway"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) =>
+                    onChange({ ...config, homeserver: event.target.value })
+                  }
+                />
+              </label>
+              {accountFields.map((field) => (
+                <label
+                  key={field.key}
+                  className={
+                    field.key === "accessToken" ? "wide-field" : undefined
+                  }
+                >
+                  <span>{field.label}</span>
+                  <input
+                    type={field.type ?? "text"}
+                    value={config[field.key]}
+                    placeholder={field.placeholder}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      onChange({
+                        ...config,
+                        [field.key]: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+              ))}
+              {needsAccount && (
+                <p className="matrix-session-hint wide-field">
+                  Your Matrix account and this device are identified
+                  automatically from the token.
+                </p>
+              )}
+              <label>
+                <span>Encrypted room</span>
+                <input value={config.roomId} readOnly placeholder="From QR code" />
+              </label>
+            </div>
+          </details>
+        )}
 
         {error && (
           <div className="connection-error" role="alert">
-            <strong>Connection failed</strong>
+            <strong>
+              {pairingPreview && !trustedGateway
+                ? "Pairing needs attention"
+                : "Connection needs attention"}
+            </strong>
             <span>{error}</span>
           </div>
         )}
 
         <footer>
           <button className="forget-button" onClick={onForget}>
-            Clear local config
+            {trustedGateway ? "Remove trusted Gateway" : "Clear local setup"}
           </button>
           <span className="settings-spacer" />
           {connected && (
@@ -217,13 +187,19 @@ export function MatrixSettings({
               Disconnect
             </button>
           )}
-          <button
-            className="connect-button"
-            onClick={onConnect}
-            disabled={busy}
-          >
-            {busy ? "Connecting…" : connected ? "Reconnect" : "Connect securely"}
-          </button>
+          {trustedGateway && (
+            <button
+              className="connect-button"
+              onClick={onConnect}
+              disabled={busy}
+            >
+              {busy
+                ? "Connecting…"
+                : connected
+                  ? "Reconnect"
+                  : "Connect securely"}
+            </button>
+          )}
         </footer>
       </section>
     </div>

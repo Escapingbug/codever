@@ -23,6 +23,7 @@ describe('protocol schemas', () => {
       gatewayId: 'gateway-1',
       deviceId: 'device-1',
       conversationId: 'conversation-1',
+      sequence: 1,
       operation: 'cancel',
       issuedAt: 1,
       expiresAt: 2,

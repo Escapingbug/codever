@@ -13,14 +13,27 @@ import { MatrixSettings } from "./MatrixSettings";
 import {
   clearMatrixConfig,
   connectMatrix,
+  getOrCreateDeviceIdentity,
   loadMatrixConfig,
   normalizeMatrixConfig,
+  resolveMatrixSession,
   saveMatrixConfig,
   type IncomingCodeverMessage,
   type MatrixConnection,
   type MatrixConnectionConfig,
   type MatrixConnectionStatus,
 } from "./matrix";
+import {
+  clearPendingPairing,
+  clearTrustedGateway,
+  inspectPairingLink,
+  loadPendingPairingRecovery,
+  loadTrustedGateway,
+  saveTrustedGateway,
+  trustedGatewayConfig,
+  type PairingPreview,
+  type TrustedGateway,
+} from "./pairing";
 
 type Session = {
   id: string;
@@ -60,6 +73,27 @@ const emptyMatrixConfig: MatrixConnectionConfig = {
   gatewayMatrixDeviceId: "",
   gatewayMatrixEd25519: "",
 };
+
+function bindCredentialsToHomeserver(
+  config: MatrixConnectionConfig,
+  homeserver: string,
+): MatrixConnectionConfig {
+  let sameOrigin = false;
+  try {
+    sameOrigin =
+      Boolean(config.homeserver) &&
+      new URL(config.homeserver).origin === new URL(homeserver).origin;
+  } catch {
+    sameOrigin = false;
+  }
+  return {
+    ...config,
+    homeserver,
+    userId: sameOrigin ? config.userId : "",
+    accessToken: sameOrigin ? config.accessToken : "",
+    matrixDeviceId: sameOrigin ? config.matrixDeviceId : "",
+  };
+}
 
 const sessions: Session[] = [
   {
@@ -186,9 +220,11 @@ export function CodeverApp() {
     useState<MatrixConnectionStatus>("offline");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
-  const [devicePublicJwk, setDevicePublicJwk] =
-    useState<JsonWebKey | null>(null);
-  const [matrixDeviceKeys, setMatrixDeviceKeys] = useState<string[]>([]);
+  const [pairingPreview, setPairingPreview] =
+    useState<PairingPreview | null>(null);
+  const [trustedGateway, setTrustedGateway] =
+    useState<TrustedGateway | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
   const [decisionStates, setDecisionStates] = useState<
     Record<string, "pending" | "approved" | "denied">
   >({});
@@ -196,6 +232,13 @@ export function CodeverApp() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const responseDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
+  const pairingAbortRef = useRef<AbortController | null>(null);
+  const pairingRecoveryRef = useRef<
+    (
+      preview: PairingPreview,
+      config: MatrixConnectionConfig,
+    ) => Promise<void>
+  >(async () => {});
 
   const selected =
     sessions.find((session) => session.id === selectedId) ?? sessions[0];
@@ -220,6 +263,76 @@ export function CodeverApp() {
     navigator.serviceWorker?.register("/sw.js").catch(() => {
       // Offline support is opportunistic in local preview environments.
     });
+    const url = new URL(window.location.href);
+    const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+    const link = hash.get("pair");
+    const rejectedQueryPairing = url.searchParams.has("pair");
+    if (link || rejectedQueryPairing) {
+      hash.delete("pair");
+      url.searchParams.delete("pair");
+      const nextHash = hash.toString();
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ""}`,
+      );
+    }
+    if (link) void openPairingLink(link);
+    void (async () => {
+      if (rejectedQueryPairing) {
+        await Promise.resolve();
+        setConnectionError(
+          "Pairing links in the URL query are not accepted. Scan the QR code or use a #pair link.",
+        );
+        setSettingsOpen(true);
+        return;
+      }
+      const identity = await getOrCreateDeviceIdentity();
+      const trust = await loadTrustedGateway(identity);
+      if (trust) {
+        clearPendingPairing();
+        setTrustedGateway(trust);
+        setDeviceKeyId(identity.keyId);
+        setMatrixConfig((current) => ({
+          ...bindCredentialsToHomeserver(
+            current,
+            trust.gatewayTransport.homeserver,
+          ),
+          ...trustedGatewayConfig(trust),
+          conversationId:
+            current.conversationId || trust.gatewayTransport.roomId,
+        }));
+        return;
+      }
+      if (link) return;
+      const pending = await loadPendingPairingRecovery(identity);
+      if (!pending) return;
+      if (pending.status === "expired") {
+        setConnectionError(
+          "The previous pairing request expired. Scan a new Gateway QR code.",
+        );
+        setSettingsOpen(true);
+        return;
+      }
+      const preview = pending.preview;
+      const transport = preview.transport;
+      const stored = loadMatrixConfig() ?? emptyMatrixConfig;
+      const recoveryConfig: MatrixConnectionConfig = {
+        ...bindCredentialsToHomeserver(stored, transport.homeserver),
+        roomId: transport.roomId,
+        gatewayId: preview.gatewayId,
+        conversationId: transport.roomId,
+        gatewayMatrixUserId: transport.userId,
+        gatewayMatrixDeviceId: transport.deviceId,
+        gatewayMatrixEd25519: transport.ed25519,
+      };
+      setPairingPreview(preview);
+      setMatrixConfig(recoveryConfig);
+      setSettingsOpen(true);
+      await pairingRecoveryRef.current(preview, recoveryConfig);
+    })().catch((error) => {
+      setConnectionError(`Saved trust could not be verified: ${formatUiError(error)}`);
+    });
   }, []);
 
   useEffect(() => {
@@ -233,6 +346,7 @@ export function CodeverApp() {
     () => () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
+      pairingAbortRef.current?.abort();
       matrixConnectionRef.current?.stop();
     },
     [],
@@ -295,14 +409,17 @@ export function CodeverApp() {
     }
   }
 
-  async function connectRealMatrix() {
+  async function connectRealMatrix(
+    configInput = matrixConfig,
+    closeSettings = true,
+  ): Promise<MatrixConnection | null> {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
     setConnectionError(null);
     setConnectionStatus("connecting");
     setMessages([]);
     try {
-      const normalized = normalizeMatrixConfig(matrixConfig);
+      const normalized = normalizeMatrixConfig(configInput);
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
       const connection = await connectMatrix(normalized, {
@@ -311,13 +428,18 @@ export function CodeverApp() {
           setConnectionStatus(status);
           if (status === "error" && detail) setConnectionError(detail);
         },
+        onTrustUpdated(trust) {
+          setTrustedGateway(trust);
+          setMatrixConfig((current) => ({
+            ...current,
+            ...trustedGatewayConfig(trust),
+          }));
+        },
       });
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
-      setDevicePublicJwk(connection.identity.publicJwk);
-      setMatrixDeviceKeys([connection.matrixDeviceKeys.ed25519]);
       setAppMode("matrix");
-      setSettingsOpen(false);
+      if (closeSettings) setSettingsOpen(false);
       setMessages((current) => [
         {
           id: `matrix-connected-${Date.now()}`,
@@ -327,9 +449,11 @@ export function CodeverApp() {
         },
         ...current,
       ]);
+      return connection;
     } catch (error) {
       setConnectionStatus("error");
       setConnectionError(formatUiError(error));
+      return null;
     }
   }
 
@@ -337,7 +461,6 @@ export function CodeverApp() {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
     setConnectionStatus("offline");
-    setMatrixDeviceKeys([]);
     setIsStreaming(false);
     if (showDemo) {
       setAppMode("demo");
@@ -347,11 +470,98 @@ export function CodeverApp() {
   }
 
   function forgetMatrixConfig() {
+    pairingAbortRef.current?.abort();
     disconnectMatrix();
     clearMatrixConfig();
+    clearPendingPairing();
+    clearTrustedGateway();
     setMatrixConfig(emptyMatrixConfig);
+    setTrustedGateway(null);
+    setPairingPreview(null);
     setConnectionError(null);
   }
+
+  async function openPairingLink(link: string) {
+    setConnectionError(null);
+    try {
+      const preview = await inspectPairingLink(link);
+      const transport = preview.transport;
+      setPairingPreview(preview);
+      setMatrixConfig((current) => ({
+        ...bindCredentialsToHomeserver(current, transport.homeserver),
+        roomId: transport.roomId,
+        gatewayId: preview.gatewayId,
+        conversationId: transport.roomId,
+        gatewayMatrixUserId: transport.userId,
+        gatewayMatrixDeviceId: transport.deviceId,
+        gatewayMatrixEd25519: transport.ed25519,
+      }));
+      setSettingsOpen(true);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    }
+  }
+
+  async function confirmPairing(
+    previewOverride: PairingPreview | null = pairingPreview,
+    configOverride: MatrixConnectionConfig = matrixConfig,
+  ) {
+    if (!previewOverride || pairingBusy) return;
+    pairingAbortRef.current?.abort();
+    const abort = new AbortController();
+    pairingAbortRef.current = abort;
+    setPairingBusy(true);
+    setConnectionError(null);
+    try {
+      const transport = previewOverride.transport;
+      const unresolvedConfig: MatrixConnectionConfig = {
+        ...configOverride,
+        homeserver: transport.homeserver,
+        roomId: transport.roomId,
+        gatewayId: previewOverride.gatewayId,
+        conversationId: transport.roomId,
+        gatewayMatrixUserId: transport.userId,
+        gatewayMatrixDeviceId: transport.deviceId,
+        gatewayMatrixEd25519: transport.ed25519,
+      };
+      const configForPairing = await resolveMatrixSession(unresolvedConfig);
+      setMatrixConfig(configForPairing);
+      const connection = await connectRealMatrix(configForPairing, false);
+      if (!connection) return;
+      const trust = await connection.pair(
+        previewOverride,
+        browserDeviceName(),
+        abort.signal,
+      );
+      const trustedConfig: MatrixConnectionConfig = {
+        ...configForPairing,
+        ...trustedGatewayConfig(trust),
+      };
+      saveTrustedGateway(trust);
+      saveMatrixConfig(trustedConfig);
+      setTrustedGateway(trust);
+      setMatrixConfig(trustedConfig);
+      setPairingPreview(null);
+      setSettingsOpen(false);
+      setMessages((current) => [
+        {
+          id: `gateway-paired-${Date.now()}`,
+          kind: "notice",
+          text: `${trust.gatewayName} is now trusted. Future Matrix device rotations must be signed by its persistent Gateway key.`,
+          time: "now",
+        },
+        ...current,
+      ]);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setConnectionError(formatUiError(error));
+      }
+    } finally {
+      if (pairingAbortRef.current === abort) pairingAbortRef.current = null;
+      setPairingBusy(false);
+    }
+  }
+  pairingRecoveryRef.current = confirmPairing;
 
   async function sendRealCommand(payload: CommandPayload): Promise<boolean> {
     const connection = matrixConnectionRef.current;
@@ -460,7 +670,7 @@ export function CodeverApp() {
       }
       return;
     }
-    responseDelayRef.current = window.setTimeout(startMockResponse, 350);
+    responseDelayRef.current = setTimeout(startMockResponse, 350);
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1063,10 +1273,17 @@ export function CodeverApp() {
         config={matrixConfig}
         status={connectionStatus}
         error={connectionError}
-        keyId={deviceKeyId}
-        publicJwk={devicePublicJwk}
-        matrixDeviceKeys={matrixDeviceKeys}
+        pairingPreview={pairingPreview}
+        trustedGateway={trustedGateway}
+        pairingBusy={pairingBusy}
         onChange={setMatrixConfig}
+        onPairingLink={(link) => void openPairingLink(link)}
+        onClearPairing={() => {
+          pairingAbortRef.current?.abort();
+          setPairingPreview(null);
+          setConnectionError(null);
+        }}
+        onConfirmPairing={() => void confirmPairing()}
         onClose={() => setSettingsOpen(false)}
         onConnect={() => void connectRealMatrix()}
         onDisconnect={() => disconnectMatrix()}
@@ -1085,4 +1302,16 @@ function formatMessageTime(timestamp: number): string {
 
 function formatUiError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function browserDeviceName(): string {
+  const userAgentData = (
+    navigator as Navigator & { userAgentData?: { platform?: string } }
+  ).userAgentData;
+  const platform =
+    userAgentData?.platform ||
+    navigator.platform ||
+    "Web device";
+  const mobile = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+  return `Codever ${mobile ? "mobile" : "desktop"} · ${platform}`;
 }

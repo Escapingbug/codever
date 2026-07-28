@@ -22,15 +22,34 @@ Useful commands:
 .\scripts\matrix-local.ps1 stop
 ```
 
-Run the fully automated real-protocol check with:
+Run the automated legacy Matrix transport check with:
 
 ```powershell
 npm run test:matrix-live
 ```
 
-This creates fresh Matrix devices, exchanges Megolm-encrypted events through
-the local Synapse process, verifies the independent P-256 command signature in
-the real Gateway, executes a deterministic test provider and decrypts its reply.
+This creates fresh Matrix devices, checks Megolm transport, signed commands,
+replay protection and a deterministic provider reply. It explicitly uses the
+legacy test-only path; use the manual PWA flow below to exercise pairing and
+the independent application-encryption envelope.
+
+Run the actual Gateway pairing experience with:
+
+```powershell
+npm run dev:matrix-gateway
+```
+
+On first launch the Gateway displays a terminal QR code, a six-digit invitation
+code, and a pasteable fallback link. In the PWA, choose **Real Matrix**, scan or
+paste the invitation, enter only `tester.accessToken` from
+`dev/matrix/local-test.json`, and confirm once. The Gateway persists its
+application identity and trusted PWA device under `dev/matrix/gateway-data`,
+separate from Synapse's own `dev/matrix/data`, then starts the agent immediately.
+
+On later launches no new pairing is required. The local Node Matrix crypto
+device is intentionally ephemeral; the Gateway signs the replacement Matrix
+device with its persistent P-256 application key and the PWA updates the pin
+automatically.
 
 Because the local homeserver uses HTTP, test it with the locally served PWA on
 `http://localhost`, not the HTTPS-hosted preview. Browsers block an HTTPS page

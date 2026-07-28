@@ -82,6 +82,7 @@ export const commandSchema = z
     gatewayId: opaqueId,
     deviceId: opaqueId,
     conversationId: opaqueId,
+    sequence: z.number().int().positive(),
     operation: z.enum(['prompt', 'cancel', 'decision', 'session.settings']),
     issuedAt: timestamp,
     expiresAt: timestamp,

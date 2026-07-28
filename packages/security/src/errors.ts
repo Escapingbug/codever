@@ -6,6 +6,7 @@ export type SecurityErrorCode =
   | 'issued_in_future'
   | 'lifetime_exceeded'
   | 'replay'
+  | 'sequence'
   | 'idempotency_conflict'
   | 'idempotency_state'
 
