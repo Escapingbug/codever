@@ -1,0 +1,21 @@
+{
+  "name": "@codever/security",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codever/protocol": "file:../protocol"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,5 +1,11 @@
 # codever
 
+> This branch contains the independent Matrix/PWA rewrite. The legacy
+> Telegram daemon remains temporarily available while the new vertical slice
+> reaches feature parity; it is not the target architecture. Start with
+> [docs/rewrite-architecture.md](docs/rewrite-architecture.md) and run the UI
+> from `apps/pwa`.
+
 Codever is an ACP-to-Telegram bridge for running coding agents from chat. It runs on your machine, starts ACP-compatible agent subprocesses, and projects the agent conversation into Telegram with tool output, permission prompts, session controls, and Codever MCP context.
 
 The current implementation is a Telegram topic session gateway: each Telegram forum topic can own an independent agent session, while the daemon, config, provider processes, and project files stay local.
