@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
-import type { CodeverCommand } from '@codever/protocol'
+import type { CodeverCommand, JsonValue } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
 import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { TopicSession } from '@/bridge/channelPort'
@@ -62,6 +62,11 @@ interface WorkspaceSettingsInput {
     permissionMode?: string
 }
 
+interface CommandExecutionResult {
+    sessionId: string | null
+    result?: JsonValue
+}
+
 export interface MatrixGatewayDependencies {
     client?: MatrixGatewayClient
     providerFactory?: (
@@ -80,6 +85,14 @@ export interface MatrixGatewayDependencies {
     isTrustedDeviceActive?: (deviceId: string) => Promise<boolean>
     /** Supplies newly paired and currently active devices without a restart. */
     listTrustedDevices?: () => Promise<readonly import('./config').MatrixGatewayTrustedDevice[]>
+    /** Creates a short-lived pairing offer authorized by an active PWA. */
+    createDeviceInvitation?: (input: {
+        requestedByDeviceId: string
+        lifetimeMs?: number
+    }) => Promise<{
+        pairingLink: string
+        expiresAt: number
+    }>
 }
 
 export type MatrixGatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
@@ -453,10 +466,12 @@ export class MatrixGatewayRunner {
         const task = (async () => {
             let outcome: 'succeeded' | 'failed' = 'succeeded'
             let executionError: unknown
-            let resultSessionId = commandSessionId(command)
+            let executionResult: CommandExecutionResult = {
+                sessionId: commandSessionId(command),
+            }
             try {
                 await beforeExecute
-                resultSessionId = await this.execute(runtime, command)
+                executionResult = await this.execute(runtime, command)
             } catch (error) {
                 outcome = 'failed'
                 executionError = error
@@ -475,7 +490,8 @@ export class MatrixGatewayRunner {
                     outcome,
                     this.client,
                     executionError === undefined ? undefined : formatError(executionError),
-                    resultSessionId,
+                    executionResult.sessionId,
+                    executionResult.result,
                 )
             } catch (deliveryError) {
                 this.log(
@@ -498,7 +514,7 @@ export class MatrixGatewayRunner {
     private async execute(
         runtime: RoomRuntime,
         command: CodeverCommand,
-    ): Promise<string | null> {
+    ): Promise<CommandExecutionResult> {
         switch (command.payload.operation) {
             case 'prompt': {
                 const appSession = this.requireAppSession(
@@ -516,7 +532,7 @@ export class MatrixGatewayRunner {
                 })
                 this.updateAppSessionRecord(appSession)
                 await this.persistRuntime(runtime)
-                return appSession.record.id
+                return { sessionId: appSession.record.id }
             }
             case 'cancel': {
                 const appSession = this.requireAppSession(
@@ -529,7 +545,7 @@ export class MatrixGatewayRunner {
                     source: 'channel',
                     user: { id: command.deviceId, username: command.deviceId },
                 })
-                return appSession.record.id
+                return { sessionId: appSession.record.id }
             }
             case 'decision': {
                 const appSession = this.requireAppSession(
@@ -540,7 +556,7 @@ export class MatrixGatewayRunner {
                 if (!appSession.port.resolveDecision(command.payload.requestId, value)) {
                     throw new Error(`Unknown or invalid decision request ${command.payload.requestId}`)
                 }
-                return appSession.record.id
+                return { sessionId: appSession.record.id }
             }
             case 'session.settings': {
                 const appSession = this.requireAppSession(
@@ -549,7 +565,7 @@ export class MatrixGatewayRunner {
                 )
                 await this.applySessionSettings(appSession, command, command.payload)
                 await this.persistRuntime(runtime)
-                return appSession.record.id
+                return { sessionId: appSession.record.id }
             }
             case 'session.create': {
                 const record = await this.createAppSessionRecord(
@@ -571,7 +587,25 @@ export class MatrixGatewayRunner {
                     })
                     throw error
                 }
-                return record.id
+                return { sessionId: record.id }
+            }
+            case 'device.invite': {
+                if (!this.dependencies.createDeviceInvitation) {
+                    throw new Error('This Gateway host does not support PWA-created device invitations')
+                }
+                const invitation = await this.dependencies.createDeviceInvitation({
+                    requestedByDeviceId: command.deviceId,
+                    ...(command.payload.lifetimeMs === undefined
+                        ? {}
+                        : { lifetimeMs: command.payload.lifetimeMs }),
+                })
+                return {
+                    sessionId: null,
+                    result: {
+                        pairingLink: invitation.pairingLink,
+                        expiresAt: invitation.expiresAt,
+                    },
+                }
             }
         }
     }
@@ -892,6 +926,7 @@ function runtimeStateWithoutVersion(
 function commandSessionId(command: CodeverCommand): string | null {
     switch (command.payload.operation) {
         case 'session.create':
+        case 'device.invite':
             return null
         case 'prompt':
         case 'cancel':

@@ -88,6 +88,12 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
     })
     .strict(),
+  z
+    .object({
+      operation: z.literal('device.invite'),
+      lifetimeMs: z.number().int().min(30_000).max(10 * 60_000).optional(),
+    })
+    .strict(),
 ])
 
 export type CommandPayload = z.infer<typeof commandPayloadSchema>
@@ -113,6 +119,7 @@ export const commandSchema = z
       'decision',
       'session.settings',
       'session.create',
+      'device.invite',
     ]),
     issuedAt: timestamp,
     expiresAt: timestamp,

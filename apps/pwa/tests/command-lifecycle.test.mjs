@@ -304,6 +304,10 @@ test("command result before explicit ack resolves acknowledgement and completion
     revision: 9,
     outcome: "succeeded",
     sessionId: "app-session-created",
+    result: {
+      pairingLink: "codever://pair?data=offer",
+      expiresAt: 1_800_000_000_000,
+    },
   };
 
   lifecycle.recordResult(result);

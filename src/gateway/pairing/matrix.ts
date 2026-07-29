@@ -184,7 +184,12 @@ export function trustedDeviceFromRecord(
     deviceName: certificate.deviceName,
     publicKey: certificate.deviceKey.publicKey,
     allowedRoomIds: [certificate.deviceTransport.roomId],
-    allowedOperations: executableOperations(certificate.allowedOperations),
+    // Device invitations are a local Gateway management capability granted
+    // to every active paired device. Adding it here also upgrades certificates
+    // issued before device.invite existed without weakening the trust root.
+    allowedOperations: withDeviceInvitation(
+      executableOperations(certificate.allowedOperations),
+    ),
     matrixUserId: certificate.deviceTransport.userId,
     matrixDeviceId: certificate.deviceTransport.deviceId,
     matrixDeviceKeys: [certificate.deviceTransport.ed25519],
@@ -214,6 +219,14 @@ function executableOperations(
   return operations.filter(
     (operation): operation is CommandOperation => operation !== 'session.select',
   )
+}
+
+function withDeviceInvitation(
+  operations: readonly CommandOperation[],
+): CommandOperation[] {
+  return operations.includes('device.invite')
+    ? [...operations]
+    : [...operations, 'device.invite']
 }
 
 function isPairingEvent(event: MatrixIncomingEvent, roomId: string): boolean {

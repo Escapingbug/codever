@@ -60,14 +60,23 @@ import {
 import {
   clearPendingPairing,
   clearTrustedGateway,
+  createDeviceInvitationLink,
+  decodeDeviceInvitationLink,
   inspectPairingLink,
   loadPendingPairingRecovery,
   loadTrustedGateway,
+  pairingLinkFromDeviceInvitation,
   saveTrustedGateway,
   trustedGatewayConfig,
+  type GeneratedDeviceInvitation,
   type PairingPreview,
   type TrustedGateway,
 } from "./pairing";
+import {
+  loginWithMatrixPassword,
+  loginWithMatrixToken,
+  requestMatrixLoginToken,
+} from "./matrixAuth";
 
 type RevisionConflictNotice = {
   commandId: string;
@@ -160,6 +169,11 @@ export function CodeverApp() {
   const [trustedGateway, setTrustedGateway] =
     useState<TrustedGateway | null>(null);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [deviceInvitation, setDeviceInvitation] =
+    useState<GeneratedDeviceInvitation | null>(null);
+  const [invitationBusy, setInvitationBusy] = useState(false);
+  const [invitationReauthRequired, setInvitationReauthRequired] =
+    useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [decisionStates, setDecisionStates] = useState<
@@ -341,10 +355,14 @@ export function CodeverApp() {
     const url = new URL(window.location.href);
     const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
     const link = hash.get("pair");
-    const rejectedQueryPairing = url.searchParams.has("pair");
-    if (link || rejectedQueryPairing) {
+    const invitation = hash.get("invite");
+    const rejectedQueryPairing =
+      url.searchParams.has("pair") || url.searchParams.has("invite");
+    if (link || invitation || rejectedQueryPairing) {
       hash.delete("pair");
+      hash.delete("invite");
       url.searchParams.delete("pair");
+      url.searchParams.delete("invite");
       const nextHash = hash.toString();
       window.history.replaceState(
         window.history.state,
@@ -352,7 +370,8 @@ export function CodeverApp() {
         `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ""}`,
       );
     }
-    if (link) void openPairingLink(link);
+    if (invitation) void openDeviceInvitation(invitation);
+    else if (link) void openPairingLink(link);
     void (async () => {
       if (rejectedQueryPairing) {
         await Promise.resolve();
@@ -383,7 +402,7 @@ export function CodeverApp() {
         setSettingsOpen(true);
         return;
       }
-      if (link) return;
+      if (link || invitation) return;
       const pending = await loadPendingPairingRecovery(identity);
       if (!pending) {
         setSettingsOpen(true);
@@ -415,6 +434,8 @@ export function CodeverApp() {
     })().catch((error) => {
       setConnectionError(`Saved trust could not be verified: ${formatUiError(error)}`);
     });
+    // URL fragments and persisted pairing recovery are consumed once at boot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useLayoutEffect(() => {
@@ -959,6 +980,8 @@ export function CodeverApp() {
     setGatewayState(null);
     selectedSessionIdRef.current = null;
     setPairingPreview(null);
+    setDeviceInvitation(null);
+    setInvitationReauthRequired(false);
     setConnectionError(null);
     setMessages([]);
     historyScopeRef.current = "";
@@ -975,6 +998,10 @@ export function CodeverApp() {
   async function openPairingLink(link: string) {
     setConnectionError(null);
     try {
+      if (deviceInvitationFromLink(link)) {
+        await openDeviceInvitation(link);
+        return;
+      }
       const preview = await inspectPairingLink(link);
       const transport = preview.transport;
       setPairingPreview(preview);
@@ -990,6 +1017,138 @@ export function CodeverApp() {
       setSettingsOpen(true);
     } catch (error) {
       setConnectionError(formatUiError(error));
+    }
+  }
+
+  async function openDeviceInvitation(link: string) {
+    setConnectionError(null);
+    try {
+      const invitation = decodeDeviceInvitationLink(link);
+      const preview = await inspectPairingLink(
+        pairingLinkFromDeviceInvitation(invitation),
+      );
+      const transport = preview.transport;
+      let nextConfig: MatrixConnectionConfig = {
+        ...bindCredentialsToHomeserver(matrixConfig, transport.homeserver),
+        roomId: transport.roomId,
+        gatewayId: preview.gatewayId,
+        conversationId: transport.roomId,
+        gatewayMatrixUserId: transport.userId,
+        gatewayMatrixDeviceId: transport.deviceId,
+        gatewayMatrixEd25519: transport.ed25519,
+        ...(invitation.matrixLogin
+          ? { userId: invitation.matrixLogin.userId }
+          : {}),
+      };
+      setPairingPreview(preview);
+      setMatrixConfig(nextConfig);
+      setSettingsOpen(true);
+
+      const matrixLogin = invitation.matrixLogin;
+      if (!matrixLogin) return;
+      if (matrixLogin.expiresAt <= Date.now()) {
+        setConnectionError(
+          "The one-time Matrix login expired. Sign in with your Matrix ID and password below; the Gateway invitation may still be valid.",
+        );
+        return;
+      }
+      try {
+        const credentials = await loginWithMatrixToken(
+          matrixLogin.homeserver,
+          matrixLogin.loginToken,
+          matrixLogin.userId,
+          browserDeviceName(),
+        );
+        nextConfig = { ...nextConfig, ...credentials };
+        setMatrixConfig(nextConfig);
+        saveMatrixConfig(nextConfig);
+      } catch (error) {
+        setConnectionError(
+          `The one-time Matrix sign-in could not be used: ${formatUiError(error)} Sign in below to continue.`,
+        );
+      }
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+      setSettingsOpen(true);
+    }
+  }
+
+  async function signInForPairing(userId: string, password: string) {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setConnectionError(null);
+    try {
+      const credentials = await loginWithMatrixPassword(
+        matrixConfig.homeserver,
+        userId,
+        password,
+        browserDeviceName(),
+      );
+      const next = { ...matrixConfig, ...credentials };
+      setMatrixConfig(next);
+      saveMatrixConfig(next);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function createDeviceInvitation(password?: string) {
+    if (invitationBusy) return;
+    if (!trustedGateway || !matrixConnectionRef.current) {
+      setConnectionError(
+        "Connect to the trusted Gateway before authorizing another device.",
+      );
+      return;
+    }
+    setInvitationBusy(true);
+    setConnectionError(null);
+    try {
+      const tokenResult = await requestMatrixLoginToken(
+        matrixConfig,
+        password,
+      );
+      if (
+        tokenResult.status === "reauth-required" &&
+        tokenResult.passwordSupported
+      ) {
+        setInvitationReauthRequired(true);
+        return;
+      }
+
+      const sent = await sendRealCommand({
+        operation: "device.invite",
+        lifetimeMs: 5 * 60_000,
+      });
+      if (!sent) return;
+      const completion = await sent.completion;
+      if (completion.outcome !== "succeeded") {
+        throw new Error("The Gateway could not create the device invitation.");
+      }
+      const gatewayInvitation = parseGatewayInvitationResult(
+        completion.result,
+      );
+      const generated = createDeviceInvitationLink({
+        pairingLink: gatewayInvitation.pairingLink,
+        appUrl: window.location.href,
+        ...(tokenResult.status === "ready"
+          ? {
+              matrixLogin: {
+                homeserver: matrixConfig.homeserver,
+                userId: matrixConfig.userId,
+                loginToken: tokenResult.loginToken,
+                expiresAt: tokenResult.expiresAt,
+              },
+            }
+          : {}),
+      });
+      setDeviceInvitation(generated);
+      setInvitationReauthRequired(false);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      setInvitationBusy(false);
     }
   }
 
@@ -1093,7 +1252,8 @@ export function CodeverApp() {
     const connection = matrixConnectionRef.current;
     if (!conflict || !connection || conflict.busy) return;
     const conflictSessionId =
-      conflict.payload.operation === "session.create"
+      conflict.payload.operation === "session.create" ||
+      conflict.payload.operation === "device.invite"
         ? undefined
         : conflict.payload.sessionId;
     const optimisticMessage = conflict.optimisticMessageId
@@ -1232,7 +1392,10 @@ export function CodeverApp() {
         reconciledOptimisticMessageIdsRef.current.delete(
           conflict.optimisticMessageId,
         );
-        if (conflict.payload.operation !== "session.create") {
+        if (
+          conflict.payload.operation !== "session.create" &&
+          conflict.payload.operation !== "device.invite"
+        ) {
           removeLiveMessage(
             conflict.payload.sessionId,
             conflict.optimisticMessageId,
@@ -2367,6 +2530,9 @@ export function CodeverApp() {
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
         pairingBusy={pairingBusy}
+        deviceInvitation={deviceInvitation}
+        invitationBusy={invitationBusy}
+        invitationReauthRequired={invitationReauthRequired}
         onChange={setMatrixConfig}
         onPairingLink={(link) => void openPairingLink(link)}
         onClearPairing={() => {
@@ -2379,6 +2545,17 @@ export function CodeverApp() {
         onConnect={() => void connectRealMatrix()}
         onDisconnect={() => disconnectMatrix()}
         onForget={forgetMatrixConfig}
+        onPasswordLogin={(userId, password) =>
+          void signInForPairing(userId, password)
+        }
+        onCreateInvitation={(password) =>
+          void createDeviceInvitation(password)
+        }
+        onClearInvitation={() => {
+          setDeviceInvitation(null);
+          setInvitationReauthRequired(false);
+          setConnectionError(null);
+        }}
       />
     </main>
   );
@@ -2571,11 +2748,46 @@ function describeConflictedAction(payload: CommandPayload): string {
       return "The session settings change";
     case "session.create":
       return "The new session request";
+    case "device.invite":
+      return "The device invitation request";
   }
 }
 
 function formatUiError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deviceInvitationFromLink(link: string): boolean {
+  if (link.includes("#invite=")) return true;
+  try {
+    decodeDeviceInvitationLink(link);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseGatewayInvitationResult(input: unknown): {
+  pairingLink: string;
+  expiresAt: number;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("The Gateway returned an invalid device invitation.");
+  }
+  const result = input as Record<string, unknown>;
+  if (
+    typeof result.pairingLink !== "string" ||
+    !result.pairingLink ||
+    typeof result.expiresAt !== "number" ||
+    !Number.isSafeInteger(result.expiresAt) ||
+    result.expiresAt <= Date.now()
+  ) {
+    throw new Error("The Gateway returned an invalid device invitation.");
+  }
+  return {
+    pairingLink: result.pairingLink,
+    expiresAt: result.expiresAt,
+  };
 }
 
 function browserDeviceName(): string {

@@ -48,6 +48,7 @@ const allOperations: PairingOperation[] = [
   'decision',
   'session.settings',
   'session.create',
+  'device.invite',
 ]
 
 export interface CreatePairingOfferInput {

@@ -192,6 +192,66 @@ describe('strict Matrix command authorization', () => {
 })
 
 describe('MatrixGatewayRunner', () => {
+    it('lets an authenticated device create a short-lived pairing invitation', async () => {
+        const fixture = await securityFixture()
+        const session = fakeTopicSession([])
+        const runtime = directRoomRuntime(fixture.config.rooms[0]!, session)
+        const createDeviceInvitation = vi.fn(async () => ({
+            pairingLink: 'codever://pair?data=signed-offer',
+            expiresAt: fixture.now + 5 * 60_000,
+        }))
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client: new FakeMatrixGatewayClient(),
+            createDeviceInvitation,
+        })
+        await initializeDirectRuntime(runner, fixture.config)
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'invite-device',
+            gatewayId: fixture.config.gatewayId,
+            deviceId: 'pwa-device-1',
+            sequenceEpoch: 'legacy-v1',
+            conversationId: fixture.config.rooms[0]!.conversationId,
+            revisionEpoch: REVISION_EPOCH,
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'device.invite',
+            issuedAt: fixture.now,
+            expiresAt: fixture.now + 60_000,
+            nonce: '0123456789abcdef-invite-device',
+            payload: {
+                operation: 'device.invite',
+                lifetimeMs: 5 * 60_000,
+            },
+        }
+
+        const result = await (runner as unknown as {
+            execute(
+                roomRuntime: typeof runtime,
+                command: CodeverCommand,
+            ): Promise<{
+                sessionId: string | null
+                result?: {
+                    pairingLink: string
+                    expiresAt: number
+                }
+            }>
+        }).execute(runtime, command)
+
+        expect(createDeviceInvitation).toHaveBeenCalledWith({
+            requestedByDeviceId: 'pwa-device-1',
+            lifetimeMs: 5 * 60_000,
+        })
+        expect(result).toEqual({
+            sessionId: null,
+            result: {
+                pairingLink: 'codever://pair?data=signed-offer',
+                expiresAt: fixture.now + 5 * 60_000,
+            },
+        })
+    })
+
     it('creates a session atomically in a Gateway-scoped project with reasoning settings', async () => {
         const fixture = await securityFixture()
         const projectDirectory = await temporaryDirectory()
@@ -246,12 +306,15 @@ describe('MatrixGatewayRunner', () => {
             },
         }
 
-        const resultSessionId = await (runner as unknown as {
-            execute(roomRuntime: typeof runtime, command: CodeverCommand): Promise<string | null>
+        const executionResult = await (runner as unknown as {
+            execute(
+                roomRuntime: typeof runtime,
+                command: CodeverCommand,
+            ): Promise<{ sessionId: string | null }>
         }).execute(runtime, command)
 
         expect(dispatched).toEqual([])
-        expect(resultSessionId).toBe(createdSessionId)
+        expect(executionResult.sessionId).toBe(createdSessionId)
         expect(createdRoom).toMatchObject({
             cwd: projectDirectory,
             providerName: 'mock-provider',
@@ -322,7 +385,7 @@ describe('MatrixGatewayRunner', () => {
                 execute(
                     roomRuntime: typeof runtime,
                     command: CodeverCommand,
-                ): Promise<string | null>
+                ): Promise<{ sessionId: string | null }>
             }).execute(runtime, command)
 
         const firstExecution = execute(firstCommand)
@@ -340,8 +403,8 @@ describe('MatrixGatewayRunner', () => {
 
         releasePrompts()
         await expect(Promise.all([firstExecution, secondExecution])).resolves.toEqual([
-            'app-session-1',
-            'app-session-2',
+            { sessionId: 'app-session-1' },
+            { sessionId: 'app-session-2' },
         ])
     })
 

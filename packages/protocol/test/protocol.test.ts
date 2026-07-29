@@ -109,6 +109,32 @@ describe('protocol schemas', () => {
     })
   })
 
+  it('accepts a bounded device invitation request without a session target', () => {
+    expect(commandSchema.parse({
+      kind: 'codever.command',
+      version: 1,
+      commandId: 'invite-1',
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      sequence: 1,
+      baseRevision: 0,
+      operation: 'device.invite',
+      issuedAt: 1,
+      expiresAt: 2,
+      nonce: '0123456789abcdef-invite',
+      payload: {
+        operation: 'device.invite',
+        lifetimeMs: 5 * 60_000,
+      },
+    }).payload).toEqual({
+      operation: 'device.invite',
+      lifetimeMs: 5 * 60_000,
+    })
+  })
+
   it('requires an explicit app session for every session-targeted command', () => {
     const base = {
       kind: 'codever.command',

@@ -1,6 +1,7 @@
 import type {
   CodeverCommand,
   CommandPayload,
+  JsonValue,
   SignedCommand,
 } from "@codever/protocol";
 import {
@@ -30,6 +31,7 @@ import {
 } from "./pairing";
 import {
   signedGatewayDeviceRotationSchema,
+  jsonValueSchema,
   signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
   type SignedPairingOffer,
@@ -282,7 +284,7 @@ export function normalizeMatrixConfig(
   return config;
 }
 
-function normalizeHomeserver(value: string): string {
+export function normalizeHomeserver(value: string): string {
   const homeserver = value.trim().replace(/\/+$/, "");
   let url: URL;
   try {
@@ -1950,6 +1952,13 @@ async function forwardEvent(
         decryptedExtension.session_id
           ? { sessionId: decryptedExtension.session_id }
           : {}),
+        ...(decryptedExtension.result === undefined
+          ? {}
+          : {
+              result: jsonValueSchema.parse(
+                decryptedExtension.result,
+              ) as JsonValue,
+            }),
       },
       decryptedExtension.revision_epoch,
       activeDeviceCount,
@@ -3039,6 +3048,8 @@ function fallbackBody(payload: CommandPayload): string {
       return "Update agent session settings";
     case "session.create":
       return "Create a new agent session";
+    case "device.invite":
+      return "Authorize a new Codever device";
   }
 }
 

@@ -1,15 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { PairingPreview, TrustedGateway } from "./pairing";
+import QRCode from "qrcode";
+import type {
+  GeneratedDeviceInvitation,
+  PairingPreview,
+  TrustedGateway,
+} from "./pairing";
 
 type Props = {
   preview: PairingPreview | null;
   trustedGateway: TrustedGateway | null;
   busy: boolean;
+  canConfirm: boolean;
+  deviceInvitation: GeneratedDeviceInvitation | null;
+  invitationBusy: boolean;
+  invitationReauthRequired: boolean;
   onLink(link: string): void;
   onClear(): void;
   onConfirm(): void;
+  onCreateInvitation(password?: string): void;
+  onClearInvitation(): void;
 };
 
 type BarcodeDetectorLike = {
@@ -24,29 +35,179 @@ export function PairingWizard({
   preview,
   trustedGateway,
   busy,
+  canConfirm,
+  deviceInvitation,
+  invitationBusy,
+  invitationReauthRequired,
   onLink,
   onClear,
   onConfirm,
+  onCreateInvitation,
+  onClearInvitation,
 }: Props) {
   const [link, setLink] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
   const [clipboardError, setClipboardError] = useState<string | null>(null);
+  const [reauthPassword, setReauthPassword] = useState("");
+  const [qrCode, setQrCode] = useState({ link: "", dataUrl: "" });
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!deviceInvitation) return;
+    void QRCode.toDataURL(deviceInvitation.link, {
+      errorCorrectionLevel: "L",
+      margin: 2,
+      width: 320,
+    }).then((value) => {
+      if (!cancelled) {
+        setQrCode({ link: deviceInvitation.link, dataUrl: value });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceInvitation]);
+  const qrDataUrl =
+    qrCode.link === deviceInvitation?.link ? qrCode.dataUrl : "";
 
   if (trustedGateway && !preview) {
     return (
-      <section className="paired-gateway-card" aria-label="Trusted Gateway">
-        <span className="gateway-device-mark" aria-hidden="true">
-          G
-        </span>
-        <div>
-          <span className="paired-label">Trusted Gateway</span>
-          <strong>{trustedGateway.gatewayName}</strong>
-          <small>
-            Paired {formatDate(trustedGateway.pairedAt)} · identity verified
-          </small>
-        </div>
-        <span className="verified-badge">Verified</span>
-      </section>
+      <div className="device-invitation-flow">
+        <section className="paired-gateway-card" aria-label="Trusted Gateway">
+          <span className="gateway-device-mark" aria-hidden="true">
+            G
+          </span>
+          <div>
+            <span className="paired-label">Trusted Gateway</span>
+            <strong>{trustedGateway.gatewayName}</strong>
+            <small>
+              Paired {formatDate(trustedGateway.pairedAt)} · identity verified
+            </small>
+          </div>
+          <span className="verified-badge">Verified</span>
+        </section>
+
+        {!deviceInvitation && !invitationReauthRequired && (
+          <button
+            className="create-device-invitation-button"
+            type="button"
+            disabled={invitationBusy}
+            onClick={() => onCreateInvitation()}
+          >
+            {invitationBusy ? "Creating invitation…" : "Add another device"}
+          </button>
+        )}
+
+        {invitationReauthRequired && !deviceInvitation && (
+          <section className="invitation-reauth" aria-live="polite">
+            <strong>Confirm it’s you</strong>
+            <p>
+              Matrix requires your password before issuing a one-time login
+              token. The password is sent only to your homeserver.
+            </p>
+            <label>
+              <span>Matrix password</span>
+              <input
+                type="password"
+                value={reauthPassword}
+                autoComplete="current-password"
+                onChange={(event) => setReauthPassword(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={invitationBusy || !reauthPassword}
+              onClick={() => onCreateInvitation(reauthPassword)}
+            >
+              {invitationBusy
+                ? "Authorizing…"
+                : "Create secure invitation"}
+            </button>
+          </section>
+        )}
+
+        {deviceInvitation && (
+          <section className="generated-device-invitation" aria-live="polite">
+            <div>
+              <strong>Scan on the new device</strong>
+              <p>
+                This invitation works once and expires{" "}
+                {formatExpiry(deviceInvitation.expiresAt)}.
+                {deviceInvitation.includesMatrixLogin
+                  ? " It signs the new device into Matrix without exposing your access token."
+                  : " The new device will sign in to Matrix separately."}
+              </p>
+            </div>
+            {qrDataUrl ? (
+              // QR codes are local data URLs; an image optimizer cannot improve
+              // them and could accidentally move the invitation off-device.
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={qrDataUrl}
+                width={320}
+                height={320}
+                alt="One-time Codever device invitation QR code"
+              />
+            ) : (
+              <div className="invitation-qr-loading">Generating QR code…</div>
+            )}
+            <label>
+              <span>One-time invitation link</span>
+              <textarea
+                value={deviceInvitation.link}
+                readOnly
+                rows={3}
+                spellCheck={false}
+              />
+            </label>
+            <div className="pairing-actions">
+              <button
+                type="button"
+                className="scan-button"
+                onClick={() => {
+                  setShareStatus(null);
+                  void navigator.clipboard
+                    .writeText(deviceInvitation.link)
+                    .then(() => setShareStatus("Invitation link copied."))
+                    .catch(() =>
+                      setShareStatus(
+                        "Copy was blocked. Select the link above manually.",
+                      ),
+                    );
+                }}
+              >
+                Copy link
+              </button>
+              {typeof navigator.share === "function" && (
+                <button
+                  type="button"
+                  className="paste-button"
+                  onClick={() =>
+                    void navigator
+                      .share({
+                        title: `Join ${trustedGateway.gatewayName}`,
+                        text: "Open this one-time Codever device invitation.",
+                        url: deviceInvitation.link,
+                      })
+                      .catch(() => undefined)
+                  }
+                >
+                  Share
+                </button>
+              )}
+              <button
+                type="button"
+                className="continue-link-button"
+                onClick={onClearInvitation}
+              >
+                Done
+              </button>
+            </div>
+            {shareStatus && <small role="status">{shareStatus}</small>}
+          </section>
+        )}
+      </div>
     );
   }
 
@@ -79,10 +240,12 @@ export function PairingWizard({
         <button
           className="pair-confirm-button"
           onClick={onConfirm}
-          disabled={busy}
+          disabled={busy || !canConfirm}
         >
           {busy
             ? "Completing secure pairing…"
+            : !canConfirm
+              ? "Sign in to Matrix to continue"
             : `Trust ${preview.gatewayName} and pair`}
         </button>
       </section>

@@ -106,7 +106,6 @@ const currentTransport = {
 }
 
 let active = await registry.listActive()
-let acceptNewOffers = false
 if (active.length === 0) {
     const created = await pairingService.createOffer({
         gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
@@ -169,7 +168,6 @@ if (active.length === 0) {
         }))
         process.stdout.write(`\nInvitation code: ${formatCode(invitationCode)}\n`)
         process.stdout.write(`Pairing link (paste fallback):\n${created.link}\n\n`)
-        acceptNewOffers = true
     }
 }
 
@@ -180,7 +178,9 @@ const stopPairingRecovery = listenForMatrixPairingRequests({
     service: pairingService,
     registry,
     gatewayTransport: currentTransport,
-    acceptNewOffers,
+    // Only offers persisted by GatewayPairingService can be accepted, so the
+    // listener can remain available for invitations created by an active PWA.
+    acceptNewOffers: true,
     onAccepted: async record => {
         process.stdout.write(`Device ${record.certificate.certificate.deviceName} is now active.\n`)
         await runner?.syncState()
@@ -223,6 +223,20 @@ runner = new MatrixGatewayRunner(config, {
         (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
         (await registry.get(deviceId))?.status === 'active',
+    createDeviceInvitation: async ({ requestedByDeviceId, lifetimeMs }) => {
+        const created = await pairingService.createOffer({
+            gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
+            gatewayTransport: currentTransport,
+            ...(lifetimeMs === undefined ? {} : { lifetimeMs }),
+        })
+        process.stdout.write(
+            `Device ${requestedByDeviceId} authorized a new pairing invitation.\n`,
+        )
+        return {
+            pairingLink: created.link,
+            expiresAt: created.signedOffer.offer.expiresAt,
+        }
+    },
     onRejected: (event, error) => {
         process.stderr.write(
             `[matrix-gateway] rejected ${event.eventId}: ${formatError(error)}\n`,

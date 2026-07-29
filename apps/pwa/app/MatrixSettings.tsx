@@ -1,11 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import type {
   MatrixConnectionConfig,
   MatrixConnectionStatus,
 } from "./matrix";
 import { PairingWizard } from "./PairingWizard";
-import type { PairingPreview, TrustedGateway } from "./pairing";
+import type {
+  GeneratedDeviceInvitation,
+  PairingPreview,
+  TrustedGateway,
+} from "./pairing";
 
 type Props = {
   open: boolean;
@@ -15,6 +20,9 @@ type Props = {
   pairingPreview: PairingPreview | null;
   trustedGateway: TrustedGateway | null;
   pairingBusy: boolean;
+  deviceInvitation: GeneratedDeviceInvitation | null;
+  invitationBusy: boolean;
+  invitationReauthRequired: boolean;
   onChange(config: MatrixConnectionConfig): void;
   onPairingLink(link: string): void;
   onClearPairing(): void;
@@ -23,21 +31,10 @@ type Props = {
   onConnect(): void;
   onDisconnect(): void;
   onForget(): void;
+  onPasswordLogin(userId: string, password: string): void;
+  onCreateInvitation(password?: string): void;
+  onClearInvitation(): void;
 };
-
-const accountFields: Array<{
-  key: "accessToken";
-  label: string;
-  placeholder: string;
-  type?: string;
-}> = [
-  {
-    key: "accessToken",
-    label: "Access token",
-    placeholder: "syt_••••••••••••",
-    type: "password",
-  },
-];
 
 export function MatrixSettings({
   open,
@@ -47,6 +44,9 @@ export function MatrixSettings({
   pairingPreview,
   trustedGateway,
   pairingBusy,
+  deviceInvitation,
+  invitationBusy,
+  invitationReauthRequired,
   onChange,
   onPairingLink,
   onClearPairing,
@@ -55,14 +55,26 @@ export function MatrixSettings({
   onConnect,
   onDisconnect,
   onForget,
+  onPasswordLogin,
+  onCreateInvitation,
+  onClearInvitation,
 }: Props) {
+  const [loginPassword, setLoginPassword] = useState("");
+
   if (!open) return null;
   const connected = status === "connected" || status === "reconnecting";
-  const busy = status === "connecting" || pairingBusy;
+  const busy = status === "connecting" || pairingBusy || invitationBusy;
   const needsAccount = Boolean(pairingPreview) && !trustedGateway;
 
   return (
-    <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      className="settings-backdrop"
+      role="presentation"
+      onMouseDown={() => {
+        setLoginPassword("");
+        onClose();
+      }}
+    >
       <section
         className="matrix-settings pairing-settings"
         role="dialog"
@@ -77,7 +89,13 @@ export function MatrixSettings({
               {trustedGateway ? "Gateway connection" : "Add a Gateway"}
             </h2>
           </div>
-          <button onClick={onClose} aria-label="Close Gateway settings">
+          <button
+            onClick={() => {
+              setLoginPassword("");
+              onClose();
+            }}
+            aria-label="Close Gateway settings"
+          >
             ×
           </button>
         </header>
@@ -95,9 +113,15 @@ export function MatrixSettings({
           preview={pairingPreview}
           trustedGateway={trustedGateway}
           busy={busy}
+          canConfirm={Boolean(config.accessToken)}
+          deviceInvitation={deviceInvitation}
+          invitationBusy={invitationBusy}
+          invitationReauthRequired={invitationReauthRequired}
           onLink={onPairingLink}
           onClear={onClearPairing}
           onConfirm={onConfirmPairing}
+          onCreateInvitation={onCreateInvitation}
+          onClearInvitation={onClearInvitation}
         />
 
         {(needsAccount || trustedGateway) && (
@@ -130,35 +154,74 @@ export function MatrixSettings({
                   }
                 />
               </label>
-              {accountFields.map((field) => (
-                <label
-                  key={field.key}
-                  className={
-                    field.key === "accessToken" ? "wide-field" : undefined
-                  }
-                >
-                  <span>{field.label}</span>
+              {needsAccount && !config.accessToken && (
+                <>
+                  <label className="wide-field">
+                    <span>Matrix ID</span>
+                    <input
+                      value={config.userId}
+                      placeholder="@you:example.org"
+                      autoComplete="username"
+                      spellCheck={false}
+                      onChange={(event) =>
+                        onChange({ ...config, userId: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="wide-field">
+                    <span>Password</span>
+                    <input
+                      type="password"
+                      value={loginPassword}
+                      placeholder="Your Matrix password"
+                      autoComplete="current-password"
+                      onChange={(event) => setLoginPassword(event.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="matrix-password-login-button wide-field"
+                    disabled={
+                      busy || !config.userId.trim() || !loginPassword
+                    }
+                    onClick={() => {
+                      onPasswordLogin(config.userId, loginPassword);
+                      setLoginPassword("");
+                    }}
+                  >
+                    {pairingBusy ? "Signing in…" : "Sign in to Matrix"}
+                  </button>
+                  <p className="matrix-session-hint wide-field">
+                    This creates a separate Matrix device session. Codever
+                    never asks you to copy an access token.
+                  </p>
+                </>
+              )}
+              {config.accessToken && (
+                <p className="matrix-session-hint wide-field">
+                  Signed in as {config.userId || "your Matrix account"} on this
+                  device.
+                </p>
+              )}
+              <details className="advanced-token-field wide-field">
+                <summary>Advanced: use an access token</summary>
+                <label>
+                  <span>Access token</span>
                   <input
-                    type={field.type ?? "text"}
-                    value={config[field.key]}
-                    placeholder={field.placeholder}
+                    type="password"
+                    value={config.accessToken}
+                    placeholder="syt_••••••••••••"
                     autoComplete="off"
                     spellCheck={false}
                     onChange={(event) =>
                       onChange({
                         ...config,
-                        [field.key]: event.target.value,
+                        accessToken: event.target.value,
                       })
                     }
                   />
                 </label>
-              ))}
-              {needsAccount && (
-                <p className="matrix-session-hint wide-field">
-                  Your Matrix account and this device are identified
-                  automatically from the token.
-                </p>
-              )}
+              </details>
               <label>
                 <span>Encrypted room</span>
                 <input value={config.roomId} readOnly placeholder="From QR code" />

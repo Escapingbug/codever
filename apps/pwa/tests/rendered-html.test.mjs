@@ -149,6 +149,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     wizard,
     settings,
     app,
+    matrixAuth,
     chatMessages,
     packageJson,
   ] = await Promise.all([
@@ -158,12 +159,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
       readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
       readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
       readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+      readFile(new URL("app/matrixAuth.ts", appRoot), "utf8"),
       readFile(new URL("app/chatMessages.ts", appRoot), "utf8"),
       readFile(new URL("package.json", appRoot), "utf8"),
     ]);
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
   assert.match(packageJson, /"@codever\/security"/);
+  assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
   assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
   assert.match(matrix, /store: syncStore/);
@@ -244,6 +247,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /setDeviceVerified/);
   assert.match(matrix, /getOwnDeviceKeys\(\)/);
   assert.match(matrix, /\/_matrix\/client\/v3\/account\/whoami/);
+  assert.match(matrixAuth, /\/_matrix\/client\/v1\/login\/get_token/);
+  assert.match(matrixAuth, /type: TOKEN_LOGIN_TYPE/);
+  assert.match(matrixAuth, /type: PASSWORD_LOGIN_TYPE/);
+  assert.match(wizard, /Add another device/);
+  assert.match(wizard, /One-time Codever device invitation QR code/);
+  assert.match(settings, /Sign in to Matrix/);
+  assert.match(settings, /Advanced: use an access token/);
+  assert.match(app, /operation: "device\.invite"/);
   assert.match(matrix, /sender === config\.userId/);
   assert.match(matrix, /error instanceof SecurityError && error\.code === "replay"/);
   assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
@@ -318,7 +329,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
   assert.match(wizard, /BarcodeDetector/);
   assert.match(settings, /Matrix transports/);
-  assert.match(settings, /identified[\s\S]*automatically from the token/);
+  assert.match(settings, /creates a separate Matrix device session/);
+  assert.match(settings, /never asks you to copy an access token/);
+  assert.match(settings, /Advanced: use an access token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
   assert.match(app, /useState<GatewayStateSnapshot \| null>\(null\)/);

@@ -1,9 +1,12 @@
+import type { JsonValue } from "@codever/protocol";
+
 export type CommandCompletion = {
   commandId: string;
   sequence: number;
   revision: number;
   outcome: "succeeded" | "failed";
   sessionId?: string;
+  result?: JsonValue;
 };
 
 type Acknowledgement = {
