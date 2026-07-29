@@ -261,6 +261,13 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.doesNotMatch(app, /setActiveDeviceCount\(incoming\.activeDeviceCount\)/);
   assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
   assert.match(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
+  assert.match(matrix, /loadCachedGatewayState\(/);
+  assert.match(matrix, /createGatewayStateCacheRecord\(/);
+  assert.match(matrix, /parseGatewayStateCacheRecord\(/);
+  assert.match(
+    matrix,
+    /cachedGatewayState[\s\S]*handlers\.onCollaborationState/,
+  );
   assert.match(matrix, /revisionInitialized: false/);
   assert.match(matrix, /stateVersion < baselineStateVersion/);
   assert.match(matrix, /retiredRevisionEpochs/);

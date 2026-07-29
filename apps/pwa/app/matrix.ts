@@ -53,7 +53,10 @@ import {
 import {
   canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
+  createGatewayStateCacheRecord,
+  parseGatewayStateCacheRecord,
   parseGatewayStateExtension,
+  type GatewayStateCacheBinding,
   type GatewayStateSnapshot,
 } from "./gatewayState";
 export {
@@ -544,10 +547,7 @@ export async function connectMatrix(
       config,
       identity,
       trust.certificate.certificate.certificateId,
-      gatewayState.revisionEpoch,
-      gatewayState.revisionEpochGeneration,
-      gatewayState.revision,
-      gatewayState.stateVersion,
+      gatewayState,
     );
     if (!accepted) return;
     handlers.onCollaborationState?.({
@@ -664,6 +664,21 @@ export async function connectMatrix(
     if (configuredGateway) {
       await verifyAndPinGatewayDevice(client, configuredGateway);
       await cryptoApi.forceDiscardSession(config.roomId);
+    }
+
+    if (activeTrust) {
+      const cachedGatewayState = await loadCachedGatewayState(
+        config,
+        identity,
+        activeTrust.certificate.certificate.certificateId,
+      );
+      if (cachedGatewayState) {
+        handlers.onCollaborationState?.({
+          revision: cachedGatewayState.revision,
+          activeDeviceCount: cachedGatewayState.activeDeviceCount,
+          gatewayState: cachedGatewayState,
+        });
+      }
     }
 
     for (const event of room.getLiveTimeline().getEvents()) {
@@ -1823,6 +1838,73 @@ function gatewayEpochScope(
   ]);
 }
 
+function gatewayStateCacheBinding(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  certificateId: string,
+): GatewayStateCacheBinding {
+  return {
+    gatewayId: config.gatewayId,
+    conversationId: config.conversationId,
+    identityKeyId: identity.keyId,
+    certificateId,
+  };
+}
+
+function gatewayStateCacheScope(binding: GatewayStateCacheBinding): string {
+  return JSON.stringify([
+    "gateway-state-cache-v1",
+    binding.gatewayId,
+    binding.identityKeyId,
+    binding.conversationId,
+    binding.certificateId,
+  ]);
+}
+
+async function loadCachedGatewayState(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  certificateId: string,
+): Promise<GatewayStateSnapshot | null> {
+  const database = await openIdentityDatabase();
+  const binding = gatewayStateCacheBinding(config, identity, certificateId);
+  try {
+    return await new Promise<GatewayStateSnapshot | null>((resolve, reject) => {
+      const transaction = database.transaction(
+        COMMAND_SEQUENCE_STORE,
+        "readonly",
+      );
+      const store = transaction.objectStore(COMMAND_SEQUENCE_STORE);
+      const epochRead = store.get(gatewayEpochScope(config, identity));
+      const cacheRead = store.get(gatewayStateCacheScope(binding));
+      transaction.oncomplete = () => {
+        try {
+          const epoch = parseDurableGatewayEpochState(epochRead.result);
+          resolve(
+            epoch
+              ? parseGatewayStateCacheRecord(cacheRead.result, binding, epoch)
+              : null,
+          );
+        } catch (error) {
+          reject(error);
+        }
+      };
+      transaction.onerror = () =>
+        reject(
+          transaction.error ??
+            new Error("Could not read the cached Gateway state."),
+        );
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            new Error("Could not read the cached Gateway state."),
+        );
+    });
+  } finally {
+    database.close();
+  }
+}
+
 async function reserveCommandSequence(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -2014,15 +2096,24 @@ function assertMatchingRevisionEpoch(
 async function initializeKnownRevision(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
-  sequenceEpoch: string,
-  revisionEpoch: string,
-  revisionEpochGeneration: number,
-  revision: number,
-  stateVersion: number,
+  certificateId: string,
+  gatewayState: GatewayStateSnapshot,
 ): Promise<boolean> {
+  const {
+    revisionEpoch,
+    revisionEpochGeneration,
+    revision,
+    stateVersion,
+  } = gatewayState;
   const database = await openIdentityDatabase();
-  const commandScope = commandSequenceScope(config, identity, sequenceEpoch);
+  const commandScope = commandSequenceScope(config, identity, certificateId);
   const epochScope = gatewayEpochScope(config, identity);
+  const cacheBinding = gatewayStateCacheBinding(
+    config,
+    identity,
+    certificateId,
+  );
+  const cacheScope = gatewayStateCacheScope(cacheBinding);
   try {
     return await new Promise<boolean>((resolve, reject) => {
       const transaction = database.transaction(
@@ -2117,12 +2208,17 @@ async function initializeKnownRevision(
             state.revisionEpoch === revisionEpoch &&
             (state.revisionEpochGeneration === undefined ||
               state.revisionEpochGeneration === revisionEpochGeneration);
-          accepted =
+          const durableStateChanged =
             epochState === null ||
             !commandAlreadyCurrent ||
             !sameEpoch ||
             stateVersion > state.stateVersion;
-          if (!accepted) return;
+          accepted = true;
+          store.put(
+            createGatewayStateCacheRecord(cacheBinding, gatewayState),
+            cacheScope,
+          );
+          if (!durableStateChanged) return;
 
           const nextEpochState: DurableGatewayEpochState = {
             revisionEpoch,

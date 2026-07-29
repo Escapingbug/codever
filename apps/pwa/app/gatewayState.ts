@@ -54,6 +54,20 @@ export type GatewayStateSnapshot = {
   capabilities: GatewayCapabilities;
 };
 
+export type GatewayStateCacheBinding = {
+  gatewayId: string;
+  conversationId: string;
+  identityKeyId: string;
+  certificateId: string;
+};
+
+export type GatewayStateCacheEpoch = {
+  revisionEpoch: string;
+  revisionEpochGeneration: number;
+  stateVersion: number;
+  revision: number;
+};
+
 export function classifyGatewayStateEpoch(
   currentEpoch: string | undefined,
   currentGeneration: number | undefined,
@@ -344,6 +358,115 @@ export function gatewayProjectKey(
   projectId: string,
 ): string {
   return `${gatewayId}\u0000${projectId}`;
+}
+
+export function createGatewayStateCacheRecord(
+  binding: GatewayStateCacheBinding,
+  state: GatewayStateSnapshot,
+): Record<string, unknown> {
+  return {
+    kind: "gateway_state_cache",
+    version: 1,
+    gateway_id: binding.gatewayId,
+    conversation_id: binding.conversationId,
+    identity_key_id: binding.identityKeyId,
+    certificate_id: binding.certificateId,
+    snapshot: gatewayStateExtension(state),
+  };
+}
+
+export function parseGatewayStateCacheRecord(
+  value: unknown,
+  binding: GatewayStateCacheBinding,
+  epoch: GatewayStateCacheEpoch,
+): GatewayStateSnapshot | null {
+  const record = asRecord(value);
+  if (
+    record?.kind !== "gateway_state_cache" ||
+    record.version !== 1 ||
+    record.gateway_id !== binding.gatewayId ||
+    record.conversation_id !== binding.conversationId ||
+    record.identity_key_id !== binding.identityKeyId ||
+    record.certificate_id !== binding.certificateId
+  ) {
+    return null;
+  }
+  let state: GatewayStateSnapshot | null;
+  try {
+    state = parseGatewayStateExtension(record.snapshot);
+  } catch {
+    return null;
+  }
+  if (
+    !state ||
+    state.revisionEpoch !== epoch.revisionEpoch ||
+    state.revisionEpochGeneration !== epoch.revisionEpochGeneration ||
+    state.stateVersion !== epoch.stateVersion ||
+    state.revision !== epoch.revision
+  ) {
+    return null;
+  }
+  return state;
+}
+
+function gatewayStateExtension(
+  state: GatewayStateSnapshot,
+): Record<string, unknown> {
+  return {
+    kind: "gateway_state",
+    version: 1,
+    state_version: state.stateVersion,
+    revision: state.revision,
+    revision_epoch: state.revisionEpoch,
+    revision_epoch_generation: state.revisionEpochGeneration,
+    active_device_count: state.activeDeviceCount,
+    current_session_id: state.currentSessionId,
+    sessions: state.sessions.map((session) => ({
+      id: session.id,
+      title: session.title,
+      updated_at: session.updatedAt,
+      project_id: session.projectId,
+      project_name: session.projectName,
+      cwd: session.cwd,
+      provider: session.provider,
+      ...(session.model ? { model: session.model } : {}),
+      ...(session.reasoningEffort
+        ? { reasoning_effort: session.reasoningEffort }
+        : {}),
+    })),
+    workspace: {
+      project_id: state.workspace.projectId,
+      project_name: state.workspace.projectName,
+      cwd: state.workspace.cwd,
+      provider: state.workspace.provider,
+      ...(state.workspace.model ? { model: state.workspace.model } : {}),
+      ...(state.workspace.reasoningEffort
+        ? { reasoning_effort: state.workspace.reasoningEffort }
+        : {}),
+      permission_mode: state.workspace.permissionMode,
+    },
+    capabilities: {
+      models: state.capabilities.models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        ...(model.defaultReasoningLevel
+          ? { default_reasoning_level: model.defaultReasoningLevel }
+          : {}),
+        supported_reasoning_levels: model.supportedReasoningLevels.map(
+          (level) => ({
+            effort: level.effort,
+            ...(level.description ? { description: level.description } : {}),
+          }),
+        ),
+      })),
+      permission_modes: state.capabilities.permissionModes.map((mode) => ({
+        id: mode.id,
+        name: mode.name,
+      })),
+      can_create_session: state.capabilities.canCreateSession,
+      can_select_session: state.capabilities.canSelectSession,
+    },
+  };
 }
 
 function legacyProjectIdentity(cwd: string): { id: string; name: string } {

@@ -11,7 +11,9 @@ import {
 import {
   canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
+  createGatewayStateCacheRecord,
   gatewayProjectKey,
+  parseGatewayStateCacheRecord,
   parseGatewayStateExtension,
 } from "../app/gatewayState.ts";
 
@@ -118,6 +120,98 @@ test("project identity is scoped by Gateway, not by display name", () => {
   assert.equal(
     gatewayProjectKey("gateway-a", "project-1"),
     gatewayProjectKey("gateway-a", "project-1"),
+  );
+});
+
+test("cached Gateway state survives reload only for the same trust and durable epoch", () => {
+  const state = parseGatewayStateExtension({
+    version: 1,
+    kind: "gateway_state",
+    state_version: 9,
+    revision: 4,
+    revision_epoch: "epoch-cache",
+    revision_epoch_generation: 3,
+    active_device_count: 1,
+    current_session_id: "session-cache",
+    sessions: [
+      {
+        id: "session-cache",
+        title: "Cached session",
+        updated_at: 1_700_000_000_000,
+        project_id: "project-cache",
+        project_name: "workspace",
+        cwd: "/workspace",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        reasoning_effort: "high",
+      },
+    ],
+    workspace: {
+      project_id: "project-cache",
+      project_name: "workspace",
+      cwd: "/workspace",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      permission_mode: "default",
+    },
+    capabilities: {
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6",
+          default_reasoning_level: "low",
+          supported_reasoning_levels: [
+            { effort: "low" },
+            { effort: "high" },
+          ],
+        },
+      ],
+      permission_modes: [{ id: "default", name: "Default" }],
+      can_create_session: true,
+      can_select_session: true,
+    },
+  });
+  assert.ok(state);
+  const binding = {
+    gatewayId: "gateway-1",
+    conversationId: "conversation-1",
+    identityKeyId: "device-key-1",
+    certificateId: "certificate-1",
+  };
+  const epoch = {
+    revisionEpoch: state.revisionEpoch,
+    revisionEpochGeneration: state.revisionEpochGeneration,
+    stateVersion: state.stateVersion,
+    revision: state.revision,
+  };
+  const record = createGatewayStateCacheRecord(binding, state);
+
+  assert.deepEqual(
+    parseGatewayStateCacheRecord(record, binding, epoch),
+    state,
+  );
+  assert.equal(
+    parseGatewayStateCacheRecord(
+      record,
+      { ...binding, certificateId: "certificate-2" },
+      epoch,
+    ),
+    null,
+  );
+  assert.equal(
+    parseGatewayStateCacheRecord(
+      record,
+      binding,
+      { ...epoch, stateVersion: epoch.stateVersion + 1 },
+    ),
+    null,
+  );
+  const tampered = structuredClone(record);
+  tampered.snapshot.revision = state.revision + 1;
+  assert.equal(
+    parseGatewayStateCacheRecord(tampered, binding, epoch),
+    null,
   );
 });
 
