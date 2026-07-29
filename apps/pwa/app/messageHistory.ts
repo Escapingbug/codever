@@ -7,9 +7,12 @@ export type PersistedChatMessage = {
   eventId?: string;
   requestId?: string;
   streamId?: string;
+  toolCallId?: string;
+  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   commandId?: string;
   revision?: number;
+  deliveryState?: "sending" | "sent" | "failed";
   originDeviceId?: string;
   originDeviceName?: string;
   raw?: Record<string, unknown>;
@@ -128,6 +131,35 @@ export async function reconcileMessageHistory(
             transaction.error ??
               request.error ??
               new Error("Could not reconcile the conversation history."),
+          );
+        transaction.onerror = () => {
+          // onabort reports the final transaction error.
+        };
+      });
+    } finally {
+      database.close();
+    }
+  });
+}
+
+export async function deleteMessageHistory(
+  scope: string,
+  messageId: string,
+): Promise<void> {
+  if (!scope || !messageId) return;
+  return enqueueHistoryWrite(async () => {
+    const database = await openHistoryDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        transaction
+          .objectStore(MESSAGE_STORE)
+          .delete(historyMessageKey(scope, messageId));
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () =>
+          reject(
+            transaction.error ??
+              new Error("Could not delete the conversation history message."),
           );
         transaction.onerror = () => {
           // onabort reports the final transaction error.

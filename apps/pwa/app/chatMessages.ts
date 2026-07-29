@@ -96,9 +96,40 @@ export function mergeChatMessage(
   const streamIndex = message.streamId
     ? current.findIndex((entry) => entry.streamId === message.streamId)
     : -1;
-  const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
+  const toolIndex = message.toolCallId
+    ? current.findIndex((entry) => entry.toolCallId === message.toolCallId)
+    : -1;
+  const targetIndex =
+    replaceIndex >= 0
+      ? replaceIndex
+      : streamIndex >= 0
+        ? streamIndex
+        : toolIndex;
   if (targetIndex >= 0) {
     const existing = current[targetIndex];
+    if (
+      existing.toolCallId &&
+      existing.toolCallId === message.toolCallId &&
+      !shouldApplyToolStatusUpdate(
+        existing.toolStatus,
+        message.toolStatus,
+      )
+    ) {
+      return [...current];
+    }
+    if (message.raw?.type === "agent.tool.completed") {
+      const next = [...current];
+      next[targetIndex] = {
+        ...existing,
+        ...message,
+        id: existing.id,
+        text: existing.text || message.text,
+        raw: { ...(existing.raw ?? {}), ...(message.raw ?? {}) },
+        timestamp: existing.timestamp ?? message.timestamp,
+        time: existing.time ?? message.time,
+      };
+      return next;
+    }
     const text =
       message.raw?.type === "agent.text.delta" &&
       existing.text !== message.text
@@ -166,4 +197,12 @@ function insertChatMessage(
   if (laterIndex >= 0) next.splice(laterIndex, 0, message);
   else next.push(message);
   return next;
+}
+
+function shouldApplyToolStatusUpdate(
+  current: "running" | "succeeded" | "failed" | undefined,
+  incoming: "running" | "succeeded" | "failed" | undefined,
+): boolean {
+  const currentIsTerminal = current === "succeeded" || current === "failed";
+  return !(currentIsTerminal && incoming === "running");
 }

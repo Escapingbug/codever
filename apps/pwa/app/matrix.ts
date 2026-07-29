@@ -146,6 +146,8 @@ export type IncomingCodeverMessage = {
   activeDeviceCount?: number;
   requestId?: string;
   streamId?: string;
+  toolCallId?: string;
+  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   raw: Record<string, unknown>;
 };
@@ -443,6 +445,7 @@ export async function connectMatrix(
   const cryptoLock = await acquireMatrixCryptoLock(cryptoStoreScope);
 
   let stopped = false;
+  let initialSyncComplete = false;
   let persistenceFailure: string | null = null;
   const failPersistence = (detail: string) => {
     if (persistenceFailure) return;
@@ -617,6 +620,7 @@ export async function connectMatrix(
       onKnownRevision,
       onAuthenticatedCommandResult,
       onGatewayState,
+      !initialSyncComplete,
     ).catch((error) => {
       handlers.onStatus("error", formatError(error));
     });
@@ -685,6 +689,7 @@ export async function connectMatrix(
     client.on(sdk.ClientEvent.Sync, onSync);
     await client.startClient({ initialSyncLimit: 30 });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
+    initialSyncComplete = true;
 
     const room = client.getRoom(config.roomId);
     if (!room) {
@@ -735,6 +740,7 @@ export async function connectMatrix(
         onKnownRevision,
         onAuthenticatedCommandResult,
         onGatewayState,
+        true,
       );
     }
     assertPersistenceHealthy();
@@ -1547,6 +1553,14 @@ export function parseCodeverEvent(
       return {
         ...common,
         kind: "tool",
+        ...(typeof payload.toolCallId === "string"
+          ? { toolCallId: payload.toolCallId }
+          : {}),
+        ...(payload.type === "agent.tool.started"
+          ? { toolStatus: "running" as const }
+          : payload.status === "succeeded" || payload.status === "failed"
+            ? { toolStatus: payload.status }
+            : {}),
         text:
           typeof payload.name === "string"
             ? payload.name
@@ -1754,6 +1768,7 @@ async function forwardEvent(
     activeDeviceCount?: number,
   ) => Promise<void>,
   onGatewayState?: (state: GatewayStateSnapshot) => Promise<void>,
+  historical = false,
 ): Promise<void> {
   const eventId = event.getId();
   const sender = event.getSender();
@@ -1952,6 +1967,7 @@ async function forwardEvent(
         decryptedExtension.session_id
           ? { sessionId: decryptedExtension.session_id }
           : {}),
+        ...(historical ? { historical: true } : {}),
         raw: decryptedExtension,
       });
     }
@@ -1978,7 +1994,7 @@ async function forwardEvent(
       parsed.activeDeviceCount,
     );
   }
-  onMessage(parsed);
+  onMessage(historical ? { ...parsed, historical: true } : parsed);
 }
 
 async function acceptGatewayDeviceRotation(

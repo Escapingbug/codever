@@ -10,6 +10,15 @@ import {
   useState,
 } from "react";
 import type { CommandPayload } from "@codever/protocol";
+import {
+  SENDING_AGENT_ACTIVITY,
+  STARTING_AGENT_ACTIVITY,
+  STOPPING_AGENT_ACTIVITY,
+  WORKING_AGENT_ACTIVITY,
+  reduceAgentActivity,
+  shouldApplyAgentActivity,
+  type AgentActivity,
+} from "./agentActivity";
 import { MatrixSettings } from "./MatrixSettings";
 import {
   NewSessionDialog,
@@ -26,6 +35,7 @@ import {
 } from "./chatMessages";
 import {
   clearMessageHistoryScope,
+  deleteMessageHistory,
   loadMessageHistoryPage,
   matrixHistoryScope,
   reconcileMessageHistory,
@@ -118,6 +128,9 @@ export function CodeverApp() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [agentActivity, setAgentActivity] =
+    useState<AgentActivity | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
@@ -143,7 +156,7 @@ export function CodeverApp() {
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [decisionStates, setDecisionStates] = useState<
-    Record<string, "pending" | "approved" | "denied">
+    Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
@@ -161,6 +174,7 @@ export function CodeverApp() {
     new Map<string, OptimisticMessageReference>(),
   );
   const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
+  const promptSubmissionTokenRef = useRef<symbol | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
@@ -346,14 +360,49 @@ export function CodeverApp() {
         current === null ? incoming.revision! : Math.max(current, incoming.revision!),
       );
     }
+    const currentSessionId = currentSessionIdRef.current;
+    const sessionId = incoming.sessionId ?? currentSessionId ?? undefined;
+    const isCurrentLiveSessionEvent = shouldApplyAgentActivity(
+      currentSessionId,
+      incoming,
+    );
+    if (isCurrentLiveSessionEvent) {
+      setAgentActivity((current) =>
+        reduceAgentActivity(current, incoming.raw),
+      );
+      const executionSignal = agentExecutionSignal(incoming);
+      if (executionSignal === "running") {
+        setIsStreaming(true);
+      } else if (executionSignal === "stopped") {
+        setIsStreaming(false);
+        setIsStopping(false);
+      }
+    }
+    const lifecycleFailure = agentLifecycleFailureText(incoming.raw);
+    if (
+      isTransientAgentLifecycleEvent(incoming.raw) &&
+      lifecycleFailure === null
+    ) {
+      return;
+    }
+    if (
+      incoming.kind === "user" &&
+      incoming.originDeviceId &&
+      incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId
+    ) {
+      // The local composer already rendered this prompt optimistically.
+      return;
+    }
+    const displayIncoming: IncomingCodeverMessage =
+      lifecycleFailure === null
+        ? incoming
+        : { ...incoming, kind: "error", text: lifecycleFailure };
+    const message = chatMessageFromIncoming(displayIncoming, sessionId);
     const ownUserMessage = Boolean(
       incoming.kind === "user" &&
         incoming.originDeviceId &&
         incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId,
     );
-    const sessionId =
-      incoming.sessionId ?? currentSessionIdRef.current ?? undefined;
-    const message = chatMessageFromIncoming(incoming, sessionId);
     const optimisticMessageId = ownUserMessage
       ? findOptimisticMessageId(optimisticMessagesRef.current.values(), message)
       : undefined;
@@ -379,8 +428,8 @@ export function CodeverApp() {
     }
     if (
       sessionId &&
-      currentSessionIdRef.current &&
-      sessionId !== currentSessionIdRef.current
+      currentSessionId &&
+      sessionId !== currentSessionId
     ) {
       return;
     }
@@ -397,14 +446,6 @@ export function CodeverApp() {
         reconcileMessageId: optimisticMessageId,
       }),
     );
-    if (
-      incoming.raw.type === "agent.text.completed" ||
-      incoming.raw.type === "command.completed" ||
-      (incoming.kind === "error" &&
-        incoming.raw.kind !== "command_result")
-    ) {
-      setIsStreaming(false);
-    }
   }
 
   async function restoreSessionHistory(
@@ -434,7 +475,34 @@ export function CodeverApp() {
         ...message,
         sessionId,
         historical: true,
+        ...(message.deliveryState === "sending"
+          ? { deliveryState: "failed" as const }
+          : {}),
       }));
+      const interruptedSends = cachedMessages.filter(
+        (message) => message.deliveryState === "failed" &&
+          cached.messages.some(
+            (cachedMessage) =>
+              cachedMessage.id === message.id &&
+              cachedMessage.deliveryState === "sending",
+          ),
+      );
+      if (interruptedSends.length > 0) {
+        await saveMessageHistory(
+          scope,
+          sessionId,
+          interruptedSends.map(
+            ({ historical: _historical, sessionId: _sessionId, ...message }) =>
+              message,
+          ),
+        );
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+      }
       historyCursorRef.current = cached.cursor;
       setMessages((current) =>
         mergeChatMessages(current, cachedMessages),
@@ -628,9 +696,15 @@ export function CodeverApp() {
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
     revisionConflictRef.current = null;
+    activePromptCommandIdRef.current = null;
+    completedCommandResultsRef.current.clear();
+    promptSubmissionTokenRef.current = null;
     setRevisionConflict(null);
     setConnectionError(null);
     setConnectionStatus("connecting");
+    setAgentActivity(null);
+    setIsStreaming(false);
+    setIsStopping(false);
     setMessages([]);
     setGatewayState(null);
     setGatewayRevision(null);
@@ -680,12 +754,18 @@ export function CodeverApp() {
               currentSessionIdRef.current !== nextSessionId;
             currentSessionIdRef.current = nextSessionId;
             if (sessionChanged) {
+              revisionConflictRef.current = null;
+              setRevisionConflict(null);
+              activePromptCommandIdRef.current = null;
+              completedCommandResultsRef.current.clear();
               historyGenerationRef.current += 1;
               historySessionIdRef.current = nextSessionId;
               historyCursorRef.current = null;
               setMessages([]);
               setDecisionStates({});
               setIsStreaming(false);
+              setIsStopping(false);
+              setAgentActivity(null);
               setHistoryHasMore(Boolean(nextSessionId));
               if (!nextSessionId) {
                 historyLoadingRef.current = false;
@@ -702,11 +782,14 @@ export function CodeverApp() {
           }
         },
         onCommandResult(result) {
-          completedCommandResultsRef.current.add(result.commandId);
           if (activePromptCommandIdRef.current === result.commandId) {
             activePromptCommandIdRef.current = null;
             completedCommandResultsRef.current.delete(result.commandId);
             setIsStreaming(false);
+            setIsStopping(false);
+            setAgentActivity(null);
+          } else if (promptSubmissionTokenRef.current !== null) {
+            completedCommandResultsRef.current.add(result.commandId);
           }
         },
       });
@@ -744,9 +827,12 @@ export function CodeverApp() {
     revisionConflictRef.current = null;
     activePromptCommandIdRef.current = null;
     completedCommandResultsRef.current.clear();
+    promptSubmissionTokenRef.current = null;
     setRevisionConflict(null);
     setConnectionStatus("offline");
     setIsStreaming(false);
+    setIsStopping(false);
+    setAgentActivity(null);
     setGatewayState(null);
     setGatewayRevision(null);
     currentSessionIdRef.current = null;
@@ -904,36 +990,108 @@ export function CodeverApp() {
   async function confirmRevisionRetry() {
     const conflict = revisionConflictRef.current;
     const connection = matrixConnectionRef.current;
-    if (!conflict || !connection || conflict.busy) return;
+    const isPromptRetry = conflict?.payload.operation === "prompt";
+    if (
+      !conflict ||
+      !connection ||
+      conflict.busy ||
+      (isPromptRetry && promptSubmissionTokenRef.current !== null)
+    ) {
+      return;
+    }
+    const promptToken = isPromptRetry ? Symbol("prompt-retry") : null;
+    if (promptToken) promptSubmissionTokenRef.current = promptToken;
+    const optimisticMessage = conflict.optimisticMessageId
+      ? messages.find(
+          (message) => message.id === conflict.optimisticMessageId,
+        )
+      : undefined;
+    const submissionSessionId =
+      optimisticMessage?.sessionId ?? currentSessionIdRef.current;
+    const submissionHistoryScope = historyScopeRef.current;
+    const submissionGeneration = historyGenerationRef.current;
+    const submissionIsCurrent = () =>
+      matrixConnectionRef.current === connection &&
+      currentSessionIdRef.current === submissionSessionId &&
+      historyScopeRef.current === submissionHistoryScope &&
+      historyGenerationRef.current === submissionGeneration;
     const busyConflict = { ...conflict, busy: true };
     revisionConflictRef.current = busyConflict;
     setRevisionConflict(busyConflict);
     try {
       const result = await connection.confirmRevisionRetry(conflict.commandId);
+      const ownsPromptToken =
+        promptToken !== null &&
+        promptSubmissionTokenRef.current === promptToken;
+      if (ownsPromptToken) {
+        promptSubmissionTokenRef.current = null;
+      }
       setGatewayRevision((current) =>
         current === null ? result.revision : Math.max(current, result.revision),
       );
       if (conflict.optimisticMessageId) {
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === conflict.optimisticMessageId
-              ? {
-                  ...message,
-                  commandId: result.commandId,
-                  revision: result.revision,
-                }
-              : message,
-          ),
-        );
+        if (submissionIsCurrent()) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === conflict.optimisticMessageId
+                ? {
+                    ...message,
+                    commandId: result.commandId,
+                    revision: result.revision,
+                    deliveryState: "sent",
+                  }
+                : message,
+            ),
+          );
+        }
+        if (
+          optimisticMessage &&
+          submissionSessionId &&
+          submissionHistoryScope
+        ) {
+          void saveMessageHistory(submissionHistoryScope, submissionSessionId, [
+            {
+              ...optimisticMessage,
+              commandId: result.commandId,
+              revision: result.revision,
+              deliveryState: "sent",
+            },
+          ]).catch((error) => {
+            setConnectionError(
+              `Conversation history could not be saved: ${formatUiError(error)}`,
+            );
+          });
+        }
+      }
+      if (conflict.payload.operation === "prompt") {
+        const promptAlreadyCompleted =
+          ownsPromptToken &&
+          completedCommandResultsRef.current.delete(result.commandId);
+        if (ownsPromptToken) completedCommandResultsRef.current.clear();
+        if (submissionIsCurrent()) {
+          if (promptAlreadyCompleted) {
+            activePromptCommandIdRef.current = null;
+            setIsStreaming(false);
+            setAgentActivity(null);
+          } else {
+            activePromptCommandIdRef.current = result.commandId;
+            setIsStreaming(true);
+            setAgentActivity(STARTING_AGENT_ACTIVITY);
+          }
+        }
       }
       const completion =
         conflict.payload.operation === "prompt"
           ? null
           : await result.completion;
-      if (completion?.outcome === "succeeded" &&
+      if (submissionIsCurrent() &&
+          completion?.outcome === "succeeded" &&
           conflict.payload.operation === "cancel") {
         setIsStreaming(false);
+        setIsStopping(false);
+        setAgentActivity(null);
       } else if (
+        submissionIsCurrent() &&
         completion?.outcome === "succeeded" &&
         conflict.payload.operation === "decision"
       ) {
@@ -950,9 +1108,25 @@ export function CodeverApp() {
           }));
         }
       }
-      revisionConflictRef.current = null;
-      setRevisionConflict(null);
+      if (revisionConflictRef.current?.commandId === conflict.commandId) {
+        revisionConflictRef.current = null;
+        setRevisionConflict(null);
+      }
     } catch (error) {
+      const ownsPromptToken =
+        promptToken !== null &&
+        promptSubmissionTokenRef.current === promptToken;
+      if (ownsPromptToken) {
+        promptSubmissionTokenRef.current = null;
+        completedCommandResultsRef.current.clear();
+      }
+      if (
+        conflict.payload.operation === "prompt" &&
+        submissionIsCurrent()
+      ) {
+        setIsStreaming(false);
+        setAgentActivity(null);
+      }
       if (error instanceof CommandRevisionConflictError) {
         const next: RevisionConflictNotice = {
           commandId: error.commandId,
@@ -961,12 +1135,16 @@ export function CodeverApp() {
           optimisticMessageId: conflict.optimisticMessageId,
           busy: false,
         };
-        revisionConflictRef.current = next;
-        setRevisionConflict(next);
+        if (submissionIsCurrent()) {
+          revisionConflictRef.current = next;
+          setRevisionConflict(next);
+        }
         return;
       }
-      revisionConflictRef.current = { ...conflict, busy: false };
-      setRevisionConflict({ ...conflict, busy: false });
+      if (submissionIsCurrent()) {
+        revisionConflictRef.current = { ...conflict, busy: false };
+        setRevisionConflict({ ...conflict, busy: false });
+      }
       setConnectionError(formatUiError(error));
     }
   }
@@ -986,6 +1164,12 @@ export function CodeverApp() {
             (message) => message.id !== conflict.optimisticMessageId,
           ),
         );
+        if (historyScopeRef.current) {
+          await deleteMessageHistory(
+            historyScopeRef.current,
+            conflict.optimisticMessageId,
+          );
+        }
       }
       revisionConflictRef.current = null;
       setRevisionConflict(null);
@@ -1042,7 +1226,13 @@ export function CodeverApp() {
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
-    if (!value || isStreaming) return;
+    if (
+      !value ||
+      isStreaming ||
+      promptSubmissionTokenRef.current !== null
+    ) {
+      return;
+    }
     if (!matrixConnected || !gatewayState) {
       setConnectionError(
         !gatewayState && matrixConnected
@@ -1054,6 +1244,21 @@ export function CodeverApp() {
       setSettingsOpen(true);
       return;
     }
+    const promptToken = Symbol("prompt");
+    promptSubmissionTokenRef.current = promptToken;
+    const submissionConnection = matrixConnectionRef.current;
+    const submissionSessionId = currentSessionIdRef.current;
+    const submissionHistoryScope = historyScopeRef.current;
+    const submissionGeneration = historyGenerationRef.current;
+    const submissionOriginDeviceId = deviceKeyId ?? undefined;
+    const submissionOriginDeviceName =
+      trustedGateway?.certificate.certificate.deviceName;
+    const submissionIsCurrent = () =>
+      promptSubmissionTokenRef.current === promptToken &&
+      matrixConnectionRef.current === submissionConnection &&
+      currentSessionIdRef.current === submissionSessionId &&
+      historyScopeRef.current === submissionHistoryScope &&
+      historyGenerationRef.current === submissionGeneration;
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
     const optimisticMessage: ChatMessage = {
       id: optimisticId,
@@ -1061,8 +1266,9 @@ export function CodeverApp() {
       text: value,
       time: "now",
       timestamp: Date.now(),
-      sessionId: currentSessionIdRef.current ?? undefined,
+      sessionId: submissionSessionId ?? undefined,
       optimistic: true,
+      deliveryState: "sending",
     };
     optimisticMessagesRef.current.set(optimisticId, {
       id: optimisticId,
@@ -1074,10 +1280,10 @@ export function CodeverApp() {
       ...current,
       optimisticMessage,
     ]);
-    if (currentSessionIdRef.current && historyScopeRef.current) {
+    if (submissionSessionId && submissionHistoryScope) {
       void saveMessageHistory(
-        historyScopeRef.current,
-        currentSessionIdRef.current,
+        submissionHistoryScope,
+        submissionSessionId,
         [optimisticMessage],
       ).catch((error) => {
         setConnectionError(
@@ -1087,14 +1293,23 @@ export function CodeverApp() {
     }
     setDraft("");
     setIsStreaming(true);
+    setAgentActivity(SENDING_AGENT_ACTIVITY);
     const result = await sendRealCommand({
       operation: "prompt",
       text: value,
     });
+    const ownsPromptToken =
+      promptSubmissionTokenRef.current === promptToken;
+    const stillCurrent = submissionIsCurrent();
+    if (ownsPromptToken) promptSubmissionTokenRef.current = null;
     if (!result) {
-      activePromptCommandIdRef.current = null;
-      setIsStreaming(false);
-      if (revisionConflictRef.current) {
+      if (ownsPromptToken) completedCommandResultsRef.current.clear();
+      if (stillCurrent) {
+        activePromptCommandIdRef.current = null;
+        setIsStreaming(false);
+        setAgentActivity(null);
+      }
+      if (stillCurrent && revisionConflictRef.current) {
         const conflict = revisionConflictRef.current;
         const matchesCurrentPrompt =
           conflict.payload.operation === "prompt" &&
@@ -1109,19 +1324,56 @@ export function CodeverApp() {
           setMessages((current) =>
             current.filter((message) => message.id !== optimisticId),
           );
+          if (submissionHistoryScope) {
+            void deleteMessageHistory(
+              submissionHistoryScope,
+              optimisticId,
+            ).catch((error) => {
+              setConnectionError(
+                `Conversation history could not be updated: ${formatUiError(error)}`,
+              );
+            });
+          }
           setDraft(value);
         }
       } else {
         optimisticMessagesRef.current.delete(optimisticId);
-        setMessages((current) => [
-          ...current,
-          {
-            id: `matrix-error-${Date.now()}`,
-            kind: "error",
-            text: "The signed command was not sent. Check Matrix connection settings.",
-            time: "now",
-          },
-        ]);
+        const failedMessage: ChatMessage = {
+          ...optimisticMessage,
+          optimistic: false,
+          deliveryState: "failed",
+        };
+        if (stillCurrent) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === optimisticId
+                ? failedMessage
+                : message,
+            ),
+          );
+        }
+        if (submissionSessionId && submissionHistoryScope) {
+          void saveMessageHistory(
+            submissionHistoryScope,
+            submissionSessionId,
+            [failedMessage],
+          ).catch((error) => {
+            setConnectionError(
+              `Conversation history could not be saved: ${formatUiError(error)}`,
+            );
+          });
+        }
+        if (stillCurrent) {
+          setMessages((current) => [
+            ...current,
+            {
+              id: `matrix-error-${Date.now()}`,
+              kind: "error",
+              text: "The signed command was not sent. Check Matrix connection settings.",
+              time: "now",
+            },
+          ]);
+        }
       }
     } else {
       const optimisticReference =
@@ -1129,40 +1381,49 @@ export function CodeverApp() {
       if (optimisticReference) {
         optimisticReference.commandId = result.commandId;
       }
-      if (completedCommandResultsRef.current.delete(result.commandId)) {
-        activePromptCommandIdRef.current = null;
-        setIsStreaming(false);
-      } else {
-        activePromptCommandIdRef.current = result.commandId;
+      const promptAlreadyCompleted =
+        ownsPromptToken &&
+        completedCommandResultsRef.current.delete(result.commandId);
+      if (ownsPromptToken) completedCommandResultsRef.current.clear();
+      if (stillCurrent) {
+        if (promptAlreadyCompleted) {
+          activePromptCommandIdRef.current = null;
+          setIsStreaming(false);
+          setAgentActivity(null);
+        } else {
+          activePromptCommandIdRef.current = result.commandId;
+          setAgentActivity(STARTING_AGENT_ACTIVITY);
+        }
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === optimisticId
+              ? {
+                  ...message,
+                  commandId: result.commandId,
+                  revision: result.revision,
+                  originDeviceId: submissionOriginDeviceId,
+                  originDeviceName: submissionOriginDeviceName,
+                  deliveryState: "sent",
+                }
+              : message,
+          ),
+        );
       }
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === optimisticId
-            ? {
-                ...message,
-                commandId: result.commandId,
-                revision: result.revision,
-                originDeviceId: deviceKeyId ?? undefined,
-                originDeviceName:
-                  trustedGateway?.certificate.certificate.deviceName,
-              }
-            : message,
-        ),
-      );
-      const sessionId = currentSessionIdRef.current;
+      const wasAlreadyReconciled =
+        reconciledOptimisticMessageIdsRef.current.delete(optimisticId);
       if (
-        sessionId &&
-        historyScopeRef.current &&
-        !reconciledOptimisticMessageIdsRef.current.delete(optimisticId)
+        submissionSessionId &&
+        submissionHistoryScope &&
+        !wasAlreadyReconciled
       ) {
-        void saveMessageHistory(historyScopeRef.current, sessionId, [
+        void saveMessageHistory(submissionHistoryScope, submissionSessionId, [
           {
             ...optimisticMessage,
             commandId: result.commandId,
             revision: result.revision,
-            originDeviceId: deviceKeyId ?? undefined,
-            originDeviceName:
-              trustedGateway?.certificate.certificate.deviceName,
+            originDeviceId: submissionOriginDeviceId,
+            originDeviceName: submissionOriginDeviceName,
+            deliveryState: "sent",
           },
         ]).catch((error) => {
           setConnectionError(
@@ -1181,9 +1442,19 @@ export function CodeverApp() {
   }
 
   async function stopStreaming() {
-    const sent = await sendRealCommand({ operation: "cancel" });
-    if (sent && (await sent.completion).outcome === "succeeded") {
-      setIsStreaming(false);
+    if (isStopping) return;
+    setIsStopping(true);
+    setAgentActivity(STOPPING_AGENT_ACTIVITY);
+    try {
+      const sent = await sendRealCommand({ operation: "cancel" });
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setIsStreaming(false);
+        setAgentActivity(null);
+      } else {
+        setAgentActivity(isStreaming ? WORKING_AGENT_ACTIVITY : null);
+      }
+    } finally {
+      setIsStopping(false);
     }
   }
 
@@ -1195,6 +1466,10 @@ export function CodeverApp() {
       setConnectionError("This permission request has no signed request ID.");
       return;
     }
+    setDecisionStates((current) => ({
+      ...current,
+      [message.id]: "submitting",
+    }));
     const sent = await sendRealCommand({
       operation: "decision",
       requestId: message.requestId,
@@ -1204,6 +1479,11 @@ export function CodeverApp() {
       setDecisionStates((current) => ({
         ...current,
         [message.id]: decision === "allow_once" ? "approved" : "denied",
+      }));
+    } else {
+      setDecisionStates((current) => ({
+        ...current,
+        [message.id]: "pending",
       }));
     }
   }
@@ -1298,7 +1578,11 @@ export function CodeverApp() {
         </label>
 
         <button
-          className={`gateway-card gateway-card-button ${matrixConnected ? "" : "offline"}`}
+          className={`gateway-card gateway-card-button connection-state-${connectionStatus} ${
+            connectionStatus === "offline" || connectionStatus === "error"
+              ? "offline"
+              : ""
+          }`}
           onClick={() => setSettingsOpen(true)}
         >
           <span className="gateway-icon">G</span>
@@ -1307,7 +1591,9 @@ export function CodeverApp() {
               {trustedGateway?.gatewayName || "Add a Gateway"}
             </strong>
             <span>
-              <i />{" "}
+              <i
+                className={`connection-dot connection-state-${connectionStatus}`}
+              />{" "}
               {connectionStatus === "connected"
                 ? "Securely connected"
                 : connectionStatus === "reconnecting"
@@ -1457,7 +1743,13 @@ export function CodeverApp() {
           <div className="conversation-heading">
             <h2>{conversationTitle}</h2>
             <span>
-              <i className={matrixConnected ? "" : "offline-dot"} />{" "}
+              <i
+                className={`connection-dot connection-state-${connectionStatus} ${
+                  connectionStatus === "offline" || connectionStatus === "error"
+                    ? "offline-dot"
+                    : ""
+                }`}
+              />{" "}
               {connectionStatus === "connected"
                 ? gatewayState
                   ? `${activeProvider} · encrypted sync active`
@@ -1501,7 +1793,10 @@ export function CodeverApp() {
           ref={feedRef}
           onScroll={handleFeedScroll}
         >
-          <div className="history-loader" aria-live="polite">
+          <div
+            className={`history-loader ${historyLoading ? "is-loading" : ""}`}
+            aria-live="polite"
+          >
             {historyLoading ? (
               <span>Loading earlier messages…</span>
             ) : historyHasMore ? (
@@ -1515,10 +1810,18 @@ export function CodeverApp() {
           <div className="date-divider">
             <span>Recent messages</span>
           </div>
+          {historyLoading && messages.length === 0 && (
+            <div className="history-skeleton" aria-hidden="true" />
+          )}
           {messages.map((message) => {
             if (message.kind === "notice") {
               return (
-                <div className="encryption-notice" key={message.id}>
+                <div
+                  className={`encryption-notice ${
+                    message.historical ? "" : "notice-enter"
+                  }`}
+                  key={message.id}
+                >
                   <span className="shield">✓</span>
                   <span>{message.text}</span>
                 </div>
@@ -1526,7 +1829,12 @@ export function CodeverApp() {
             }
             if (message.kind === "error") {
               return (
-                <div className="message-row agent-row" key={message.id}>
+                <div
+                  className={`message-row agent-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="agent-mark error-mark">!</div>
                   <div className="bubble agent-bubble error-bubble">
                     <span className="agent-label">CONNECTION ERROR</span>
@@ -1537,8 +1845,16 @@ export function CodeverApp() {
               );
             }
             if (message.kind === "user") {
+              const deliveryState =
+                message.deliveryState ??
+                (message.revision !== undefined ? "sent" : undefined);
               return (
-                <div className="message-row user-row" key={message.id}>
+                <div
+                  className={`message-row user-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="bubble user-bubble">
                     {message.originDeviceName &&
                       message.originDeviceId !== deviceKeyId && (
@@ -1551,24 +1867,74 @@ export function CodeverApp() {
                       {message.revision !== undefined
                         ? `r${message.revision} · ${message.time ?? ""}`
                         : message.time}{" "}
-                      <span>✓✓</span>
+                      {deliveryState && (
+                        <span
+                          className={`delivery-indicator ${deliveryState}`}
+                          aria-label={
+                            deliveryState === "sending"
+                              ? "Sending"
+                              : deliveryState === "failed"
+                                ? "Send failed"
+                                : "Sent"
+                          }
+                        >
+                          {deliveryState === "sending"
+                            ? "…"
+                            : deliveryState === "failed"
+                              ? "!"
+                              : "✓✓"}
+                        </span>
+                      )}
                     </time>
                   </div>
                 </div>
               );
             }
             if (message.kind === "tool") {
+              const toolStatus = message.toolStatus ?? "succeeded";
               return (
-                <div className="message-row agent-row" key={message.id}>
-                  <div className="agent-mark">C</div>
-                  <div className="tool-card">
+                <div
+                  className={`message-row agent-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
+                  <div
+                    className={`agent-mark ${
+                      toolStatus === "running" ? "live" : ""
+                    }`}
+                  >
+                    C
+                  </div>
+                  <div className={`tool-card ${toolStatus}`}>
                     <div className="tool-heading">
                       <span className="terminal-mark">&gt;_</span>
                       <span>
                         <strong>{message.text || "Agent tool"}</strong>
-                        <small>Received from encrypted room</small>
+                        <small>
+                          {toolStatus === "running"
+                            ? "Agent is using this tool"
+                            : toolStatus === "failed"
+                              ? "Tool failed"
+                              : "Tool completed"}
+                        </small>
                       </span>
-                      <b>✓</b>
+                      <b
+                        className="tool-status-icon"
+                        aria-label={
+                          toolStatus === "running"
+                            ? "Tool running"
+                            : toolStatus === "failed"
+                              ? "Tool failed"
+                              : "Tool completed"
+                        }
+                      >
+                        {toolStatus === "running"
+                          ? ""
+                          : toolStatus === "failed"
+                            ? "×"
+                            : "✓"}
+                      </b>
                     </div>
                     <div className="tool-command">
                       <code>
@@ -1584,7 +1950,12 @@ export function CodeverApp() {
               const decisionState =
                 decisionStates[message.id] ?? "pending";
               return (
-                <div className="message-row agent-row" key={message.id}>
+                <div
+                  className={`message-row agent-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="agent-mark">C</div>
                   <div className="permission-card">
                     <div className="permission-title">
@@ -1601,6 +1972,10 @@ export function CodeverApp() {
                     {message.historical ? (
                       <div className="decision-state historical">
                         History only · request not replayed
+                      </div>
+                    ) : decisionState === "submitting" ? (
+                      <div className="decision-state submitting">
+                        Signing response…
                       </div>
                     ) : decisionState === "pending" ? (
                       <div className="permission-actions">
@@ -1630,17 +2005,51 @@ export function CodeverApp() {
               );
             }
             return (
-              <div className="message-row agent-row" key={message.id}>
-                <div className="agent-mark">C</div>
+              <div
+                className={`message-row agent-row ${
+                  message.historical ? "" : "message-enter"
+                }`}
+                key={message.id}
+              >
+                <div
+                  className={`agent-mark ${
+                    message.raw?.type === "agent.text.delta" ? "live" : ""
+                  }`}
+                >
+                  C
+                </div>
                 <div className="bubble agent-bubble">
                   <span className="agent-label">CODEX</span>
-                  <p>{message.text}</p>
+                  <p>
+                    {message.text}
+                    {message.raw?.type === "agent.text.delta" && (
+                      <span className="cursor" aria-hidden="true" />
+                    )}
+                  </p>
                   <time>{message.time}</time>
                 </div>
               </div>
             );
           })}
-
+          {agentActivity && (
+            <div
+              className={`agent-activity activity-${agentActivity.phase}`}
+              key={`${agentActivity.phase}:${agentActivity.label}:${agentActivity.detail ?? ""}`}
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <span className="activity-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+              <span>
+                <strong>{agentActivity.label}</strong>
+                {agentActivity.detail && <small>{agentActivity.detail}</small>}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="composer-area">
@@ -1675,6 +2084,7 @@ export function CodeverApp() {
               </div>
               <div className="revision-conflict-actions">
                 <button
+                  key="stop-agent"
                   type="button"
                   disabled={revisionConflict.busy}
                   onClick={() => void discardRevisionConflict()}
@@ -1812,16 +2222,18 @@ export function CodeverApp() {
               {isStreaming ? (
                 <button
                   type="button"
-                  className="send-button stop-button"
+                  className="send-button stop-button mount-feedback"
                   onClick={() => void stopStreaming()}
                   aria-label="Stop agent"
+                  disabled={isStopping}
                 >
-                  ■
+                  {isStopping ? <span className="button-spinner" /> : "■"}
                 </button>
               ) : (
                 <button
+                  key="send-message"
                   type="submit"
-                  className="send-button"
+                  className="send-button mount-feedback"
                   disabled={!draft.trim() || !sessionReady}
                   aria-label="Send message"
                 >
@@ -1892,6 +2304,70 @@ export function CodeverApp() {
   );
 }
 
+function isTransientAgentLifecycleEvent(
+  raw: Record<string, unknown>,
+): boolean {
+  return (
+    raw.kind === "status" ||
+    raw.type === "command.accepted" ||
+    raw.type === "command.completed" ||
+    raw.type === "session.updated"
+  );
+}
+
+function agentExecutionSignal(
+  incoming: IncomingCodeverMessage,
+): "running" | "stopped" | null {
+  const raw = incoming.raw;
+  if (
+    (raw.kind === "status" &&
+      (raw.state === "querying" ||
+        raw.state === "running" ||
+        raw.state === "stopping")) ||
+    (raw.type === "session.updated" &&
+      (raw.status === "running" || raw.status === "stopping")) ||
+    raw.type === "agent.text.delta" ||
+    raw.type === "agent.tool.started" ||
+    raw.type === "agent.permission.requested"
+  ) {
+    return "running";
+  }
+  if (
+    (raw.kind === "status" &&
+      (raw.state === "idle" || raw.state === "failed")) ||
+    (raw.type === "session.updated" &&
+      (raw.status === "idle" || raw.status === "failed")) ||
+    raw.type === "agent.text.completed" ||
+    raw.type === "agent.error" ||
+    (incoming.kind === "agent" && raw.kind === "message")
+  ) {
+    return "stopped";
+  }
+  return null;
+}
+
+function agentLifecycleFailureText(
+  raw: Record<string, unknown>,
+): string | null {
+  if (
+    raw.type === "command.completed" &&
+    raw.outcome === "failed"
+  ) {
+    return typeof raw.error === "string" && raw.error.trim()
+      ? raw.error
+      : "The command could not be completed.";
+  }
+  if (
+    (raw.type === "session.updated" && raw.status === "failed") ||
+    (raw.kind === "status" && raw.state === "failed")
+  ) {
+    return typeof raw.error === "string" && raw.error.trim()
+      ? raw.error
+      : "The agent session failed.";
+  }
+  return null;
+}
+
 function chatMessageFromIncoming(
   incoming: IncomingCodeverMessage,
   sessionId?: string,
@@ -1905,6 +2381,8 @@ function chatMessageFromIncoming(
     timestamp: incoming.timestamp,
     requestId: incoming.requestId,
     streamId: incoming.streamId,
+    toolCallId: incoming.toolCallId,
+    toolStatus: incoming.toolStatus,
     replacesEventId: incoming.replacesEventId,
     commandId: incoming.commandId,
     revision: incoming.revision,
