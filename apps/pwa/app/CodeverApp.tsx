@@ -142,6 +142,7 @@ export function CodeverApp() {
     Record<string, "pending" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
@@ -293,11 +294,16 @@ export function CodeverApp() {
   }, []);
 
   useEffect(() => {
+    if (!followLatestRef.current) return;
     feedRef.current?.scrollTo({
       top: feedRef.current.scrollHeight,
-      behavior: "smooth",
+      behavior: "auto",
     });
   }, [messages, isStreaming]);
+
+  useEffect(() => {
+    followLatestRef.current = true;
+  }, [selected?.id]);
 
   useEffect(
     () => () => {
@@ -790,6 +796,7 @@ export function CodeverApp() {
       return;
     }
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
+    followLatestRef.current = true;
     setMessages((current) => [
       ...current,
       { id: optimisticId, kind: "user", text: value, time: "now" },
@@ -1177,7 +1184,16 @@ export function CodeverApp() {
           </div>
         )}
 
-        <div className="chat-feed" ref={feedRef}>
+        <div
+          className="chat-feed"
+          ref={feedRef}
+          onScroll={(event) => {
+            const feed = event.currentTarget;
+            const remaining =
+              feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+            followLatestRef.current = remaining <= 48;
+          }}
+        >
           <div className="date-divider">
             <span>Today</span>
           </div>

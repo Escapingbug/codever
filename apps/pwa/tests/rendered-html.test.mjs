@@ -83,6 +83,31 @@ test("ships a complete installable offline shell", async () => {
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
 });
 
+test("keeps conversations inside the viewport with an independently scrollable feed", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+    readFile(new URL("app/globals.css", appRoot), "utf8"),
+  ]);
+  const appShell = styles.match(/\.app-shell \{([\s\S]*?)\}/)?.[1] ?? "";
+  const sessionPanel =
+    styles.match(/\.session-panel \{([\s\S]*?)\}/)?.[1] ?? "";
+  const conversationPanel =
+    styles.match(/\.conversation-panel \{([\s\S]*?)\}/)?.[1] ?? "";
+  const chatFeed = styles.match(/\.chat-feed \{([\s\S]*?)\}/)?.[1] ?? "";
+
+  assert.match(appShell, /grid-template-rows:\s*minmax\(0,\s*1fr\)/);
+  assert.match(appShell, /height:\s*100dvh/);
+  assert.match(appShell, /min-height:\s*0/);
+  assert.match(sessionPanel, /min-height:\s*0/);
+  assert.match(sessionPanel, /overflow:\s*hidden/);
+  assert.match(conversationPanel, /min-height:\s*0/);
+  assert.match(conversationPanel, /overflow:\s*hidden/);
+  assert.match(chatFeed, /overflow-y:\s*auto/);
+  assert.match(chatFeed, /touch-action:\s*pan-y/);
+  assert.match(source, /followLatestRef\.current = remaining <= 48/);
+  assert.doesNotMatch(source, /behavior:\s*"smooth"/);
+});
+
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {
   const [matrix, pairing, replayStore, wizard, settings, app, packageJson] = await Promise.all([
     readFile(new URL("app/matrix.ts", appRoot), "utf8"),
