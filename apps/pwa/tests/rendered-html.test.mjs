@@ -71,9 +71,15 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /stopStreaming/);
   assert.match(source, /onScroll=\{handleFeedScroll\}/);
   assert.match(source, /loadOlderHistory/);
+  assert.match(source, /persistMessageHistoryPage/);
+  assert.doesNotMatch(
+    source,
+    /if \(cachedMessages\.length > 0\) \{[\s\S]{0,240}?return;/,
+  );
   assert.match(source, /History only · request not replayed/);
   assert.match(history, /codever-pwa-message-history/);
   assert.match(history, /loadMessageHistoryPage/);
+  assert.match(history, /reconcileMessageHistory/);
   assert.match(history, /\["scope", "sessionId", "timestamp", "id"\]/);
   assert.match(
     styles,
@@ -123,15 +129,25 @@ test("keeps conversations inside the viewport with an independently scrollable f
 });
 
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {
-  const [matrix, pairing, replayStore, wizard, settings, app, packageJson] = await Promise.all([
-    readFile(new URL("app/matrix.ts", appRoot), "utf8"),
-    readFile(new URL("app/pairing.ts", appRoot), "utf8"),
-    readFile(new URL("app/IndexedDbReplayStore.ts", appRoot), "utf8"),
-    readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
-    readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
-    readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
-    readFile(new URL("package.json", appRoot), "utf8"),
-  ]);
+  const [
+    matrix,
+    pairing,
+    replayStore,
+    wizard,
+    settings,
+    app,
+    chatMessages,
+    packageJson,
+  ] = await Promise.all([
+      readFile(new URL("app/matrix.ts", appRoot), "utf8"),
+      readFile(new URL("app/pairing.ts", appRoot), "utf8"),
+      readFile(new URL("app/IndexedDbReplayStore.ts", appRoot), "utf8"),
+      readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
+      readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
+      readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+      readFile(new URL("app/chatMessages.ts", appRoot), "utf8"),
+      readFile(new URL("package.json", appRoot), "utf8"),
+    ]);
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
   assert.match(packageJson, /"@codever\/security"/);
@@ -341,6 +357,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
+  assert.match(matrix, /loadRecentHistory\(sessionId/);
   assert.match(matrix, /client\.scrollback\(room/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
   assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
@@ -350,7 +367,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /`codever\.pair\.\$\{request\.request\.requestId\}\.\$\{crypto\.randomUUID\(\)\}`/,
   );
   assert.match(app, /sendRealCommand/);
-  assert.match(app, /entry\.commandId === message\.commandId/);
+  assert.match(chatMessages, /entry\.commandId === message\.commandId/);
   assert.match(app, /message\.originDeviceName/);
   assert.match(app, /Another device updated this session/);
   assert.match(app, /Review complete · send/);

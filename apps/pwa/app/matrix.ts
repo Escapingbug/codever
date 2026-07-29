@@ -233,6 +233,10 @@ export type MatrixConnection = {
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
   markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
+  loadRecentHistory(
+    sessionId: string,
+    limit?: number,
+  ): Promise<MatrixHistoryPage>;
   loadHistoryPage(sessionId: string, limit?: number): Promise<MatrixHistoryPage>;
   stop(): void;
 };
@@ -1073,6 +1077,32 @@ export async function connectMatrix(
         room.oldState.paginationToken !== null,
     };
   };
+  const loadRecentHistory = async (
+    sessionId: string,
+    limit = 30,
+  ): Promise<MatrixHistoryPage> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    const room = client.getRoom(config.roomId);
+    if (!room) throw new Error("The Matrix room is not available.");
+    const pageLimit = Math.max(1, Math.min(limit, 100));
+    await scanHistoryTimeline(room, sessionId);
+    return {
+      messages: takeHistory(sessionId, pageLimit),
+      hasMore:
+        hasPendingHistory(sessionId) ||
+        room.oldState.paginationToken !== null,
+    };
+  };
+  const enqueueHistoryOperation = (
+    operation: () => Promise<MatrixHistoryPage>,
+  ): Promise<MatrixHistoryPage> => {
+    const queued = historyChain.then(operation);
+    historyChain = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  };
   return {
     identity,
     matrixDeviceKeys,
@@ -1173,15 +1203,15 @@ export async function connectMatrix(
       deliveredHistory.set(sessionId, delivered);
       for (const eventId of eventIds) delivered.add(eventId);
     },
+    loadRecentHistory(sessionId, limit) {
+      return enqueueHistoryOperation(() =>
+        loadRecentHistory(sessionId, limit),
+      );
+    },
     loadHistoryPage(sessionId, limit) {
-      const operation = historyChain.then(() =>
+      return enqueueHistoryOperation(() =>
         loadHistoryPage(sessionId, limit),
       );
-      historyChain = operation.then(
-        () => undefined,
-        () => undefined,
-      );
-      return operation;
     },
     stop() {
       if (stopped) return;

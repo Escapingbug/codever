@@ -32,6 +32,7 @@ const MESSAGE_STORE = "messages";
 const BY_SESSION_INDEX = "by-session";
 const BY_SCOPE_INDEX = "by-scope";
 const DEFAULT_PAGE_SIZE = 30;
+let historyWriteChain: Promise<void> = Promise.resolve();
 
 type StoredChatMessage = Omit<PersistedChatMessage, "timestamp"> & {
   key: string;
@@ -58,33 +59,84 @@ export async function saveMessageHistory(
   messages: readonly PersistedChatMessage[],
 ): Promise<void> {
   if (!scope || !sessionId || messages.length === 0) return;
-  const database = await openHistoryDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(MESSAGE_STORE, "readwrite");
-      const store = transaction.objectStore(MESSAGE_STORE);
-      for (const message of messages) {
-        store.put({
-          ...structuredClone(message),
-          timestamp: message.timestamp ?? Date.now(),
-          key: historyMessageKey(scope, message.id),
-          scope,
-          sessionId,
-        } satisfies StoredChatMessage);
-      }
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () =>
-        reject(
-          transaction.error ??
-            new Error("Could not persist the conversation history."),
+  return enqueueHistoryWrite(async () => {
+    const database = await openHistoryDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        const store = transaction.objectStore(MESSAGE_STORE);
+        for (const message of messages) {
+          store.put(storedChatMessage(scope, sessionId, message));
+        }
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () =>
+          reject(
+            transaction.error ??
+              new Error("Could not persist the conversation history."),
+          );
+        transaction.onerror = () => {
+          // onabort reports the final transaction error.
+        };
+      });
+    } finally {
+      database.close();
+    }
+  });
+}
+
+export async function reconcileMessageHistory(
+  scope: string,
+  sessionId: string,
+  message: PersistedChatMessage,
+  optimisticMessageId?: string,
+): Promise<void> {
+  if (!scope || !sessionId) return;
+  return enqueueHistoryWrite(async () => {
+    const database = await openHistoryDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        const store = transaction.objectStore(MESSAGE_STORE);
+        const index = store.index(BY_SESSION_INDEX);
+        const range = IDBKeyRange.bound(
+          [scope, sessionId, 0, ""],
+          [scope, sessionId, Number.MAX_SAFE_INTEGER, "\uffff"],
         );
-      transaction.onerror = () => {
-        // onabort reports the final transaction error.
-      };
-    });
-  } finally {
-    database.close();
-  }
+        const request = index.openCursor(range);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            store.put(storedChatMessage(scope, sessionId, message));
+            return;
+          }
+          const candidate = cursor.value as StoredChatMessage;
+          if (
+            candidate.id !== message.id &&
+            (candidate.id === optimisticMessageId ||
+              (message.commandId &&
+                candidate.kind === "user" &&
+                candidate.commandId === message.commandId))
+          ) {
+            cursor.delete();
+          }
+          cursor.continue();
+        };
+        request.onerror = () => transaction.abort();
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () =>
+          reject(
+            transaction.error ??
+              request.error ??
+              new Error("Could not reconcile the conversation history."),
+          );
+        transaction.onerror = () => {
+          // onabort reports the final transaction error.
+        };
+      });
+    } finally {
+      database.close();
+    }
+  });
 }
 
 export async function loadMessageHistoryPage(
@@ -170,39 +222,63 @@ export async function loadMessageHistoryPage(
 
 export async function clearMessageHistoryScope(scope: string): Promise<void> {
   if (!scope) return;
-  const database = await openHistoryDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(MESSAGE_STORE, "readwrite");
-      const index = transaction
-        .objectStore(MESSAGE_STORE)
-        .index(BY_SCOPE_INDEX);
-      const request = index.openCursor(IDBKeyRange.only(scope));
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) return;
-        cursor.delete();
-        cursor.continue();
-      };
-      request.onerror = () => transaction.abort();
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () =>
-        reject(
-          transaction.error ??
-            request.error ??
-            new Error("Could not clear the conversation history."),
-        );
-      transaction.onerror = () => {
-        // onabort reports the final transaction error.
-      };
-    });
-  } finally {
-    database.close();
-  }
+  return enqueueHistoryWrite(async () => {
+    const database = await openHistoryDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        const index = transaction
+          .objectStore(MESSAGE_STORE)
+          .index(BY_SCOPE_INDEX);
+        const request = index.openCursor(IDBKeyRange.only(scope));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return;
+          cursor.delete();
+          cursor.continue();
+        };
+        request.onerror = () => transaction.abort();
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () =>
+          reject(
+            transaction.error ??
+              request.error ??
+              new Error("Could not clear the conversation history."),
+          );
+        transaction.onerror = () => {
+          // onabort reports the final transaction error.
+        };
+      });
+    } finally {
+      database.close();
+    }
+  });
 }
 
 function historyMessageKey(scope: string, messageId: string): string {
   return `${scope}\u0000${messageId}`;
+}
+
+function storedChatMessage(
+  scope: string,
+  sessionId: string,
+  message: PersistedChatMessage,
+): StoredChatMessage {
+  return {
+    ...structuredClone(message),
+    timestamp: message.timestamp ?? Date.now(),
+    key: historyMessageKey(scope, message.id),
+    scope,
+    sessionId,
+  };
+}
+
+function enqueueHistoryWrite(operation: () => Promise<void>): Promise<void> {
+  const queued = historyWriteChain.then(operation);
+  historyWriteChain = queued.catch(() => {
+    // Keep later writes available after one failed transaction.
+  });
+  return queued;
 }
 
 function openHistoryDatabase(): Promise<IDBDatabase> {
