@@ -85,8 +85,9 @@ export function MatrixSettings({
         <div className="settings-security-note">
           <span>✓</span>
           <p>
-            The six-digit code confirms the Gateway directly. Matrix carries
-            encrypted messages, but never decides which device Codever trusts.
+            Your Gateway provides one QR code or pairing link. The six-digit
+            code confirms it directly; Matrix transports encrypted messages
+            but never decides which device Codever trusts.
           </p>
         </div>
 

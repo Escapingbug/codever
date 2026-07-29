@@ -212,12 +212,12 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 export function CodeverApp() {
-  const [appMode, setAppMode] = useState<"demo" | "matrix">("demo");
+  const [appMode, setAppMode] = useState<"demo" | "matrix">("matrix");
   const [selectedId, setSelectedId] = useState(sessions[0].id);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [permission, setPermission] = useState<
     "pending" | "approved" | "denied"
   >("pending");
@@ -278,7 +278,9 @@ export function CodeverApp() {
     connectionStatus === "connected" || connectionStatus === "reconnecting";
   const conversationTitle =
     appMode === "matrix"
-      ? matrixConfig.roomId || "Encrypted Matrix room"
+      ? trustedGateway
+        ? matrixConfig.roomId || "Encrypted Matrix room"
+        : "Add a Gateway"
       : selected.title;
   const activeProvider = appMode === "matrix" ? "Gateway agent" : selected.provider;
 
@@ -317,20 +319,26 @@ export function CodeverApp() {
         setTrustedGateway(trust);
         setActiveDeviceCount(trust.activeDeviceCount ?? null);
         setDeviceKeyId(identity.keyId);
-        setMatrixConfig((current) => ({
+        const stored = loadMatrixConfig() ?? emptyMatrixConfig;
+        const trustedConfig: MatrixConnectionConfig = {
           ...bindCredentialsToHomeserver(
-            current,
+            stored,
             trust.gatewayTransport.homeserver,
           ),
           ...trustedGatewayConfig(trust),
           conversationId:
-            current.conversationId || trust.gatewayTransport.roomId,
-        }));
+            stored.conversationId || trust.gatewayTransport.roomId,
+        };
+        setMatrixConfig(trustedConfig);
+        setSettingsOpen(true);
         return;
       }
       if (link) return;
       const pending = await loadPendingPairingRecovery(identity);
-      if (!pending) return;
+      if (!pending) {
+        setSettingsOpen(true);
+        return;
+      }
       if (pending.status === "expired") {
         setConnectionError(
           "The previous pairing request expired. Scan a new Gateway QR code.",
@@ -541,7 +549,7 @@ export function CodeverApp() {
     }
   }
 
-  function disconnectMatrix(showDemo = true) {
+  function disconnectMatrix() {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
     revisionConflictRef.current = null;
@@ -550,11 +558,6 @@ export function CodeverApp() {
     setRevisionConflict(null);
     setConnectionStatus("offline");
     setIsStreaming(false);
-    if (showDemo) {
-      setAppMode("demo");
-      setMessages(initialMessages);
-      setPermission("pending");
-    }
   }
 
   function forgetMatrixConfig() {
@@ -569,6 +572,8 @@ export function CodeverApp() {
     setGatewayRevision(0);
     setPairingPreview(null);
     setConnectionError(null);
+    setMessages([]);
+    setSettingsOpen(true);
   }
 
   async function openPairingLink(link: string) {
@@ -660,7 +665,7 @@ export function CodeverApp() {
     const connection = matrixConnectionRef.current;
     if (!connection || connectionStatus !== "connected") {
       setConnectionError(
-        "Real Matrix is not connected. Open connection settings and reconnect.",
+        "The Gateway is not connected. Open Gateway settings and reconnect.",
       );
       setSettingsOpen(true);
       return null;
@@ -857,6 +862,15 @@ export function CodeverApp() {
     event?.preventDefault();
     const value = draft.trim();
     if (!value || isStreaming) return;
+    if (appMode === "matrix" && !matrixConnected) {
+      setConnectionError(
+        trustedGateway
+          ? "The Gateway is offline. Reconnect before sending."
+          : "Add and pair a Gateway before sending your first message.",
+      );
+      setSettingsOpen(true);
+      return;
+    }
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
     setMessages((current) => [
       ...current,
@@ -1055,35 +1069,6 @@ export function CodeverApp() {
           </button>
         </header>
 
-        <div className="mode-switch" aria-label="Connection mode">
-          <button
-            className={appMode === "demo" ? "active" : ""}
-            onClick={() => {
-              if (appMode === "matrix") disconnectMatrix();
-              else setAppMode("demo");
-            }}
-          >
-            Demo
-          </button>
-          <button
-            className={appMode === "matrix" ? "active" : ""}
-            onClick={() => {
-              if (matrixConnected) setAppMode("matrix");
-              else setSettingsOpen(true);
-            }}
-          >
-            <span className={matrixConnected ? "online" : ""} />
-            Real Matrix
-          </button>
-          <button
-            className="mode-settings"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Open Matrix connection settings"
-          >
-            ⚙
-          </button>
-        </div>
-
         <label className="search-box">
           <span aria-hidden="true">⌕</span>
           <input
@@ -1102,19 +1087,17 @@ export function CodeverApp() {
           <span className="gateway-icon">G</span>
           <div>
             <strong>
-              {appMode === "matrix"
-                ? matrixConfig.gatewayId || "Matrix gateway"
-                : "Studio Mac"}
+              {trustedGateway?.gatewayName || "Add a Gateway"}
             </strong>
             <span>
               <i />{" "}
-              {appMode === "matrix"
-                ? connectionStatus === "connected"
-                  ? "Matrix E2EE connected"
-                  : connectionStatus === "reconnecting"
-                    ? "Matrix reconnecting"
-                    : "Configure real Matrix"
-                : "Gateway online · 12 ms"}
+              {connectionStatus === "connected"
+                ? "Securely connected"
+                : connectionStatus === "reconnecting"
+                  ? "Reconnecting securely"
+                  : trustedGateway
+                    ? "Gateway offline · open to reconnect"
+                    : "Scan QR or paste a one-time pairing link"}
             </span>
           </div>
           <span className="gateway-more" aria-hidden="true">•••</span>
@@ -1122,11 +1105,18 @@ export function CodeverApp() {
 
         <div className="session-section-label">
           <span>Recent</span>
-          <span>{filteredSessions.length}</span>
+          <span>
+            {appMode === "matrix" ? (trustedGateway ? 1 : 0) : filteredSessions.length}
+          </span>
         </div>
 
         <div className="session-list">
-          {(appMode === "matrix" ? sessions.slice(0, 1) : filteredSessions).map((session) => (
+          {(appMode === "matrix"
+            ? trustedGateway
+              ? sessions.slice(0, 1)
+              : []
+            : filteredSessions
+          ).map((session) => (
             <button
               key={session.id}
               className={`session-row ${
@@ -1136,7 +1126,9 @@ export function CodeverApp() {
             >
               <span className={`session-avatar ${session.color}`}>
                 {session.initials}
-                {session.active && <i className="agent-active" />}
+                {(appMode === "matrix" ? matrixConnected : session.active) && (
+                  <i className="agent-active" />
+                )}
               </span>
               <span className="session-copy">
                 <span className="session-title-line">
@@ -1153,11 +1145,17 @@ export function CodeverApp() {
                       ? "Live encrypted session · signed commands"
                       : session.preview}
                   </span>
-                  {session.unread && <b>{session.unread}</b>}
+                  {appMode === "demo" && session.unread && <b>{session.unread}</b>}
                 </span>
               </span>
             </button>
           ))}
+          {appMode === "matrix" && !trustedGateway && (
+            <div className="empty-search">
+              <span>G</span>
+              Add a Gateway to start your first secure conversation
+            </div>
+          )}
           {appMode === "demo" && filteredSessions.length === 0 && (
             <div className="empty-search">
               <span>⌕</span>
@@ -1445,7 +1443,9 @@ export function CodeverApp() {
               </code>
             </div>
             <span className="context-spacer" />
-            <span className="token-state">18k / 128k</span>
+            {appMode === "demo" && (
+              <span className="token-state">18k / 128k</span>
+            )}
           </div>
 
           {revisionConflict && (
@@ -1486,9 +1486,16 @@ export function CodeverApp() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}
-              placeholder={`Message ${activeProvider}…`}
+              placeholder={
+                matrixConnected
+                  ? `Message ${activeProvider}…`
+                  : trustedGateway
+                    ? "Reconnect your Gateway to send messages"
+                    : "Add a Gateway to start"
+              }
               aria-label={`Message ${activeProvider}`}
               rows={1}
+              disabled={!matrixConnected}
             />
             <div className="composer-actions">
               <button
@@ -1545,7 +1552,7 @@ export function CodeverApp() {
                 <button
                   type="submit"
                   className="send-button"
-                  disabled={!draft.trim()}
+                  disabled={!draft.trim() || !matrixConnected}
                   aria-label="Send message"
                 >
                   ↑

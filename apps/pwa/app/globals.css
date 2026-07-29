@@ -201,56 +201,6 @@ select:focus-visible {
   letter-spacing: -0.04em;
 }
 
-.mode-switch {
-  display: grid;
-  grid-template-columns: 1fr 1.35fr 32px;
-  gap: 3px;
-  margin: 0 17px 11px;
-  padding: 3px;
-  border: 1px solid #e4e6ed;
-  border-radius: 11px;
-  background: #f0f1f5;
-}
-
-.mode-switch button {
-  display: flex;
-  height: 29px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 8px;
-  background: transparent;
-  color: #858c9c;
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.mode-switch button:hover {
-  color: #4d566a;
-}
-
-.mode-switch button.active {
-  background: white;
-  box-shadow: 0 2px 7px rgb(38 45 67 / 8%);
-  color: #4f45ae;
-}
-
-.mode-switch button > span {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #a4a9b5;
-}
-
-.mode-switch button > span.online {
-  background: var(--green);
-  box-shadow: 0 0 0 3px rgb(40 175 119 / 10%);
-}
-
-.mode-switch .mode-settings {
-  font-size: 13px;
-}
-
 .round-button {
   display: grid;
   width: 38px;
@@ -2072,9 +2022,304 @@ select:focus-visible {
   font-weight: 680;
 }
 
+/* Readable product type scale. The original mockup used screenshot-sized
+   typography; these values target normal desktop and mobile reading distance. */
+html {
+  font-size: 16px;
+}
+
+body {
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.app-shell {
+  grid-template-columns: 78px 380px minmax(520px, 1fr);
+}
+
+.rail-button,
+.profile-avatar {
+  font-size: 12px;
+}
+
+.eyebrow,
+.session-section-label {
+  font-size: 12px;
+}
+
+.session-header h1 {
+  font-size: 26px;
+}
+
+.search-box input {
+  font-size: 14px;
+}
+
+.search-box kbd,
+.gateway-more {
+  font-size: 11px;
+}
+
+.gateway-card {
+  min-height: 72px;
+}
+
+.gateway-card strong {
+  font-size: 15px;
+}
+
+.gateway-card div span {
+  font-size: 12px;
+}
+
+.session-row {
+  min-height: 82px;
+}
+
+.session-avatar,
+.conversation-avatar {
+  font-size: 13px;
+}
+
+.session-title-line strong {
+  font-size: 15px;
+}
+
+.session-title-line time {
+  font-size: 12px;
+}
+
+.session-preview-line > span {
+  font-size: 13px;
+}
+
+.session-preview-line b {
+  font-size: 11px;
+}
+
+.empty-search {
+  font-size: 14px;
+}
+
+.trust-footer {
+  min-height: 76px;
+}
+
+.trust-footer strong {
+  font-size: 13px;
+}
+
+.trust-footer small {
+  font-size: 11px;
+}
+
+.conversation-header {
+  height: 78px;
+}
+
+.conversation-heading h2 {
+  font-size: 18px;
+}
+
+.conversation-heading span {
+  font-size: 12px;
+}
+
+.details-popover {
+  font-size: 14px;
+}
+
+.details-popover .mini-label,
+.agent-label {
+  font-size: 11px;
+}
+
+.details-popover code,
+.verified-line {
+  font-size: 12px;
+}
+
+.date-divider span {
+  font-size: 11px;
+}
+
+.encryption-notice {
+  font-size: 12px;
+}
+
+.bubble {
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.bubble time,
+.permission-card time {
+  font-size: 11px;
+}
+
+.agent-mark,
+.terminal-mark {
+  font-size: 11px;
+}
+
+.tool-heading strong,
+.permission-title strong {
+  font-size: 14px;
+}
+
+.tool-heading small,
+.permission-title small,
+.tool-command,
+.tool-card > button {
+  font-size: 12px;
+}
+
+.permission-card > p {
+  font-size: 13px;
+}
+
+.file-list code {
+  font-size: 11px;
+}
+
+.permission-actions button,
+.decision-state {
+  font-size: 12px;
+}
+
+.context-strip {
+  height: 44px;
+}
+
+.context-item small {
+  font-size: 11px;
+}
+
+.context-item b,
+.branch-item,
+.token-state {
+  font-size: 12px;
+}
+
+.revision-conflict-card strong {
+  font-size: 13px;
+}
+
+.revision-conflict-card p,
+.revision-conflict-actions button {
+  font-size: 12px;
+}
+
+.composer {
+  min-height: 112px;
+}
+
+.composer textarea {
+  min-height: 40px;
+  font-size: 15px;
+}
+
+.agent-controls select {
+  font-size: 12px;
+}
+
+.composer-hint {
+  font-size: 11px;
+}
+
+.connection-toast strong {
+  font-size: 13px;
+}
+
+.connection-toast small,
+.connection-toast b {
+  font-size: 12px;
+}
+
+.matrix-settings h2 {
+  font-size: 24px;
+}
+
+.settings-security-note p {
+  font-size: 13px;
+}
+
+.matrix-form-grid label > span,
+.pairing-link-field > span {
+  font-size: 12px;
+}
+
+.matrix-form-grid input {
+  height: 44px;
+  font-size: 14px;
+}
+
+.connection-error strong,
+.connection-error span {
+  font-size: 12px;
+}
+
+.matrix-settings > footer button,
+.pairing-actions button,
+.pair-confirm-button {
+  min-height: 40px;
+  font-size: 12px;
+}
+
+.pairing-hero h3 {
+  font-size: 18px;
+}
+
+.pairing-hero p {
+  font-size: 13px;
+}
+
+.pairing-link-field textarea {
+  font-size: 13px;
+}
+
+.pairing-inline-error,
+.paired-label,
+.verification-panel small,
+.verified-badge,
+.connection-details summary small,
+.connection-details summary b,
+.matrix-session-hint {
+  font-size: 11px;
+}
+
+.pairing-device strong,
+.paired-gateway-card strong {
+  font-size: 15px;
+}
+
+.pairing-device small,
+.paired-gateway-card small,
+.text-button,
+.verification-panel > span {
+  font-size: 12px;
+}
+
+.connection-details summary strong {
+  font-size: 13px;
+}
+
+.scanner-dialog > header strong {
+  font-size: 14px;
+}
+
+.scanner-viewport small,
+.scanner-fallback button {
+  font-size: 12px;
+}
+
+.scanner-fallback p {
+  font-size: 13px;
+}
+
 @media (max-width: 1050px) {
   .app-shell {
-    grid-template-columns: 68px 310px minmax(420px, 1fr);
+    grid-template-columns: 68px 340px minmax(420px, 1fr);
   }
 
   .rail {
@@ -2095,7 +2340,7 @@ select:focus-visible {
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px), (max-height: 610px) and (max-width: 1100px) {
   html,
   body {
     overflow: hidden;
@@ -2128,6 +2373,14 @@ select:focus-visible {
     min-height: 76px;
   }
 
+  .session-title-line strong {
+    font-size: 16px;
+  }
+
+  .session-preview-line > span {
+    font-size: 14px;
+  }
+
   .trust-footer {
     padding-bottom: max(11px, env(safe-area-inset-bottom));
   }
@@ -2149,6 +2402,14 @@ select:focus-visible {
   .conversation-header {
     height: calc(65px + env(safe-area-inset-top));
     padding: env(safe-area-inset-top) 11px 0 8px;
+  }
+
+  .conversation-heading h2 {
+    font-size: 17px;
+  }
+
+  .conversation-heading span {
+    font-size: 13px;
   }
 
   .mobile-back {
@@ -2180,6 +2441,17 @@ select:focus-visible {
   .permission-card {
     max-width: 86%;
     width: auto;
+  }
+
+  .bubble {
+    font-size: 16px;
+  }
+
+  .composer textarea,
+  .matrix-form-grid input,
+  .pairing-link-field textarea,
+  .agent-controls select {
+    font-size: 16px;
   }
 
   .tool-card,

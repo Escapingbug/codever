@@ -53,8 +53,9 @@ cd apps\pwa
 npm run dev
 ```
 
-Open the localhost URL printed by the development server. Switch the app from
-**Demo** to **Real Matrix**.
+Open the localhost URL printed by the development server. Codever opens
+directly in the real secure workspace; there is no demo-mode switch. On a new
+browser device the **Add a Gateway** dialog opens automatically.
 
 Start the real local Gateway from the repository root in another terminal:
 
@@ -63,9 +64,10 @@ npm run dev:matrix-gateway
 ```
 
 On first launch the Gateway displays a terminal QR code, invitation code, and
-pasteable fallback link. Scan the QR code in the PWA or paste the link. The PWA
-shows the Gateway name and the same invitation code; no Matrix fingerprints or
-JSON files are exposed.
+pasteable fallback link. In the browser, use the automatically opened
+**Add a Gateway** dialog to scan the QR code or paste the link. The PWA shows
+the Gateway name and the same invitation code; no Matrix fingerprints or JSON
+files are exposed.
 
 For this disposable local fixture only, expand **Matrix connection** and copy
 one value from `dev/matrix/local-test.json`:

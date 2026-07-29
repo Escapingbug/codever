@@ -32,14 +32,13 @@ test("server-renders the Codever agent workspace", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Your agents, anywhere · Codever<\/title>/i);
-  assert.match(html, /Matrix PWA rewrite/);
-  assert.match(html, /Gateway online/);
-  assert.match(html, /end-to-end encrypted/);
-  assert.match(html, /Permission required/);
-  assert.match(html, /Allow once/);
-  assert.match(html, /Message Codex/);
-  assert.match(html, /Real Matrix/);
-  assert.match(html, /Connection mode/);
+  assert.match(html, /Add a Gateway/);
+  assert.match(html, /Scan QR or paste a one-time pairing link/);
+  assert.match(html, /Matrix E2EE \+ P-256/);
+  assert.match(html, /Add a Gateway to start/);
+  assert.doesNotMatch(html, />Demo</);
+  assert.doesNotMatch(html, /Connection mode/);
+  assert.doesNotMatch(html, /Permission required/);
   assert.doesNotMatch(html, /Your site is taking shape|codex-preview/i);
 });
 
@@ -61,8 +60,18 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
   assert.match(source, /setPermission\("approved"\)/);
   assert.match(source, /stopStreaming/);
-  assert.match(styles, /@media \(max-width: 760px\)/);
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\), \(max-height: 610px\) and \(max-width: 1100px\)/,
+  );
   assert.match(styles, /\.mobile-chat-open \.conversation-panel/);
+  assert.match(styles, /Readable product type scale/);
+  assert.match(styles, /\.bubble \{[\s\S]*?font-size: 15px/);
+  assert.match(styles, /\.composer textarea \{[\s\S]*?font-size: 15px/);
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.composer textarea,[\s\S]*?font-size: 16px/,
+  );
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
 });
 
@@ -232,11 +241,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(wizard, /Invitation code/);
   assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
   assert.match(wizard, /BarcodeDetector/);
-  assert.match(settings, /Matrix carries/);
+  assert.match(settings, /Matrix transports/);
   assert.match(settings, /identified[\s\S]*automatically from the token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
-  assert.match(app, /appMode.*"demo".*"matrix"/s);
+  assert.match(app, /useState<"demo" \| "matrix">\("matrix"\)/);
+  assert.doesNotMatch(app, />\s*Demo\s*</);
   assert.match(app, /connectRealMatrix/);
   assert.match(app, /confirmPairing/);
   assert.match(app, /const link = hash\.get\("pair"\)/);

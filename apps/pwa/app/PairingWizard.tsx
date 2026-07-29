@@ -96,10 +96,10 @@ export function PairingWizard({
           ↗
         </span>
         <div>
-          <h3>Pair a Gateway</h3>
+          <h3>Add your Gateway</h3>
           <p>
-            Scan the QR code shown by your computer, or paste its one-time
-            pairing link. No fingerprints or configuration files needed.
+            Open Codever Gateway on your computer and choose Add device. Then
+            scan its QR code or paste the one-time pairing link shown there.
           </p>
         </div>
       </div>
