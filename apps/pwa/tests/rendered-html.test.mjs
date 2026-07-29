@@ -77,6 +77,11 @@ test("ships a complete installable offline shell", async () => {
     /if \(cachedMessages\.length > 0\) \{[\s\S]{0,240}?return;/,
   );
   assert.match(source, /History only · request not replayed/);
+  assert.match(source, /findOptimisticMessageId/);
+  assert.doesNotMatch(
+    source,
+    /local composer already rendered this prompt optimistically/,
+  );
   assert.match(history, /codever-pwa-message-history/);
   assert.match(history, /loadMessageHistoryPage/);
   assert.match(history, /reconcileMessageHistory/);

@@ -385,14 +385,6 @@ export function CodeverApp() {
     ) {
       return;
     }
-    if (
-      incoming.kind === "user" &&
-      incoming.originDeviceId &&
-      incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId
-    ) {
-      // The local composer already rendered this prompt optimistically.
-      return;
-    }
     const displayIncoming: IncomingCodeverMessage =
       lifecycleFailure === null
         ? incoming
