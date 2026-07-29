@@ -262,10 +262,11 @@ async function loginGateway(
 ): Promise<LoginResult> {
     const user = process.env.CODEVER_MATRIX_GATEWAY_USER ?? 'gateway'
     const password = process.env.CODEVER_MATRIX_GATEWAY_PASSWORD
+        ?? await readPasswordFile(process.env.CODEVER_MATRIX_GATEWAY_PASSWORD_FILE)
         ?? (isLoopbackHomeserver(homeserver) ? 'codever-gateway-local' : undefined)
     if (!password) {
         throw new Error(
-            'CODEVER_MATRIX_GATEWAY_PASSWORD is required for a non-local Matrix homeserver',
+            'A Matrix Gateway password environment value or file is required for a non-local homeserver',
         )
     }
     const requestBody = JSON.stringify({
@@ -293,6 +294,13 @@ async function loginGateway(
         )
     }
     throw new Error('Gateway Matrix login failed')
+}
+
+async function readPasswordFile(path: string | undefined): Promise<string | undefined> {
+    if (!path) return undefined
+    const password = (await readFile(path, 'utf8')).trim()
+    if (!password) throw new Error(`Matrix Gateway password file is empty: ${path}`)
+    return password
 }
 
 function assertAllowedHomeserver(homeserver: string): void {
