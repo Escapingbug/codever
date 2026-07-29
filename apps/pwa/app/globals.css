@@ -2133,6 +2133,12 @@ select:focus-visible {
   font-size: 8px;
 }
 
+.pairing-scan-status {
+  margin: 8px 1px 0;
+  color: #6e668d;
+  font-size: 8px;
+}
+
 .pairing-confirmation {
   overflow: hidden;
   border: 1px solid #dfdafa;
@@ -2673,6 +2679,37 @@ select:focus-visible {
   font-weight: 680;
 }
 
+.scanner-source-actions {
+  display: flex;
+  gap: 8px;
+  padding: 13px 14px 8px;
+}
+
+.scanner-source-actions button {
+  min-height: 38px;
+  flex: 1;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 9px;
+  background: #292c39;
+  color: #f3f3f7;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.scanner-source-actions button:first-child {
+  border-color: transparent;
+  background: var(--violet);
+}
+
+.scanner-device-hint {
+  margin: 0;
+  padding: 0 15px 14px;
+  color: #aeb2c0;
+  font-size: 8px;
+  line-height: 1.5;
+  text-align: center;
+}
+
 /* Motion is opt-in for feed items so hydrating history never animates as a
    batch. Overlays animate on mount because they are conditionally rendered. */
 .connection-state-connecting > i,
@@ -3133,11 +3170,13 @@ body {
 }
 
 .scanner-viewport small,
-.scanner-fallback button {
+.scanner-fallback button,
+.scanner-source-actions button {
   font-size: 12px;
 }
 
-.scanner-fallback p {
+.scanner-fallback p,
+.scanner-device-hint {
   font-size: 13px;
 }
 

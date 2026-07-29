@@ -17,6 +17,7 @@
     "@codever/protocol": "file:../../packages/protocol",
     "@codever/security": "file:../../packages/security",
     "drizzle-orm": "0.45.2",
+    "jsqr": "1.4.0",
     "matrix-js-sdk": "41.0.0",
     "next": "16.2.6",
     "qrcode": "1.5.4",

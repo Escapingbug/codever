@@ -147,6 +147,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     pairing,
     replayStore,
     wizard,
+    qrScanning,
+    qrDecodeFallback,
     settings,
     app,
     matrixAuth,
@@ -157,6 +159,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
       readFile(new URL("app/pairing.ts", appRoot), "utf8"),
       readFile(new URL("app/IndexedDbReplayStore.ts", appRoot), "utf8"),
       readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
+      readFile(new URL("app/qrScanning.ts", appRoot), "utf8"),
+      readFile(new URL("app/qrDecodeFallback.ts", appRoot), "utf8"),
       readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
       readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
       readFile(new URL("app/matrixAuth.ts", appRoot), "utf8"),
@@ -166,6 +170,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
   assert.match(packageJson, /"@codever\/security"/);
+  assert.match(packageJson, /"jsqr": "1\.4\.0"/);
   assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
   assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
@@ -325,9 +330,15 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(replayStore, /claims\.some\(\(claim\) => activeKeys\.has\(claim\.key\)\)/);
   assert.match(wizard, /Scan QR code/);
   assert.match(wizard, /Paste from clipboard/);
+  assert.match(wizard, /capture="environment"/);
+  assert.match(wizard, /Take photo/);
+  assert.match(wizard, /Choose photo/);
   assert.match(wizard, /Invitation code/);
   assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
-  assert.match(wizard, /BarcodeDetector/);
+  assert.match(qrScanning, /BarcodeDetector/);
+  assert.match(wizard, /decodeQrImageFile/);
+  assert.match(qrScanning, /import\("\.\/qrDecodeFallback"\)/);
+  assert.match(qrDecodeFallback, /jsQR/);
   assert.match(settings, /Matrix transports/);
   assert.match(settings, /creates a separate Matrix device session/);
   assert.match(settings, /never asks you to copy an access token/);

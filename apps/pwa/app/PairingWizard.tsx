@@ -7,6 +7,12 @@ import type {
   PairingPreview,
   TrustedGateway,
 } from "./pairing";
+import {
+  createNativeQrDetector,
+  detectQrFromCanvas,
+  decodeQrImageFile,
+  drawVideoFrame,
+} from "./qrScanning";
 
 type Props = {
   preview: PairingPreview | null;
@@ -22,14 +28,6 @@ type Props = {
   onCreateInvitation(password?: string): void;
   onClearInvitation(): void;
 };
-
-type BarcodeDetectorLike = {
-  detect(source: ImageBitmapSource): Promise<Array<{ rawValue: string }>>;
-};
-
-type BarcodeDetectorConstructor = new (options?: {
-  formats?: string[];
-}) => BarcodeDetectorLike;
 
 export function PairingWizard({
   preview,
@@ -51,6 +49,10 @@ export function PairingWizard({
   const [reauthPassword, setReauthPassword] = useState("");
   const [qrCode, setQrCode] = useState({ link: "", dataUrl: "" });
   const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const [imageScanBusy, setImageScanBusy] = useState(false);
+  const [imageScanError, setImageScanError] = useState<string | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -337,7 +339,60 @@ export function PairingWizard({
             onLink(value);
           }}
           onClose={() => setScannerOpen(false)}
+          onTakePhoto={() => {
+            setScannerOpen(false);
+            cameraInputRef.current?.click();
+          }}
+          onChoosePhoto={() => {
+            setScannerOpen(false);
+            photoInputRef.current?.click();
+          }}
         />
+      )}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        hidden
+        onChange={(event) => {
+          void decodeSelectedQrImage(
+            event.currentTarget,
+            setImageScanBusy,
+            setImageScanError,
+            (value) => {
+              setLink(value);
+              onLink(value);
+            },
+          );
+        }}
+      />
+      <input
+        ref={photoInputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(event) => {
+          void decodeSelectedQrImage(
+            event.currentTarget,
+            setImageScanBusy,
+            setImageScanError,
+            (value) => {
+              setLink(value);
+              onLink(value);
+            },
+          );
+        }}
+      />
+      {imageScanBusy && (
+        <p className="pairing-scan-status" role="status">
+          Reading QR code from image…
+        </p>
+      )}
+      {imageScanError && (
+        <p className="pairing-inline-error" role="alert">
+          {imageScanError}
+        </p>
       )}
     </section>
   );
@@ -346,12 +401,23 @@ export function PairingWizard({
 function QrScanner({
   onResult,
   onClose,
+  onTakePhoto,
+  onChoosePhoto,
 }: {
   onResult(value: string): void;
   onClose(): void;
+  onTakePhoto(): void;
+  onChoosePhoto(): void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const onResultRef = useRef(onResult);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    onResultRef.current = onResult;
+  }, [onResult]);
 
   useEffect(() => {
     let stopped = false;
@@ -359,14 +425,9 @@ function QrScanner({
     let timer: number | null = null;
 
     void (async () => {
-      const Detector = (
-        window as typeof window & {
-          BarcodeDetector?: BarcodeDetectorConstructor;
-        }
-      ).BarcodeDetector;
-      if (!Detector) {
+      if (!navigator.mediaDevices?.getUserMedia) {
         setError(
-          "QR scanning is not available in this browser. Paste the pairing link instead.",
+          "Live camera access is not available in this browser. Take a photo or choose an image instead.",
         );
         return;
       }
@@ -375,27 +436,36 @@ function QrScanner({
           video: { facingMode: { ideal: "environment" } },
           audio: false,
         });
+        streamRef.current = stream;
         if (stopped || !videoRef.current) return;
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
-        const detector = new Detector({ formats: ["qr_code"] });
+        const nativeDetector = createNativeQrDetector();
         const scan = async () => {
-          if (stopped || !videoRef.current) return;
-          const results = await detector.detect(videoRef.current);
-          const value = results[0]?.rawValue;
-          if (value) {
-            onResult(value);
+          if (
+            stopped ||
+            !stream?.active ||
+            !videoRef.current ||
+            !canvasRef.current
+          ) {
             return;
+          }
+          if (drawVideoFrame(videoRef.current, canvasRef.current)) {
+            const value = await detectQrFromCanvas(
+              canvasRef.current,
+              nativeDetector,
+            );
+            if (value) {
+              stopCameraStream(streamRef, videoRef);
+              onResultRef.current(value);
+              return;
+            }
           }
           timer = window.setTimeout(() => void scan(), 220);
         };
         await scan();
       } catch (scanError) {
-        setError(
-          scanError instanceof Error
-            ? scanError.message
-            : "Camera access was not available.",
-        );
+        setError(cameraErrorMessage(scanError));
       }
     })();
 
@@ -403,8 +473,14 @@ function QrScanner({
       stopped = true;
       if (timer !== null) window.clearTimeout(timer);
       stream?.getTracks().forEach((track) => track.stop());
+      if (streamRef.current === stream) streamRef.current = null;
     };
-  }, [onResult]);
+  }, []);
+
+  const leaveLiveCamera = (next: () => void) => {
+    stopCameraStream(streamRef, videoRef);
+    next();
+  };
 
   return (
     <div className="scanner-backdrop" role="presentation">
@@ -424,18 +500,87 @@ function QrScanner({
           <div className="scanner-fallback">
             <span aria-hidden="true">▦</span>
             <p>{error}</p>
-            <button onClick={onClose}>Paste a link instead</button>
           </div>
         ) : (
           <div className="scanner-viewport">
             <video ref={videoRef} playsInline muted />
+            <canvas ref={canvasRef} hidden aria-hidden="true" />
             <span className="scanner-frame" aria-hidden="true" />
-            <small>Center the Codever QR code in the frame</small>
+            <small>Point the camera at a Codever QR code</small>
           </div>
         )}
+        <div className="scanner-source-actions">
+          <button type="button" onClick={() => leaveLiveCamera(onTakePhoto)}>
+            Take photo
+          </button>
+          <button type="button" onClick={() => leaveLiveCamera(onChoosePhoto)}>
+            Choose photo
+          </button>
+          <button type="button" onClick={onClose}>
+            Paste link instead
+          </button>
+        </div>
+        <p className="scanner-device-hint">
+          QR on this phone? Choose its screenshot, or open the invitation link
+          directly.
+        </p>
       </section>
     </div>
   );
+}
+
+async function decodeSelectedQrImage(
+  input: HTMLInputElement,
+  setBusy: (busy: boolean) => void,
+  setError: (error: string | null) => void,
+  onResult: (value: string) => void,
+): Promise<void> {
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  setBusy(true);
+  setError(null);
+  try {
+    const value = await decodeQrImageFile(file);
+    if (!value) {
+      throw new Error("No QR code was found in that image.");
+    }
+    onResult(value);
+  } catch (error) {
+    setError(
+      error instanceof Error
+        ? error.message
+        : "The selected image could not be scanned.",
+    );
+  } finally {
+    setBusy(false);
+  }
+}
+
+function stopCameraStream(
+  streamRef: { current: MediaStream | null },
+  videoRef: { current: HTMLVideoElement | null },
+): void {
+  streamRef.current?.getTracks().forEach((track) => track.stop());
+  streamRef.current = null;
+  if (videoRef.current) videoRef.current.srcObject = null;
+}
+
+function cameraErrorMessage(error: unknown): string {
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+      return "Camera permission was denied. Take a photo or choose an image instead.";
+    }
+    if (error.name === "NotFoundError") {
+      return "No camera was found. Choose an image containing the QR code.";
+    }
+    if (error.name === "NotReadableError") {
+      return "The camera is busy in another app. Take a photo or choose an image instead.";
+    }
+  }
+  return error instanceof Error
+    ? error.message
+    : "Camera access was not available.";
 }
 
 function formatExpiry(timestamp: number): string {
