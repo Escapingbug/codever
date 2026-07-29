@@ -2,13 +2,19 @@ import { mkdir, open, readFile, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { MatrixGatewayRoomConfig } from './config'
+import { gatewayProjectIdentity } from './project'
 
 export interface PersistedAppSession {
     id: string
     title: string
     updatedAt: number
+    projectId: string
+    projectName: string
+    cwd: string
     provider: string
     model: string | null
+    reasoningEffort: string | null
+    permissionMode: string
     providerSessionId: string | null
 }
 
@@ -20,9 +26,12 @@ export interface PersistedRoomRuntimeState {
     currentSessionId: string | null
     appSessions: PersistedAppSession[]
     workspace: {
+        projectId: string
+        projectName: string
         cwd: string
         provider: string
         model: string | null
+        reasoningEffort: string | null
         permissionMode: string
     }
 }
@@ -142,6 +151,7 @@ function defaultRoomState(
     room: MatrixGatewayRoomConfig,
     replayGeneration: string,
 ): PersistedRoomRuntimeState {
+    const project = gatewayProjectIdentity(room.cwd)
     return {
         revisionEpoch: randomUUID(),
         revisionEpochGeneration: 1,
@@ -150,9 +160,14 @@ function defaultRoomState(
         currentSessionId: null,
         appSessions: [],
         workspace: {
-            cwd: room.cwd,
+            projectId: project.id,
+            projectName: project.name,
+            cwd: project.cwd,
             provider: room.providerName,
             model: room.model ?? null,
+            reasoningEffort: typeof room.providerSettings?.reasoningEffort === 'string'
+                ? room.providerSettings.reasoningEffort
+                : null,
             permissionMode: 'default',
         },
     }
@@ -187,12 +202,29 @@ function validateStateFile(value: unknown): RuntimeStateFile {
             || typeof workspace.cwd !== 'string'
             || typeof workspace.provider !== 'string'
             || !(workspace.model === null || typeof workspace.model === 'string')
+            || !(
+                workspace.reasoningEffort === undefined
+                || workspace.reasoningEffort === null
+                || typeof workspace.reasoningEffort === 'string'
+            )
             || typeof workspace.permissionMode !== 'string'
         ) {
             throw new Error(`Invalid Gateway runtime state for room ${roomId}`)
         }
+        const workspaceProject = gatewayProjectIdentity(
+            workspace.cwd,
+            typeof workspace.projectName === 'string' ? workspace.projectName : undefined,
+        )
         const appSessions = room.appSessions.map((entry, index) =>
-            validateAppSession(entry, roomId, index),
+            validateAppSession(entry, roomId, index, {
+                projectId: workspaceProject.id,
+                projectName: workspaceProject.name,
+                cwd: workspaceProject.cwd,
+                reasoningEffort: typeof workspace.reasoningEffort === 'string'
+                    ? workspace.reasoningEffort
+                    : null,
+                permissionMode: workspace.permissionMode as string,
+            }),
         )
         if (
             room.currentSessionId !== null
@@ -214,9 +246,16 @@ function validateStateFile(value: unknown): RuntimeStateFile {
             currentSessionId: room.currentSessionId as string | null,
             appSessions,
             workspace: {
-                cwd: workspace.cwd,
+                projectId: typeof workspace.projectId === 'string' && workspace.projectId
+                    ? workspace.projectId
+                    : workspaceProject.id,
+                projectName: workspaceProject.name,
+                cwd: workspaceProject.cwd,
                 provider: workspace.provider,
                 model: workspace.model as string | null,
+                reasoningEffort: typeof workspace.reasoningEffort === 'string'
+                    ? workspace.reasoningEffort
+                    : null,
                 permissionMode: workspace.permissionMode,
             },
         }
@@ -228,6 +267,13 @@ function validateAppSession(
     value: unknown,
     roomId: string,
     index: number,
+    fallback: {
+        projectId: string
+        projectName: string
+        cwd: string
+        reasoningEffort: string | null
+        permissionMode: string
+    },
 ): PersistedAppSession {
     const session = asRecord(value)
     if (
@@ -242,7 +288,44 @@ function validateAppSession(
     ) {
         throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
     }
-    return session as unknown as PersistedAppSession
+    if (
+        !(
+            session.reasoningEffort === undefined
+            || session.reasoningEffort === null
+            || typeof session.reasoningEffort === 'string'
+        )
+        || !(session.permissionMode === undefined || typeof session.permissionMode === 'string')
+        || !(session.cwd === undefined || typeof session.cwd === 'string')
+        || !(session.projectId === undefined || typeof session.projectId === 'string')
+        || !(session.projectName === undefined || typeof session.projectName === 'string')
+    ) {
+        throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
+    }
+    const generatedProject = session.cwd === undefined
+        ? null
+        : gatewayProjectIdentity(
+            session.cwd as string,
+            typeof session.projectName === 'string' ? session.projectName : undefined,
+        )
+    return {
+        id: session.id,
+        title: session.title,
+        updatedAt: session.updatedAt as number,
+        projectId: typeof session.projectId === 'string' && session.projectId
+            ? session.projectId
+            : generatedProject?.id ?? fallback.projectId,
+        projectName: generatedProject?.name ?? fallback.projectName,
+        cwd: generatedProject?.cwd ?? fallback.cwd,
+        provider: session.provider,
+        model: session.model as string | null,
+        reasoningEffort: typeof session.reasoningEffort === 'string'
+            ? session.reasoningEffort
+            : fallback.reasoningEffort,
+        permissionMode: typeof session.permissionMode === 'string'
+            ? session.permissionMode
+            : fallback.permissionMode,
+        providerSessionId: session.providerSessionId as string | null,
+    }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -255,9 +338,29 @@ function requiresEpochGenerationMigration(value: unknown): boolean {
     const rooms = asRecord(asRecord(value)?.rooms)
     return Boolean(
         rooms
-        && Object.values(rooms).some(room =>
-            asRecord(room)?.revisionEpochGeneration === undefined,
-        ),
+        && Object.values(rooms).some(room => {
+            const record = asRecord(room)
+            const workspace = asRecord(record?.workspace)
+            return (
+                record?.revisionEpochGeneration === undefined
+                || workspace?.projectId === undefined
+                || workspace?.projectName === undefined
+                || workspace?.reasoningEffort === undefined
+                || (
+                    Array.isArray(record?.appSessions)
+                    && record.appSessions.some(session => {
+                        const appSession = asRecord(session)
+                        return (
+                            appSession?.projectId === undefined
+                            || appSession?.projectName === undefined
+                            || appSession?.cwd === undefined
+                            || appSession?.reasoningEffort === undefined
+                            || appSession?.permissionMode === undefined
+                        )
+                    })
+                )
+            )
+        }),
     )
 }
 

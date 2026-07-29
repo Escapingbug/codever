@@ -375,6 +375,89 @@ select:focus-visible {
   scrollbar-color: #d9dce4 transparent;
 }
 
+.gateway-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 2px 16px 8px;
+  padding: 8px 7px;
+  border-bottom: 1px solid #eceef3;
+}
+
+.gateway-group-mark {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #24283a;
+  color: #a995ff;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.gateway-group-heading > span:last-child,
+.project-session-group > header > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gateway-group-heading strong,
+.project-session-group > header strong {
+  overflow: hidden;
+  color: #4a5265;
+  font-size: 10px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gateway-group-heading small,
+.project-session-group > header small {
+  overflow: hidden;
+  color: #9aA1b0;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-session-group {
+  margin-bottom: 8px;
+}
+
+.project-session-group > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 13px 2px 21px;
+  padding: 5px 4px;
+}
+
+.project-folder {
+  color: var(--violet);
+  font-size: 13px;
+}
+
+.project-session-group > header b {
+  display: grid;
+  min-width: 19px;
+  height: 19px;
+  place-items: center;
+  border-radius: 10px;
+  background: #ebe9fb;
+  color: #6655cf;
+  font-size: 8px;
+}
+
+.project-session-group .session-row {
+  width: calc(100% - 28px);
+  margin-inline: 18px 10px;
+}
+
 .session-row {
   display: flex;
   width: calc(100% - 18px);
@@ -1931,6 +2014,133 @@ select:focus-visible {
   background: rgb(12 14 25 / 76%);
 }
 
+.new-session-backdrop {
+  position: fixed;
+  z-index: 75;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(21 24 38 / 48%);
+  backdrop-filter: blur(7px);
+}
+
+.new-session-dialog {
+  width: min(570px, 100%);
+  overflow: hidden;
+  border: 1px solid #e1e3eb;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 28px 90px rgb(26 31 52 / 28%);
+}
+
+.new-session-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 22px 14px;
+  border-bottom: 1px solid #eceef3;
+}
+
+.new-session-dialog > header h2 {
+  margin: 2px 0 0;
+  font-size: 22px;
+  letter-spacing: -0.035em;
+}
+
+.new-session-dialog > header p {
+  margin: 5px 0 0;
+  color: #8b93a5;
+  font-size: 11px;
+}
+
+.new-session-dialog > header button {
+  padding: 0;
+  background: transparent;
+  color: #858d9f;
+  font-size: 25px;
+}
+
+.new-session-dialog form {
+  display: grid;
+  gap: 14px;
+  padding: 18px 22px 20px;
+}
+
+.new-session-dialog label {
+  display: grid;
+  gap: 6px;
+}
+
+.new-session-dialog label > span {
+  color: #687185;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.new-session-dialog input,
+.new-session-dialog select {
+  width: 100%;
+  height: 42px;
+  min-width: 0;
+  padding: 0 11px;
+  border: 1px solid #dfe2ea;
+  border-radius: 10px;
+  background: #fbfbfd;
+  font-size: 12px;
+}
+
+.new-session-dialog input:disabled {
+  color: #687185;
+  opacity: 1;
+}
+
+.new-session-grid {
+  display: grid;
+  gap: 11px;
+}
+
+.new-session-grid.two-columns {
+  grid-template-columns: 1fr 1fr;
+}
+
+.project-identity-note {
+  margin-top: -6px;
+  color: #8d95a6;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.new-session-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding-top: 3px;
+}
+
+.new-session-dialog footer button {
+  min-width: 112px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.new-session-dialog .secondary-button {
+  background: #f0f1f5;
+  color: #5e6678;
+}
+
+.new-session-dialog .primary-button {
+  background: var(--violet);
+  color: white;
+}
+
+.new-session-dialog .primary-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 .scanner-dialog {
   width: min(460px, 100%);
   overflow: hidden;
@@ -2490,6 +2700,17 @@ body {
     right: 12px;
     bottom: calc(12px + env(safe-area-inset-bottom));
   }
+
+  .new-session-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .new-session-dialog {
+    max-height: 92dvh;
+    overflow: auto;
+    border-radius: 20px 20px 0 0;
+  }
 }
 
 @media (max-width: 420px) {
@@ -2523,6 +2744,10 @@ body {
 
   .matrix-settings > footer {
     flex-wrap: wrap;
+  }
+
+  .new-session-grid.two-columns {
+    grid-template-columns: 1fr;
   }
 
   .settings-spacer {

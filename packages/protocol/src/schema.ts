@@ -57,21 +57,31 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       operation: z.literal('session.settings'),
       model: z.string().min(1).max(256).optional(),
       provider: z.string().min(1).max(256).optional(),
+      reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
       cwd: z.string().min(1).max(4096).optional(),
+      projectName: z.string().min(1).max(256).optional(),
     })
     .strict()
     .refine(
       (settings) =>
         settings.model !== undefined ||
         settings.provider !== undefined ||
+        settings.reasoningEffort !== undefined ||
         settings.permissionMode !== undefined ||
-        settings.cwd !== undefined,
+        settings.cwd !== undefined ||
+        settings.projectName !== undefined,
       'At least one session setting is required',
     ),
   z
     .object({
       operation: z.literal('session.create'),
+      cwd: z.string().min(1).max(4096).optional(),
+      projectName: z.string().min(1).max(256).optional(),
+      provider: z.string().min(1).max(256).optional(),
+      model: z.string().min(1).max(256).optional(),
+      reasoningEffort: z.string().min(1).max(64).optional(),
+      permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
     })
     .strict(),
   z

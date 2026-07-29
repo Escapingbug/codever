@@ -11,6 +11,11 @@ import {
 import type { CommandPayload } from "@codever/protocol";
 import { MatrixSettings } from "./MatrixSettings";
 import {
+  NewSessionDialog,
+  type NewSessionInput,
+} from "./NewSessionDialog";
+import { gatewayProjectKey } from "./gatewayState";
+import {
   CommandRevisionConflictError,
   clearMatrixConfig,
   connectMatrix,
@@ -131,6 +136,8 @@ export function CodeverApp() {
   const [trustedGateway, setTrustedGateway] =
     useState<TrustedGateway | null>(null);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [decisionStates, setDecisionStates] = useState<
     Record<string, "pending" | "approved" | "denied">
   >({});
@@ -155,12 +162,37 @@ export function CodeverApp() {
   const filteredSessions = useMemo(
     () =>
       (gatewayState?.sessions ?? []).filter((session) =>
-        `${session.title} ${session.provider} ${session.model ?? ""}`
+        `${session.title} ${session.projectName} ${session.cwd} ${session.provider} ${session.model ?? ""}`
           .toLowerCase()
           .includes(search.toLowerCase()),
       ),
     [gatewayState, search],
   );
+  const projectGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        key: string;
+        projectId: string;
+        projectName: string;
+        cwd: string;
+        sessions: NonNullable<typeof gatewayState>["sessions"];
+      }
+    >();
+    for (const session of filteredSessions) {
+      const key = gatewayProjectKey(matrixConfig.gatewayId, session.projectId);
+      const group = groups.get(key) ?? {
+        key,
+        projectId: session.projectId,
+        projectName: session.projectName,
+        cwd: session.cwd,
+        sessions: [],
+      };
+      group.sessions.push(session);
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  }, [filteredSessions, gatewayState, matrixConfig.gatewayId]);
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
   const sessionReady = Boolean(matrixConnected && gatewayState && selected);
@@ -173,6 +205,9 @@ export function CodeverApp() {
       : "Add a Gateway");
   const activeProvider =
     gatewayState?.workspace.provider ?? selected?.provider ?? "Gateway agent";
+  const activeModelCapability = gatewayState?.capabilities.models.find(
+    (model) => model.id === gatewayState.workspace.model,
+  );
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => {
@@ -710,7 +745,7 @@ export function CodeverApp() {
     if (sent) await sent.completion;
   }
 
-  async function createSession() {
+  async function createSession(input: NewSessionInput) {
     if (!gatewayState?.capabilities.canCreateSession) {
       setConnectionError(
         gatewayState
@@ -719,10 +754,23 @@ export function CodeverApp() {
       );
       return;
     }
-    const sent = await sendRealCommand({ operation: "session.create" });
-    if (sent) {
-      await sent.completion;
-      setMobileChatOpen(true);
+    setNewSessionBusy(true);
+    try {
+      const sent = await sendRealCommand({
+        operation: "session.create",
+        cwd: input.cwd,
+        projectName: input.projectName,
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.reasoningEffort
+          ? { reasoningEffort: input.reasoningEffort }
+          : {}),
+      });
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setNewSessionOpen(false);
+        setMobileChatOpen(true);
+      }
+    } finally {
+      setNewSessionBusy(false);
     }
   }
 
@@ -849,6 +897,14 @@ export function CodeverApp() {
     if (sent) await sent.completion;
   }
 
+  async function changeReasoningEffort(nextReasoningEffort: string) {
+    const sent = await sendRealCommand({
+      operation: "session.settings",
+      reasoningEffort: nextReasoningEffort,
+    });
+    if (sent) await sent.completion;
+  }
+
   async function changeMode(nextMode: string) {
     const sent = await sendRealCommand({
       operation: "session.settings",
@@ -901,7 +957,7 @@ export function CodeverApp() {
           <button
             className="round-button"
             aria-label="New conversation"
-            onClick={() => void createSession()}
+            onClick={() => setNewSessionOpen(true)}
             disabled={
               !matrixConnected ||
               !gatewayState?.capabilities.canCreateSession
@@ -951,38 +1007,64 @@ export function CodeverApp() {
         </div>
 
         <div className="session-list">
-          {filteredSessions.map((session) => (
-            <button
-              key={session.id}
-              className={`session-row ${
-                gatewayState?.currentSessionId === session.id ? "selected" : ""
-              }`}
-              onClick={() => void chooseSession(session.id)}
-              disabled={
-                gatewayState?.currentSessionId !== session.id &&
-                !gatewayState?.capabilities.canSelectSession
-              }
-            >
-              <span className="session-avatar violet">
-                {sessionInitials(session.title)}
-                {matrixConnected &&
-                  gatewayState?.currentSessionId === session.id && (
-                  <i className="agent-active" />
-                )}
+          {projectGroups.length > 0 && (
+            <div className="gateway-group-heading">
+              <span className="gateway-group-mark">G</span>
+              <span>
+                <strong>{trustedGateway?.gatewayName || "Gateway"}</strong>
+                <small>{matrixConfig.gatewayId}</small>
               </span>
-              <span className="session-copy">
-                <span className="session-title-line">
-                  <strong>{session.title}</strong>
-                  <time>{formatSessionTime(session.updatedAt)}</time>
+            </div>
+          )}
+          {projectGroups.map((project) => (
+            <section className="project-session-group" key={project.key}>
+              <header>
+                <span className="project-folder">⌘</span>
+                <span>
+                  <strong>{project.projectName}</strong>
+                  <small>{project.cwd}</small>
                 </span>
-                <span className="session-preview-line">
-                  <span>
-                    {session.provider}
-                    {session.model ? ` · ${session.model}` : ""}
+                <b>{project.sessions.length}</b>
+              </header>
+              {project.sessions.map((session) => (
+                <button
+                  key={session.id}
+                  className={`session-row ${
+                    gatewayState?.currentSessionId === session.id
+                      ? "selected"
+                      : ""
+                  }`}
+                  onClick={() => void chooseSession(session.id)}
+                  disabled={
+                    gatewayState?.currentSessionId !== session.id &&
+                    !gatewayState?.capabilities.canSelectSession
+                  }
+                >
+                  <span className="session-avatar violet">
+                    {sessionInitials(session.title)}
+                    {matrixConnected &&
+                      gatewayState?.currentSessionId === session.id && (
+                        <i className="agent-active" />
+                      )}
                   </span>
-                </span>
-              </span>
-            </button>
+                  <span className="session-copy">
+                    <span className="session-title-line">
+                      <strong>{session.title}</strong>
+                      <time>{formatSessionTime(session.updatedAt)}</time>
+                    </span>
+                    <span className="session-preview-line">
+                      <span>
+                        {session.provider}
+                        {session.model ? ` · ${session.model}` : ""}
+                        {session.reasoningEffort
+                          ? ` · ${session.reasoningEffort}`
+                          : ""}
+                      </span>
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </section>
           ))}
           {!trustedGateway && (
             <div className="empty-search">
@@ -1080,8 +1162,13 @@ export function CodeverApp() {
 
         {detailsOpen && (
           <div className="details-popover">
-            <span className="mini-label">Workspace</span>
-            <strong>{gatewayState?.workspace.cwd || "Syncing…"}</strong>
+            <span className="mini-label">Project</span>
+            <strong>
+              {gatewayState?.workspace.projectName || "Syncing…"}
+            </strong>
+            <code>{gatewayState?.workspace.cwd || "Syncing…"}</code>
+            <span className="mini-label">Gateway</span>
+            <code>{matrixConfig.gatewayId || "Not connected"}</code>
             <span className="mini-label">Device</span>
             <code>{matrixConfig.matrixDeviceId || "Not connected"}</code>
             <span className="verified-line">
@@ -1223,8 +1310,11 @@ export function CodeverApp() {
             <div className="context-item">
               <span className="context-icon">⌘</span>
               <span>
-                <small>Workspace</small>
-                <b>{gatewayState?.workspace.cwd || "Syncing Gateway state…"}</b>
+                <small>Project · Gateway</small>
+                <b title={gatewayState?.workspace.cwd}>
+                  {gatewayState?.workspace.projectName || "Syncing Gateway state…"}
+                  {trustedGateway ? ` · ${trustedGateway.gatewayName}` : ""}
+                </b>
               </span>
             </div>
             <div className="context-item branch-item">
@@ -1321,24 +1411,65 @@ export function CodeverApp() {
                 <span className="control-divider" />
                 <label>
                   <select
-                    value={gatewayState?.workspace.permissionMode ?? ""}
-                    onChange={(event) => void changeMode(event.target.value)}
-                    aria-label="Agent mode"
+                    value={
+                      gatewayState?.workspace.reasoningEffort ??
+                      activeModelCapability?.defaultReasoningLevel ??
+                      ""
+                    }
+                    onChange={(event) =>
+                      void changeReasoningEffort(event.target.value)
+                    }
+                    aria-label="Reasoning effort"
+                    title="Reasoning effort"
                     disabled={
                       !sessionReady ||
-                      gatewayState!.capabilities.permissionModes.length === 0
+                      !activeModelCapability ||
+                      activeModelCapability.supportedReasoningLevels.length === 0
                     }
                   >
-                    {!gatewayState && <option value="">Syncing…</option>}
-                    {(gatewayState?.capabilities.permissionModes ?? []).map(
-                      (mode) => (
-                        <option key={mode.id} value={mode.id}>
-                          {mode.name}
+                    {!activeModelCapability && (
+                      <option value="">Reasoning</option>
+                    )}
+                    {(activeModelCapability?.supportedReasoningLevels ?? []).map(
+                      (level) => (
+                        <option key={level.effort} value={level.effort}>
+                          {level.effort}
+                          {level.effort ===
+                          activeModelCapability?.defaultReasoningLevel
+                            ? " (default)"
+                            : ""}
                         </option>
                       ),
                     )}
                   </select>
                 </label>
+                {(gatewayState?.capabilities.permissionModes.length ?? 0) >
+                  1 && (
+                  <>
+                    <span className="control-divider" />
+                    <label>
+                      <select
+                        value={gatewayState?.workspace.permissionMode ?? ""}
+                        onChange={(event) => void changeMode(event.target.value)}
+                        aria-label="Permission mode"
+                        title="Permission mode"
+                        disabled={
+                          !sessionReady ||
+                          gatewayState!.capabilities.permissionModes.length === 0
+                        }
+                      >
+                        {!gatewayState && <option value="">Syncing…</option>}
+                        {(gatewayState?.capabilities.permissionModes ?? []).map(
+                          (mode) => (
+                            <option key={mode.id} value={mode.id}>
+                              {mode.name}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </label>
+                  </>
+                )}
               </div>
               {isStreaming ? (
                 <button
@@ -1380,6 +1511,22 @@ export function CodeverApp() {
           </span>
           <b>Open settings</b>
         </button>
+      )}
+
+      {gatewayState && (
+        <NewSessionDialog
+          open={newSessionOpen}
+          busy={newSessionBusy}
+          gatewayId={matrixConfig.gatewayId}
+          gatewayName={trustedGateway?.gatewayName || "Gateway"}
+          workspace={gatewayState.workspace}
+          sessions={gatewayState.sessions}
+          models={gatewayState.capabilities.models}
+          onClose={() => {
+            if (!newSessionBusy) setNewSessionOpen(false);
+          }}
+          onCreate={(input) => void createSession(input)}
+        />
       )}
 
       <MatrixSettings

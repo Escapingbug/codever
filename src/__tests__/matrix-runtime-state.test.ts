@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
     FileCommandReplayStore,
     FileGatewayRuntimeStateStore,
+    gatewayProjectIdentity,
 } from '@/gateway/matrix'
 
 const temporaryDirectories: string[] = []
@@ -18,6 +19,14 @@ afterEach(async () => {
 })
 
 describe('FileGatewayRuntimeStateStore', () => {
+    it('allows duplicate project names while keeping cwd-scoped identities distinct', () => {
+        const first = gatewayProjectIdentity('/work/client/app', 'Client')
+        const second = gatewayProjectIdentity('/archive/client/app', 'Client')
+
+        expect(first.name).toBe(second.name)
+        expect(first.id).not.toBe(second.id)
+    })
+
     it('preserves the runtime epoch and never regresses a concurrent state version', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-state-'))
         temporaryDirectories.push(directory)
@@ -48,8 +57,13 @@ describe('FileGatewayRuntimeStateStore', () => {
                     id: 'app-session-1',
                     title: 'Persisted session',
                     updatedAt: 1,
+                    projectId: initial.workspace.projectId,
+                    projectName: initial.workspace.projectName,
+                    cwd: initial.workspace.cwd,
                     provider: 'mock-provider',
                     model: null,
+                    reasoningEffort: null,
+                    permissionMode: 'default',
                     providerSessionId: 'provider-session-1',
                 }],
                 currentSessionId: 'app-session-1',
@@ -96,8 +110,13 @@ describe('FileGatewayRuntimeStateStore', () => {
                 id: 'app-session-1',
                 title: 'Survives ledger recovery',
                 updatedAt: 1,
+                projectId: firstState.workspace.projectId,
+                projectName: firstState.workspace.projectName,
+                cwd: firstState.workspace.cwd,
                 provider: 'mock-provider',
                 model: null,
+                reasoningEffort: null,
+                permissionMode: 'default',
                 providerSessionId: 'provider-session-1',
             }],
         })
@@ -153,8 +172,15 @@ describe('FileGatewayRuntimeStateStore', () => {
                     revisionEpoch: 'legacy-runtime-epoch',
                     replayGeneration: 'ledger-generation-1',
                     stateVersion: 7,
-                    currentSessionId: null,
-                    appSessions: [],
+                    currentSessionId: 'legacy-session',
+                    appSessions: [{
+                        id: 'legacy-session',
+                        title: 'Legacy session',
+                        updatedAt: 1,
+                        provider: 'mock-provider',
+                        model: null,
+                        providerSessionId: null,
+                    }],
                     workspace: {
                         cwd: room.cwd,
                         provider: room.providerName,
@@ -171,6 +197,17 @@ describe('FileGatewayRuntimeStateStore', () => {
             revisionEpoch: 'legacy-runtime-epoch',
             revisionEpochGeneration: 1,
             stateVersion: 7,
+            workspace: {
+                projectName: 'repo',
+                reasoningEffort: null,
+            },
+            appSessions: [{
+                id: 'legacy-session',
+                projectName: 'repo',
+                cwd: 'C:\\repo',
+                reasoningEffort: null,
+                permissionMode: 'default',
+            }],
         })
         expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
             rooms: {

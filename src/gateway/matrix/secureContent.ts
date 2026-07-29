@@ -44,17 +44,32 @@ export interface GatewayStateSnapshot {
         id: string
         title: string
         updatedAt: number
-        provider: string
-        model?: string
-    }>
-    workspace: {
+        projectId: string
+        projectName: string
         cwd: string
         provider: string
         model?: string
+        reasoningEffort?: string
+    }>
+    workspace: {
+        projectId: string
+        projectName: string
+        cwd: string
+        provider: string
+        model?: string
+        reasoningEffort?: string
         permissionMode: string
     }
     capabilities: {
-        models: Array<{ id: string; name: string }>
+        models: Array<{
+            id: string
+            name: string
+            defaultReasoningLevel?: string
+            supportedReasoningLevels?: Array<{
+                effort: string
+                description?: string
+            }>
+        }>
         permissionModes: Array<{ id: string; name: string }>
         canCreateSession: boolean
         canSelectSession: boolean
@@ -288,19 +303,44 @@ export class GatewaySecureContentLayer {
                 id: session.id,
                 title: session.title,
                 updated_at: session.updatedAt,
+                project_id: session.projectId,
+                project_name: session.projectName,
+                cwd: session.cwd,
                 provider: session.provider,
                 ...(session.model ? { model: session.model } : {}),
+                ...(session.reasoningEffort
+                    ? { reasoning_effort: session.reasoningEffort }
+                    : {}),
             })),
             workspace: {
+                project_id: state.workspace.projectId,
+                project_name: state.workspace.projectName,
                 cwd: state.workspace.cwd,
                 provider: state.workspace.provider,
                 ...(state.workspace.model ? { model: state.workspace.model } : {}),
+                ...(state.workspace.reasoningEffort
+                    ? { reasoning_effort: state.workspace.reasoningEffort }
+                    : {}),
                 permission_mode: state.workspace.permissionMode,
             },
             capabilities: {
                 models: state.capabilities.models.map(model => ({
                     id: model.id,
                     name: model.name,
+                    ...(model.defaultReasoningLevel
+                        ? { default_reasoning_level: model.defaultReasoningLevel }
+                        : {}),
+                    ...(model.supportedReasoningLevels
+                        ? {
+                            supported_reasoning_levels:
+                                model.supportedReasoningLevels.map(level => ({
+                                    effort: level.effort,
+                                    ...(level.description
+                                        ? { description: level.description }
+                                        : {}),
+                                })),
+                        }
+                        : {}),
                 })),
                 permission_modes: state.capabilities.permissionModes.map(mode => ({
                     id: mode.id,

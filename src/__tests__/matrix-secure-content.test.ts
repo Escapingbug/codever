@@ -138,6 +138,8 @@ describe('Gateway application-layer Matrix content', () => {
             currentSessionId: null,
             sessions: [],
             workspace: {
+                projectId: 'project-repo',
+                projectName: 'repo',
                 cwd: 'C:\\repo',
                 provider: 'codex',
                 permissionMode: 'default',
@@ -177,6 +179,8 @@ describe('Gateway application-layer Matrix content', () => {
                 current_session_id: null,
                 sessions: [],
                 workspace: {
+                    project_id: 'project-repo',
+                    project_name: 'repo',
                     cwd: 'C:\\repo',
                     provider: 'codex',
                     permission_mode: 'default',
@@ -198,6 +202,8 @@ describe('Gateway application-layer Matrix content', () => {
             currentSessionId: null,
             sessions: [],
             workspace: {
+                projectId: 'project-repo',
+                projectName: 'repo',
                 cwd: 'C:\\repo',
                 provider: 'codex',
                 permissionMode: 'default',

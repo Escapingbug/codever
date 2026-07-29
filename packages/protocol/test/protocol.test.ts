@@ -89,8 +89,20 @@ describe('protocol schemas', () => {
       sequence: 1,
       operation: 'session.create',
       nonce: '0123456789abcdef-create',
-      payload: { operation: 'session.create' },
-    }).payload).toEqual({ operation: 'session.create' })
+      payload: {
+        operation: 'session.create',
+        cwd: '/workspace/client',
+        projectName: 'Client',
+        model: 'gpt-5',
+        reasoningEffort: 'high',
+      },
+    }).payload).toEqual({
+      operation: 'session.create',
+      cwd: '/workspace/client',
+      projectName: 'Client',
+      model: 'gpt-5',
+      reasoningEffort: 'high',
+    })
     expect(commandSchema.parse({
       ...base,
       commandId: 'select-1',

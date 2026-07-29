@@ -11,7 +11,9 @@ authority and it is not the source of truth for local agent state.
 - Mobile installs the Codever PWA and never runs a Gateway.
 - Desktop installs the same web UI together with a local Gateway service.
 - A Gateway can also be installed independently on a headless machine.
-- One private encrypted Matrix room maps to one Codever conversation.
+- One private encrypted Matrix room maps to one Gateway collaboration
+  namespace. The Gateway may expose multiple project-scoped agent sessions
+  inside that encrypted namespace.
 - Existing Matrix clients can transport the room events, but only Codever
   clients can decrypt application content.
 - Codever-specific fields add tool cards, decisions, streaming state and
@@ -40,12 +42,22 @@ local execution state.
 
 ## Room model
 
-Each Codever conversation owns one private encrypted room. The Matrix room ID is
-a transport locator, not a Codever identity. A local binding record maps:
+Each Gateway collaboration namespace owns one private encrypted room. The
+Matrix room ID is a transport locator, not a Codever project or session
+identity. A local binding record maps:
 
 ```text
-conversationId <-> roomId <-> gatewayId <-> provider session
+conversationId <-> roomId <-> gatewayId
+                              └─ projectId <-> cwd
+                                   └─ app session <-> provider session
 ```
+
+Project identity is the pair `(gatewayId, projectId)`. Project display names
+are intentionally non-unique; the Gateway derives a stable `projectId` from
+the local working directory, so two different paths may both be displayed
+with the same project name. Each app session persists its own project, model,
+reasoning effort and provider-session binding, and selecting it restores those
+settings before the next turn.
 
 Sensitive business data must not be written to unencrypted Matrix state:
 

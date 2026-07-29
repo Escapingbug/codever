@@ -11,6 +11,7 @@ import {
 import {
   canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
+  gatewayProjectKey,
   parseGatewayStateExtension,
 } from "../app/gatewayState.ts";
 
@@ -30,18 +31,33 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           id: "session-1",
           title: "Live session",
           updated_at: 1_700_000_000_000,
+          project_id: "project-workspace",
+          project_name: "workspace",
+          cwd: "C:/workspace",
           provider: "codex",
           model: "gpt-5",
+          reasoning_effort: "high",
         },
       ],
       workspace: {
+        project_id: "project-workspace",
+        project_name: "workspace",
         cwd: "C:/workspace",
         provider: "codex",
         model: "gpt-5",
+        reasoning_effort: "high",
         permission_mode: "default",
       },
       capabilities: {
-        models: [{ id: "gpt-5", name: "GPT-5" }],
+        models: [{
+          id: "gpt-5",
+          name: "GPT-5",
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: [
+            { effort: "medium", description: "Balanced" },
+            { effort: "high" },
+          ],
+        }],
         permission_modes: [{ id: "default", name: "Default" }],
         can_create_session: true,
         can_select_session: true,
@@ -59,23 +75,49 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           id: "session-1",
           title: "Live session",
           updatedAt: 1_700_000_000_000,
+          projectId: "project-workspace",
+          projectName: "workspace",
+          cwd: "C:/workspace",
           provider: "codex",
           model: "gpt-5",
+          reasoningEffort: "high",
         },
       ],
       workspace: {
+        projectId: "project-workspace",
+        projectName: "workspace",
         cwd: "C:/workspace",
         provider: "codex",
         model: "gpt-5",
+        reasoningEffort: "high",
         permissionMode: "default",
       },
       capabilities: {
-        models: [{ id: "gpt-5", name: "GPT-5" }],
+        models: [{
+          id: "gpt-5",
+          name: "GPT-5",
+          defaultReasoningLevel: "medium",
+          supportedReasoningLevels: [
+            { effort: "medium", description: "Balanced" },
+            { effort: "high" },
+          ],
+        }],
         permissionModes: [{ id: "default", name: "Default" }],
         canCreateSession: true,
         canSelectSession: true,
       },
     },
+  );
+});
+
+test("project identity is scoped by Gateway, not by display name", () => {
+  assert.notEqual(
+    gatewayProjectKey("gateway-a", "project-same-name"),
+    gatewayProjectKey("gateway-b", "project-same-name"),
+  );
+  assert.equal(
+    gatewayProjectKey("gateway-a", "project-1"),
+    gatewayProjectKey("gateway-a", "project-1"),
   );
 });
 

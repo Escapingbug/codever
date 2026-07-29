@@ -43,10 +43,11 @@ test("server-renders the Codever agent workspace", async () => {
 });
 
 test("ships a complete installable offline shell", async () => {
-  const [manifestText, serviceWorker, source, styles] = await Promise.all([
+  const [manifestText, serviceWorker, source, newSession, styles] = await Promise.all([
     readFile(new URL("public/manifest.webmanifest", appRoot), "utf8"),
     readFile(new URL("public/sw.js", appRoot), "utf8"),
     readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+    readFile(new URL("app/NewSessionDialog.tsx", appRoot), "utf8"),
     readFile(new URL("app/globals.css", appRoot), "utf8"),
   ]);
   const manifest = JSON.parse(manifestText);
@@ -61,6 +62,11 @@ test("ships a complete installable offline shell", async () => {
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
   assert.match(source, /operation: "session\.select"/);
+  assert.match(source, /gatewayProjectKey/);
+  assert.match(source, /changeReasoningEffort/);
+  assert.match(newSession, /Gateway × Project/);
+  assert.match(newSession, /Project names may repeat/);
+  assert.match(newSession, /Reasoning effort/);
   assert.match(source, /stopStreaming/);
   assert.match(
     styles,

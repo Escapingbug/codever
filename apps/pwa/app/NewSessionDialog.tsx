@@ -1,0 +1,261 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  gatewayProjectKey,
+  type GatewayModelCapability,
+  type GatewaySessionSummary,
+  type GatewayWorkspaceState,
+} from "./gatewayState";
+
+type NewSessionInput = {
+  cwd: string;
+  projectName: string;
+  model?: string;
+  reasoningEffort?: string;
+};
+
+type Props = {
+  open: boolean;
+  busy: boolean;
+  gatewayId: string;
+  gatewayName: string;
+  workspace: GatewayWorkspaceState;
+  sessions: GatewaySessionSummary[];
+  models: GatewayModelCapability[];
+  onClose(): void;
+  onCreate(input: NewSessionInput): void;
+};
+
+const NEW_PROJECT = "__new_project__";
+
+export function NewSessionDialog({
+  open,
+  busy,
+  gatewayId,
+  gatewayName,
+  workspace,
+  sessions,
+  models,
+  onClose,
+  onCreate,
+}: Props) {
+  const projects = useMemo(() => {
+    const values = new Map<
+      string,
+      { id: string; name: string; cwd: string; key: string }
+    >();
+    const add = (project: { projectId: string; projectName: string; cwd: string }) => {
+      const key = gatewayProjectKey(gatewayId, project.projectId);
+      if (!values.has(key)) {
+        values.set(key, {
+          id: project.projectId,
+          name: project.projectName,
+          cwd: project.cwd,
+          key,
+        });
+      }
+    };
+    add(workspace);
+    for (const session of sessions) add(session);
+    return [...values.values()];
+  }, [gatewayId, sessions, workspace]);
+  const currentProjectKey = gatewayProjectKey(
+    gatewayId,
+    workspace.projectId,
+  );
+  const [projectSelection, setProjectSelection] = useState(currentProjectKey);
+  const [projectName, setProjectName] = useState(workspace.projectName);
+  const [cwd, setCwd] = useState(workspace.cwd);
+  const [model, setModel] = useState(workspace.model ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(
+    workspace.reasoningEffort ??
+      models.find((entry) => entry.id === workspace.model)
+        ?.defaultReasoningLevel ??
+      "",
+  );
+
+  const selectedModel = models.find((entry) => entry.id === model);
+  const reasoningLevels = selectedModel?.supportedReasoningLevels ?? [];
+
+  useEffect(() => {
+    if (!open) return;
+    setProjectSelection(currentProjectKey);
+    setProjectName(workspace.projectName);
+    setCwd(workspace.cwd);
+    setModel(workspace.model ?? "");
+    setReasoningEffort(
+      workspace.reasoningEffort ??
+        models.find((entry) => entry.id === workspace.model)
+          ?.defaultReasoningLevel ??
+        "",
+    );
+  }, [
+    currentProjectKey,
+    open,
+    workspace.cwd,
+    workspace.model,
+    workspace.projectName,
+    workspace.reasoningEffort,
+    models,
+  ]);
+
+  if (!open) return null;
+
+  const chooseProject = (next: string) => {
+    setProjectSelection(next);
+    if (next === NEW_PROJECT) {
+      setProjectName("");
+      setCwd("");
+      return;
+    }
+    const project = projects.find((entry) => entry.key === next);
+    if (!project) return;
+    setProjectName(project.name);
+    setCwd(project.cwd);
+  };
+
+  const chooseModel = (next: string) => {
+    setModel(next);
+    const capability = models.find((entry) => entry.id === next);
+    const supported = capability?.supportedReasoningLevels ?? [];
+    if (!supported.some((level) => level.effort === reasoningEffort)) {
+      setReasoningEffort(capability?.defaultReasoningLevel ?? supported[0]?.effort ?? "");
+    }
+  };
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const normalizedName = projectName.trim();
+    const normalizedCwd = cwd.trim();
+    if (!normalizedName || !normalizedCwd || busy) return;
+    onCreate({
+      cwd: normalizedCwd,
+      projectName: normalizedName,
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+    });
+  };
+
+  return (
+    <div className="new-session-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="new-session-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-session-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span className="eyebrow">Gateway × Project</span>
+            <h2 id="new-session-title">Create a session</h2>
+            <p>{gatewayName}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close new session">
+            ×
+          </button>
+        </header>
+
+        <form onSubmit={submit}>
+          <label>
+            <span>Project</span>
+            <select
+              value={projectSelection}
+              onChange={(event) => chooseProject(event.target.value)}
+              disabled={busy}
+            >
+              {projects.map((project) => (
+                <option key={project.key} value={project.key}>
+                  {project.name} — {project.cwd}
+                </option>
+              ))}
+              <option value={NEW_PROJECT}>New project…</option>
+            </select>
+          </label>
+
+          <div className="new-session-grid">
+            <label>
+              <span>Project name</span>
+              <input
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+                placeholder="My project"
+                disabled={busy || projectSelection !== NEW_PROJECT}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <span>Working directory (Mac)</span>
+              <input
+                value={cwd}
+                onChange={(event) => setCwd(event.target.value)}
+                placeholder="/Users/me/Documents/project"
+                disabled={busy || projectSelection !== NEW_PROJECT}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+          </div>
+          <small className="project-identity-note">
+            Project names may repeat. Identity is scoped by this Gateway and
+            the project working directory.
+          </small>
+
+          <div className="new-session-grid two-columns">
+            <label>
+              <span>Model</span>
+              <select
+                value={model}
+                onChange={(event) => chooseModel(event.target.value)}
+                disabled={busy || models.length === 0}
+              >
+                {!model && <option value="">Gateway default</option>}
+                {models.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Reasoning effort</span>
+              <select
+                value={reasoningEffort}
+                onChange={(event) => setReasoningEffort(event.target.value)}
+                disabled={busy || reasoningLevels.length === 0}
+              >
+                {reasoningLevels.length === 0 && (
+                  <option value="">Model default</option>
+                )}
+                {reasoningLevels.map((level) => (
+                  <option key={level.effort} value={level.effort}>
+                    {level.effort}
+                    {level.effort === selectedModel?.defaultReasoningLevel
+                      ? " (default)"
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <footer>
+            <button type="button" className="secondary-button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={busy || !projectName.trim() || !cwd.trim()}
+            >
+              {busy ? "Creating…" : "Create session"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+export type { NewSessionInput };

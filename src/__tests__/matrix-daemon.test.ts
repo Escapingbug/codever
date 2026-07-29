@@ -22,6 +22,7 @@ import {
 } from '@/channel/matrix'
 import {
     FileCommandReplayStore,
+    gatewayProjectIdentity,
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
     StrictMatrixCommandAuthorizer,
@@ -191,6 +192,73 @@ describe('strict Matrix command authorization', () => {
 })
 
 describe('MatrixGatewayRunner', () => {
+    it('creates a session atomically in a Gateway-scoped project with reasoning settings', async () => {
+        const fixture = await securityFixture()
+        const projectDirectory = await temporaryDirectory()
+        const dispatched: SessionInput[] = []
+        const session = fakeTopicSession(dispatched)
+        const provider = fakeProvider([{
+            id: 'gpt-project',
+            name: 'GPT Project',
+            provider: 'mock-provider',
+            defaultReasoningLevel: 'medium',
+            supportedReasoningLevels: [
+                { effort: 'medium' },
+                { effort: 'high' },
+            ],
+        }])
+        const runtime = {
+            ...directRoomRuntime(fixture.config.rooms[0]!, session),
+            capabilityProvider: provider as AgentProvider | null,
+        }
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client: new FakeMatrixGatewayClient(),
+        })
+        await initializeDirectRuntime(runner, fixture.config)
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'create-project-session',
+            gatewayId: fixture.config.gatewayId,
+            deviceId: 'pwa-device-1',
+            sequenceEpoch: 'legacy-v1',
+            conversationId: fixture.config.rooms[0]!.conversationId,
+            revisionEpoch: REVISION_EPOCH,
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'session.create',
+            issuedAt: fixture.now,
+            expiresAt: fixture.now + 60_000,
+            nonce: '0123456789abcdef-create-project',
+            payload: {
+                operation: 'session.create',
+                cwd: projectDirectory,
+                projectName: 'Same name is allowed',
+                model: 'gpt-project',
+                reasoningEffort: 'high',
+            },
+        }
+
+        await (runner as unknown as {
+            execute(roomRuntime: typeof runtime, command: CodeverCommand): Promise<void>
+        }).execute(runtime, command)
+
+        expect(dispatched).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'command', name: 'cwd', args: projectDirectory }),
+            expect.objectContaining({ kind: 'command', name: 'model', args: 'gpt-project' }),
+            expect.objectContaining({ kind: 'command', name: 'reasoningEffort', args: 'high' }),
+            expect.objectContaining({ kind: 'command', name: 'new' }),
+        ]))
+        expect([...runtime.appSessions.values()]).toEqual([
+            expect.objectContaining({
+                projectName: 'Same name is allowed',
+                cwd: projectDirectory,
+                model: 'gpt-project',
+                reasoningEffort: 'high',
+            }),
+        ])
+    })
+
     it('initializes crypto before sync, verifies room encryption, and routes a signed prompt to TopicSession', async () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
@@ -1004,15 +1072,19 @@ function directRoomRuntime(
     config: MatrixGatewayConfig['rooms'][number],
     session: TopicSession,
 ) {
+    const project = gatewayProjectIdentity(config.cwd)
     return {
         config,
         port: session.channelPort,
         session,
         capabilityProvider: null,
         workspace: {
+            projectId: project.id,
+            projectName: project.name,
             cwd: config.cwd,
             provider: config.providerName,
             model: config.model ?? null,
+            reasoningEffort: null,
             permissionMode: 'default',
         },
         appSessions: new Map(),
@@ -1037,7 +1109,9 @@ async function initializeDirectRuntime(
     await store.initialize(config.rooms, REPLAY_GENERATION)
 }
 
-function fakeProvider(): AgentProvider {
+function fakeProvider(
+    models: ReturnType<AgentProvider['getAvailableModels']> = [],
+): AgentProvider {
     return {
         name: 'mock-provider',
         startQuery: vi.fn((): AgentQueryHandle => ({
@@ -1049,7 +1123,7 @@ function fakeProvider(): AgentProvider {
         })),
         isReady: vi.fn(() => true),
         getInitError: vi.fn(() => null),
-        getAvailableModels: vi.fn(() => []),
+        getAvailableModels: vi.fn(() => models),
         getAvailablePermissionModes: vi.fn(() => []),
     }
 }

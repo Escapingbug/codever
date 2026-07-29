@@ -3,23 +3,40 @@ export type GatewayCapabilityOption = {
   name: string;
 };
 
+export type GatewayReasoningLevel = {
+  effort: string;
+  description?: string;
+};
+
+export type GatewayModelCapability = GatewayCapabilityOption & {
+  defaultReasoningLevel?: string;
+  supportedReasoningLevels: GatewayReasoningLevel[];
+};
+
 export type GatewaySessionSummary = {
   id: string;
   title: string;
   updatedAt: number;
-  provider: string;
-  model?: string;
-};
-
-export type GatewayWorkspaceState = {
+  projectId: string;
+  projectName: string;
   cwd: string;
   provider: string;
   model?: string;
+  reasoningEffort?: string;
+};
+
+export type GatewayWorkspaceState = {
+  projectId: string;
+  projectName: string;
+  cwd: string;
+  provider: string;
+  model?: string;
+  reasoningEffort?: string;
   permissionMode: string;
 };
 
 export type GatewayCapabilities = {
-  models: GatewayCapabilityOption[];
+  models: GatewayModelCapability[];
   permissionModes: GatewayCapabilityOption[];
   canCreateSession: boolean;
   canSelectSession: boolean;
@@ -85,7 +102,7 @@ export function parseGatewayStateExtension(
     throw new Error("The authenticated Gateway state snapshot is malformed.");
   }
 
-  const sessions = extension.sessions.map((value) => {
+  const parsedSessions = extension.sessions.map((value) => {
     const session = asRecord(value);
     if (
       !session ||
@@ -99,6 +116,21 @@ export function parseGatewayStateExtension(
       !(
         session.model === undefined ||
         (typeof session.model === "string" && session.model.length > 0)
+      ) ||
+      !(
+        session.reasoning_effort === undefined ||
+        (typeof session.reasoning_effort === "string" &&
+          session.reasoning_effort.length > 0)
+      ) ||
+      !(session.cwd === undefined || typeof session.cwd === "string") ||
+      !(
+        session.project_id === undefined ||
+        (typeof session.project_id === "string" && session.project_id.length > 0)
+      ) ||
+      !(
+        session.project_name === undefined ||
+        (typeof session.project_name === "string" &&
+          session.project_name.length > 0)
       )
     ) {
       throw new Error("The authenticated Gateway session summary is malformed.");
@@ -109,7 +141,17 @@ export function parseGatewayStateExtension(
       updatedAt: session.updated_at,
       provider: session.provider,
       ...(typeof session.model === "string" ? { model: session.model } : {}),
-    } satisfies GatewaySessionSummary;
+      ...(typeof session.reasoning_effort === "string"
+        ? { reasoningEffort: session.reasoning_effort }
+        : {}),
+      rawProjectId:
+        typeof session.project_id === "string" ? session.project_id : undefined,
+      rawProjectName:
+        typeof session.project_name === "string"
+          ? session.project_name
+          : undefined,
+      rawCwd: typeof session.cwd === "string" ? session.cwd : undefined,
+    };
   });
 
   const workspace = asRecord(extension.workspace);
@@ -121,12 +163,53 @@ export function parseGatewayStateExtension(
     typeof workspace.permission_mode !== "string" ||
     !workspace.permission_mode ||
     !(
+      workspace.project_id === undefined ||
+      (typeof workspace.project_id === "string" && workspace.project_id.length > 0)
+    ) ||
+    !(
+      workspace.project_name === undefined ||
+      (typeof workspace.project_name === "string" &&
+        workspace.project_name.length > 0)
+    ) ||
+    !(
+      workspace.reasoning_effort === undefined ||
+      (typeof workspace.reasoning_effort === "string" &&
+        workspace.reasoning_effort.length > 0)
+    ) ||
+    !(
       workspace.model === undefined ||
       (typeof workspace.model === "string" && workspace.model.length > 0)
     )
   ) {
     throw new Error("The authenticated Gateway workspace state is malformed.");
   }
+  const workspaceCwd = workspace.cwd as string;
+  const fallbackProject = legacyProjectIdentity(workspaceCwd);
+  const workspaceProjectId =
+    typeof workspace.project_id === "string"
+      ? workspace.project_id
+      : fallbackProject.id;
+  const workspaceProjectName =
+    typeof workspace.project_name === "string"
+      ? workspace.project_name
+      : fallbackProject.name;
+  const sessions: GatewaySessionSummary[] = parsedSessions.map((session) => {
+    const cwd = session.rawCwd ?? workspaceCwd;
+    const fallback = legacyProjectIdentity(cwd);
+    return {
+      id: session.id,
+      title: session.title,
+      updatedAt: session.updatedAt,
+      projectId: session.rawProjectId ?? fallback.id,
+      projectName: session.rawProjectName ?? fallback.name,
+      cwd,
+      provider: session.provider,
+      ...(session.model ? { model: session.model } : {}),
+      ...(session.reasoningEffort
+        ? { reasoningEffort: session.reasoningEffort }
+        : {}),
+    };
+  });
 
   const capabilities = asRecord(extension.capabilities);
   if (
@@ -158,6 +241,60 @@ export function parseGatewayStateExtension(
       }
       return { id: option.id, name: option.name };
     });
+  const parseModels = (values: unknown[]): GatewayModelCapability[] =>
+    values.map((value) => {
+      const option = asRecord(value);
+      if (
+        !option ||
+        typeof option.id !== "string" ||
+        !option.id ||
+        typeof option.name !== "string" ||
+        !option.name ||
+        !(
+          option.default_reasoning_level === undefined ||
+          (typeof option.default_reasoning_level === "string" &&
+            option.default_reasoning_level.length > 0)
+        ) ||
+        !(
+          option.supported_reasoning_levels === undefined ||
+          Array.isArray(option.supported_reasoning_levels)
+        )
+      ) {
+        throw new Error(
+          "The authenticated Gateway model capability is malformed.",
+        );
+      }
+      const levels = (option.supported_reasoning_levels ?? []).map((level) => {
+        const record = asRecord(level);
+        if (
+          !record ||
+          typeof record.effort !== "string" ||
+          !record.effort ||
+          !(
+            record.description === undefined ||
+            typeof record.description === "string"
+          )
+        ) {
+          throw new Error(
+            "The authenticated Gateway reasoning capability is malformed.",
+          );
+        }
+        return {
+          effort: record.effort,
+          ...(typeof record.description === "string"
+            ? { description: record.description }
+            : {}),
+        };
+      });
+      return {
+        id: option.id,
+        name: option.name,
+        ...(typeof option.default_reasoning_level === "string"
+          ? { defaultReasoningLevel: option.default_reasoning_level }
+          : {}),
+        supportedReasoningLevels: levels,
+      };
+    });
 
   const currentSessionId = extension.current_session_id;
   if (
@@ -178,15 +315,20 @@ export function parseGatewayStateExtension(
     currentSessionId,
     sessions,
     workspace: {
-      cwd: workspace.cwd,
+      projectId: workspaceProjectId,
+      projectName: workspaceProjectName,
+      cwd: workspaceCwd,
       provider: workspace.provider,
       ...(typeof workspace.model === "string"
         ? { model: workspace.model }
         : {}),
+      ...(typeof workspace.reasoning_effort === "string"
+        ? { reasoningEffort: workspace.reasoning_effort }
+        : {}),
       permissionMode: workspace.permission_mode,
     },
     capabilities: {
-      models: parseOptions(capabilities.models, "model"),
+      models: parseModels(capabilities.models),
       permissionModes: parseOptions(
         capabilities.permission_modes,
         "permission mode",
@@ -194,6 +336,25 @@ export function parseGatewayStateExtension(
       canCreateSession: capabilities.can_create_session,
       canSelectSession: capabilities.can_select_session,
     },
+  };
+}
+
+export function gatewayProjectKey(
+  gatewayId: string,
+  projectId: string,
+): string {
+  return `${gatewayId}\u0000${projectId}`;
+}
+
+function legacyProjectIdentity(cwd: string): { id: string; name: string } {
+  const normalized = cwd.replaceAll("\\", "/").replace(/\/+$/u, "") || "/";
+  const name =
+    normalized === "/"
+      ? "/"
+      : normalized.split("/").filter(Boolean).at(-1) ?? normalized;
+  return {
+    id: `legacy-project:${encodeURIComponent(normalized)}`,
+    name,
   };
 }
 
