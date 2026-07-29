@@ -181,6 +181,7 @@ export function CodeverApp() {
     new Map<string, OptimisticMessageReference>(),
   );
   const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
+  const pendingPromptSessionIdsRef = useRef(new Set<string>());
   const selectedSessionIdRef = useRef<string | null>(null);
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
@@ -232,7 +233,7 @@ export function CodeverApp() {
       groups.set(key, group);
     }
     return [...groups.values()];
-  }, [filteredSessions, gatewayState, matrixConfig.gatewayId]);
+  }, [filteredSessions, matrixConfig.gatewayId]);
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
   const isStreaming = Boolean(
@@ -513,7 +514,6 @@ export function CodeverApp() {
     }
     if (
       sessionId &&
-      selectedSessionIdRef.current &&
       sessionId !== selectedSessionIdRef.current
     ) {
       return;
@@ -564,22 +564,17 @@ export function CodeverApp() {
           ? { deliveryState: "failed" as const }
           : {}),
       }));
-      const interruptedSends = cachedMessages.filter(
-        (message) => message.deliveryState === "failed" &&
-          cached.messages.some(
-            (cachedMessage) =>
-              cachedMessage.id === message.id &&
-              cachedMessage.deliveryState === "sending",
-          ),
-      );
+      const interruptedSends = cached.messages
+        .filter((message) => message.deliveryState === "sending")
+        .map((message) => ({
+          ...message,
+          deliveryState: "failed" as const,
+        }));
       if (interruptedSends.length > 0) {
         await saveMessageHistory(
           scope,
           sessionId,
-          interruptedSends.map(
-            ({ historical: _historical, sessionId: _sessionId, ...message }) =>
-              message,
-          ),
+          interruptedSends,
         );
         if (
           generation !== historyGenerationRef.current ||
@@ -804,6 +799,7 @@ export function CodeverApp() {
     matrixConnectionRef.current = null;
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
+    pendingPromptSessionIdsRef.current.clear();
     revisionConflictRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
@@ -926,6 +922,7 @@ export function CodeverApp() {
     matrixConnectionRef.current = null;
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
+    pendingPromptSessionIdsRef.current.clear();
     revisionConflictRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
@@ -1231,6 +1228,16 @@ export function CodeverApp() {
     try {
       await connection.discardRevisionConflict(conflict.commandId);
       if (conflict.optimisticMessageId) {
+        optimisticMessagesRef.current.delete(conflict.optimisticMessageId);
+        reconciledOptimisticMessageIdsRef.current.delete(
+          conflict.optimisticMessageId,
+        );
+        if (conflict.payload.operation !== "session.create") {
+          removeLiveMessage(
+            conflict.payload.sessionId,
+            conflict.optimisticMessageId,
+          );
+        }
         setMessages((current) =>
           current.filter(
             (message) => message.id !== conflict.optimisticMessageId,
@@ -1293,8 +1300,14 @@ export function CodeverApp() {
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
-    if (!value || isStreaming) return;
+    if (!value) return;
     const sessionId = selectedSessionIdRef.current;
+    if (
+      isStreaming ||
+      (sessionId && pendingPromptSessionIdsRef.current.has(sessionId))
+    ) {
+      return;
+    }
     if (!matrixConnected || !gatewayState || !sessionId) {
       setConnectionError(
         !gatewayState && matrixConnected
@@ -1348,11 +1361,13 @@ export function CodeverApp() {
     setDraft("");
     setSessionRunning(sessionId, true);
     setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
+    pendingPromptSessionIdsRef.current.add(sessionId);
     const result = await sendRealCommand({
       operation: "prompt",
       sessionId,
       text: value,
     });
+    pendingPromptSessionIdsRef.current.delete(sessionId);
     if (!result) {
       setSessionRunning(sessionId, false);
       setSessionAgentActivity(sessionId, null);

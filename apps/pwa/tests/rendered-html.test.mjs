@@ -69,6 +69,7 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(source, /agentActivitiesBySession/);
   assert.match(source, /setSessionAgentActivity\(sessionId/);
+  assert.match(source, /pendingPromptSessionIdsRef\.current\.has\(sessionId\)/);
   assert.doesNotMatch(source, /const \[isStreaming, setIsStreaming\]/);
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
