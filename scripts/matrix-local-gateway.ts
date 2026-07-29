@@ -49,9 +49,10 @@ const quietLogger: Logger = {
 }
 
 const fixture = await readJson<LocalMatrixFixture>(
-    join(process.cwd(), 'dev', 'matrix', 'local-test.json'),
+    process.env.CODEVER_MATRIX_FIXTURE
+        ?? join(process.cwd(), 'dev', 'matrix', 'local-test.json'),
 )
-assertLocalHomeserver(fixture.homeserver)
+assertAllowedHomeserver(fixture.homeserver)
 
 const registered = registerConfiguredProviders()
 const providerName = process.env.CODEVER_PROVIDER
@@ -108,7 +109,7 @@ let active = await registry.listActive()
 let acceptNewOffers = false
 if (active.length === 0) {
     const created = await pairingService.createOffer({
-        gatewayName: 'Codever local Gateway',
+        gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
         gatewayTransport: currentTransport,
     })
     const invitationCode = await pairingVerificationCode(
@@ -152,7 +153,7 @@ if (active.length === 0) {
     }
     if (process.env.CODEVER_PAIR_NEW_DEVICE === '1') {
         const created = await pairingService.createOffer({
-            gatewayName: 'Codever local Gateway',
+            gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
             gatewayTransport: currentTransport,
         })
         const invitationCode = await pairingVerificationCode(
@@ -259,12 +260,22 @@ async function loginGateway(
     homeserver: string,
     deviceId: string,
 ): Promise<LoginResult> {
+    const user = process.env.CODEVER_MATRIX_GATEWAY_USER ?? 'gateway'
+    const password = process.env.CODEVER_MATRIX_GATEWAY_PASSWORD
+        ?? (isLoopbackHomeserver(homeserver) ? 'codever-gateway-local' : undefined)
+    if (!password) {
+        throw new Error(
+            'CODEVER_MATRIX_GATEWAY_PASSWORD is required for a non-local Matrix homeserver',
+        )
+    }
     const requestBody = JSON.stringify({
         type: 'm.login.password',
-        identifier: { type: 'm.id.user', user: 'gateway' },
-        password: 'codever-gateway-local',
+        identifier: { type: 'm.id.user', user },
+        password,
         device_id: deviceId,
-        initial_device_display_name: `Codever local Gateway ${deviceId}`,
+        initial_device_display_name: `${
+            process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway'
+        } ${deviceId}`,
     })
     for (let attempt = 0; attempt < 4; attempt += 1) {
         const response = await fetch(`${homeserver}/_matrix/client/v3/login`, {
@@ -284,14 +295,18 @@ async function loginGateway(
     throw new Error('Gateway Matrix login failed')
 }
 
-function assertLocalHomeserver(homeserver: string): void {
+function assertAllowedHomeserver(homeserver: string): void {
     const url = new URL(homeserver)
-    if (
-        url.protocol !== 'http:'
-        || (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1')
-    ) {
-        throw new Error('This helper only accepts the disposable localhost Synapse fixture')
+    if (isLoopbackHomeserver(homeserver)) return
+    if (url.protocol !== 'https:') {
+        throw new Error('A non-local Matrix homeserver must use HTTPS')
     }
+}
+
+function isLoopbackHomeserver(homeserver: string): boolean {
+    const url = new URL(homeserver)
+    return url.protocol === 'http:'
+        && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')
 }
 
 function formatCode(code: string): string {
