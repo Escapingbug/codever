@@ -52,3 +52,54 @@ Production configuration must set `crypto.useIndexedDB` to `true` and provide a
 stable `databasePrefix`. A 32-byte `storageKey` or a `storagePassword` should
 protect that persistent crypto store. In-memory crypto is rejected unless
 `allowInMemoryForTesting` is explicitly enabled.
+
+## Local administration
+
+The Gateway host may expose the local administration API over a Unix domain
+socket (or a current-user-only named pipe on Windows). It must never expose
+these routes on a TCP listener.
+
+The active Matrix process owns the server so device invitations are bound to
+its current Matrix transport fingerprint:
+
+```text
+codever gateway invite
+  -> admin.sock
+  -> DeviceInvitationCoordinator
+  -> GatewayPairingService
+```
+
+The local admin and authenticated-PWA `device.invite` paths share the same
+coordinator, invitation limit, persistence, and signing identity. A configured
+Matrix login-token issuer may exchange the PWA account's long-lived access
+token for a short-lived one-time login token. The access token is never returned
+from the admin API, written to logs, or placed in a QR code.
+
+Current routes:
+
+- `GET /v1/status`
+- `GET /v1/devices`
+- `POST /v1/device-invitations`
+- `DELETE /v1/device-invitations/:offerId`
+- `POST /v1/devices/:deviceId/revoke`
+
+Mutation requests are local-user authorized by socket permissions. Invitation
+creation additionally requires an `Idempotency-Key`, is rate limited, and
+returns responses with `Cache-Control: no-store`.
+
+The local Matrix host recognizes:
+
+- `CODEVER_GATEWAY_ADMIN_SOCKET` to override the socket path;
+- `CODEVER_PWA_LOGIN_FILE` to locate owner-only PWA Matrix credentials used
+  solely for `get_login_token`;
+- `CODEVER_PWA_URL` as the CLI default invitation destination.
+
+For example:
+
+```sh
+codever gateway invite \
+  --app-url https://pwa.example/ \
+  --matrix-login preferred \
+  --qr png \
+  --output codever-invitation.png
+```

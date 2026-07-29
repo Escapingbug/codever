@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createDeviceInvitationLink,
+  decodeDeviceInvitationLink,
   decodePairingLink,
   encodePairingLink,
   gatewayDeviceRotationSchema,
   pairingCertificateSchema,
   pairingOfferSchema,
   pairingRequestSchema,
+  pairingLinkFromDeviceInvitation,
   type SignedPairingOffer,
 } from '../src/index.js'
 
@@ -143,6 +146,46 @@ describe('pairing schemas', () => {
       },
     }
     expect(decodePairingLink(encodePairingLink(signed))).toEqual(signed)
+  })
+
+  it('round-trips a PWA invitation without exposing a long-lived access token', () => {
+    const signed: SignedPairingOffer = {
+      offer: {
+        kind: 'codever.pairing.offer',
+        version: 1,
+        offerId: 'offer-invitation',
+        gatewayId: 'gateway-1',
+        gatewayName: 'Studio gateway',
+        gatewayKey: publicKey,
+        gatewayTransport,
+        challenge: 'd'.repeat(43),
+        allowedOperations: ['prompt', 'device.invite'],
+        issuedAt: 1,
+        expiresAt: 300_001,
+      },
+      signature: {
+        algorithm: 'ES256',
+        keyId: 'a'.repeat(43),
+        value: 'signature',
+      },
+    }
+    const pairingLink = encodePairingLink(signed)
+    const generated = createDeviceInvitationLink({
+      pairingLink,
+      appUrl: 'https://pwa.example/settings?discard=true',
+      matrixLogin: {
+        homeserver: gatewayTransport.homeserver,
+        userId: '@pwa:example.org',
+        loginToken: 'one-time-login-token',
+        expiresAt: 120_001,
+      },
+    })
+
+    expect(generated.link).not.toContain('discard=true')
+    expect(generated.expiresAt).toBe(120_001)
+    const decoded = decodeDeviceInvitationLink(generated.link)
+    expect(decoded.matrixLogin?.loginToken).toBe('one-time-login-token')
+    expect(pairingLinkFromDeviceInvitation(decoded)).toBe(pairingLink)
   })
 
   it('only accepts a device-key-only Matrix rotation', () => {

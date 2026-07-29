@@ -1,13 +1,18 @@
 import {
   canonicalJson,
+  createDeviceInvitationLink as createProtocolDeviceInvitationLink,
+  decodeDeviceInvitationLink as decodeProtocolDeviceInvitationLink,
   decodePairingLink,
-  encodePairingLink,
+  pairingLinkFromDeviceInvitation as protocolPairingLinkFromDeviceInvitation,
   signedGatewayDeviceRotationSchema,
   signedPairingCertificateSchema,
   signedPairingOfferSchema,
   signedPairingRequestSchema,
   signedPairingResponseSchema,
   type MatrixTransportBinding,
+  type DeviceInvitation,
+  type GeneratedDeviceInvitation,
+  type MatrixLoginInvitation,
   type PairingPublicKey,
   type SignedGatewayDeviceRotation,
   type SignedPairingCertificate,
@@ -42,25 +47,11 @@ export type PairingPreview = {
   transport: MatrixTransportBinding;
 };
 
-export type MatrixLoginInvitation = {
-  homeserver: string;
-  userId: string;
-  loginToken: string;
-  expiresAt: number;
-};
-
-export type DeviceInvitation = {
-  kind: "codever.device.invitation";
-  version: 1;
-  offer: SignedPairingOffer;
-  matrixLogin?: MatrixLoginInvitation;
-};
-
-export type GeneratedDeviceInvitation = {
-  link: string;
-  expiresAt: number;
-  includesMatrixLogin: boolean;
-};
+export type {
+  DeviceInvitation,
+  GeneratedDeviceInvitation,
+  MatrixLoginInvitation,
+} from "@codever/protocol";
 
 export type TrustedGateway = {
   version: 1;
@@ -119,72 +110,22 @@ export function createDeviceInvitationLink(input: {
   appUrl: string;
   matrixLogin?: MatrixLoginInvitation;
 }): GeneratedDeviceInvitation {
-  const offer = decodePairingLink(input.pairingLink);
-  const invitation: DeviceInvitation = {
-    kind: "codever.device.invitation",
-    version: 1,
-    offer,
-    ...(input.matrixLogin ? { matrixLogin: input.matrixLogin } : {}),
-  };
-  validateDeviceInvitation(invitation);
-  const appUrl = new URL(input.appUrl);
-  if (!["https:", "http:"].includes(appUrl.protocol)) {
-    throw new Error("The PWA invitation must use an http(s) URL.");
-  }
-  appUrl.search = "";
-  appUrl.hash = new URLSearchParams({
-    invite: encodeText(canonicalJson(invitation)),
-  }).toString();
-  return {
-    link: appUrl.toString(),
-    expiresAt: Math.min(
-      offer.offer.expiresAt,
-      input.matrixLogin?.expiresAt ?? Number.POSITIVE_INFINITY,
-    ),
-    includesMatrixLogin: Boolean(input.matrixLogin),
-  };
+  return createProtocolDeviceInvitationLink(input);
 }
 
 export function decodeDeviceInvitationLink(input: string): DeviceInvitation {
-  const encoded = deviceInvitationPayload(input.trim());
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(decodeText(encoded));
-  } catch (error) {
-    throw new Error("This Codever device invitation is malformed.", {
-      cause: error,
-    });
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("This Codever device invitation is malformed.");
-  }
-  const record = parsed as Record<string, unknown>;
-  const invitation: DeviceInvitation = {
-    kind:
-      record.kind === "codever.device.invitation"
-        ? record.kind
-        : (() => {
-            throw new Error("This is not a Codever device invitation.");
-          })(),
-    version:
-      record.version === 1
-        ? record.version
-        : (() => {
-            throw new Error("This Codever device invitation version is unsupported.");
-          })(),
-    offer: signedPairingOfferSchema.parse(record.offer),
-    ...(record.matrixLogin === undefined
-      ? {}
-      : { matrixLogin: parseMatrixLoginInvitation(record.matrixLogin) }),
-  };
-  validateDeviceInvitation(invitation);
-  return invitation;
+  return decodeProtocolDeviceInvitationLink(
+    input,
+    typeof window === "undefined"
+      ? "https://codever.invalid/"
+      : window.location.href,
+  );
 }
 
 export function pairingLinkFromDeviceInvitation(
   invitation: DeviceInvitation,
 ): string {
-  return encodePairingLink(invitation.offer);
+  return protocolPairingLinkFromDeviceInvitation(invitation);
 }
 
 export async function completePairing(
@@ -452,89 +393,6 @@ function decodeFlexiblePairingLink(input: string): SignedPairingOffer {
     if (data.startsWith("codever://")) return decodePairingLink(data);
     return decodePairingLink(`codever://pair?data=${data}`);
   }
-}
-
-function validateDeviceInvitation(invitation: DeviceInvitation): void {
-  const matrixLogin = invitation.matrixLogin;
-  if (!matrixLogin) return;
-  if (
-    new URL(matrixLogin.homeserver).origin !==
-    new URL(invitation.offer.offer.gatewayTransport.homeserver).origin
-  ) {
-    throw new Error(
-      "The Matrix login token does not match the Gateway homeserver.",
-    );
-  }
-}
-
-function parseMatrixLoginInvitation(input: unknown): MatrixLoginInvitation {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("The Matrix login invitation is malformed.");
-  }
-  const record = input as Record<string, unknown>;
-  const homeserver =
-    typeof record.homeserver === "string" ? record.homeserver : "";
-  const userId = typeof record.userId === "string" ? record.userId : "";
-  const loginToken =
-    typeof record.loginToken === "string" ? record.loginToken : "";
-  const expiresAt = record.expiresAt;
-  if (
-    !homeserver ||
-    !userId ||
-    !loginToken ||
-    typeof expiresAt !== "number" ||
-    !Number.isSafeInteger(expiresAt) ||
-    expiresAt <= 0
-  ) {
-    throw new Error("The Matrix login invitation is malformed.");
-  }
-  return { homeserver, userId, loginToken, expiresAt };
-}
-
-function deviceInvitationPayload(input: string): string {
-  if (/^[A-Za-z0-9_-]+$/u.test(input)) return input;
-  let url: URL;
-  try {
-    url = new URL(
-      input,
-      typeof window === "undefined"
-        ? "https://codever.invalid/"
-        : window.location.href,
-    );
-  } catch {
-    throw new Error("Paste a complete Codever device invitation.");
-  }
-  if (url.searchParams.has("invite")) {
-    throw new Error("Query-string device invitations are not accepted.");
-  }
-  const encoded = new URLSearchParams(url.hash.replace(/^#/, "")).get(
-    "invite",
-  );
-  if (!encoded) throw new Error("Paste a complete Codever device invitation.");
-  return encoded;
-}
-
-function encodeText(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/u, "");
-}
-
-function decodeText(value: string): string {
-  if (!/^[A-Za-z0-9_-]+$/u.test(value)) {
-    throw new Error("Invalid device invitation encoding.");
-  }
-  const padded =
-    value.replace(/-/g, "+").replace(/_/g, "/") +
-    "=".repeat((4 - (value.length % 4)) % 4);
-  const binary = atob(padded);
-  return new TextDecoder("utf-8", { fatal: true }).decode(
-    Uint8Array.from(binary, (character) => character.charCodeAt(0)),
-  );
 }
 
 async function loadReusablePendingRequest(

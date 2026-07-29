@@ -120,6 +120,52 @@ export const signedPairingOfferSchema = z
 
 export type SignedPairingOffer = z.infer<typeof signedPairingOfferSchema>
 
+export const matrixLoginInvitationSchema = z
+  .object({
+    homeserver: z.url(),
+    userId: opaqueId,
+    loginToken: z.string().min(1).max(16_384),
+    expiresAt: timestamp,
+  })
+  .strict()
+
+export type MatrixLoginInvitation = z.infer<typeof matrixLoginInvitationSchema>
+
+export const deviceInvitationSchema = z
+  .object({
+    kind: z.literal('codever.device.invitation'),
+    version: z.literal(PROTOCOL_VERSION),
+    offer: signedPairingOfferSchema,
+    matrixLogin: matrixLoginInvitationSchema.optional(),
+  })
+  .strict()
+  .superRefine((invitation, context) => {
+    if (!invitation.matrixLogin) return
+    let loginOrigin: string
+    let gatewayOrigin: string
+    try {
+      loginOrigin = new URL(invitation.matrixLogin.homeserver).origin
+      gatewayOrigin = new URL(invitation.offer.offer.gatewayTransport.homeserver).origin
+    } catch {
+      return
+    }
+    if (loginOrigin !== gatewayOrigin) {
+      context.addIssue({
+        code: 'custom',
+        path: ['matrixLogin', 'homeserver'],
+        message: 'The Matrix login token does not match the Gateway homeserver',
+      })
+    }
+  })
+
+export type DeviceInvitation = z.infer<typeof deviceInvitationSchema>
+
+export interface GeneratedDeviceInvitation {
+  link: string
+  expiresAt: number
+  includesMatrixLogin: boolean
+}
+
 /**
  * A client proves possession of its Codever device key and binds the request
  * to every security-relevant byte in the scanned offer.
@@ -339,4 +385,68 @@ export function decodePairingLink(input: string): SignedPairingOffer {
     throw new TypeError('Invalid pairing link payload', { cause: error })
   }
   return signedPairingOfferSchema.parse(decoded)
+}
+
+export function createDeviceInvitationLink(input: {
+  pairingLink: string
+  appUrl: string
+  matrixLogin?: MatrixLoginInvitation
+}): GeneratedDeviceInvitation {
+  const offer = decodePairingLink(input.pairingLink)
+  const invitation = deviceInvitationSchema.parse({
+    kind: 'codever.device.invitation',
+    version: PROTOCOL_VERSION,
+    offer,
+    ...(input.matrixLogin ? { matrixLogin: input.matrixLogin } : {}),
+  })
+  const appUrl = new URL(input.appUrl)
+  if (appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:') {
+    throw new TypeError('The PWA invitation must use an http(s) URL')
+  }
+  appUrl.search = ''
+  appUrl.hash = new URLSearchParams({
+    invite: encodeBase64Url(new TextEncoder().encode(canonicalJson(invitation))),
+  }).toString()
+  return {
+    link: appUrl.toString(),
+    expiresAt: Math.min(
+      offer.offer.expiresAt,
+      invitation.matrixLogin?.expiresAt ?? Number.POSITIVE_INFINITY,
+    ),
+    includesMatrixLogin: Boolean(invitation.matrixLogin),
+  }
+}
+
+export function decodeDeviceInvitationLink(
+  input: string,
+  baseUrl = 'https://codever.invalid/',
+): DeviceInvitation {
+  const trimmed = input.trim()
+  let payload = /^[A-Za-z0-9_-]+$/u.test(trimmed) ? trimmed : ''
+  if (!payload) {
+    let url: URL
+    try {
+      url = new URL(trimmed, baseUrl)
+    } catch (error) {
+      throw new TypeError('Invalid Codever device invitation', { cause: error })
+    }
+    if (url.searchParams.has('invite')) {
+      throw new TypeError('Query-string device invitations are not accepted')
+    }
+    payload = new URLSearchParams(url.hash.replace(/^#/u, '')).get('invite') ?? ''
+  }
+  if (!payload) throw new TypeError('Invalid Codever device invitation')
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(decodeBase64Url(payload)),
+    )
+  } catch (error) {
+    throw new TypeError('Invalid Codever device invitation payload', { cause: error })
+  }
+  return deviceInvitationSchema.parse(decoded)
+}
+
+export function pairingLinkFromDeviceInvitation(invitation: DeviceInvitation): string {
+  return encodePairingLink(deviceInvitationSchema.parse(invitation).offer)
 }

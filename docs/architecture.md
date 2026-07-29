@@ -87,6 +87,26 @@ Agent MCP tool call
 
 Scheduled reminders and immediate send-message requests are injected into the same topic-session runtime path as user messages.
 
+### 3.5 Matrix Gateway Local Administration
+
+The Matrix/PWA Gateway exposes host-owner management over a Unix domain socket,
+not a TCP port:
+
+```text
+codever gateway ...
+  -> GatewayAdminClient
+  -> owner-only admin socket
+  -> DeviceInvitationCoordinator
+  -> GatewayPairingService
+```
+
+The authenticated-PWA `device.invite` operation and the local admin API use the
+same `DeviceInvitationCoordinator`. The running Gateway process supplies its
+current Matrix transport binding, so an external helper cannot accidentally
+sign an invitation for a stale Matrix device. Long-lived Matrix access tokens
+remain server-side and may only be exchanged for short-lived one-time device
+login tokens.
+
 ## 4. Main Components
 
 ### 4.1 `daemon.ts`

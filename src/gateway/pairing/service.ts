@@ -32,7 +32,10 @@ import {
   type DeviceKeyPair,
 } from '@codever/security'
 import type { GatewayPairingIdentity } from './identityStore.js'
-import { FileTrustedDeviceRegistry } from './registry.js'
+import {
+  FileTrustedDeviceRegistry,
+  type PairingOfferSource,
+} from './registry.js'
 
 const DEFAULT_OFFER_LIFETIME_MS = 5 * 60_000
 const MAX_OFFER_LIFETIME_MS = 10 * 60_000
@@ -55,6 +58,7 @@ export interface CreatePairingOfferInput {
   gatewayName: string
   gatewayTransport: MatrixTransportBinding
   allowedOperations?: PairingOperation[]
+  source?: PairingOfferSource
   lifetimeMs?: number
   now?: number
 }
@@ -113,7 +117,7 @@ export class GatewayPairingService {
       this.identity.keys.privateKey,
       this.identity.keys.keyId,
     )
-    await this.registry.addOffer(signedOffer)
+    await this.registry.addOffer(signedOffer, input.source)
     return { signedOffer, link: encodePairingLink(signedOffer) }
   }
 
@@ -151,7 +155,10 @@ export class GatewayPairingService {
       }
       throw new Error('Pairing request was denied')
     }
-    const signedOffer = await this.registry.getOffer(signedRequest.request.offerId)
+    const signedOffer = await this.registry.getOffer(
+      signedRequest.request.offerId,
+      now,
+    )
     if (!signedOffer) throw new Error('Pairing offer is unavailable')
 
     const request = await this.offerGuard.consume(signedOffer, signedRequest, { now })
