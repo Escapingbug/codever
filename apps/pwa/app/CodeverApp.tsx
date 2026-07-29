@@ -4,6 +4,7 @@ import {
   FormEvent,
   KeyboardEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,6 +16,14 @@ import {
   type NewSessionInput,
 } from "./NewSessionDialog";
 import { gatewayProjectKey } from "./gatewayState";
+import {
+  clearMessageHistoryScope,
+  loadMessageHistoryPage,
+  matrixHistoryScope,
+  saveMessageHistory,
+  type MessageHistoryCursor,
+  type PersistedChatMessage,
+} from "./messageHistory";
 import {
   CommandRevisionConflictError,
   clearMatrixConfig,
@@ -43,19 +52,9 @@ import {
   type TrustedGateway,
 } from "./pairing";
 
-type ChatMessage = {
-  id: string;
-  kind: "notice" | "user" | "agent" | "tool" | "permission" | "error";
-  text?: string;
-  time?: string;
-  eventId?: string;
-  requestId?: string;
-  streamId?: string;
-  commandId?: string;
-  revision?: number;
-  originDeviceId?: string;
-  originDeviceName?: string;
-  raw?: Record<string, unknown>;
+type ChatMessage = PersistedChatMessage & {
+  sessionId?: string;
+  historical?: boolean;
 };
 
 type RevisionConflictNotice = {
@@ -113,6 +112,8 @@ export function CodeverApp() {
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -154,6 +155,16 @@ export function CodeverApp() {
   const activePromptCommandIdRef = useRef<string | null>(null);
   const completedCommandResultsRef = useRef(new Set<string>());
   const currentSessionIdRef = useRef<string | null>(null);
+  const historyScopeRef = useRef("");
+  const historySessionIdRef = useRef<string | null>(null);
+  const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
+  const historyGenerationRef = useRef(0);
+  const historyLoadingRef = useRef(false);
+  const followLatestRef = useRef(true);
+  const prependScrollRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
 
   const selected =
     gatewayState?.sessions.find(
@@ -292,11 +303,22 @@ export function CodeverApp() {
     });
   }, []);
 
-  useEffect(() => {
-    feedRef.current?.scrollTo({
-      top: feedRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+  useLayoutEffect(() => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    const prepend = prependScrollRef.current;
+    if (prepend) {
+      prependScrollRef.current = null;
+      feed.scrollTop =
+        prepend.scrollTop + (feed.scrollHeight - prepend.scrollHeight);
+      return;
+    }
+    if (followLatestRef.current) {
+      feed.scrollTo({
+        top: feed.scrollHeight,
+        behavior: "auto",
+      });
+    }
   }, [messages, isStreaming]);
 
   useEffect(
@@ -321,78 +343,36 @@ export function CodeverApp() {
       // The local composer already rendered this prompt optimistically.
       return;
     }
-    const message: ChatMessage = {
-      id: incoming.eventId,
-      eventId: incoming.eventId,
-      kind: incoming.kind === "error" ? "error" : incoming.kind,
-      text: incoming.text,
-      time: formatMessageTime(incoming.timestamp),
-      requestId: incoming.requestId,
-      streamId: incoming.streamId,
-      commandId: incoming.commandId,
-      revision: incoming.revision,
-      originDeviceId: incoming.originDeviceId,
-      originDeviceName: incoming.originDeviceName,
-      raw: incoming.raw,
-    };
-    if (incoming.requestId) {
+    const sessionId =
+      incoming.sessionId ?? currentSessionIdRef.current ?? undefined;
+    const message = chatMessageFromIncoming(incoming, sessionId);
+    if (sessionId && historyScopeRef.current) {
+      void saveMessageHistory(
+        historyScopeRef.current,
+        sessionId,
+        [message],
+      ).catch((error) => {
+        setConnectionError(
+          `Conversation history could not be saved: ${formatUiError(error)}`,
+        );
+      });
+    }
+    if (
+      sessionId &&
+      currentSessionIdRef.current &&
+      sessionId !== currentSessionIdRef.current
+    ) {
+      return;
+    }
+    if (incoming.requestId && !incoming.historical) {
       setDecisionStates((current) => ({
         ...current,
         [incoming.eventId]: "pending",
       }));
     }
-    setMessages((current) => {
-      if (
-        incoming.commandId &&
-        current.some((entry) => entry.commandId === incoming.commandId)
-      ) {
-        return current;
-      }
-      const eventType =
-        typeof incoming.raw.type === "string" ? incoming.raw.type : "";
-      const replaceIndex = incoming.replacesEventId
-        ? current.findIndex(
-            (entry) =>
-              entry.eventId === incoming.replacesEventId ||
-              entry.id === incoming.replacesEventId,
-          )
-        : -1;
-      const streamIndex = incoming.streamId
-        ? current.findIndex((entry) => entry.streamId === incoming.streamId)
-        : -1;
-      const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
-      if (targetIndex < 0) {
-        if (incoming.kind === "user" && incoming.revision !== undefined) {
-          const laterRevision = current.findIndex(
-            (entry) =>
-              entry.kind === "user" &&
-              typeof entry.revision === "number" &&
-              entry.revision > incoming.revision!,
-          );
-          if (laterRevision >= 0) {
-            const ordered = [...current];
-            ordered.splice(laterRevision, 0, message);
-            return ordered;
-          }
-        }
-        return [...current, message];
-      }
-
-      const next = [...current];
-      if (
-        eventType === "agent.text.delta" &&
-        next[targetIndex].text !== incoming.text
-      ) {
-        next[targetIndex] = {
-          ...message,
-          id: next[targetIndex].id,
-          text: `${next[targetIndex].text ?? ""}${incoming.text}`,
-        };
-      } else {
-        next[targetIndex] = { ...message, id: next[targetIndex].id };
-      }
-      return next;
-    });
+    const feed = feedRef.current;
+    followLatestRef.current = !feed || isNearFeedBottom(feed);
+    setMessages((current) => mergeChatMessage(current, message));
     if (
       incoming.raw.type === "agent.text.completed" ||
       incoming.raw.type === "command.completed" ||
@@ -400,6 +380,212 @@ export function CodeverApp() {
         incoming.raw.kind !== "command_result")
     ) {
       setIsStreaming(false);
+    }
+  }
+
+  async function restoreSessionHistory(
+    sessionId: string,
+    connection: MatrixConnection | null = matrixConnectionRef.current,
+  ): Promise<void> {
+    const scope = historyScopeRef.current;
+    if (!scope) return;
+    const generation = ++historyGenerationRef.current;
+    historySessionIdRef.current = sessionId;
+    historyCursorRef.current = null;
+    followLatestRef.current = true;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    setHistoryHasMore(false);
+    setMessages([]);
+    setDecisionStates({});
+    try {
+      const cached = await loadMessageHistoryPage(scope, sessionId);
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      const cachedMessages = cached.messages.map((message) => ({
+        ...message,
+        sessionId,
+        historical: true,
+      }));
+      historyCursorRef.current = cached.cursor;
+      setMessages((current) =>
+        mergeChatMessages(current, cachedMessages),
+      );
+      setHistoryHasMore(cached.hasMore || Boolean(connection));
+
+      if (!connection) return;
+      connection.markHistoryLoaded(
+        sessionId,
+        cachedMessages.flatMap((message) =>
+          message.eventId ? [message.eventId] : [],
+        ),
+      );
+      if (cachedMessages.length > 0) {
+        // The cache is the first page after a reload. Remote pagination starts
+        // only when the user asks for older content.
+        return;
+      }
+      const remote = await connection.loadHistoryPage(sessionId);
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      const remoteMessages = remote.messages.map((incoming) =>
+        chatMessageFromIncoming(
+          { ...incoming, historical: true },
+          incoming.sessionId ?? sessionId,
+        ),
+      );
+      if (remoteMessages.length > 0) {
+        await saveMessageHistory(scope, sessionId, remoteMessages);
+        historyCursorRef.current = olderHistoryCursor(
+          historyCursorRef.current,
+          remoteMessages,
+        );
+        setMessages((current) =>
+          mergeChatMessages(current, remoteMessages),
+        );
+      }
+      setHistoryHasMore(cached.hasMore || remote.hasMore);
+    } catch (error) {
+      setConnectionError(
+        `Conversation history could not be restored: ${formatUiError(error)}`,
+      );
+    } finally {
+      if (generation === historyGenerationRef.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+    }
+  }
+
+  async function loadOlderHistory(): Promise<void> {
+    const sessionId = historySessionIdRef.current;
+    const scope = historyScopeRef.current;
+    if (
+      !sessionId ||
+      !scope ||
+      historyLoadingRef.current ||
+      !historyHasMore
+    ) {
+      return;
+    }
+    const generation = historyGenerationRef.current;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    try {
+      const cached = await loadMessageHistoryPage(scope, sessionId, {
+        before: historyCursorRef.current,
+      });
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      if (cached.messages.length > 0) {
+        const olderMessages = cached.messages.map((message) => ({
+          ...message,
+          sessionId,
+          historical: true,
+        }));
+        prepareHistoryPrepend(feedRef.current, prependScrollRef);
+        historyCursorRef.current = cached.cursor;
+        setMessages((current) =>
+          mergeChatMessages(current, olderMessages),
+        );
+        // Consume at most one local page per pull. Once the local cache ends,
+        // advance Matrix by one page in parallel so a later pull does not need
+        // to replay every already-cached server page after a refresh.
+        const connection = matrixConnectionRef.current;
+        if (!connection) {
+          setHistoryHasMore(cached.hasMore);
+          return;
+        }
+        connection.markHistoryLoaded(
+          sessionId,
+          olderMessages.flatMap((message) =>
+            message.eventId ? [message.eventId] : [],
+          ),
+        );
+        const prefetched = await connection.loadHistoryPage(sessionId);
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+        const prefetchedMessages = prefetched.messages.map((incoming) =>
+          chatMessageFromIncoming(
+            { ...incoming, historical: true },
+            incoming.sessionId ?? sessionId,
+          ),
+        );
+        if (prefetchedMessages.length > 0) {
+          await saveMessageHistory(scope, sessionId, prefetchedMessages);
+        }
+        setHistoryHasMore(cached.hasMore || prefetched.hasMore);
+        return;
+      }
+
+      const connection = matrixConnectionRef.current;
+      if (!connection) {
+        setHistoryHasMore(false);
+        return;
+      }
+      const remote = await connection.loadHistoryPage(sessionId);
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      const olderMessages = remote.messages.map((incoming) =>
+        chatMessageFromIncoming(
+          { ...incoming, historical: true },
+          incoming.sessionId ?? sessionId,
+        ),
+      );
+      if (olderMessages.length > 0) {
+        await saveMessageHistory(scope, sessionId, olderMessages);
+        prepareHistoryPrepend(feedRef.current, prependScrollRef);
+        historyCursorRef.current = olderHistoryCursor(
+          historyCursorRef.current,
+          olderMessages,
+        );
+        setMessages((current) =>
+          mergeChatMessages(current, olderMessages),
+        );
+      }
+      setHistoryHasMore(remote.hasMore);
+    } catch (error) {
+      setConnectionError(
+        `Older history could not be loaded: ${formatUiError(error)}`,
+      );
+    } finally {
+      if (generation === historyGenerationRef.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+    }
+  }
+
+  function handleFeedScroll() {
+    const feed = feedRef.current;
+    if (!feed) return;
+    followLatestRef.current = isNearFeedBottom(feed);
+    if (
+      feed.scrollTop <= 80 &&
+      historyHasMore &&
+      !historyLoadingRef.current
+    ) {
+      void loadOlderHistory();
     }
   }
 
@@ -417,8 +603,19 @@ export function CodeverApp() {
     setGatewayState(null);
     setGatewayRevision(null);
     currentSessionIdRef.current = null;
+    historySessionIdRef.current = null;
+    historyCursorRef.current = null;
+    historyGenerationRef.current += 1;
+    historyLoadingRef.current = false;
+    setHistoryLoading(false);
+    setHistoryHasMore(false);
     try {
       const normalized = normalizeMatrixConfig(configInput);
+      historyScopeRef.current = matrixHistoryScope({
+        gatewayId: normalized.gatewayId,
+        conversationId: normalized.conversationId,
+        roomId: normalized.roomId,
+      });
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
       const connection = await connectMatrix(normalized, {
@@ -447,15 +644,28 @@ export function CodeverApp() {
           }
           if (state.gatewayState) {
             const nextSessionId = state.gatewayState.currentSessionId;
-            if (
-              currentSessionIdRef.current !== null &&
-              currentSessionIdRef.current !== nextSessionId
-            ) {
+            const sessionChanged =
+              currentSessionIdRef.current !== nextSessionId;
+            currentSessionIdRef.current = nextSessionId;
+            if (sessionChanged) {
+              historyGenerationRef.current += 1;
+              historySessionIdRef.current = nextSessionId;
+              historyCursorRef.current = null;
               setMessages([]);
               setDecisionStates({});
               setIsStreaming(false);
+              setHistoryHasMore(Boolean(nextSessionId));
+              if (!nextSessionId) {
+                historyLoadingRef.current = false;
+                setHistoryLoading(false);
+              }
+              if (nextSessionId && matrixConnectionRef.current) {
+                void restoreSessionHistory(
+                  nextSessionId,
+                  matrixConnectionRef.current,
+                );
+              }
             }
-            currentSessionIdRef.current = nextSessionId;
             setGatewayState(state.gatewayState);
           }
         },
@@ -471,6 +681,12 @@ export function CodeverApp() {
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
       if (closeSettings) setSettingsOpen(false);
+      if (currentSessionIdRef.current) {
+        await restoreSessionHistory(
+          currentSessionIdRef.current,
+          connection,
+        );
+      }
       setMessages((current) => [
         {
           id: `matrix-connected-${Date.now()}`,
@@ -500,9 +716,16 @@ export function CodeverApp() {
     setGatewayState(null);
     setGatewayRevision(null);
     currentSessionIdRef.current = null;
+    historyGenerationRef.current += 1;
+    historySessionIdRef.current = null;
+    historyCursorRef.current = null;
+    historyLoadingRef.current = false;
+    setHistoryLoading(false);
+    setHistoryHasMore(false);
   }
 
   function forgetMatrixConfig() {
+    const historyScope = historyScopeRef.current;
     pairingAbortRef.current?.abort();
     disconnectMatrix();
     clearMatrixConfig();
@@ -517,6 +740,14 @@ export function CodeverApp() {
     setPairingPreview(null);
     setConnectionError(null);
     setMessages([]);
+    historyScopeRef.current = "";
+    if (historyScope) {
+      void clearMessageHistoryScope(historyScope).catch((error) => {
+        setConnectionError(
+          `Conversation history could not be cleared: ${formatUiError(error)}`,
+        );
+      });
+    }
     setSettingsOpen(true);
   }
 
@@ -790,10 +1021,30 @@ export function CodeverApp() {
       return;
     }
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
+    const optimisticMessage: ChatMessage = {
+      id: optimisticId,
+      kind: "user",
+      text: value,
+      time: "now",
+      timestamp: Date.now(),
+      sessionId: currentSessionIdRef.current ?? undefined,
+    };
+    followLatestRef.current = true;
     setMessages((current) => [
       ...current,
-      { id: optimisticId, kind: "user", text: value, time: "now" },
+      optimisticMessage,
     ]);
+    if (currentSessionIdRef.current && historyScopeRef.current) {
+      void saveMessageHistory(
+        historyScopeRef.current,
+        currentSessionIdRef.current,
+        [optimisticMessage],
+      ).catch((error) => {
+        setConnectionError(
+          `Conversation history could not be saved: ${formatUiError(error)}`,
+        );
+      });
+    }
     setDraft("");
     setIsStreaming(true);
     const result = await sendRealCommand({
@@ -851,6 +1102,23 @@ export function CodeverApp() {
             : message,
         ),
       );
+      const sessionId = currentSessionIdRef.current;
+      if (sessionId && historyScopeRef.current) {
+        void saveMessageHistory(historyScopeRef.current, sessionId, [
+          {
+            ...optimisticMessage,
+            commandId: result.commandId,
+            revision: result.revision,
+            originDeviceId: deviceKeyId ?? undefined,
+            originDeviceName:
+              trustedGateway?.certificate.certificate.deviceName,
+          },
+        ]).catch((error) => {
+          setConnectionError(
+            `Conversation history could not be saved: ${formatUiError(error)}`,
+          );
+        });
+      }
     }
   }
 
@@ -1177,9 +1445,24 @@ export function CodeverApp() {
           </div>
         )}
 
-        <div className="chat-feed" ref={feedRef}>
+        <div
+          className="chat-feed"
+          ref={feedRef}
+          onScroll={handleFeedScroll}
+        >
+          <div className="history-loader" aria-live="polite">
+            {historyLoading ? (
+              <span>Loading earlier messages…</span>
+            ) : historyHasMore ? (
+              <button type="button" onClick={() => void loadOlderHistory()}>
+                Load earlier messages
+              </button>
+            ) : messages.length > 0 ? (
+              <span>Beginning of loaded history</span>
+            ) : null}
+          </div>
           <div className="date-divider">
-            <span>Today</span>
+            <span>Recent messages</span>
           </div>
           {messages.map((message) => {
             if (message.kind === "notice") {
@@ -1264,7 +1547,11 @@ export function CodeverApp() {
                       This decision will be signed by your local Codever key and
                       sent through the encrypted room.
                     </p>
-                    {decisionState === "pending" ? (
+                    {message.historical ? (
+                      <div className="decision-state historical">
+                        History only · request not replayed
+                      </div>
+                    ) : decisionState === "pending" ? (
                       <div className="permission-actions">
                         <button
                           className="approve-button"
@@ -1552,6 +1839,149 @@ export function CodeverApp() {
       />
     </main>
   );
+}
+
+function chatMessageFromIncoming(
+  incoming: IncomingCodeverMessage,
+  sessionId?: string,
+): ChatMessage {
+  return {
+    id: incoming.eventId,
+    eventId: incoming.eventId,
+    kind: incoming.kind === "error" ? "error" : incoming.kind,
+    text: incoming.text,
+    time: formatMessageTime(incoming.timestamp),
+    timestamp: incoming.timestamp,
+    requestId: incoming.requestId,
+    streamId: incoming.streamId,
+    replacesEventId: incoming.replacesEventId,
+    commandId: incoming.commandId,
+    revision: incoming.revision,
+    originDeviceId: incoming.originDeviceId,
+    originDeviceName: incoming.originDeviceName,
+    sessionId,
+    historical: incoming.historical,
+    raw: incoming.raw,
+  };
+}
+
+function mergeChatMessages(
+  current: readonly ChatMessage[],
+  incoming: readonly ChatMessage[],
+): ChatMessage[] {
+  return [...incoming]
+    .sort(compareChatMessages)
+    .reduce<ChatMessage[]>(
+      (messages, message) => mergeChatMessage(messages, message),
+      [...current],
+    );
+}
+
+function mergeChatMessage(
+  current: readonly ChatMessage[],
+  message: ChatMessage,
+): ChatMessage[] {
+  if (current.some((entry) => entry.id === message.id)) return [...current];
+  if (
+    message.commandId &&
+    current.some((entry) => entry.commandId === message.commandId)
+  ) {
+    return [...current];
+  }
+  const replaceIndex = message.replacesEventId
+    ? current.findIndex(
+        (entry) =>
+          entry.eventId === message.replacesEventId ||
+          entry.id === message.replacesEventId,
+      )
+    : -1;
+  const streamIndex = message.streamId
+    ? current.findIndex((entry) => entry.streamId === message.streamId)
+    : -1;
+  const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
+  if (targetIndex >= 0) {
+    const next = [...current];
+    if (
+      message.raw?.type === "agent.text.delta" &&
+      next[targetIndex].text !== message.text
+    ) {
+      next[targetIndex] = {
+        ...message,
+        id: next[targetIndex].id,
+        text: `${next[targetIndex].text ?? ""}${message.text ?? ""}`,
+      };
+    } else {
+      next[targetIndex] = { ...message, id: next[targetIndex].id };
+    }
+    return next;
+  }
+
+  const next = [...current];
+  const laterIndex = next.findIndex((entry) => {
+    if (
+      message.kind === "user" &&
+      message.revision !== undefined &&
+      entry.kind === "user" &&
+      entry.revision !== undefined
+    ) {
+      return entry.revision > message.revision;
+    }
+    return (
+      message.timestamp !== undefined &&
+      entry.timestamp !== undefined &&
+      compareChatMessages(entry, message) > 0
+    );
+  });
+  if (laterIndex >= 0) next.splice(laterIndex, 0, message);
+  else next.push(message);
+  return next;
+}
+
+function compareChatMessages(
+  left: Pick<ChatMessage, "timestamp" | "id">,
+  right: Pick<ChatMessage, "timestamp" | "id">,
+): number {
+  return (
+    (left.timestamp ?? Number.MAX_SAFE_INTEGER) -
+      (right.timestamp ?? Number.MAX_SAFE_INTEGER) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function olderHistoryCursor(
+  current: MessageHistoryCursor | null,
+  messages: readonly ChatMessage[],
+): MessageHistoryCursor | null {
+  const oldest = [...messages]
+    .filter((message) => message.timestamp !== undefined)
+    .sort(compareChatMessages)[0];
+  if (!oldest || oldest.timestamp === undefined) return current;
+  const candidate = { timestamp: oldest.timestamp, id: oldest.id };
+  if (
+    !current ||
+    candidate.timestamp < current.timestamp ||
+    (candidate.timestamp === current.timestamp && candidate.id < current.id)
+  ) {
+    return candidate;
+  }
+  return current;
+}
+
+function prepareHistoryPrepend(
+  feed: HTMLDivElement | null,
+  target: {
+    current: { scrollHeight: number; scrollTop: number } | null;
+  },
+): void {
+  if (!feed) return;
+  target.current = {
+    scrollHeight: feed.scrollHeight,
+    scrollTop: feed.scrollTop,
+  };
+}
+
+function isNearFeedBottom(feed: HTMLDivElement): boolean {
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 96;
 }
 
 function formatMessageTime(timestamp: number): string {
