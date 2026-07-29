@@ -208,11 +208,18 @@ describe('MatrixGatewayRunner', () => {
             ],
         }])
         const runtime = {
-            ...directRoomRuntime(fixture.config.rooms[0]!, session),
+            ...directRoomRuntime(fixture.config.rooms[0]!, session, false),
             capabilityProvider: provider as AgentProvider | null,
         }
+        let createdRoom: MatrixGatewayConfig['rooms'][number] | undefined
+        let createdSessionId: string | undefined
         const runner = new MatrixGatewayRunner(fixture.config, {
             client: new FakeMatrixGatewayClient(),
+            sessionFactory: (room, _port, appSession) => {
+                createdRoom = room
+                createdSessionId = appSession?.id
+                return session
+            },
         })
         await initializeDirectRuntime(runner, fixture.config)
         const command: CodeverCommand = {
@@ -239,23 +246,102 @@ describe('MatrixGatewayRunner', () => {
             },
         }
 
-        await (runner as unknown as {
-            execute(roomRuntime: typeof runtime, command: CodeverCommand): Promise<void>
+        const resultSessionId = await (runner as unknown as {
+            execute(roomRuntime: typeof runtime, command: CodeverCommand): Promise<string | null>
         }).execute(runtime, command)
 
-        expect(dispatched).toEqual(expect.arrayContaining([
-            expect.objectContaining({ kind: 'command', name: 'cwd', args: projectDirectory }),
-            expect.objectContaining({ kind: 'command', name: 'model', args: 'gpt-project' }),
-            expect.objectContaining({ kind: 'command', name: 'reasoningEffort', args: 'high' }),
-            expect.objectContaining({ kind: 'command', name: 'new' }),
-        ]))
-        expect([...runtime.appSessions.values()]).toEqual([
+        expect(dispatched).toEqual([])
+        expect(resultSessionId).toBe(createdSessionId)
+        expect(createdRoom).toMatchObject({
+            cwd: projectDirectory,
+            providerName: 'mock-provider',
+            model: 'gpt-project',
+            providerSettings: expect.objectContaining({
+                reasoningEffort: 'high',
+            }),
+        })
+        expect([...runtime.appSessions.values()].map(appSession => appSession.record)).toEqual([
             expect.objectContaining({
                 projectName: 'Same name is allowed',
                 cwd: projectDirectory,
                 model: 'gpt-project',
                 reasoningEffort: 'high',
             }),
+        ])
+    })
+
+    it('routes two concurrently running prompts to independent app session runtimes', async () => {
+        const fixture = await securityFixture()
+        const firstDispatches: SessionInput[] = []
+        const secondDispatches: SessionInput[] = []
+        const firstSession = fakeTopicSession(firstDispatches)
+        const secondSession = fakeTopicSession(secondDispatches)
+        const entered = new Set<string>()
+        let releasePrompts!: () => void
+        const promptsMayFinish = new Promise<void>(resolve => {
+            releasePrompts = resolve
+        })
+        firstSession.dispatch = vi.fn(async (input: SessionInput) => {
+            firstDispatches.push(input)
+            entered.add('app-session-1')
+            await promptsMayFinish
+        })
+        secondSession.dispatch = vi.fn(async (input: SessionInput) => {
+            secondDispatches.push(input)
+            entered.add('app-session-2')
+            await promptsMayFinish
+        })
+        const runtime = directRoomRuntime(fixture.config.rooms[0]!, firstSession)
+        const firstRuntime = runtime.appSessions.get('app-session-1')!
+        runtime.appSessions.set('app-session-2', {
+            record: {
+                ...firstRuntime.record,
+                id: 'app-session-2',
+                title: 'Second session',
+            },
+            port: secondSession.channelPort,
+            session: secondSession,
+            capabilityProvider: null,
+        })
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client: new FakeMatrixGatewayClient(),
+        })
+        await initializeDirectRuntime(runner, fixture.config)
+        const firstCommand = (await signedPrompt(fixture.keys, fixture.now)).command
+        const secondCommand: CodeverCommand = {
+            ...structuredClone(firstCommand),
+            commandId: 'second-session-prompt',
+            payload: {
+                operation: 'prompt',
+                sessionId: 'app-session-2',
+                text: 'second prompt',
+            },
+        }
+        const execute = (command: CodeverCommand) =>
+            (runner as unknown as {
+                execute(
+                    roomRuntime: typeof runtime,
+                    command: CodeverCommand,
+                ): Promise<string | null>
+            }).execute(runtime, command)
+
+        const firstExecution = execute(firstCommand)
+        const secondExecution = execute(secondCommand)
+        await vi.waitFor(() => expect(entered).toEqual(new Set([
+            'app-session-1',
+            'app-session-2',
+        ])))
+        expect(firstDispatches).toEqual([
+            expect.objectContaining({ kind: 'user_message', text: 'hello from PWA' }),
+        ])
+        expect(secondDispatches).toEqual([
+            expect.objectContaining({ kind: 'user_message', text: 'second prompt' }),
+        ])
+
+        releasePrompts()
+        await expect(Promise.all([firstExecution, secondExecution])).resolves.toEqual([
+            'app-session-1',
+            'app-session-2',
         ])
     })
 
@@ -352,7 +438,7 @@ describe('MatrixGatewayRunner', () => {
                     models: [],
                     permission_modes: [{ id: 'default', name: 'Default' }],
                     can_create_session: true,
-                    can_select_session: true,
+                    can_select_session: false,
                 },
             },
         })
@@ -437,7 +523,7 @@ describe('MatrixGatewayRunner', () => {
                 revision_epoch: REVISION_EPOCH,
                 revision_epoch_generation: 1,
                 state_version: 5,
-                current_session_id: 'app-session-1',
+                current_session_id: null,
                 sessions: [{
                     id: 'app-session-1',
                     title: 'Restored work',
@@ -537,10 +623,7 @@ describe('MatrixGatewayRunner', () => {
         const internals = runner as unknown as {
             scheduleExecution(
                 event: MatrixIncomingEvent,
-                runtime: {
-                    config: MatrixGatewayConfig['rooms'][number]
-                    session: TopicSession
-                },
+                runtime: ReturnType<typeof directRoomRuntime>,
                 command: CodeverCommand,
                 revision: number,
             ): void
@@ -582,10 +665,7 @@ describe('MatrixGatewayRunner', () => {
         const internals = runner as unknown as {
             scheduleExecution(
                 event: MatrixIncomingEvent,
-                runtime: {
-                    config: MatrixGatewayConfig['rooms'][number]
-                    session: TopicSession
-                },
+                runtime: ReturnType<typeof directRoomRuntime>,
                 command: CodeverCommand,
                 revision: number,
                 beforeExecute?: Promise<unknown>,
@@ -621,7 +701,11 @@ describe('MatrixGatewayRunner', () => {
 
         const signed = await signedPrompt(fixture.keys, fixture.now)
         const tampered = structuredClone(signed)
-        tampered.command.payload = { operation: 'prompt', text: 'malicious' }
+        tampered.command.payload = {
+            operation: 'prompt',
+            sessionId: 'app-session-1',
+            text: 'malicious',
+        }
         client.emit(incomingSigned(tampered))
         client.emit({ ...incomingSigned(signed, 'clear-event'), encrypted: false })
 
@@ -954,7 +1038,19 @@ async function securityFixture() {
                     replayGeneration: REPLAY_GENERATION,
                     stateVersion: 0,
                     currentSessionId: null,
-                    appSessions: [],
+                    appSessions: [{
+                        id: 'app-session-1',
+                        title: 'Existing session',
+                        updatedAt: now - 1_000,
+                        projectId: gatewayProjectIdentity('C:\\repo').id,
+                        projectName: gatewayProjectIdentity('C:\\repo').name,
+                        cwd: 'C:\\repo',
+                        provider: 'mock-provider',
+                        model: null,
+                        reasoningEffort: null,
+                        permissionMode: 'default',
+                        providerSessionId: null,
+                    }],
                     workspace: {
                         cwd: 'C:\\repo',
                         provider: 'mock-provider',
@@ -991,7 +1087,11 @@ async function signedPrompt(
         issuedAt: now,
         expiresAt: now + 60_000,
         nonce: `0123456789abcdef-${sequence}-${Math.random()}`,
-        payload: { operation: 'prompt', text: 'hello from PWA' },
+        payload: {
+            operation: 'prompt',
+            sessionId: 'app-session-1',
+            text: 'hello from PWA',
+        },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }
@@ -1016,7 +1116,7 @@ async function signedCancel(
         issuedAt: now,
         expiresAt: now + 60_000,
         nonce: `fedcba9876543210-${sequence}-${Math.random()}`,
-        payload: { operation: 'cancel' },
+        payload: { operation: 'cancel', sessionId: 'app-session-1' },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }
@@ -1071,12 +1171,24 @@ function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
 function directRoomRuntime(
     config: MatrixGatewayConfig['rooms'][number],
     session: TopicSession,
+    includeDefaultSession = true,
 ) {
     const project = gatewayProjectIdentity(config.cwd)
+    const record = {
+        id: 'app-session-1',
+        title: 'Existing session',
+        updatedAt: 1,
+        projectId: project.id,
+        projectName: project.name,
+        cwd: project.cwd,
+        provider: config.providerName,
+        model: config.model ?? null,
+        reasoningEffort: null,
+        permissionMode: 'default',
+        providerSessionId: null,
+    }
     return {
         config,
-        port: session.channelPort,
-        session,
         capabilityProvider: null,
         workspace: {
             projectId: project.id,
@@ -1087,8 +1199,14 @@ function directRoomRuntime(
             reasoningEffort: null,
             permissionMode: 'default',
         },
-        appSessions: new Map(),
-        currentAppSessionId: null,
+        appSessions: new Map(includeDefaultSession
+            ? [[record.id, {
+                record,
+                port: session.channelPort,
+                session,
+                capabilityProvider: null,
+            }]]
+            : []),
         revisionEpoch: REVISION_EPOCH,
         revisionEpochGeneration: 1,
         replayGeneration: REPLAY_GENERATION,

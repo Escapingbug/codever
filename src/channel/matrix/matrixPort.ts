@@ -17,11 +17,12 @@ export interface MatrixPortOptions {
     roomId: string
     gatewayId: string
     /**
-     * Resolves the active first-party app session at send time. A Matrix room
-     * can carry several Codever sessions, so persisted timeline events must
-     * retain this routing identity for history reconstruction.
+     * Immutable first-party app-session identity for this port. A Matrix room
+     * can carry several Codever sessions, but every TopicSession owns its own
+     * port so delayed output can never be attributed to whichever session a
+     * client happens to be viewing.
      */
-    getSessionId?: () => string | null
+    sessionId?: string
     onLog?: (message: string) => void
 }
 
@@ -230,7 +231,7 @@ export class MatrixPort implements ChannelPort {
     }
 
     private sessionMetadata(): { session_id?: string } {
-        const sessionId = this.options.getSessionId?.()
+        const sessionId = this.options.sessionId
         return sessionId ? { session_id: sessionId } : {}
     }
 

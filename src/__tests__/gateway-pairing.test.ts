@@ -17,6 +17,7 @@ import {
   FileGatewayIdentityStore,
   FileTrustedDeviceRegistry,
   GatewayPairingService,
+  trustedDeviceFromRecord,
 } from '@/gateway/pairing'
 
 const temporaryDirectories: string[] = []
@@ -196,7 +197,14 @@ describe('Gateway pairing', () => {
 
     expect(renewed.response.response.activeDeviceCount).toBe(1)
     expect(renewed.response.response.certificate.certificate.allowedOperations)
-      .toEqual(expect.arrayContaining(['session.create', 'session.select']))
+      .toEqual(expect.arrayContaining(['session.create']))
+    expect(renewed.response.response.certificate.certificate.allowedOperations)
+      .not.toContain('session.select')
+    const legacyRecord = await fixture.registry.get('phone-one')
+    expect(legacyRecord).not.toBeNull()
+    legacyRecord!.certificate.certificate.allowedOperations.push('session.select')
+    expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
+      .not.toContain('session.select')
     expect(renewed.response.response.certificate.certificate.certificateId)
       .not.toBe(first.response.response.certificate.certificate.certificateId)
     await expect(fixture.registry.listActive(now + 5_000)).resolves.toHaveLength(1)

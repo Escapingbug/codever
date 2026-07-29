@@ -29,7 +29,11 @@ function command(overrides: Partial<CodeverCommand> = {}): CodeverCommand {
     issuedAt: now - 1_000,
     expiresAt: now + 60_000,
     nonce: '0123456789abcdef',
-    payload: { operation: 'prompt', text: 'hello' },
+    payload: {
+      operation: 'prompt',
+      sessionId: 'app-session-1',
+      text: 'hello',
+    },
     ...overrides,
   } as CodeverCommand
 }
@@ -58,7 +62,11 @@ describe('signed commands', () => {
     const keys = await generateDeviceKeyPair()
     const signed = await signCommand(command(), keys.privateKey, keys.keyId)
     const tampered = structuredClone(signed)
-    tampered.command.payload = { operation: 'prompt', text: 'malicious replacement' }
+    tampered.command.payload = {
+      operation: 'prompt',
+      sessionId: 'app-session-1',
+      text: 'malicious replacement',
+    }
 
     await expect(
       verifyCommand(tampered, keys.publicKey, {
@@ -148,7 +156,13 @@ describe('IdempotencyLedger', () => {
     await ledger.begin(command(), now)
     await expect(
       ledger.begin(
-        command({ payload: { operation: 'prompt', text: 'different' } }),
+        command({
+          payload: {
+            operation: 'prompt',
+            sessionId: 'app-session-1',
+            text: 'different',
+          },
+        }),
         now + 1,
       ),
     ).rejects.toMatchObject({ code: 'idempotency_conflict' })

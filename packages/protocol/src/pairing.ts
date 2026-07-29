@@ -13,6 +13,8 @@ export const pairingOperationSchema = z.enum([
   'decision',
   'session.settings',
   'session.create',
+  // Legacy v1 certificates may contain this grant. New Gateways do not issue
+  // it and commandSchema does not accept it: selection is client-local state.
   'session.select',
 ])
 

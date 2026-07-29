@@ -771,7 +771,11 @@ async function signedPrompt(
         issuedAt: now,
         expiresAt: now + 60_000,
         nonce: `0123456789abcdef-${deviceId}-${baseRevision}`,
-        payload: { operation: 'prompt', text: `hello from ${deviceId}` },
+        payload: {
+            operation: 'prompt',
+            sessionId: 'app-session-1',
+            text: `hello from ${deviceId}`,
+        },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }

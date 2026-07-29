@@ -35,6 +35,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
   z
     .object({
       operation: z.literal('prompt'),
+      sessionId: opaqueId,
       text: z.string(),
       attachments: z.array(attachmentSchema).max(100).optional(),
     })
@@ -42,12 +43,14 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
   z
     .object({
       operation: z.literal('cancel'),
+      sessionId: opaqueId,
       targetCommandId: opaqueId.optional(),
     })
     .strict(),
   z
     .object({
       operation: z.literal('decision'),
+      sessionId: opaqueId,
       requestId: opaqueId,
       decision: z.enum(['allow_once', 'allow_session', 'deny']),
     })
@@ -55,6 +58,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
   z
     .object({
       operation: z.literal('session.settings'),
+      sessionId: opaqueId,
       model: z.string().min(1).max(256).optional(),
       provider: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
@@ -84,12 +88,6 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
     })
     .strict(),
-  z
-    .object({
-      operation: z.literal('session.select'),
-      sessionId: opaqueId,
-    })
-    .strict(),
 ])
 
 export type CommandPayload = z.infer<typeof commandPayloadSchema>
@@ -115,7 +113,6 @@ export const commandSchema = z
       'decision',
       'session.settings',
       'session.create',
-      'session.select',
     ]),
     issuedAt: timestamp,
     expiresAt: timestamp,

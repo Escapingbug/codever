@@ -3,6 +3,7 @@ export type CommandCompletion = {
   sequence: number;
   revision: number;
   outcome: "succeeded" | "failed";
+  sessionId?: string;
 };
 
 type Acknowledgement = {

@@ -303,6 +303,7 @@ test("command result before explicit ack resolves acknowledgement and completion
     sequence: 4,
     revision: 9,
     outcome: "succeeded",
+    sessionId: "app-session-created",
   };
 
   lifecycle.recordResult(result);

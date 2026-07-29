@@ -9,7 +9,6 @@ import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSess
 import {
     CODEVER_MATRIX_EXTENSION,
     MatrixPort,
-    MatrixRoomSessionRegistry,
     type MatrixIncomingEvent,
 } from '@/channel/matrix'
 import { StrictMatrixCommandAuthorizer } from './authorizer'
@@ -25,46 +24,34 @@ import {
 import { FileCommandReplayStore, RevisionConflictError } from './fileReplayLedger'
 import {
     FileGatewayRuntimeStateStore,
+    type PersistedAppSession,
     type PersistedRoomRuntimeState,
 } from './fileRuntimeState'
 import { GatewaySecureContentLayer } from './secureContent'
 import { gatewayProjectIdentity } from './project'
 
-interface RoomRuntime {
-    config: MatrixGatewayRoomConfig
+type WorkspaceState = PersistedRoomRuntimeState['workspace']
+
+interface AppSessionRuntime {
+    record: AppSessionRecord
     port: MatrixPort
     session: TopicSession
     capabilityProvider: AgentProvider | null
-    workspace: {
-        projectId: string
-        projectName: string
-        cwd: string
-        provider: string
-        model: string | null
-        reasoningEffort: string | null
-        permissionMode: string
-    }
-    appSessions: Map<string, AppSessionRecord>
-    currentAppSessionId: string | null
+}
+
+interface RoomRuntime {
+    config: MatrixGatewayRoomConfig
+    /** Defaults used only when creating a new independent app session. */
+    workspace: WorkspaceState
+    capabilityProvider: AgentProvider | null
+    appSessions: Map<string, AppSessionRuntime>
     revisionEpoch: string
     revisionEpochGeneration: number
     replayGeneration: string
     stateVersion: number
 }
 
-interface AppSessionRecord {
-    id: string
-    title: string
-    updatedAt: number
-    projectId: string
-    projectName: string
-    cwd: string
-    provider: string
-    model: string | null
-    reasoningEffort: string | null
-    permissionMode: string
-    providerSessionId: string | null
-}
+type AppSessionRecord = PersistedAppSession
 
 interface WorkspaceSettingsInput {
     cwd?: string
@@ -77,8 +64,15 @@ interface WorkspaceSettingsInput {
 
 export interface MatrixGatewayDependencies {
     client?: MatrixGatewayClient
-    providerFactory?: (room: MatrixGatewayRoomConfig) => AgentProvider | undefined
-    sessionFactory?: (room: MatrixGatewayRoomConfig, port: MatrixPort) => TopicSession
+    providerFactory?: (
+        room: MatrixGatewayRoomConfig,
+        appSession: Readonly<AppSessionRecord>,
+    ) => AgentProvider | undefined
+    sessionFactory?: (
+        room: MatrixGatewayRoomConfig,
+        port: MatrixPort,
+        appSession: Readonly<AppSessionRecord>,
+    ) => TopicSession
     now?: () => number
     onLog?: (message: string) => void
     onRejected?: (event: MatrixIncomingEvent, error: unknown) => void
@@ -96,7 +90,6 @@ export class MatrixGatewayRunner {
     private readonly runtimeStateStore: FileGatewayRuntimeStateStore
     private readonly authorizer: StrictMatrixCommandAuthorizer
     private readonly secureContent: GatewaySecureContentLayer | null
-    private readonly roomTargets = new MatrixRoomSessionRegistry()
     private readonly rooms = new Map<string, RoomRuntime>()
     private state: MatrixGatewayState = 'stopped'
     private unsubscribe: (() => void) | null = null
@@ -192,18 +185,20 @@ export class MatrixGatewayRunner {
                 revisionEpoch: runtime.revisionEpoch,
                 revisionEpochGeneration: runtime.revisionEpochGeneration,
                 stateVersion,
-                currentSessionId: runtime.currentAppSessionId,
-                sessions: [...runtime.appSessions.values()].map(session => ({
-                    id: session.id,
-                    title: session.title,
-                    updatedAt: session.updatedAt,
-                    projectId: session.projectId,
-                    projectName: session.projectName,
-                    cwd: session.cwd,
-                    provider: session.provider,
-                    ...(session.model ? { model: session.model } : {}),
-                    ...(session.reasoningEffort
-                        ? { reasoningEffort: session.reasoningEffort }
+                // Session selection is a per-device PWA view concern. It is
+                // deliberately absent from Gateway-authoritative state.
+                currentSessionId: null,
+                sessions: [...runtime.appSessions.values()].map(({ record }) => ({
+                    id: record.id,
+                    title: record.title,
+                    updatedAt: record.updatedAt,
+                    projectId: record.projectId,
+                    projectName: record.projectName,
+                    cwd: record.cwd,
+                    provider: record.provider,
+                    ...(record.model ? { model: record.model } : {}),
+                    ...(record.reasoningEffort
+                        ? { reasoningEffort: record.reasoningEffort }
                         : {}),
                 })),
                 workspace: {
@@ -223,7 +218,7 @@ export class MatrixGatewayRunner {
                     // advertise modes whose policy is not actually enforced.
                     permissionModes: [{ id: 'default', name: 'Default' }],
                     canCreateSession: true,
-                    canSelectSession: true,
+                    canSelectSession: false,
                 },
             }, this.client)
         }))
@@ -378,19 +373,20 @@ export class MatrixGatewayRunner {
                 this.secureContent
                 && authorized.command.payload.operation === 'prompt'
             ) {
-                // Establish the app-session identity before any collaboration,
-                // status, or Agent event is emitted. Matrix rooms are shared by
-                // several sessions, and history routing must never depend on
-                // whichever session happens to be selected during replay.
-                const appSession = this.ensureAppSession(
+                const appSession = this.requireAppSession(
                     runtime,
-                    authorized.command.payload.text,
+                    authorized.command.payload.sessionId,
                 )
+                if (appSession.record.title === 'New session') {
+                    appSession.record.title = sessionTitle(
+                        authorized.command.payload.text,
+                    )
+                }
                 await this.persistRuntime(runtime)
                 collaborationDelivery = this.secureContent.sendCollaborationPrompt(runtime.config, {
                     commandId: authorized.command.commandId,
                     revision: authorized.revision,
-                    sessionId: appSession.id,
+                    sessionId: appSession.record.id,
                     originDeviceId: authorized.command.deviceId,
                     originDeviceName: opened?.trustedDevice.deviceName
                         ?? opened?.trustedDevice.deviceId
@@ -457,9 +453,10 @@ export class MatrixGatewayRunner {
         const task = (async () => {
             let outcome: 'succeeded' | 'failed' = 'succeeded'
             let executionError: unknown
+            let resultSessionId = commandSessionId(command)
             try {
                 await beforeExecute
-                await this.execute(runtime, command)
+                resultSessionId = await this.execute(runtime, command)
             } catch (error) {
                 outcome = 'failed'
                 executionError = error
@@ -478,7 +475,7 @@ export class MatrixGatewayRunner {
                     outcome,
                     this.client,
                     executionError === undefined ? undefined : formatError(executionError),
-                    runtime.currentAppSessionId,
+                    resultSessionId,
                 )
             } catch (deliveryError) {
                 this.log(
@@ -498,90 +495,98 @@ export class MatrixGatewayRunner {
         this.executionTasks.add(task)
     }
 
-    private async execute(runtime: RoomRuntime, command: CodeverCommand): Promise<void> {
+    private async execute(
+        runtime: RoomRuntime,
+        command: CodeverCommand,
+    ): Promise<string | null> {
         switch (command.payload.operation) {
             case 'prompt': {
-                const appSession = this.ensureAppSession(runtime, command.payload.text)
-                await this.persistRuntime(runtime)
-                await runtime.session.dispatch({
+                const appSession = this.requireAppSession(
+                    runtime,
+                    command.payload.sessionId,
+                )
+                if (appSession.record.title === 'New session') {
+                    appSession.record.title = sessionTitle(command.payload.text)
+                }
+                await appSession.session.dispatch({
                     kind: 'user_message',
                     text: command.payload.text,
                     source: 'channel',
                     user: { id: command.deviceId, username: command.deviceId },
                 })
-                appSession.providerSessionId = runtime.session.sessionRecord.conversationId
-                this.updateCurrentAppSession(runtime)
+                this.updateAppSessionRecord(appSession)
                 await this.persistRuntime(runtime)
-                return
+                return appSession.record.id
             }
-            case 'cancel':
-                await runtime.session.dispatch({
+            case 'cancel': {
+                const appSession = this.requireAppSession(
+                    runtime,
+                    command.payload.sessionId,
+                )
+                await appSession.session.dispatch({
                     kind: 'cancel',
                     reason: 'user',
                     source: 'channel',
                     user: { id: command.deviceId, username: command.deviceId },
                 })
-                return
+                return appSession.record.id
+            }
             case 'decision': {
+                const appSession = this.requireAppSession(
+                    runtime,
+                    command.payload.sessionId,
+                )
                 const value = command.payload.decision === 'deny' ? 'deny' : 'allow'
-                if (!runtime.port.resolveDecision(command.payload.requestId, value)) {
+                if (!appSession.port.resolveDecision(command.payload.requestId, value)) {
                     throw new Error(`Unknown or invalid decision request ${command.payload.requestId}`)
                 }
-                return
+                return appSession.record.id
             }
             case 'session.settings': {
-                await this.applyWorkspaceSettings(runtime, command, command.payload, true)
+                const appSession = this.requireAppSession(
+                    runtime,
+                    command.payload.sessionId,
+                )
+                await this.applySessionSettings(appSession, command, command.payload)
                 await this.persistRuntime(runtime)
-                return
+                return appSession.record.id
             }
             case 'session.create': {
-                await this.applyWorkspaceSettings(runtime, command, command.payload, false)
-                await dispatchCommand(runtime.session, command, 'new', '')
-                runtime.session.sessionRecord.setConversationId(null)
-                const session = this.createAppSession(runtime, 'New session')
-                runtime.currentAppSessionId = session.id
-                await this.persistRuntime(runtime)
-                return
-            }
-            case 'session.select': {
-                const selected = runtime.appSessions.get(command.payload.sessionId)
-                if (!selected) {
-                    throw new Error(`Unknown app session ${command.payload.sessionId}`)
-                }
-                await this.applyWorkspaceSettings(runtime, command, {
-                    cwd: selected.cwd,
-                    projectName: selected.projectName,
-                    provider: selected.provider,
-                    model: selected.model,
-                    reasoningEffort: selected.reasoningEffort,
-                    permissionMode: selected.permissionMode,
-                }, false)
-                await dispatchCommand(
-                    runtime.session,
-                    command,
-                    selected.providerSessionId ? 'resume' : 'new',
-                    selected.providerSessionId ?? '',
+                const record = await this.createAppSessionRecord(
+                    runtime,
+                    command.payload,
                 )
-                runtime.session.sessionRecord.setConversationId(selected.providerSessionId)
-                selected.updatedAt = this.now()
-                runtime.currentAppSessionId = selected.id
-                await this.persistRuntime(runtime)
-                return
+                const appSession = this.createAppSessionRuntime(runtime, record)
+                runtime.appSessions.set(record.id, appSession)
+                try {
+                    await this.persistRuntime(runtime)
+                } catch (error) {
+                    runtime.appSessions.delete(record.id)
+                    appSession.port.close()
+                    await appSession.session.destroy().catch(destroyError => {
+                        this.log(
+                            `[matrix-gateway] rolled-back app session ${record.id} destroy failed: `
+                            + formatError(destroyError),
+                        )
+                    })
+                    throw error
+                }
+                return record.id
             }
         }
     }
 
-    private async applyWorkspaceSettings(
-        runtime: RoomRuntime,
+    private async applySessionSettings(
+        appSession: AppSessionRuntime,
         command: CodeverCommand,
         settings: WorkspaceSettingsInput,
-        updateCurrentSession: boolean,
     ): Promise<void> {
-        const providerName = settings.provider ?? runtime.workspace.provider
-        const providerChanged = providerName !== runtime.workspace.provider
+        const current = workspaceFromRecord(appSession.record)
+        const providerName = settings.provider ?? current.provider
+        const providerChanged = providerName !== current.provider
         const targetProvider = providerChanged
             ? getProvider(providerName)
-            : runtime.capabilityProvider
+            : appSession.capabilityProvider
         if (!targetProvider) {
             throw new Error(`Provider ${providerName} is not configured`)
         }
@@ -590,7 +595,7 @@ export class MatrixGatewayRunner {
             ? settings.model
             : providerChanged
                 ? null
-                : runtime.workspace.model
+                : current.model
         const selectedModel = requestedModel
             ? availableModels.find(model =>
                 model.id === requestedModel || model.name === requestedModel,
@@ -602,12 +607,12 @@ export class MatrixGatewayRunner {
             )
         }
         const modelId = selectedModel?.id ?? null
-        const modelChanged = modelId !== runtime.workspace.model
+        const modelChanged = modelId !== current.model
         const requestedReasoningEffort = settings.reasoningEffort !== undefined
             ? settings.reasoningEffort
             : providerChanged || modelChanged
                 ? selectedModel?.defaultReasoningLevel ?? null
-                : runtime.workspace.reasoningEffort
+                : current.reasoningEffort
         if (requestedReasoningEffort) {
             if (!selectedModel) {
                 throw new Error('Select a model before setting reasoning effort')
@@ -619,15 +624,15 @@ export class MatrixGatewayRunner {
                 )
             }
         }
-        const permissionMode = settings.permissionMode ?? runtime.workspace.permissionMode
+        const permissionMode = settings.permissionMode ?? current.permissionMode
         if (permissionMode !== 'default') {
             throw new Error(`Permission mode ${permissionMode} is not currently available`)
         }
 
         let project = {
-            id: runtime.workspace.projectId,
-            name: runtime.workspace.projectName,
-            cwd: runtime.workspace.cwd,
+            id: current.projectId,
+            name: current.projectName,
+            cwd: current.cwd,
         }
         if (settings.cwd !== undefined) {
             project = gatewayProjectIdentity(settings.cwd, settings.projectName)
@@ -639,37 +644,36 @@ export class MatrixGatewayRunner {
                 throw new Error(`Project working directory does not exist: ${project.cwd}`)
             }
         } else if (settings.projectName !== undefined) {
-            project = gatewayProjectIdentity(runtime.workspace.cwd, settings.projectName)
+            project = gatewayProjectIdentity(current.cwd, settings.projectName)
         }
 
         if (providerChanged) {
-            await dispatchCommand(runtime.session, command, 'provider', providerName)
+            await dispatchCommand(appSession.session, command, 'provider', providerName)
         }
-        if (project.cwd !== runtime.workspace.cwd) {
-            await dispatchCommand(runtime.session, command, 'cwd', project.cwd)
+        if (project.cwd !== current.cwd) {
+            await dispatchCommand(appSession.session, command, 'cwd', project.cwd)
         }
         if (providerChanged || modelChanged || settings.model !== undefined) {
-            await dispatchCommand(runtime.session, command, 'model', modelId ?? '')
+            await dispatchCommand(appSession.session, command, 'model', modelId ?? '')
         }
         if (
             providerChanged
             || modelChanged
-            || requestedReasoningEffort !== runtime.workspace.reasoningEffort
+            || requestedReasoningEffort !== current.reasoningEffort
             || settings.reasoningEffort !== undefined
         ) {
             await dispatchCommand(
-                runtime.session,
+                appSession.session,
                 command,
                 'reasoningEffort',
                 requestedReasoningEffort ?? '',
             )
         }
-        if (permissionMode !== runtime.workspace.permissionMode) {
-            await dispatchCommand(runtime.session, command, 'permissionMode', permissionMode)
+        if (permissionMode !== current.permissionMode) {
+            await dispatchCommand(appSession.session, command, 'permissionMode', permissionMode)
         }
 
-        runtime.capabilityProvider = targetProvider
-        runtime.workspace = {
+        Object.assign(appSession.record, {
             projectId: project.id,
             projectName: project.name,
             cwd: project.cwd,
@@ -677,54 +681,49 @@ export class MatrixGatewayRunner {
             model: modelId,
             reasoningEffort: requestedReasoningEffort,
             permissionMode,
-        }
-        if (updateCurrentSession) this.updateCurrentAppSession(runtime)
+            providerSessionId: appSession.session.sessionRecord.conversationId,
+            updatedAt: this.now(),
+        })
+        appSession.capabilityProvider = targetProvider
     }
 
-    private ensureAppSession(runtime: RoomRuntime, prompt: string): AppSessionRecord {
-        const current = runtime.currentAppSessionId
-            ? runtime.appSessions.get(runtime.currentAppSessionId)
-            : undefined
-        if (current) {
-            if (current.title === 'New session') current.title = sessionTitle(prompt)
-            return current
-        }
-        const created = this.createAppSession(runtime, sessionTitle(prompt))
-        runtime.currentAppSessionId = created.id
-        return created
+    private requireAppSession(
+        runtime: RoomRuntime,
+        sessionId: string,
+    ): AppSessionRuntime {
+        const appSession = runtime.appSessions.get(sessionId)
+        if (!appSession) throw new Error(`Unknown app session ${sessionId}`)
+        return appSession
     }
 
-    private createAppSession(runtime: RoomRuntime, title: string): AppSessionRecord {
-        const now = this.now()
-        const session: AppSessionRecord = {
+    private async createAppSessionRecord(
+        runtime: RoomRuntime,
+        settings: WorkspaceSettingsInput,
+    ): Promise<AppSessionRecord> {
+        const workspace = await resolveWorkspaceSettings(
+            runtime.workspace,
+            settings,
+            runtime.capabilityProvider,
+        )
+        return {
             id: randomUUID(),
-            title,
-            updatedAt: now,
-            projectId: runtime.workspace.projectId,
-            projectName: runtime.workspace.projectName,
-            cwd: runtime.workspace.cwd,
-            provider: runtime.workspace.provider,
-            model: runtime.workspace.model,
-            reasoningEffort: runtime.workspace.reasoningEffort,
-            permissionMode: runtime.workspace.permissionMode,
+            title: 'New session',
+            updatedAt: this.now(),
+            projectId: workspace.projectId,
+            projectName: workspace.projectName,
+            cwd: workspace.cwd,
+            provider: workspace.provider,
+            model: workspace.model,
+            reasoningEffort: workspace.reasoningEffort,
+            permissionMode: workspace.permissionMode,
             providerSessionId: null,
         }
-        runtime.appSessions.set(session.id, session)
-        return session
     }
 
-    private updateCurrentAppSession(runtime: RoomRuntime): void {
-        if (!runtime.currentAppSessionId) return
-        const current = runtime.appSessions.get(runtime.currentAppSessionId)
-        if (!current) return
-        current.projectId = runtime.workspace.projectId
-        current.projectName = runtime.workspace.projectName
-        current.cwd = runtime.workspace.cwd
-        current.provider = runtime.workspace.provider
-        current.model = runtime.workspace.model
-        current.reasoningEffort = runtime.workspace.reasoningEffort
-        current.permissionMode = runtime.workspace.permissionMode
-        current.updatedAt = this.now()
+    private updateAppSessionRecord(appSession: AppSessionRuntime): void {
+        appSession.record.providerSessionId =
+            appSession.session.sessionRecord.conversationId
+        appSession.record.updatedAt = this.now()
     }
 
     private async persistRuntime(runtime: RoomRuntime): Promise<void> {
@@ -737,99 +736,81 @@ export class MatrixGatewayRunner {
     private async createRoomRuntimes(): Promise<void> {
         for (const room of this.config.rooms) {
             const restored = this.runtimeStateStore.getRoom(room.roomId)
-            const { model: _configuredModel, ...roomWithoutModel } = room
-            const effectiveRoom: MatrixGatewayRoomConfig = {
-                ...roomWithoutModel,
-                cwd: restored.workspace.cwd,
-                providerName: restored.workspace.provider,
-                ...(restored.workspace.model
-                    ? { model: restored.workspace.model }
-                    : {}),
-                providerSettings: {
-                    ...(room.providerSettings ?? {}),
-                    ...(restored.workspace.reasoningEffort
-                        ? { reasoningEffort: restored.workspace.reasoningEffort }
-                        : {}),
-                    permissionMode: restored.workspace.permissionMode,
-                },
-            }
-            const selectedProviderSessionId = restored.currentSessionId
-                ? restored.appSessions.find(session => session.id === restored.currentSessionId)
-                    ?.providerSessionId ?? null
-                : null
-            let runtime: RoomRuntime | undefined
-            const port = new MatrixPort({
-                transport: this.secureContent
-                    ? this.secureContent.transportForRoom(room, this.client)
-                    : this.client,
-                roomId: room.roomId,
-                gatewayId: this.config.gatewayId,
-                getSessionId: () =>
-                    runtime?.currentAppSessionId ?? restored.currentSessionId,
-                onLog: this.dependencies.onLog,
-            })
-            let capabilityProvider: AgentProvider | null
-            let session: TopicSession
-            if (this.dependencies.sessionFactory) {
-                session = this.dependencies.sessionFactory(effectiveRoom, port)
-                if (selectedProviderSessionId !== null) {
-                    session.sessionRecord.setConversationId(selectedProviderSessionId)
-                }
-                capabilityProvider = getProvider(effectiveRoom.providerName) ?? null
-            } else {
-                const provider = this.dependencies.providerFactory?.(effectiveRoom)
-                    ?? createProviderInstance(effectiveRoom.providerName)
-                if (!provider) {
-                    throw new Error(
-                        `Matrix room ${room.roomId} provider ${effectiveRoom.providerName} is unavailable`,
-                    )
-                }
-                capabilityProvider = provider
-                session = this.createDefaultSession(
-                    effectiveRoom,
-                    port,
-                    provider,
-                    selectedProviderSessionId,
-                )
-            }
-            runtime = {
+            const runtime: RoomRuntime = {
                 config: room,
-                port,
-                session,
-                capabilityProvider,
+                capabilityProvider: getProvider(restored.workspace.provider) ?? null,
                 workspace: structuredClone(restored.workspace),
-                appSessions: new Map(
-                    restored.appSessions.map(appSession => [appSession.id, { ...appSession }]),
-                ),
-                currentAppSessionId: restored.currentSessionId,
+                appSessions: new Map(),
                 revisionEpoch: restored.revisionEpoch,
                 revisionEpochGeneration: restored.revisionEpochGeneration,
                 replayGeneration: restored.replayGeneration,
                 stateVersion: restored.stateVersion,
             }
+            // Register before restoring children so startup cleanup can destroy
+            // any earlier child if a later app-session factory fails.
             this.rooms.set(room.roomId, runtime)
-            this.roomTargets.bind(room.roomId, {
-                dispatch: input => session.dispatch(input),
-                resolveDecision: port.resolveDecision.bind(port),
-            })
+            for (const persisted of restored.appSessions) {
+                const record = { ...persisted }
+                runtime.appSessions.set(
+                    record.id,
+                    this.createAppSessionRuntime(runtime, record),
+                )
+            }
         }
+    }
+
+    private createAppSessionRuntime(
+        runtime: RoomRuntime,
+        record: AppSessionRecord,
+    ): AppSessionRuntime {
+        const effectiveRoom = roomConfigForSession(runtime.config, record)
+        const port = new MatrixPort({
+            transport: this.secureContent
+                ? this.secureContent.transportForRoom(runtime.config, this.client)
+                : this.client,
+            roomId: runtime.config.roomId,
+            gatewayId: this.config.gatewayId,
+            sessionId: record.id,
+            onLog: this.dependencies.onLog,
+        })
+        let capabilityProvider: AgentProvider | null
+        let session: TopicSession
+        if (this.dependencies.sessionFactory) {
+            session = this.dependencies.sessionFactory(effectiveRoom, port, record)
+            session.sessionRecord.setConversationId(record.providerSessionId)
+            capabilityProvider = getProvider(record.provider) ?? null
+        } else {
+            const provider = this.dependencies.providerFactory?.(effectiveRoom, record)
+                ?? createProviderInstance(record.provider)
+            if (!provider) {
+                port.close()
+                throw new Error(
+                    `Matrix app session ${record.id} provider ${record.provider} is unavailable`,
+                )
+            }
+            capabilityProvider = provider
+            session = this.createDefaultSession(effectiveRoom, port, provider, record)
+        }
+        return { record, port, session, capabilityProvider }
     }
 
     private createDefaultSession(
         room: MatrixGatewayRoomConfig,
         port: MatrixPort,
         provider: AgentProvider,
-        providerSessionId: string | null,
+        appSession: AppSessionRecord,
     ): TopicSession {
         const sessionRecord = createTopicSessionRecord({
             cwd: room.cwd,
             providerName: room.providerName,
-            groupChatId: numericRoomCompatibilityId(room.roomId),
+            groupChatId: numericRoomCompatibilityId(
+                `${room.roomId}\0${appSession.id}`,
+            ),
             model: room.model,
             verboseLevel: room.verboseLevel,
             timeoutSeconds: room.timeoutSeconds,
             providerSettings: room.providerSettings,
-            conversationId: providerSessionId,
+            conversationId: appSession.providerSessionId,
         })
         return createTopicSession({ sessionRecord, provider, channelPort: port })
     }
@@ -843,11 +824,15 @@ export class MatrixGatewayRunner {
         const runtimes = [...this.rooms.values()]
         this.rooms.clear()
         for (const runtime of runtimes) {
-            this.roomTargets.unbind(runtime.config.roomId)
-            runtime.port.close()
-            await runtime.session.destroy().catch(error => {
-                this.log(`[matrix-gateway] session destroy failed for ${runtime.config.roomId}: ${formatError(error)}`)
-            })
+            for (const appSession of runtime.appSessions.values()) {
+                appSession.port.close()
+                await appSession.session.destroy().catch(error => {
+                    this.log(
+                        `[matrix-gateway] app session ${appSession.record.id} destroy failed: `
+                        + formatError(error),
+                    )
+                })
+            }
         }
         await Promise.allSettled([...this.executionTasks])
         this.executionTasks.clear()
@@ -896,9 +881,136 @@ function runtimeStateWithoutVersion(
         revisionEpoch: runtime.revisionEpoch,
         revisionEpochGeneration: runtime.revisionEpochGeneration,
         replayGeneration: runtime.replayGeneration,
-        currentSessionId: runtime.currentAppSessionId,
-        appSessions: [...runtime.appSessions.values()].map(session => ({ ...session })),
+        currentSessionId: null,
+        appSessions: [...runtime.appSessions.values()].map(({ record }) => ({
+            ...record,
+        })),
         workspace: structuredClone(runtime.workspace),
+    }
+}
+
+function commandSessionId(command: CodeverCommand): string | null {
+    switch (command.payload.operation) {
+        case 'session.create':
+            return null
+        case 'prompt':
+        case 'cancel':
+        case 'decision':
+        case 'session.settings':
+            return command.payload.sessionId
+    }
+}
+
+function workspaceFromRecord(record: AppSessionRecord): WorkspaceState {
+    return {
+        projectId: record.projectId,
+        projectName: record.projectName,
+        cwd: record.cwd,
+        provider: record.provider,
+        model: record.model,
+        reasoningEffort: record.reasoningEffort,
+        permissionMode: record.permissionMode,
+    }
+}
+
+function roomConfigForSession(
+    room: MatrixGatewayRoomConfig,
+    session: AppSessionRecord,
+): MatrixGatewayRoomConfig {
+    const { model: _configuredModel, ...roomWithoutModel } = room
+    return {
+        ...roomWithoutModel,
+        cwd: session.cwd,
+        providerName: session.provider,
+        ...(session.model ? { model: session.model } : {}),
+        providerSettings: {
+            ...(room.providerSettings ?? {}),
+            ...(session.reasoningEffort
+                ? { reasoningEffort: session.reasoningEffort }
+                : {}),
+            permissionMode: session.permissionMode,
+        },
+    }
+}
+
+async function resolveWorkspaceSettings(
+    current: WorkspaceState,
+    settings: WorkspaceSettingsInput,
+    currentCapabilityProvider: AgentProvider | null,
+): Promise<WorkspaceState> {
+    const providerName = settings.provider ?? current.provider
+    const providerChanged = providerName !== current.provider
+    const targetProvider = providerChanged
+        ? getProvider(providerName)
+        : currentCapabilityProvider ?? getProvider(providerName)
+    if (!targetProvider) {
+        throw new Error(`Provider ${providerName} is not configured`)
+    }
+    const availableModels = targetProvider.getAvailableModels()
+    const requestedModel = settings.model !== undefined
+        ? settings.model
+        : providerChanged
+            ? null
+            : current.model
+    const selectedModel = requestedModel
+        ? availableModels.find(model =>
+            model.id === requestedModel || model.name === requestedModel,
+        )
+        : undefined
+    if (requestedModel && !selectedModel) {
+        throw new Error(
+            `Model ${requestedModel} is not available for provider ${providerName}`,
+        )
+    }
+    const model = selectedModel?.id ?? null
+    const modelChanged = model !== current.model
+    const reasoningEffort = settings.reasoningEffort !== undefined
+        ? settings.reasoningEffort
+        : providerChanged || modelChanged
+            ? selectedModel?.defaultReasoningLevel ?? null
+            : current.reasoningEffort
+    if (reasoningEffort) {
+        if (!selectedModel) {
+            throw new Error('Select a model before setting reasoning effort')
+        }
+        if (
+            !(selectedModel.supportedReasoningLevels ?? [])
+                .some(level => level.effort === reasoningEffort)
+        ) {
+            throw new Error(
+                `Reasoning effort ${reasoningEffort} is not available for model ${selectedModel.id}`,
+            )
+        }
+    }
+    const permissionMode = settings.permissionMode ?? current.permissionMode
+    if (permissionMode !== 'default') {
+        throw new Error(`Permission mode ${permissionMode} is not currently available`)
+    }
+    let project = {
+        id: current.projectId,
+        name: current.projectName,
+        cwd: current.cwd,
+    }
+    if (settings.cwd !== undefined) {
+        project = gatewayProjectIdentity(settings.cwd, settings.projectName)
+        if (!isAbsolute(project.cwd) && !win32.isAbsolute(project.cwd)) {
+            throw new Error('Project working directory must be an absolute path')
+        }
+        const projectStat = await stat(project.cwd).catch(() => null)
+        if (!projectStat?.isDirectory()) {
+            throw new Error(`Project working directory does not exist: ${project.cwd}`)
+        }
+    } else if (settings.projectName !== undefined) {
+        project = gatewayProjectIdentity(current.cwd, settings.projectName)
+    }
+    return {
+        projectId: project.id,
+        projectName: project.name,
+        cwd: project.cwd,
+        provider: providerName,
+        model,
+        reasoningEffort,
+        permissionMode,
     }
 }
 

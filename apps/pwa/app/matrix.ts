@@ -1946,6 +1946,10 @@ async function forwardEvent(
         sequence: decryptedExtension.sequence,
         revision: decryptedExtension.revision,
         outcome: decryptedExtension.outcome,
+        ...(typeof decryptedExtension.session_id === "string" &&
+        decryptedExtension.session_id
+          ? { sessionId: decryptedExtension.session_id }
+          : {}),
       },
       decryptedExtension.revision_epoch,
       activeDeviceCount,
@@ -3035,8 +3039,6 @@ function fallbackBody(payload: CommandPayload): string {
       return "Update agent session settings";
     case "session.create":
       return "Create a new agent session";
-    case "session.select":
-      return `Switch to agent session ${payload.sessionId}`;
   }
 }
 

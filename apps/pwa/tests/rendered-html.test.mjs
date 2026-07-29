@@ -62,7 +62,14 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
-  assert.match(source, /operation: "session\.select"/);
+  assert.doesNotMatch(source, /operation: "session\.select"/);
+  assert.match(
+    source,
+    /function chooseSession\(id: string\)[\s\S]*?activateLocalSession\(id\)/,
+  );
+  assert.match(source, /agentActivitiesBySession/);
+  assert.match(source, /setSessionAgentActivity\(sessionId/);
+  assert.doesNotMatch(source, /const \[isStreaming, setIsStreaming\]/);
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
   assert.match(newSession, /Gateway × Project/);
@@ -383,6 +390,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /completion\?\.outcome === "succeeded"/);
   assert.match(
     app,
-    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setIsStreaming\(false\)/,
+    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setSessionRunning\(sessionId, false\)/,
+  );
+  assert.match(
+    app,
+    /activePromptCommandsRef\.current\.get\(result\.commandId\)[\s\S]*setSessionRunning\(promptSessionId, false\)/,
   );
 });
