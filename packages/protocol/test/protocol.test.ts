@@ -15,7 +15,7 @@ describe('canonicalJson', () => {
 })
 
 describe('protocol schemas', () => {
-  it('requires the outer signed operation to match the payload', () => {
+  it('requires commands to bind the pairing-certificate sequence epoch', () => {
     const result = commandSchema.safeParse({
       kind: 'codever.command',
       version: 1,
@@ -23,6 +23,28 @@ describe('protocol schemas', () => {
       gatewayId: 'gateway-1',
       deviceId: 'device-1',
       conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      sequence: 1,
+      baseRevision: 0,
+      operation: 'cancel',
+      issuedAt: 1,
+      expiresAt: 2,
+      nonce: '0123456789abcdef',
+      payload: { operation: 'cancel' },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('requires the outer signed operation to match the payload', () => {
+    const result = commandSchema.safeParse({
+      kind: 'codever.command',
+      version: 1,
+      commandId: 'cmd-1',
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
       sequence: 1,
       operation: 'cancel',
       issuedAt: 1,
@@ -46,5 +68,47 @@ describe('protocol schemas', () => {
         payload: { type: 'agent.text.delta', streamId: 'stream-1', text: 'hello' },
       }),
     ).toMatchObject({ version: 1, sequence: 1 })
+  })
+
+  it('accepts strict app session create and select commands', () => {
+    const base = {
+      kind: 'codever.command',
+      version: 1,
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      baseRevision: 0,
+      issuedAt: 1,
+      expiresAt: 2,
+    }
+    expect(commandSchema.parse({
+      ...base,
+      commandId: 'create-1',
+      sequence: 1,
+      operation: 'session.create',
+      nonce: '0123456789abcdef-create',
+      payload: { operation: 'session.create' },
+    }).payload).toEqual({ operation: 'session.create' })
+    expect(commandSchema.parse({
+      ...base,
+      commandId: 'select-1',
+      sequence: 2,
+      operation: 'session.select',
+      nonce: '0123456789abcdef-select',
+      payload: { operation: 'session.select', sessionId: 'app-session-1' },
+    }).payload).toEqual({
+      operation: 'session.select',
+      sessionId: 'app-session-1',
+    })
+    expect(commandSchema.safeParse({
+      ...base,
+      commandId: 'select-invalid',
+      sequence: 3,
+      operation: 'session.select',
+      nonce: '0123456789abcdef-invalid',
+      payload: { operation: 'session.select' },
+    }).success).toBe(false)
   })
 })

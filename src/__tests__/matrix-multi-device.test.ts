@@ -321,6 +321,7 @@ describe('multi-device Matrix collaboration', () => {
             'command-durable',
             3,
             7,
+            'runtime-epoch-1',
             'succeeded',
             failingTransport,
         )).rejects.toThrow('device-b offline')
@@ -494,6 +495,7 @@ describe('multi-device Matrix collaboration', () => {
             'startup-recovery',
             4,
             9,
+            'runtime-epoch-1',
             'succeeded',
             { sendEncryptedRoomEvent: async () => { throw new Error('offline') } },
         )).rejects.toThrow('offline')
@@ -565,22 +567,30 @@ describe('multi-device Matrix collaboration', () => {
             trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A', 'certificate-a'),
             trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B', 'certificate-b'),
         ]
+        const replayStore = new FileCommandReplayStore(join(directory, 'commands.jsonl'))
         const authorizer = new StrictMatrixCommandAuthorizer(
             'gateway-1',
             policies,
-            new FileCommandReplayStore(join(directory, 'commands.jsonl')),
+            replayStore,
         )
         await authorizer.initialize(now)
+        await expect(
+            replayStore.getConversationRevision(
+                'gateway-1',
+                'conversation-1',
+                'runtime-epoch-1',
+            ),
+        ).resolves.toBe(0)
 
         const acceptedA = await authorizer.authorizeDelivery(
-            await signedPrompt(first, 'device-a', 1, 0),
+            await signedPrompt(first, 'device-a', 1, 0, 'runtime-epoch-1', 'certificate-a'),
             context('device-a'),
             now,
         )
         expect(acceptedA).toMatchObject({ duplicate: false, revision: 1 })
 
         await expect(authorizer.authorizeDelivery(
-            await signedPrompt(second, 'device-b', 1, 0),
+            await signedPrompt(second, 'device-b', 1, 0, 'runtime-epoch-1', 'certificate-b'),
             context('device-b'),
             now,
         )).rejects.toMatchObject({
@@ -590,11 +600,91 @@ describe('multi-device Matrix collaboration', () => {
         })
 
         const acceptedB = await authorizer.authorizeDelivery(
-            await signedPrompt(second, 'device-b', 1, 1),
+            await signedPrompt(second, 'device-b', 1, 1, 'runtime-epoch-1', 'certificate-b'),
             context('device-b'),
             now,
         )
         expect(acceptedB).toMatchObject({ duplicate: false, revision: 2 })
+        await expect(
+            replayStore.getConversationRevision(
+                'gateway-1',
+                'conversation-1',
+                'runtime-epoch-1',
+            ),
+        ).resolves.toBe(2)
+
+        await expect(authorizer.authorizeDelivery(
+            await signedPrompt(first, 'device-a', 1, 0, 'runtime-epoch-2', 'certificate-a'),
+            context('device-a'),
+            now,
+        )).rejects.toMatchObject({ code: 'revision-epoch-mismatch' })
+        const acceptedAfterRuntimeReset = await authorizer.authorizeDelivery(
+            await signedPrompt(first, 'device-a', 1, 0, 'runtime-epoch-2', 'certificate-a'),
+            context('device-a', 'runtime-epoch-2'),
+            now,
+        )
+        expect(acceptedAfterRuntimeReset).toMatchObject({ duplicate: false, revision: 1 })
+        await expect(
+            replayStore.getConversationRevision(
+                'gateway-1',
+                'conversation-1',
+                'runtime-epoch-2',
+            ),
+        ).resolves.toBe(1)
+    })
+
+    it('rejects a delayed command from the previous certificate after same-device renewal', async () => {
+        const directory = await temporaryDirectory()
+        const device = await generateDeviceKeyPair()
+        const oldPolicy = trusted(
+            'device-a',
+            'Alice phone',
+            device.publicJwk,
+            'MATRIX_A',
+            'certificate-old',
+        )
+        const replayStore = new FileCommandReplayStore(join(directory, 'commands.jsonl'))
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            'gateway-1',
+            [oldPolicy],
+            replayStore,
+        )
+        await authorizer.initialize(now)
+        const delayedOldCommand = await signedPrompt(
+            device,
+            'device-a',
+            1,
+            0,
+            'runtime-epoch-1',
+            'certificate-old',
+        )
+
+        authorizer.trustDevice(trusted(
+            'device-a',
+            'Alice phone',
+            device.publicJwk,
+            'MATRIX_A',
+            'certificate-new',
+        ))
+
+        await expect(authorizer.authorizeDelivery(
+            delayedOldCommand,
+            context('device-a'),
+            now,
+        )).rejects.toMatchObject({ code: 'sequence-epoch-mismatch' })
+
+        await expect(authorizer.authorizeDelivery(
+            await signedPrompt(
+                device,
+                'device-a',
+                1,
+                0,
+                'runtime-epoch-1',
+                'certificate-new',
+            ),
+            context('device-a'),
+            now,
+        )).resolves.toMatchObject({ duplicate: false, revision: 1 })
     })
 })
 
@@ -654,6 +744,8 @@ async function signedPrompt(
     deviceId: string,
     sequence: number,
     baseRevision: number,
+    revisionEpoch = 'runtime-epoch-1',
+    sequenceEpoch = `certificate-${deviceId}`,
 ) {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -661,7 +753,9 @@ async function signedPrompt(
         commandId: `${deviceId}-${sequence}-${baseRevision}`,
         gatewayId: 'gateway-1',
         deviceId,
+        sequenceEpoch,
         conversationId: 'conversation-1',
+        revisionEpoch,
         sequence,
         baseRevision,
         operation: 'prompt',
@@ -673,10 +767,11 @@ async function signedPrompt(
     return signCommand(command, keys.privateKey, keys.keyId)
 }
 
-function context(deviceId: string) {
+function context(deviceId: string, revisionEpoch = 'runtime-epoch-1') {
     return {
         roomId: '!room:localhost',
         conversationId: 'conversation-1',
+        revisionEpoch,
         matrixSender: `@${deviceId}:localhost`,
         matrixDeviceKey: 'ignored-with-app-envelope',
         applicationDeviceId: deviceId,

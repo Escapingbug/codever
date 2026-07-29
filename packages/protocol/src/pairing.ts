@@ -12,6 +12,8 @@ export const pairingOperationSchema = z.enum([
   'cancel',
   'decision',
   'session.settings',
+  'session.create',
+  'session.select',
 ])
 
 export type PairingOperation = z.infer<typeof pairingOperationSchema>

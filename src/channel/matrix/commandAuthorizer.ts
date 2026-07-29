@@ -121,6 +121,16 @@ function commandToSessionInputs(command: CodeverCommand, sender: string): readon
             }
             return inputs
         }
+        case 'session.create':
+            return [{ kind: 'command', name: 'new', source: 'channel', user }]
+        case 'session.select':
+            return [{
+                kind: 'command',
+                name: 'resume',
+                args: command.payload.sessionId,
+                source: 'channel',
+                user,
+            }]
     }
 }
 

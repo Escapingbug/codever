@@ -47,6 +47,8 @@ const allOperations: PairingOperation[] = [
   'cancel',
   'decision',
   'session.settings',
+  'session.create',
+  'session.select',
 ]
 
 export interface CreatePairingOfferInput {
@@ -229,6 +231,20 @@ export class GatewayPairingService {
       this.identity.keys.privateKey,
       this.identity.keys.keyId,
     )
+    const existingDevice = await this.registry.get(request.request.deviceId)
+    if (
+      existingDevice?.status === 'active'
+      && canonicalJson(existingDevice.certificate.certificate.deviceKey)
+        !== canonicalJson(request.request.deviceKey)
+    ) {
+      throw new Error(
+        `Active device ${request.request.deviceId} cannot renew with a different application key`,
+      )
+    }
+    const activeDevices = await this.registry.listActive(now)
+    const replacesActiveDevice = activeDevices.some(record =>
+      record.certificate.certificate.deviceId === request.request.deviceId,
+    )
     const responseDocument: PairingResponse = {
       kind: 'codever.pairing.response',
       version: 1,
@@ -236,7 +252,7 @@ export class GatewayPairingService {
       requestId: request.request.requestId,
       requestDigest: await pairingRequestDigest(request),
       gatewayId: this.identity.gatewayId,
-      activeDeviceCount: (await this.registry.listActive(now)).length + 1,
+      activeDeviceCount: activeDevices.length + (replacesActiveDevice ? 0 : 1),
       certificate,
       issuedAt: now,
       // The offer is already atomically consumed. Keep the exact persisted

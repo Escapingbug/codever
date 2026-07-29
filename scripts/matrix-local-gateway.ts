@@ -173,14 +173,16 @@ if (active.length === 0) {
 }
 
 const trustedDevices = active.map(trustedDeviceFromRecord)
+let runner: MatrixGatewayRunner | null = null
 const stopPairingRecovery = listenForMatrixPairingRequests({
     client,
     service: pairingService,
     registry,
     gatewayTransport: currentTransport,
     acceptNewOffers,
-    onAccepted: record => {
+    onAccepted: async record => {
         process.stdout.write(`Device ${record.certificate.certificate.deviceName} is now active.\n`)
+        await runner?.syncState()
     },
     onRejected: error => {
         process.stderr.write(`[matrix-pairing-recovery] rejected: ${formatError(error)}\n`)
@@ -214,7 +216,7 @@ const config: MatrixGatewayConfig = {
         envelopeReplayLedgerPath: join(dataDirectory, 'envelope-replay.json'),
     },
 }
-const runner = new MatrixGatewayRunner(config, {
+runner = new MatrixGatewayRunner(config, {
     client,
     listTrustedDevices: async () =>
         (await registry.listActive()).map(trustedDeviceFromRecord),
@@ -237,7 +239,7 @@ await new Promise<void>(resolve => {
     const stop = (): void => {
         if (stopping) return
         stopping = true
-        void runner.stop().finally(resolve)
+        void runner!.stop().finally(resolve)
     }
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)

@@ -34,6 +34,32 @@ export interface OpenedGatewayMatrixContent {
 
 export type TrustedDeviceProvider = () => Promise<readonly MatrixGatewayTrustedDevice[]>
 
+export interface GatewayStateSnapshot {
+    revision: number
+    revisionEpoch: string
+    stateVersion: number
+    currentSessionId: string | null
+    sessions: Array<{
+        id: string
+        title: string
+        updatedAt: number
+        provider: string
+        model?: string
+    }>
+    workspace: {
+        cwd: string
+        provider: string
+        model?: string
+        permissionMode: string
+    }
+    capabilities: {
+        models: Array<{ id: string; name: string }>
+        permissionModes: Array<{ id: string; name: string }>
+        canCreateSession: boolean
+        canSelectSession: boolean
+    }
+}
+
 export class GatewaySecureContentLayer {
     private gatewayKeys: DeviceKeyPair | null = null
     private readonly replayStore: FileReplayStore
@@ -128,6 +154,7 @@ export class GatewaySecureContentLayer {
         commandId: string,
         sequence: number,
         revision: number,
+        revisionEpoch: string,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         const active = (await this.currentTrustedDevices()).filter(device =>
@@ -150,6 +177,7 @@ export class GatewaySecureContentLayer {
                     command_id: commandId,
                     sequence,
                     revision,
+                    revision_epoch: revisionEpoch,
                     active_device_count: active.length,
                 },
             },
@@ -162,6 +190,7 @@ export class GatewaySecureContentLayer {
         commandId: string,
         expectedRevision: number,
         receivedBaseRevision: number,
+        revisionEpoch: string,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
@@ -170,6 +199,7 @@ export class GatewaySecureContentLayer {
             command_id: commandId,
             expected_revision: expectedRevision,
             received_base_revision: receivedBaseRevision,
+            revision_epoch: revisionEpoch,
         }, `codever.command.conflict.${commandId}`, transport)
     }
 
@@ -211,6 +241,7 @@ export class GatewaySecureContentLayer {
         commandId: string,
         sequence: number,
         revision: number,
+        revisionEpoch: string,
         outcome: 'succeeded' | 'failed',
         transport: MatrixTransport,
         error?: string,
@@ -221,9 +252,68 @@ export class GatewaySecureContentLayer {
             command_id: commandId,
             sequence,
             revision,
+            revision_epoch: revisionEpoch,
             outcome,
             ...(error ? { error } : {}),
         }, `codever.command.result.${commandId}.${outcome}`, transport)
+    }
+
+    async sendGatewayState(
+        room: MatrixGatewayRoomConfig,
+        state: GatewayStateSnapshot,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
+            throw new Error('Gateway state revision must be a non-negative integer')
+        }
+        if (!Number.isSafeInteger(state.stateVersion) || state.stateVersion < 1) {
+            throw new Error('Gateway state version must be a positive integer')
+        }
+        const extension = {
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            kind: 'gateway_state',
+            revision: state.revision,
+            revision_epoch: state.revisionEpoch,
+            state_version: state.stateVersion,
+            current_session_id: state.currentSessionId,
+            sessions: state.sessions.map(session => ({
+                id: session.id,
+                title: session.title,
+                updated_at: session.updatedAt,
+                provider: session.provider,
+                ...(session.model ? { model: session.model } : {}),
+            })),
+            workspace: {
+                cwd: state.workspace.cwd,
+                provider: state.workspace.provider,
+                ...(state.workspace.model ? { model: state.workspace.model } : {}),
+                permission_mode: state.workspace.permissionMode,
+            },
+            capabilities: {
+                models: state.capabilities.models.map(model => ({
+                    id: model.id,
+                    name: model.name,
+                })),
+                permission_modes: state.capabilities.permissionModes.map(mode => ({
+                    id: mode.id,
+                    name: mode.name,
+                })),
+                can_create_session: state.capabilities.canCreateSession,
+                can_select_session: state.capabilities.canSelectSession,
+            },
+        }
+        return this.sealOutgoingToAll({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            // A state sync is an explicit new snapshot even when the command
+            // revision is unchanged (for example, after device pairing).
+            transactionId: `codever.gateway.state.${state.revision}.${randomUUID()}`,
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever gateway state',
+                [CODEVER_MATRIX_EXTENSION]: extension,
+            },
+        }, room, transport)
     }
 
     /**

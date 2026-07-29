@@ -1,10 +1,16 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClientEvent, SyncState, type MatrixClient, type MatrixEvent } from 'matrix-js-sdk'
 import type { CodeverCommand, SignedCommand } from '@codever/protocol'
-import { generateDeviceKeyPair, signCommand } from '@codever/security'
+import {
+    exportDeviceKeyPair,
+    generateDeviceKeyPair,
+    InMemoryReplayStore,
+    openSecureEnvelope,
+    signCommand,
+} from '@codever/security'
 import type { AgentProvider, AgentQueryHandle } from '@/providers/provider'
 import type { TopicSession } from '@/bridge/channelPort'
 import type { SessionInput } from '@/runtime/semantic'
@@ -28,6 +34,8 @@ import {
 import { startMatrixDaemon } from '@/matrix-daemon'
 
 const temporaryDirectories: string[] = []
+const REVISION_EPOCH = 'runtime-epoch-1'
+const REPLAY_GENERATION = 'replay-generation-1'
 
 afterEach(async () => {
     await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, { recursive: true, force: true })))
@@ -47,6 +55,7 @@ describe('strict Matrix command authorization', () => {
         await expect(authorizer.authorize(signed, {
             roomId: '!room:example.org',
             conversationId: 'conversation-1',
+            revisionEpoch: REVISION_EPOCH,
             matrixSender: '@alice:example.org',
             matrixDeviceKey: 'matrix-ed25519-key',
         }, fixture.now)).resolves.toMatchObject({
@@ -63,12 +72,14 @@ describe('strict Matrix command authorization', () => {
         await expect(restarted.authorize(signed, {
             roomId: '!room:example.org',
             conversationId: 'conversation-1',
+            revisionEpoch: REVISION_EPOCH,
             matrixSender: '@alice:example.org',
             matrixDeviceKey: 'matrix-ed25519-key',
         }, fixture.now)).rejects.toMatchObject({ code: 'replay' })
         await expect(restarted.authorizeDelivery(signed, {
             roomId: '!room:example.org',
             conversationId: 'conversation-1',
+            revisionEpoch: REVISION_EPOCH,
             matrixSender: '@alice:example.org',
             matrixDeviceKey: 'matrix-ed25519-key',
         }, fixture.now)).resolves.toMatchObject({
@@ -91,6 +102,7 @@ describe('strict Matrix command authorization', () => {
             {
                 roomId: '!room:example.org',
                 conversationId: 'conversation-1',
+                revisionEpoch: REVISION_EPOCH,
                 matrixSender: '@alice:example.org',
                 matrixDeviceKey: 'server-substituted-key',
             },
@@ -103,6 +115,7 @@ describe('strict Matrix command authorization', () => {
         const context = {
             roomId: '!room:example.org',
             conversationId: 'conversation-1',
+            revisionEpoch: REVISION_EPOCH,
             matrixSender: '@alice:example.org',
             matrixDeviceKey: 'matrix-ed25519-key',
         }
@@ -154,7 +167,13 @@ describe('strict Matrix command authorization', () => {
         )
         await replacementGatewayIdentity.initialize(fixture.now)
         await expect(replacementGatewayIdentity.authorize(
-            await signedPrompt(fixture.keys, fixture.now, 1, 3),
+            await signedPrompt(
+                fixture.keys,
+                fixture.now,
+                1,
+                3,
+                'replacement-gateway-key',
+            ),
             context,
             fixture.now,
         )).resolves.toMatchObject({ sequence: 1 })
@@ -207,6 +226,162 @@ describe('MatrixGatewayRunner', () => {
         expect(session.destroy).toHaveBeenCalledOnce()
     })
 
+    it('broadcasts an encrypted revision-zero authoritative state and supports explicit resync', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = Date.now() + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+
+        await runner.start()
+        expect(client.sent).toHaveLength(1)
+        await runner.syncState()
+        expect(client.sent).toHaveLength(2)
+        expect(client.sent[0]!.transactionId).not.toBe(client.sent[1]!.transactionId)
+
+        const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const opened = await openSecureEnvelope(outer.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: gatewayKeys.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+        })
+        expect(opened.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_state',
+                revision: 0,
+                revision_epoch: REVISION_EPOCH,
+                state_version: 1,
+                current_session_id: null,
+                workspace: {
+                    cwd: 'C:\\repo',
+                    provider: 'mock-provider',
+                    permission_mode: 'default',
+                },
+                capabilities: {
+                    models: [],
+                    permission_modes: [{ id: 'default', name: 'Default' }],
+                    can_create_session: true,
+                    can_select_session: true,
+                },
+            },
+        })
+        await runner.stop()
+    })
+
+    it('restores persisted sessions, provider session, workspace, epoch, and state version before first sync', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = Date.now() + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        await writeFile(
+            `${fixture.config.replayLedgerPath}.runtime-state.json`,
+            `${JSON.stringify({
+                version: 1,
+                rooms: {
+                    '!room:example.org': {
+                        revisionEpoch: REVISION_EPOCH,
+                        replayGeneration: REPLAY_GENERATION,
+                        stateVersion: 4,
+                        currentSessionId: 'app-session-1',
+                        appSessions: [{
+                            id: 'app-session-1',
+                            title: 'Restored work',
+                            updatedAt: fixture.now - 1_000,
+                            provider: 'mock-provider',
+                            model: null,
+                            providerSessionId: 'provider-session-1',
+                        }],
+                        workspace: {
+                            cwd: 'D:\\restored',
+                            provider: 'mock-provider',
+                            model: null,
+                            permissionMode: 'default',
+                        },
+                    },
+                },
+            })}\n`,
+            'utf8',
+        )
+        const client = new FakeMatrixGatewayClient()
+        const session = fakeTopicSession([])
+        let restoredRoom: MatrixGatewayConfig['rooms'][number] | undefined
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: (room) => {
+                restoredRoom = room
+                return session
+            },
+        })
+
+        await runner.start()
+        expect(restoredRoom?.cwd).toBe('D:\\restored')
+        expect(session.sessionRecord.conversationId).toBe('provider-session-1')
+        const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const opened = await openSecureEnvelope(outer.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: gatewayKeys.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+        })
+        expect(opened.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_state',
+                revision_epoch: REVISION_EPOCH,
+                state_version: 5,
+                current_session_id: 'app-session-1',
+                sessions: [{
+                    id: 'app-session-1',
+                    title: 'Restored work',
+                }],
+                workspace: { cwd: 'D:\\restored' },
+            },
+        })
+        const persisted = JSON.parse(
+            await readFile(`${fixture.config.replayLedgerPath}.runtime-state.json`, 'utf8'),
+        ) as { rooms: Record<string, { stateVersion: number }> }
+        expect(persisted.rooms['!room:example.org']?.stateVersion).toBe(5)
+        await runner.stop()
+    })
+
     it('queues initial-sync commands until crypto and room encryption checks complete', async () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
@@ -220,7 +395,7 @@ describe('MatrixGatewayRunner', () => {
 
         await runner.start()
 
-        expect(dispatched).toHaveLength(1)
+        await vi.waitFor(() => expect(dispatched).toHaveLength(1))
         expect(client.lifecycle).toEqual([
             'crypto',
             'start',
@@ -273,12 +448,14 @@ describe('MatrixGatewayRunner', () => {
             onRejected: (_event, error) => rejected.push(error),
             onLog: message => logs.push(message),
         })
+        await initializeDirectRuntime(runner, fixture.config)
         const sendCommandResult = vi.fn(async (
             _room: MatrixGatewayConfig['rooms'][number],
             _deviceId: string,
             _commandId: string,
             _sequence: number,
             _revision: number,
+            _revisionEpoch: string,
             _outcome: 'succeeded' | 'failed',
             _transport: MatrixGatewayClient,
             _error?: string,
@@ -301,14 +478,14 @@ describe('MatrixGatewayRunner', () => {
 
         internals.scheduleExecution(
             incomingSigned(signed),
-            { config: fixture.config.rooms[0]!, session },
+            directRoomRuntime(fixture.config.rooms[0]!, session),
             signed.command,
             1,
         )
 
         await vi.waitFor(() => expect(sendCommandResult).toHaveBeenCalledOnce())
         expect(sendCommandResult.mock.calls[0]?.[3]).toBe(signed.command.sequence)
-        expect(sendCommandResult.mock.calls[0]?.[5]).toBe('succeeded')
+        expect(sendCommandResult.mock.calls[0]?.[6]).toBe('succeeded')
         expect(dispatched).toHaveLength(1)
         expect(rejected).toEqual([])
         expect(logs).toContainEqual(expect.stringContaining('succeeded result delivery failed'))
@@ -323,6 +500,7 @@ describe('MatrixGatewayRunner', () => {
             client,
             sessionFactory: () => session,
         })
+        await initializeDirectRuntime(runner, fixture.config)
         Reflect.set(runner, 'secureContent', {
             sendCommandResult: vi.fn(async () => ({ eventId: '$result' })),
         })
@@ -346,7 +524,7 @@ describe('MatrixGatewayRunner', () => {
 
         internals.scheduleExecution(
             incomingSigned(signed),
-            { config: fixture.config.rooms[0]!, session },
+            directRoomRuntime(fixture.config.rooms[0]!, session),
             signed.command,
             1,
             fanOutAttempt,
@@ -687,6 +865,37 @@ async function securityFixture() {
         replayLedgerPath: join(directory, 'replay.jsonl'),
         allowInsecureLegacyForTesting: true,
     }
+    await writeFile(
+        config.replayLedgerPath,
+        `${JSON.stringify({
+            version: 1,
+            kind: 'generation',
+            generation: REPLAY_GENERATION,
+        })}\n`,
+        'utf8',
+    )
+    await writeFile(
+        `${config.replayLedgerPath}.runtime-state.json`,
+        `${JSON.stringify({
+            version: 1,
+            rooms: {
+                '!room:example.org': {
+                    revisionEpoch: REVISION_EPOCH,
+                    replayGeneration: REPLAY_GENERATION,
+                    stateVersion: 0,
+                    currentSessionId: null,
+                    appSessions: [],
+                    workspace: {
+                        cwd: 'C:\\repo',
+                        provider: 'mock-provider',
+                        model: null,
+                        permissionMode: 'default',
+                    },
+                },
+            },
+        })}\n`,
+        'utf8',
+    )
     return { keys, config, now }
 }
 
@@ -695,6 +904,7 @@ async function signedPrompt(
     now: number,
     sequence = 1,
     baseRevision = sequence - 1,
+    sequenceEpoch = 'legacy-v1',
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -702,7 +912,9 @@ async function signedPrompt(
         commandId: `command-${sequence}-${Math.random()}`,
         gatewayId: 'gateway-1',
         deviceId: 'pwa-device-1',
+        sequenceEpoch,
         conversationId: 'conversation-1',
+        revisionEpoch: REVISION_EPOCH,
         sequence,
         baseRevision,
         operation: 'prompt',
@@ -725,7 +937,9 @@ async function signedCancel(
         commandId: `cancel-${sequence}-${Math.random()}`,
         gatewayId: 'gateway-1',
         deviceId: 'pwa-device-1',
+        sequenceEpoch: 'legacy-v1',
         conversationId: 'conversation-1',
+        revisionEpoch: REVISION_EPOCH,
         sequence,
         baseRevision: sequence - 1,
         operation: 'cancel',
@@ -759,6 +973,12 @@ function incomingSigned(signedCommand: SignedCommand, suffix = 'event'): MatrixI
 }
 
 function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
+    const sessionRecord = {
+        conversationId: null as string | null,
+        setConversationId(value: string | null) {
+            this.conversationId = value
+        },
+    } as TopicSession['sessionRecord']
     return {
         dispatch: vi.fn(async (input: SessionInput) => {
             dispatched.push(input)
@@ -766,7 +986,7 @@ function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
         receiveInput: vi.fn(),
         destroy: vi.fn(async () => undefined),
         state: 'idle',
-        sessionRecord: {} as TopicSession['sessionRecord'],
+        sessionRecord,
         channelPort: {} as TopicSession['channelPort'],
         getProgress: vi.fn(() => null),
         getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
@@ -776,6 +996,42 @@ function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
             message: 'not found',
         })),
     }
+}
+
+function directRoomRuntime(
+    config: MatrixGatewayConfig['rooms'][number],
+    session: TopicSession,
+) {
+    return {
+        config,
+        port: session.channelPort,
+        session,
+        capabilityProvider: null,
+        workspace: {
+            cwd: config.cwd,
+            provider: config.providerName,
+            model: config.model ?? null,
+            permissionMode: 'default',
+        },
+        appSessions: new Map(),
+        currentAppSessionId: null,
+        revisionEpoch: REVISION_EPOCH,
+        replayGeneration: REPLAY_GENERATION,
+        stateVersion: 0,
+    }
+}
+
+async function initializeDirectRuntime(
+    runner: MatrixGatewayRunner,
+    config: MatrixGatewayConfig,
+): Promise<void> {
+    const store = Reflect.get(runner, 'runtimeStateStore') as {
+        initialize(
+            rooms: MatrixGatewayConfig['rooms'],
+            replayGeneration: string,
+        ): Promise<void>
+    }
+    await store.initialize(config.rooms, REPLAY_GENERATION)
 }
 
 function fakeProvider(): AgentProvider {

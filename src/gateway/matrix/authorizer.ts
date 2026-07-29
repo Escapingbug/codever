@@ -8,6 +8,7 @@ export interface MatrixCommandContext {
     conversationId: string
     matrixSender: string
     matrixDeviceKey: string
+    revisionEpoch: string
     applicationDeviceId?: string
 }
 
@@ -69,10 +70,23 @@ export class StrictMatrixCommandAuthorizer {
             conversationId: context.conversationId,
             allowedOperations: policy.allowedOperations,
         }, { now })
+        const expectedSequenceEpoch = policy.sequenceEpoch ?? this.sequenceEpoch
+        if (command.sequenceEpoch !== expectedSequenceEpoch) {
+            throw new MatrixAuthorizationError(
+                'sequence-epoch-mismatch',
+                `Expected certificate sequence epoch ${expectedSequenceEpoch}`,
+            )
+        }
+        if (command.revisionEpoch !== context.revisionEpoch) {
+            throw new MatrixAuthorizationError(
+                'revision-epoch-mismatch',
+                `Expected revision epoch ${context.revisionEpoch}`,
+            )
+        }
         const claim = await this.replayStore.claimCommandInOrder(
             command,
             now,
-            policy.sequenceEpoch ?? this.sequenceEpoch,
+            expectedSequenceEpoch,
         )
         return { command, duplicate: claim.status === 'duplicate', revision: claim.revision }
     }
@@ -85,6 +99,8 @@ export type MatrixAuthorizationErrorCode =
     | 'matrix-device-mismatch'
     | 'application-device-mismatch'
     | 'certificate-expired'
+    | 'sequence-epoch-mismatch'
+    | 'revision-epoch-mismatch'
 
 export class MatrixAuthorizationError extends Error {
     constructor(

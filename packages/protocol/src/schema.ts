@@ -69,6 +69,17 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
         settings.cwd !== undefined,
       'At least one session setting is required',
     ),
+  z
+    .object({
+      operation: z.literal('session.create'),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal('session.select'),
+      sessionId: opaqueId,
+    })
+    .strict(),
 ])
 
 export type CommandPayload = z.infer<typeof commandPayloadSchema>
@@ -81,11 +92,21 @@ export const commandSchema = z
     commandId: opaqueId,
     gatewayId: opaqueId,
     deviceId: opaqueId,
+    /** Pairing-certificate generation that authorized this device command. */
+    sequenceEpoch: opaqueId,
     conversationId: opaqueId,
+    revisionEpoch: opaqueId,
     sequence: z.number().int().positive(),
     /** Last Gateway-assigned conversation revision observed by this device. */
     baseRevision: z.number().int().nonnegative(),
-    operation: z.enum(['prompt', 'cancel', 'decision', 'session.settings']),
+    operation: z.enum([
+      'prompt',
+      'cancel',
+      'decision',
+      'session.settings',
+      'session.create',
+      'session.select',
+    ]),
     issuedAt: timestamp,
     expiresAt: timestamp,
     nonce: z.string().min(16).max(256),

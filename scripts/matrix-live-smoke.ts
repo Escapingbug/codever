@@ -25,6 +25,8 @@ import {
     CODEVER_MATRIX_EXTENSION,
 } from '../src/channel/matrix/index.js'
 import {
+    FileCommandReplayStore,
+    FileGatewayRuntimeStateStore,
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
     type MatrixGatewayConfig,
@@ -130,6 +132,14 @@ try {
         replayLedgerPath: join(replayDirectory, 'replay.jsonl'),
         allowInsecureLegacyForTesting: true,
     }
+    const runtimeState = new FileGatewayRuntimeStateStore(
+        `${config.replayLedgerPath}.runtime-state.json`,
+    )
+    const replayStore = new FileCommandReplayStore(config.replayLedgerPath)
+    await replayStore.initialize()
+    const replayGeneration = replayStore.getGeneration()
+    await runtimeState.initialize(config.rooms, replayGeneration)
+    const revisionEpoch = runtimeState.getRoom(fixture.roomId).revisionEpoch
 
     process.stdout.write('[3/5] Starting the real Matrix Gateway and Rust crypto...\n')
     const gatewaySdkClient = createClient({
@@ -174,8 +184,11 @@ try {
         commandId: crypto.randomUUID(),
         gatewayId: fixture.gatewayId,
         deviceId: testerLogin.device_id,
+        sequenceEpoch: 'legacy-v1',
         conversationId: fixture.roomId,
+        revisionEpoch,
         sequence: 1,
+        baseRevision: 0,
         operation: 'prompt',
         issuedAt: now,
         expiresAt: now + 120_000,

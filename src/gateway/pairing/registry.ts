@@ -127,7 +127,13 @@ export class FileTrustedDeviceRegistry {
       if (pending.status !== 'pending') throw new Error('Pairing request was already decided')
       const deviceId = certificate.certificate.deviceId
       const existing = state.trustedDevices[deviceId]
-      if (existing?.status === 'active') throw new Error(`Device is already trusted: ${deviceId}`)
+      if (
+        existing?.status === 'active'
+        && canonicalJson(existing.certificate.certificate.deviceKey)
+          !== canonicalJson(certificate.certificate.deviceKey)
+      ) {
+        throw new Error(`Active device ${deviceId} cannot renew with a different application key`)
+      }
       const keyId = certificate.certificate.deviceKey.keyId
       const duplicateKey = Object.values(state.trustedDevices).find(record =>
         record.status === 'active'

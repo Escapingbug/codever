@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { CodeverCommand } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
-import { createProviderInstance } from '@/providers/registry'
+import { createProviderInstance, getProvider } from '@/providers/registry'
 import type { TopicSession } from '@/bridge/channelPort'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import {
@@ -21,12 +21,37 @@ import {
     type MatrixGatewayClient,
 } from './client'
 import { FileCommandReplayStore, RevisionConflictError } from './fileReplayLedger'
+import {
+    FileGatewayRuntimeStateStore,
+    type PersistedRoomRuntimeState,
+} from './fileRuntimeState'
 import { GatewaySecureContentLayer } from './secureContent'
 
 interface RoomRuntime {
     config: MatrixGatewayRoomConfig
     port: MatrixPort
     session: TopicSession
+    capabilityProvider: AgentProvider | null
+    workspace: {
+        cwd: string
+        provider: string
+        model: string | null
+        permissionMode: string
+    }
+    appSessions: Map<string, AppSessionRecord>
+    currentAppSessionId: string | null
+    revisionEpoch: string
+    replayGeneration: string
+    stateVersion: number
+}
+
+interface AppSessionRecord {
+    id: string
+    title: string
+    updatedAt: number
+    provider: string
+    model: string | null
+    providerSessionId: string | null
 }
 
 export interface MatrixGatewayDependencies {
@@ -46,6 +71,8 @@ export type MatrixGatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
 
 export class MatrixGatewayRunner {
     private readonly client: MatrixGatewayClient
+    private readonly replayStore: FileCommandReplayStore
+    private readonly runtimeStateStore: FileGatewayRuntimeStateStore
     private readonly authorizer: StrictMatrixCommandAuthorizer
     private readonly secureContent: GatewaySecureContentLayer | null
     private readonly roomTargets = new MatrixRoomSessionRegistry()
@@ -65,12 +92,14 @@ export class MatrixGatewayRunner {
         validateMatrixGatewayConfig(config)
         this.client = dependencies.client
             ?? createMatrixJsSdkGatewayClient(config.connection, dependencies.onLog)
-        const replayStore = new FileCommandReplayStore(config.replayLedgerPath)
+        this.replayStore = new FileCommandReplayStore(config.replayLedgerPath)
+        this.runtimeStateStore = new FileGatewayRuntimeStateStore(
+            `${config.replayLedgerPath}.runtime-state.json`,
+        )
         this.authorizer = new StrictMatrixCommandAuthorizer(
             config.gatewayId,
             config.trustedDevices,
-            replayStore,
-            config.applicationSecurity?.gatewayKeyPair.keyId ?? 'legacy-v1',
+            this.replayStore,
         )
         this.secureContent = config.applicationSecurity
             ? new GatewaySecureContentLayer(
@@ -86,12 +115,71 @@ export class MatrixGatewayRunner {
         return this.state
     }
 
+    async syncState(roomId?: string): Promise<void> {
+        if (!this.secureContent) return
+        const runtimes = roomId
+            ? [this.rooms.get(roomId)].filter((runtime): runtime is RoomRuntime => runtime !== undefined)
+            : [...this.rooms.values()]
+        await Promise.all(runtimes.map(async runtime => {
+            const stateVersion = await this.runtimeStateStore.incrementStateVersion(
+                runtime.config.roomId,
+                runtimeStateWithoutVersion(runtime),
+            )
+            runtime.stateVersion = stateVersion
+            const revision = await this.replayStore.getConversationRevision(
+                this.config.gatewayId,
+                runtime.config.conversationId,
+                runtime.revisionEpoch,
+            )
+            let models: Array<{ id: string; name: string }> = []
+            try {
+                models = (runtime.capabilityProvider?.getAvailableModels() ?? [])
+                    .map(model => ({ id: model.id, name: model.name }))
+            } catch (error) {
+                this.log(
+                    `[matrix-gateway] model capability discovery failed for ${runtime.workspace.provider}: `
+                    + formatError(error),
+                )
+            }
+            await this.secureContent!.sendGatewayState(runtime.config, {
+                revision,
+                revisionEpoch: runtime.revisionEpoch,
+                stateVersion,
+                currentSessionId: runtime.currentAppSessionId,
+                sessions: [...runtime.appSessions.values()].map(session => ({
+                    id: session.id,
+                    title: session.title,
+                    updatedAt: session.updatedAt,
+                    provider: session.provider,
+                    ...(session.model ? { model: session.model } : {}),
+                })),
+                workspace: {
+                    cwd: runtime.workspace.cwd,
+                    provider: runtime.workspace.provider,
+                    ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
+                    permissionMode: runtime.workspace.permissionMode,
+                },
+                capabilities: {
+                    models,
+                    // The runtime currently always asks for permission. Do not
+                    // advertise modes whose policy is not actually enforced.
+                    permissionModes: [{ id: 'default', name: 'Default' }],
+                    canCreateSession: true,
+                    canSelectSession: true,
+                },
+            }, this.client)
+        }))
+    }
+
     async start(): Promise<void> {
         if (this.state === 'running') return
         if (this.state !== 'stopped') throw new Error(`Cannot start Matrix gateway while ${this.state}`)
         this.state = 'starting'
         this.startupFailure = null
         try {
+            await this.replayStore.initialize(this.now())
+            const replayGeneration = this.replayStore.getGeneration()
+            await this.runtimeStateStore.initialize(this.config.rooms, replayGeneration)
             await this.authorizer.initialize(this.now())
             await this.secureContent?.initialize(this.now())
             await this.createRoomRuntimes()
@@ -114,6 +202,9 @@ export class MatrixGatewayRunner {
             }
             if (this.startupFailure) throw this.startupFailure
             this.state = 'running'
+            await this.syncState().catch(error => {
+                this.log(`[matrix-gateway] initial state sync failed: ${formatError(error)}`)
+            })
             const queued = this.startupEvents
             this.startupEvents = []
             for (const event of queued) this.enqueue(event)
@@ -198,6 +289,7 @@ export class MatrixGatewayRunner {
             authorized = await this.authorizer.authorizeDelivery(extension.signed_command, {
                 roomId: event.roomId,
                 conversationId: runtime.config.conversationId,
+                revisionEpoch: runtime.revisionEpoch,
                 matrixSender: event.sender,
                 matrixDeviceKey: event.senderDeviceId,
                 ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
@@ -215,6 +307,7 @@ export class MatrixGatewayRunner {
                     candidateCommand.commandId,
                     error.expectedRevision,
                     error.receivedBaseRevision,
+                    runtime.revisionEpoch,
                     this.client,
                 )
                 return
@@ -270,6 +363,7 @@ export class MatrixGatewayRunner {
                 authorized.command.commandId,
                 authorized.command.sequence,
                 authorized.revision,
+                runtime.revisionEpoch,
                 this.client,
             ).catch(error => {
                 this.log(
@@ -312,6 +406,7 @@ export class MatrixGatewayRunner {
                     command.commandId,
                     command.sequence,
                     revision,
+                    runtime.revisionEpoch,
                     outcome,
                     this.client,
                     executionError === undefined ? undefined : formatError(executionError),
@@ -321,6 +416,12 @@ export class MatrixGatewayRunner {
                     `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
                 )
             }
+            await this.syncState(runtime.config.roomId).catch(error => {
+                this.log(
+                    `[matrix-gateway] post-command state sync failed for ${command.commandId}: `
+                    + formatError(error),
+                )
+            })
         })()
             .finally(() => {
                 this.executionTasks.delete(task)
@@ -330,14 +431,22 @@ export class MatrixGatewayRunner {
 
     private async execute(runtime: RoomRuntime, command: CodeverCommand): Promise<void> {
         switch (command.payload.operation) {
-            case 'prompt':
+            case 'prompt': {
+                const appSession = this.ensureAppSession(runtime, command.payload.text)
+                await this.persistRuntime(runtime)
                 await runtime.session.dispatch({
                     kind: 'user_message',
                     text: command.payload.text,
                     source: 'channel',
                     user: { id: command.deviceId, username: command.deviceId },
                 })
+                appSession.providerSessionId = runtime.session.sessionRecord.conversationId
+                appSession.updatedAt = this.now()
+                appSession.provider = runtime.workspace.provider
+                appSession.model = runtime.workspace.model
+                await this.persistRuntime(runtime)
                 return
+            }
             case 'cancel':
                 await runtime.session.dispatch({
                     kind: 'cancel',
@@ -355,19 +464,157 @@ export class MatrixGatewayRunner {
             }
             case 'session.settings': {
                 const settings = command.payload
-                if (settings.provider) await dispatchCommand(runtime.session, command, 'provider', settings.provider)
-                if (settings.cwd) await dispatchCommand(runtime.session, command, 'cwd', settings.cwd)
-                if (settings.model) await dispatchCommand(runtime.session, command, 'model', settings.model)
+                const targetProvider = settings.provider
+                    ? getProvider(settings.provider)
+                    : runtime.capabilityProvider
+                if (settings.provider && !targetProvider) {
+                    throw new Error(`Provider ${settings.provider} is not configured`)
+                }
+                const selectedModel = settings.model
+                    ? (targetProvider?.getAvailableModels() ?? []).find(model =>
+                        model.id === settings.model || model.name === settings.model,
+                    )
+                    : undefined
+                if (settings.model && !selectedModel) {
+                    throw new Error(
+                        `Model ${settings.model} is not available for provider `
+                        + (settings.provider ?? runtime.workspace.provider),
+                    )
+                }
+                if (settings.permissionMode && settings.permissionMode !== 'default') {
+                    throw new Error(
+                        `Permission mode ${settings.permissionMode} is not currently available`,
+                    )
+                }
+                if (settings.provider) {
+                    await dispatchCommand(runtime.session, command, 'provider', settings.provider)
+                    runtime.workspace.provider = settings.provider
+                    runtime.workspace.model = null
+                    runtime.capabilityProvider = targetProvider ?? null
+                    await this.persistRuntime(runtime)
+                }
+                if (settings.cwd) {
+                    await dispatchCommand(runtime.session, command, 'cwd', settings.cwd)
+                    runtime.workspace.cwd = settings.cwd
+                    await this.persistRuntime(runtime)
+                }
+                if (selectedModel) {
+                    await dispatchCommand(runtime.session, command, 'model', selectedModel.id)
+                    runtime.workspace.model = selectedModel.id
+                    await this.persistRuntime(runtime)
+                }
                 if (settings.permissionMode) {
                     await dispatchCommand(runtime.session, command, 'permissionMode', settings.permissionMode)
+                    runtime.workspace.permissionMode = settings.permissionMode
+                    await this.persistRuntime(runtime)
                 }
+                this.updateCurrentAppSession(runtime)
+                await this.persistRuntime(runtime)
+                return
+            }
+            case 'session.create': {
+                await dispatchCommand(runtime.session, command, 'new', '')
+                runtime.session.sessionRecord.setConversationId(null)
+                const session = this.createAppSession(runtime, 'New session')
+                runtime.currentAppSessionId = session.id
+                await this.persistRuntime(runtime)
+                return
+            }
+            case 'session.select': {
+                const selected = runtime.appSessions.get(command.payload.sessionId)
+                if (!selected) {
+                    throw new Error(`Unknown app session ${command.payload.sessionId}`)
+                }
+                if (selected.provider !== runtime.workspace.provider) {
+                    await dispatchCommand(runtime.session, command, 'provider', selected.provider)
+                    runtime.workspace.provider = selected.provider
+                    runtime.capabilityProvider = getProvider(selected.provider) ?? null
+                    await this.persistRuntime(runtime)
+                }
+                if (selected.model !== runtime.workspace.model) {
+                    await dispatchCommand(
+                        runtime.session,
+                        command,
+                        'model',
+                        selected.model ?? '',
+                    )
+                    runtime.workspace.model = selected.model
+                    await this.persistRuntime(runtime)
+                }
+                await dispatchCommand(
+                    runtime.session,
+                    command,
+                    selected.providerSessionId ? 'resume' : 'new',
+                    selected.providerSessionId ?? '',
+                )
+                runtime.session.sessionRecord.setConversationId(selected.providerSessionId)
+                selected.updatedAt = this.now()
+                runtime.currentAppSessionId = selected.id
+                await this.persistRuntime(runtime)
                 return
             }
         }
     }
 
+    private ensureAppSession(runtime: RoomRuntime, prompt: string): AppSessionRecord {
+        const current = runtime.currentAppSessionId
+            ? runtime.appSessions.get(runtime.currentAppSessionId)
+            : undefined
+        if (current) {
+            if (current.title === 'New session') current.title = sessionTitle(prompt)
+            return current
+        }
+        const created = this.createAppSession(runtime, sessionTitle(prompt))
+        runtime.currentAppSessionId = created.id
+        return created
+    }
+
+    private createAppSession(runtime: RoomRuntime, title: string): AppSessionRecord {
+        const now = this.now()
+        const session: AppSessionRecord = {
+            id: randomUUID(),
+            title,
+            updatedAt: now,
+            provider: runtime.workspace.provider,
+            model: runtime.workspace.model,
+            providerSessionId: null,
+        }
+        runtime.appSessions.set(session.id, session)
+        return session
+    }
+
+    private updateCurrentAppSession(runtime: RoomRuntime): void {
+        if (!runtime.currentAppSessionId) return
+        const current = runtime.appSessions.get(runtime.currentAppSessionId)
+        if (!current) return
+        current.provider = runtime.workspace.provider
+        current.model = runtime.workspace.model
+        current.updatedAt = this.now()
+    }
+
+    private async persistRuntime(runtime: RoomRuntime): Promise<void> {
+        await this.runtimeStateStore.saveRoom(
+            runtime.config.roomId,
+            runtimeState(runtime),
+        )
+    }
+
     private async createRoomRuntimes(): Promise<void> {
         for (const room of this.config.rooms) {
+            const restored = this.runtimeStateStore.getRoom(room.roomId)
+            const { model: _configuredModel, ...roomWithoutModel } = room
+            const effectiveRoom: MatrixGatewayRoomConfig = {
+                ...roomWithoutModel,
+                cwd: restored.workspace.cwd,
+                providerName: restored.workspace.provider,
+                ...(restored.workspace.model
+                    ? { model: restored.workspace.model }
+                    : {}),
+            }
+            const selectedProviderSessionId = restored.currentSessionId
+                ? restored.appSessions.find(session => session.id === restored.currentSessionId)
+                    ?.providerSessionId ?? null
+                : null
             const port = new MatrixPort({
                 transport: this.secureContent
                     ? this.secureContent.transportForRoom(room, this.client)
@@ -376,10 +623,44 @@ export class MatrixGatewayRunner {
                 gatewayId: this.config.gatewayId,
                 onLog: this.dependencies.onLog,
             })
-            const session = this.dependencies.sessionFactory
-                ? this.dependencies.sessionFactory(room, port)
-                : this.createDefaultSession(room, port)
-            const runtime = { config: room, port, session }
+            let capabilityProvider: AgentProvider | null
+            let session: TopicSession
+            if (this.dependencies.sessionFactory) {
+                session = this.dependencies.sessionFactory(effectiveRoom, port)
+                if (selectedProviderSessionId !== null) {
+                    session.sessionRecord.setConversationId(selectedProviderSessionId)
+                }
+                capabilityProvider = getProvider(effectiveRoom.providerName) ?? null
+            } else {
+                const provider = this.dependencies.providerFactory?.(effectiveRoom)
+                    ?? createProviderInstance(effectiveRoom.providerName)
+                if (!provider) {
+                    throw new Error(
+                        `Matrix room ${room.roomId} provider ${effectiveRoom.providerName} is unavailable`,
+                    )
+                }
+                capabilityProvider = provider
+                session = this.createDefaultSession(
+                    effectiveRoom,
+                    port,
+                    provider,
+                    selectedProviderSessionId,
+                )
+            }
+            const runtime: RoomRuntime = {
+                config: room,
+                port,
+                session,
+                capabilityProvider,
+                workspace: structuredClone(restored.workspace),
+                appSessions: new Map(
+                    restored.appSessions.map(appSession => [appSession.id, { ...appSession }]),
+                ),
+                currentAppSessionId: restored.currentSessionId,
+                revisionEpoch: restored.revisionEpoch,
+                replayGeneration: restored.replayGeneration,
+                stateVersion: restored.stateVersion,
+            }
             this.rooms.set(room.roomId, runtime)
             this.roomTargets.bind(room.roomId, {
                 dispatch: input => session.dispatch(input),
@@ -388,10 +669,12 @@ export class MatrixGatewayRunner {
         }
     }
 
-    private createDefaultSession(room: MatrixGatewayRoomConfig, port: MatrixPort): TopicSession {
-        const provider = this.dependencies.providerFactory?.(room)
-            ?? createProviderInstance(room.providerName)
-        if (!provider) throw new Error(`Matrix room ${room.roomId} provider ${room.providerName} is unavailable`)
+    private createDefaultSession(
+        room: MatrixGatewayRoomConfig,
+        port: MatrixPort,
+        provider: AgentProvider,
+        providerSessionId: string | null,
+    ): TopicSession {
         const sessionRecord = createTopicSessionRecord({
             cwd: room.cwd,
             providerName: room.providerName,
@@ -400,6 +683,7 @@ export class MatrixGatewayRunner {
             verboseLevel: room.verboseLevel,
             timeoutSeconds: room.timeoutSeconds,
             providerSettings: room.providerSettings,
+            conversationId: providerSessionId,
         })
         return createTopicSession({ sessionRecord, provider, channelPort: port })
     }
@@ -450,6 +734,31 @@ async function dispatchCommand(
 function numericRoomCompatibilityId(roomId: string): number {
     const hex = createHash('sha256').update(roomId).digest('hex').slice(0, 12)
     return -Math.max(1, Number.parseInt(hex, 16))
+}
+
+function runtimeState(runtime: RoomRuntime): PersistedRoomRuntimeState {
+    return {
+        ...runtimeStateWithoutVersion(runtime),
+        stateVersion: runtime.stateVersion,
+    }
+}
+
+function runtimeStateWithoutVersion(
+    runtime: RoomRuntime,
+): Omit<PersistedRoomRuntimeState, 'stateVersion'> {
+    return {
+        revisionEpoch: runtime.revisionEpoch,
+        replayGeneration: runtime.replayGeneration,
+        currentSessionId: runtime.currentAppSessionId,
+        appSessions: [...runtime.appSessions.values()].map(session => ({ ...session })),
+        workspace: structuredClone(runtime.workspace),
+    }
+}
+
+function sessionTitle(prompt: string): string {
+    const normalized = prompt.replace(/\s+/gu, ' ').trim()
+    if (!normalized) return 'New session'
+    return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

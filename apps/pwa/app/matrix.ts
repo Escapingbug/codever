@@ -50,6 +50,20 @@ import {
   matrixSyncDatabaseName,
   waitForMatrixSyncStoreClose,
 } from "./matrixSyncStore";
+import {
+  classifyGatewayStateEpoch,
+  parseGatewayStateExtension,
+  type GatewayStateSnapshot,
+} from "./gatewayState";
+export {
+  parseGatewayStateExtension,
+  type GatewayCapabilities,
+  type GatewayCapabilityOption,
+  type GatewaySessionSummary,
+  type GatewayStateSnapshot,
+  type GatewayWorkspaceState,
+  classifyGatewayStateEpoch,
+} from "./gatewayState";
 
 export const MATRIX_CONFIG_STORAGE_KEY = "codever.matrix.connection.v1";
 const DEVICE_DATABASE = "codever-pwa-identity";
@@ -83,6 +97,7 @@ type CommandReservation = {
   commandId: string;
   sequence: number;
   baseRevision: number;
+  revisionEpoch: string;
 };
 
 type PendingOutboundCommand = CommandReservation & {
@@ -94,6 +109,10 @@ type PendingOutboundCommand = CommandReservation & {
 type CommandSequenceState = {
   lastAcknowledged: number;
   lastRevision: number;
+  revisionInitialized: boolean;
+  revisionEpoch?: string;
+  retiredRevisionEpochs: string[];
+  stateVersion: number;
   pending?: PendingOutboundCommand;
 };
 
@@ -125,6 +144,7 @@ export type MatrixConnectionStatus =
 export type CollaborationState = {
   activeDeviceCount?: number;
   revision?: number;
+  gatewayState?: GatewayStateSnapshot;
 };
 
 export type CommandResultState = CommandCompletion;
@@ -322,6 +342,7 @@ async function createSignedCommand(
   payload: CommandPayload,
   now: number,
   reservation: CommandReservation,
+  sequenceEpoch: string,
 ): Promise<SignedCommand> {
   const config = normalizeMatrixConfig(configInput);
   const command: CodeverCommand = {
@@ -333,8 +354,10 @@ async function createSignedCommand(
     // The Matrix device ID is transport metadata and may rotate independently.
     deviceId: identity.keyId,
     conversationId: config.conversationId,
+    sequenceEpoch,
     sequence: reservation.sequence,
     baseRevision: reservation.baseRevision,
+    revisionEpoch: reservation.revisionEpoch,
     operation: payload.operation,
     issuedAt: now,
     expiresAt: now + COMMAND_TTL_MS,
@@ -415,6 +438,7 @@ export async function connectMatrix(
     commandId: string,
     sequence: number,
     revision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ): Promise<void> => {
     const trust = activeTrust;
@@ -423,18 +447,20 @@ export async function connectMatrix(
       config,
       identity,
       trust.certificate.certificate.certificateId,
-      { commandId, sequence, baseRevision: revision },
+      { commandId, sequence, baseRevision: revision, revisionEpoch },
       revision,
+      revisionEpoch,
     );
     commandLifecycle.recordAcknowledgement(commandId, sequence, revision);
     handlers.onCollaborationState?.({
       revision,
-      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+      ...(activeDeviceCount !== undefined ? { activeDeviceCount } : {}),
     });
   };
   const onRevisionConflict = async (
     commandId: string,
     expectedRevision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ): Promise<void> => {
     const trust = activeTrust;
@@ -444,11 +470,12 @@ export async function connectMatrix(
       identity,
       trust.certificate.certificate.certificateId,
       expectedRevision,
+      revisionEpoch,
     );
     revisionConflicts.set(commandId, expectedRevision);
     handlers.onCollaborationState?.({
       revision: expectedRevision,
-      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+      ...(activeDeviceCount !== undefined ? { activeDeviceCount } : {}),
     });
     if (
       commandLifecycle.rejectAcknowledgement(
@@ -461,6 +488,7 @@ export async function connectMatrix(
   };
   const onAuthenticatedCommandResult = async (
     result: CommandResultState,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ): Promise<void> => {
     // Persist the implicit acknowledgement before waking either sender waiter.
@@ -470,6 +498,7 @@ export async function connectMatrix(
       result.commandId,
       result.sequence,
       result.revision,
+      revisionEpoch,
       activeDeviceCount,
     );
     commandLifecycle.recordResult(result);
@@ -477,6 +506,7 @@ export async function connectMatrix(
   };
   const onKnownRevision = async (
     revision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ): Promise<void> => {
     const trust = activeTrust;
@@ -486,11 +516,32 @@ export async function connectMatrix(
         identity,
         trust.certificate.certificate.certificateId,
         revision,
+        revisionEpoch,
       );
     }
     handlers.onCollaborationState?.({
       revision,
-      ...(activeDeviceCount ? { activeDeviceCount } : {}),
+      ...(activeDeviceCount !== undefined ? { activeDeviceCount } : {}),
+    });
+  };
+  const onGatewayState = async (
+    gatewayState: GatewayStateSnapshot,
+  ): Promise<void> => {
+    const trust = activeTrust;
+    if (!trust) return;
+    const accepted = await initializeKnownRevision(
+      config,
+      identity,
+      trust.certificate.certificate.certificateId,
+      gatewayState.revisionEpoch,
+      gatewayState.revision,
+      gatewayState.stateVersion,
+    );
+    if (!accepted) return;
+    handlers.onCollaborationState?.({
+      revision: gatewayState.revision,
+      activeDeviceCount: gatewayState.activeDeviceCount,
+      gatewayState,
     });
   };
   const onTimeline = (
@@ -518,6 +569,7 @@ export async function connectMatrix(
       onRevisionConflict,
       onKnownRevision,
       onAuthenticatedCommandResult,
+      onGatewayState,
     ).catch((error) => {
       handlers.onStatus("error", formatError(error));
     });
@@ -620,6 +672,7 @@ export async function connectMatrix(
         onRevisionConflict,
         onKnownRevision,
         onAuthenticatedCommandResult,
+        onGatewayState,
       );
     }
     assertPersistenceHealthy();
@@ -712,6 +765,11 @@ export async function connectMatrix(
       );
     }
     const sequenceEpoch = trust.certificate.certificate.certificateId;
+    await assertRevisionInitialized(
+      config,
+      identity,
+      sequenceEpoch,
+    );
     const recovered = await retryPendingCommand(
       client,
       config,
@@ -804,6 +862,7 @@ export async function connectMatrix(
         payload,
         Date.now(),
         reservation,
+        sequenceEpoch,
       );
       const certificate = trust.certificate.certificate;
       const plaintext = {
@@ -1169,7 +1228,7 @@ export function parseCodeverEvent(
   const body =
     typeof effectiveContent.body === "string" ? effectiveContent.body : "";
   const collaborationMetadata = {
-    ...(isPositiveInteger(effectiveExtension.revision)
+    ...(isNonnegativeInteger(effectiveExtension.revision)
       ? { revision: effectiveExtension.revision }
       : {}),
     ...(isPositiveInteger(effectiveExtension.active_device_count)
@@ -1335,21 +1394,26 @@ async function forwardEvent(
     commandId: string,
     sequence: number,
     revision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
   onRevisionConflict?: (
     commandId: string,
     expectedRevision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
   onKnownRevision?: (
     revision: number,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
   onCommandResult?: (
     result: CommandResultState,
+    revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
+  onGatewayState?: (state: GatewayStateSnapshot) => Promise<void>,
 ): Promise<void> {
   const eventId = event.getId();
   const sender = event.getSender();
@@ -1454,18 +1518,27 @@ async function forwardEvent(
     throw new Error("The secure Gateway envelope did not contain Matrix content.");
   }
   const decryptedExtension = asRecord(decryptedContent["io.codever"]);
-  if (
-    decryptedExtension?.kind === "command_ack" &&
-    typeof decryptedExtension.command_id === "string" &&
-    typeof decryptedExtension.sequence === "number" &&
-    Number.isSafeInteger(decryptedExtension.sequence) &&
-    decryptedExtension.sequence > 0 &&
-    isPositiveInteger(decryptedExtension.revision)
-  ) {
+  const gatewayState = parseGatewayStateExtension(decryptedExtension);
+  if (gatewayState) {
+    await onGatewayState?.(gatewayState);
+    seen.add(eventId);
+    return;
+  }
+  if (decryptedExtension?.kind === "command_ack") {
+    if (
+      typeof decryptedExtension.command_id !== "string" ||
+      !isPositiveInteger(decryptedExtension.sequence) ||
+      !isPositiveInteger(decryptedExtension.revision) ||
+      typeof decryptedExtension.revision_epoch !== "string" ||
+      !decryptedExtension.revision_epoch
+    ) {
+      throw new Error("The authenticated command acknowledgement is malformed.");
+    }
     await onCommandAcknowledged?.(
       decryptedExtension.command_id,
       decryptedExtension.sequence,
       decryptedExtension.revision,
+      decryptedExtension.revision_epoch,
       isPositiveInteger(decryptedExtension.active_device_count)
         ? decryptedExtension.active_device_count
         : undefined,
@@ -1473,14 +1546,19 @@ async function forwardEvent(
     seen.add(eventId);
     return;
   }
-  if (
-    decryptedExtension?.kind === "revision_conflict" &&
-    typeof decryptedExtension.command_id === "string" &&
-    isNonnegativeInteger(decryptedExtension.expected_revision)
-  ) {
+  if (decryptedExtension?.kind === "revision_conflict") {
+    if (
+      typeof decryptedExtension.command_id !== "string" ||
+      !isNonnegativeInteger(decryptedExtension.expected_revision) ||
+      typeof decryptedExtension.revision_epoch !== "string" ||
+      !decryptedExtension.revision_epoch
+    ) {
+      throw new Error("The authenticated revision conflict is malformed.");
+    }
     await onRevisionConflict?.(
       decryptedExtension.command_id,
       decryptedExtension.expected_revision,
+      decryptedExtension.revision_epoch,
       isPositiveInteger(decryptedExtension.active_device_count)
         ? decryptedExtension.active_device_count
         : undefined,
@@ -1488,14 +1566,20 @@ async function forwardEvent(
     seen.add(eventId);
     return;
   }
-  if (
-    decryptedExtension?.kind === "command_result" &&
-    typeof decryptedExtension.command_id === "string" &&
-    isPositiveInteger(decryptedExtension.sequence) &&
-    isPositiveInteger(decryptedExtension.revision) &&
-    (decryptedExtension.outcome === "succeeded" ||
-      decryptedExtension.outcome === "failed")
-  ) {
+  if (decryptedExtension?.kind === "command_result") {
+    if (
+      typeof decryptedExtension.command_id !== "string" ||
+      !isPositiveInteger(decryptedExtension.sequence) ||
+      !isPositiveInteger(decryptedExtension.revision) ||
+      typeof decryptedExtension.revision_epoch !== "string" ||
+      !decryptedExtension.revision_epoch ||
+      !(
+        decryptedExtension.outcome === "succeeded" ||
+        decryptedExtension.outcome === "failed"
+      )
+    ) {
+      throw new Error("The authenticated command result is malformed.");
+    }
     const activeDeviceCount = isPositiveInteger(
       decryptedExtension.active_device_count,
     )
@@ -1508,6 +1592,7 @@ async function forwardEvent(
         revision: decryptedExtension.revision,
         outcome: decryptedExtension.outcome,
       },
+      decryptedExtension.revision_epoch,
       activeDeviceCount,
     );
     if (decryptedExtension.outcome === "failed") {
@@ -1538,8 +1623,16 @@ async function forwardEvent(
   );
   seen.add(eventId);
   if (!parsed) return;
-  if (parsed.revision) {
-    await onKnownRevision?.(parsed.revision, parsed.activeDeviceCount);
+  if (
+    parsed.revision !== undefined &&
+    typeof decryptedExtension?.revision_epoch === "string" &&
+    decryptedExtension.revision_epoch
+  ) {
+    await onKnownRevision?.(
+      parsed.revision,
+      decryptedExtension.revision_epoch,
+      parsed.activeDeviceCount,
+    );
   }
   onMessage(parsed);
 }
@@ -1727,6 +1820,13 @@ async function reserveCommandSequence(
       let failure: Error | null = null;
       read.onsuccess = () => {
         const state = parseCommandSequenceState(read.result);
+        if (!state.revisionInitialized) {
+          failure = new Error(
+            "Waiting for the current Gateway session state before sending.",
+          );
+          transaction.abort();
+          return;
+        }
         if (state.pending) {
           failure = new Error(
             "Another Codever command is still waiting to be delivered.",
@@ -1738,6 +1838,7 @@ async function reserveCommandSequence(
           commandId: crypto.randomUUID(),
           sequence: state.lastAcknowledged + 1,
           baseRevision: state.lastRevision,
+          revisionEpoch: state.revisionEpoch!,
         };
         store.put(
           {
@@ -1777,6 +1878,24 @@ async function reserveCommandSequence(
   }
 }
 
+async function assertRevisionInitialized(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+): Promise<void> {
+  const state = await readCommandSequenceState(
+    commandSequenceScope(config, identity, sequenceEpoch),
+  );
+  if (!state.revisionInitialized) {
+    throw new Error(
+      "Waiting for the current Gateway session state before sending.",
+    );
+  }
+  if (!state.revisionEpoch) {
+    throw new Error("The Gateway revision epoch is not initialized.");
+  }
+}
+
 async function savePendingCommandPlaintext(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -1807,20 +1926,31 @@ async function acknowledgePendingCommand(
   sequenceEpoch: string,
   reservation: CommandReservation,
   revision: number,
+  revisionEpoch: string,
 ): Promise<void> {
   await updateCommandSequenceState(
     commandSequenceScope(config, identity, sequenceEpoch),
     (state) => {
+      assertMatchingRevisionEpoch(state, revisionEpoch);
+      if (reservation.revisionEpoch !== revisionEpoch) {
+        throw new Error(
+          "Rejected an acknowledgement for a different revision epoch.",
+        );
+      }
       if (state.lastAcknowledged >= reservation.sequence) {
         return {
           ...state,
           lastRevision: Math.max(state.lastRevision, revision),
+          revisionInitialized: true,
         };
       }
       if (!state.pending) {
         return {
+          ...state,
           lastAcknowledged: reservation.sequence,
           lastRevision: Math.max(state.lastRevision, revision),
+          revisionInitialized: true,
+          pending: undefined,
         };
       }
       if (
@@ -1828,8 +1958,11 @@ async function acknowledgePendingCommand(
         state.pending.sequence === reservation.sequence
       ) {
         return {
+          ...state,
           lastAcknowledged: reservation.sequence,
           lastRevision: Math.max(state.lastRevision, revision),
+          revisionInitialized: true,
+          pending: undefined,
         };
       }
       // A historical acknowledgement for a different command must not clear
@@ -1839,18 +1972,127 @@ async function acknowledgePendingCommand(
   );
 }
 
+function assertMatchingRevisionEpoch(
+  state: CommandSequenceState,
+  revisionEpoch: string,
+): void {
+  if (
+    !state.revisionInitialized ||
+    !state.revisionEpoch ||
+    state.revisionEpoch !== revisionEpoch
+  ) {
+    throw new Error(
+      "Rejected an authenticated Gateway event from a different revision epoch.",
+    );
+  }
+}
+
+async function initializeKnownRevision(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  revisionEpoch: string,
+  revision: number,
+  stateVersion: number,
+): Promise<boolean> {
+  const database = await openIdentityDatabase();
+  const scope = commandSequenceScope(config, identity, sequenceEpoch);
+  try {
+    return await new Promise<boolean>((resolve, reject) => {
+      const transaction = database.transaction(
+        COMMAND_SEQUENCE_STORE,
+        "readwrite",
+      );
+      const store = transaction.objectStore(COMMAND_SEQUENCE_STORE);
+      const read = store.get(scope);
+      let accepted = false;
+      let failure: Error | null = null;
+      read.onsuccess = () => {
+        try {
+          const state = parseCommandSequenceState(read.result);
+          const epochStatus = classifyGatewayStateEpoch(
+            state.revisionEpoch,
+            state.retiredRevisionEpochs,
+            revisionEpoch,
+          );
+          if (epochStatus === "retired") {
+            throw new Error(
+              "Rejected a Gateway state snapshot from a retired revision epoch.",
+            );
+          }
+          const sameEpoch =
+            state.revisionInitialized && epochStatus === "current";
+          if (sameEpoch && stateVersion <= state.stateVersion) return;
+          if (sameEpoch && revision < state.lastRevision) {
+            throw new Error(
+              "Rejected a Gateway state snapshot with a regressed revision.",
+            );
+          }
+          accepted = true;
+          store.put(
+            sameEpoch
+              ? {
+                  ...state,
+                  lastRevision: revision,
+                  stateVersion,
+                }
+              : {
+                  lastAcknowledged: 0,
+                  lastRevision: revision,
+                  revisionInitialized: true,
+                  revisionEpoch,
+                  retiredRevisionEpochs: [
+                    ...new Set([
+                      ...state.retiredRevisionEpochs,
+                      ...(state.revisionEpoch ? [state.revisionEpoch] : []),
+                    ]),
+                  ],
+                  stateVersion,
+                },
+            scope,
+          );
+        } catch (error) {
+          failure =
+            error instanceof Error ? error : new Error(String(error));
+          transaction.abort();
+        }
+      };
+      read.onerror = () => transaction.abort();
+      transaction.oncomplete = () => resolve(accepted);
+      transaction.onerror = () =>
+        reject(
+          failure ??
+            transaction.error ??
+            new Error("Could not initialize the Gateway revision state."),
+        );
+      transaction.onabort = () =>
+        reject(
+          failure ??
+            transaction.error ??
+            new Error("Could not initialize the Gateway revision state."),
+        );
+    });
+  } finally {
+    database.close();
+  }
+}
+
 async function recordKnownRevision(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
   sequenceEpoch: string,
   revision: number,
+  revisionEpoch: string,
 ): Promise<void> {
   await updateCommandSequenceState(
     commandSequenceScope(config, identity, sequenceEpoch),
-    (state) => ({
-      ...state,
-      lastRevision: Math.max(state.lastRevision, revision),
-    }),
+    (state) => {
+      assertMatchingRevisionEpoch(state, revisionEpoch);
+      return {
+        ...state,
+        lastRevision: Math.max(state.lastRevision, revision),
+      };
+    },
   );
 }
 
@@ -1865,6 +2107,7 @@ async function rebasePendingCommand(
     commandId: crypto.randomUUID(),
     sequence: reservation.sequence,
     baseRevision: expectedRevision,
+    revisionEpoch: reservation.revisionEpoch,
   };
   await updateCommandSequenceState(
     commandSequenceScope(config, identity, sequenceEpoch),
@@ -1875,6 +2118,7 @@ async function rebasePendingCommand(
       ) {
         throw new Error("The command changed before it could be safely rebased.");
       }
+      assertMatchingRevisionEpoch(state, reservation.revisionEpoch);
       return {
         ...state,
         lastRevision: Math.max(state.lastRevision, expectedRevision),
@@ -1901,8 +2145,10 @@ async function abandonIncompleteCommand(
     (state) =>
       state.pending?.commandId === commandId && !state.pending.plaintext
         ? {
+            ...state,
             lastAcknowledged: state.lastAcknowledged,
             lastRevision: state.lastRevision,
+            pending: undefined,
           }
         : state,
   );
@@ -1919,8 +2165,10 @@ async function discardPendingCommand(
     (state) =>
       state.pending?.commandId === commandId
         ? {
+            ...state,
             lastAcknowledged: state.lastAcknowledged,
             lastRevision: state.lastRevision,
+            pending: undefined,
           }
         : state,
   );
@@ -1941,6 +2189,7 @@ async function retryPendingCommand(
   const state = await readCommandSequenceState(scope);
   const pending = state.pending;
   if (!pending) return null;
+  assertMatchingRevisionEpoch(state, pending.revisionEpoch);
   if (!pending.plaintext) {
     if (Date.now() - pending.createdAt < INCOMPLETE_OUTBOX_LEASE_MS) {
       throw new Error("Another tab is preparing a Codever command.");
@@ -1948,8 +2197,10 @@ async function retryPendingCommand(
     await updateCommandSequenceState(scope, (current) =>
       current.pending?.commandId === pending.commandId
         ? {
+            ...current,
             lastAcknowledged: current.lastAcknowledged,
             lastRevision: current.lastRevision,
+            pending: undefined,
           }
         : current,
     );
@@ -2070,7 +2321,13 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     Number.isSafeInteger(value) &&
     value >= 0
   ) {
-    return { lastAcknowledged: value, lastRevision: 0 };
+    return {
+      lastAcknowledged: value,
+      lastRevision: 0,
+      revisionInitialized: false,
+      retiredRevisionEpochs: [],
+      stateVersion: 0,
+    };
   }
   const record = asRecord(value);
   const lastAcknowledged = record?.lastAcknowledged;
@@ -2079,7 +2336,13 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     !Number.isSafeInteger(lastAcknowledged) ||
     lastAcknowledged < 0
   ) {
-    return { lastAcknowledged: 0, lastRevision: 0 };
+    return {
+      lastAcknowledged: 0,
+      lastRevision: 0,
+      revisionInitialized: false,
+      retiredRevisionEpochs: [],
+      stateVersion: 0,
+    };
   }
   const lastRevision =
     typeof record?.lastRevision === "number" &&
@@ -2087,8 +2350,38 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     record.lastRevision >= 0
       ? record.lastRevision
       : 0;
+  const revisionInitialized = record?.revisionInitialized === true;
+  const stateVersion =
+    typeof record?.stateVersion === "number" &&
+    Number.isSafeInteger(record.stateVersion) &&
+    record.stateVersion >= 0
+      ? record.stateVersion
+      : 0;
+  const revisionEpoch =
+    typeof record?.revisionEpoch === "string" && record.revisionEpoch
+      ? record.revisionEpoch
+      : undefined;
+  const retiredRevisionEpochs = Array.isArray(record?.retiredRevisionEpochs)
+    ? [
+        ...new Set(
+          record.retiredRevisionEpochs.filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0,
+          ),
+        ),
+      ]
+    : [];
   const pending = asRecord(record?.pending);
-  if (!pending) return { lastAcknowledged, lastRevision };
+  if (!pending) {
+    return {
+      lastAcknowledged,
+      lastRevision,
+      revisionInitialized,
+      retiredRevisionEpochs,
+      stateVersion,
+      ...(revisionEpoch ? { revisionEpoch } : {}),
+    };
+  }
   if (
     typeof pending.commandId !== "string" ||
     typeof pending.sequence !== "number" ||
@@ -2102,6 +2395,10 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
   return {
     lastAcknowledged,
     lastRevision,
+    revisionInitialized,
+    retiredRevisionEpochs,
+    stateVersion,
+    ...(revisionEpoch ? { revisionEpoch } : {}),
     pending: {
       commandId: pending.commandId,
       sequence: pending.sequence,
@@ -2111,6 +2408,10 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
         pending.baseRevision >= 0
           ? pending.baseRevision
           : lastRevision,
+      revisionEpoch:
+        typeof pending.revisionEpoch === "string" && pending.revisionEpoch
+          ? pending.revisionEpoch
+          : revisionEpoch ?? "",
       createdAt: pending.createdAt,
       payload: pending.payload as CommandPayload,
       ...(asRecord(pending.plaintext)
@@ -2156,6 +2457,10 @@ function fallbackBody(payload: CommandPayload): string {
       return `Permission decision: ${payload.decision}`;
     case "session.settings":
       return "Update agent session settings";
+    case "session.create":
+      return "Create a new agent session";
+    case "session.select":
+      return `Switch to agent session ${payload.sessionId}`;
   }
 }
 

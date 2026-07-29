@@ -21,6 +21,7 @@ import {
   saveMatrixConfig,
   type IncomingCodeverMessage,
   type CommandSendResult,
+  type GatewayStateSnapshot,
   type MatrixConnection,
   type MatrixConnectionConfig,
   type MatrixConnectionStatus,
@@ -36,21 +37,6 @@ import {
   type PairingPreview,
   type TrustedGateway,
 } from "./pairing";
-
-type Session = {
-  id: string;
-  initials: string;
-  color: string;
-  title: string;
-  preview: string;
-  time: string;
-  unread?: number;
-  active?: boolean;
-  provider: string;
-  model: string;
-  repository: string;
-  branch: string;
-};
 
 type ChatMessage = {
   id: string;
@@ -109,100 +95,6 @@ function bindCredentialsToHomeserver(
   };
 }
 
-const sessions: Session[] = [
-  {
-    id: "matrix-rewrite",
-    initials: "CV",
-    color: "violet",
-    title: "Matrix PWA rewrite",
-    preview: "Waiting for permission to edit 3 files",
-    time: "now",
-    unread: 1,
-    active: true,
-    provider: "Codex",
-    model: "GPT-5.2 Codex",
-    repository: "escapingbug/codever",
-    branch: "rewrite/matrix-pwa",
-  },
-  {
-    id: "release",
-    initials: "RL",
-    color: "blue",
-    title: "Prepare v0.4 release",
-    preview: "All 128 tests passed. Ready to tag.",
-    time: "10:42",
-    provider: "Claude Code",
-    model: "Claude Sonnet 4",
-    repository: "codever/desktop",
-    branch: "release/0.4",
-  },
-  {
-    id: "security",
-    initials: "SC",
-    color: "green",
-    title: "Security review",
-    preview: "I found two places to harden nonce validation.",
-    time: "Mon",
-    unread: 3,
-    provider: "Codex",
-    model: "GPT-5.2 Codex",
-    repository: "escapingbug/codever",
-    branch: "security/device-trust",
-  },
-  {
-    id: "ios",
-    initials: "MB",
-    color: "orange",
-    title: "Mobile layout polish",
-    preview: "The safe-area and keyboard fixes are in.",
-    time: "Sun",
-    provider: "Cursor Agent",
-    model: "Composer",
-    repository: "codever/pwa",
-    branch: "feat/mobile-shell",
-  },
-  {
-    id: "docs",
-    initials: "DX",
-    color: "pink",
-    title: "Protocol documentation",
-    preview: "Updated the encrypted envelope examples.",
-    time: "Fri",
-    provider: "OpenCode",
-    model: "Gemini 3 Pro",
-    repository: "codever/protocol",
-    branch: "docs/envelopes",
-  },
-];
-
-const initialMessages: ChatMessage[] = [
-  {
-    id: "notice",
-    kind: "notice",
-    text: "Messages and agent commands are end-to-end encrypted. Only your trusted devices can read or authorize them.",
-  },
-  {
-    id: "user-1",
-    kind: "user",
-    text: "Build the first PWA screen from the architecture plan. Keep it familiar like Telegram, but make agent state and trust obvious.",
-    time: "10:36",
-  },
-  {
-    id: "agent-1",
-    kind: "agent",
-    text: "I’ll turn the starter into a responsive three-pane workspace, then add a local interaction model for sessions, permissions, and streaming responses.",
-    time: "10:36",
-  },
-  { id: "tool-1", kind: "tool", time: "10:37" },
-  {
-    id: "agent-2",
-    kind: "agent",
-    text: "The app shell and mobile navigation are in place. I’m ready to update the PWA metadata and offline cache next.",
-    time: "10:38",
-  },
-  { id: "permission-1", kind: "permission", time: "10:38" },
-];
-
 function Icon({ children }: { children: React.ReactNode }) {
   return (
     <span className="icon" aria-hidden="true">
@@ -212,19 +104,11 @@ function Icon({ children }: { children: React.ReactNode }) {
 }
 
 export function CodeverApp() {
-  const [appMode, setAppMode] = useState<"demo" | "matrix">("matrix");
-  const [selectedId, setSelectedId] = useState(sessions[0].id);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [permission, setPermission] = useState<
-    "pending" | "approved" | "denied"
-  >("pending");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamText, setStreamText] = useState("");
-  const [model, setModel] = useState(sessions[0].model);
-  const [mode, setMode] = useState("Agent");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
@@ -237,7 +121,9 @@ export function CodeverApp() {
   const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
     null,
   );
-  const [gatewayRevision, setGatewayRevision] = useState(0);
+  const [gatewayState, setGatewayState] =
+    useState<GatewayStateSnapshot | null>(null);
+  const [gatewayRevision, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
   const [pairingPreview, setPairingPreview] =
@@ -249,8 +135,6 @@ export function CodeverApp() {
     Record<string, "pending" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const responseDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
@@ -262,27 +146,33 @@ export function CodeverApp() {
   const revisionConflictRef = useRef<RevisionConflictNotice | null>(null);
   const activePromptCommandIdRef = useRef<string | null>(null);
   const completedCommandResultsRef = useRef(new Set<string>());
+  const currentSessionIdRef = useRef<string | null>(null);
 
   const selected =
-    sessions.find((session) => session.id === selectedId) ?? sessions[0];
+    gatewayState?.sessions.find(
+      (session) => session.id === gatewayState.currentSessionId,
+    ) ?? null;
   const filteredSessions = useMemo(
     () =>
-      sessions.filter((session) =>
-        `${session.title} ${session.preview} ${session.repository}`
+      (gatewayState?.sessions ?? []).filter((session) =>
+        `${session.title} ${session.provider} ${session.model ?? ""}`
           .toLowerCase()
           .includes(search.toLowerCase()),
       ),
-    [search],
+    [gatewayState, search],
   );
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
+  const sessionReady = Boolean(matrixConnected && gatewayState && selected);
   const conversationTitle =
-    appMode === "matrix"
-      ? trustedGateway
-        ? matrixConfig.roomId || "Encrypted Matrix room"
-        : "Add a Gateway"
-      : selected.title;
-  const activeProvider = appMode === "matrix" ? "Gateway agent" : selected.provider;
+    selected?.title ??
+    (trustedGateway
+      ? gatewayState
+        ? "No active session"
+        : "Syncing Gateway state…"
+      : "Add a Gateway");
+  const activeProvider =
+    gatewayState?.workspace.provider ?? selected?.provider ?? "Gateway agent";
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => {
@@ -372,12 +262,10 @@ export function CodeverApp() {
       top: feedRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages, streamText, isStreaming]);
+  }, [messages, isStreaming]);
 
   useEffect(
     () => () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
       pairingAbortRef.current?.abort();
       matrixConnectionRef.current?.stop();
     },
@@ -385,11 +273,10 @@ export function CodeverApp() {
   );
 
   function receiveMatrixMessage(incoming: IncomingCodeverMessage) {
-    if (incoming.activeDeviceCount) {
-      setActiveDeviceCount(incoming.activeDeviceCount);
-    }
-    if (incoming.revision) {
-      setGatewayRevision((current) => Math.max(current, incoming.revision ?? 0));
+    if (incoming.revision !== undefined) {
+      setGatewayRevision((current) =>
+        current === null ? incoming.revision! : Math.max(current, incoming.revision!),
+      );
     }
     if (
       incoming.kind === "user" &&
@@ -440,7 +327,7 @@ export function CodeverApp() {
         : -1;
       const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
       if (targetIndex < 0) {
-        if (incoming.kind === "user" && incoming.revision) {
+        if (incoming.kind === "user" && incoming.revision !== undefined) {
           const laterRevision = current.findIndex(
             (entry) =>
               entry.kind === "user" &&
@@ -492,6 +379,9 @@ export function CodeverApp() {
     setConnectionError(null);
     setConnectionStatus("connecting");
     setMessages([]);
+    setGatewayState(null);
+    setGatewayRevision(null);
+    currentSessionIdRef.current = null;
     try {
       const normalized = normalizeMatrixConfig(configInput);
       setMatrixConfig(normalized);
@@ -510,13 +400,28 @@ export function CodeverApp() {
           }));
         },
         onCollaborationState(state) {
-          if (state.activeDeviceCount) {
-            setActiveDeviceCount(state.activeDeviceCount);
-          }
-          if (state.revision) {
+          if (state.gatewayState) {
+            setActiveDeviceCount(state.gatewayState.activeDeviceCount);
+            setGatewayRevision(state.gatewayState.revision);
+          } else if (state.revision !== undefined) {
             setGatewayRevision((current) =>
-              Math.max(current, state.revision ?? 0),
+              current === null
+                ? state.revision!
+                : Math.max(current, state.revision!),
             );
+          }
+          if (state.gatewayState) {
+            const nextSessionId = state.gatewayState.currentSessionId;
+            if (
+              currentSessionIdRef.current !== null &&
+              currentSessionIdRef.current !== nextSessionId
+            ) {
+              setMessages([]);
+              setDecisionStates({});
+              setIsStreaming(false);
+            }
+            currentSessionIdRef.current = nextSessionId;
+            setGatewayState(state.gatewayState);
           }
         },
         onCommandResult(result) {
@@ -530,7 +435,6 @@ export function CodeverApp() {
       });
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
-      setAppMode("matrix");
       if (closeSettings) setSettingsOpen(false);
       setMessages((current) => [
         {
@@ -558,6 +462,9 @@ export function CodeverApp() {
     setRevisionConflict(null);
     setConnectionStatus("offline");
     setIsStreaming(false);
+    setGatewayState(null);
+    setGatewayRevision(null);
+    currentSessionIdRef.current = null;
   }
 
   function forgetMatrixConfig() {
@@ -569,7 +476,9 @@ export function CodeverApp() {
     setMatrixConfig(emptyMatrixConfig);
     setTrustedGateway(null);
     setActiveDeviceCount(null);
-    setGatewayRevision(0);
+    setGatewayRevision(null);
+    setGatewayState(null);
+    currentSessionIdRef.current = null;
     setPairingPreview(null);
     setConnectionError(null);
     setMessages([]);
@@ -701,7 +610,9 @@ export function CodeverApp() {
     setRevisionConflict(busyConflict);
     try {
       const result = await connection.confirmRevisionRetry(conflict.commandId);
-      setGatewayRevision((current) => Math.max(current, result.revision));
+      setGatewayRevision((current) =>
+        current === null ? result.revision : Math.max(current, result.revision),
+      );
       if (conflict.optimisticMessageId) {
         setMessages((current) =>
           current.map((message) =>
@@ -737,16 +648,6 @@ export function CodeverApp() {
             [request.id]:
               decision === "deny" ? "denied" : "approved",
           }));
-        }
-      } else if (
-        completion?.outcome === "succeeded" &&
-        conflict.payload.operation === "session.settings"
-      ) {
-        if (conflict.payload.model) setModel(conflict.payload.model);
-        if (conflict.payload.permissionMode) {
-          setMode(
-            conflict.payload.permissionMode === "plan" ? "Plan" : "Agent",
-          );
         }
       }
       revisionConflictRef.current = null;
@@ -795,76 +696,45 @@ export function CodeverApp() {
     }
   }
 
-  function chooseSession(id: string) {
-    if (appMode === "matrix") {
-      setMobileChatOpen(true);
-      return;
-    }
-    const next = sessions.find((session) => session.id === id);
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
-    timerRef.current = null;
-    responseDelayRef.current = null;
-    setIsStreaming(false);
-    setStreamText("");
-    setSelectedId(id);
-    setModel(next?.model ?? sessions[0].model);
+  async function chooseSession(id: string) {
     setMobileChatOpen(true);
-    if (id === sessions[0].id) {
-      setPermission("pending");
-      setMessages(initialMessages);
+    if (id === gatewayState?.currentSessionId) return;
+    if (!gatewayState?.capabilities.canSelectSession) {
+      setConnectionError("This Gateway does not support switching sessions.");
       return;
     }
-    setPermission("approved");
-    setMessages([
-      {
-        id: `${id}-notice`,
-        kind: "notice",
-        text: "This session is secured by your verified device keys.",
-      },
-      {
-        id: `${id}-agent`,
-        kind: "agent",
-        text: next?.preview ?? "Session ready.",
-        time: next?.time,
-      },
-    ]);
+    const sent = await sendRealCommand({
+      operation: "session.select",
+      sessionId: id,
+    });
+    if (sent) await sent.completion;
   }
 
-  function startMockResponse() {
-    const response =
-      "I’m on it. I’ll inspect the current context, make the smallest safe change, and report back with the verification result.";
-    let cursor = 0;
-    setStreamText("");
-    responseDelayRef.current = null;
-    timerRef.current = setInterval(() => {
-      cursor += 2;
-      setStreamText(response.slice(0, cursor));
-      if (cursor >= response.length) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        timerRef.current = null;
-        setMessages((current) => [
-          ...current,
-          {
-            id: `agent-${Date.now()}`,
-            kind: "agent",
-            text: response,
-            time: "now",
-          },
-        ]);
-        setStreamText("");
-        setIsStreaming(false);
-      }
-    }, 28);
+  async function createSession() {
+    if (!gatewayState?.capabilities.canCreateSession) {
+      setConnectionError(
+        gatewayState
+          ? "This Gateway does not support creating sessions."
+          : "Waiting for the current Gateway session state.",
+      );
+      return;
+    }
+    const sent = await sendRealCommand({ operation: "session.create" });
+    if (sent) {
+      await sent.completion;
+      setMobileChatOpen(true);
+    }
   }
 
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
     if (!value || isStreaming) return;
-    if (appMode === "matrix" && !matrixConnected) {
+    if (!matrixConnected || !gatewayState) {
       setConnectionError(
-        trustedGateway
+        !gatewayState && matrixConnected
+          ? "Waiting for the current Gateway session state."
+          : trustedGateway
           ? "The Gateway is offline. Reconnect before sending."
           : "Add and pair a Gateway before sending your first message.",
       );
@@ -878,66 +748,62 @@ export function CodeverApp() {
     ]);
     setDraft("");
     setIsStreaming(true);
-    if (appMode === "matrix") {
-      const result = await sendRealCommand({
-        operation: "prompt",
-        text: value,
-      });
-      if (!result) {
-        activePromptCommandIdRef.current = null;
-        setIsStreaming(false);
-        if (revisionConflictRef.current) {
-          const conflict = revisionConflictRef.current;
-          const matchesCurrentPrompt =
-            conflict.payload.operation === "prompt" &&
-            conflict.payload.text === value;
-          const next = matchesCurrentPrompt
-            ? { ...conflict, optimisticMessageId: optimisticId }
-            : conflict;
-          revisionConflictRef.current = next;
-          setRevisionConflict(next);
-          if (!matchesCurrentPrompt) {
-            setMessages((current) =>
-              current.filter((message) => message.id !== optimisticId),
-            );
-            setDraft(value);
-          }
-        } else {
-          setMessages((current) => [
-            ...current,
-            {
-              id: `matrix-error-${Date.now()}`,
-              kind: "error",
-              text: "The signed command was not sent. Check Matrix connection settings.",
-              time: "now",
-            },
-          ]);
+    const result = await sendRealCommand({
+      operation: "prompt",
+      text: value,
+    });
+    if (!result) {
+      activePromptCommandIdRef.current = null;
+      setIsStreaming(false);
+      if (revisionConflictRef.current) {
+        const conflict = revisionConflictRef.current;
+        const matchesCurrentPrompt =
+          conflict.payload.operation === "prompt" &&
+          conflict.payload.text === value;
+        const next = matchesCurrentPrompt
+          ? { ...conflict, optimisticMessageId: optimisticId }
+          : conflict;
+        revisionConflictRef.current = next;
+        setRevisionConflict(next);
+        if (!matchesCurrentPrompt) {
+          setMessages((current) =>
+            current.filter((message) => message.id !== optimisticId),
+          );
+          setDraft(value);
         }
       } else {
-        if (completedCommandResultsRef.current.delete(result.commandId)) {
-          activePromptCommandIdRef.current = null;
-          setIsStreaming(false);
-        } else {
-          activePromptCommandIdRef.current = result.commandId;
-        }
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === optimisticId
-              ? {
-                  ...message,
-                  commandId: result.commandId,
-                  revision: result.revision,
-                  originDeviceId: deviceKeyId ?? undefined,
-                  originDeviceName:
-                    trustedGateway?.certificate.certificate.deviceName,
-                }
-              : message,
-          ),
-        );
+        setMessages((current) => [
+          ...current,
+          {
+            id: `matrix-error-${Date.now()}`,
+            kind: "error",
+            text: "The signed command was not sent. Check Matrix connection settings.",
+            time: "now",
+          },
+        ]);
       }
-      return;
+    } else {
+      if (completedCommandResultsRef.current.delete(result.commandId)) {
+        activePromptCommandIdRef.current = null;
+        setIsStreaming(false);
+      } else {
+        activePromptCommandIdRef.current = result.commandId;
+      }
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === optimisticId
+            ? {
+                ...message,
+                commandId: result.commandId,
+                revision: result.revision,
+                originDeviceId: deviceKeyId ?? undefined,
+                originDeviceName:
+                  trustedGateway?.certificate.certificate.deviceName,
+              }
+            : message,
+        ),
+      );
     }
-    responseDelayRef.current = setTimeout(startMockResponse, 350);
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -948,40 +814,16 @@ export function CodeverApp() {
   }
 
   async function stopStreaming() {
-    if (appMode === "matrix") {
-      const sent = await sendRealCommand({ operation: "cancel" });
-      if (sent && (await sent.completion).outcome === "succeeded") {
-        setIsStreaming(false);
-      }
-      return;
+    const sent = await sendRealCommand({ operation: "cancel" });
+    if (sent && (await sent.completion).outcome === "succeeded") {
+      setIsStreaming(false);
     }
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (responseDelayRef.current) clearTimeout(responseDelayRef.current);
-    timerRef.current = null;
-    responseDelayRef.current = null;
-    if (streamText) {
-      setMessages((current) => [
-        ...current,
-        {
-          id: `agent-stopped-${Date.now()}`,
-          kind: "agent",
-          text: `${streamText} — stopped`,
-          time: "now",
-        },
-      ]);
-    }
-    setStreamText("");
-    setIsStreaming(false);
   }
 
   async function decidePermission(
     message: ChatMessage,
     decision: "allow_once" | "deny",
   ) {
-    if (appMode === "demo") {
-      setPermission(decision === "allow_once" ? "approved" : "denied");
-      return;
-    }
     if (!message.requestId) {
       setConnectionError("This permission request has no signed request ID.");
       return;
@@ -1000,31 +842,23 @@ export function CodeverApp() {
   }
 
   async function changeModel(nextModel: string) {
-    if (appMode === "matrix") {
-      const sent = await sendRealCommand({
-        operation: "session.settings",
-        model: nextModel,
-      });
-      if (sent && (await sent.completion).outcome === "succeeded") {
-        setModel(nextModel);
-      }
-      return;
-    }
-    setModel(nextModel);
+    const sent = await sendRealCommand({
+      operation: "session.settings",
+      model: nextModel,
+    });
+    if (sent) await sent.completion;
   }
 
   async function changeMode(nextMode: string) {
-    if (appMode === "matrix" && nextMode !== "Ask") {
-      const sent = await sendRealCommand({
-        operation: "session.settings",
-        permissionMode: nextMode === "Plan" ? "plan" : "default",
-      });
-      if (sent && (await sent.completion).outcome === "succeeded") {
-        setMode(nextMode);
-      }
-      return;
-    }
-    setMode(nextMode);
+    const sent = await sendRealCommand({
+      operation: "session.settings",
+      permissionMode: nextMode as
+        | "default"
+        | "accept_edits"
+        | "plan"
+        | "bypass_permissions",
+    });
+    if (sent) await sent.completion;
   }
 
   return (
@@ -1064,7 +898,15 @@ export function CodeverApp() {
             <span className="eyebrow">Workspace</span>
             <h1>Codever</h1>
           </div>
-          <button className="round-button" aria-label="New conversation">
+          <button
+            className="round-button"
+            aria-label="New conversation"
+            onClick={() => void createSession()}
+            disabled={
+              !matrixConnected ||
+              !gatewayState?.capabilities.canCreateSession
+            }
+          >
             +
           </button>
         </header>
@@ -1105,61 +947,67 @@ export function CodeverApp() {
 
         <div className="session-section-label">
           <span>Recent</span>
-          <span>
-            {appMode === "matrix" ? (trustedGateway ? 1 : 0) : filteredSessions.length}
-          </span>
+          <span>{gatewayState?.sessions.length ?? 0}</span>
         </div>
 
         <div className="session-list">
-          {(appMode === "matrix"
-            ? trustedGateway
-              ? sessions.slice(0, 1)
-              : []
-            : filteredSessions
-          ).map((session) => (
+          {filteredSessions.map((session) => (
             <button
               key={session.id}
               className={`session-row ${
-                selectedId === session.id ? "selected" : ""
+                gatewayState?.currentSessionId === session.id ? "selected" : ""
               }`}
-              onClick={() => chooseSession(session.id)}
+              onClick={() => void chooseSession(session.id)}
+              disabled={
+                gatewayState?.currentSessionId !== session.id &&
+                !gatewayState?.capabilities.canSelectSession
+              }
             >
-              <span className={`session-avatar ${session.color}`}>
-                {session.initials}
-                {(appMode === "matrix" ? matrixConnected : session.active) && (
+              <span className="session-avatar violet">
+                {sessionInitials(session.title)}
+                {matrixConnected &&
+                  gatewayState?.currentSessionId === session.id && (
                   <i className="agent-active" />
                 )}
               </span>
               <span className="session-copy">
                 <span className="session-title-line">
-                  <strong>
-                    {appMode === "matrix"
-                      ? matrixConfig.roomId || "Encrypted Matrix room"
-                      : session.title}
-                  </strong>
-                  <time>{session.time}</time>
+                  <strong>{session.title}</strong>
+                  <time>{formatSessionTime(session.updatedAt)}</time>
                 </span>
                 <span className="session-preview-line">
                   <span>
-                    {appMode === "matrix"
-                      ? "Live encrypted session · signed commands"
-                      : session.preview}
+                    {session.provider}
+                    {session.model ? ` · ${session.model}` : ""}
                   </span>
-                  {appMode === "demo" && session.unread && <b>{session.unread}</b>}
                 </span>
               </span>
             </button>
           ))}
-          {appMode === "matrix" && !trustedGateway && (
+          {!trustedGateway && (
             <div className="empty-search">
               <span>G</span>
               Add a Gateway to start your first secure conversation
             </div>
           )}
-          {appMode === "demo" && filteredSessions.length === 0 && (
+          {trustedGateway && !gatewayState && (
+            <div className="empty-search">
+              <span>↻</span>
+              Syncing current Gateway state…
+            </div>
+          )}
+          {gatewayState &&
+            gatewayState.sessions.length > 0 &&
+            filteredSessions.length === 0 && (
             <div className="empty-search">
               <span>⌕</span>
               No matching conversations
+            </div>
+          )}
+          {gatewayState && gatewayState.sessions.length === 0 && (
+            <div className="empty-search">
+              <span>+</span>
+              Create your first secure conversation
             </div>
           )}
         </div>
@@ -1167,21 +1015,21 @@ export function CodeverApp() {
         <footer className="trust-footer">
           <span className="shield">✓</span>
           <span>
-            <strong>
-              {appMode === "matrix" ? "Matrix E2EE + P-256" : "Encryption active"}
-            </strong>
+            <strong>Matrix E2EE + P-256</strong>
             <small>
-              {appMode === "matrix"
-                ? deviceKeyId
-                  ? `${matrixConnected ? "This device online" : "This device offline"} · ${
-                      activeDeviceCount === null
-                        ? "device count pending"
-                        : `${activeDeviceCount} active ${
-                            activeDeviceCount === 1 ? "device" : "devices"
-                          }`
-                    } · r${gatewayRevision}`
-                  : "Local device key not loaded"
-                : "4 trusted devices"}
+              {deviceKeyId
+                ? `${matrixConnected ? "This device online" : "This device offline"} · ${
+                    activeDeviceCount === null
+                      ? "device count pending"
+                      : `${activeDeviceCount} trusted ${
+                          activeDeviceCount === 1 ? "device" : "devices"
+                        }`
+                  } · ${
+                    gatewayRevision === null
+                      ? "syncing state"
+                      : `r${gatewayRevision}`
+                  }`
+                : "Local device key not loaded"}
             </small>
           </span>
           <button
@@ -1202,18 +1050,18 @@ export function CodeverApp() {
           >
             ‹
           </button>
-          <span className={`conversation-avatar ${selected.color}`}>
-            {selected.initials}
+          <span className="conversation-avatar violet">
+            {sessionInitials(conversationTitle)}
           </span>
           <div className="conversation-heading">
             <h2>{conversationTitle}</h2>
             <span>
               <i className={matrixConnected ? "" : "offline-dot"} />{" "}
-              {appMode === "matrix"
-                ? connectionStatus === "connected"
-                  ? "Encrypted sync active"
-                  : connectionStatus
-                : `${selected.provider} is ready`}
+              {connectionStatus === "connected"
+                ? gatewayState
+                  ? `${activeProvider} · encrypted sync active`
+                  : "Syncing Gateway state…"
+                : connectionStatus}
             </span>
           </div>
           <div className="header-actions">
@@ -1232,27 +1080,12 @@ export function CodeverApp() {
 
         {detailsOpen && (
           <div className="details-popover">
-            <span className="mini-label">
-              {appMode === "matrix" ? "Homeserver" : "Repository"}
-            </span>
-            <strong>
-              {appMode === "matrix"
-                ? matrixConfig.homeserver
-                : selected.repository}
-            </strong>
-            <span className="mini-label">
-              {appMode === "matrix" ? "Device" : "Branch"}
-            </span>
-            <code>
-              {appMode === "matrix"
-                ? matrixConfig.matrixDeviceId
-                : selected.branch}
-            </code>
+            <span className="mini-label">Workspace</span>
+            <strong>{gatewayState?.workspace.cwd || "Syncing…"}</strong>
+            <span className="mini-label">Device</span>
+            <code>{matrixConfig.matrixDeviceId || "Not connected"}</code>
             <span className="verified-line">
-              <b>✓</b>{" "}
-              {appMode === "matrix"
-                ? "Commands signed locally"
-                : "Gateway identity verified"}
+              <b>✓</b> Commands signed locally
             </span>
           </div>
         )}
@@ -1294,7 +1127,7 @@ export function CodeverApp() {
                       )}
                     <p>{message.text}</p>
                     <time>
-                      {message.revision
+                      {message.revision !== undefined
                         ? `r${message.revision} · ${message.time ?? ""}`
                         : message.time}{" "}
                       <span>✓✓</span>
@@ -1312,33 +1145,23 @@ export function CodeverApp() {
                       <span className="terminal-mark">&gt;_</span>
                       <span>
                         <strong>{message.text || "Agent tool"}</strong>
-                        <small>
-                          {appMode === "matrix"
-                            ? "Received from encrypted room"
-                            : "Completed in 1.8s"}
-                        </small>
+                        <small>Received from encrypted room</small>
                       </span>
                       <b>✓</b>
                     </div>
                     <div className="tool-command">
                       <code>
-                        {appMode === "matrix"
-                          ? JSON.stringify(message.raw ?? {}).slice(0, 180)
-                          : "rg --files apps/pwa"}
+                        {JSON.stringify(message.raw ?? {}).slice(0, 180)}
                       </code>
                     </div>
-                    <button>
-                      {appMode === "matrix" ? "Encrypted event details" : "View 24 files"}
-                    </button>
+                    <button>Encrypted event details</button>
                   </div>
                 </div>
               );
             }
             if (message.kind === "permission") {
               const decisionState =
-                appMode === "matrix"
-                  ? decisionStates[message.id] ?? "pending"
-                  : permission;
+                decisionStates[message.id] ?? "pending";
               return (
                 <div className="message-row agent-row" key={message.id}>
                   <div className="agent-mark">C</div>
@@ -1347,25 +1170,13 @@ export function CodeverApp() {
                       <span>!</span>
                       <div>
                         <strong>{message.text || "Permission required"}</strong>
-                        <small>
-                          {appMode === "matrix"
-                            ? "Signed response required"
-                            : "Write access · 3 files"}
-                        </small>
+                        <small>Signed response required</small>
                       </div>
                     </div>
                     <p>
-                      {appMode === "matrix"
-                        ? "This decision will be signed by your local Codever key and sent through the encrypted room."
-                        : "Allow Codex to update the PWA screen, metadata, and offline shell?"}
+                      This decision will be signed by your local Codever key and
+                      sent through the encrypted room.
                     </p>
-                    {appMode === "demo" && (
-                      <div className="file-list">
-                        <code>app/CodeverApp.tsx</code>
-                        <code>app/globals.css</code>
-                        <code>public/sw.js</code>
-                      </div>
-                    )}
                     {decisionState === "pending" ? (
                       <div className="permission-actions">
                         <button
@@ -1405,20 +1216,6 @@ export function CodeverApp() {
             );
           })}
 
-          {isStreaming && appMode === "demo" && (
-            <div className="message-row agent-row streaming-row">
-              <div className="agent-mark live">C</div>
-              <div className="bubble agent-bubble">
-                <span className="agent-label">
-                  CODEX <i>responding</i>
-                </span>
-                <p>
-                  {streamText}
-                  <span className="cursor" />
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="composer-area">
@@ -1426,26 +1223,15 @@ export function CodeverApp() {
             <div className="context-item">
               <span className="context-icon">⌘</span>
               <span>
-                <small>{appMode === "matrix" ? "Encrypted room" : "Repository"}</small>
-                <b>
-                  {appMode === "matrix"
-                    ? matrixConfig.roomId || "Not connected"
-                    : selected.repository}
-                </b>
+                <small>Workspace</small>
+                <b>{gatewayState?.workspace.cwd || "Syncing Gateway state…"}</b>
               </span>
             </div>
             <div className="context-item branch-item">
               <span className="branch-mark">⑂</span>
-              <code>
-                {appMode === "matrix"
-                  ? matrixConfig.gatewayId || "Gateway"
-                  : selected.branch}
-              </code>
+              <code>{gatewayState?.workspace.provider || "Gateway"}</code>
             </div>
             <span className="context-spacer" />
-            {appMode === "demo" && (
-              <span className="token-state">18k / 128k</span>
-            )}
           </div>
 
           {revisionConflict && (
@@ -1504,9 +1290,7 @@ export function CodeverApp() {
                 aria-label="Attach a file"
                 onClick={() =>
                   setConnectionError(
-                    appMode === "matrix"
-                      ? "Encrypted attachment upload is not available in this milestone."
-                      : "Attach a file in the connected Gateway app."
+                    "Encrypted attachment upload is not available in this milestone.",
                   )
                 }
               >
@@ -1516,26 +1300,43 @@ export function CodeverApp() {
                 <label>
                   <span className="status-spark" />
                   <select
-                    value={model}
+                    value={gatewayState?.workspace.model ?? ""}
                     onChange={(event) => void changeModel(event.target.value)}
                     aria-label="Agent model"
+                    disabled={
+                      !sessionReady ||
+                      gatewayState!.capabilities.models.length === 0
+                    }
                   >
-                    <option>GPT-5.2 Codex</option>
-                    <option>Claude Sonnet 4</option>
-                    <option>Gemini 3 Pro</option>
-                    <option>Composer</option>
+                    {!gatewayState?.workspace.model && (
+                      <option value="">Gateway default</option>
+                    )}
+                    {(gatewayState?.capabilities.models ?? []).map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <span className="control-divider" />
                 <label>
                   <select
-                    value={mode}
+                    value={gatewayState?.workspace.permissionMode ?? ""}
                     onChange={(event) => void changeMode(event.target.value)}
                     aria-label="Agent mode"
+                    disabled={
+                      !sessionReady ||
+                      gatewayState!.capabilities.permissionModes.length === 0
+                    }
                   >
-                    <option>Agent</option>
-                    <option>Plan</option>
-                    <option>Ask</option>
+                    {!gatewayState && <option value="">Syncing…</option>}
+                    {(gatewayState?.capabilities.permissionModes ?? []).map(
+                      (mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.name}
+                        </option>
+                      ),
+                    )}
                   </select>
                 </label>
               </div>
@@ -1552,7 +1353,7 @@ export function CodeverApp() {
                 <button
                   type="submit"
                   className="send-button"
-                  disabled={!draft.trim() || !matrixConnected}
+                  disabled={!draft.trim() || !sessionReady}
                   aria-label="Send message"
                 >
                   ↑
@@ -1561,9 +1362,7 @@ export function CodeverApp() {
             </div>
           </form>
           <p className="composer-hint">
-            {appMode === "matrix"
-              ? "Signed locally · Matrix E2EE transport · Enter to send"
-              : "Enter to send · Shift + Enter for a new line"}
+            Signed locally · Matrix E2EE transport · Enter to send
           </p>
         </div>
       </section>
@@ -1615,6 +1414,29 @@ function formatMessageTime(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function formatSessionTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return formatMessageTime(timestamp);
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function sessionInitials(title: string): string {
+  const initials = title
+    .trim()
+    .split(/\s+/u)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+  return initials || "CV";
+}
+
 function describeConflictedAction(payload: CommandPayload): string {
   switch (payload.operation) {
     case "prompt":
@@ -1627,6 +1449,10 @@ function describeConflictedAction(payload: CommandPayload): string {
       return `The ${payload.decision.replaceAll("_", " ")} permission decision`;
     case "session.settings":
       return "The session settings change";
+    case "session.create":
+      return "The new session request";
+    case "session.select":
+      return "The session switch";
   }
 }
 

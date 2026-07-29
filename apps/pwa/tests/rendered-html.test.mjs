@@ -58,7 +58,9 @@ test("ships a complete installable offline shell", async () => {
   assert.match(serviceWorker, /caches\.open\(CACHE_NAME\)/);
   assert.match(serviceWorker, /event\.request\.mode === "navigate"/);
   assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
-  assert.match(source, /setPermission\("approved"\)/);
+  assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
+  assert.match(source, /operation: "session\.create"/);
+  assert.match(source, /operation: "session\.select"/);
   assert.match(source, /stopStreaming/);
   assert.match(
     styles,
@@ -245,7 +247,24 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(settings, /identified[\s\S]*automatically from the token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
-  assert.match(app, /useState<"demo" \| "matrix">\("matrix"\)/);
+  assert.match(app, /useState<GatewayStateSnapshot \| null>\(null\)/);
+  assert.match(
+    app,
+    /setActiveDeviceCount\(state\.gatewayState\.activeDeviceCount\)/,
+  );
+  assert.doesNotMatch(app, /setActiveDeviceCount\(incoming\.activeDeviceCount\)/);
+  assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
+  assert.match(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
+  assert.match(matrix, /revisionInitialized: false/);
+  assert.match(matrix, /stateVersion <= state\.stateVersion/);
+  assert.match(matrix, /retiredRevisionEpochs/);
+  assert.match(matrix, /epochStatus === "retired"/);
+  assert.match(matrix, /snapshot from a retired revision epoch/);
+  assert.match(matrix, /lastAcknowledged: 0,[\s\S]*revisionEpoch,[\s\S]*stateVersion/);
+  assert.match(matrix, /revisionEpoch: reservation\.revisionEpoch/);
+  assert.match(matrix, /revision_epoch !== "string"/);
+  assert.match(matrix, /assertMatchingRevisionEpoch/);
+  assert.match(matrix, /Waiting for the current Gateway session state/);
   assert.doesNotMatch(app, />\s*Demo\s*</);
   assert.match(app, /connectRealMatrix/);
   assert.match(app, /confirmPairing/);

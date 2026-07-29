@@ -8,6 +8,123 @@ import {
   matrixSyncDatabaseName,
   waitForMatrixSyncStoreClose,
 } from "../app/matrixSyncStore.ts";
+import {
+  classifyGatewayStateEpoch,
+  parseGatewayStateExtension,
+} from "../app/gatewayState.ts";
+
+test("authenticated Gateway state accepts revision zero and real capabilities", () => {
+  assert.deepEqual(
+    parseGatewayStateExtension({
+      version: 1,
+      kind: "gateway_state",
+      state_version: 1,
+      revision: 0,
+      revision_epoch: "epoch-1",
+      active_device_count: 1,
+      current_session_id: "session-1",
+      sessions: [
+        {
+          id: "session-1",
+          title: "Live session",
+          updated_at: 1_700_000_000_000,
+          provider: "codex",
+          model: "gpt-5",
+        },
+      ],
+      workspace: {
+        cwd: "C:/workspace",
+        provider: "codex",
+        model: "gpt-5",
+        permission_mode: "default",
+      },
+      capabilities: {
+        models: [{ id: "gpt-5", name: "GPT-5" }],
+        permission_modes: [{ id: "default", name: "Default" }],
+        can_create_session: true,
+        can_select_session: true,
+      },
+    }),
+    {
+      stateVersion: 1,
+      revision: 0,
+      revisionEpoch: "epoch-1",
+      activeDeviceCount: 1,
+      currentSessionId: "session-1",
+      sessions: [
+        {
+          id: "session-1",
+          title: "Live session",
+          updatedAt: 1_700_000_000_000,
+          provider: "codex",
+          model: "gpt-5",
+        },
+      ],
+      workspace: {
+        cwd: "C:/workspace",
+        provider: "codex",
+        model: "gpt-5",
+        permissionMode: "default",
+      },
+      capabilities: {
+        models: [{ id: "gpt-5", name: "GPT-5" }],
+        permissionModes: [{ id: "default", name: "Default" }],
+        canCreateSession: true,
+        canSelectSession: true,
+      },
+    },
+  );
+});
+
+test("Gateway state rejects a missing or invalid state version", () => {
+  const base = {
+    version: 1,
+    kind: "gateway_state",
+    revision: 0,
+    revision_epoch: "epoch-1",
+    active_device_count: 1,
+    current_session_id: null,
+    sessions: [],
+    workspace: {
+      cwd: "C:/workspace",
+      provider: "codex",
+      permission_mode: "default",
+    },
+    capabilities: {
+      models: [],
+      permission_modes: [{ id: "default", name: "Default" }],
+      can_create_session: true,
+      can_select_session: true,
+    },
+  };
+  assert.throws(
+    () => parseGatewayStateExtension(base),
+    /state snapshot is malformed/,
+  );
+  assert.throws(
+    () => parseGatewayStateExtension({ ...base, state_version: 0 }),
+    /state snapshot is malformed/,
+  );
+});
+
+test("revision epochs can advance once and can never return to a retired epoch", () => {
+  assert.equal(
+    classifyGatewayStateEpoch(undefined, [], "epoch-a"),
+    "new",
+  );
+  assert.equal(
+    classifyGatewayStateEpoch("epoch-a", [], "epoch-a"),
+    "current",
+  );
+  assert.equal(
+    classifyGatewayStateEpoch("epoch-b", ["epoch-a"], "epoch-a"),
+    "retired",
+  );
+  assert.equal(
+    classifyGatewayStateEpoch("epoch-b", ["epoch-a"], "epoch-c"),
+    "new",
+  );
+});
 
 test("command result before explicit ack resolves acknowledgement and completion once", async () => {
   const lifecycle = new CommandLifecycle();

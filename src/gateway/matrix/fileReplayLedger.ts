@@ -1,5 +1,6 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { mkdir, open, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { canonicalJson, type CodeverCommand } from '@codever/protocol'
 import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
@@ -15,6 +16,12 @@ interface PersistedClaimBatch {
         value: number
         commandKey: string
     }
+}
+
+interface PersistedLedgerGeneration {
+    version: 1
+    kind: 'generation'
+    generation: string
 }
 
 export interface CommandClaimResult {
@@ -47,6 +54,7 @@ export class FileCommandReplayStore implements ReplayStore {
     private readonly revisions = new Map<string, number>()
     private readonly commandRevisions = new Map<string, number>()
     private initialized = false
+    private generation: string | null = null
     private chain: Promise<unknown> = Promise.resolve()
 
     constructor(private readonly filePath: string) {}
@@ -55,9 +63,17 @@ export class FileCommandReplayStore implements ReplayStore {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
             await this.pruneInternal(now)
+            if (!this.generation) throw new Error('Command replay ledger generation is unavailable')
         })
         this.chain = operation.then(() => undefined, () => undefined)
         return operation
+    }
+
+    getGeneration(): string {
+        if (!this.initialized || !this.generation) {
+            throw new Error('Command replay ledger is not initialized')
+        }
+        return this.generation
     }
 
     claimAll(nextClaims: readonly ReplayClaim[], now: number): Promise<boolean> {
@@ -72,8 +88,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 version: 1,
                 claims: nextClaims.map(claim => ({ ...claim })),
             }
-            await mkdir(dirname(this.filePath), { recursive: true })
-            await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8')
+            await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             return true
         })
@@ -97,12 +112,14 @@ export class FileCommandReplayStore implements ReplayStore {
                 command.gatewayId,
                 command.deviceId,
                 command.conversationId,
+                command.revisionEpoch,
                 sequenceEpoch,
             ])
-            const revisionScope = canonicalJson([
+            const revisionScope = conversationRevisionScope(
                 command.gatewayId,
                 command.conversationId,
-            ])
+                command.revisionEpoch,
+            )
             const nextClaims: ReplayClaim[] = [
                 { key: `${scope}:nonce:${command.nonce}`, expiresAt: command.expiresAt },
                 { key: `${scope}:command:${command.commandId}`, expiresAt: command.expiresAt },
@@ -160,12 +177,28 @@ export class FileCommandReplayStore implements ReplayStore {
         return operation
     }
 
+    getConversationRevision(
+        gatewayId: string,
+        conversationId: string,
+        revisionEpoch: string,
+    ): Promise<number> {
+        const operation = this.chain.then(async () => {
+            if (!this.initialized) await this.load()
+            return this.revisions.get(
+                conversationRevisionScope(gatewayId, conversationId, revisionEpoch),
+            ) ?? 0
+        })
+        this.chain = operation.then(() => undefined, () => undefined)
+        return operation
+    }
+
     private async load(): Promise<void> {
         let text: string
         try {
             text = await readFile(this.filePath, 'utf8')
         } catch (error) {
             if (isMissingFile(error)) {
+                await this.createGeneration()
                 this.initialized = true
                 return
             }
@@ -173,6 +206,7 @@ export class FileCommandReplayStore implements ReplayStore {
         }
 
         const lines = text.split(/\r?\n/)
+        let generationEntries = 0
         for (let index = 0; index < lines.length; index++) {
             const line = lines[index]
             if (!line.trim()) continue
@@ -181,6 +215,14 @@ export class FileCommandReplayStore implements ReplayStore {
                 value = JSON.parse(line)
             } catch {
                 throw new Error(`Corrupt command replay ledger at line ${index + 1}`)
+            }
+            if (isPersistedLedgerGeneration(value)) {
+                generationEntries += 1
+                if (generationEntries > 1) {
+                    throw new Error(`Duplicate command replay ledger generation at line ${index + 1}`)
+                }
+                this.generation = value.generation
+                continue
             }
             if (!isPersistedClaimBatch(value)) {
                 throw new Error(`Invalid command replay ledger entry at line ${index + 1}`)
@@ -205,6 +247,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 this.commandRevisions.set(value.revision.commandKey, value.revision.value)
             }
         }
+        if (!this.generation) await this.createGeneration()
         this.initialized = true
     }
 
@@ -214,10 +257,35 @@ export class FileCommandReplayStore implements ReplayStore {
         }
     }
 
-    private async append(record: PersistedClaimBatch): Promise<void> {
-        await mkdir(dirname(this.filePath), { recursive: true })
-        await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8')
+    private async createGeneration(): Promise<void> {
+        const generation = randomUUID()
+        await this.append({
+            version: 1,
+            kind: 'generation',
+            generation,
+        })
+        this.generation = generation
     }
+
+    private async append(record: PersistedClaimBatch | PersistedLedgerGeneration): Promise<void> {
+        await mkdir(dirname(this.filePath), { recursive: true })
+        const handle = await open(this.filePath, 'a')
+        try {
+            await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8')
+            await handle.sync()
+        } finally {
+            await handle.close()
+        }
+    }
+}
+
+function isPersistedLedgerGeneration(value: unknown): value is PersistedLedgerGeneration {
+    if (!value || typeof value !== 'object') return false
+    const record = value as Record<string, unknown>
+    return record.version === 1
+        && record.kind === 'generation'
+        && typeof record.generation === 'string'
+        && record.generation.length > 0
 }
 
 function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
@@ -259,4 +327,12 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
 
 function isMissingFile(error: unknown): boolean {
     return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
+}
+
+function conversationRevisionScope(
+    gatewayId: string,
+    conversationId: string,
+    revisionEpoch: string,
+): string {
+    return canonicalJson([gatewayId, conversationId, revisionEpoch])
 }

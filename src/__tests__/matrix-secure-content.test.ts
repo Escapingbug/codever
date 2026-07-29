@@ -103,6 +103,7 @@ describe('Gateway application-layer Matrix content', () => {
             'command-1',
             1,
             1,
+            'gateway-key-epoch',
             matrix,
         )
         const ackExtension = sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
@@ -128,6 +129,84 @@ describe('Gateway application-layer Matrix content', () => {
                 sequence: 1,
             },
         })
+
+        await layer.sendGatewayState(room, {
+            revision: 0,
+            revisionEpoch: 'gateway-key-epoch',
+            stateVersion: 1,
+            currentSessionId: null,
+            sessions: [],
+            workspace: {
+                cwd: 'C:\\repo',
+                provider: 'codex',
+                permissionMode: 'default',
+            },
+            capabilities: {
+                models: [{ id: 'gpt-test', name: 'GPT Test' }],
+                permissionModes: [{ id: 'default', name: 'Default' }],
+                canCreateSession: true,
+                canSelectSession: true,
+            },
+        }, matrix)
+        const stateExtension = sent[2]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const openedState = await openSecureEnvelope(stateExtension.secure_envelope, {
+            recipientPrivateKey: device.privateKey,
+            senderPublicKey: gateway.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'phone-1',
+                senderKeyId: gateway.keyId,
+                recipientKeyId: device.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: Date.now(),
+        })
+        expect(openedState.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                version: 1,
+                kind: 'gateway_state',
+                revision: 0,
+                revision_epoch: 'gateway-key-epoch',
+                state_version: 1,
+                active_device_count: 1,
+                current_session_id: null,
+                sessions: [],
+                workspace: {
+                    cwd: 'C:\\repo',
+                    provider: 'codex',
+                    permission_mode: 'default',
+                },
+                capabilities: {
+                    models: [{ id: 'gpt-test', name: 'GPT Test' }],
+                    permission_modes: [{ id: 'default', name: 'Default' }],
+                    can_create_session: true,
+                    can_select_session: true,
+                },
+            },
+        })
+        const firstStateTransaction = sent[2]!.transactionId
+        await layer.sendGatewayState(room, {
+            revision: 0,
+            revisionEpoch: 'gateway-key-epoch',
+            stateVersion: 2,
+            currentSessionId: null,
+            sessions: [],
+            workspace: {
+                cwd: 'C:\\repo',
+                provider: 'codex',
+                permissionMode: 'default',
+            },
+            capabilities: {
+                models: [{ id: 'gpt-test', name: 'GPT Test' }],
+                permissionModes: [{ id: 'default', name: 'Default' }],
+                canCreateSession: true,
+                canSelectSession: true,
+            },
+        }, matrix)
+        expect(sent[3]!.transactionId).not.toBe(firstStateTransaction)
 
         const incoming = await sealSecureEnvelope({
             plaintext: {

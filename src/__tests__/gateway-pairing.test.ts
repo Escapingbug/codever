@@ -157,6 +157,102 @@ describe('Gateway pairing', () => {
     })
   })
 
+  it('renews an active device in place when the verified request uses the same application key', async () => {
+    const fixture = await pairingFixture()
+    const deviceKeys = await generateDeviceKeyPair()
+    const firstOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      allowedOperations: ['prompt', 'cancel', 'decision', 'session.settings'],
+      now,
+    })
+    const firstRequest = await createSignedPairingRequest({
+      signedOffer: firstOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Alice phone',
+      deviceKeys,
+      deviceTransport: deviceTransport(),
+      now: now + 1_000,
+    })
+    const first = await fixture.service.receiveRequest(firstRequest.signedRequest, now + 2_000)
+
+    const renewalOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now: now + 3_000,
+    })
+    const renewalRequest = await createSignedPairingRequest({
+      signedOffer: renewalOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Alice phone',
+      deviceKeys,
+      deviceTransport: deviceTransport(),
+      now: now + 4_000,
+    })
+    const renewed = await fixture.service.receiveRequest(
+      renewalRequest.signedRequest,
+      now + 5_000,
+    )
+
+    expect(renewed.response.response.activeDeviceCount).toBe(1)
+    expect(renewed.response.response.certificate.certificate.allowedOperations)
+      .toEqual(expect.arrayContaining(['session.create', 'session.select']))
+    expect(renewed.response.response.certificate.certificate.certificateId)
+      .not.toBe(first.response.response.certificate.certificate.certificateId)
+    await expect(fixture.registry.listActive(now + 5_000)).resolves.toHaveLength(1)
+    await expect(fixture.registry.get('phone-one')).resolves.toMatchObject({
+      status: 'active',
+      certificate: {
+        certificate: {
+          certificateId: renewed.response.response.certificate.certificate.certificateId,
+        },
+      },
+    })
+  })
+
+  it('rejects renewal of an active device ID with a different application key', async () => {
+    const fixture = await pairingFixture()
+    const firstOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now,
+    })
+    const firstRequest = await createSignedPairingRequest({
+      signedOffer: firstOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Alice phone',
+      deviceKeys: await generateDeviceKeyPair(),
+      deviceTransport: deviceTransport(),
+      now: now + 1_000,
+    })
+    const first = await fixture.service.receiveRequest(firstRequest.signedRequest, now + 2_000)
+
+    const attackerOffer = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now: now + 3_000,
+    })
+    const attackerRequest = await createSignedPairingRequest({
+      signedOffer: attackerOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Mallory phone',
+      deviceKeys: await generateDeviceKeyPair(),
+      deviceTransport: deviceTransport(),
+      now: now + 4_000,
+    })
+
+    await expect(
+      fixture.service.receiveRequest(attackerRequest.signedRequest, now + 5_000),
+    ).rejects.toThrow('cannot renew with a different application key')
+    await expect(fixture.registry.get('phone-one')).resolves.toMatchObject({
+      certificate: {
+        certificate: {
+          certificateId: first.response.response.certificate.certificate.certificateId,
+        },
+      },
+    })
+  })
+
   it('rejects a second active device ID that reuses an application key', async () => {
     const fixture = await pairingFixture()
     const sharedKeys = await generateDeviceKeyPair()
