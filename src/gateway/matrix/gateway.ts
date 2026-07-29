@@ -41,6 +41,7 @@ interface RoomRuntime {
     appSessions: Map<string, AppSessionRecord>
     currentAppSessionId: string | null
     revisionEpoch: string
+    revisionEpochGeneration: number
     replayGeneration: string
     stateVersion: number
 }
@@ -144,6 +145,7 @@ export class MatrixGatewayRunner {
             await this.secureContent!.sendGatewayState(runtime.config, {
                 revision,
                 revisionEpoch: runtime.revisionEpoch,
+                revisionEpochGeneration: runtime.revisionEpochGeneration,
                 stateVersion,
                 currentSessionId: runtime.currentAppSessionId,
                 sessions: [...runtime.appSessions.values()].map(session => ({
@@ -658,6 +660,7 @@ export class MatrixGatewayRunner {
                 ),
                 currentAppSessionId: restored.currentSessionId,
                 revisionEpoch: restored.revisionEpoch,
+                revisionEpochGeneration: restored.revisionEpochGeneration,
                 replayGeneration: restored.replayGeneration,
                 stateVersion: restored.stateVersion,
             }
@@ -748,6 +751,7 @@ function runtimeStateWithoutVersion(
 ): Omit<PersistedRoomRuntimeState, 'stateVersion'> {
     return {
         revisionEpoch: runtime.revisionEpoch,
+        revisionEpochGeneration: runtime.revisionEpochGeneration,
         replayGeneration: runtime.replayGeneration,
         currentSessionId: runtime.currentAppSessionId,
         appSessions: [...runtime.appSessions.values()].map(session => ({ ...session })),

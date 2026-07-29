@@ -9,6 +9,7 @@ import {
   waitForMatrixSyncStoreClose,
 } from "../app/matrixSyncStore.ts";
 import {
+  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
   parseGatewayStateExtension,
 } from "../app/gatewayState.ts";
@@ -21,6 +22,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
       state_version: 1,
       revision: 0,
       revision_epoch: "epoch-1",
+      revision_epoch_generation: 1,
       active_device_count: 1,
       current_session_id: "session-1",
       sessions: [
@@ -49,6 +51,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
       stateVersion: 1,
       revision: 0,
       revisionEpoch: "epoch-1",
+      revisionEpochGeneration: 1,
       activeDeviceCount: 1,
       currentSessionId: "session-1",
       sessions: [
@@ -82,6 +85,7 @@ test("Gateway state rejects a missing or invalid state version", () => {
     kind: "gateway_state",
     revision: 0,
     revision_epoch: "epoch-1",
+    revision_epoch_generation: 1,
     active_device_count: 1,
     current_session_id: null,
     sessions: [],
@@ -107,22 +111,52 @@ test("Gateway state rejects a missing or invalid state version", () => {
   );
 });
 
-test("revision epochs can advance once and can never return to a retired epoch", () => {
+test("revision epochs can advance once and can never return after certificate renewal", () => {
   assert.equal(
-    classifyGatewayStateEpoch(undefined, [], "epoch-a"),
+    classifyGatewayStateEpoch(undefined, undefined, [], "epoch-a", 1),
     "new",
   );
   assert.equal(
-    classifyGatewayStateEpoch("epoch-a", [], "epoch-a"),
+    classifyGatewayStateEpoch("epoch-a", 1, [], "epoch-a", 1),
     "current",
   );
   assert.equal(
-    classifyGatewayStateEpoch("epoch-b", ["epoch-a"], "epoch-a"),
+    classifyGatewayStateEpoch("epoch-b", 2, ["epoch-a"], "epoch-a", 1),
     "retired",
   );
   assert.equal(
-    classifyGatewayStateEpoch("epoch-b", ["epoch-a"], "epoch-c"),
+    classifyGatewayStateEpoch("epoch-b", 2, ["epoch-a"], "epoch-c", 3),
     "new",
+  );
+});
+
+test("offline E3 before delayed E2 rejects the lower generation", () => {
+  assert.equal(
+    classifyGatewayStateEpoch("epoch-3", 3, ["epoch-1"], "epoch-2", 2),
+    "stale",
+  );
+  assert.equal(
+    classifyGatewayStateEpoch("epoch-3", 3, [], "forged-epoch", 3),
+    "conflict",
+  );
+});
+
+test("legacy cert-scoped state can migrate to a rotated epoch only with a newer state version", () => {
+  assert.equal(
+    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-1", 7),
+    true,
+  );
+  assert.equal(
+    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 8),
+    true,
+  );
+  assert.equal(
+    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 7),
+    false,
+  );
+  assert.equal(
+    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 6),
+    false,
   );
 });
 

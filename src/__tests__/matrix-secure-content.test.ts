@@ -133,6 +133,7 @@ describe('Gateway application-layer Matrix content', () => {
         await layer.sendGatewayState(room, {
             revision: 0,
             revisionEpoch: 'gateway-key-epoch',
+            revisionEpochGeneration: 1,
             stateVersion: 1,
             currentSessionId: null,
             sessions: [],
@@ -170,6 +171,7 @@ describe('Gateway application-layer Matrix content', () => {
                 kind: 'gateway_state',
                 revision: 0,
                 revision_epoch: 'gateway-key-epoch',
+                revision_epoch_generation: 1,
                 state_version: 1,
                 active_device_count: 1,
                 current_session_id: null,
@@ -191,6 +193,7 @@ describe('Gateway application-layer Matrix content', () => {
         await layer.sendGatewayState(room, {
             revision: 0,
             revisionEpoch: 'gateway-key-epoch',
+            revisionEpochGeneration: 1,
             stateVersion: 2,
             currentSessionId: null,
             sessions: [],

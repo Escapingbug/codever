@@ -14,6 +14,7 @@ export interface PersistedAppSession {
 
 export interface PersistedRoomRuntimeState {
     revisionEpoch: string
+    revisionEpochGeneration: number
     replayGeneration: string
     stateVersion: number
     currentSessionId: string | null
@@ -35,6 +36,7 @@ export class FileGatewayRuntimeStateStore {
     private state: RuntimeStateFile = { version: 1, rooms: {} }
     private chain: Promise<unknown> = Promise.resolve()
     private initialized = false
+    private migrationPending = false
 
     constructor(private readonly path: string) {}
 
@@ -45,7 +47,7 @@ export class FileGatewayRuntimeStateStore {
         return this.serial(async () => {
             if (!replayGeneration) throw new Error('Replay ledger generation is required')
             if (!this.initialized) await this.load()
-            let changed = false
+            let changed = this.migrationPending
             for (const room of rooms) {
                 const current = this.state.rooms[room.roomId]
                 if (!current) {
@@ -55,11 +57,15 @@ export class FileGatewayRuntimeStateStore {
                 }
                 if (current.replayGeneration !== replayGeneration) {
                     current.revisionEpoch = randomUUID()
+                    current.revisionEpochGeneration += 1
                     current.replayGeneration = replayGeneration
                     changed = true
                 }
             }
-            if (changed) await this.writeAtomic()
+            if (changed) {
+                await this.writeAtomic()
+                this.migrationPending = false
+            }
         })
     }
 
@@ -110,6 +116,7 @@ export class FileGatewayRuntimeStateStore {
     private async load(): Promise<void> {
         try {
             const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
+            this.migrationPending = requiresEpochGenerationMigration(parsed)
             this.state = validateStateFile(parsed)
         } catch (error) {
             if (!isMissingFile(error)) throw error
@@ -137,6 +144,7 @@ function defaultRoomState(
 ): PersistedRoomRuntimeState {
     return {
         revisionEpoch: randomUUID(),
+        revisionEpochGeneration: 1,
         replayGeneration,
         stateVersion: 0,
         currentSessionId: null,
@@ -163,6 +171,13 @@ function validateStateFile(value: unknown): RuntimeStateFile {
             !room
             || typeof room.revisionEpoch !== 'string'
             || !room.revisionEpoch
+            || !(
+                room.revisionEpochGeneration === undefined
+                || (
+                    Number.isSafeInteger(room.revisionEpochGeneration)
+                    && (room.revisionEpochGeneration as number) >= 1
+                )
+            )
             || !(room.replayGeneration === undefined || typeof room.replayGeneration === 'string')
             || !Number.isSafeInteger(room.stateVersion)
             || (room.stateVersion as number) < 0
@@ -187,6 +202,9 @@ function validateStateFile(value: unknown): RuntimeStateFile {
         }
         parsed[roomId] = {
             revisionEpoch: room.revisionEpoch,
+            revisionEpochGeneration: typeof room.revisionEpochGeneration === 'number'
+                ? room.revisionEpochGeneration
+                : 1,
             // Runtime-state files created before ledger generations existed
             // intentionally mismatch on initialize and rotate the epoch once.
             replayGeneration: typeof room.replayGeneration === 'string'
@@ -231,6 +249,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null
+}
+
+function requiresEpochGenerationMigration(value: unknown): boolean {
+    const rooms = asRecord(asRecord(value)?.rooms)
+    return Boolean(
+        rooms
+        && Object.values(rooms).some(room =>
+            asRecord(room)?.revisionEpochGeneration === undefined,
+        ),
+    )
 }
 
 function isMissingFile(error: unknown): boolean {

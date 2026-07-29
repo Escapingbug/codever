@@ -272,6 +272,7 @@ describe('MatrixGatewayRunner', () => {
                 kind: 'gateway_state',
                 revision: 0,
                 revision_epoch: REVISION_EPOCH,
+                revision_epoch_generation: 1,
                 state_version: 1,
                 current_session_id: null,
                 workspace: {
@@ -366,6 +367,7 @@ describe('MatrixGatewayRunner', () => {
             [CODEVER_MATRIX_EXTENSION]: {
                 kind: 'gateway_state',
                 revision_epoch: REVISION_EPOCH,
+                revision_epoch_generation: 1,
                 state_version: 5,
                 current_session_id: 'app-session-1',
                 sessions: [{
@@ -1016,6 +1018,7 @@ function directRoomRuntime(
         appSessions: new Map(),
         currentAppSessionId: null,
         revisionEpoch: REVISION_EPOCH,
+        revisionEpochGeneration: 1,
         replayGeneration: REPLAY_GENERATION,
         stateVersion: 0,
     }

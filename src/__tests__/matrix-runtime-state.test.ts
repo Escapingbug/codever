@@ -31,10 +31,12 @@ describe('FileGatewayRuntimeStateStore', () => {
         const store = new FileGatewayRuntimeStateStore(path)
         await store.initialize([room], 'ledger-generation-1')
         const initial = store.getRoom(room.roomId)
+        expect(initial.revisionEpochGeneration).toBe(1)
 
         await Promise.all([
             store.incrementStateVersion(room.roomId, {
                 revisionEpoch: initial.revisionEpoch,
+                revisionEpochGeneration: initial.revisionEpochGeneration,
                 replayGeneration: initial.replayGeneration,
                 currentSessionId: null,
                 appSessions: [],
@@ -58,6 +60,7 @@ describe('FileGatewayRuntimeStateStore', () => {
         await restarted.initialize([room], 'ledger-generation-1')
         expect(restarted.getRoom(room.roomId)).toMatchObject({
             revisionEpoch: initial.revisionEpoch,
+            revisionEpochGeneration: 1,
             replayGeneration: 'ledger-generation-1',
             stateVersion: 1,
             currentSessionId: 'app-session-1',
@@ -85,6 +88,7 @@ describe('FileGatewayRuntimeStateStore', () => {
         const firstRuntime = new FileGatewayRuntimeStateStore(runtimePath)
         await firstRuntime.initialize([room], firstGeneration)
         const firstState = firstRuntime.getRoom(room.roomId)
+        expect(firstState.revisionEpochGeneration).toBe(1)
         await firstRuntime.saveRoom(room.roomId, {
             ...firstState,
             currentSessionId: 'app-session-1',
@@ -108,6 +112,7 @@ describe('FileGatewayRuntimeStateStore', () => {
         const secondState = afterMissing.getRoom(room.roomId)
         expect(secondState).toMatchObject({
             replayGeneration: secondGeneration,
+            revisionEpochGeneration: 2,
             currentSessionId: 'app-session-1',
         })
         expect(secondState.revisionEpoch).not.toBe(firstState.revisionEpoch)
@@ -119,8 +124,61 @@ describe('FileGatewayRuntimeStateStore', () => {
         expect(thirdGeneration).not.toBe(secondGeneration)
         const afterEmpty = new FileGatewayRuntimeStateStore(runtimePath)
         await afterEmpty.initialize([room], thirdGeneration)
-        expect(afterEmpty.getRoom(room.roomId).revisionEpoch)
-            .not.toBe(secondState.revisionEpoch)
+        const thirdState = afterEmpty.getRoom(room.roomId)
+        expect(thirdState.revisionEpoch).not.toBe(secondState.revisionEpoch)
+        expect(thirdState.revisionEpochGeneration).toBe(3)
+
+        const stableRestart = new FileGatewayRuntimeStateStore(runtimePath)
+        await stableRestart.initialize([room], thirdGeneration)
+        expect(stableRestart.getRoom(room.roomId)).toMatchObject({
+            revisionEpoch: thirdState.revisionEpoch,
+            revisionEpochGeneration: 3,
+        })
+    })
+
+    it('migrates an existing runtime epoch to generation one without changing the epoch', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-migration-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'runtime-state.json')
+        const room = {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'mock-provider',
+        }
+        await writeFile(path, `${JSON.stringify({
+            version: 1,
+            rooms: {
+                [room.roomId]: {
+                    revisionEpoch: 'legacy-runtime-epoch',
+                    replayGeneration: 'ledger-generation-1',
+                    stateVersion: 7,
+                    currentSessionId: null,
+                    appSessions: [],
+                    workspace: {
+                        cwd: room.cwd,
+                        provider: room.providerName,
+                        model: null,
+                        permissionMode: 'default',
+                    },
+                },
+            },
+        })}\n`, 'utf8')
+
+        const migrated = new FileGatewayRuntimeStateStore(path)
+        await migrated.initialize([room], 'ledger-generation-1')
+        expect(migrated.getRoom(room.roomId)).toMatchObject({
+            revisionEpoch: 'legacy-runtime-epoch',
+            revisionEpochGeneration: 1,
+            stateVersion: 7,
+        })
+        expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+            rooms: {
+                [room.roomId]: {
+                    revisionEpochGeneration: 1,
+                },
+            },
+        })
     })
 
     it('recovers a fully written final replay record even if the trailing newline is lost', async () => {

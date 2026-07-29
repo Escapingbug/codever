@@ -29,6 +29,7 @@ export type GatewayStateSnapshot = {
   stateVersion: number;
   revision: number;
   revisionEpoch: string;
+  revisionEpochGeneration: number;
   activeDeviceCount: number;
   currentSessionId: string | null;
   sessions: GatewaySessionSummary[];
@@ -38,12 +39,28 @@ export type GatewayStateSnapshot = {
 
 export function classifyGatewayStateEpoch(
   currentEpoch: string | undefined,
+  currentGeneration: number | undefined,
   retiredEpochs: readonly string[],
   incomingEpoch: string,
-): "current" | "new" | "retired" {
-  if (incomingEpoch === currentEpoch) return "current";
+  incomingGeneration: number,
+): "current" | "new" | "retired" | "stale" | "conflict" {
   if (retiredEpochs.includes(incomingEpoch)) return "retired";
-  return "new";
+  if (currentEpoch === undefined || currentGeneration === undefined) return "new";
+  if (incomingGeneration < currentGeneration) return "stale";
+  if (incomingGeneration > currentGeneration) return "new";
+  return incomingEpoch === currentEpoch ? "current" : "conflict";
+}
+
+export function canMigrateLegacyGatewayState(
+  currentEpoch: string,
+  currentStateVersion: number,
+  incomingEpoch: string,
+  incomingStateVersion: number,
+): boolean {
+  return (
+    incomingEpoch === currentEpoch ||
+    incomingStateVersion > currentStateVersion
+  );
 }
 
 export function parseGatewayStateExtension(
@@ -57,6 +74,7 @@ export function parseGatewayStateExtension(
     !isNonnegativeInteger(extension.revision) ||
     typeof extension.revision_epoch !== "string" ||
     extension.revision_epoch.length === 0 ||
+    !isPositiveInteger(extension.revision_epoch_generation) ||
     !isPositiveInteger(extension.active_device_count) ||
     !(
       extension.current_session_id === null ||
@@ -155,6 +173,7 @@ export function parseGatewayStateExtension(
     stateVersion: extension.state_version,
     revision: extension.revision,
     revisionEpoch: extension.revision_epoch,
+    revisionEpochGeneration: extension.revision_epoch_generation,
     activeDeviceCount: extension.active_device_count,
     currentSessionId,
     sessions,

@@ -51,6 +51,7 @@ import {
   waitForMatrixSyncStoreClose,
 } from "./matrixSyncStore";
 import {
+  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
   parseGatewayStateExtension,
   type GatewayStateSnapshot,
@@ -62,6 +63,7 @@ export {
   type GatewaySessionSummary,
   type GatewayStateSnapshot,
   type GatewayWorkspaceState,
+  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
 } from "./gatewayState";
 
@@ -111,9 +113,18 @@ type CommandSequenceState = {
   lastRevision: number;
   revisionInitialized: boolean;
   revisionEpoch?: string;
+  revisionEpochGeneration?: number;
   retiredRevisionEpochs: string[];
   stateVersion: number;
   pending?: PendingOutboundCommand;
+};
+
+type DurableGatewayEpochState = {
+  revisionEpoch: string;
+  revisionEpochGeneration: number;
+  stateVersion: number;
+  revision: number;
+  retiredRevisionEpochs: string[];
 };
 
 export type IncomingCodeverMessage = {
@@ -534,6 +545,7 @@ export async function connectMatrix(
       identity,
       trust.certificate.certificate.certificateId,
       gatewayState.revisionEpoch,
+      gatewayState.revisionEpochGeneration,
       gatewayState.revision,
       gatewayState.stateVersion,
     );
@@ -1799,6 +1811,18 @@ function commandSequenceScope(
   ]);
 }
 
+function gatewayEpochScope(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+): string {
+  return JSON.stringify([
+    "gateway-epoch-v1",
+    config.gatewayId,
+    identity.keyId,
+    config.conversationId,
+  ]);
+}
+
 async function reserveCommandSequence(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -1992,11 +2016,13 @@ async function initializeKnownRevision(
   identity: DeviceIdentity,
   sequenceEpoch: string,
   revisionEpoch: string,
+  revisionEpochGeneration: number,
   revision: number,
   stateVersion: number,
 ): Promise<boolean> {
   const database = await openIdentityDatabase();
-  const scope = commandSequenceScope(config, identity, sequenceEpoch);
+  const commandScope = commandSequenceScope(config, identity, sequenceEpoch);
+  const epochScope = gatewayEpochScope(config, identity);
   try {
     return await new Promise<boolean>((resolve, reject) => {
       const transaction = database.transaction(
@@ -2004,36 +2030,114 @@ async function initializeKnownRevision(
         "readwrite",
       );
       const store = transaction.objectStore(COMMAND_SEQUENCE_STORE);
-      const read = store.get(scope);
+      const commandRead = store.get(commandScope);
+      const epochRead = store.get(epochScope);
       let accepted = false;
       let failure: Error | null = null;
-      read.onsuccess = () => {
+      let readsCompleted = 0;
+      const applySnapshot = () => {
+        readsCompleted += 1;
+        if (readsCompleted !== 2) return;
         try {
-          const state = parseCommandSequenceState(read.result);
-          const epochStatus = classifyGatewayStateEpoch(
-            state.revisionEpoch,
-            state.retiredRevisionEpochs,
-            revisionEpoch,
-          );
-          if (epochStatus === "retired") {
+          const state = parseCommandSequenceState(commandRead.result);
+          const epochState = parseDurableGatewayEpochState(epochRead.result);
+          const migratingLegacyState =
+            !epochState &&
+            state.revisionInitialized &&
+            Boolean(state.revisionEpoch);
+          if (
+            migratingLegacyState &&
+            !canMigrateLegacyGatewayState(
+              state.revisionEpoch!,
+              state.stateVersion,
+              revisionEpoch,
+              stateVersion,
+            )
+          ) {
             throw new Error(
-              "Rejected a Gateway state snapshot from a retired revision epoch.",
+              "Refusing to migrate to a new revision epoch without a newer Gateway state version.",
             );
           }
+          const epochStatus = classifyGatewayStateEpoch(
+            epochState?.revisionEpoch,
+            epochState?.revisionEpochGeneration,
+            epochState?.retiredRevisionEpochs ??
+              state.retiredRevisionEpochs,
+            revisionEpoch,
+            revisionEpochGeneration,
+          );
+          if (epochStatus === "retired" || epochStatus === "stale") {
+            throw new Error(
+              "Rejected a Gateway state snapshot from an older revision epoch generation.",
+            );
+          }
+          if (epochStatus === "conflict") {
+            throw new Error(
+              "Rejected a Gateway state snapshot that changed epoch without advancing its generation.",
+            );
+          }
+          const migrationKeepsEpoch =
+            migratingLegacyState && state.revisionEpoch === revisionEpoch;
           const sameEpoch =
-            state.revisionInitialized && epochStatus === "current";
-          if (sameEpoch && stateVersion <= state.stateVersion) return;
-          if (sameEpoch && revision < state.lastRevision) {
+            (epochState !== null && epochStatus === "current") ||
+            migrationKeepsEpoch;
+          const baselineStateVersion =
+            epochState?.stateVersion ?? state.stateVersion;
+          const baselineRevision =
+            epochState?.revision ?? state.lastRevision;
+          if (
+            sameEpoch &&
+            (stateVersion < baselineStateVersion ||
+              (stateVersion === baselineStateVersion &&
+                revision !== baselineRevision))
+          ) {
+            throw new Error(
+              "Rejected an inconsistent or stale Gateway state snapshot.",
+            );
+          }
+          if (sameEpoch && revision < baselineRevision) {
             throw new Error(
               "Rejected a Gateway state snapshot with a regressed revision.",
             );
           }
-          accepted = true;
+          const retiredRevisionEpochs = sameEpoch
+            ? epochState?.retiredRevisionEpochs ??
+              state.retiredRevisionEpochs
+            : [
+                ...new Set([
+                  ...(epochState?.retiredRevisionEpochs ??
+                    state.retiredRevisionEpochs),
+                  ...(epochState?.revisionEpoch || state.revisionEpoch
+                    ? [epochState?.revisionEpoch ?? state.revisionEpoch!]
+                    : []),
+                ]),
+              ];
+          const commandAlreadyCurrent =
+            state.revisionInitialized &&
+            state.revisionEpoch === revisionEpoch &&
+            (state.revisionEpochGeneration === undefined ||
+              state.revisionEpochGeneration === revisionEpochGeneration);
+          accepted =
+            epochState === null ||
+            !commandAlreadyCurrent ||
+            !sameEpoch ||
+            stateVersion > state.stateVersion;
+          if (!accepted) return;
+
+          const nextEpochState: DurableGatewayEpochState = {
+            revisionEpoch,
+            revisionEpochGeneration,
+            revision,
+            stateVersion,
+            retiredRevisionEpochs,
+          };
+          store.put(nextEpochState, epochScope);
           store.put(
-            sameEpoch
+            commandAlreadyCurrent
               ? {
                   ...state,
                   lastRevision: revision,
+                  revisionEpochGeneration,
                   stateVersion,
                 }
               : {
@@ -2041,15 +2145,11 @@ async function initializeKnownRevision(
                   lastRevision: revision,
                   revisionInitialized: true,
                   revisionEpoch,
-                  retiredRevisionEpochs: [
-                    ...new Set([
-                      ...state.retiredRevisionEpochs,
-                      ...(state.revisionEpoch ? [state.revisionEpoch] : []),
-                    ]),
-                  ],
+                  revisionEpochGeneration,
+                  retiredRevisionEpochs,
                   stateVersion,
                 },
-            scope,
+            commandScope,
           );
         } catch (error) {
           failure =
@@ -2057,7 +2157,10 @@ async function initializeKnownRevision(
           transaction.abort();
         }
       };
-      read.onerror = () => transaction.abort();
+      commandRead.onsuccess = applySnapshot;
+      epochRead.onsuccess = applySnapshot;
+      commandRead.onerror = () => transaction.abort();
+      epochRead.onerror = () => transaction.abort();
       transaction.oncomplete = () => resolve(accepted);
       transaction.onerror = () =>
         reject(
@@ -2361,6 +2464,12 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     typeof record?.revisionEpoch === "string" && record.revisionEpoch
       ? record.revisionEpoch
       : undefined;
+  const revisionEpochGeneration =
+    typeof record?.revisionEpochGeneration === "number" &&
+    Number.isSafeInteger(record.revisionEpochGeneration) &&
+    record.revisionEpochGeneration > 0
+      ? record.revisionEpochGeneration
+      : undefined;
   const retiredRevisionEpochs = Array.isArray(record?.retiredRevisionEpochs)
     ? [
         ...new Set(
@@ -2380,6 +2489,9 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
       retiredRevisionEpochs,
       stateVersion,
       ...(revisionEpoch ? { revisionEpoch } : {}),
+      ...(revisionEpochGeneration !== undefined
+        ? { revisionEpochGeneration }
+        : {}),
     };
   }
   if (
@@ -2399,6 +2511,9 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     retiredRevisionEpochs,
     stateVersion,
     ...(revisionEpoch ? { revisionEpoch } : {}),
+    ...(revisionEpochGeneration !== undefined
+      ? { revisionEpochGeneration }
+      : {}),
     pending: {
       commandId: pending.commandId,
       sequence: pending.sequence,
@@ -2418,6 +2533,38 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
         ? { plaintext: pending.plaintext as Record<string, unknown> }
         : {}),
     },
+  };
+}
+
+function parseDurableGatewayEpochState(
+  value: unknown,
+): DurableGatewayEpochState | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (
+    typeof record.revisionEpoch !== "string" ||
+    !record.revisionEpoch ||
+    !isPositiveInteger(record.revisionEpochGeneration) ||
+    !isPositiveInteger(record.stateVersion) ||
+    !isNonnegativeInteger(record.revision)
+  ) {
+    throw new Error("The durable Gateway epoch state is corrupt.");
+  }
+  return {
+    revisionEpoch: record.revisionEpoch,
+    revisionEpochGeneration: record.revisionEpochGeneration,
+    stateVersion: record.stateVersion,
+    revision: record.revision,
+    retiredRevisionEpochs: Array.isArray(record.retiredRevisionEpochs)
+      ? [
+          ...new Set(
+            record.retiredRevisionEpochs.filter(
+              (entry): entry is string =>
+                typeof entry === "string" && entry.length > 0,
+            ),
+          ),
+        ]
+      : [],
   };
 }
 

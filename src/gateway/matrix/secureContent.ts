@@ -37,6 +37,7 @@ export type TrustedDeviceProvider = () => Promise<readonly MatrixGatewayTrustedD
 export interface GatewayStateSnapshot {
     revision: number
     revisionEpoch: string
+    revisionEpochGeneration: number
     stateVersion: number
     currentSessionId: string | null
     sessions: Array<{
@@ -266,6 +267,12 @@ export class GatewaySecureContentLayer {
         if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
             throw new Error('Gateway state revision must be a non-negative integer')
         }
+        if (
+            !Number.isSafeInteger(state.revisionEpochGeneration)
+            || state.revisionEpochGeneration < 1
+        ) {
+            throw new Error('Gateway revision epoch generation must be a positive integer')
+        }
         if (!Number.isSafeInteger(state.stateVersion) || state.stateVersion < 1) {
             throw new Error('Gateway state version must be a positive integer')
         }
@@ -274,6 +281,7 @@ export class GatewaySecureContentLayer {
             kind: 'gateway_state',
             revision: state.revision,
             revision_epoch: state.revisionEpoch,
+            revision_epoch_generation: state.revisionEpochGeneration,
             state_version: state.stateVersion,
             current_session_id: state.currentSessionId,
             sessions: state.sessions.map(session => ({
