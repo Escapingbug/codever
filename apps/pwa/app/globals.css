@@ -804,11 +804,42 @@ select:focus-visible {
   -webkit-overflow-scrolling: touch;
 }
 
+.history-loader {
+  display: flex;
+  min-height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: #949baa;
+  font-size: 10px;
+}
+
+.history-loader button {
+  padding: 5px 11px;
+  border: 1px solid #e1e4eb;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 88%);
+  color: #697286;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.history-loader button:hover {
+  border-color: #cbc4f4;
+  color: #6654c6;
+}
+
 .date-divider {
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 3px 0 4px;
+}
+
+.decision-state.historical {
+  border-color: #e2e4ea;
+  background: #f5f6f8;
+  color: #7d8493;
 }
 
 .date-divider span {

@@ -43,11 +43,12 @@ test("server-renders the Codever agent workspace", async () => {
 });
 
 test("ships a complete installable offline shell", async () => {
-  const [manifestText, serviceWorker, source, newSession, styles] = await Promise.all([
+  const [manifestText, serviceWorker, source, newSession, history, styles] = await Promise.all([
     readFile(new URL("public/manifest.webmanifest", appRoot), "utf8"),
     readFile(new URL("public/sw.js", appRoot), "utf8"),
     readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
     readFile(new URL("app/NewSessionDialog.tsx", appRoot), "utf8"),
+    readFile(new URL("app/messageHistory.ts", appRoot), "utf8"),
     readFile(new URL("app/globals.css", appRoot), "utf8"),
   ]);
   const manifest = JSON.parse(manifestText);
@@ -68,6 +69,12 @@ test("ships a complete installable offline shell", async () => {
   assert.match(newSession, /Project names may repeat/);
   assert.match(newSession, /Reasoning effort/);
   assert.match(source, /stopStreaming/);
+  assert.match(source, /onScroll=\{handleFeedScroll\}/);
+  assert.match(source, /loadOlderHistory/);
+  assert.match(source, /History only · request not replayed/);
+  assert.match(history, /codever-pwa-message-history/);
+  assert.match(history, /loadMessageHistoryPage/);
+  assert.match(history, /\["scope", "sessionId", "timestamp", "id"\]/);
   assert.match(
     styles,
     /@media \(max-width: 900px\), \(max-height: 610px\) and \(max-width: 1100px\)/,
@@ -104,7 +111,14 @@ test("keeps conversations inside the viewport with an independently scrollable f
   assert.match(conversationPanel, /overflow:\s*hidden/);
   assert.match(chatFeed, /overflow-y:\s*auto/);
   assert.match(chatFeed, /touch-action:\s*pan-y/);
-  assert.match(source, /followLatestRef\.current = remaining <= 48/);
+  assert.match(
+    source,
+    /followLatestRef\.current = isNearFeedBottom\(feed\)/,
+  );
+  assert.match(
+    source,
+    /function isNearFeedBottom[\s\S]*?scrollHeight - feed\.scrollTop - feed\.clientHeight <= 96/,
+  );
   assert.doesNotMatch(source, /behavior:\s*"smooth"/);
 });
 
@@ -326,12 +340,17 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /await pairingRecoveryRef\.current\(preview, recoveryConfig\)/,
   );
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
+  assert.match(matrix, /loadHistoryPage\(sessionId/);
+  assert.match(matrix, /client\.scrollback\(room/);
+  assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
+  assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
+  assert.match(matrix, /sessionId: effectiveExtension\.session_id/);
   assert.match(
     matrix,
     /`codever\.pair\.\$\{request\.request\.requestId\}\.\$\{crypto\.randomUUID\(\)\}`/,
   );
   assert.match(app, /sendRealCommand/);
-  assert.match(app, /entry\.commandId === incoming\.commandId/);
+  assert.match(app, /entry\.commandId === message\.commandId/);
   assert.match(app, /message\.originDeviceName/);
   assert.match(app, /Another device updated this session/);
   assert.match(app, /Review complete · send/);

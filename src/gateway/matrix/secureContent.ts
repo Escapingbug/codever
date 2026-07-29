@@ -224,6 +224,7 @@ export class GatewaySecureContentLayer {
         input: {
             commandId: string
             revision: number
+            sessionId?: string
             originDeviceId: string
             originDeviceName: string
             text: string
@@ -242,6 +243,7 @@ export class GatewaySecureContentLayer {
                     kind: 'collaboration_command',
                     command_id: input.commandId,
                     revision: input.revision,
+                    ...(input.sessionId ? { session_id: input.sessionId } : {}),
                     origin_device_id: input.originDeviceId,
                     origin_device_name: input.originDeviceName,
                     operation: 'prompt',
@@ -261,6 +263,7 @@ export class GatewaySecureContentLayer {
         outcome: 'succeeded' | 'failed',
         transport: MatrixTransport,
         error?: string,
+        sessionId?: string | null,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
@@ -269,6 +272,7 @@ export class GatewaySecureContentLayer {
             sequence,
             revision,
             revision_epoch: revisionEpoch,
+            ...(sessionId ? { session_id: sessionId } : {}),
             outcome,
             ...(error ? { error } : {}),
         }, `codever.command.result.${commandId}.${outcome}`, transport)

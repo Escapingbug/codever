@@ -311,6 +311,7 @@ describe('multi-device Matrix collaboration', () => {
         await firstLayer.sendCollaborationPrompt(room, {
             commandId: 'command-durable',
             revision: 7,
+            sessionId: 'session-durable',
             originDeviceId: 'device-a',
             originDeviceName: 'Alice phone',
             text: 'durable prompt',
@@ -324,6 +325,8 @@ describe('multi-device Matrix collaboration', () => {
             'runtime-epoch-1',
             'succeeded',
             failingTransport,
+            undefined,
+            'session-durable',
         )).rejects.toThrow('device-b offline')
         await vi.waitFor(() => {
             expect(firstAttempts.filter(request =>
@@ -363,8 +366,14 @@ describe('multi-device Matrix collaboration', () => {
             command_id: 'command-durable',
             sequence: 3,
             revision: 7,
+            session_id: 'session-durable',
             outcome: 'succeeded',
         })
+        expect(
+            plaintext
+                .map(content => content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>)
+                .find(extension => extension.kind === 'collaboration_command'),
+        ).toMatchObject({ session_id: 'session-durable' })
         expect(recovered.map(request => request.transactionId)).toEqual(
             expect.arrayContaining(
                 firstAttempts

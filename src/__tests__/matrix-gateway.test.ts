@@ -74,6 +74,47 @@ describe('MatrixPort', () => {
         expect(transport.delivered).toHaveLength(1)
     })
 
+    it('binds messages, edits, decisions, and status to the active app session', async () => {
+        const transport = new InMemoryMatrixTransport()
+        let sessionId = 'session-a'
+        const port = new MatrixPort({
+            transport,
+            roomId: '!room:example.org',
+            gatewayId: 'gateway-1',
+            getSessionId: () => sessionId,
+        })
+
+        await port.send({ text: 'first', format: 'plain' })
+        sessionId = 'session-b'
+        await port.edit('$first', { text: 'second', format: 'plain' })
+        const decision = port.requestDecision({
+            type: 'permission',
+            title: 'Allow?',
+            options: [{ label: 'Deny', value: 'deny' }],
+        })
+        port.notifyStatus({
+            state: 'querying',
+            cwd: '/repo',
+            provider: 'codex',
+        })
+        await vi.waitFor(() => expect(transport.delivered).toHaveLength(4))
+
+        const extensions = transport.delivered.map(
+            delivery =>
+                delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>,
+        )
+        expect(extensions[0].session_id).toBe('session-a')
+        expect(extensions.slice(1).map(extension => extension.session_id))
+            .toEqual(['session-b', 'session-b', 'session-b'])
+        expect(
+            (
+                transport.delivered[1].content['m.new_content'] as Record<string, unknown>
+            )[CODEVER_MATRIX_EXTENSION],
+        ).toMatchObject({ session_id: 'session-b' })
+        expect(port.resolveDecision(String(extensions[2].decision_id), 'deny')).toBe(true)
+        await expect(decision).resolves.toEqual({ value: 'deny' })
+    })
+
     it('keeps retries idempotent when DeliveryOutbox reuses a message without explicit metadata', async () => {
         const transport = new InMemoryMatrixTransport()
         const port = createPort(transport)

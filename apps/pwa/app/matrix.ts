@@ -137,6 +137,8 @@ export type IncomingCodeverMessage = {
   encrypted: boolean;
   kind: "agent" | "user" | "tool" | "permission" | "notice" | "error";
   text: string;
+  sessionId?: string;
+  historical?: boolean;
   commandId?: string;
   revision?: number;
   originDeviceId?: string;
@@ -171,6 +173,11 @@ export type CommandSendResult = {
   completion: Promise<CommandCompletion>;
 };
 
+export type MatrixHistoryPage = {
+  messages: IncomingCodeverMessage[];
+  hasMore: boolean;
+};
+
 class RevisionConflictError extends Error {
   constructor(
     readonly commandId: string,
@@ -194,6 +201,21 @@ export class CommandRevisionConflictError extends Error {
   }
 }
 
+/**
+ * Historical envelopes are authenticated and decrypted for display only. They
+ * deliberately do not consume or mutate the execution replay ledger; the
+ * history decoder below never dispatches control callbacks.
+ */
+class DisplayOnlyReplayStore implements ReplayStore {
+  async claimAll(): Promise<boolean> {
+    return true;
+  }
+
+  async prune(): Promise<void> {
+    // Display-only verification has no replay state to prune.
+  }
+}
+
 export type MatrixConnection = {
   readonly identity: DeviceIdentity;
   readonly matrixDeviceKeys: {
@@ -210,6 +232,8 @@ export type MatrixConnection = {
   send(payload: CommandPayload): Promise<CommandSendResult>;
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
+  markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
+  loadHistoryPage(sessionId: string, limit?: number): Promise<MatrixHistoryPage>;
   stop(): void;
 };
 
@@ -395,6 +419,7 @@ export async function connectMatrix(
   const identity = await getOrCreateDeviceIdentity();
   let activeTrust = await loadTrustedGateway(identity);
   const replayStore = new IndexedDbReplayStore();
+  const historyReplayStore = new DisplayOnlyReplayStore();
   const sdk = await import("matrix-js-sdk");
   const syncStoreDatabaseName = await matrixSyncDatabaseName(config);
   await waitForMatrixSyncStoreClose(syncStoreDatabaseName);
@@ -448,6 +473,12 @@ export async function connectMatrix(
   const seen = new Set<string>();
   const commandLifecycle = new CommandLifecycle();
   const revisionConflicts = new Map<string, number>();
+  const historySeen = new Set<string>();
+  const historyBySession = new Map<string, IncomingCodeverMessage[]>();
+  const deliveredHistory = new Map<string, Set<string>>();
+  let legacyHistorySessionHint: string | null = null;
+  let historyInitialized = false;
+  let historyChain: Promise<unknown> = Promise.resolve();
   const onCommandAcknowledged = async (
     commandId: string,
     sequence: number,
@@ -945,6 +976,103 @@ export async function connectMatrix(
     );
     return response.event_id;
   };
+  const scanHistoryTimeline = async (
+    room: Room,
+    initialSessionId: string,
+  ): Promise<void> => {
+    if (!historyInitialized) {
+      legacyHistorySessionHint = initialSessionId;
+      historyInitialized = true;
+    }
+    const events = room
+      .getLiveTimeline()
+      .getEvents()
+      .filter((event) => {
+        const eventId = event.getId();
+        return Boolean(eventId && !historySeen.has(eventId));
+      })
+      .reverse();
+    for (const event of events) {
+      const eventId = event.getId();
+      if (!eventId) continue;
+      const decoded = await decodeHistoricalEvent(
+        client,
+        event,
+        config,
+        identity,
+        activeTrust,
+        historyReplayStore,
+      );
+      historySeen.add(eventId);
+      if (decoded?.gatewaySessionId !== undefined) {
+        legacyHistorySessionHint = decoded.gatewaySessionId;
+      }
+      if (!decoded?.message) continue;
+      const sessionId =
+        decoded.message.sessionId ?? legacyHistorySessionHint;
+      if (!sessionId) continue;
+      const message = {
+        ...decoded.message,
+        sessionId,
+        historical: true,
+      };
+      const history = historyBySession.get(sessionId) ?? [];
+      if (!history.some((candidate) => candidate.eventId === message.eventId)) {
+        history.push(message);
+        history.sort(compareIncomingMessages);
+        historyBySession.set(sessionId, history);
+      }
+    }
+  };
+  const takeHistory = (
+    sessionId: string,
+    limit: number,
+  ): IncomingCodeverMessage[] => {
+    const delivered = deliveredHistory.get(sessionId) ?? new Set<string>();
+    deliveredHistory.set(sessionId, delivered);
+    const available = (historyBySession.get(sessionId) ?? []).filter(
+      (message) => !delivered.has(message.eventId),
+    );
+    const page = available.slice(-limit);
+    for (const message of page) delivered.add(message.eventId);
+    return page;
+  };
+  const hasPendingHistory = (sessionId: string): boolean => {
+    const delivered = deliveredHistory.get(sessionId) ?? new Set<string>();
+    return (historyBySession.get(sessionId) ?? []).some(
+      (message) => !delivered.has(message.eventId),
+    );
+  };
+  const loadHistoryPage = async (
+    sessionId: string,
+    limit = 30,
+  ): Promise<MatrixHistoryPage> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    const room = client.getRoom(config.roomId);
+    if (!room) throw new Error("The Matrix room is not available.");
+    const pageLimit = Math.max(1, Math.min(limit, 100));
+    await scanHistoryTimeline(room, sessionId);
+    let messages = takeHistory(sessionId, pageLimit);
+    if (
+      messages.length < pageLimit &&
+      room.oldState.paginationToken !== null
+    ) {
+      // One Matrix request per pull keeps recovery progressive even when the
+      // room contains traffic for several Codever sessions.
+      await client.scrollback(room, Math.max(30, pageLimit));
+      await scanHistoryTimeline(room, sessionId);
+      messages = [
+        ...takeHistory(sessionId, pageLimit - messages.length),
+        ...messages,
+      ].sort(compareIncomingMessages);
+    }
+    return {
+      messages,
+      hasMore:
+        hasPendingHistory(sessionId) ||
+        room.oldState.paginationToken !== null,
+    };
+  };
   return {
     identity,
     matrixDeviceKeys,
@@ -1035,6 +1163,21 @@ export async function connectMatrix(
         pendingRevisionConflict = null;
       });
       outboundChain = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    },
+    markHistoryLoaded(sessionId, eventIds) {
+      const delivered = deliveredHistory.get(sessionId) ?? new Set<string>();
+      deliveredHistory.set(sessionId, delivered);
+      for (const eventId of eventIds) delivered.add(eventId);
+    },
+    loadHistoryPage(sessionId, limit) {
+      const operation = historyChain.then(() =>
+        loadHistoryPage(sessionId, limit),
+      );
+      historyChain = operation.then(
         () => undefined,
         () => undefined,
       );
@@ -1255,6 +1398,10 @@ export function parseCodeverEvent(
   const body =
     typeof effectiveContent.body === "string" ? effectiveContent.body : "";
   const collaborationMetadata = {
+    ...(typeof effectiveExtension.session_id === "string" &&
+    effectiveExtension.session_id
+      ? { sessionId: effectiveExtension.session_id }
+      : {}),
     ...(isNonnegativeInteger(effectiveExtension.revision)
       ? { revision: effectiveExtension.revision }
       : {}),
@@ -1405,6 +1552,142 @@ export function parseCodeverEvent(
         text: humanizeField(payload.type),
       };
   }
+}
+
+type DecodedHistoricalEvent = {
+  gatewaySessionId?: string | null;
+  message?: IncomingCodeverMessage;
+};
+
+/**
+ * Opens an archived Gateway envelope on a display-only path. This function
+ * cannot acknowledge commands, advance revisions, resolve results, rotate
+ * trust, or execute decisions. Envelope expiry is evaluated at the signed
+ * issue time because expiry prevents delayed execution; it does not make an
+ * already-authenticated archive unreadable.
+ */
+async function decodeHistoricalEvent(
+  client: MatrixClient,
+  event: MatrixEvent,
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  trust: TrustedGateway | null,
+  replayStore: ReplayStore,
+): Promise<DecodedHistoricalEvent | null> {
+  const eventId = event.getId();
+  const sender = event.getSender();
+  if (!eventId || !sender || sender === config.userId || !trust) return null;
+  if (event.getType() === "m.room.encrypted" || event.isEncrypted()) {
+    await client.decryptEventIfNeeded(event);
+  }
+  if (event.isDecryptionFailure() || event.getType() !== "m.room.message") {
+    return null;
+  }
+  const content = asRecord(event.getContent());
+  const extension = asRecord(content?.["io.codever"]);
+  if (
+    !content ||
+    extension?.kind !== "secure_envelope" ||
+    !extension.secure_envelope
+  ) {
+    return null;
+  }
+  const routed = signedSecureEnvelopeSchema.safeParse(
+    extension.secure_envelope,
+  );
+  if (!routed.success) {
+    throw new Error("An archived Gateway envelope is malformed.");
+  }
+  if (
+    routed.data.envelope.recipientDeviceId !==
+      trust.certificate.certificate.deviceId ||
+    routed.data.envelope.recipientKeyId !== identity.keyId
+  ) {
+    return null;
+  }
+  const opened = await openSecureEnvelope(extension.secure_envelope, {
+    recipientPrivateKey: identity.privateKey,
+    senderPublicKey: trust.gatewayKey.publicKey,
+    expected: {
+      gatewayId: trust.gatewayId,
+      conversationId: config.conversationId,
+      direction: "gateway_to_device",
+      senderDeviceId: trust.certificate.certificate.gatewayId,
+      recipientDeviceId: trust.certificate.certificate.deviceId,
+      senderKeyId: trust.gatewayKey.keyId,
+      recipientKeyId: identity.keyId,
+    },
+    replayStore,
+    now: routed.data.envelope.issuedAt,
+  });
+  const decryptedContent = asRecord(opened.plaintext);
+  if (!decryptedContent) {
+    throw new Error(
+      "An archived Gateway envelope did not contain Matrix content.",
+    );
+  }
+  const decryptedExtension = asRecord(decryptedContent["io.codever"]);
+  const gatewayState = parseGatewayStateExtension(decryptedExtension);
+  if (gatewayState) {
+    return { gatewaySessionId: gatewayState.currentSessionId };
+  }
+  if (decryptedExtension?.kind === "command_result") {
+    if (
+      decryptedExtension.outcome !== "failed" ||
+      typeof decryptedExtension.command_id !== "string"
+    ) {
+      return null;
+    }
+    return {
+      message: {
+        eventId,
+        sender: trust.gatewayId,
+        timestamp: event.getTs(),
+        encrypted: true,
+        kind: "error",
+        text:
+          typeof decryptedExtension.error === "string"
+            ? decryptedExtension.error
+            : "The Gateway accepted the command but could not complete it.",
+        commandId: decryptedExtension.command_id,
+        ...(isPositiveInteger(decryptedExtension.revision)
+          ? { revision: decryptedExtension.revision }
+          : {}),
+        ...(typeof decryptedExtension.session_id === "string" &&
+        decryptedExtension.session_id
+          ? { sessionId: decryptedExtension.session_id }
+          : {}),
+        historical: true,
+        raw: decryptedExtension,
+      },
+    };
+  }
+  if (
+    decryptedExtension?.kind === "command_ack" ||
+    decryptedExtension?.kind === "revision_conflict"
+  ) {
+    return null;
+  }
+  const message = parseCodeverEvent(
+    eventId,
+    trust.gatewayId,
+    event.getTs(),
+    true,
+    decryptedContent,
+  );
+  return message
+    ? { message: { ...message, historical: true } }
+    : null;
+}
+
+function compareIncomingMessages(
+  left: IncomingCodeverMessage,
+  right: IncomingCodeverMessage,
+): number {
+  return (
+    left.timestamp - right.timestamp ||
+    left.eventId.localeCompare(right.eventId)
+  );
 }
 
 async function forwardEvent(
@@ -1635,6 +1918,10 @@ async function forwardEvent(
             : "The Gateway accepted the command but could not complete it.",
         commandId: decryptedExtension.command_id,
         revision: decryptedExtension.revision,
+        ...(typeof decryptedExtension.session_id === "string" &&
+        decryptedExtension.session_id
+          ? { sessionId: decryptedExtension.session_id }
+          : {}),
         raw: decryptedExtension,
       });
     }

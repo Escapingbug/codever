@@ -378,9 +378,19 @@ export class MatrixGatewayRunner {
                 this.secureContent
                 && authorized.command.payload.operation === 'prompt'
             ) {
+                // Establish the app-session identity before any collaboration,
+                // status, or Agent event is emitted. Matrix rooms are shared by
+                // several sessions, and history routing must never depend on
+                // whichever session happens to be selected during replay.
+                const appSession = this.ensureAppSession(
+                    runtime,
+                    authorized.command.payload.text,
+                )
+                await this.persistRuntime(runtime)
                 collaborationDelivery = this.secureContent.sendCollaborationPrompt(runtime.config, {
                     commandId: authorized.command.commandId,
                     revision: authorized.revision,
+                    sessionId: appSession.id,
                     originDeviceId: authorized.command.deviceId,
                     originDeviceName: opened?.trustedDevice.deviceName
                         ?? opened?.trustedDevice.deviceId
@@ -468,6 +478,7 @@ export class MatrixGatewayRunner {
                     outcome,
                     this.client,
                     executionError === undefined ? undefined : formatError(executionError),
+                    runtime.currentAppSessionId,
                 )
             } catch (deliveryError) {
                 this.log(
@@ -746,12 +757,15 @@ export class MatrixGatewayRunner {
                 ? restored.appSessions.find(session => session.id === restored.currentSessionId)
                     ?.providerSessionId ?? null
                 : null
+            let runtime: RoomRuntime | undefined
             const port = new MatrixPort({
                 transport: this.secureContent
                     ? this.secureContent.transportForRoom(room, this.client)
                     : this.client,
                 roomId: room.roomId,
                 gatewayId: this.config.gatewayId,
+                getSessionId: () =>
+                    runtime?.currentAppSessionId ?? restored.currentSessionId,
                 onLog: this.dependencies.onLog,
             })
             let capabilityProvider: AgentProvider | null
@@ -778,7 +792,7 @@ export class MatrixGatewayRunner {
                     selectedProviderSessionId,
                 )
             }
-            const runtime: RoomRuntime = {
+            runtime = {
                 config: room,
                 port,
                 session,

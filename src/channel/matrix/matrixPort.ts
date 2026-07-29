@@ -16,6 +16,12 @@ export interface MatrixPortOptions {
     transport: MatrixTransport
     roomId: string
     gatewayId: string
+    /**
+     * Resolves the active first-party app session at send time. A Matrix room
+     * can carry several Codever sessions, so persisted timeline events must
+     * retain this routing identity for history reconstruction.
+     */
+    getSessionId?: () => string | null
     onLog?: (message: string) => void
 }
 
@@ -46,6 +52,7 @@ export class MatrixPort implements ChannelPort {
         const content = buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
+            ...this.sessionMetadata(),
             format: message.format,
             ...(message.attachments?.length ? {
                 attachments: message.attachments.map(attachment => ({
@@ -76,6 +83,7 @@ export class MatrixPort implements ChannelPort {
         const replacement = buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
+            ...this.sessionMetadata(),
             format: message.format,
             replaces_event_id: targetEventId,
             ...(messageOptions.ui === undefined ? {} : { ui: messageOptions.ui }),
@@ -121,6 +129,7 @@ export class MatrixPort implements ChannelPort {
                 [CODEVER_MATRIX_EXTENSION]: {
                     version: CODEVER_MATRIX_PROTOCOL_VERSION,
                     kind: 'decision_request',
+                    ...this.sessionMetadata(),
                     decision_id: decisionId,
                     decision_type: request.type,
                     title: request.title,
@@ -158,6 +167,7 @@ export class MatrixPort implements ChannelPort {
         const extension = {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             kind: 'status',
+            ...this.sessionMetadata(),
             operation_id: operationId,
             state: status.state,
             provider: status.provider,
@@ -217,6 +227,11 @@ export class MatrixPort implements ChannelPort {
             .update(operationId)
             .digest('hex')
         return `codever.${digest}`
+    }
+
+    private sessionMetadata(): { session_id?: string } {
+        const sessionId = this.options.getSessionId?.()
+        return sessionId ? { session_id: sessionId } : {}
     }
 
     private operationIdFor(message: ChannelMessage): string {
