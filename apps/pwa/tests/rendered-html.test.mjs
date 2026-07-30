@@ -62,6 +62,10 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
+  assert.match(
+    source,
+    /<button[\s\S]{0,160}?aria-label="Settings"[\s\S]{0,160}?onClick=\{\(\) => setSettingsOpen\(true\)\}/,
+  );
   assert.doesNotMatch(source, /operation: "session\.select"/);
   assert.match(
     source,

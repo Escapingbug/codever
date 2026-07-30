@@ -1815,7 +1815,12 @@ export function CodeverApp() {
           </button>
         </nav>
         <div className="rail-spacer" />
-        <button className="rail-button" aria-label="Settings">
+        <button
+          type="button"
+          className="rail-button"
+          aria-label="Settings"
+          onClick={() => setSettingsOpen(true)}
+        >
           <Icon>⚙</Icon>
           <span>Settings</span>
         </button>
