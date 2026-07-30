@@ -1,0 +1,4 @@
+@codever_matrix path /_matrix/* /_synapse/client/*
+handle @codever_matrix {
+    reverse_proxy 127.0.0.1:8008
+}

@@ -1,0 +1,79 @@
+server_name: "__SERVER_NAME__"
+public_baseurl: "https://__SERVER_NAME__/"
+pid_file: /data/homeserver.pid
+web_client_location: null
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "__POSTGRES_PASSWORD__"
+    database: synapse
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+log_config: /data/log.config
+media_store_path: /data/media_store
+signing_key_path: /data/signing.key
+macaroon_secret_key: "__MACAROON_SECRET__"
+form_secret: "__FORM_SECRET__"
+registration_shared_secret: "__REGISTRATION_SECRET__"
+
+# Private single-homeserver deployment: no federation listener or sender.
+send_federation: false
+federation_domain_whitelist: []
+allow_public_rooms_without_auth: false
+allow_public_rooms_over_federation: false
+allow_guest_access: false
+
+enable_registration: false
+enable_registration_without_verification: false
+registration_requires_token: false
+password_config:
+  enabled: true
+  localdb_enabled: true
+
+# Codever device invitations exchange an existing PWA session for a short-lived,
+# single-use Matrix login token. This private homeserver is dedicated to
+# Codever, so the owner-authorized Gateway can mint the token without an
+# additional UI-auth round trip. Keep the token lifetime no longer than the
+# pairing invitation lifetime.
+login_via_existing_session:
+  enabled: true
+  require_ui_auth: false
+  token_timeout: 5m
+
+require_auth_for_profile_requests: true
+limit_profile_requests_to_users_who_share_rooms: true
+user_directory:
+  enabled: false
+  search_all_users: false
+  prefer_local_users: true
+
+url_preview_enabled: false
+enable_metrics: false
+report_stats: false
+# Codever streams media and imposes no business-size cap. This deliberately
+# high guard is only a protocol/server safety bound; disk capacity is expected
+# to be the practical limit.
+max_upload_size: 1T
+media_retention:
+  # Codever imports uploaded ciphertext into the Gateway immediately. Matrix
+  # media is transport staging, not the authoritative Session file store.
+  local_media_lifetime: 1d
+  remote_media_lifetime: 1d
+
+trusted_key_servers: []
+suppress_key_server_warning: true
