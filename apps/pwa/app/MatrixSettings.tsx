@@ -17,6 +17,7 @@ type Props = {
   open: boolean;
   config: MatrixConnectionConfig;
   status: MatrixConnectionStatus;
+  progressDetail: string | null;
   error: string | null;
   pairingPreview: PairingPreview | null;
   trustedGateway: TrustedGateway | null;
@@ -41,6 +42,7 @@ export function MatrixSettings({
   open,
   config,
   status,
+  progressDetail,
   error,
   pairingPreview,
   trustedGateway,
@@ -114,6 +116,7 @@ export function MatrixSettings({
           preview={pairingPreview}
           trustedGateway={trustedGateway}
           busy={busy}
+          progressDetail={progressDetail}
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}
           invitationBusy={invitationBusy}

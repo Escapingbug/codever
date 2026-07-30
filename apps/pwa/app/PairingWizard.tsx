@@ -18,6 +18,7 @@ type Props = {
   preview: PairingPreview | null;
   trustedGateway: TrustedGateway | null;
   busy: boolean;
+  progressDetail: string | null;
   canConfirm: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;
@@ -33,6 +34,7 @@ export function PairingWizard({
   preview,
   trustedGateway,
   busy,
+  progressDetail,
   canConfirm,
   deviceInvitation,
   invitationBusy,
@@ -250,6 +252,11 @@ export function PairingWizard({
               ? "Sign in to Matrix to continue"
             : `Trust ${preview.gatewayName} and pair`}
         </button>
+        {busy && progressDetail && (
+          <p className="pairing-scan-status" role="status">
+            {progressDetail}
+          </p>
+        )}
       </section>
     );
   }

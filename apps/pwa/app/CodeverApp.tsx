@@ -164,6 +164,7 @@ export function CodeverApp() {
   );
   const [connectionStatus, setConnectionStatus] =
     useState<MatrixConnectionStatus>("offline");
+  const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
   const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
@@ -848,6 +849,7 @@ export function CodeverApp() {
     completedCommandResultsRef.current.clear();
     setRevisionConflict(null);
     setConnectionError(null);
+    setConnectionDetail("Preparing the encrypted Matrix connection…");
     setConnectionStatus("connecting");
     setMessages([]);
     setSelectedSessionId(null);
@@ -878,6 +880,7 @@ export function CodeverApp() {
         onMessage: receiveMatrixMessage,
         onStatus(status, detail) {
           setConnectionStatus(status);
+          setConnectionDetail(detail ?? null);
           if (status === "error" && detail) setConnectionError(detail);
         },
         onTrustUpdated(trust) {
@@ -985,6 +988,7 @@ export function CodeverApp() {
       return connection;
     } catch (error) {
       setConnectionStatus("error");
+      setConnectionDetail(null);
       setConnectionError(formatUiError(error));
       return null;
     }
@@ -1003,6 +1007,7 @@ export function CodeverApp() {
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     setConnectionStatus("offline");
+    setConnectionDetail(null);
     setRunningSessionIds(new Set());
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
@@ -2569,6 +2574,7 @@ export function CodeverApp() {
         open={settingsOpen}
         config={matrixConfig}
         status={connectionStatus}
+        progressDetail={connectionDetail}
         error={connectionError}
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}

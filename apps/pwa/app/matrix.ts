@@ -86,6 +86,11 @@ const DEVICE_KEY = "p256-v1";
 const COMMAND_SEQUENCE_STORE = "command-sequences";
 const COMMAND_TTL_MS = 2 * 60_000;
 const INCOMPLETE_OUTBOX_LEASE_MS = 30_000;
+const LOCAL_STORE_TIMEOUT_MS = 10_000;
+const CRYPTO_INITIALIZATION_TIMEOUT_MS = 30_000;
+const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
+const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
+const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
 
 export type MatrixConnectionConfig = {
   homeserver: string;
@@ -433,13 +438,23 @@ export async function connectMatrix(
   },
 ): Promise<MatrixConnection> {
   const config = normalizeMatrixConfig(configInput);
-  const identity = await getOrCreateDeviceIdentity();
+  handlers.onStatus("connecting", "Preparing this browser’s device identity…");
+  const identity = await withMatrixTimeout(
+    getOrCreateDeviceIdentity(),
+    LOCAL_STORE_TIMEOUT_MS,
+    "The browser device identity store did not open in time.",
+  );
   let activeTrust = await loadTrustedGateway(identity);
   const replayStore = new IndexedDbReplayStore();
   const historyReplayStore = new DisplayOnlyReplayStore();
   const sdk = await import("matrix-js-sdk");
   const syncStoreDatabaseName = await matrixSyncDatabaseName(config);
-  await waitForMatrixSyncStoreClose(syncStoreDatabaseName);
+  handlers.onStatus("connecting", "Opening the Matrix sync store…");
+  await withMatrixTimeout(
+    waitForMatrixSyncStoreClose(syncStoreDatabaseName),
+    LOCAL_STORE_TIMEOUT_MS,
+    "The Matrix sync store did not close its previous connection in time.",
+  );
   const syncStore = new sdk.IndexedDBStore({
     indexedDB: window.indexedDB,
     dbName: syncStoreDatabaseName,
@@ -672,17 +687,29 @@ export async function connectMatrix(
   try {
     // SDK 41 assigns the store's user factory during createClient, so startup
     // must happen after createClient({ store }) and before the first /sync.
-    await syncStore.startup();
+    await withMatrixTimeout(
+      syncStore.startup(),
+      LOCAL_STORE_TIMEOUT_MS,
+      "The Matrix sync database did not open in time.",
+    );
     if (activeTrust && !(await syncStore.getSavedSyncToken())) {
       throw new Error(
         "This trusted browser has no persisted Matrix sync checkpoint, so its device list may be stale. Log in as a new Matrix device and pair this browser again.",
       );
     }
     assertPersistenceHealthy();
-    await client.initRustCrypto({
-      useIndexedDB: true,
-      cryptoDatabasePrefix: cryptoStoreScope,
-    });
+    handlers.onStatus(
+      "connecting",
+      "Initializing end-to-end encryption on this device…",
+    );
+    await withMatrixTimeout(
+      client.initRustCrypto({
+        useIndexedDB: true,
+        cryptoDatabasePrefix: cryptoStoreScope,
+      }),
+      CRYPTO_INITIALIZATION_TIMEOUT_MS,
+      "Matrix encryption initialization did not finish in time. Close other Codever tabs and scan a new invitation.",
+    );
     const cryptoApi = client.getCrypto();
     if (!cryptoApi) {
       throw new Error("Matrix Rust crypto did not initialize.");
@@ -692,15 +719,29 @@ export async function connectMatrix(
     );
     cryptoApi.globalBlacklistUnverifiedDevices = true;
     cryptoApi.setDeviceIsolationMode(new AllDevicesIsolationMode(false));
-    matrixDeviceKeys = await cryptoApi.getOwnDeviceKeys();
+    matrixDeviceKeys = await withMatrixTimeout(
+      cryptoApi.getOwnDeviceKeys(),
+      LOCAL_STORE_TIMEOUT_MS,
+      "Matrix did not create this device’s encryption keys in time.",
+    );
     if (!matrixDeviceKeys) {
       throw new Error("Matrix device keys were not initialized.");
     }
     client.on(sdk.RoomEvent.Timeline, onTimeline);
     client.on(sdk.ClientEvent.Sync, onSync);
-    await client.startClient({ initialSyncLimit: 30 });
+    handlers.onStatus("connecting", "Starting the first encrypted sync…");
+    await client.startClient({ initialSyncLimit: activeTrust ? 30 : 1 });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
     initialSyncComplete = true;
+    handlers.onStatus(
+      "connecting",
+      "Publishing this device’s encryption keys…",
+    );
+    await waitForOwnMatrixDeviceKeys(
+      config,
+      matrixDeviceKeys,
+      DEVICE_KEYS_UPLOAD_TIMEOUT_MS,
+    );
 
     const room = client.getRoom(config.roomId);
     if (!room) {
@@ -712,9 +753,19 @@ export async function connectMatrix(
       throw new Error("Refusing to connect: the selected Matrix room is not encrypted.");
     }
     const configuredGateway = gatewayPin(config);
-    if (configuredGateway) {
-      await verifyAndPinGatewayDevice(client, configuredGateway);
-      await cryptoApi.forceDiscardSession(config.roomId);
+    if (configuredGateway && activeTrust) {
+      handlers.onStatus("connecting", "Verifying the trusted Gateway device…");
+      await withMatrixTimeout(
+        verifyAndPinGatewayDevice(client, configuredGateway),
+        GATEWAY_DEVICE_TIMEOUT_MS,
+        "The trusted Gateway device could not be verified in time.",
+      );
+      handlers.onStatus("connecting", "Preparing a fresh encrypted session…");
+      await withMatrixTimeout(
+        cryptoApi.forceDiscardSession(config.roomId),
+        LOCAL_STORE_TIMEOUT_MS,
+        "The encrypted Matrix session could not be rotated in time.",
+      );
     }
 
     if (activeTrust) {
@@ -761,13 +812,25 @@ export async function connectMatrix(
     client.off(sdk.RoomEvent.Timeline, onTimeline);
     client.off(sdk.ClientEvent.Sync, onSync);
     client.stopClient();
-    await destroyAndReleaseMatrixSyncStore(
-      syncStoreDatabaseName,
-      syncStore,
-      cryptoLock,
-    );
-    handlers.onStatus("error", formatError(error));
-    throw error;
+    let detail = formatError(error);
+    try {
+      await withMatrixTimeout(
+        destroyAndReleaseMatrixSyncStore(
+          syncStoreDatabaseName,
+          syncStore,
+          cryptoLock,
+        ),
+        LOCAL_STORE_TIMEOUT_MS,
+        "Timed out while closing the Matrix stores.",
+      );
+    } catch (cleanupError) {
+      await cryptoLock.release().catch(() => undefined);
+      detail = `${detail} The local Matrix stores did not close cleanly: ${formatError(
+        cleanupError,
+      )} Reload this page before trying another invitation.`;
+    }
+    handlers.onStatus("error", detail);
+    throw new Error(detail);
   }
   if (!matrixDeviceKeys) {
     await destroyAndReleaseMatrixSyncStore(
@@ -1136,13 +1199,25 @@ export async function connectMatrix(
       assertPersistenceHealthy();
       const offerTransport = preview.transport;
       assertMatchingPairingRoute(config, offerTransport);
-      await verifyAndPinGatewayDevice(client, offerTransport);
-      await client.getCrypto()?.forceDiscardSession(config.roomId);
+      handlers.onStatus("connected", "Verifying the Gateway device…");
+      await withMatrixTimeout(
+        verifyAndPinGatewayDevice(client, offerTransport),
+        GATEWAY_DEVICE_TIMEOUT_MS,
+        "The Gateway Matrix device could not be verified in time.",
+      );
+      handlers.onStatus("connected", "Preparing the encrypted pairing request…");
+      await withMatrixTimeout(
+        client.getCrypto()?.forceDiscardSession(config.roomId) ??
+          Promise.resolve(),
+        LOCAL_STORE_TIMEOUT_MS,
+        "The encrypted pairing session could not be prepared in time.",
+      );
       const transport = createMatrixPairingTransport(
         client,
         sdk.RoomEvent.Timeline,
         sdk.MsgType.Notice,
         config.roomId,
+        (detail) => handlers.onStatus("connected", detail),
       );
       const trust = await completePairing(
         preview,
@@ -1159,6 +1234,7 @@ export async function connectMatrix(
         signal,
       );
       activeTrust = trust;
+      handlers.onStatus("connected");
       return trust;
     },
     send(payload) {
@@ -1256,6 +1332,7 @@ function createMatrixPairingTransport(
   timelineEvent: string,
   noticeType: MsgType.Notice,
   roomId: string,
+  onProgress?: (detail: string) => void,
 ): PairingTransport {
   return {
     async exchange(request, offer, signal) {
@@ -1277,11 +1354,17 @@ function createMatrixPairingTransport(
             pairing_request: request,
           },
         };
-        await client.sendMessage(
-          roomId,
-          content,
-          `codever.pair.${request.request.requestId}.${crypto.randomUUID()}`,
+        onProgress?.("Sending the encrypted pairing request…");
+        await withMatrixTimeout(
+          client.sendMessage(
+            roomId,
+            content,
+            `codever.pair.${request.request.requestId}.${crypto.randomUUID()}`,
+          ),
+          ENCRYPTED_SEND_TIMEOUT_MS,
+          "The encrypted pairing request could not be sent in time.",
         );
+        onProgress?.("Waiting for the Gateway to approve this device…");
       } catch (error) {
         response.cancel();
         throw error;
@@ -1413,6 +1496,93 @@ async function verifyAndPinGatewayDevice(
     throw new Error("The Gateway device fingerprint does not match the invitation.");
   }
   await cryptoApi.setDeviceVerified(gateway.userId, gateway.deviceId, true);
+}
+
+async function waitForOwnMatrixDeviceKeys(
+  config: MatrixConnectionConfig,
+  expected: { ed25519: string; curve25519: string },
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  do {
+    const remaining = Math.max(1, deadline - Date.now());
+    let published:
+      | { ed25519: unknown; curve25519: unknown }
+      | undefined;
+    try {
+      const response = await fetch(
+        `${config.homeserver}/_matrix/client/v3/keys/query`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.accessToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            device_keys: { [config.userId]: [config.matrixDeviceId] },
+          }),
+          signal: AbortSignal.timeout(Math.min(5_000, remaining)),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`Matrix key query failed with HTTP ${response.status}.`);
+      }
+      const result = asRecord(await response.json());
+      const users = asRecord(result?.device_keys);
+      const devices = asRecord(users?.[config.userId]);
+      const device = asRecord(devices?.[config.matrixDeviceId]);
+      const keys = asRecord(device?.keys);
+      published = {
+        ed25519: keys?.[`ed25519:${config.matrixDeviceId}`],
+        curve25519: keys?.[`curve25519:${config.matrixDeviceId}`],
+      };
+    } catch (error) {
+      lastError = error;
+    }
+    if (
+      typeof published?.ed25519 === "string" ||
+      typeof published?.curve25519 === "string"
+    ) {
+      if (
+        published.ed25519 !== expected.ed25519 ||
+        published.curve25519 !== expected.curve25519
+      ) {
+        throw new Error(
+          "Matrix published different encryption keys for this device. Scan a new invitation to create a fresh Matrix device.",
+        );
+      }
+      return;
+    }
+    if (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+  } while (Date.now() < deadline);
+  throw new Error(
+    `This device did not publish its Matrix encryption keys in time.${
+      lastError ? ` ${formatError(lastError)}` : ""
+    }`,
+  );
+}
+
+function withMatrixTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    operation.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
 }
 
 function assertMatchingPairingRoute(
@@ -2145,6 +2315,8 @@ function assertMatrixEventMatchesTransport(
 }
 
 function gatewayPin(config: MatrixConnectionConfig): {
+  homeserver: string;
+  roomId: string;
   userId: string;
   deviceId: string;
   ed25519: string;
@@ -2164,6 +2336,8 @@ function gatewayPin(config: MatrixConnectionConfig): {
     throw new Error("Gateway Matrix user ID must start with @.");
   }
   return {
+    homeserver: config.homeserver,
+    roomId: config.roomId,
     userId: config.gatewayMatrixUserId,
     deviceId: config.gatewayMatrixDeviceId,
     ed25519: config.gatewayMatrixEd25519,

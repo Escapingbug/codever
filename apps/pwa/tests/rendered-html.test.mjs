@@ -214,11 +214,23 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(packageJson, /"jsqr": "1\.4\.0"/);
   assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
+  assert.match(matrix, /initialSyncLimit: activeTrust \? 30 : 1/);
+  assert.match(matrix, /Publishing this device’s encryption keys/);
+  assert.match(matrix, /await waitForOwnMatrixDeviceKeys\(/);
+  assert.match(matrix, /CRYPTO_INITIALIZATION_TIMEOUT_MS/);
+  assert.match(
+    matrix,
+    /if \(configuredGateway && activeTrust\)[\s\S]*verifyAndPinGatewayDevice/,
+  );
+  assert.match(
+    matrix,
+    /async pair[\s\S]*verifyAndPinGatewayDevice[\s\S]*createMatrixPairingTransport/,
+  );
   assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
   assert.match(matrix, /store: syncStore/);
   assert.match(
     matrix,
-    /createClient\([\s\S]*await syncStore\.startup\(\)[\s\S]*initRustCrypto/,
+    /createClient\([\s\S]*syncStore\.startup\(\)[\s\S]*initRustCrypto/,
   );
   assert.match(matrix, /checkpointMatrixSyncStore/);
   assert.match(matrix, /checkpointAndReleaseMatrixSyncStore/);
@@ -387,6 +399,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(wizard, /Choose photo/);
   assert.match(wizard, /Invitation code/);
   assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
+  assert.match(wizard, /busy && progressDetail/);
+  assert.match(settings, /progressDetail=\{progressDetail\}/);
+  assert.match(app, /setConnectionDetail\(detail \?\? null\)/);
   assert.match(qrScanning, /BarcodeDetector/);
   assert.match(wizard, /decodeQrImageFile/);
   assert.match(qrScanning, /import\("\.\/qrDecodeFallback"\)/);
