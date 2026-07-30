@@ -16,6 +16,9 @@ import {
   type NewSessionInput,
 } from "./NewSessionDialog";
 import { gatewayProjectKey } from "./gatewayState";
+import { MarkdownContent } from "./MarkdownContent";
+import { ToolGroupCard } from "./ToolGroupCard";
+import { legacyToolGroupPresentation } from "./presentation";
 import {
   clearMessageHistoryScope,
   loadMessageHistoryPage,
@@ -1511,25 +1514,16 @@ export function CodeverApp() {
               );
             }
             if (message.kind === "tool") {
+              const toolGroup =
+                message.toolGroup ??
+                legacyToolGroupPresentation({
+                  groupId: message.eventId ?? message.id,
+                  name: message.text || "Agent tool",
+                  timestamp: message.timestamp ?? Date.now(),
+                });
               return (
-                <div className="message-row agent-row" key={message.id}>
-                  <div className="agent-mark">C</div>
-                  <div className="tool-card">
-                    <div className="tool-heading">
-                      <span className="terminal-mark">&gt;_</span>
-                      <span>
-                        <strong>{message.text || "Agent tool"}</strong>
-                        <small>Received from encrypted room</small>
-                      </span>
-                      <b>✓</b>
-                    </div>
-                    <div className="tool-command">
-                      <code>
-                        {JSON.stringify(message.raw ?? {}).slice(0, 180)}
-                      </code>
-                    </div>
-                    <button>Encrypted event details</button>
-                  </div>
+                <div className="message-row tool-group-row" key={message.id}>
+                  <ToolGroupCard group={toolGroup} time={message.time} />
                 </div>
               );
             }
@@ -1587,7 +1581,11 @@ export function CodeverApp() {
                 <div className="agent-mark">C</div>
                 <div className="bubble agent-bubble">
                   <span className="agent-label">CODEX</span>
-                  <p>{message.text}</p>
+                  {message.format === "markdown" || !message.format ? (
+                    <MarkdownContent content={message.text ?? ""} />
+                  ) : (
+                    <p className="message-copy">{message.text}</p>
+                  )}
                   <time>{message.time}</time>
                 </div>
               </div>
@@ -1863,6 +1861,8 @@ function chatMessageFromIncoming(
     revision: incoming.revision,
     originDeviceId: incoming.originDeviceId,
     originDeviceName: incoming.originDeviceName,
+    format: incoming.format,
+    toolGroup: incoming.toolGroup,
     sessionId,
     historical: incoming.historical,
     raw: incoming.raw,

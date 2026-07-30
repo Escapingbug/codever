@@ -1,4 +1,8 @@
-import type { ChannelMessage } from '@/bridge/channelPort'
+import type {
+    ChannelMessage,
+    ChannelToolGroupPresentation,
+    ChannelToolPresentationItem,
+} from '@/bridge/channelPort'
 import type { ConversationEvent } from './semantic'
 import { escapeHtml } from '@/utils/formatting'
 import { formatToolBubble } from '@/channel/telegram/toolBubble'
@@ -24,6 +28,8 @@ interface ProjectedToolState {
     displayTitle?: string
     category?: 'read' | 'edit' | 'write' | 'execute' | 'search' | 'agent' | 'unknown'
     content?: Array<{ type: 'content'; contentType: string; text?: string } | { type: 'diff'; path?: string; oldText?: string; newText?: string } | { type: 'terminal'; terminalId?: string }>
+    startedAt: number
+    updatedAt: number
 }
 
 export class ChannelProjector {
@@ -31,6 +37,7 @@ export class ChannelProjector {
     private toolStates = new Map<string, ProjectedToolState>()
     private normalToolGroupKey: string | null = null
     private normalToolGroupIndex = 0
+    private normalToolGroupToolIds: string[] = []
 
     project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {
@@ -43,7 +50,7 @@ export class ChannelProjector {
 
             case 'decision_request':
                 return [
-                    ...this.flushText(),
+                    ...this.flushText(event, true),
                     {
                         message: {
                             text: `<b>${escapeHtml(event.title)}</b>${event.body ? `\n\n${escapeHtml(event.body)}` : ''}`,
@@ -65,7 +72,7 @@ export class ChannelProjector {
 
             case 'mode_change':
                 return [
-                    ...this.flushText(),
+                    ...this.flushText(event, true),
                     {
                         message: { text: `Mode: <code>${escapeHtml(event.mode)}</code>`, format: 'html' },
                         isToolEvent: false,
@@ -81,9 +88,9 @@ export class ChannelProjector {
                     return []
                 }
                 const commandText = formatCommandResult(event.command, event.output)
-                if (!commandText) return this.flushText()
+                if (!commandText) return this.flushText(event, true)
                 return [
-                    ...this.flushText(),
+                    ...this.flushText(event, true),
                     {
                         message: {
                             text: commandText,
@@ -105,7 +112,7 @@ export class ChannelProjector {
     }
 
     flush(semanticEvent?: ConversationEvent): ProjectedMessage[] {
-        return this.flushText(semanticEvent)
+        return this.flushText(semanticEvent, true)
     }
 
     statusMessage(text: string): ProjectedMessage {
@@ -121,12 +128,19 @@ export class ChannelProjector {
         this.toolStates.clear()
         this.normalToolGroupKey = null
         this.normalToolGroupIndex = 0
+        this.normalToolGroupToolIds = []
     }
 
-    private flushText(semanticEvent?: ConversationEvent): ProjectedMessage[] {
+    private flushText(
+        semanticEvent?: ConversationEvent,
+        closeEmptyToolGroup = false,
+    ): ProjectedMessage[] {
         const text = this.textBuffer
         this.textBuffer = ''
-        if (!text.trim()) return []
+        if (!text.trim()) {
+            if (closeEmptyToolGroup) this.closeNormalToolGroup()
+            return []
+        }
         this.closeNormalToolGroup()
         return [{
             message: { text, format: 'markdown' },
@@ -146,6 +160,10 @@ export class ChannelProjector {
                     message: {
                         text: this.formatToolState(state),
                         format: 'html',
+                        presentation: this.toolGroupPresentation(
+                            event.toolCallId,
+                            [event.toolCallId],
+                        ),
                     },
                     toolUseId: event.toolCallId,
                     isToolEvent: true,
@@ -168,9 +186,19 @@ export class ChannelProjector {
     private projectNormalToolGroup(event: Extract<ConversationEvent, { kind: 'tool' }>): ProjectedMessage {
         const groupKey = this.ensureNormalToolGroup()
         const state = this.mergeToolState(event)
+        if (!this.normalToolGroupToolIds.includes(event.toolCallId)) {
+            this.normalToolGroupToolIds.push(event.toolCallId)
+        }
 
         return {
-            message: { text: this.formatToolState(state), format: 'html' },
+            message: {
+                text: this.formatToolState(state),
+                format: 'html',
+                presentation: this.toolGroupPresentation(
+                    groupKey,
+                    this.normalToolGroupToolIds,
+                ),
+            },
             toolUseId: groupKey,
             isToolEvent: true,
             isTerminal: event.phase === 'completed' || event.phase === 'failed',
@@ -181,16 +209,18 @@ export class ChannelProjector {
     private ensureNormalToolGroup(): string {
         if (!this.normalToolGroupKey) {
             this.normalToolGroupKey = `normal-tool-group:${++this.normalToolGroupIndex}`
+            this.normalToolGroupToolIds = []
         }
         return this.normalToolGroupKey
     }
 
     private closeNormalToolGroup(): void {
         this.normalToolGroupKey = null
+        this.normalToolGroupToolIds = []
     }
 
     private projectTurnFinished(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): ProjectedMessage[] {
-        const messages = this.flushText(event)
+        const messages = this.flushText(event, true)
         if (event.status === 'success') return messages
 
         messages.push({
@@ -226,6 +256,10 @@ export class ChannelProjector {
             message: {
                 text: this.formatToolState(state),
                 format: 'html',
+                presentation: this.toolGroupPresentation(
+                    event.toolCallId,
+                    [event.toolCallId],
+                ),
             },
             toolUseId: event.toolCallId,
             isToolEvent: true,
@@ -265,9 +299,35 @@ export class ChannelProjector {
         const content = event.content ?? existing?.content
 
         // Save merged state
-        const state = { toolName, phase: event.phase, input, output, isError, displayTitle, category, content }
+        const state = {
+            toolName,
+            phase: event.phase,
+            input,
+            output,
+            isError,
+            displayTitle,
+            category,
+            content,
+            startedAt: existing?.startedAt ?? event.meta.timestamp,
+            updatedAt: event.meta.timestamp,
+        }
         this.toolStates.set(event.toolCallId, state)
         return state
+    }
+
+    private toolGroupPresentation(
+        groupId: string,
+        toolCallIds: readonly string[],
+    ): ChannelToolGroupPresentation {
+        return {
+            kind: 'tool_group',
+            version: 1,
+            groupId,
+            tools: toolCallIds.flatMap((toolCallId) => {
+                const state = this.toolStates.get(toolCallId)
+                return state ? [toolPresentationItem(toolCallId, state)] : []
+            }),
+        }
     }
 
     private formatToolState(state: ProjectedToolState): string {
@@ -298,6 +358,81 @@ export class ChannelProjector {
             content: state.content,
         })
     }
+}
+
+function toolPresentationItem(
+    toolCallId: string,
+    state: ProjectedToolState,
+): ChannelToolPresentationItem {
+    const name = isGenericToolName(state.toolName) && state.displayTitle
+        ? state.displayTitle
+        : state.toolName
+    const detail = toolPresentationDetail(state)
+    const result = allowedToolOutput(state)
+    return {
+        id: toolCallId,
+        name,
+        title: state.displayTitle ?? name,
+        ...(detail ? { detail } : {}),
+        ...(result ? { result: truncatePresentationText(result) } : {}),
+        category: state.category ?? 'unknown',
+        phase: state.phase,
+        isError: state.phase === 'failed' || Boolean(state.isError),
+        startedAt: state.startedAt,
+        updatedAt: state.updatedAt,
+    }
+}
+
+function toolPresentationDetail(state: ProjectedToolState): string | undefined {
+    const input = asRecord(state.input) ?? undefined
+    const value = state.displayTitle
+        ?? pickInputText(input, detailKeysForTool(state.toolName, state.category))
+        ?? (typeof state.input === 'string' ? state.input : undefined)
+    return value ? truncatePresentationText(value) : undefined
+}
+
+function detailKeysForTool(
+    toolName: string,
+    category: ProjectedToolState['category'],
+): string[] {
+    const normalized = toolName.toLowerCase()
+    if (category === 'execute' || ['bash', 'shell', 'terminal'].includes(normalized)) {
+        return ['command', 'cmd', 'script']
+    }
+    if (
+        category === 'read'
+        || category === 'edit'
+        || category === 'write'
+        || ['read', 'edit', 'write'].includes(normalized)
+    ) {
+        return ['file_path', 'filePath', 'path', 'target_file', 'targetFile']
+    }
+    if (category === 'search') {
+        return ['query', 'pattern', 'regex', 'glob', 'url']
+    }
+    if (category === 'agent') {
+        return ['description', 'prompt', 'task']
+    }
+    return ['description', 'command', 'query', 'path', 'file_path']
+}
+
+function pickInputText(
+    input: Record<string, unknown> | undefined,
+    keys: readonly string[],
+): string | undefined {
+    if (!input) return undefined
+    for (const key of keys) {
+        const value = input[key]
+        if (typeof value === 'string' && value.trim()) return value.trim()
+    }
+    return undefined
+}
+
+function truncatePresentationText(value: string, limit = 240): string {
+    const normalized = value.replace(/\s+/gu, ' ').trim()
+    return normalized.length > limit
+        ? `${normalized.slice(0, limit - 1)}…`
+        : normalized
 }
 
 function isGenericToolName(toolName: string | undefined): boolean {

@@ -59,6 +59,13 @@ import {
   type GatewayStateCacheBinding,
   type GatewayStateSnapshot,
 } from "./gatewayState";
+import {
+  legacyToolGroupPresentation,
+  messageFormat,
+  parseToolGroupPresentation,
+  type MessageFormat,
+  type ToolGroupPresentation,
+} from "./presentation";
 export {
   parseGatewayStateExtension,
   type GatewayCapabilities,
@@ -147,6 +154,8 @@ export type IncomingCodeverMessage = {
   requestId?: string;
   streamId?: string;
   replacesEventId?: string;
+  format: MessageFormat;
+  toolGroup?: ToolGroupPresentation;
   raw: Record<string, unknown>;
 };
 
@@ -1428,6 +1437,7 @@ export function parseCodeverEvent(
       ...collaborationMetadata,
       kind: "user",
       text: effectiveExtension.text,
+      format: "plain",
       commandId: effectiveExtension.command_id,
       revision: effectiveExtension.revision,
       originDeviceId: effectiveExtension.origin_device_id,
@@ -1440,14 +1450,25 @@ export function parseCodeverEvent(
   }
   if (effectiveExtension.kind === "message") {
     const ui = asRecord(effectiveExtension.ui);
+    const toolGroup =
+      parseToolGroupPresentation(ui) ??
+      (ui?.kind === "tool_card"
+        ? legacyToolGroupPresentation({
+            groupId: eventId,
+            name: body || "Agent tool",
+            timestamp,
+          })
+        : undefined);
     return {
       eventId,
       sender,
       timestamp,
       encrypted,
       ...collaborationMetadata,
-      kind: ui?.kind === "tool_card" ? "tool" : "agent",
+      kind: toolGroup ? "tool" : "agent",
       text: body,
+      format: messageFormat(effectiveExtension.format),
+      ...(toolGroup ? { toolGroup } : {}),
       ...(typeof relation?.event_id === "string"
         ? { replacesEventId: relation.event_id }
         : {}),
@@ -1466,6 +1487,7 @@ export function parseCodeverEvent(
         typeof effectiveExtension.title === "string"
           ? effectiveExtension.title
           : body,
+      format: "plain",
       ...(typeof effectiveExtension.decision_id === "string"
         ? { requestId: effectiveExtension.decision_id }
         : {}),
@@ -1481,6 +1503,7 @@ export function parseCodeverEvent(
       ...collaborationMetadata,
       kind: "notice",
       text: body || "Gateway status updated.",
+      format: "plain",
       raw: effectiveExtension,
     };
   }
@@ -1508,22 +1531,49 @@ export function parseCodeverEvent(
         ...common,
         kind: "agent",
         text: typeof payload.text === "string" ? payload.text : "",
+        format: "markdown",
         ...(typeof payload.streamId === "string"
           ? { streamId: payload.streamId }
           : {}),
       };
     case "agent.tool.started":
-    case "agent.tool.completed":
+    case "agent.tool.completed": {
+      const name =
+        typeof payload.name === "string"
+          ? payload.name
+          : payload.type === "agent.tool.completed"
+            ? `Tool ${String(payload.status ?? "completed")}`
+            : "Agent tool";
+      const failed =
+        payload.status === "failed" ||
+        payload.status === "error" ||
+        payload.isError === true;
+      const phase =
+        payload.type === "agent.tool.completed"
+          ? failed
+            ? "failed"
+            : "completed"
+          : "started";
+      const groupId =
+        typeof payload.toolCallId === "string"
+          ? payload.toolCallId
+          : typeof payload.toolUseId === "string"
+            ? payload.toolUseId
+            : eventId;
       return {
         ...common,
         kind: "tool",
-        text:
-          typeof payload.name === "string"
-            ? payload.name
-            : payload.type === "agent.tool.completed"
-              ? `Tool ${String(payload.status ?? "completed")}`
-              : "Agent tool",
+        text: name,
+        format: "plain",
+        toolGroup: legacyToolGroupPresentation({
+          groupId,
+          name,
+          timestamp,
+          phase,
+          isError: failed,
+        }),
       };
+    }
     case "agent.permission.requested":
       return {
         ...common,
@@ -1532,6 +1582,7 @@ export function parseCodeverEvent(
           typeof payload.title === "string"
             ? payload.title
             : "Permission required",
+        format: "plain",
         ...(typeof payload.requestId === "string"
           ? { requestId: payload.requestId }
           : {}),
@@ -1544,12 +1595,14 @@ export function parseCodeverEvent(
           typeof payload.message === "string"
             ? payload.message
             : "The agent reported an error.",
+        format: "plain",
       };
     default:
       return {
         ...common,
         kind: "notice",
         text: humanizeField(payload.type),
+        format: "plain",
       };
   }
 }
@@ -1649,6 +1702,7 @@ async function decodeHistoricalEvent(
           typeof decryptedExtension.error === "string"
             ? decryptedExtension.error
             : "The Gateway accepted the command but could not complete it.",
+        format: "plain",
         commandId: decryptedExtension.command_id,
         ...(isPositiveInteger(decryptedExtension.revision)
           ? { revision: decryptedExtension.revision }
@@ -1916,6 +1970,7 @@ async function forwardEvent(
           typeof decryptedExtension.error === "string"
             ? decryptedExtension.error
             : "The Gateway accepted the command but could not complete it.",
+        format: "plain",
         commandId: decryptedExtension.command_id,
         revision: decryptedExtension.revision,
         ...(typeof decryptedExtension.session_id === "string" &&
@@ -2011,6 +2066,7 @@ async function acceptGatewayDeviceRotation(
     encrypted: event.isEncrypted(),
     kind: "notice",
     text: "Gateway security keys were updated automatically.",
+    format: "plain",
     raw: { type: "gateway.device.rotated", rotationId: rotation.rotationId },
   });
 }

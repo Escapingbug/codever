@@ -122,6 +122,32 @@ test("keeps conversations inside the viewport with an independently scrollable f
   assert.doesNotMatch(source, /behavior:\s*"smooth"/);
 });
 
+test("renders safe Markdown and keeps consecutive tools in an accessible folded group", async () => {
+  const [app, markdown, toolGroup, presentation, packageJson, styles] =
+    await Promise.all([
+      readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+      readFile(new URL("app/MarkdownContent.tsx", appRoot), "utf8"),
+      readFile(new URL("app/ToolGroupCard.tsx", appRoot), "utf8"),
+      readFile(new URL("app/presentation.ts", appRoot), "utf8"),
+      readFile(new URL("package.json", appRoot), "utf8"),
+      readFile(new URL("app/globals.css", appRoot), "utf8"),
+    ]);
+
+  assert.match(app, /<MarkdownContent content=\{message\.text \?\? ""\}/);
+  assert.match(app, /<ToolGroupCard group=\{toolGroup\}/);
+  assert.doesNotMatch(app, /JSON\.stringify\(message\.raw/);
+  assert.match(markdown, /remarkPlugins=\{\[remarkGfm\]\}/);
+  assert.match(markdown, /skipHtml/);
+  assert.match(markdown, /rel="noopener noreferrer"/);
+  assert.match(toolGroup, /aria-expanded=\{expanded\}/);
+  assert.match(toolGroup, /group\.tools\.map/);
+  assert.match(presentation, /const TOOL_LIMIT = 200/);
+  assert.match(packageJson, /"react-markdown"/);
+  assert.match(packageJson, /"remark-gfm"/);
+  assert.match(styles, /\.markdown-content pre/);
+  assert.match(styles, /\.tool-group-details/);
+});
+
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {
   const [matrix, pairing, replayStore, wizard, settings, app, packageJson] = await Promise.all([
     readFile(new URL("app/matrix.ts", appRoot), "utf8"),

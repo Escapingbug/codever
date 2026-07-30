@@ -450,7 +450,7 @@ describe('SemanticSessionRuntime', () => {
         }
     })
 
-    it('replaces the normal tool message between assistant text messages instead of appending history', async () => {
+    it('updates one normal tool group while retaining every structured tool item', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
         const operations: DeliveryOperation[] = []
@@ -487,6 +487,23 @@ describe('SemanticSessionRuntime', () => {
         expect(finalToolMessage).not.toContain('npm test')
         expect(finalToolMessage).not.toContain('passed')
         expect(finalToolMessage).not.toContain('const secret')
+        expect(operations[3].message.presentation).toMatchObject({
+            kind: 'tool_group',
+            tools: [
+                {
+                    id: 'tool-1',
+                    name: 'Bash',
+                    detail: 'npm test',
+                    phase: 'completed',
+                },
+                {
+                    id: 'tool-2',
+                    name: 'Read',
+                    detail: '/repo/src/app.ts',
+                    phase: 'completed',
+                },
+            ],
+        })
     })
 
     it('suppresses all tool output in quiet mode while preserving assistant text', async () => {

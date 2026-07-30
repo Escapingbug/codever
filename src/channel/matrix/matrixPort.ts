@@ -48,6 +48,7 @@ export class MatrixPort implements ChannelPort {
 
     async send(message: ChannelMessage): Promise<ChannelSendResult> {
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
+        const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const content = buildMessageContent(message, {
             kind: 'message',
@@ -64,7 +65,7 @@ export class MatrixPort implements ChannelPort {
                     local_path: attachment.path,
                 })),
             } : {}),
-            ...(messageOptions.ui === undefined ? {} : { ui: messageOptions.ui }),
+            ...(presentation === undefined ? {} : { ui: presentation }),
         })
         const transactionId = this.transactionId('send', operationId)
         const result = await this.options.transport.sendEncryptedRoomEvent({
@@ -79,6 +80,7 @@ export class MatrixPort implements ChannelPort {
     async edit(messageId: string | number, message: ChannelMessage): Promise<void> {
         const targetEventId = String(messageId)
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
+        const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const replacement = buildMessageContent(message, {
             kind: 'message',
@@ -86,7 +88,7 @@ export class MatrixPort implements ChannelPort {
             ...this.sessionMetadata(),
             format: message.format,
             replaces_event_id: targetEventId,
-            ...(messageOptions.ui === undefined ? {} : { ui: messageOptions.ui }),
+            ...(presentation === undefined ? {} : { ui: presentation }),
         })
         const content: MatrixRoomMessageContent = {
             ...replacement,
