@@ -125,6 +125,76 @@ describe('ChannelProjector — patch merge', () => {
         expect(message).toContain('Show the plan in Telegram')
         expect(message).not.toContain('raw provider shape')
     })
+
+    it('keeps every consecutive tool in the structured normal-verbosity group', () => {
+        const first = makeToolEvent({
+            toolCallId: 'group-tool-1',
+            phase: 'completed',
+            toolName: 'Bash',
+            category: 'execute',
+            input: { command: 'npm test' },
+            meta: makeMeta('group-tool-1'),
+        })
+        const second = makeToolEvent({
+            toolCallId: 'group-tool-2',
+            phase: 'started',
+            toolName: 'Read',
+            category: 'read',
+            input: { file_path: '/src/app.ts' },
+            meta: makeMeta('group-tool-2'),
+        })
+
+        projector.project(first, { verboseLevel: 1 })
+        const result = projector.project(second, { verboseLevel: 1 })
+        const presentation = result[0]?.message.presentation
+
+        expect(presentation?.kind).toBe('tool_group')
+        expect(presentation?.tools).toMatchObject([
+            {
+                id: 'group-tool-1',
+                name: 'Bash',
+                detail: 'npm test',
+                phase: 'completed',
+            },
+            {
+                id: 'group-tool-2',
+                name: 'Read',
+                detail: '/src/app.ts',
+                phase: 'started',
+            },
+        ])
+    })
+
+    it('starts a new tool group after a decision even without buffered assistant text', () => {
+        const first = projector.project(makeToolEvent({
+            toolCallId: 'before-decision',
+            phase: 'completed',
+            toolName: 'Read',
+            meta: makeMeta('before-decision'),
+        }), { verboseLevel: 1 })
+        projector.project({
+            kind: 'decision_request',
+            meta: {
+                ...makeMeta('decision'),
+                id: 'decision',
+            },
+            decisionId: 'decision-1',
+            title: 'Continue?',
+            options: [{ id: 'yes', label: 'Yes', value: 'yes' }],
+            required: true,
+            source: 'provider',
+        })
+        const second = projector.project(makeToolEvent({
+            toolCallId: 'after-decision',
+            phase: 'started',
+            toolName: 'Bash',
+            meta: makeMeta('after-decision'),
+        }), { verboseLevel: 1 })
+
+        expect(first[0]?.toolUseId).not.toBe(second[0]?.toolUseId)
+        expect(second[0]?.message.presentation?.tools).toHaveLength(1)
+        expect(second[0]?.message.presentation?.tools[0]?.id).toBe('after-decision')
+    })
 })
 
 describe('ChannelProjector — command_result friendly rendering', () => {

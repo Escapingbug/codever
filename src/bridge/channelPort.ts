@@ -16,9 +16,42 @@ export interface ChannelAttachment {
     filename?: string
 }
 
+export type ChannelToolCategory =
+    | 'read'
+    | 'edit'
+    | 'write'
+    | 'execute'
+    | 'search'
+    | 'agent'
+    | 'unknown'
+
+export interface ChannelToolPresentationItem {
+    id: string
+    name: string
+    title: string
+    detail?: string
+    result?: string
+    category: ChannelToolCategory
+    phase: 'started' | 'updated' | 'completed' | 'failed'
+    isError: boolean
+    startedAt: number
+    updatedAt: number
+}
+
+export interface ChannelToolGroupPresentation {
+    kind: 'tool_group'
+    version: 1
+    groupId: string
+    tools: ChannelToolPresentationItem[]
+}
+
+export type ChannelPresentation = ChannelToolGroupPresentation
+
 export interface ChannelMessage {
     text: string
     format: 'markdown' | 'html' | 'plain'
+    /** Channel-neutral structured UI hints. Ports may serialize or ignore them. */
+    presentation?: ChannelPresentation
     replyMarkup?: unknown
     attachments?: ChannelAttachment[]
 }

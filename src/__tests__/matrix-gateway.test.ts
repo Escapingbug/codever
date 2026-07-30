@@ -32,7 +32,23 @@ describe('MatrixPort', () => {
         const result = await port.send({
             text: '<b>Hello</b> &amp; goodbye',
             format: 'html',
-            replyMarkup: { idempotencyKey: 'turn-1:text-1', ui: { kind: 'tool_card' } },
+            presentation: {
+                kind: 'tool_group',
+                version: 1,
+                groupId: 'group-1',
+                tools: [{
+                    id: 'tool-1',
+                    name: 'Read',
+                    title: '/repo/app.ts',
+                    detail: '/repo/app.ts',
+                    category: 'read',
+                    phase: 'completed',
+                    isError: false,
+                    startedAt: 1_000,
+                    updatedAt: 2_000,
+                }],
+            },
+            replyMarkup: { idempotencyKey: 'turn-1:text-1' },
         })
 
         expect(result.messageId).toBe('$memory-1')
@@ -50,7 +66,15 @@ describe('MatrixPort', () => {
                     kind: 'message',
                     operation_id: 'turn-1:text-1',
                     format: 'html',
-                    ui: { kind: 'tool_card' },
+                    ui: {
+                        kind: 'tool_group',
+                        version: 1,
+                        groupId: 'group-1',
+                        tools: [expect.objectContaining({
+                            id: 'tool-1',
+                            phase: 'completed',
+                        })],
+                    },
                 },
             },
         })

@@ -1,3 +1,8 @@
+import type {
+  MessageFormat,
+  ToolGroupPresentation,
+} from "./presentation";
+
 export type PersistedChatMessage = {
   id: string;
   kind: "notice" | "user" | "agent" | "tool" | "permission" | "error";
@@ -15,6 +20,8 @@ export type PersistedChatMessage = {
   deliveryState?: "sending" | "sent" | "failed";
   originDeviceId?: string;
   originDeviceName?: string;
+  format?: MessageFormat;
+  toolGroup?: ToolGroupPresentation;
   raw?: Record<string, unknown>;
 };
 

@@ -25,6 +25,9 @@ import {
   type NewSessionInput,
 } from "./NewSessionDialog";
 import { gatewayProjectKey } from "./gatewayState";
+import { MarkdownContent } from "./MarkdownContent";
+import { ToolGroupCard } from "./ToolGroupCard";
+import { legacyToolGroupPresentation } from "./presentation";
 import {
   compareChatMessages,
   findOptimisticMessageId,
@@ -2162,58 +2165,21 @@ export function CodeverApp() {
               );
             }
             if (message.kind === "tool") {
-              const toolStatus = message.toolStatus ?? "succeeded";
+              const toolGroup =
+                message.toolGroup ??
+                legacyToolGroupPresentation({
+                  groupId: message.eventId ?? message.id,
+                  name: message.text || "Agent tool",
+                  timestamp: message.timestamp ?? Date.now(),
+                });
               return (
                 <div
-                  className={`message-row agent-row ${
+                  className={`message-row tool-group-row ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
                 >
-                  <div
-                    className={`agent-mark ${
-                      toolStatus === "running" ? "live" : ""
-                    }`}
-                  >
-                    C
-                  </div>
-                  <div className={`tool-card ${toolStatus}`}>
-                    <div className="tool-heading">
-                      <span className="terminal-mark">&gt;_</span>
-                      <span>
-                        <strong>{message.text || "Agent tool"}</strong>
-                        <small>
-                          {toolStatus === "running"
-                            ? "Agent is using this tool"
-                            : toolStatus === "failed"
-                              ? "Tool failed"
-                              : "Tool completed"}
-                        </small>
-                      </span>
-                      <b
-                        className="tool-status-icon"
-                        aria-label={
-                          toolStatus === "running"
-                            ? "Tool running"
-                            : toolStatus === "failed"
-                              ? "Tool failed"
-                              : "Tool completed"
-                        }
-                      >
-                        {toolStatus === "running"
-                          ? ""
-                          : toolStatus === "failed"
-                            ? "×"
-                            : "✓"}
-                      </b>
-                    </div>
-                    <div className="tool-command">
-                      <code>
-                        {JSON.stringify(message.raw ?? {}).slice(0, 180)}
-                      </code>
-                    </div>
-                    <button>Encrypted event details</button>
-                  </div>
+                  <ToolGroupCard group={toolGroup} time={message.time} />
                 </div>
               );
             }
@@ -2291,12 +2257,21 @@ export function CodeverApp() {
                 </div>
                 <div className="bubble agent-bubble">
                   <span className="agent-label">CODEX</span>
-                  <p>
-                    {message.text}
-                    {message.raw?.type === "agent.text.delta" && (
-                      <span className="cursor" aria-hidden="true" />
-                    )}
-                  </p>
+                  {message.format === "markdown" || !message.format ? (
+                    <>
+                      <MarkdownContent content={message.text ?? ""} />
+                      {message.raw?.type === "agent.text.delta" && (
+                        <span className="cursor" aria-hidden="true" />
+                      )}
+                    </>
+                  ) : (
+                    <p className="message-copy">
+                      {message.text}
+                      {message.raw?.type === "agent.text.delta" && (
+                        <span className="cursor" aria-hidden="true" />
+                      )}
+                    </p>
+                  )}
                   <time>{message.time}</time>
                 </div>
               </div>
@@ -2643,6 +2618,8 @@ function chatMessageFromIncoming(
     revision: incoming.revision,
     originDeviceId: incoming.originDeviceId,
     originDeviceName: incoming.originDeviceName,
+    format: incoming.format,
+    toolGroup: incoming.toolGroup,
     sessionId,
     historical: incoming.historical,
     raw: incoming.raw,
