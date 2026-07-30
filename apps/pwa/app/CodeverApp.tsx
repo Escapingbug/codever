@@ -28,6 +28,7 @@ import { gatewayProjectKey } from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
 import { legacyToolGroupPresentation } from "./presentation";
+import { registerPwaUpdates } from "./pwaUpdate";
 import {
   compareChatMessages,
   findOptimisticMessageId,
@@ -352,10 +353,9 @@ export function CodeverApp() {
     );
   }
 
+  useEffect(() => registerPwaUpdates(), []);
+
   useEffect(() => {
-    navigator.serviceWorker?.register("/sw.js").catch(() => {
-      // Offline support is opportunistic in local preview environments.
-    });
     const url = new URL(window.location.href);
     const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
     const link = hash.get("pair");
