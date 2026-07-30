@@ -2169,6 +2169,17 @@ select:focus-visible {
   background: #f0faf6;
 }
 
+.settings-build-version {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+
+.settings-build-version code {
+  font-family: var(--font-geist-mono);
+}
+
 .settings-security-note > span {
   display: grid;
   width: 25px;

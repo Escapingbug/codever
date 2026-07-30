@@ -1,9 +1,19 @@
-const CACHE_NAME = "codever-shell-v5";
+const CACHE_NAME = "codever-shell-v6";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)),
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.all(
+        APP_SHELL.map(async (url) => {
+          const response = await fetch(url, { cache: "reload" });
+          if (!response.ok) {
+            throw new Error(`Could not refresh the app shell: ${url}`);
+          }
+          await cache.put(url, response);
+        }),
+      ),
+    ),
   );
   self.skipWaiting();
 });
@@ -28,7 +38,7 @@ self.addEventListener("fetch", (event) => {
 
   if (event.request.mode === "navigate") {
     event.respondWith(
-      fetch(event.request)
+      fetch(event.request, { cache: "no-store" })
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
@@ -57,4 +67,10 @@ self.addEventListener("fetch", (event) => {
       })
       .catch(() => caches.match(event.request)),
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });

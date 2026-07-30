@@ -57,9 +57,11 @@ test("ships a complete installable offline shell", async () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/");
   assert.ok(manifest.icons.length > 0);
+  assert.match(serviceWorker, /codever-shell-v6/);
   assert.match(serviceWorker, /caches\.open\(CACHE_NAME\)/);
   assert.match(serviceWorker, /event\.request\.mode === "navigate"/);
-  assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
+  assert.match(serviceWorker, /cache:\s*"no-store"/);
+  assert.match(source, /registerPwaUpdates\(\)/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
   assert.doesNotMatch(source, /operation: "session\.select"/);

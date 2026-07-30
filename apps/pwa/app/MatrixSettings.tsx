@@ -11,6 +11,7 @@ import type {
   PairingPreview,
   TrustedGateway,
 } from "./pairing";
+import { CODEVER_BUILD_VERSION } from "./buildInfo";
 
 type Props = {
   open: boolean;
@@ -240,6 +241,10 @@ export function MatrixSettings({
             <span>{error}</span>
           </div>
         )}
+
+        <p className="settings-build-version">
+          PWA build <code>{CODEVER_BUILD_VERSION}</code>
+        </p>
 
         <footer>
           <button className="forget-button" onClick={onForget}>
