@@ -11,6 +11,11 @@
   --violet-soft: #efedff;
   --green: #28af77;
   --shadow: 0 12px 42px rgb(33 43 74 / 9%);
+  --motion-fast: 140ms;
+  --motion-base: 180ms;
+  --motion-panel: 220ms;
+  --motion-ease-out: cubic-bezier(0.22, 0.78, 0.25, 1);
+  --motion-ease-soft: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 * {
@@ -759,6 +764,8 @@ select:focus-visible {
   background: white;
   box-shadow: 0 14px 36px rgb(33 43 74 / 17%);
   font-size: 12px;
+  transform-origin: top right;
+  animation: popover-enter var(--motion-base) var(--motion-ease-out);
 }
 
 .details-popover .mini-label {
@@ -812,6 +819,40 @@ select:focus-visible {
   justify-content: center;
   color: #949baa;
   font-size: 10px;
+  transition:
+    color var(--motion-fast) ease,
+    opacity var(--motion-fast) ease;
+}
+
+.history-loader.is-loading {
+  gap: 7px;
+  color: #7163c0;
+}
+
+.history-loader.is-loading::before {
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgb(105 87 229 / 18%);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  content: "";
+  animation: motion-spin 700ms linear infinite;
+}
+
+.history-skeleton {
+  width: min(430px, 72%);
+  height: 42px;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-left: 35px;
+  border: 1px solid #eceef3;
+  border-radius: 13px 13px 13px 4px;
+  background:
+    linear-gradient(#ebeaf3 0 0) 12px 10px / 34% 7px no-repeat,
+    linear-gradient(#f0f1f5 0 0) 12px 25px / 70% 6px no-repeat,
+    #fafafd;
+  opacity: 0.58;
+  animation: history-skeleton-pulse 1.15s ease-in-out infinite alternate;
 }
 
 .history-loader button {
@@ -874,9 +915,27 @@ select:focus-visible {
   font-size: 9px;
 }
 
+.notice-enter {
+  animation: notice-enter var(--motion-base) var(--motion-ease-out);
+}
+
 .message-row {
   display: flex;
   width: 100%;
+}
+
+.message-enter {
+  --message-enter-x: 0px;
+
+  animation: message-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.message-enter.user-row {
+  --message-enter-x: 6px;
+}
+
+.message-enter.agent-row {
+  --message-enter-x: -4px;
 }
 
 .user-row {
@@ -1057,7 +1116,27 @@ select:focus-visible {
   letter-spacing: -2px;
 }
 
+.delivery-indicator {
+  display: inline-block;
+  min-width: 14px;
+  transition:
+    color var(--motion-fast) ease,
+    opacity var(--motion-fast) ease,
+    transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.delivery-indicator.sending {
+  animation: delivery-pending 900ms ease-in-out infinite alternate;
+}
+
+.delivery-indicator.failed {
+  color: #ffd0d4;
+  letter-spacing: 0;
+  animation: delivery-failed var(--motion-panel) var(--motion-ease-out);
+}
+
 .agent-mark {
+  position: relative;
   display: grid;
   width: 27px;
   height: 27px;
@@ -1072,6 +1151,81 @@ select:focus-visible {
 
 .agent-mark.live {
   box-shadow: 0 0 0 4px rgb(105 87 229 / 10%);
+}
+
+.agent-mark.live::after {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgb(105 87 229 / 30%);
+  border-radius: 12px;
+  content: "";
+  pointer-events: none;
+  animation: agent-live-ring 1.4s ease-out infinite;
+}
+
+.agent-activity {
+  display: flex;
+  max-width: min(500px, 78%);
+  min-height: 32px;
+  align-items: center;
+  align-self: flex-start;
+  gap: 8px;
+  margin-left: 35px;
+  color: #747d91;
+  font-size: 10px;
+  font-weight: 620;
+  animation: activity-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.agent-activity-leaving {
+  pointer-events: none;
+  animation: activity-leave var(--motion-fast) ease-in forwards;
+}
+
+.activity-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.activity-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.32;
+  animation: activity-dot 900ms ease-in-out infinite;
+}
+
+.activity-dots > span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.activity-dots > span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.agent-activity > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agent-activity strong {
+  color: #626b7e;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.agent-activity small {
+  overflow: hidden;
+  max-width: min(420px, 65vw);
+  color: #949bad;
+  font-size: 10px;
+  font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-bubble {
@@ -1123,6 +1277,27 @@ select:focus-visible {
   box-shadow: 0 3px 9px rgb(31 42 70 / 5%);
 }
 
+.tool-card {
+  transition:
+    border-color var(--motion-base) ease,
+    background-color var(--motion-base) ease,
+    box-shadow var(--motion-base) ease;
+}
+
+.tool-card.running {
+  border-color: #dcd7fa;
+  box-shadow: 0 4px 13px rgb(75 60 170 / 9%);
+}
+
+.tool-card.succeeded {
+  border-color: #d7ece3;
+}
+
+.tool-card.failed {
+  border-color: #efd4d7;
+  background: #fffafa;
+}
+
 .tool-heading {
   display: flex;
   align-items: center;
@@ -1171,6 +1346,39 @@ select:focus-visible {
   background: #e9f8f2;
   color: #28a574;
   font-size: 10px;
+  transition:
+    background-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.tool-card.running .tool-heading > b {
+  position: relative;
+  background: #f0eefc;
+  color: transparent;
+}
+
+.tool-card.running .tool-heading > b::before {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgb(105 87 229 / 22%);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  content: "";
+  animation: motion-spin 700ms linear infinite;
+}
+
+.tool-card.succeeded .tool-heading > b {
+  background: #e9f8f2;
+  color: #28a574;
+  animation: state-confirm var(--motion-panel) var(--motion-ease-out);
+}
+
+.tool-card.failed .tool-heading > b {
+  background: #fae8ea;
+  color: #b64a54;
+  animation: state-confirm var(--motion-panel) var(--motion-ease-out);
 }
 
 .tool-command {
@@ -1502,11 +1710,36 @@ select:focus-visible {
 }
 
 .decision-state {
+  position: relative;
   margin-top: 11px;
   padding: 7px 10px;
   border-radius: 8px;
   font-size: 9px;
   font-weight: 650;
+  transition:
+    background-color var(--motion-base) ease,
+    color var(--motion-base) ease,
+    opacity var(--motion-fast) ease;
+}
+
+.decision-state.submitting {
+  padding-left: 29px;
+  background: #f2f0fc;
+  color: #6758b8;
+}
+
+.decision-state.submitting::before {
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgb(105 87 229 / 20%);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  content: "";
+  transform: translateY(-50%);
+  animation: decision-spin 700ms linear infinite;
 }
 
 .decision-state.approved {
@@ -1771,7 +2004,10 @@ select:focus-visible {
   color: white;
   font-size: 16px;
   font-weight: 650;
-  transition: 140ms ease;
+  transition:
+    background-color var(--motion-fast) ease,
+    transform var(--motion-fast) var(--motion-ease-out),
+    opacity var(--motion-fast) ease;
 }
 
 .send-button:disabled {
@@ -1784,9 +2020,27 @@ select:focus-visible {
   transform: translateY(-1px);
 }
 
+.send-button:not(:disabled):active {
+  transform: translateY(0) scale(0.94);
+}
+
+.send-button.mount-feedback,
+.stop-button.mount-feedback {
+  animation: composer-control-enter var(--motion-fast) var(--motion-ease-out);
+}
+
 .stop-button {
   background: #3c4050;
   font-size: 10px;
+}
+
+.button-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgb(255 255 255 / 35%);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: motion-spin 700ms linear infinite;
 }
 
 .composer-hint {
@@ -1812,6 +2066,7 @@ select:focus-visible {
   box-shadow: 0 12px 34px rgb(55 37 45 / 17%);
   color: #5d4045;
   text-align: left;
+  animation: toast-enter var(--motion-panel) var(--motion-ease-out);
 }
 
 .connection-toast > span:first-child {
@@ -1861,6 +2116,7 @@ select:focus-visible {
   padding: 22px;
   background: rgb(20 22 35 / 53%);
   backdrop-filter: blur(6px);
+  animation: backdrop-enter var(--motion-base) ease-out;
 }
 
 .matrix-settings {
@@ -1871,6 +2127,8 @@ select:focus-visible {
   border-radius: 20px;
   background: #fbfbfd;
   box-shadow: 0 28px 90px rgb(10 12 28 / 30%);
+  transform-origin: center;
+  animation: dialog-enter var(--motion-panel) var(--motion-ease-out);
 }
 
 .matrix-settings > header {
@@ -2226,6 +2484,12 @@ select:focus-visible {
   font-size: 8px;
 }
 
+.pairing-scan-status {
+  margin: 8px 1px 0;
+  color: #6e668d;
+  font-size: 8px;
+}
+
 .pairing-confirmation {
   overflow: hidden;
   border: 1px solid #dfdafa;
@@ -2337,6 +2601,141 @@ select:focus-visible {
   font-weight: 750;
 }
 
+.device-invitation-flow {
+  display: flex;
+  flex-direction: column;
+}
+
+.create-device-invitation-button {
+  min-height: 42px;
+  margin: 0 22px 16px;
+  border-radius: 10px;
+  background: var(--violet);
+  color: white;
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.create-device-invitation-button:disabled {
+  opacity: 0.62;
+  cursor: wait;
+}
+
+.invitation-reauth,
+.generated-device-invitation {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  margin: 0 22px 16px;
+  padding: 15px;
+  border: 1px solid #dfdafa;
+  border-radius: 14px;
+  background: #fbfaff;
+}
+
+.invitation-reauth strong,
+.generated-device-invitation strong {
+  color: #393f51;
+  font-size: 11px;
+}
+
+.invitation-reauth p,
+.generated-device-invitation p {
+  margin: 3px 0 0;
+  color: #747d8f;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.invitation-reauth label,
+.generated-device-invitation label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #636c7e;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.invitation-reauth input,
+.generated-device-invitation textarea {
+  width: 100%;
+  border: 1px solid #dfe2e9;
+  border-radius: 9px;
+  outline: 0;
+  background: white;
+  padding: 9px 10px;
+  color: #444c5e;
+  font-size: 9px;
+}
+
+.generated-device-invitation textarea {
+  resize: vertical;
+  font-family: var(--font-geist-mono);
+  line-height: 1.4;
+}
+
+.invitation-reauth > button {
+  min-height: 38px;
+  border-radius: 9px;
+  background: var(--violet);
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.invitation-reauth > button:disabled {
+  opacity: 0.6;
+}
+
+.generated-device-invitation > img,
+.invitation-qr-loading {
+  width: min(320px, 100%);
+  aspect-ratio: 1;
+  align-self: center;
+  border: 1px solid #eceaf5;
+  border-radius: 12px;
+  background: white;
+}
+
+.invitation-qr-loading {
+  display: grid;
+  place-items: center;
+  color: #858c9b;
+  font-size: 9px;
+}
+
+.generated-device-invitation > small {
+  color: #747d8f;
+  font-size: 8px;
+}
+
+.matrix-password-login-button {
+  min-height: 38px;
+  border-radius: 9px;
+  background: var(--violet);
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.matrix-password-login-button:disabled {
+  opacity: 0.6;
+}
+
+.advanced-token-field {
+  color: #777f90;
+  font-size: 8px;
+}
+
+.advanced-token-field > summary {
+  cursor: pointer;
+}
+
+.advanced-token-field > label {
+  margin-top: 8px;
+}
+
 .connection-details {
   margin: 0 22px 15px;
   overflow: hidden;
@@ -2405,6 +2804,7 @@ select:focus-visible {
   place-items: center;
   padding: 20px;
   background: rgb(12 14 25 / 76%);
+  animation: backdrop-enter var(--motion-base) ease-out;
 }
 
 .new-session-backdrop {
@@ -2416,6 +2816,7 @@ select:focus-visible {
   padding: 20px;
   background: rgb(21 24 38 / 48%);
   backdrop-filter: blur(7px);
+  animation: backdrop-enter var(--motion-base) ease-out;
 }
 
 .new-session-dialog {
@@ -2425,6 +2826,8 @@ select:focus-visible {
   border-radius: 18px;
   background: white;
   box-shadow: 0 28px 90px rgb(26 31 52 / 28%);
+  transform-origin: center;
+  animation: dialog-enter var(--motion-panel) var(--motion-ease-out);
 }
 
 .new-session-dialog > header {
@@ -2540,6 +2943,8 @@ select:focus-visible {
   border-radius: 17px;
   background: #171923;
   box-shadow: 0 25px 80px rgb(0 0 0 / 45%);
+  transform-origin: center;
+  animation: dialog-enter var(--motion-panel) var(--motion-ease-out);
 }
 
 .scanner-dialog > header {
@@ -2623,6 +3028,210 @@ select:focus-visible {
   color: #39334f;
   font-size: 9px;
   font-weight: 680;
+}
+
+.scanner-source-actions {
+  display: flex;
+  gap: 8px;
+  padding: 13px 14px 8px;
+}
+
+.scanner-source-actions button {
+  min-height: 38px;
+  flex: 1;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 9px;
+  background: #292c39;
+  color: #f3f3f7;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.scanner-source-actions button:first-child {
+  border-color: transparent;
+  background: var(--violet);
+}
+
+.scanner-device-hint {
+  margin: 0;
+  padding: 0 15px 14px;
+  color: #aeb2c0;
+  font-size: 8px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* Motion is opt-in for feed items so hydrating history never animates as a
+   batch. Overlays animate on mount because they are conditionally rendered. */
+.connection-state-connecting > i,
+.connection-state-reconnecting > i,
+i.connection-state-connecting,
+i.connection-state-reconnecting {
+  background: #d99b36;
+  box-shadow: 0 0 0 3px rgb(217 155 54 / 11%);
+  animation: connection-pulse 1.15s ease-in-out infinite;
+}
+
+.connection-state-connected > i,
+i.connection-state-connected {
+  background: var(--green);
+  animation: connection-confirm var(--motion-panel) var(--motion-ease-out);
+}
+
+@keyframes message-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--message-enter-x), 6px, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes notice-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+}
+
+@keyframes activity-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 5px, 0);
+  }
+}
+
+@keyframes activity-leave {
+  to {
+    opacity: 0;
+    transform: translate3d(0, -3px, 0);
+  }
+}
+
+@keyframes activity-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 0.9;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes agent-live-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  28% {
+    opacity: 0.7;
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.16);
+  }
+}
+
+@keyframes history-skeleton-pulse {
+  to {
+    opacity: 0.9;
+  }
+}
+
+@keyframes motion-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes decision-spin {
+  from {
+    transform: translateY(-50%) rotate(0);
+  }
+
+  to {
+    transform: translateY(-50%) rotate(1turn);
+  }
+}
+
+@keyframes state-confirm {
+  from {
+    transform: scale(0.76);
+  }
+}
+
+@keyframes delivery-pending {
+  to {
+    opacity: 0.48;
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes delivery-failed {
+  35% {
+    transform: translateX(-2px);
+  }
+
+  70% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes connection-pulse {
+  50% {
+    opacity: 0.55;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes connection-confirm {
+  from {
+    opacity: 0.55;
+    transform: scale(0.72);
+  }
+}
+
+@keyframes popover-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale(0.98);
+  }
+}
+
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.985);
+  }
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(8px, 4px, 0);
+  }
+}
+
+@keyframes composer-control-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
 }
 
 /* Readable product type scale. The original mockup used screenshot-sized
@@ -2912,11 +3521,13 @@ body {
 }
 
 .scanner-viewport small,
-.scanner-fallback button {
+.scanner-fallback button,
+.scanner-source-actions button {
   font-size: 12px;
 }
 
-.scanner-fallback p {
+.scanner-fallback p,
+.scanner-device-hint {
   font-size: 13px;
 }
 
@@ -3115,6 +3726,8 @@ body {
     width: 100%;
     max-height: 92dvh;
     border-radius: 20px 20px 0 0;
+    transform-origin: bottom center;
+    animation-name: mobile-sheet-enter;
   }
 
   .connection-toast {
@@ -3131,6 +3744,15 @@ body {
     max-height: 92dvh;
     overflow: auto;
     border-radius: 20px 20px 0 0;
+    transform-origin: bottom center;
+    animation-name: mobile-sheet-enter;
+  }
+}
+
+@keyframes mobile-sheet-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
   }
 }
 
@@ -3191,6 +3813,12 @@ body {
     margin-inline: 15px;
   }
 
+  .create-device-invitation-button,
+  .invitation-reauth,
+  .generated-device-invitation {
+    margin-inline: 15px;
+  }
+
   .pairing-actions button {
     flex: 1;
   }
@@ -3217,5 +3845,13 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .agent-mark.live {
+    box-shadow: 0 0 0 3px rgb(105 87 229 / 13%);
+  }
+
+  .history-skeleton {
+    opacity: 0.75;
   }
 }

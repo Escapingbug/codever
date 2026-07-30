@@ -30,7 +30,7 @@ describe('protocol schemas', () => {
       issuedAt: 1,
       expiresAt: 2,
       nonce: '0123456789abcdef',
-      payload: { operation: 'cancel' },
+      payload: { operation: 'cancel', sessionId: 'app-session-1' },
     })
     expect(result.success).toBe(false)
   })
@@ -50,7 +50,11 @@ describe('protocol schemas', () => {
       issuedAt: 1,
       expiresAt: 2,
       nonce: '0123456789abcdef',
-      payload: { operation: 'prompt', text: 'hello' },
+      payload: {
+        operation: 'prompt',
+        sessionId: 'app-session-1',
+        text: 'hello',
+      },
     })
     expect(result.success).toBe(false)
   })
@@ -70,7 +74,7 @@ describe('protocol schemas', () => {
     ).toMatchObject({ version: 1, sequence: 1 })
   })
 
-  it('accepts strict app session create and select commands', () => {
+  it('accepts strict app session creation', () => {
     const base = {
       kind: 'codever.command',
       version: 1,
@@ -103,24 +107,83 @@ describe('protocol schemas', () => {
       model: 'gpt-5',
       reasoningEffort: 'high',
     })
+  })
+
+  it('accepts a bounded device invitation request without a session target', () => {
     expect(commandSchema.parse({
-      ...base,
+      kind: 'codever.command',
+      version: 1,
+      commandId: 'invite-1',
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      sequence: 1,
+      baseRevision: 0,
+      operation: 'device.invite',
+      issuedAt: 1,
+      expiresAt: 2,
+      nonce: '0123456789abcdef-invite',
+      payload: {
+        operation: 'device.invite',
+        lifetimeMs: 5 * 60_000,
+      },
+    }).payload).toEqual({
+      operation: 'device.invite',
+      lifetimeMs: 5 * 60_000,
+    })
+  })
+
+  it('requires an explicit app session for every session-targeted command', () => {
+    const base = {
+      kind: 'codever.command',
+      version: 1,
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      baseRevision: 0,
+      issuedAt: 1,
+      expiresAt: 2,
+    }
+    const payloads = [
+      { operation: 'prompt', text: 'hello' },
+      { operation: 'cancel' },
+      { operation: 'decision', requestId: 'request-1', decision: 'deny' },
+      { operation: 'session.settings', model: 'gpt-5' },
+    ] as const
+
+    for (const [index, payload] of payloads.entries()) {
+      expect(commandSchema.safeParse({
+        ...base,
+        commandId: `targeted-${index}`,
+        sequence: index + 1,
+        operation: payload.operation,
+        nonce: `0123456789abcdef-targeted-${index}`,
+        payload,
+      }).success).toBe(false)
+    }
+  })
+
+  it('does not expose session selection as a Gateway command', () => {
+    expect(commandSchema.safeParse({
+      kind: 'codever.command',
+      version: 1,
       commandId: 'select-1',
-      sequence: 2,
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      sequence: 1,
+      baseRevision: 0,
       operation: 'session.select',
+      issuedAt: 1,
+      expiresAt: 2,
       nonce: '0123456789abcdef-select',
       payload: { operation: 'session.select', sessionId: 'app-session-1' },
-    }).payload).toEqual({
-      operation: 'session.select',
-      sessionId: 'app-session-1',
-    })
-    expect(commandSchema.safeParse({
-      ...base,
-      commandId: 'select-invalid',
-      sequence: 3,
-      operation: 'session.select',
-      nonce: '0123456789abcdef-invalid',
-      payload: { operation: 'session.select' },
     }).success).toBe(false)
   })
 })

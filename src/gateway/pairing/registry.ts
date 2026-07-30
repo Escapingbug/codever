@@ -10,9 +10,25 @@ import { canonicalJson } from '@codever/protocol'
 
 export interface StoredPairingOffer {
   signedOffer: SignedPairingOffer
-  status: 'open' | 'consumed'
+  status: 'open' | 'consumed' | 'cancelled' | 'expired'
+  source?: PairingOfferSource
   consumedAt?: number
+  cancelledAt?: number
+  expiredAt?: number
   requestId?: string
+}
+
+export type PairingOfferSource =
+  | { kind: 'gateway-startup' }
+  | { kind: 'local-admin' }
+  | { kind: 'paired-device'; deviceId: string }
+
+export interface PairingOfferSummary {
+  offerId: string
+  status: StoredPairingOffer['status']
+  source?: PairingOfferSource
+  issuedAt: number
+  expiresAt: number
 }
 
 export interface StoredPendingPairing {
@@ -54,20 +70,35 @@ export class FileTrustedDeviceRegistry {
     this.file = new AtomicJsonFile(path, options)
   }
 
-  async addOffer(signedOffer: SignedPairingOffer): Promise<void> {
+  async addOffer(
+    signedOffer: SignedPairingOffer,
+    source?: PairingOfferSource,
+  ): Promise<void> {
     await this.file.transaction(initialState, (state) => {
       validateState(state)
       const id = signedOffer.offer.offerId
       if (state.offers[id]) throw new Error(`Pairing offer already exists: ${id}`)
-      state.offers[id] = { signedOffer: structuredClone(signedOffer), status: 'open' }
+      state.offers[id] = {
+        signedOffer: structuredClone(signedOffer),
+        status: 'open',
+        ...(source ? { source: structuredClone(source) } : {}),
+      }
       return { result: undefined, changed: true }
     })
   }
 
-  async getOffer(offerId: string): Promise<SignedPairingOffer | undefined> {
+  async getOffer(
+    offerId: string,
+    now = Date.now(),
+  ): Promise<SignedPairingOffer | undefined> {
     return this.file.transaction(initialState, (state) => {
       validateState(state)
       const stored = state.offers[offerId]
+      if (stored?.status === 'open' && stored.signedOffer.offer.expiresAt <= now) {
+        stored.status = 'expired'
+        stored.expiredAt = now
+        return { result: undefined, changed: true }
+      }
       return {
         result: stored?.status === 'open' ? structuredClone(stored.signedOffer) : undefined,
         changed: false,
@@ -80,6 +111,81 @@ export class FileTrustedDeviceRegistry {
       validateState(state)
       const stored = state.offers[offerId]
       return { result: stored ? structuredClone(stored.signedOffer) : undefined, changed: false }
+    })
+  }
+
+  async cancelOffer(offerId: string, now = Date.now()): Promise<boolean> {
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      const stored = state.offers[offerId]
+      if (!stored || stored.status !== 'open') {
+        return { result: false, changed: false }
+      }
+      if (stored.signedOffer.offer.expiresAt <= now) {
+        stored.status = 'expired'
+        stored.expiredAt = now
+        return { result: false, changed: true }
+      }
+      stored.status = 'cancelled'
+      stored.cancelledAt = now
+      return { result: true, changed: true }
+    })
+  }
+
+  async listOffers(now = Date.now()): Promise<PairingOfferSummary[]> {
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      let changed = false
+      const result = Object.values(state.offers).map((stored) => {
+        if (stored.status === 'open' && stored.signedOffer.offer.expiresAt <= now) {
+          stored.status = 'expired'
+          stored.expiredAt = now
+          changed = true
+        }
+        return {
+          offerId: stored.signedOffer.offer.offerId,
+          status: stored.status,
+          ...(stored.source ? { source: structuredClone(stored.source) } : {}),
+          issuedAt: stored.signedOffer.offer.issuedAt,
+          expiresAt: stored.signedOffer.offer.expiresAt,
+        }
+      })
+      return { result, changed }
+    })
+  }
+
+  async pruneOffers(
+    now = Date.now(),
+    retentionMs = 24 * 60 * 60_000,
+  ): Promise<{ expired: number; deleted: number }> {
+    if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) {
+      throw new RangeError('Pairing offer retention must be a non-negative integer')
+    }
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      let expired = 0
+      let deleted = 0
+      for (const [offerId, stored] of Object.entries(state.offers)) {
+        const offerExpiresAt = stored.signedOffer.offer.expiresAt
+        if (stored.status === 'open' && offerExpiresAt <= now) {
+          stored.status = 'expired'
+          stored.expiredAt = now
+          expired += 1
+        }
+        const terminalAt =
+          stored.consumedAt
+          ?? stored.cancelledAt
+          ?? stored.expiredAt
+          ?? offerExpiresAt
+        if (stored.status !== 'open' && terminalAt + retentionMs <= now) {
+          delete state.offers[offerId]
+          deleted += 1
+        }
+      }
+      return {
+        result: { expired, deleted },
+        changed: expired > 0 || deleted > 0,
+      }
     })
   }
 
@@ -201,6 +307,18 @@ export class FileTrustedDeviceRegistry {
             && record.certificate.certificate.expiresAt > now,
           )
           .map((record) => structuredClone(record)),
+        changed: false,
+      }
+    })
+  }
+
+  async list(): Promise<TrustedDeviceRecord[]> {
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      return {
+        result: Object.values(state.trustedDevices).map((record) =>
+          structuredClone(record),
+        ),
         changed: false,
       }
     })

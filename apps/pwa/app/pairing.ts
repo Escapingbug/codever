@@ -1,12 +1,18 @@
 import {
   canonicalJson,
+  createDeviceInvitationLink as createProtocolDeviceInvitationLink,
+  decodeDeviceInvitationLink as decodeProtocolDeviceInvitationLink,
   decodePairingLink,
+  pairingLinkFromDeviceInvitation as protocolPairingLinkFromDeviceInvitation,
   signedGatewayDeviceRotationSchema,
   signedPairingCertificateSchema,
   signedPairingOfferSchema,
   signedPairingRequestSchema,
   signedPairingResponseSchema,
   type MatrixTransportBinding,
+  type DeviceInvitation,
+  type GeneratedDeviceInvitation,
+  type MatrixLoginInvitation,
   type PairingPublicKey,
   type SignedGatewayDeviceRotation,
   type SignedPairingCertificate,
@@ -40,6 +46,12 @@ export type PairingPreview = {
   expiresAt: number;
   transport: MatrixTransportBinding;
 };
+
+export type {
+  DeviceInvitation,
+  GeneratedDeviceInvitation,
+  MatrixLoginInvitation,
+} from "@codever/protocol";
 
 export type TrustedGateway = {
   version: 1;
@@ -91,6 +103,29 @@ export async function inspectPairingLink(
     expiresAt: offer.expiresAt,
     transport: offer.gatewayTransport,
   };
+}
+
+export function createDeviceInvitationLink(input: {
+  pairingLink: string;
+  appUrl: string;
+  matrixLogin?: MatrixLoginInvitation;
+}): GeneratedDeviceInvitation {
+  return createProtocolDeviceInvitationLink(input);
+}
+
+export function decodeDeviceInvitationLink(input: string): DeviceInvitation {
+  return decodeProtocolDeviceInvitationLink(
+    input,
+    typeof window === "undefined"
+      ? "https://codever.invalid/"
+      : window.location.href,
+  );
+}
+
+export function pairingLinkFromDeviceInvitation(
+  invitation: DeviceInvitation,
+): string {
+  return protocolPairingLinkFromDeviceInvitation(invitation);
 }
 
 export async function completePairing(

@@ -62,7 +62,15 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /navigator\.serviceWorker\?\.register\("\/sw\.js"\)/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
-  assert.match(source, /operation: "session\.select"/);
+  assert.doesNotMatch(source, /operation: "session\.select"/);
+  assert.match(
+    source,
+    /function chooseSession\(id: string\)[\s\S]*?activateLocalSession\(id\)/,
+  );
+  assert.match(source, /agentActivitiesBySession/);
+  assert.match(source, /setSessionAgentActivity\(sessionId/);
+  assert.match(source, /pendingPromptSessionIdsRef\.current\.has\(sessionId\)/);
+  assert.doesNotMatch(source, /const \[isStreaming, setIsStreaming\]/);
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
   assert.match(newSession, /Gateway × Project/);
@@ -71,9 +79,20 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /stopStreaming/);
   assert.match(source, /onScroll=\{handleFeedScroll\}/);
   assert.match(source, /loadOlderHistory/);
+  assert.match(source, /persistMessageHistoryPage/);
+  assert.doesNotMatch(
+    source,
+    /if \(cachedMessages\.length > 0\) \{[\s\S]{0,240}?return;/,
+  );
   assert.match(source, /History only · request not replayed/);
+  assert.match(source, /findOptimisticMessageId/);
+  assert.doesNotMatch(
+    source,
+    /local composer already rendered this prompt optimistically/,
+  );
   assert.match(history, /codever-pwa-message-history/);
   assert.match(history, /loadMessageHistoryPage/);
+  assert.match(history, /reconcileMessageHistory/);
   assert.match(history, /\["scope", "sessionId", "timestamp", "id"\]/);
   assert.match(
     styles,
@@ -149,18 +168,36 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
 });
 
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {
-  const [matrix, pairing, replayStore, wizard, settings, app, packageJson] = await Promise.all([
-    readFile(new URL("app/matrix.ts", appRoot), "utf8"),
-    readFile(new URL("app/pairing.ts", appRoot), "utf8"),
-    readFile(new URL("app/IndexedDbReplayStore.ts", appRoot), "utf8"),
-    readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
-    readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
-    readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
-    readFile(new URL("package.json", appRoot), "utf8"),
-  ]);
+  const [
+    matrix,
+    pairing,
+    replayStore,
+    wizard,
+    qrScanning,
+    qrDecodeFallback,
+    settings,
+    app,
+    matrixAuth,
+    chatMessages,
+    packageJson,
+  ] = await Promise.all([
+      readFile(new URL("app/matrix.ts", appRoot), "utf8"),
+      readFile(new URL("app/pairing.ts", appRoot), "utf8"),
+      readFile(new URL("app/IndexedDbReplayStore.ts", appRoot), "utf8"),
+      readFile(new URL("app/PairingWizard.tsx", appRoot), "utf8"),
+      readFile(new URL("app/qrScanning.ts", appRoot), "utf8"),
+      readFile(new URL("app/qrDecodeFallback.ts", appRoot), "utf8"),
+      readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
+      readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+      readFile(new URL("app/matrixAuth.ts", appRoot), "utf8"),
+      readFile(new URL("app/chatMessages.ts", appRoot), "utf8"),
+      readFile(new URL("package.json", appRoot), "utf8"),
+    ]);
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
   assert.match(packageJson, /"@codever\/security"/);
+  assert.match(packageJson, /"jsqr": "1\.4\.0"/);
+  assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
   assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
   assert.match(matrix, /store: syncStore/);
@@ -241,6 +278,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /setDeviceVerified/);
   assert.match(matrix, /getOwnDeviceKeys\(\)/);
   assert.match(matrix, /\/_matrix\/client\/v3\/account\/whoami/);
+  assert.match(matrixAuth, /\/_matrix\/client\/v1\/login\/get_token/);
+  assert.match(matrixAuth, /type: TOKEN_LOGIN_TYPE/);
+  assert.match(matrixAuth, /type: PASSWORD_LOGIN_TYPE/);
+  assert.match(wizard, /Add another device/);
+  assert.match(wizard, /One-time Codever device invitation QR code/);
+  assert.match(settings, /Sign in to Matrix/);
+  assert.match(settings, /Advanced: use an access token/);
+  assert.match(app, /operation: "device\.invite"/);
   assert.match(matrix, /sender === config\.userId/);
   assert.match(matrix, /error instanceof SecurityError && error\.code === "replay"/);
   assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
@@ -311,11 +356,19 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(replayStore, /claims\.some\(\(claim\) => activeKeys\.has\(claim\.key\)\)/);
   assert.match(wizard, /Scan QR code/);
   assert.match(wizard, /Paste from clipboard/);
+  assert.match(wizard, /capture="environment"/);
+  assert.match(wizard, /Take photo/);
+  assert.match(wizard, /Choose photo/);
   assert.match(wizard, /Invitation code/);
   assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
-  assert.match(wizard, /BarcodeDetector/);
+  assert.match(qrScanning, /BarcodeDetector/);
+  assert.match(wizard, /decodeQrImageFile/);
+  assert.match(qrScanning, /import\("\.\/qrDecodeFallback"\)/);
+  assert.match(qrDecodeFallback, /jsQR/);
   assert.match(settings, /Matrix transports/);
-  assert.match(settings, /identified[\s\S]*automatically from the token/);
+  assert.match(settings, /creates a separate Matrix device session/);
+  assert.match(settings, /never asks you to copy an access token/);
+  assert.match(settings, /Advanced: use an access token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
   assert.match(app, /useState<GatewayStateSnapshot \| null>\(null\)/);
@@ -367,6 +420,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
+  assert.match(matrix, /loadRecentHistory\(sessionId/);
   assert.match(matrix, /client\.scrollback\(room/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
   assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
@@ -376,7 +430,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /`codever\.pair\.\$\{request\.request\.requestId\}\.\$\{crypto\.randomUUID\(\)\}`/,
   );
   assert.match(app, /sendRealCommand/);
-  assert.match(app, /entry\.commandId === message\.commandId/);
+  assert.match(chatMessages, /entry\.commandId === message\.commandId/);
   assert.match(app, /message\.originDeviceName/);
   assert.match(app, /Another device updated this session/);
   assert.match(app, /Review complete · send/);
@@ -387,6 +441,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /completion\?\.outcome === "succeeded"/);
   assert.match(
     app,
-    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setIsStreaming\(false\)/,
+    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setSessionRunning\(sessionId, false\)/,
+  );
+  assert.match(
+    app,
+    /activePromptCommandsRef\.current\.get\(result\.commandId\)[\s\S]*setSessionRunning\(promptSessionId, false\)/,
   );
 });

@@ -264,6 +264,7 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
         error?: string,
         sessionId?: string | null,
+        result?: JsonValue,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
@@ -275,6 +276,7 @@ export class GatewaySecureContentLayer {
             ...(sessionId ? { session_id: sessionId } : {}),
             outcome,
             ...(error ? { error } : {}),
+            ...(result === undefined ? {} : { result }),
         }, `codever.command.result.${commandId}.${outcome}`, transport)
     }
 

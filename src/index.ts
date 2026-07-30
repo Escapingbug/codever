@@ -1,11 +1,14 @@
 import { parseArgs } from 'node:util'
 import { spawn } from 'node:child_process'
 import { HttpsProxyAgent } from 'https-proxy-agent'
-import { existsSync, readdirSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import QRCode from 'qrcode'
 import { config, getDaemonLogPath, getDaemonBaseDir } from './config'
 import { pairing } from './channel/telegram/pairing'
+import { GatewayAdminClient } from './gateway/admin/client'
 import { loadProviderProfiles } from './providers/configured'
 import { resolveNodePath } from './utils/nodePath'
 import { isDaemonRunning, startDaemon, stopDaemon } from './daemon/process'
@@ -49,12 +52,25 @@ async function main() {
             interval: { type: 'string' },
             'max-restarts': { type: 'string' },
             'restart-window': { type: 'string' },
+            socket: { type: 'string' },
+            'app-url': { type: 'string' },
+            lifetime: { type: 'string' },
+            'matrix-login': { type: 'string' },
+            qr: { type: 'string' },
+            output: { type: 'string' },
+            reason: { type: 'string' },
+            json: { type: 'boolean', default: false },
         },
         allowPositionals: true,
         strict: false
     })
 
     const command = positionals[0]
+
+    if (command === 'gateway') {
+        await handleGatewayCommand(positionals.slice(1), values)
+        return
+    }
 
     // --- codever start ---
     if (command === 'start') {
@@ -318,6 +334,11 @@ Usage:
   codever watchdog install          Install Windows scheduled watchdog task
   codever watchdog uninstall        Remove Windows scheduled watchdog task
   codever status                    Show daemon and config status
+  codever gateway status            Show the local Matrix Gateway status
+  codever gateway invite            Create a one-time device invitation QR
+  codever gateway devices           List paired PWA devices
+  codever gateway cancel <offer>    Cancel an unused invitation
+  codever gateway revoke <device>   Revoke a paired PWA device
   codever logs [-f]                 Show daemon logs (follow with -f)
   codever logs --groups             List all group log directories
   codever logs --group <chatId>     Show logs for a specific group
@@ -341,6 +362,177 @@ Architecture:
     console.error(`Unknown command: ${command}`)
     console.error('Run "codever --help" for usage.')
     process.exit(1)
+}
+
+async function handleGatewayCommand(
+    positionals: string[],
+    values: Record<string, unknown>,
+): Promise<void> {
+    if (values.help) {
+        console.log(`Usage:
+  codever gateway status [--socket PATH] [--json]
+  codever gateway invite [--socket PATH] [--app-url URL]
+      [--lifetime SECONDS] [--matrix-login required|preferred|disabled]
+      [--qr terminal|png|none] [--output PATH] [--json]
+  codever gateway devices [--socket PATH] [--json]
+  codever gateway cancel <invitation-id> [--socket PATH]
+  codever gateway revoke <device-id> [--reason TEXT] [--socket PATH]
+`)
+        return
+    }
+    const subcommand = positionals[0] ?? 'status'
+    const socketPath =
+        stringOption(values.socket)
+        ?? process.env.CODEVER_GATEWAY_ADMIN_SOCKET
+        ?? defaultGatewayAdminSocket()
+    const client = new GatewayAdminClient({ socketPath })
+
+    if (subcommand === 'status') {
+        const status = await client.status()
+        if (values.json) {
+            console.log(JSON.stringify(status, null, 2))
+            return
+        }
+        console.log(`Gateway: ${status.state}`)
+        console.log(`Gateway ID: ${status.gatewayId}`)
+        console.log(`PID: ${status.pid}`)
+        console.log(`Active devices: ${status.activeDeviceCount}`)
+        console.log(`Open invitations: ${status.openInvitationCount}`)
+        console.log(`Admin socket: ${socketPath}`)
+        return
+    }
+
+    if (subcommand === 'invite') {
+        const appUrl =
+            stringOption(values['app-url'])
+            ?? process.env.CODEVER_PWA_URL
+        const matrixLogin = parseMatrixLoginMode(values['matrix-login'])
+        const lifetimeMs = parseLifetimeMs(values.lifetime)
+        const invitation = await client.createInvitation({
+            ...(lifetimeMs === undefined ? {} : { lifetimeMs }),
+            matrixLogin,
+            ...(appUrl ? { appUrl } : {}),
+        })
+        if (values.json) {
+            console.log(JSON.stringify(invitation, null, 2))
+            return
+        }
+        const qrMode = stringOption(values.qr) ?? 'terminal'
+        if (qrMode === 'terminal') {
+            console.log(await QRCode.toString(invitation.url, {
+                type: 'terminal',
+                small: true,
+                errorCorrectionLevel: 'L',
+            }))
+        } else if (qrMode === 'png') {
+            const output = stringOption(values.output)
+                ?? join(process.cwd(), 'codever-device-invitation.png')
+            const png = await QRCode.toBuffer(invitation.url, {
+                type: 'png',
+                width: 512,
+                margin: 2,
+                errorCorrectionLevel: 'L',
+            })
+            writeFileSync(output, png, { mode: 0o600 })
+            if (process.platform !== 'win32') chmodSync(output, 0o600)
+            console.log(`QR code: ${output}`)
+        } else if (qrMode !== 'none') {
+            throw new Error('--qr must be terminal, png, or none')
+        }
+        console.log(`Invitation link:\n${invitation.url}`)
+        console.log(`Verification code: ${formatGatewayCode(invitation.verificationCode)}`)
+        console.log(`Expires: ${new Date(invitation.expiresAt).toISOString()}`)
+        console.log(
+            invitation.includesMatrixLogin
+                ? 'Matrix login: one-time token included'
+                : `Matrix login: ${invitation.matrixLoginStatus}`,
+        )
+        console.log('Treat this one-time invitation as a credential until it expires.')
+        return
+    }
+
+    if (subcommand === 'devices') {
+        const devices = await client.devices()
+        if (values.json) {
+            console.log(JSON.stringify({ devices }, null, 2))
+            return
+        }
+        if (devices.length === 0) {
+            console.log('No paired PWA devices.')
+            return
+        }
+        for (const device of devices) {
+            console.log(
+                `${device.deviceId}\t${device.status}\t${device.deviceName}`
+                + `\t${device.matrixDeviceId}`,
+            )
+        }
+        return
+    }
+
+    if (subcommand === 'cancel') {
+        const invitationId = positionals[1]
+        if (!invitationId) {
+            throw new Error('Usage: codever gateway cancel <invitation-id>')
+        }
+        await client.cancelInvitation(invitationId)
+        console.log(`Cancelled invitation ${invitationId}.`)
+        return
+    }
+
+    if (subcommand === 'revoke') {
+        const deviceId = positionals[1]
+        if (!deviceId) {
+            throw new Error('Usage: codever gateway revoke <device-id> [--reason TEXT]')
+        }
+        const reason = stringOption(values.reason)
+        await client.revokeDevice(deviceId, reason ? { reason } : {})
+        console.log(`Revoked device ${deviceId}.`)
+        return
+    }
+
+    throw new Error(
+        'Usage: codever gateway [status | invite | devices | cancel <offer> | revoke <device>]',
+    )
+}
+
+function parseLifetimeMs(value: unknown): number | undefined {
+    const text = stringOption(value)
+    if (!text) return undefined
+    const seconds = Number(text)
+    if (!Number.isSafeInteger(seconds) || seconds < 30 || seconds > 600) {
+        throw new Error('--lifetime must be an integer between 30 and 600 seconds')
+    }
+    return seconds * 1_000
+}
+
+function parseMatrixLoginMode(
+    value: unknown,
+): 'required' | 'preferred' | 'disabled' {
+    const mode = stringOption(value) ?? 'preferred'
+    if (mode !== 'required' && mode !== 'preferred' && mode !== 'disabled') {
+        throw new Error('--matrix-login must be required, preferred, or disabled')
+    }
+    return mode
+}
+
+function stringOption(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function defaultGatewayAdminSocket(): string {
+    if (process.platform === 'win32') return String.raw`\\.\pipe\codever-gateway-admin`
+    return join(
+        homedir(),
+        '.config',
+        'codever-rewrite-pwa',
+        'gateway-data',
+        'admin.sock',
+    )
+}
+
+function formatGatewayCode(code: string): string {
+    return code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code
 }
 
 main().catch((e) => {

@@ -123,14 +123,8 @@ function commandToSessionInputs(command: CodeverCommand, sender: string): readon
         }
         case 'session.create':
             return [{ kind: 'command', name: 'new', source: 'channel', user }]
-        case 'session.select':
-            return [{
-                kind: 'command',
-                name: 'resume',
-                args: command.payload.sessionId,
-                source: 'channel',
-                user,
-            }]
+        case 'device.invite':
+            throw new Error('Device invitations must be handled by the Matrix Gateway pairing service')
     }
 }
 

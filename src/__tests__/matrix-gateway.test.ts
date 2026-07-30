@@ -98,25 +98,29 @@ describe('MatrixPort', () => {
         expect(transport.delivered).toHaveLength(1)
     })
 
-    it('binds messages, edits, decisions, and status to the active app session', async () => {
+    it('keeps every delayed delivery bound to its owning app session', async () => {
         const transport = new InMemoryMatrixTransport()
-        let sessionId = 'session-a'
-        const port = new MatrixPort({
+        const portA = new MatrixPort({
             transport,
             roomId: '!room:example.org',
             gatewayId: 'gateway-1',
-            getSessionId: () => sessionId,
+            sessionId: 'session-a',
+        })
+        const portB = new MatrixPort({
+            transport,
+            roomId: '!room:example.org',
+            gatewayId: 'gateway-1',
+            sessionId: 'session-b',
         })
 
-        await port.send({ text: 'first', format: 'plain' })
-        sessionId = 'session-b'
-        await port.edit('$first', { text: 'second', format: 'plain' })
-        const decision = port.requestDecision({
+        await portA.send({ text: 'first', format: 'plain' })
+        await portA.edit('$first', { text: 'second', format: 'plain' })
+        const decision = portB.requestDecision({
             type: 'permission',
             title: 'Allow?',
             options: [{ label: 'Deny', value: 'deny' }],
         })
-        port.notifyStatus({
+        portB.notifyStatus({
             state: 'querying',
             cwd: '/repo',
             provider: 'codex',
@@ -129,13 +133,14 @@ describe('MatrixPort', () => {
         )
         expect(extensions[0].session_id).toBe('session-a')
         expect(extensions.slice(1).map(extension => extension.session_id))
-            .toEqual(['session-b', 'session-b', 'session-b'])
+            .toEqual(['session-a', 'session-b', 'session-b'])
         expect(
             (
                 transport.delivered[1].content['m.new_content'] as Record<string, unknown>
             )[CODEVER_MATRIX_EXTENSION],
-        ).toMatchObject({ session_id: 'session-b' })
-        expect(port.resolveDecision(String(extensions[2].decision_id), 'deny')).toBe(true)
+        ).toMatchObject({ session_id: 'session-a' })
+        expect(portA.resolveDecision(String(extensions[2].decision_id), 'deny')).toBe(false)
+        expect(portB.resolveDecision(String(extensions[2].decision_id), 'deny')).toBe(true)
         await expect(decision).resolves.toEqual({ value: 'deny' })
     })
 
@@ -250,7 +255,11 @@ describe('MatrixIncomingRouter', () => {
             issuedAt: 1_000,
             expiresAt: 61_000,
             nonce: '0123456789abcdef',
-            payload: { operation: 'prompt', text: 'run verified task' },
+            payload: {
+                operation: 'prompt',
+                sessionId: 'app-session-1',
+                text: 'run verified task',
+            },
         }, keyPair.privateKey, keyPair.keyId)
         const sessions = new MatrixRoomSessionRegistry()
         const devices = new InMemoryMatrixPinnedDeviceStore()

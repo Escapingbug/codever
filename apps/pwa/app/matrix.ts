@@ -1,6 +1,7 @@
 import type {
   CodeverCommand,
   CommandPayload,
+  JsonValue,
   SignedCommand,
 } from "@codever/protocol";
 import {
@@ -30,6 +31,7 @@ import {
 } from "./pairing";
 import {
   signedGatewayDeviceRotationSchema,
+  jsonValueSchema,
   signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
   type SignedPairingOffer,
@@ -153,6 +155,8 @@ export type IncomingCodeverMessage = {
   activeDeviceCount?: number;
   requestId?: string;
   streamId?: string;
+  toolCallId?: string;
+  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   format: MessageFormat;
   toolGroup?: ToolGroupPresentation;
@@ -242,6 +246,10 @@ export type MatrixConnection = {
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
   markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
+  loadRecentHistory(
+    sessionId: string,
+    limit?: number,
+  ): Promise<MatrixHistoryPage>;
   loadHistoryPage(sessionId: string, limit?: number): Promise<MatrixHistoryPage>;
   stop(): void;
 };
@@ -285,7 +293,7 @@ export function normalizeMatrixConfig(
   return config;
 }
 
-function normalizeHomeserver(value: string): string {
+export function normalizeHomeserver(value: string): string {
   const homeserver = value.trim().replace(/\/+$/, "");
   let url: URL;
   try {
@@ -448,6 +456,7 @@ export async function connectMatrix(
   const cryptoLock = await acquireMatrixCryptoLock(cryptoStoreScope);
 
   let stopped = false;
+  let initialSyncComplete = false;
   let persistenceFailure: string | null = null;
   const failPersistence = (detail: string) => {
     if (persistenceFailure) return;
@@ -622,6 +631,7 @@ export async function connectMatrix(
       onKnownRevision,
       onAuthenticatedCommandResult,
       onGatewayState,
+      !initialSyncComplete,
     ).catch((error) => {
       handlers.onStatus("error", formatError(error));
     });
@@ -690,6 +700,7 @@ export async function connectMatrix(
     client.on(sdk.ClientEvent.Sync, onSync);
     await client.startClient({ initialSyncLimit: 30 });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
+    initialSyncComplete = true;
 
     const room = client.getRoom(config.roomId);
     if (!room) {
@@ -740,6 +751,7 @@ export async function connectMatrix(
         onKnownRevision,
         onAuthenticatedCommandResult,
         onGatewayState,
+        true,
       );
     }
     assertPersistenceHealthy();
@@ -1082,6 +1094,32 @@ export async function connectMatrix(
         room.oldState.paginationToken !== null,
     };
   };
+  const loadRecentHistory = async (
+    sessionId: string,
+    limit = 30,
+  ): Promise<MatrixHistoryPage> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    const room = client.getRoom(config.roomId);
+    if (!room) throw new Error("The Matrix room is not available.");
+    const pageLimit = Math.max(1, Math.min(limit, 100));
+    await scanHistoryTimeline(room, sessionId);
+    return {
+      messages: takeHistory(sessionId, pageLimit),
+      hasMore:
+        hasPendingHistory(sessionId) ||
+        room.oldState.paginationToken !== null,
+    };
+  };
+  const enqueueHistoryOperation = (
+    operation: () => Promise<MatrixHistoryPage>,
+  ): Promise<MatrixHistoryPage> => {
+    const queued = historyChain.then(operation);
+    historyChain = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  };
   return {
     identity,
     matrixDeviceKeys,
@@ -1182,15 +1220,15 @@ export async function connectMatrix(
       deliveredHistory.set(sessionId, delivered);
       for (const eventId of eventIds) delivered.add(eventId);
     },
+    loadRecentHistory(sessionId, limit) {
+      return enqueueHistoryOperation(() =>
+        loadRecentHistory(sessionId, limit),
+      );
+    },
     loadHistoryPage(sessionId, limit) {
-      const operation = historyChain.then(() =>
+      return enqueueHistoryOperation(() =>
         loadHistoryPage(sessionId, limit),
       );
-      historyChain = operation.then(
-        () => undefined,
-        () => undefined,
-      );
-      return operation;
     },
     stop() {
       if (stopped) return;
@@ -1572,6 +1610,14 @@ export function parseCodeverEvent(
           phase,
           isError: failed,
         }),
+        ...(typeof payload.toolCallId === "string"
+          ? { toolCallId: payload.toolCallId }
+          : {}),
+        ...(payload.type === "agent.tool.started"
+          ? { toolStatus: "running" as const }
+          : payload.status === "succeeded" || payload.status === "failed"
+            ? { toolStatus: payload.status }
+            : {}),
       };
     }
     case "agent.permission.requested":
@@ -1778,6 +1824,7 @@ async function forwardEvent(
     activeDeviceCount?: number,
   ) => Promise<void>,
   onGatewayState?: (state: GatewayStateSnapshot) => Promise<void>,
+  historical = false,
 ): Promise<void> {
   const eventId = event.getId();
   const sender = event.getSender();
@@ -1955,6 +2002,17 @@ async function forwardEvent(
         sequence: decryptedExtension.sequence,
         revision: decryptedExtension.revision,
         outcome: decryptedExtension.outcome,
+        ...(typeof decryptedExtension.session_id === "string" &&
+        decryptedExtension.session_id
+          ? { sessionId: decryptedExtension.session_id }
+          : {}),
+        ...(decryptedExtension.result === undefined
+          ? {}
+          : {
+              result: jsonValueSchema.parse(
+                decryptedExtension.result,
+              ) as JsonValue,
+            }),
       },
       decryptedExtension.revision_epoch,
       activeDeviceCount,
@@ -1977,6 +2035,7 @@ async function forwardEvent(
         decryptedExtension.session_id
           ? { sessionId: decryptedExtension.session_id }
           : {}),
+        ...(historical ? { historical: true } : {}),
         raw: decryptedExtension,
       });
     }
@@ -2003,7 +2062,7 @@ async function forwardEvent(
       parsed.activeDeviceCount,
     );
   }
-  onMessage(parsed);
+  onMessage(historical ? { ...parsed, historical: true } : parsed);
 }
 
 async function acceptGatewayDeviceRotation(
@@ -3045,8 +3104,8 @@ function fallbackBody(payload: CommandPayload): string {
       return "Update agent session settings";
     case "session.create":
       return "Create a new agent session";
-    case "session.select":
-      return `Switch to agent session ${payload.sessionId}`;
+    case "device.invite":
+      return "Authorize a new Codever device";
   }
 }
 

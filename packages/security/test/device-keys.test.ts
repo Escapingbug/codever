@@ -29,7 +29,11 @@ function command(): CodeverCommand {
     issuedAt: now - 1,
     expiresAt: now + 60_000,
     nonce: generateCommandNonce(),
-    payload: { operation: 'prompt', text: 'hello' },
+    payload: {
+      operation: 'prompt',
+      sessionId: 'app-session-1',
+      text: 'hello',
+    },
   }
 }
 

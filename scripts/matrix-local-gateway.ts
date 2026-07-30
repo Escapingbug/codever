@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createClient } from 'matrix-js-sdk'
 import type { Logger } from 'matrix-js-sdk/lib/logger.js'
 import QRCode from 'qrcode'
@@ -8,6 +8,7 @@ import { FileReplayStore } from '@codever/security/node'
 import {
     FileGatewayIdentityStore,
     FileTrustedDeviceRegistry,
+    DeviceInvitationCoordinator,
     GatewayPairingService,
     listenForMatrixPairingRequests,
     announceMatrixDeviceRotation,
@@ -15,6 +16,10 @@ import {
     trustedDeviceFromRecord,
     waitForMatrixPairing,
 } from '../src/gateway/pairing/index.js'
+import {
+    FileMatrixLoginTokenIssuer,
+    startGatewayAdminServer,
+} from '../src/gateway/admin/index.js'
 import {
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
@@ -104,13 +109,39 @@ const currentTransport = {
     deviceId: login.device_id,
     ed25519: ownKeys.ed25519,
 }
+const pwaLoginPath = process.env.CODEVER_PWA_LOGIN_FILE
+    ?? join(dirname(dataDirectory), 'pwa-login.json')
+const invitationCoordinator = new DeviceInvitationCoordinator(
+    pairingService,
+    registry,
+    {
+        gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
+        gatewayTransport: () => currentTransport,
+        matrixLoginTokenIssuer: new FileMatrixLoginTokenIssuer({
+            credentialsPath: pwaLoginPath,
+        }),
+        onAudit: event => {
+            if (event.action === 'created') {
+                process.stdout.write(
+                    `Created ${event.source.kind} pairing invitation `
+                    + `${event.invitationId ?? '(unknown)'}.\n`,
+                )
+                return
+            }
+            process.stderr.write(
+                `[device-invitation] ${event.source.kind} failed: `
+                + `${event.errorCode ?? 'unknown'}\n`,
+            )
+        },
+    },
+)
 
 let active = await registry.listActive()
-let acceptNewOffers = false
 if (active.length === 0) {
     const created = await pairingService.createOffer({
         gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
         gatewayTransport: currentTransport,
+        source: { kind: 'gateway-startup' },
     })
     const invitationCode = await pairingVerificationCode(
         created.signedOffer.offer.offerId,
@@ -152,24 +183,22 @@ if (active.length === 0) {
         process.stdout.write('Gateway Matrix transport key rotated and signed automatically.\n')
     }
     if (process.env.CODEVER_PAIR_NEW_DEVICE === '1') {
-        const created = await pairingService.createOffer({
-            gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
-            gatewayTransport: currentTransport,
+        const created = await invitationCoordinator.create({
+            source: { kind: 'gateway-startup' },
+            matrixLogin: 'disabled',
         })
-        const invitationCode = await pairingVerificationCode(
-            created.signedOffer.offer.offerId,
-            created.signedOffer.offer.challenge,
-            created.signedOffer.offer.gatewayKey.keyId,
-        )
         process.stdout.write('\nAdd another Codever device:\n\n')
-        process.stdout.write(await QRCode.toString(created.link, {
+        process.stdout.write(await QRCode.toString(created.invitationLink, {
             type: 'terminal',
             small: true,
             errorCorrectionLevel: 'L',
         }))
-        process.stdout.write(`\nInvitation code: ${formatCode(invitationCode)}\n`)
-        process.stdout.write(`Pairing link (paste fallback):\n${created.link}\n\n`)
-        acceptNewOffers = true
+        process.stdout.write(
+            `\nInvitation code: ${formatCode(created.verificationCode)}\n`,
+        )
+        process.stdout.write(
+            `Pairing link (paste fallback):\n${created.pairingLink}\n\n`,
+        )
     }
 }
 
@@ -180,7 +209,9 @@ const stopPairingRecovery = listenForMatrixPairingRequests({
     service: pairingService,
     registry,
     gatewayTransport: currentTransport,
-    acceptNewOffers,
+    // Only offers persisted by GatewayPairingService can be accepted, so the
+    // listener can remain available for invitations created by an active PWA.
+    acceptNewOffers: true,
     onAccepted: async record => {
         process.stdout.write(`Device ${record.certificate.certificate.deviceName} is now active.\n`)
         await runner?.syncState()
@@ -223,6 +254,20 @@ runner = new MatrixGatewayRunner(config, {
         (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
         (await registry.get(deviceId))?.status === 'active',
+    createDeviceInvitation: async ({ requestedByDeviceId, lifetimeMs }) => {
+        const created = await invitationCoordinator.create({
+            source: { kind: 'paired-device', deviceId: requestedByDeviceId },
+            matrixLogin: 'disabled',
+            ...(lifetimeMs === undefined ? {} : { lifetimeMs }),
+        })
+        process.stdout.write(
+            `Device ${requestedByDeviceId} authorized a new pairing invitation.\n`,
+        )
+        return {
+            pairingLink: created.pairingLink,
+            expiresAt: created.expiresAt,
+        }
+    },
     onRejected: (event, error) => {
         process.stderr.write(
             `[matrix-gateway] rejected ${event.eventId}: ${formatError(error)}\n`,
@@ -231,8 +276,22 @@ runner = new MatrixGatewayRunner(config, {
 })
 
 await runner.start()
+const adminServer = await startGatewayAdminServer({
+    socketPath: process.env.CODEVER_GATEWAY_ADMIN_SOCKET
+        ?? join(dataDirectory, 'admin.sock'),
+    gatewayId: identity.gatewayId,
+    coordinator: invitationCoordinator,
+    pairingService,
+    registry,
+    getGatewayState: () => runner?.getState() ?? 'starting',
+    syncGatewayState: async () => {
+        await runner?.syncState()
+    },
+    onLog: message => process.stdout.write(`${message}\n`),
+})
 process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)
 process.stdout.write(`Provider: ${providerName}\nWorking directory: ${cwd}\n`)
+process.stdout.write(`Gateway admin socket: ${adminServer.socketPath}\n`)
 process.stdout.write('Press Ctrl+C to stop the Gateway.\n')
 
 await new Promise<void>(resolve => {
@@ -240,7 +299,14 @@ await new Promise<void>(resolve => {
     const stop = (): void => {
         if (stopping) return
         stopping = true
-        void runner!.stop().finally(resolve)
+        void adminServer.stop()
+            .catch(error => {
+                process.stderr.write(
+                    `[gateway-admin] shutdown failed: ${formatError(error)}\n`,
+                )
+            })
+            .then(() => runner!.stop())
+            .finally(resolve)
     }
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)

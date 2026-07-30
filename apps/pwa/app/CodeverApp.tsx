@@ -10,6 +10,14 @@ import {
   useState,
 } from "react";
 import type { CommandPayload } from "@codever/protocol";
+import {
+  SENDING_AGENT_ACTIVITY,
+  STARTING_AGENT_ACTIVITY,
+  STOPPING_AGENT_ACTIVITY,
+  WORKING_AGENT_ACTIVITY,
+  reduceAgentActivity,
+  type AgentActivity,
+} from "./agentActivity";
 import { MatrixSettings } from "./MatrixSettings";
 import {
   NewSessionDialog,
@@ -20,12 +28,21 @@ import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
 import { legacyToolGroupPresentation } from "./presentation";
 import {
+  compareChatMessages,
+  findOptimisticMessageId,
+  mergeChatMessage,
+  mergeChatMessages,
+  type ChatMessage,
+  type OptimisticMessageReference,
+} from "./chatMessages";
+import {
   clearMessageHistoryScope,
+  deleteMessageHistory,
   loadMessageHistoryPage,
   matrixHistoryScope,
+  reconcileMessageHistory,
   saveMessageHistory,
   type MessageHistoryCursor,
-  type PersistedChatMessage,
 } from "./messageHistory";
 import {
   CommandRevisionConflictError,
@@ -46,19 +63,23 @@ import {
 import {
   clearPendingPairing,
   clearTrustedGateway,
+  createDeviceInvitationLink,
+  decodeDeviceInvitationLink,
   inspectPairingLink,
   loadPendingPairingRecovery,
   loadTrustedGateway,
+  pairingLinkFromDeviceInvitation,
   saveTrustedGateway,
   trustedGatewayConfig,
+  type GeneratedDeviceInvitation,
   type PairingPreview,
   type TrustedGateway,
 } from "./pairing";
-
-type ChatMessage = PersistedChatMessage & {
-  sessionId?: string;
-  historical?: boolean;
-};
+import {
+  loginWithMatrixPassword,
+  loginWithMatrixToken,
+  requestMatrixLoginToken,
+} from "./matrixAuth";
 
 type RevisionConflictNotice = {
   commandId: string;
@@ -117,7 +138,18 @@ export function CodeverApp() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null,
+  );
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [stoppingSessionIds, setStoppingSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [agentActivitiesBySession, setAgentActivitiesBySession] = useState<
+    Map<string, AgentActivity>
+  >(() => new Map());
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
@@ -140,10 +172,15 @@ export function CodeverApp() {
   const [trustedGateway, setTrustedGateway] =
     useState<TrustedGateway | null>(null);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [deviceInvitation, setDeviceInvitation] =
+    useState<GeneratedDeviceInvitation | null>(null);
+  const [invitationBusy, setInvitationBusy] = useState(false);
+  const [invitationReauthRequired, setInvitationReauthRequired] =
+    useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [decisionStates, setDecisionStates] = useState<
-    Record<string, "pending" | "approved" | "denied">
+    Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
@@ -155,9 +192,16 @@ export function CodeverApp() {
     ) => Promise<void>
   >(async () => {});
   const revisionConflictRef = useRef<RevisionConflictNotice | null>(null);
-  const activePromptCommandIdRef = useRef<string | null>(null);
+  const activePromptCommandsRef = useRef(new Map<string, string>());
   const completedCommandResultsRef = useRef(new Set<string>());
-  const currentSessionIdRef = useRef<string | null>(null);
+  const optimisticMessagesRef = useRef(
+    new Map<string, OptimisticMessageReference>(),
+  );
+  const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
+  const pendingPromptSessionIdsRef = useRef(new Set<string>());
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const pendingCreatedSessionIdRef = useRef<string | null>(null);
+  const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
@@ -171,7 +215,7 @@ export function CodeverApp() {
 
   const selected =
     gatewayState?.sessions.find(
-      (session) => session.id === gatewayState.currentSessionId,
+      (session) => session.id === selectedSessionId,
     ) ?? null;
   const filteredSessions = useMemo(
     () =>
@@ -206,9 +250,18 @@ export function CodeverApp() {
       groups.set(key, group);
     }
     return [...groups.values()];
-  }, [filteredSessions, gatewayState, matrixConfig.gatewayId]);
+  }, [filteredSessions, matrixConfig.gatewayId]);
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
+  const isStreaming = Boolean(
+    selectedSessionId && runningSessionIds.has(selectedSessionId),
+  );
+  const isStopping = Boolean(
+    selectedSessionId && stoppingSessionIds.has(selectedSessionId),
+  );
+  const agentActivity = selectedSessionId
+    ? agentActivitiesBySession.get(selectedSessionId) ?? null
+    : null;
   const sessionReady = Boolean(matrixConnected && gatewayState && selected);
   const conversationTitle =
     selected?.title ??
@@ -218,10 +271,85 @@ export function CodeverApp() {
         : "Syncing Gateway state…"
       : "Add a Gateway");
   const activeProvider =
-    gatewayState?.workspace.provider ?? selected?.provider ?? "Gateway agent";
+    selected?.provider ?? gatewayState?.workspace.provider ?? "Gateway agent";
+  const activeWorkspace = selected
+    ? {
+        projectId: selected.projectId,
+        projectName: selected.projectName,
+        cwd: selected.cwd,
+        provider: selected.provider,
+        model: selected.model,
+        reasoningEffort: selected.reasoningEffort,
+        permissionMode: "default",
+      }
+    : gatewayState?.workspace;
   const activeModelCapability = gatewayState?.capabilities.models.find(
-    (model) => model.id === gatewayState.workspace.model,
+    (model) => model.id === activeWorkspace?.model,
   );
+
+  function setSessionRunning(sessionId: string, running: boolean) {
+    setRunningSessionIds((current) => {
+      const next = new Set(current);
+      if (running) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }
+
+  function setSessionStopping(sessionId: string, stopping: boolean) {
+    setStoppingSessionIds((current) => {
+      const next = new Set(current);
+      if (stopping) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }
+
+  function setSessionAgentActivity(
+    sessionId: string,
+    update:
+      | AgentActivity
+      | null
+      | ((current: AgentActivity | null) => AgentActivity | null),
+  ) {
+    setAgentActivitiesBySession((current) => {
+      const next = new Map(current);
+      const activity =
+        typeof update === "function"
+          ? update(next.get(sessionId) ?? null)
+          : update;
+      if (activity) next.set(sessionId, activity);
+      else next.delete(sessionId);
+      return next;
+    });
+  }
+
+  function rememberLiveMessage(
+    sessionId: string,
+    message: ChatMessage,
+    options: { reconcileMessageId?: string } = {},
+  ) {
+    const current = liveMessagesBySessionRef.current.get(sessionId) ?? [];
+    const exactIndex = current.findIndex((entry) => entry.id === message.id);
+    const next =
+      options.reconcileMessageId
+        ? mergeChatMessage(current, message, options)
+        : exactIndex >= 0
+        ? current.map((entry, index) =>
+            index === exactIndex ? { ...entry, ...message } : entry,
+          )
+        : mergeChatMessage(current, message);
+    liveMessagesBySessionRef.current.set(sessionId, next.slice(-1_000));
+  }
+
+  function removeLiveMessage(sessionId: string, messageId: string) {
+    const current = liveMessagesBySessionRef.current.get(sessionId);
+    if (!current) return;
+    liveMessagesBySessionRef.current.set(
+      sessionId,
+      current.filter((message) => message.id !== messageId),
+    );
+  }
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => {
@@ -230,10 +358,14 @@ export function CodeverApp() {
     const url = new URL(window.location.href);
     const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
     const link = hash.get("pair");
-    const rejectedQueryPairing = url.searchParams.has("pair");
-    if (link || rejectedQueryPairing) {
+    const invitation = hash.get("invite");
+    const rejectedQueryPairing =
+      url.searchParams.has("pair") || url.searchParams.has("invite");
+    if (link || invitation || rejectedQueryPairing) {
       hash.delete("pair");
+      hash.delete("invite");
       url.searchParams.delete("pair");
+      url.searchParams.delete("invite");
       const nextHash = hash.toString();
       window.history.replaceState(
         window.history.state,
@@ -241,7 +373,8 @@ export function CodeverApp() {
         `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ""}`,
       );
     }
-    if (link) void openPairingLink(link);
+    if (invitation) void openDeviceInvitation(invitation);
+    else if (link) void openPairingLink(link);
     void (async () => {
       if (rejectedQueryPairing) {
         await Promise.resolve();
@@ -272,7 +405,7 @@ export function CodeverApp() {
         setSettingsOpen(true);
         return;
       }
-      if (link) return;
+      if (link || invitation) return;
       const pending = await loadPendingPairingRecovery(identity);
       if (!pending) {
         setSettingsOpen(true);
@@ -304,6 +437,8 @@ export function CodeverApp() {
     })().catch((error) => {
       setConnectionError(`Saved trust could not be verified: ${formatUiError(error)}`);
     });
+    // URL fragments and persisted pairing recovery are consumed once at boot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useLayoutEffect(() => {
@@ -342,23 +477,60 @@ export function CodeverApp() {
         current === null ? incoming.revision! : Math.max(current, incoming.revision!),
       );
     }
+    const sessionId =
+      incoming.sessionId ?? selectedSessionIdRef.current ?? undefined;
+    if (sessionId && !incoming.historical) {
+      setSessionAgentActivity(sessionId, (current) =>
+        reduceAgentActivity(current, incoming.raw),
+      );
+      const executionSignal = agentExecutionSignal(incoming);
+      if (executionSignal === "running") {
+        setSessionRunning(sessionId, true);
+      } else if (executionSignal === "stopped") {
+        setSessionRunning(sessionId, false);
+        setSessionStopping(sessionId, false);
+      }
+    }
+    const lifecycleFailure = agentLifecycleFailureText(incoming.raw);
     if (
-      incoming.kind === "user" &&
-      incoming.originDeviceId &&
-      incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId
+      isTransientAgentLifecycleEvent(incoming.raw) &&
+      lifecycleFailure === null
     ) {
-      // The local composer already rendered this prompt optimistically.
       return;
     }
-    const sessionId =
-      incoming.sessionId ?? currentSessionIdRef.current ?? undefined;
-    const message = chatMessageFromIncoming(incoming, sessionId);
+    const displayIncoming: IncomingCodeverMessage =
+      lifecycleFailure === null
+        ? incoming
+        : { ...incoming, kind: "error", text: lifecycleFailure };
+    const message = chatMessageFromIncoming(displayIncoming, sessionId);
+    const ownUserMessage = Boolean(
+      incoming.kind === "user" &&
+        incoming.originDeviceId &&
+        incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId,
+    );
+    const optimisticMessageId = ownUserMessage
+      ? findOptimisticMessageId(optimisticMessagesRef.current.values(), message)
+      : undefined;
+    if (optimisticMessageId) {
+      reconciledOptimisticMessageIdsRef.current.add(optimisticMessageId);
+      optimisticMessagesRef.current.delete(optimisticMessageId);
+    }
+    if (sessionId && !incoming.historical) {
+      rememberLiveMessage(sessionId, message, {
+        reconcileMessageId: optimisticMessageId,
+      });
+    }
     if (sessionId && historyScopeRef.current) {
-      void saveMessageHistory(
-        historyScopeRef.current,
-        sessionId,
-        [message],
-      ).catch((error) => {
+      const persist =
+        message.kind === "user" && message.eventId
+          ? reconcileMessageHistory(
+              historyScopeRef.current,
+              sessionId,
+              message,
+              optimisticMessageId,
+            )
+          : saveMessageHistory(historyScopeRef.current, sessionId, [message]);
+      void persist.catch((error) => {
         setConnectionError(
           `Conversation history could not be saved: ${formatUiError(error)}`,
         );
@@ -366,8 +538,7 @@ export function CodeverApp() {
     }
     if (
       sessionId &&
-      currentSessionIdRef.current &&
-      sessionId !== currentSessionIdRef.current
+      sessionId !== selectedSessionIdRef.current
     ) {
       return;
     }
@@ -379,15 +550,11 @@ export function CodeverApp() {
     }
     const feed = feedRef.current;
     followLatestRef.current = !feed || isNearFeedBottom(feed);
-    setMessages((current) => mergeChatMessage(current, message));
-    if (
-      incoming.raw.type === "agent.text.completed" ||
-      incoming.raw.type === "command.completed" ||
-      (incoming.kind === "error" &&
-        incoming.raw.kind !== "command_result")
-    ) {
-      setIsStreaming(false);
-    }
+    setMessages((current) =>
+      mergeChatMessage(current, message, {
+        reconcileMessageId: optimisticMessageId,
+      }),
+    );
   }
 
   async function restoreSessionHistory(
@@ -417,10 +584,34 @@ export function CodeverApp() {
         ...message,
         sessionId,
         historical: true,
+        ...(message.deliveryState === "sending"
+          ? { deliveryState: "failed" as const }
+          : {}),
       }));
+      const interruptedSends = cached.messages
+        .filter((message) => message.deliveryState === "sending")
+        .map((message) => ({
+          ...message,
+          deliveryState: "failed" as const,
+        }));
+      if (interruptedSends.length > 0) {
+        await saveMessageHistory(
+          scope,
+          sessionId,
+          interruptedSends,
+        );
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+      }
+      const liveMessages =
+        liveMessagesBySessionRef.current.get(sessionId) ?? [];
       historyCursorRef.current = cached.cursor;
       setMessages((current) =>
-        mergeChatMessages(current, cachedMessages),
+        mergeChatMessages(current, [...liveMessages, ...cachedMessages]),
       );
       setHistoryHasMore(cached.hasMore || Boolean(connection));
 
@@ -431,12 +622,14 @@ export function CodeverApp() {
           message.eventId ? [message.eventId] : [],
         ),
       );
-      if (cachedMessages.length > 0) {
-        // The cache is the first page after a reload. Remote pagination starts
-        // only when the user asks for older content.
-        return;
-      }
-      const remote = await connection.loadHistoryPage(sessionId);
+      // Even with a local first page, reconcile once against Matrix's recent
+      // timeline. Older PWA versions persisted local optimistic timestamps and
+      // discarded the authoritative user echo, so cache-only restoration can
+      // preserve the wrong user/agent order indefinitely.
+      const remote =
+        cachedMessages.length > 0
+          ? await connection.loadRecentHistory(sessionId)
+          : await connection.loadHistoryPage(sessionId);
       if (
         generation !== historyGenerationRef.current ||
         historySessionIdRef.current !== sessionId
@@ -450,7 +643,7 @@ export function CodeverApp() {
         ),
       );
       if (remoteMessages.length > 0) {
-        await saveMessageHistory(scope, sessionId, remoteMessages);
+        await persistMessageHistoryPage(scope, sessionId, remoteMessages);
         historyCursorRef.current = olderHistoryCursor(
           historyCursorRef.current,
           remoteMessages,
@@ -535,7 +728,11 @@ export function CodeverApp() {
           ),
         );
         if (prefetchedMessages.length > 0) {
-          await saveMessageHistory(scope, sessionId, prefetchedMessages);
+          await persistMessageHistoryPage(
+            scope,
+            sessionId,
+            prefetchedMessages,
+          );
         }
         setHistoryHasMore(cached.hasMore || prefetched.hasMore);
         return;
@@ -560,7 +757,7 @@ export function CodeverApp() {
         ),
       );
       if (olderMessages.length > 0) {
-        await saveMessageHistory(scope, sessionId, olderMessages);
+        await persistMessageHistoryPage(scope, sessionId, olderMessages);
         prepareHistoryPrepend(feedRef.current, prependScrollRef);
         historyCursorRef.current = olderHistoryCursor(
           historyCursorRef.current,
@@ -596,20 +793,53 @@ export function CodeverApp() {
     }
   }
 
+  function activateLocalSession(
+    sessionId: string | null,
+    connection: MatrixConnection | null = matrixConnectionRef.current,
+  ) {
+    const sessionChanged = selectedSessionIdRef.current !== sessionId;
+    selectedSessionIdRef.current = sessionId;
+    setSelectedSessionId(sessionId);
+    if (!sessionChanged) return;
+    historyGenerationRef.current += 1;
+    historySessionIdRef.current = sessionId;
+    historyCursorRef.current = null;
+    setMessages([]);
+    setDecisionStates({});
+    setHistoryHasMore(Boolean(sessionId));
+    if (!sessionId) {
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+    } else if (connection) {
+      void restoreSessionHistory(sessionId, connection);
+    }
+  }
+
   async function connectRealMatrix(
     configInput = matrixConfig,
     closeSettings = true,
   ): Promise<MatrixConnection | null> {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
+    optimisticMessagesRef.current.clear();
+    reconciledOptimisticMessageIdsRef.current.clear();
+    pendingPromptSessionIdsRef.current.clear();
     revisionConflictRef.current = null;
+    activePromptCommandsRef.current.clear();
+    completedCommandResultsRef.current.clear();
     setRevisionConflict(null);
     setConnectionError(null);
     setConnectionStatus("connecting");
     setMessages([]);
+    setSelectedSessionId(null);
+    setRunningSessionIds(new Set());
+    setStoppingSessionIds(new Set());
+    setAgentActivitiesBySession(new Map());
+    pendingCreatedSessionIdRef.current = null;
+    liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
     setGatewayRevision(null);
-    currentSessionIdRef.current = null;
+    selectedSessionIdRef.current = null;
     historySessionIdRef.current = null;
     historyCursorRef.current = null;
     historyGenerationRef.current += 1;
@@ -650,47 +880,47 @@ export function CodeverApp() {
             );
           }
           if (state.gatewayState) {
-            const nextSessionId = state.gatewayState.currentSessionId;
-            const sessionChanged =
-              currentSessionIdRef.current !== nextSessionId;
-            currentSessionIdRef.current = nextSessionId;
-            if (sessionChanged) {
-              historyGenerationRef.current += 1;
-              historySessionIdRef.current = nextSessionId;
-              historyCursorRef.current = null;
-              setMessages([]);
-              setDecisionStates({});
-              setIsStreaming(false);
-              setHistoryHasMore(Boolean(nextSessionId));
-              if (!nextSessionId) {
-                historyLoadingRef.current = false;
-                setHistoryLoading(false);
-              }
-              if (nextSessionId && matrixConnectionRef.current) {
-                void restoreSessionHistory(
-                  nextSessionId,
-                  matrixConnectionRef.current,
-                );
-              }
-            }
             setGatewayState(state.gatewayState);
+            const availableIds = new Set(
+              state.gatewayState.sessions.map((session) => session.id),
+            );
+            const pendingCreated = pendingCreatedSessionIdRef.current;
+            const nextSessionId =
+              pendingCreated && availableIds.has(pendingCreated)
+                ? pendingCreated
+                : selectedSessionIdRef.current &&
+                    availableIds.has(selectedSessionIdRef.current)
+                  ? selectedSessionIdRef.current
+                  : state.gatewayState.currentSessionId &&
+                      availableIds.has(state.gatewayState.currentSessionId)
+                    ? state.gatewayState.currentSessionId
+                    : state.gatewayState.sessions[0]?.id ?? null;
+            if (pendingCreated === nextSessionId) {
+              pendingCreatedSessionIdRef.current = null;
+            }
+            activateLocalSession(nextSessionId);
           }
         },
         onCommandResult(result) {
-          completedCommandResultsRef.current.add(result.commandId);
-          if (activePromptCommandIdRef.current === result.commandId) {
-            activePromptCommandIdRef.current = null;
+          const promptSessionId =
+            activePromptCommandsRef.current.get(result.commandId);
+          if (promptSessionId) {
+            activePromptCommandsRef.current.delete(result.commandId);
             completedCommandResultsRef.current.delete(result.commandId);
-            setIsStreaming(false);
+            setSessionRunning(promptSessionId, false);
+            setSessionStopping(promptSessionId, false);
+            setSessionAgentActivity(promptSessionId, null);
+          } else {
+            completedCommandResultsRef.current.add(result.commandId);
           }
         },
       });
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
       if (closeSettings) setSettingsOpen(false);
-      if (currentSessionIdRef.current) {
+      if (selectedSessionIdRef.current) {
         await restoreSessionHistory(
-          currentSessionIdRef.current,
+          selectedSessionIdRef.current,
           connection,
         );
       }
@@ -714,15 +944,23 @@ export function CodeverApp() {
   function disconnectMatrix() {
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
+    optimisticMessagesRef.current.clear();
+    reconciledOptimisticMessageIdsRef.current.clear();
+    pendingPromptSessionIdsRef.current.clear();
     revisionConflictRef.current = null;
-    activePromptCommandIdRef.current = null;
+    activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
+    pendingCreatedSessionIdRef.current = null;
+    liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     setConnectionStatus("offline");
-    setIsStreaming(false);
+    setRunningSessionIds(new Set());
+    setStoppingSessionIds(new Set());
+    setAgentActivitiesBySession(new Map());
+    setSelectedSessionId(null);
     setGatewayState(null);
     setGatewayRevision(null);
-    currentSessionIdRef.current = null;
+    selectedSessionIdRef.current = null;
     historyGenerationRef.current += 1;
     historySessionIdRef.current = null;
     historyCursorRef.current = null;
@@ -743,8 +981,10 @@ export function CodeverApp() {
     setActiveDeviceCount(null);
     setGatewayRevision(null);
     setGatewayState(null);
-    currentSessionIdRef.current = null;
+    selectedSessionIdRef.current = null;
     setPairingPreview(null);
+    setDeviceInvitation(null);
+    setInvitationReauthRequired(false);
     setConnectionError(null);
     setMessages([]);
     historyScopeRef.current = "";
@@ -761,6 +1001,10 @@ export function CodeverApp() {
   async function openPairingLink(link: string) {
     setConnectionError(null);
     try {
+      if (deviceInvitationFromLink(link)) {
+        await openDeviceInvitation(link);
+        return;
+      }
       const preview = await inspectPairingLink(link);
       const transport = preview.transport;
       setPairingPreview(preview);
@@ -776,6 +1020,138 @@ export function CodeverApp() {
       setSettingsOpen(true);
     } catch (error) {
       setConnectionError(formatUiError(error));
+    }
+  }
+
+  async function openDeviceInvitation(link: string) {
+    setConnectionError(null);
+    try {
+      const invitation = decodeDeviceInvitationLink(link);
+      const preview = await inspectPairingLink(
+        pairingLinkFromDeviceInvitation(invitation),
+      );
+      const transport = preview.transport;
+      let nextConfig: MatrixConnectionConfig = {
+        ...bindCredentialsToHomeserver(matrixConfig, transport.homeserver),
+        roomId: transport.roomId,
+        gatewayId: preview.gatewayId,
+        conversationId: transport.roomId,
+        gatewayMatrixUserId: transport.userId,
+        gatewayMatrixDeviceId: transport.deviceId,
+        gatewayMatrixEd25519: transport.ed25519,
+        ...(invitation.matrixLogin
+          ? { userId: invitation.matrixLogin.userId }
+          : {}),
+      };
+      setPairingPreview(preview);
+      setMatrixConfig(nextConfig);
+      setSettingsOpen(true);
+
+      const matrixLogin = invitation.matrixLogin;
+      if (!matrixLogin) return;
+      if (matrixLogin.expiresAt <= Date.now()) {
+        setConnectionError(
+          "The one-time Matrix login expired. Sign in with your Matrix ID and password below; the Gateway invitation may still be valid.",
+        );
+        return;
+      }
+      try {
+        const credentials = await loginWithMatrixToken(
+          matrixLogin.homeserver,
+          matrixLogin.loginToken,
+          matrixLogin.userId,
+          browserDeviceName(),
+        );
+        nextConfig = { ...nextConfig, ...credentials };
+        setMatrixConfig(nextConfig);
+        saveMatrixConfig(nextConfig);
+      } catch (error) {
+        setConnectionError(
+          `The one-time Matrix sign-in could not be used: ${formatUiError(error)} Sign in below to continue.`,
+        );
+      }
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+      setSettingsOpen(true);
+    }
+  }
+
+  async function signInForPairing(userId: string, password: string) {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setConnectionError(null);
+    try {
+      const credentials = await loginWithMatrixPassword(
+        matrixConfig.homeserver,
+        userId,
+        password,
+        browserDeviceName(),
+      );
+      const next = { ...matrixConfig, ...credentials };
+      setMatrixConfig(next);
+      saveMatrixConfig(next);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function createDeviceInvitation(password?: string) {
+    if (invitationBusy) return;
+    if (!trustedGateway || !matrixConnectionRef.current) {
+      setConnectionError(
+        "Connect to the trusted Gateway before authorizing another device.",
+      );
+      return;
+    }
+    setInvitationBusy(true);
+    setConnectionError(null);
+    try {
+      const tokenResult = await requestMatrixLoginToken(
+        matrixConfig,
+        password,
+      );
+      if (
+        tokenResult.status === "reauth-required" &&
+        tokenResult.passwordSupported
+      ) {
+        setInvitationReauthRequired(true);
+        return;
+      }
+
+      const sent = await sendRealCommand({
+        operation: "device.invite",
+        lifetimeMs: 5 * 60_000,
+      });
+      if (!sent) return;
+      const completion = await sent.completion;
+      if (completion.outcome !== "succeeded") {
+        throw new Error("The Gateway could not create the device invitation.");
+      }
+      const gatewayInvitation = parseGatewayInvitationResult(
+        completion.result,
+      );
+      const generated = createDeviceInvitationLink({
+        pairingLink: gatewayInvitation.pairingLink,
+        appUrl: window.location.href,
+        ...(tokenResult.status === "ready"
+          ? {
+              matrixLogin: {
+                homeserver: matrixConfig.homeserver,
+                userId: matrixConfig.userId,
+                loginToken: tokenResult.loginToken,
+                expiresAt: tokenResult.expiresAt,
+              },
+            }
+          : {}),
+      });
+      setDeviceInvitation(generated);
+      setInvitationReauthRequired(false);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      setInvitationBusy(false);
     }
   }
 
@@ -878,6 +1254,19 @@ export function CodeverApp() {
     const conflict = revisionConflictRef.current;
     const connection = matrixConnectionRef.current;
     if (!conflict || !connection || conflict.busy) return;
+    const conflictSessionId =
+      conflict.payload.operation === "session.create" ||
+      conflict.payload.operation === "device.invite"
+        ? undefined
+        : conflict.payload.sessionId;
+    const optimisticMessage = conflict.optimisticMessageId
+      ? [
+          ...messages,
+          ...(conflictSessionId
+            ? liveMessagesBySessionRef.current.get(conflictSessionId) ?? []
+            : []),
+        ].find((message) => message.id === conflict.optimisticMessageId)
+      : undefined;
     const busyConflict = { ...conflict, busy: true };
     revisionConflictRef.current = busyConflict;
     setRevisionConflict(busyConflict);
@@ -886,26 +1275,68 @@ export function CodeverApp() {
       setGatewayRevision((current) =>
         current === null ? result.revision : Math.max(current, result.revision),
       );
-      if (conflict.optimisticMessageId) {
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === conflict.optimisticMessageId
-              ? {
-                  ...message,
-                  commandId: result.commandId,
-                  revision: result.revision,
-                }
-              : message,
-          ),
+      if (
+        conflict.optimisticMessageId &&
+        optimisticMessage &&
+        conflictSessionId
+      ) {
+        const sentMessage: ChatMessage = {
+          ...optimisticMessage,
+          commandId: result.commandId,
+          revision: result.revision,
+          optimistic: true,
+          deliveryState: "sent",
+        };
+        const optimisticReference = optimisticMessagesRef.current.get(
+          conflict.optimisticMessageId,
         );
+        if (optimisticReference) {
+          optimisticReference.commandId = result.commandId;
+        }
+        if (selectedSessionIdRef.current === conflictSessionId) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === conflict.optimisticMessageId
+                ? sentMessage
+                : message,
+            ),
+          );
+        }
+        rememberLiveMessage(conflictSessionId, sentMessage);
+        if (historyScopeRef.current) {
+          void saveMessageHistory(
+            historyScopeRef.current,
+            conflictSessionId,
+            [sentMessage],
+          ).catch((error) => {
+            setConnectionError(
+              `Conversation history could not be saved: ${formatUiError(error)}`,
+            );
+          });
+        }
+      }
+      if (conflict.payload.operation === "prompt") {
+        const sessionId = conflict.payload.sessionId;
+        if (completedCommandResultsRef.current.delete(result.commandId)) {
+          setSessionRunning(sessionId, false);
+          setSessionAgentActivity(sessionId, null);
+        } else {
+          activePromptCommandsRef.current.set(result.commandId, sessionId);
+          setSessionRunning(sessionId, true);
+          setSessionAgentActivity(sessionId, STARTING_AGENT_ACTIVITY);
+        }
       }
       const completion =
         conflict.payload.operation === "prompt"
           ? null
           : await result.completion;
-      if (completion?.outcome === "succeeded" &&
-          conflict.payload.operation === "cancel") {
-        setIsStreaming(false);
+      if (
+        completion?.outcome === "succeeded" &&
+        conflict.payload.operation === "cancel"
+      ) {
+        setSessionRunning(conflict.payload.sessionId, false);
+        setSessionStopping(conflict.payload.sessionId, false);
+        setSessionAgentActivity(conflict.payload.sessionId, null);
       } else if (
         completion?.outcome === "succeeded" &&
         conflict.payload.operation === "decision"
@@ -923,9 +1354,15 @@ export function CodeverApp() {
           }));
         }
       }
-      revisionConflictRef.current = null;
-      setRevisionConflict(null);
+      if (revisionConflictRef.current?.commandId === conflict.commandId) {
+        revisionConflictRef.current = null;
+        setRevisionConflict(null);
+      }
     } catch (error) {
+      if (conflict.payload.operation === "prompt") {
+        setSessionRunning(conflict.payload.sessionId, false);
+        setSessionAgentActivity(conflict.payload.sessionId, null);
+      }
       if (error instanceof CommandRevisionConflictError) {
         const next: RevisionConflictNotice = {
           commandId: error.commandId,
@@ -954,11 +1391,30 @@ export function CodeverApp() {
     try {
       await connection.discardRevisionConflict(conflict.commandId);
       if (conflict.optimisticMessageId) {
+        optimisticMessagesRef.current.delete(conflict.optimisticMessageId);
+        reconciledOptimisticMessageIdsRef.current.delete(
+          conflict.optimisticMessageId,
+        );
+        if (
+          conflict.payload.operation !== "session.create" &&
+          conflict.payload.operation !== "device.invite"
+        ) {
+          removeLiveMessage(
+            conflict.payload.sessionId,
+            conflict.optimisticMessageId,
+          );
+        }
         setMessages((current) =>
           current.filter(
             (message) => message.id !== conflict.optimisticMessageId,
           ),
         );
+        if (historyScopeRef.current) {
+          await deleteMessageHistory(
+            historyScopeRef.current,
+            conflict.optimisticMessageId,
+          );
+        }
       }
       revisionConflictRef.current = null;
       setRevisionConflict(null);
@@ -969,18 +1425,9 @@ export function CodeverApp() {
     }
   }
 
-  async function chooseSession(id: string) {
+  function chooseSession(id: string) {
     setMobileChatOpen(true);
-    if (id === gatewayState?.currentSessionId) return;
-    if (!gatewayState?.capabilities.canSelectSession) {
-      setConnectionError("This Gateway does not support switching sessions.");
-      return;
-    }
-    const sent = await sendRealCommand({
-      operation: "session.select",
-      sessionId: id,
-    });
-    if (sent) await sent.completion;
+    activateLocalSession(id);
   }
 
   async function createSession(input: NewSessionInput) {
@@ -1003,7 +1450,11 @@ export function CodeverApp() {
           ? { reasoningEffort: input.reasoningEffort }
           : {}),
       });
-      if (sent && (await sent.completion).outcome === "succeeded") {
+      const completion = sent ? await sent.completion : null;
+      if (completion?.outcome === "succeeded") {
+        if (completion.sessionId) {
+          pendingCreatedSessionIdRef.current = completion.sessionId;
+        }
         setNewSessionOpen(false);
         setMobileChatOpen(true);
       }
@@ -1015,11 +1466,20 @@ export function CodeverApp() {
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
-    if (!value || isStreaming) return;
-    if (!matrixConnected || !gatewayState) {
+    if (!value) return;
+    const sessionId = selectedSessionIdRef.current;
+    if (
+      isStreaming ||
+      (sessionId && pendingPromptSessionIdsRef.current.has(sessionId))
+    ) {
+      return;
+    }
+    if (!matrixConnected || !gatewayState || !sessionId) {
       setConnectionError(
         !gatewayState && matrixConnected
           ? "Waiting for the current Gateway session state."
+          : gatewayState && !sessionId
+          ? "Create or select a session before sending a message."
           : trustedGateway
           ? "The Gateway is offline. Reconnect before sending."
           : "Add and pair a Gateway before sending your first message.",
@@ -1027,6 +1487,10 @@ export function CodeverApp() {
       setSettingsOpen(true);
       return;
     }
+    const submissionHistoryScope = historyScopeRef.current;
+    const submissionOriginDeviceId = deviceKeyId ?? undefined;
+    const submissionOriginDeviceName =
+      trustedGateway?.certificate.certificate.deviceName;
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
     const optimisticMessage: ChatMessage = {
       id: optimisticId,
@@ -1034,17 +1498,25 @@ export function CodeverApp() {
       text: value,
       time: "now",
       timestamp: Date.now(),
-      sessionId: currentSessionIdRef.current ?? undefined,
+      sessionId,
+      optimistic: true,
+      deliveryState: "sending",
     };
+    optimisticMessagesRef.current.set(optimisticId, {
+      id: optimisticId,
+      text: value,
+      sessionId: optimisticMessage.sessionId,
+    });
+    rememberLiveMessage(sessionId, optimisticMessage);
     followLatestRef.current = true;
     setMessages((current) => [
       ...current,
       optimisticMessage,
     ]);
-    if (currentSessionIdRef.current && historyScopeRef.current) {
+    if (submissionHistoryScope) {
       void saveMessageHistory(
-        historyScopeRef.current,
-        currentSessionIdRef.current,
+        submissionHistoryScope,
+        sessionId,
         [optimisticMessage],
       ).catch((error) => {
         setConnectionError(
@@ -1053,18 +1525,23 @@ export function CodeverApp() {
       });
     }
     setDraft("");
-    setIsStreaming(true);
+    setSessionRunning(sessionId, true);
+    setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
+    pendingPromptSessionIdsRef.current.add(sessionId);
     const result = await sendRealCommand({
       operation: "prompt",
+      sessionId,
       text: value,
     });
+    pendingPromptSessionIdsRef.current.delete(sessionId);
     if (!result) {
-      activePromptCommandIdRef.current = null;
-      setIsStreaming(false);
+      setSessionRunning(sessionId, false);
+      setSessionAgentActivity(sessionId, null);
       if (revisionConflictRef.current) {
         const conflict = revisionConflictRef.current;
         const matchesCurrentPrompt =
           conflict.payload.operation === "prompt" &&
+          conflict.payload.sessionId === sessionId &&
           conflict.payload.text === value;
         const next = matchesCurrentPrompt
           ? { ...conflict, optimisticMessageId: optimisticId }
@@ -1072,55 +1549,113 @@ export function CodeverApp() {
         revisionConflictRef.current = next;
         setRevisionConflict(next);
         if (!matchesCurrentPrompt) {
-          setMessages((current) =>
-            current.filter((message) => message.id !== optimisticId),
-          );
-          setDraft(value);
+          optimisticMessagesRef.current.delete(optimisticId);
+          removeLiveMessage(sessionId, optimisticId);
+          if (selectedSessionIdRef.current === sessionId) {
+            setMessages((current) =>
+              current.filter((message) => message.id !== optimisticId),
+            );
+          }
+          if (submissionHistoryScope) {
+            void deleteMessageHistory(
+              submissionHistoryScope,
+              optimisticId,
+            ).catch((error) => {
+              setConnectionError(
+                `Conversation history could not be updated: ${formatUiError(error)}`,
+              );
+            });
+          }
+          if (selectedSessionIdRef.current === sessionId) {
+            setDraft(value);
+          }
         }
       } else {
-        setMessages((current) => [
-          ...current,
-          {
-            id: `matrix-error-${Date.now()}`,
-            kind: "error",
-            text: "The signed command was not sent. Check Matrix connection settings.",
-            time: "now",
-          },
-        ]);
+        optimisticMessagesRef.current.delete(optimisticId);
+        const failedMessage: ChatMessage = {
+          ...optimisticMessage,
+          optimistic: false,
+          deliveryState: "failed",
+        };
+        rememberLiveMessage(sessionId, failedMessage);
+        if (selectedSessionIdRef.current === sessionId) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === optimisticId
+                ? failedMessage
+              : message,
+            ),
+          );
+        }
+        if (submissionHistoryScope) {
+          void saveMessageHistory(
+            submissionHistoryScope,
+            sessionId,
+            [failedMessage],
+          ).catch((error) => {
+            setConnectionError(
+              `Conversation history could not be saved: ${formatUiError(error)}`,
+            );
+          });
+        }
+        const errorMessage: ChatMessage = {
+          id: `matrix-error-${Date.now()}`,
+          kind: "error",
+          text: "The signed command was not sent. Check Matrix connection settings.",
+          time: "now",
+          timestamp: Date.now(),
+          sessionId,
+        };
+        rememberLiveMessage(sessionId, errorMessage);
+        if (selectedSessionIdRef.current === sessionId) {
+          setMessages((current) => [
+            ...current,
+            errorMessage,
+          ]);
+        }
       }
     } else {
-      if (completedCommandResultsRef.current.delete(result.commandId)) {
-        activePromptCommandIdRef.current = null;
-        setIsStreaming(false);
-      } else {
-        activePromptCommandIdRef.current = result.commandId;
+      const optimisticReference =
+        optimisticMessagesRef.current.get(optimisticId);
+      if (optimisticReference) {
+        optimisticReference.commandId = result.commandId;
       }
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === optimisticId
-            ? {
-                ...message,
-                commandId: result.commandId,
-                revision: result.revision,
-                originDeviceId: deviceKeyId ?? undefined,
-                originDeviceName:
-                  trustedGateway?.certificate.certificate.deviceName,
-              }
-            : message,
-        ),
-      );
-      const sessionId = currentSessionIdRef.current;
-      if (sessionId && historyScopeRef.current) {
-        void saveMessageHistory(historyScopeRef.current, sessionId, [
-          {
-            ...optimisticMessage,
-            commandId: result.commandId,
-            revision: result.revision,
-            originDeviceId: deviceKeyId ?? undefined,
-            originDeviceName:
-              trustedGateway?.certificate.certificate.deviceName,
-          },
-        ]).catch((error) => {
+      if (completedCommandResultsRef.current.delete(result.commandId)) {
+        setSessionRunning(sessionId, false);
+        setSessionAgentActivity(sessionId, null);
+      } else {
+        activePromptCommandsRef.current.set(result.commandId, sessionId);
+        setSessionAgentActivity(sessionId, STARTING_AGENT_ACTIVITY);
+      }
+      const sentMessage: ChatMessage = {
+        ...optimisticMessage,
+        commandId: result.commandId,
+        revision: result.revision,
+        originDeviceId: submissionOriginDeviceId,
+        originDeviceName: submissionOriginDeviceName,
+        deliveryState: "sent",
+      };
+      const wasAlreadyReconciled =
+        reconciledOptimisticMessageIdsRef.current.delete(optimisticId);
+      if (
+        !wasAlreadyReconciled &&
+        selectedSessionIdRef.current === sessionId
+      ) {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === optimisticId ? sentMessage : message,
+          ),
+        );
+      }
+      if (!wasAlreadyReconciled) {
+        rememberLiveMessage(sessionId, sentMessage);
+      }
+      if (!wasAlreadyReconciled && submissionHistoryScope) {
+        void saveMessageHistory(
+          submissionHistoryScope,
+          sessionId,
+          [sentMessage],
+        ).catch((error) => {
           setConnectionError(
             `Conversation history could not be saved: ${formatUiError(error)}`,
           );
@@ -1137,9 +1672,24 @@ export function CodeverApp() {
   }
 
   async function stopStreaming() {
-    const sent = await sendRealCommand({ operation: "cancel" });
-    if (sent && (await sent.completion).outcome === "succeeded") {
-      setIsStreaming(false);
+    if (isStopping) return;
+    const sessionId = selectedSessionIdRef.current;
+    if (!sessionId) return;
+    setSessionStopping(sessionId, true);
+    setSessionAgentActivity(sessionId, STOPPING_AGENT_ACTIVITY);
+    try {
+      const sent = await sendRealCommand({ operation: "cancel", sessionId });
+      if (sent && (await sent.completion).outcome === "succeeded") {
+        setSessionRunning(sessionId, false);
+        setSessionAgentActivity(sessionId, null);
+      } else {
+        setSessionAgentActivity(
+          sessionId,
+          runningSessionIds.has(sessionId) ? WORKING_AGENT_ACTIVITY : null,
+        );
+      }
+    } finally {
+      setSessionStopping(sessionId, false);
     }
   }
 
@@ -1151,8 +1701,18 @@ export function CodeverApp() {
       setConnectionError("This permission request has no signed request ID.");
       return;
     }
+    const sessionId = message.sessionId ?? selectedSessionIdRef.current;
+    if (!sessionId) {
+      setConnectionError("This permission request has no session identity.");
+      return;
+    }
+    setDecisionStates((current) => ({
+      ...current,
+      [message.id]: "submitting",
+    }));
     const sent = await sendRealCommand({
       operation: "decision",
+      sessionId,
       requestId: message.requestId,
       decision,
     });
@@ -1161,28 +1721,42 @@ export function CodeverApp() {
         ...current,
         [message.id]: decision === "allow_once" ? "approved" : "denied",
       }));
+    } else {
+      setDecisionStates((current) => ({
+        ...current,
+        [message.id]: "pending",
+      }));
     }
   }
 
   async function changeModel(nextModel: string) {
+    const sessionId = selectedSessionIdRef.current;
+    if (!sessionId) return;
     const sent = await sendRealCommand({
       operation: "session.settings",
+      sessionId,
       model: nextModel,
     });
     if (sent) await sent.completion;
   }
 
   async function changeReasoningEffort(nextReasoningEffort: string) {
+    const sessionId = selectedSessionIdRef.current;
+    if (!sessionId) return;
     const sent = await sendRealCommand({
       operation: "session.settings",
+      sessionId,
       reasoningEffort: nextReasoningEffort,
     });
     if (sent) await sent.completion;
   }
 
   async function changeMode(nextMode: string) {
+    const sessionId = selectedSessionIdRef.current;
+    if (!sessionId) return;
     const sent = await sendRealCommand({
       operation: "session.settings",
+      sessionId,
       permissionMode: nextMode as
         | "default"
         | "accept_edits"
@@ -1254,7 +1828,11 @@ export function CodeverApp() {
         </label>
 
         <button
-          className={`gateway-card gateway-card-button ${matrixConnected ? "" : "offline"}`}
+          className={`gateway-card gateway-card-button connection-state-${connectionStatus} ${
+            connectionStatus === "offline" || connectionStatus === "error"
+              ? "offline"
+              : ""
+          }`}
           onClick={() => setSettingsOpen(true)}
         >
           <span className="gateway-icon">G</span>
@@ -1263,7 +1841,9 @@ export function CodeverApp() {
               {trustedGateway?.gatewayName || "Add a Gateway"}
             </strong>
             <span>
-              <i />{" "}
+              <i
+                className={`connection-dot connection-state-${connectionStatus}`}
+              />{" "}
               {connectionStatus === "connected"
                 ? "Securely connected"
                 : connectionStatus === "reconnecting"
@@ -1305,20 +1885,16 @@ export function CodeverApp() {
                 <button
                   key={session.id}
                   className={`session-row ${
-                    gatewayState?.currentSessionId === session.id
+                    selectedSessionId === session.id
                       ? "selected"
                       : ""
                   }`}
                   onClick={() => void chooseSession(session.id)}
-                  disabled={
-                    gatewayState?.currentSessionId !== session.id &&
-                    !gatewayState?.capabilities.canSelectSession
-                  }
                 >
                   <span className="session-avatar violet">
                     {sessionInitials(session.title)}
                     {matrixConnected &&
-                      gatewayState?.currentSessionId === session.id && (
+                      runningSessionIds.has(session.id) && (
                         <i className="agent-active" />
                       )}
                   </span>
@@ -1413,7 +1989,13 @@ export function CodeverApp() {
           <div className="conversation-heading">
             <h2>{conversationTitle}</h2>
             <span>
-              <i className={matrixConnected ? "" : "offline-dot"} />{" "}
+              <i
+                className={`connection-dot connection-state-${connectionStatus} ${
+                  connectionStatus === "offline" || connectionStatus === "error"
+                    ? "offline-dot"
+                    : ""
+                }`}
+              />{" "}
               {connectionStatus === "connected"
                 ? gatewayState
                   ? `${activeProvider} · encrypted sync active`
@@ -1439,9 +2021,9 @@ export function CodeverApp() {
           <div className="details-popover">
             <span className="mini-label">Project</span>
             <strong>
-              {gatewayState?.workspace.projectName || "Syncing…"}
+              {activeWorkspace?.projectName || "Syncing…"}
             </strong>
-            <code>{gatewayState?.workspace.cwd || "Syncing…"}</code>
+            <code>{activeWorkspace?.cwd || "Syncing…"}</code>
             <span className="mini-label">Gateway</span>
             <code>{matrixConfig.gatewayId || "Not connected"}</code>
             <span className="mini-label">Device</span>
@@ -1457,7 +2039,10 @@ export function CodeverApp() {
           ref={feedRef}
           onScroll={handleFeedScroll}
         >
-          <div className="history-loader" aria-live="polite">
+          <div
+            className={`history-loader ${historyLoading ? "is-loading" : ""}`}
+            aria-live="polite"
+          >
             {historyLoading ? (
               <span>Loading earlier messages…</span>
             ) : historyHasMore ? (
@@ -1471,10 +2056,18 @@ export function CodeverApp() {
           <div className="date-divider">
             <span>Recent messages</span>
           </div>
+          {historyLoading && messages.length === 0 && (
+            <div className="history-skeleton" aria-hidden="true" />
+          )}
           {messages.map((message) => {
             if (message.kind === "notice") {
               return (
-                <div className="encryption-notice" key={message.id}>
+                <div
+                  className={`encryption-notice ${
+                    message.historical ? "" : "notice-enter"
+                  }`}
+                  key={message.id}
+                >
                   <span className="shield">✓</span>
                   <span>{message.text}</span>
                 </div>
@@ -1482,7 +2075,12 @@ export function CodeverApp() {
             }
             if (message.kind === "error") {
               return (
-                <div className="message-row agent-row" key={message.id}>
+                <div
+                  className={`message-row agent-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="agent-mark error-mark">!</div>
                   <div className="bubble agent-bubble error-bubble">
                     <span className="agent-label">CONNECTION ERROR</span>
@@ -1493,8 +2091,16 @@ export function CodeverApp() {
               );
             }
             if (message.kind === "user") {
+              const deliveryState =
+                message.deliveryState ??
+                (message.revision !== undefined ? "sent" : undefined);
               return (
-                <div className="message-row user-row" key={message.id}>
+                <div
+                  className={`message-row user-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="bubble user-bubble">
                     {message.originDeviceName &&
                       message.originDeviceId !== deviceKeyId && (
@@ -1507,7 +2113,24 @@ export function CodeverApp() {
                       {message.revision !== undefined
                         ? `r${message.revision} · ${message.time ?? ""}`
                         : message.time}{" "}
-                      <span>✓✓</span>
+                      {deliveryState && (
+                        <span
+                          className={`delivery-indicator ${deliveryState}`}
+                          aria-label={
+                            deliveryState === "sending"
+                              ? "Sending"
+                              : deliveryState === "failed"
+                                ? "Send failed"
+                                : "Sent"
+                          }
+                        >
+                          {deliveryState === "sending"
+                            ? "…"
+                            : deliveryState === "failed"
+                              ? "!"
+                              : "✓✓"}
+                        </span>
+                      )}
                     </time>
                   </div>
                 </div>
@@ -1522,7 +2145,12 @@ export function CodeverApp() {
                   timestamp: message.timestamp ?? Date.now(),
                 });
               return (
-                <div className="message-row tool-group-row" key={message.id}>
+                <div
+                  className={`message-row tool-group-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <ToolGroupCard group={toolGroup} time={message.time} />
                 </div>
               );
@@ -1531,7 +2159,12 @@ export function CodeverApp() {
               const decisionState =
                 decisionStates[message.id] ?? "pending";
               return (
-                <div className="message-row agent-row" key={message.id}>
+                <div
+                  className={`message-row agent-row ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
                   <div className="agent-mark">C</div>
                   <div className="permission-card">
                     <div className="permission-title">
@@ -1548,6 +2181,10 @@ export function CodeverApp() {
                     {message.historical ? (
                       <div className="decision-state historical">
                         History only · request not replayed
+                      </div>
+                    ) : decisionState === "submitting" ? (
+                      <div className="decision-state submitting">
+                        Signing response…
                       </div>
                     ) : decisionState === "pending" ? (
                       <div className="permission-actions">
@@ -1577,21 +2214,60 @@ export function CodeverApp() {
               );
             }
             return (
-              <div className="message-row agent-row" key={message.id}>
-                <div className="agent-mark">C</div>
+              <div
+                className={`message-row agent-row ${
+                  message.historical ? "" : "message-enter"
+                }`}
+                key={message.id}
+              >
+                <div
+                  className={`agent-mark ${
+                    message.raw?.type === "agent.text.delta" ? "live" : ""
+                  }`}
+                >
+                  C
+                </div>
                 <div className="bubble agent-bubble">
                   <span className="agent-label">CODEX</span>
                   {message.format === "markdown" || !message.format ? (
-                    <MarkdownContent content={message.text ?? ""} />
+                    <>
+                      <MarkdownContent content={message.text ?? ""} />
+                      {message.raw?.type === "agent.text.delta" && (
+                        <span className="cursor" aria-hidden="true" />
+                      )}
+                    </>
                   ) : (
-                    <p className="message-copy">{message.text}</p>
+                    <p className="message-copy">
+                      {message.text}
+                      {message.raw?.type === "agent.text.delta" && (
+                        <span className="cursor" aria-hidden="true" />
+                      )}
+                    </p>
                   )}
                   <time>{message.time}</time>
                 </div>
               </div>
             );
           })}
-
+          {agentActivity && (
+            <div
+              className={`agent-activity activity-${agentActivity.phase}`}
+              key={`${agentActivity.phase}:${agentActivity.label}:${agentActivity.detail ?? ""}`}
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <span className="activity-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+              <span>
+                <strong>{agentActivity.label}</strong>
+                {agentActivity.detail && <small>{agentActivity.detail}</small>}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="composer-area">
@@ -1600,15 +2276,15 @@ export function CodeverApp() {
               <span className="context-icon">⌘</span>
               <span>
                 <small>Project · Gateway</small>
-                <b title={gatewayState?.workspace.cwd}>
-                  {gatewayState?.workspace.projectName || "Syncing Gateway state…"}
+                <b title={activeWorkspace?.cwd}>
+                  {activeWorkspace?.projectName || "Syncing Gateway state…"}
                   {trustedGateway ? ` · ${trustedGateway.gatewayName}` : ""}
                 </b>
               </span>
             </div>
             <div className="context-item branch-item">
               <span className="branch-mark">⑂</span>
-              <code>{gatewayState?.workspace.provider || "Gateway"}</code>
+              <code>{activeWorkspace?.provider || "Gateway"}</code>
             </div>
             <span className="context-spacer" />
           </div>
@@ -1626,6 +2302,7 @@ export function CodeverApp() {
               </div>
               <div className="revision-conflict-actions">
                 <button
+                  key="stop-agent"
                   type="button"
                   disabled={revisionConflict.busy}
                   onClick={() => void discardRevisionConflict()}
@@ -1679,7 +2356,7 @@ export function CodeverApp() {
                 <label>
                   <span className="status-spark" />
                   <select
-                    value={gatewayState?.workspace.model ?? ""}
+                    value={activeWorkspace?.model ?? ""}
                     onChange={(event) => void changeModel(event.target.value)}
                     aria-label="Agent model"
                     disabled={
@@ -1687,7 +2364,7 @@ export function CodeverApp() {
                       gatewayState!.capabilities.models.length === 0
                     }
                   >
-                    {!gatewayState?.workspace.model && (
+                    {!activeWorkspace?.model && (
                       <option value="">Gateway default</option>
                     )}
                     {(gatewayState?.capabilities.models ?? []).map((model) => (
@@ -1701,7 +2378,7 @@ export function CodeverApp() {
                 <label>
                   <select
                     value={
-                      gatewayState?.workspace.reasoningEffort ??
+                      activeWorkspace?.reasoningEffort ??
                       activeModelCapability?.defaultReasoningLevel ??
                       ""
                     }
@@ -1738,7 +2415,7 @@ export function CodeverApp() {
                     <span className="control-divider" />
                     <label>
                       <select
-                        value={gatewayState?.workspace.permissionMode ?? ""}
+                        value={activeWorkspace?.permissionMode ?? ""}
                         onChange={(event) => void changeMode(event.target.value)}
                         aria-label="Permission mode"
                         title="Permission mode"
@@ -1763,16 +2440,18 @@ export function CodeverApp() {
               {isStreaming ? (
                 <button
                   type="button"
-                  className="send-button stop-button"
+                  className="send-button stop-button mount-feedback"
                   onClick={() => void stopStreaming()}
                   aria-label="Stop agent"
+                  disabled={isStopping}
                 >
-                  ■
+                  {isStopping ? <span className="button-spinner" /> : "■"}
                 </button>
               ) : (
                 <button
+                  key="send-message"
                   type="submit"
-                  className="send-button"
+                  className="send-button mount-feedback"
                   disabled={!draft.trim() || !sessionReady}
                   aria-label="Send message"
                 >
@@ -1826,6 +2505,9 @@ export function CodeverApp() {
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
         pairingBusy={pairingBusy}
+        deviceInvitation={deviceInvitation}
+        invitationBusy={invitationBusy}
+        invitationReauthRequired={invitationReauthRequired}
         onChange={setMatrixConfig}
         onPairingLink={(link) => void openPairingLink(link)}
         onClearPairing={() => {
@@ -1838,9 +2520,84 @@ export function CodeverApp() {
         onConnect={() => void connectRealMatrix()}
         onDisconnect={() => disconnectMatrix()}
         onForget={forgetMatrixConfig}
+        onPasswordLogin={(userId, password) =>
+          void signInForPairing(userId, password)
+        }
+        onCreateInvitation={(password) =>
+          void createDeviceInvitation(password)
+        }
+        onClearInvitation={() => {
+          setDeviceInvitation(null);
+          setInvitationReauthRequired(false);
+          setConnectionError(null);
+        }}
       />
     </main>
   );
+}
+
+function isTransientAgentLifecycleEvent(
+  raw: Record<string, unknown>,
+): boolean {
+  return (
+    raw.kind === "status" ||
+    raw.type === "command.accepted" ||
+    raw.type === "command.completed" ||
+    raw.type === "session.updated"
+  );
+}
+
+function agentExecutionSignal(
+  incoming: IncomingCodeverMessage,
+): "running" | "stopped" | null {
+  const raw = incoming.raw;
+  if (
+    (raw.kind === "status" &&
+      (raw.state === "querying" ||
+        raw.state === "running" ||
+        raw.state === "stopping")) ||
+    (raw.type === "session.updated" &&
+      (raw.status === "running" || raw.status === "stopping")) ||
+    raw.type === "agent.text.delta" ||
+    raw.type === "agent.tool.started" ||
+    raw.type === "agent.permission.requested"
+  ) {
+    return "running";
+  }
+  if (
+    (raw.kind === "status" &&
+      (raw.state === "idle" || raw.state === "failed")) ||
+    (raw.type === "session.updated" &&
+      (raw.status === "idle" || raw.status === "failed")) ||
+    raw.type === "agent.text.completed" ||
+    raw.type === "agent.error" ||
+    (incoming.kind === "agent" && raw.kind === "message")
+  ) {
+    return "stopped";
+  }
+  return null;
+}
+
+function agentLifecycleFailureText(
+  raw: Record<string, unknown>,
+): string | null {
+  if (
+    raw.type === "command.completed" &&
+    raw.outcome === "failed"
+  ) {
+    return typeof raw.error === "string" && raw.error.trim()
+      ? raw.error
+      : "The command could not be completed.";
+  }
+  if (
+    (raw.type === "session.updated" && raw.status === "failed") ||
+    (raw.kind === "status" && raw.state === "failed")
+  ) {
+    return typeof raw.error === "string" && raw.error.trim()
+      ? raw.error
+      : "The agent session failed.";
+  }
+  return null;
 }
 
 function chatMessageFromIncoming(
@@ -1856,6 +2613,8 @@ function chatMessageFromIncoming(
     timestamp: incoming.timestamp,
     requestId: incoming.requestId,
     streamId: incoming.streamId,
+    toolCallId: incoming.toolCallId,
+    toolStatus: incoming.toolStatus,
     replacesEventId: incoming.replacesEventId,
     commandId: incoming.commandId,
     revision: incoming.revision,
@@ -1869,87 +2628,21 @@ function chatMessageFromIncoming(
   };
 }
 
-function mergeChatMessages(
-  current: readonly ChatMessage[],
-  incoming: readonly ChatMessage[],
-): ChatMessage[] {
-  return [...incoming]
-    .sort(compareChatMessages)
-    .reduce<ChatMessage[]>(
-      (messages, message) => mergeChatMessage(messages, message),
-      [...current],
-    );
-}
-
-function mergeChatMessage(
-  current: readonly ChatMessage[],
-  message: ChatMessage,
-): ChatMessage[] {
-  if (current.some((entry) => entry.id === message.id)) return [...current];
-  if (
-    message.commandId &&
-    current.some((entry) => entry.commandId === message.commandId)
-  ) {
-    return [...current];
-  }
-  const replaceIndex = message.replacesEventId
-    ? current.findIndex(
-        (entry) =>
-          entry.eventId === message.replacesEventId ||
-          entry.id === message.replacesEventId,
-      )
-    : -1;
-  const streamIndex = message.streamId
-    ? current.findIndex((entry) => entry.streamId === message.streamId)
-    : -1;
-  const targetIndex = replaceIndex >= 0 ? replaceIndex : streamIndex;
-  if (targetIndex >= 0) {
-    const next = [...current];
-    if (
-      message.raw?.type === "agent.text.delta" &&
-      next[targetIndex].text !== message.text
-    ) {
-      next[targetIndex] = {
-        ...message,
-        id: next[targetIndex].id,
-        text: `${next[targetIndex].text ?? ""}${message.text ?? ""}`,
-      };
-    } else {
-      next[targetIndex] = { ...message, id: next[targetIndex].id };
-    }
-    return next;
-  }
-
-  const next = [...current];
-  const laterIndex = next.findIndex((entry) => {
-    if (
-      message.kind === "user" &&
-      message.revision !== undefined &&
-      entry.kind === "user" &&
-      entry.revision !== undefined
-    ) {
-      return entry.revision > message.revision;
-    }
-    return (
-      message.timestamp !== undefined &&
-      entry.timestamp !== undefined &&
-      compareChatMessages(entry, message) > 0
-    );
-  });
-  if (laterIndex >= 0) next.splice(laterIndex, 0, message);
-  else next.push(message);
-  return next;
-}
-
-function compareChatMessages(
-  left: Pick<ChatMessage, "timestamp" | "id">,
-  right: Pick<ChatMessage, "timestamp" | "id">,
-): number {
-  return (
-    (left.timestamp ?? Number.MAX_SAFE_INTEGER) -
-      (right.timestamp ?? Number.MAX_SAFE_INTEGER) ||
-    left.id.localeCompare(right.id)
+async function persistMessageHistoryPage(
+  scope: string,
+  sessionId: string,
+  messages: readonly ChatMessage[],
+): Promise<void> {
+  const canonicalUsers = messages.filter(
+    (message) => message.kind === "user" && message.eventId,
   );
+  const remaining = messages.filter(
+    (message) => message.kind !== "user" || !message.eventId,
+  );
+  await saveMessageHistory(scope, sessionId, remaining);
+  for (const message of canonicalUsers) {
+    await reconcileMessageHistory(scope, sessionId, message);
+  }
 }
 
 function olderHistoryCursor(
@@ -2032,13 +2725,46 @@ function describeConflictedAction(payload: CommandPayload): string {
       return "The session settings change";
     case "session.create":
       return "The new session request";
-    case "session.select":
-      return "The session switch";
+    case "device.invite":
+      return "The device invitation request";
   }
 }
 
 function formatUiError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deviceInvitationFromLink(link: string): boolean {
+  if (link.includes("#invite=")) return true;
+  try {
+    decodeDeviceInvitationLink(link);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseGatewayInvitationResult(input: unknown): {
+  pairingLink: string;
+  expiresAt: number;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("The Gateway returned an invalid device invitation.");
+  }
+  const result = input as Record<string, unknown>;
+  if (
+    typeof result.pairingLink !== "string" ||
+    !result.pairingLink ||
+    typeof result.expiresAt !== "number" ||
+    !Number.isSafeInteger(result.expiresAt) ||
+    result.expiresAt <= Date.now()
+  ) {
+    throw new Error("The Gateway returned an invalid device invitation.");
+  }
+  return {
+    pairingLink: result.pairingLink,
+    expiresAt: result.expiresAt,
+  };
 }
 
 function browserDeviceName(): string {

@@ -327,6 +327,10 @@ describe('multi-device Matrix collaboration', () => {
             failingTransport,
             undefined,
             'session-durable',
+            {
+                pairingLink: 'codever://pair?data=signed-offer',
+                expiresAt: now + 300_000,
+            },
         )).rejects.toThrow('device-b offline')
         await vi.waitFor(() => {
             expect(firstAttempts.filter(request =>
@@ -368,6 +372,10 @@ describe('multi-device Matrix collaboration', () => {
             revision: 7,
             session_id: 'session-durable',
             outcome: 'succeeded',
+            result: {
+                pairingLink: 'codever://pair?data=signed-offer',
+                expiresAt: now + 300_000,
+            },
         })
         expect(
             plaintext
@@ -771,7 +779,11 @@ async function signedPrompt(
         issuedAt: now,
         expiresAt: now + 60_000,
         nonce: `0123456789abcdef-${deviceId}-${baseRevision}`,
-        payload: { operation: 'prompt', text: `hello from ${deviceId}` },
+        payload: {
+            operation: 'prompt',
+            sessionId: 'app-session-1',
+            text: `hello from ${deviceId}`,
+        },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }

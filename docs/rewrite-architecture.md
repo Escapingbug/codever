@@ -29,7 +29,8 @@ Codever PWA / enrolled Matrix client
   -> MatrixTransport
   -> application signature + AEAD + replay check
   -> Codever execution authorization
-  -> SemanticSessionRuntime
+  -> app-session lookup by signed sessionId
+  -> that session's SemanticSessionRuntime
   -> AgentProvider / ACP
   -> ConversationEvent
   -> signed application secure envelope
@@ -48,16 +49,35 @@ identity. A local binding record maps:
 
 ```text
 conversationId <-> roomId <-> gatewayId
-                              └─ projectId <-> cwd
-                                   └─ app session <-> provider session
+                              └─ app session A
+                              │    ├─ projectId <-> cwd
+                              │    └─ TopicSession <-> provider session
+                              └─ app session B
+                                   ├─ projectId <-> cwd
+                                   └─ TopicSession <-> provider session
 ```
 
 Project identity is the pair `(gatewayId, projectId)`. Project display names
 are intentionally non-unique; the Gateway derives a stable `projectId` from
 the local working directory, so two different paths may both be displayed
 with the same project name. Each app session persists its own project, model,
-reasoning effort and provider-session binding, and selecting it restores those
-settings before the next turn.
+reasoning effort and provider-session binding.
+
+An app session is an independently live execution address, not a saved profile
+that is installed into one room-level runtime when selected:
+
+- every persisted app session owns its own `TopicSession`,
+  `SemanticSessionRuntime`, provider instance and fixed-session `MatrixPort`;
+- prompt, cancel, decision and settings commands carry the target `sessionId`;
+- sessions may run and receive provider events concurrently;
+- output remains tagged with the runtime's immutable app-session ID, including
+  delayed edits, decisions and status events;
+- selecting a conversation is PWA-local view state. It changes which history
+  is displayed and never sends a Gateway mutation or suspends another session.
+
+The Gateway intentionally has no mutable “current app session”. Legacy
+authoritative-state fields are emitted only as `current_session_id: null` and
+`can_select_session: false` during protocol migration.
 
 Sensitive business data must not be written to unencrypted Matrix state:
 
