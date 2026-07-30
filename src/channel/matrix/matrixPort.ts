@@ -24,6 +24,8 @@ export interface MatrixPortOptions {
      */
     sessionId?: string
     onLog?: (message: string) => void
+    /** Observe every runtime status transition, including non-visible ones. */
+    onStatusChange?: (status: SessionStatus) => void
 }
 
 export interface MatrixMessageOptions {
@@ -156,10 +158,15 @@ export class MatrixPort implements ChannelPort {
     }
 
     notifyStatus(status: SessionStatus): void {
-        if (status.state !== 'querying') return
+        try {
+            this.options.onStatusChange?.(status)
+        } catch (error) {
+            this.options.onLog?.(`[matrix] status observer failed: ${formatError(error)}`)
+        }
 
+        const state = matrixSessionStatus(status.state)
         const body = [
-            'Agent started working...',
+            matrixSessionStatusLabel(state),
             `Provider: ${status.provider}`,
             `Cwd: ${status.cwd}`,
             ...(status.model ? [`Model: ${status.model}`] : []),
@@ -170,7 +177,7 @@ export class MatrixPort implements ChannelPort {
             kind: 'status',
             ...this.sessionMetadata(),
             operation_id: operationId,
-            state: status.state,
+            state,
             provider: status.provider,
             cwd: status.cwd,
             model: status.model,
@@ -241,6 +248,36 @@ export class MatrixPort implements ChannelPort {
         const operationId = randomUUID()
         this.messageOperationIds.set(message, operationId)
         return operationId
+    }
+}
+
+function matrixSessionStatus(
+    state: SessionStatus['state'],
+): 'idle' | 'running' | 'stopping' | 'failed' {
+    switch (state) {
+        case 'querying':
+            return 'running'
+        case 'canceling':
+            return 'stopping'
+        case 'dead':
+            return 'failed'
+        case 'idle':
+            return 'idle'
+    }
+}
+
+function matrixSessionStatusLabel(
+    state: ReturnType<typeof matrixSessionStatus>,
+): string {
+    switch (state) {
+        case 'running':
+            return 'Agent started working...'
+        case 'stopping':
+            return 'Stopping agent...'
+        case 'failed':
+            return 'Agent session stopped after an error.'
+        case 'idle':
+            return 'Agent is ready.'
     }
 }
 

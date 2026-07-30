@@ -201,10 +201,11 @@ export class MatrixGatewayRunner {
                 // Session selection is a per-device PWA view concern. It is
                 // deliberately absent from Gateway-authoritative state.
                 currentSessionId: null,
-                sessions: [...runtime.appSessions.values()].map(({ record }) => ({
+                sessions: [...runtime.appSessions.values()].map(({ record, session }) => ({
                     id: record.id,
                     title: record.title,
                     updatedAt: record.updatedAt,
+                    status: gatewaySessionStatus(session.state),
                     projectId: record.projectId,
                     projectName: record.projectName,
                     cwd: record.cwd,
@@ -806,6 +807,14 @@ export class MatrixGatewayRunner {
             gatewayId: this.config.gatewayId,
             sessionId: record.id,
             onLog: this.dependencies.onLog,
+            onStatusChange: () => {
+                void this.syncState(runtime.config.roomId).catch(error => {
+                    this.log(
+                        `[matrix-gateway] session status sync failed for ${record.id}: `
+                        + formatError(error),
+                    )
+                })
+            },
         })
         let capabilityProvider: AgentProvider | null
         let session: TopicSession
@@ -945,6 +954,21 @@ function workspaceFromRecord(record: AppSessionRecord): WorkspaceState {
         model: record.model,
         reasoningEffort: record.reasoningEffort,
         permissionMode: record.permissionMode,
+    }
+}
+
+function gatewaySessionStatus(
+    state: TopicSession['state'],
+): 'idle' | 'running' | 'stopping' | 'failed' {
+    switch (state) {
+        case 'querying':
+            return 'running'
+        case 'canceling':
+            return 'stopping'
+        case 'dead':
+            return 'failed'
+        case 'idle':
+            return 'idle'
     }
 }
 

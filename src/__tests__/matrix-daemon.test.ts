@@ -590,6 +590,7 @@ describe('MatrixGatewayRunner', () => {
                 sessions: [{
                     id: 'app-session-1',
                     title: 'Restored work',
+                    status: 'idle',
                 }],
                 workspace: { cwd: 'D:\\restored' },
             },

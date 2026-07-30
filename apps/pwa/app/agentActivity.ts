@@ -22,6 +22,12 @@ export const STARTING_AGENT_ACTIVITY = agentActivityForPhase("starting");
 export const WORKING_AGENT_ACTIVITY = agentActivityForPhase("working");
 export const STOPPING_AGENT_ACTIVITY = agentActivityForPhase("stopping");
 
+export type AgentExecutionSignal =
+  | "running"
+  | "stopping"
+  | "stopped"
+  | null;
+
 export function shouldApplyAgentActivity(
   currentSessionId: string | null,
   event: {
@@ -74,6 +80,7 @@ export function reduceAgentActivity(
       case "running":
         return WORKING_AGENT_ACTIVITY;
       case "stopping":
+      case "canceling":
         return STOPPING_AGENT_ACTIVITY;
       case "idle":
       case "failed":
@@ -118,6 +125,45 @@ export function reduceAgentActivity(
     default:
       return current;
   }
+}
+
+/**
+ * Derives whether the full Agent turn is still interruptible.
+ *
+ * Individual text or tool completions are not terminal because a turn may
+ * continue with more text, tools, or permission requests afterwards. Only an
+ * explicit session lifecycle transition or fatal Agent error ends the turn.
+ */
+export function agentExecutionSignal(raw: unknown): AgentExecutionSignal {
+  const event = asRecord(raw);
+  if (!event) return null;
+  if (
+    (event.kind === "status" &&
+      (event.state === "querying" || event.state === "running")) ||
+    (event.type === "session.updated" && event.status === "running") ||
+    event.type === "agent.text.delta" ||
+    event.type === "agent.tool.started" ||
+    event.type === "agent.permission.requested"
+  ) {
+    return "running";
+  }
+  if (
+    (event.kind === "status" &&
+      (event.state === "canceling" || event.state === "stopping")) ||
+    (event.type === "session.updated" && event.status === "stopping")
+  ) {
+    return "stopping";
+  }
+  if (
+    (event.kind === "status" &&
+      (event.state === "idle" || event.state === "failed")) ||
+    (event.type === "session.updated" &&
+      (event.status === "idle" || event.status === "failed")) ||
+    event.type === "agent.error"
+  ) {
+    return "stopped";
+  }
+  return null;
 }
 
 function createActivity(

@@ -17,6 +17,7 @@ export type GatewaySessionSummary = {
   id: string;
   title: string;
   updatedAt: number;
+  status: "idle" | "running" | "stopping" | "failed";
   projectId: string;
   projectName: string;
   cwd: string;
@@ -125,6 +126,13 @@ export function parseGatewayStateExtension(
       typeof session.title !== "string" ||
       !session.title ||
       !isNonnegativeInteger(session.updated_at) ||
+      !(
+        session.status === undefined ||
+        session.status === "idle" ||
+        session.status === "running" ||
+        session.status === "stopping" ||
+        session.status === "failed"
+      ) ||
       typeof session.provider !== "string" ||
       !session.provider ||
       !(
@@ -153,6 +161,12 @@ export function parseGatewayStateExtension(
       id: session.id,
       title: session.title,
       updatedAt: session.updated_at,
+      status:
+        session.status === "running" ||
+        session.status === "stopping" ||
+        session.status === "failed"
+          ? session.status
+          : "idle",
       provider: session.provider,
       ...(typeof session.model === "string" ? { model: session.model } : {}),
       ...(typeof session.reasoning_effort === "string"
@@ -214,6 +228,7 @@ export function parseGatewayStateExtension(
       id: session.id,
       title: session.title,
       updatedAt: session.updatedAt,
+      status: session.status,
       projectId: session.rawProjectId ?? fallback.id,
       projectName: session.rawProjectName ?? fallback.name,
       cwd,
@@ -425,6 +440,7 @@ function gatewayStateExtension(
       id: session.id,
       title: session.title,
       updated_at: session.updatedAt,
+      status: session.status,
       project_id: session.projectId,
       project_name: session.projectName,
       cwd: session.cwd,

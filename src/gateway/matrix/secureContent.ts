@@ -44,6 +44,7 @@ export interface GatewayStateSnapshot {
         id: string
         title: string
         updatedAt: number
+        status: 'idle' | 'running' | 'stopping' | 'failed'
         projectId: string
         projectName: string
         cwd: string
@@ -309,6 +310,7 @@ export class GatewaySecureContentLayer {
                 id: session.id,
                 title: session.title,
                 updated_at: session.updatedAt,
+                status: session.status,
                 project_id: session.projectId,
                 project_name: session.projectName,
                 cwd: session.cwd,

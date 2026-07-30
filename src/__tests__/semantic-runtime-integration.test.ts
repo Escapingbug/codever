@@ -432,12 +432,13 @@ describe('Semantic runtime integration chain', () => {
                 interrupt,
             })),
         })
+        const channel = createChannel()
         const runtime = new SemanticSessionRuntime({
             sessionId: 'session-1',
             cwd: '/repo',
             provider,
             providerName: 'mock-acp',
-            channelPort: createChannel(),
+            channelPort: channel,
         })
 
         const running = runtime.dispatch({ kind: 'user_message', text: 'long task', source: 'channel' })
@@ -447,6 +448,7 @@ describe('Semantic runtime integration chain', () => {
             void runtime.dispatch({ kind: 'cancel', reason: 'user', source: 'channel' })
             await delay(20)
             expect(interrupt).toHaveBeenCalled()
+            expect(channel.statuses.map(status => status.state)).toContain('canceling')
         } finally {
             release()
             await running

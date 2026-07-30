@@ -77,6 +77,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           id: "session-1",
           title: "Live session",
           updatedAt: 1_700_000_000_000,
+          status: "idle",
           projectId: "project-workspace",
           projectName: "workspace",
           cwd: "C:/workspace",
@@ -138,6 +139,7 @@ test("cached Gateway state survives reload only for the same trust and durable e
         id: "session-cache",
         title: "Cached session",
         updated_at: 1_700_000_000_000,
+        status: "running",
         project_id: "project-cache",
         project_name: "workspace",
         cwd: "/workspace",
@@ -173,6 +175,7 @@ test("cached Gateway state survives reload only for the same trust and durable e
     },
   });
   assert.ok(state);
+  assert.equal(state.sessions[0].status, "running");
   const binding = {
     gatewayId: "gateway-1",
     conversationId: "conversation-1",

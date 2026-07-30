@@ -373,6 +373,7 @@ export class SemanticSessionRuntime {
         const handle = this.currentHandle
         const abortController = this.abortController
         this.state = 'canceling'
+        this.notifyStatus('canceling')
         const interrupting = handle?.interrupt()
         abortController?.abort()
         await interrupting
@@ -430,6 +431,7 @@ export class SemanticSessionRuntime {
         this.recordCommand('new', { reset: true })
 
         this.state = 'canceling'
+        this.notifyStatus('canceling')
         const interrupting = handle?.interrupt()
         abortController?.abort()
         await interrupting

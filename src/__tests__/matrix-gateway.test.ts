@@ -185,24 +185,30 @@ describe('MatrixPort', () => {
         await expect(response).resolves.toEqual({ value: 'allow' })
     })
 
-    it('sends querying status and typing through the transport boundary', async () => {
+    it('publishes normalized runtime lifecycle and typing through the transport boundary', async () => {
         const transport = new InMemoryMatrixTransport()
-        const port = createPort(transport)
+        const observedStates: string[] = []
+        const port = new MatrixPort({
+            transport,
+            roomId: '!room:example.org',
+            gatewayId: 'gateway-1',
+            onStatusChange: status => observedStates.push(status.state),
+        })
 
         port.notifyStatus({ state: 'querying', cwd: '/repo', provider: 'codex', model: 'gpt' })
+        port.notifyStatus({ state: 'canceling', cwd: '/repo', provider: 'codex', model: 'gpt' })
+        port.notifyStatus({ state: 'idle', cwd: '/repo', provider: 'codex', model: 'gpt' })
         port.sendChatAction('typing')
 
-        await vi.waitFor(() => expect(transport.delivered).toHaveLength(1))
+        await vi.waitFor(() => expect(transport.delivered).toHaveLength(3))
         await vi.waitFor(() => expect(transport.typing).toHaveLength(1))
         expect(transport.delivered[0].content.body).toContain('Provider: codex')
-        expect(transport.delivered[0].content).toMatchObject({
-            msgtype: 'm.notice',
-            [CODEVER_MATRIX_EXTENSION]: {
-                version: 1,
-                kind: 'status',
-                state: 'querying',
-            },
-        })
+        expect(
+            transport.delivered.map(delivery =>
+                (delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).state,
+            ),
+        ).toEqual(['running', 'stopping', 'idle'])
+        expect(observedStates).toEqual(['querying', 'canceling', 'idle'])
         expect(transport.typing[0]).toEqual({
             roomId: '!room:example.org',
             typing: true,

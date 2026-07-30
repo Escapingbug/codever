@@ -5,6 +5,7 @@ import {
   STARTING_AGENT_ACTIVITY,
   STOPPING_AGENT_ACTIVITY,
   WORKING_AGENT_ACTIVITY,
+  agentExecutionSignal,
   agentActivityForPhase,
   reduceAgentActivity,
   shouldApplyAgentActivity,
@@ -64,6 +65,13 @@ test("signed session lifecycle drives every connected device", () => {
   );
   assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
+      kind: "status",
+      state: "canceling",
+    }),
+    STOPPING_AGENT_ACTIVITY,
+  );
+  assert.equal(
+    reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
       type: "session.updated",
       status: "stopping",
     }),
@@ -82,6 +90,37 @@ test("signed session lifecycle drives every connected device", () => {
       status: "failed",
     }),
     null,
+  );
+});
+
+test("execution stays stoppable through partial text and tool completions", () => {
+  assert.equal(
+    agentExecutionSignal({ kind: "status", state: "running" }),
+    "running",
+  );
+  assert.equal(
+    agentExecutionSignal({ kind: "status", state: "canceling" }),
+    "stopping",
+  );
+  assert.equal(
+    agentExecutionSignal({
+      type: "agent.text.completed",
+      streamId: "stream-1",
+      text: "partial answer",
+    }),
+    null,
+  );
+  assert.equal(
+    agentExecutionSignal({
+      type: "agent.tool.completed",
+      toolCallId: "tool-1",
+      status: "succeeded",
+    }),
+    null,
+  );
+  assert.equal(
+    agentExecutionSignal({ kind: "status", state: "idle" }),
+    "stopped",
   );
 });
 

@@ -15,6 +15,7 @@ import {
   STARTING_AGENT_ACTIVITY,
   STOPPING_AGENT_ACTIVITY,
   WORKING_AGENT_ACTIVITY,
+  agentExecutionSignal,
   reduceAgentActivity,
   type AgentActivity,
 } from "./agentActivity";
@@ -480,9 +481,12 @@ export function CodeverApp() {
       setSessionAgentActivity(sessionId, (current) =>
         reduceAgentActivity(current, incoming.raw),
       );
-      const executionSignal = agentExecutionSignal(incoming);
+      const executionSignal = agentExecutionSignal(incoming.raw);
       if (executionSignal === "running") {
         setSessionRunning(sessionId, true);
+      } else if (executionSignal === "stopping") {
+        setSessionRunning(sessionId, true);
+        setSessionStopping(sessionId, true);
       } else if (executionSignal === "stopped") {
         setSessionRunning(sessionId, false);
         setSessionStopping(sessionId, false);
@@ -878,6 +882,36 @@ export function CodeverApp() {
           }
           if (state.gatewayState) {
             setGatewayState(state.gatewayState);
+            const runningIds = new Set(
+              state.gatewayState.sessions
+                .filter(
+                  (session) =>
+                    session.status === "running" ||
+                    session.status === "stopping",
+                )
+                .map((session) => session.id),
+            );
+            const stoppingIds = new Set(
+              state.gatewayState.sessions
+                .filter((session) => session.status === "stopping")
+                .map((session) => session.id),
+            );
+            setRunningSessionIds(runningIds);
+            setStoppingSessionIds(stoppingIds);
+            setAgentActivitiesBySession((current) => {
+              const next = new Map<string, AgentActivity>();
+              for (const session of state.gatewayState!.sessions) {
+                if (session.status === "stopping") {
+                  next.set(session.id, STOPPING_AGENT_ACTIVITY);
+                } else if (session.status === "running") {
+                  next.set(
+                    session.id,
+                    current.get(session.id) ?? WORKING_AGENT_ACTIVITY,
+                  );
+                }
+              }
+              return next;
+            });
             const availableIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
@@ -1674,19 +1708,13 @@ export function CodeverApp() {
     if (!sessionId) return;
     setSessionStopping(sessionId, true);
     setSessionAgentActivity(sessionId, STOPPING_AGENT_ACTIVITY);
-    try {
-      const sent = await sendRealCommand({ operation: "cancel", sessionId });
-      if (sent && (await sent.completion).outcome === "succeeded") {
-        setSessionRunning(sessionId, false);
-        setSessionAgentActivity(sessionId, null);
-      } else {
-        setSessionAgentActivity(
-          sessionId,
-          runningSessionIds.has(sessionId) ? WORKING_AGENT_ACTIVITY : null,
-        );
-      }
-    } finally {
+    const sent = await sendRealCommand({ operation: "cancel", sessionId });
+    if (!sent || (await sent.completion).outcome !== "succeeded") {
       setSessionStopping(sessionId, false);
+      setSessionAgentActivity(
+        sessionId,
+        runningSessionIds.has(sessionId) ? WORKING_AGENT_ACTIVITY : null,
+      );
     }
   }
 
@@ -2467,7 +2495,8 @@ export function CodeverApp() {
                   type="button"
                   className="send-button stop-button mount-feedback"
                   onClick={() => void stopStreaming()}
-                  aria-label="Stop agent"
+                  aria-label={isStopping ? "Stopping agent" : "Stop agent"}
+                  aria-busy={isStopping}
                   disabled={isStopping}
                 >
                   {isStopping ? <span className="button-spinner" /> : "■"}
@@ -2570,37 +2599,6 @@ function isTransientAgentLifecycleEvent(
     raw.type === "command.completed" ||
     raw.type === "session.updated"
   );
-}
-
-function agentExecutionSignal(
-  incoming: IncomingCodeverMessage,
-): "running" | "stopped" | null {
-  const raw = incoming.raw;
-  if (
-    (raw.kind === "status" &&
-      (raw.state === "querying" ||
-        raw.state === "running" ||
-        raw.state === "stopping")) ||
-    (raw.type === "session.updated" &&
-      (raw.status === "running" || raw.status === "stopping")) ||
-    raw.type === "agent.text.delta" ||
-    raw.type === "agent.tool.started" ||
-    raw.type === "agent.permission.requested"
-  ) {
-    return "running";
-  }
-  if (
-    (raw.kind === "status" &&
-      (raw.state === "idle" || raw.state === "failed")) ||
-    (raw.type === "session.updated" &&
-      (raw.status === "idle" || raw.status === "failed")) ||
-    raw.type === "agent.text.completed" ||
-    raw.type === "agent.error" ||
-    (incoming.kind === "agent" && raw.kind === "message")
-  ) {
-    return "stopped";
-  }
-  return null;
 }
 
 function agentLifecycleFailureText(
