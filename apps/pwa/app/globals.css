@@ -2701,7 +2701,7 @@ select:focus-visible {
 
 .generated-device-invitation > img,
 .invitation-qr-loading {
-  width: min(320px, 100%);
+  width: min(256px, 100%);
   aspect-ratio: 1;
   align-self: center;
   border: 1px solid #eceaf5;

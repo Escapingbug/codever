@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/command-lifecycle.test.mjs tests/chat-messages.test.ts tests/agent-activity.test.mjs && tsx --test tests/matrix-events.test.mts tests/device-invitation.test.mts tests/matrix-auth.test.mts tests/pwa-update.test.mts",
+    "test": "pnpm run build && node --test tests/rendered-html.test.mjs tests/command-lifecycle.test.mjs tests/chat-messages.test.ts tests/agent-activity.test.mjs && tsx --test tests/matrix-events.test.mts tests/device-invitation.test.mts tests/invitation-relay.test.mts tests/matrix-auth.test.mts tests/pwa-update.test.mts tests/qr-scanning.test.mts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

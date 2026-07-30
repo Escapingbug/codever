@@ -30,6 +30,11 @@ import { ToolGroupCard } from "./ToolGroupCard";
 import { legacyToolGroupPresentation } from "./presentation";
 import { registerPwaUpdates } from "./pwaUpdate";
 import {
+  hasShortDeviceInvitation,
+  resolveShortDeviceInvitation,
+  shortenDeviceInvitation,
+} from "./invitationRelay";
+import {
   compareChatMessages,
   findOptimisticMessageId,
   mergeChatMessage,
@@ -360,13 +365,22 @@ export function CodeverApp() {
     const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
     const link = hash.get("pair");
     const invitation = hash.get("invite");
+    const shortInvitation =
+      hash.has("i") || hash.has("k") ? url.toString() : null;
     const rejectedQueryPairing =
-      url.searchParams.has("pair") || url.searchParams.has("invite");
-    if (link || invitation || rejectedQueryPairing) {
+      url.searchParams.has("pair") ||
+      url.searchParams.has("invite") ||
+      url.searchParams.has("i") ||
+      url.searchParams.has("k");
+    if (link || invitation || shortInvitation || rejectedQueryPairing) {
       hash.delete("pair");
       hash.delete("invite");
+      hash.delete("i");
+      hash.delete("k");
       url.searchParams.delete("pair");
       url.searchParams.delete("invite");
+      url.searchParams.delete("i");
+      url.searchParams.delete("k");
       const nextHash = hash.toString();
       window.history.replaceState(
         window.history.state,
@@ -376,11 +390,12 @@ export function CodeverApp() {
     }
     if (invitation) void openDeviceInvitation(invitation);
     else if (link) void openPairingLink(link);
+    else if (shortInvitation) void openPairingLink(shortInvitation);
     void (async () => {
       if (rejectedQueryPairing) {
         await Promise.resolve();
         setConnectionError(
-          "Pairing links in the URL query are not accepted. Scan the QR code or use a #pair link.",
+          "Pairing links in the URL query are not accepted. Scan the QR code or use a fragment invitation.",
         );
         setSettingsOpen(true);
         return;
@@ -406,7 +421,7 @@ export function CodeverApp() {
         setSettingsOpen(true);
         return;
       }
-      if (link || invitation) return;
+      if (link || invitation || shortInvitation) return;
       const pending = await loadPendingPairingRecovery(identity);
       if (!pending) {
         setSettingsOpen(true);
@@ -1035,6 +1050,21 @@ export function CodeverApp() {
   async function openPairingLink(link: string) {
     setConnectionError(null);
     try {
+      if (
+        hasShortDeviceInvitation(
+          link,
+          typeof window === "undefined"
+            ? "https://codever.invalid/"
+            : window.location.href,
+        )
+      ) {
+        const invitationLink = await resolveShortDeviceInvitation(
+          link,
+          window.location.href,
+        );
+        await openDeviceInvitation(invitationLink);
+        return;
+      }
       if (deviceInvitationFromLink(link)) {
         await openDeviceInvitation(link);
         return;
@@ -1166,7 +1196,7 @@ export function CodeverApp() {
       const gatewayInvitation = parseGatewayInvitationResult(
         completion.result,
       );
-      const generated = createDeviceInvitationLink({
+      const fullInvitation = createDeviceInvitationLink({
         pairingLink: gatewayInvitation.pairingLink,
         appUrl: window.location.href,
         ...(tokenResult.status === "ready"
@@ -1180,6 +1210,10 @@ export function CodeverApp() {
             }
           : {}),
       });
+      const generated = await shortenDeviceInvitation(
+        fullInvitation,
+        window.location.href,
+      );
       setDeviceInvitation(generated);
       setInvitationReauthRequired(false);
     } catch (error) {

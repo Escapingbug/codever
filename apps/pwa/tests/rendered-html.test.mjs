@@ -185,6 +185,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     app,
     matrixAuth,
     chatMessages,
+    invitationRelay,
+    invitationRoute,
+    relayStore,
     packageJson,
   ] = await Promise.all([
       readFile(new URL("app/matrix.ts", appRoot), "utf8"),
@@ -197,6 +200,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
       readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
       readFile(new URL("app/matrixAuth.ts", appRoot), "utf8"),
       readFile(new URL("app/chatMessages.ts", appRoot), "utf8"),
+      readFile(new URL("app/invitationRelay.ts", appRoot), "utf8"),
+      readFile(new URL("app/api/invitations/route.ts", appRoot), "utf8"),
+      readFile(
+        new URL("app/api/invitations/relayStore.ts", appRoot),
+        "utf8",
+      ),
       readFile(new URL("package.json", appRoot), "utf8"),
     ]);
 
@@ -289,6 +298,17 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrixAuth, /type: PASSWORD_LOGIN_TYPE/);
   assert.match(wizard, /Add another device/);
   assert.match(wizard, /One-time Codever device invitation QR code/);
+  assert.match(wizard, /margin: 4/);
+  assert.match(wizard, /width: 256/);
+  assert.match(app, /shortenDeviceInvitation/);
+  assert.match(app, /resolveShortDeviceInvitation/);
+  assert.match(invitationRelay, /name: "AES-GCM"/);
+  assert.match(invitationRelay, /url\.hash = new URLSearchParams/);
+  assert.match(invitationRoute, /action === "store"/);
+  assert.match(invitationRoute, /action === "resolve"/);
+  assert.match(relayStore, /new Map<string, EncryptedInvitationRelayEntry>/);
+  assert.match(relayStore, /INVITATION_RELAY_MAX_ENTRIES = 256/);
+  assert.doesNotMatch(invitationRoute, /loginToken|accessToken|pairingLink/);
   assert.match(settings, /Sign in to Matrix/);
   assert.match(settings, /Advanced: use an access token/);
   assert.match(app, /operation: "device\.invite"/);

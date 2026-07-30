@@ -59,8 +59,8 @@ export function PairingWizard({
     if (!deviceInvitation) return;
     void QRCode.toDataURL(deviceInvitation.link, {
       errorCorrectionLevel: "L",
-      margin: 2,
-      width: 320,
+      margin: 4,
+      width: 256,
     }).then((value) => {
       if (!cancelled) {
         setQrCode({ link: deviceInvitation.link, dataUrl: value });
@@ -147,8 +147,8 @@ export function PairingWizard({
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={qrDataUrl}
-                width={320}
-                height={320}
+                width={256}
+                height={256}
                 alt="One-time Codever device invitation QR code"
               />
             ) : (
@@ -159,7 +159,7 @@ export function PairingWizard({
               <textarea
                 value={deviceInvitation.link}
                 readOnly
-                rows={3}
+                rows={2}
                 spellCheck={false}
               />
             </label>
