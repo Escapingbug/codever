@@ -953,7 +953,10 @@ export async function connectMatrix(
         const revision = await waitForCommandAcknowledgement(
           recovered.reservation,
         );
-        if (JSON.stringify(recovered.payload) === JSON.stringify(payload)) {
+        if (
+          !recovered.expired &&
+          JSON.stringify(recovered.payload) === JSON.stringify(payload)
+        ) {
           return {
             eventId: recovered.eventId,
             commandId: recovered.reservation.commandId,
@@ -964,6 +967,10 @@ export async function connectMatrix(
             ),
           };
         }
+        // An expired command can only be replayed to recover its durable
+        // acknowledgement. Its original result may already have fallen out of
+        // this client's Matrix timeline, so the user's current action must be
+        // sent as a fresh command after the sequence is repaired.
       } catch (error) {
         if (!(error instanceof RevisionConflictError)) throw error;
         holdRevisionConflict(
@@ -2989,6 +2996,7 @@ async function retryPendingCommand(
   eventId: string;
   payload: CommandPayload;
   reservation: CommandReservation;
+  expired: boolean;
 } | null> {
   const scope = commandSequenceScope(config, identity, sequenceEpoch);
   const state = await readCommandSequenceState(scope);
@@ -3014,14 +3022,12 @@ async function retryPendingCommand(
   const extension = asRecord(pending.plaintext["io.codever"]);
   const signed = asRecord(extension?.signed_command);
   const command = asRecord(signed?.command);
-  if (
-    typeof command?.expiresAt !== "number" ||
-    command.expiresAt <= Date.now()
-  ) {
+  if (typeof command?.expiresAt !== "number") {
     throw new Error(
-      "A queued command expired before the Gateway confirmed it. Re-pair this device to start a fresh secure command sequence.",
+      "The queued command is invalid. Re-pair this device to start a fresh secure command sequence.",
     );
   }
+  const expired = command.expiresAt <= Date.now();
   const certificate = trust.certificate.certificate;
   const secureEnvelope = await sealSecureEnvelope({
     plaintext: pending.plaintext,
@@ -3053,6 +3059,7 @@ async function retryPendingCommand(
     eventId: response.event_id,
     payload: pending.payload,
     reservation: pending,
+    expired,
   };
 }
 

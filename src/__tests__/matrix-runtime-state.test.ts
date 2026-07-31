@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { CodeverCommand } from '@codever/protocol'
 import {
     FileCommandReplayStore,
     FileGatewayRuntimeStateStore,
@@ -233,5 +234,81 @@ describe('FileGatewayRuntimeStateStore', () => {
         await recovered.initialize()
         expect(recovered.getGeneration()).toBe(first.getGeneration())
         await expect(recovered.claimAll([claim], Date.now())).resolves.toBe(false)
+    })
+
+    it('recovers an expired command from a ledger written before recovery metadata existed', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-replay-command-recovery-'))
+        temporaryDirectories.push(directory)
+        const ledgerPath = join(directory, 'replay.jsonl')
+        const now = 2_000_000
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'legacy-command-1',
+            gatewayId: 'gateway-1',
+            deviceId: 'device-1',
+            sequenceEpoch: 'certificate-1',
+            conversationId: 'conversation-1',
+            revisionEpoch: 'revision-epoch-1',
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'prompt',
+            issuedAt: now,
+            expiresAt: now + 60_000,
+            nonce: '0123456789abcdef-legacy-command',
+            payload: {
+                operation: 'prompt',
+                sessionId: 'session-1',
+                text: 'recover me',
+            },
+        }
+        const first = new FileCommandReplayStore(ledgerPath)
+        await first.initialize(now)
+        await expect(
+            first.claimCommandInOrder(command, now, command.sequenceEpoch),
+        ).resolves.toEqual({ status: 'accepted', revision: 1 })
+        await expect(
+            first.claimCommandInOrder(
+                {
+                    ...command,
+                    payload: {
+                        operation: 'prompt',
+                        sessionId: 'session-1',
+                        text: 'different payload',
+                    },
+                },
+                now + 1,
+                command.sequenceEpoch,
+            ),
+        ).rejects.toMatchObject({ code: 'replay' })
+
+        const records = (await readFile(ledgerPath, 'utf8'))
+            .trim()
+            .split('\n')
+            .map(line => JSON.parse(line) as Record<string, unknown>)
+        for (const record of records) {
+            const revision = record.revision as Record<string, unknown> | undefined
+            if (!revision) continue
+            delete revision.commandSequence
+            delete revision.commandNonceKey
+            delete revision.commandBaseRevision
+            delete revision.commandFingerprint
+        }
+        await writeFile(
+            ledgerPath,
+            `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
+            'utf8',
+        )
+
+        const afterExpiry = now + 2 * 60_000
+        const recovered = new FileCommandReplayStore(ledgerPath)
+        await recovered.initialize(afterExpiry)
+        await expect(
+            recovered.claimCommandInOrder(
+                command,
+                afterExpiry,
+                command.sequenceEpoch,
+            ),
+        ).resolves.toEqual({ status: 'duplicate', revision: 1 })
     })
 })

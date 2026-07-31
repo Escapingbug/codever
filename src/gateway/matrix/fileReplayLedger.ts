@@ -1,6 +1,6 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { canonicalJson, type CodeverCommand } from '@codever/protocol'
 import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
@@ -15,7 +15,19 @@ interface PersistedClaimBatch {
         scope: string
         value: number
         commandKey: string
+        commandSequence?: number
+        commandNonceKey?: string
+        commandBaseRevision?: number
+        commandFingerprint?: string
     }
+}
+
+interface PersistedCommandOutcome {
+    revision: number
+    sequence: number | undefined
+    nonceKey: string | undefined
+    baseRevision: number | undefined
+    fingerprint: string | undefined
 }
 
 interface PersistedLedgerGeneration {
@@ -52,7 +64,7 @@ export class FileCommandReplayStore implements ReplayStore {
     private readonly claims = new Map<string, number>()
     private readonly sequences = new Map<string, number>()
     private readonly revisions = new Map<string, number>()
-    private readonly commandRevisions = new Map<string, number>()
+    private readonly commandOutcomes = new Map<string, PersistedCommandOutcome>()
     private initialized = false
     private generation: string | null = null
     private chain: Promise<unknown> = Promise.resolve()
@@ -104,9 +116,6 @@ export class FileCommandReplayStore implements ReplayStore {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
             await this.pruneInternal(now)
-            if (command.expiresAt <= now) {
-                throw new SecurityError('expired', 'Expired commands cannot enter the replay store')
-            }
 
             const scope = canonicalJson([
                 command.gatewayId,
@@ -124,14 +133,41 @@ export class FileCommandReplayStore implements ReplayStore {
                 { key: `${scope}:nonce:${command.nonce}`, expiresAt: command.expiresAt },
                 { key: `${scope}:command:${command.commandId}`, expiresAt: command.expiresAt },
             ]
+            const nonceKey = nextClaims[0]?.key
+            const commandKey = nextClaims[1]?.key
+            if (!nonceKey || !commandKey) throw new Error('Command replay claim is missing')
+            const fingerprint = commandFingerprint(command)
+            const priorOutcome = this.commandOutcomes.get(commandKey)
+            if (priorOutcome) {
+                if (
+                    priorOutcome.sequence === command.sequence
+                    && priorOutcome.nonceKey === nonceKey
+                    && priorOutcome.baseRevision === command.baseRevision
+                    && (
+                        priorOutcome.fingerprint === undefined
+                        || priorOutcome.fingerprint === fingerprint
+                    )
+                ) {
+                    return {
+                        status: 'duplicate' as const,
+                        revision: priorOutcome.revision,
+                    }
+                }
+                throw new SecurityError(
+                    'replay',
+                    'Accepted command id does not match its durable execution record',
+                )
+            }
+            if (command.expiresAt <= now) {
+                throw new SecurityError(
+                    'expired',
+                    'Unknown expired commands cannot enter the replay store',
+                )
+            }
             const existingClaims = nextClaims.filter(claim => this.claims.has(claim.key)).length
             const lastSequence = this.sequences.get(scope) ?? 0
             if (existingClaims === nextClaims.length && command.sequence <= lastSequence) {
-                const revision = this.commandRevisions.get(nextClaims[1]?.key ?? '')
-                if (revision === undefined) {
-                    throw new Error('Accepted command is missing its persisted conversation revision')
-                }
-                return { status: 'duplicate' as const, revision }
+                throw new Error('Accepted command is missing its persisted execution outcome')
             }
             if (existingClaims > 0) {
                 throw new SecurityError('replay', 'Command nonce or command id has already been used')
@@ -148,20 +184,32 @@ export class FileCommandReplayStore implements ReplayStore {
                 throw new RevisionConflictError(currentRevision, command.baseRevision)
             }
             const revision = currentRevision + 1
-            const commandKey = nextClaims[1]?.key
-            if (!commandKey) throw new Error('Command replay claim is missing')
 
             const record: PersistedClaimBatch = {
                 version: 1,
                 claims: nextClaims,
                 sequence: { scope, value: command.sequence },
-                revision: { scope: revisionScope, value: revision, commandKey },
+                revision: {
+                    scope: revisionScope,
+                    value: revision,
+                    commandKey,
+                    commandSequence: command.sequence,
+                    commandNonceKey: nonceKey,
+                    commandBaseRevision: command.baseRevision,
+                    commandFingerprint: fingerprint,
+                },
             }
             await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             this.sequences.set(scope, command.sequence)
             this.revisions.set(revisionScope, revision)
-            this.commandRevisions.set(commandKey, revision)
+            this.commandOutcomes.set(commandKey, {
+                revision,
+                sequence: command.sequence,
+                nonceKey,
+                baseRevision: command.baseRevision,
+                fingerprint,
+            })
             return { status: 'accepted' as const, revision }
         })
         this.chain = operation.then(() => undefined, () => undefined)
@@ -244,7 +292,22 @@ export class FileCommandReplayStore implements ReplayStore {
                     throw new Error(`Non-contiguous conversation revision at line ${index + 1}`)
                 }
                 this.revisions.set(value.revision.scope, value.revision.value)
-                this.commandRevisions.set(value.revision.commandKey, value.revision.value)
+                const legacyNonceKey = value.claims.find(
+                    claim => claim.key !== value.revision?.commandKey,
+                )?.key
+                this.commandOutcomes.set(value.revision.commandKey, {
+                    revision: value.revision.value,
+                    sequence:
+                        value.revision.commandSequence
+                        ?? value.sequence?.value,
+                    nonceKey:
+                        value.revision.commandNonceKey
+                        ?? legacyNonceKey,
+                    baseRevision:
+                        value.revision.commandBaseRevision
+                        ?? value.revision.value - 1,
+                    fingerprint: value.revision.commandFingerprint,
+                })
             }
         }
         if (!this.generation) await this.createGeneration()
@@ -321,6 +384,36 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
             && revision.value > 0
             && typeof revision.commandKey === 'string'
             && revision.commandKey.length > 0)) return false
+        if (
+            revision.commandSequence !== undefined
+            && !(
+                typeof revision.commandSequence === 'number'
+                && Number.isSafeInteger(revision.commandSequence)
+                && revision.commandSequence > 0
+            )
+        ) return false
+        if (
+            revision.commandNonceKey !== undefined
+            && !(
+                typeof revision.commandNonceKey === 'string'
+                && revision.commandNonceKey.length > 0
+            )
+        ) return false
+        if (
+            revision.commandBaseRevision !== undefined
+            && !(
+                typeof revision.commandBaseRevision === 'number'
+                && Number.isSafeInteger(revision.commandBaseRevision)
+                && revision.commandBaseRevision >= 0
+            )
+        ) return false
+        if (
+            revision.commandFingerprint !== undefined
+            && !(
+                typeof revision.commandFingerprint === 'string'
+                && revision.commandFingerprint.length > 0
+            )
+        ) return false
     }
     return true
 }
@@ -335,4 +428,11 @@ function conversationRevisionScope(
     revisionEpoch: string,
 ): string {
     return canonicalJson([gatewayId, conversationId, revisionEpoch])
+}
+
+function commandFingerprint(command: CodeverCommand): string {
+    return createHash('sha256')
+        .update('codever-command-recovery:v1\0')
+        .update(canonicalJson(command))
+        .digest('hex')
 }

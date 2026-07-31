@@ -119,6 +119,12 @@ export interface VerificationClock {
   now?: number
   maxFutureSkewMs?: number
   maxLifetimeMs?: number
+  /**
+   * Allows a caller with a durable execution ledger to authenticate an
+   * expired command before deciding whether it is an exact, already-accepted
+   * recovery. This must never be used to execute a new expired command.
+   */
+  allowExpired?: boolean
 }
 
 const DEFAULT_MAX_FUTURE_SKEW_MS = 30_000
@@ -157,7 +163,7 @@ export async function verifyCommand(
   }
 
   const now = clock.now ?? Date.now()
-  if (command.expiresAt <= now) {
+  if (!clock.allowExpired && command.expiresAt <= now) {
     throw new SecurityError('expired', 'Command has expired')
   }
   if (command.issuedAt > now + (clock.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS)) {

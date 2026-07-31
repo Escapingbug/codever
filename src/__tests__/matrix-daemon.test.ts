@@ -89,6 +89,52 @@ describe('strict Matrix command authorization', () => {
         })
     })
 
+    it('recovers an expired command only when the durable ledger already accepted it', async () => {
+        const fixture = await securityFixture()
+        const signed = await signedPrompt(fixture.keys, fixture.now)
+        const context = {
+            roomId: '!room:example.org',
+            conversationId: 'conversation-1',
+            revisionEpoch: REVISION_EPOCH,
+            matrixSender: '@alice:example.org',
+            matrixDeviceKey: 'matrix-ed25519-key',
+        }
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await authorizer.initialize(fixture.now)
+        await expect(
+            authorizer.authorizeDelivery(signed, context, fixture.now),
+        ).resolves.toMatchObject({ duplicate: false, revision: 1 })
+
+        const afterExpiry = fixture.now + 2 * 60_000
+        const restarted = new StrictMatrixCommandAuthorizer(
+            fixture.config.gatewayId,
+            fixture.config.trustedDevices,
+            new FileCommandReplayStore(fixture.config.replayLedgerPath),
+        )
+        await restarted.initialize(afterExpiry)
+        await expect(
+            restarted.authorizeDelivery(signed, context, afterExpiry),
+        ).resolves.toMatchObject({
+            duplicate: true,
+            revision: 1,
+            command: { commandId: signed.command.commandId },
+        })
+
+        const unknownExpired = await signedPrompt(
+            fixture.keys,
+            fixture.now,
+            2,
+            1,
+        )
+        await expect(
+            restarted.authorizeDelivery(unknownExpired, context, afterExpiry),
+        ).rejects.toMatchObject({ code: 'expired' })
+    })
+
     it('rejects a valid app signature arriving through a non-pinned Matrix device', async () => {
         const fixture = await securityFixture()
         const authorizer = new StrictMatrixCommandAuthorizer(

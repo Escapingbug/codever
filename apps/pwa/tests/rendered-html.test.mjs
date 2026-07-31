@@ -287,6 +287,15 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /waitForCommandAcknowledgement/);
   assert.match(matrix, /lastAcknowledged/);
   assert.match(matrix, /retryPendingCommand/);
+  assert.match(matrix, /const expired = command\.expiresAt <= Date\.now\(\)/);
+  assert.match(
+    matrix,
+    /!recovered\.expired &&[\s\S]*JSON\.stringify\(recovered\.payload\)/,
+  );
+  assert.doesNotMatch(
+    matrix,
+    /A queued command expired before the Gateway confirmed it/,
+  );
   assert.match(matrix, /certificate\.certificate\.certificateId/);
   assert.match(matrix, /direction: "device_to_gateway"/);
   assert.match(matrix, /direction: "gateway_to_device"/);

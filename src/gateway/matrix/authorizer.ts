@@ -69,7 +69,14 @@ export class StrictMatrixCommandAuthorizer {
             deviceId: policy.deviceId,
             conversationId: context.conversationId,
             allowedOperations: policy.allowedOperations,
-        }, { now })
+        }, {
+            now,
+            // The replay ledger below is the authority that may recover an
+            // expired command. It accepts only an exact command that it
+            // durably recorded before expiry; every unknown expired command
+            // still fails closed.
+            allowExpired: true,
+        })
         const expectedSequenceEpoch = policy.sequenceEpoch ?? this.sequenceEpoch
         if (command.sequenceEpoch !== expectedSequenceEpoch) {
             throw new MatrixAuthorizationError(

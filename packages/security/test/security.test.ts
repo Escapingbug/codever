@@ -119,6 +119,19 @@ describe('signed commands', () => {
       }, { now }),
     ).rejects.toMatchObject({ code: 'expired' })
   })
+
+  it('can authenticate an expired command for a durable recovery check', async () => {
+    const keys = await generateDeviceKeyPair()
+    const expired = command({ issuedAt: now - 60_000, expiresAt: now - 1 })
+    const signed = await signCommand(expired, keys.privateKey, keys.keyId)
+
+    await expect(
+      verifyCommand(signed, keys.publicKey, {
+        gatewayId: 'gateway-1',
+        deviceId: 'device-1',
+      }, { now, allowExpired: true }),
+    ).resolves.toMatchObject({ commandId: expired.commandId })
+  })
 })
 
 describe('ReplayGuard', () => {
