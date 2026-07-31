@@ -29,7 +29,9 @@ import type {
   Room,
 } from "matrix-js-sdk";
 import {
+  applyGatewayTransportSnapshot,
   completePairing,
+  latestGatewayTransportIssuedAt,
   loadTrustedGateway,
   saveTrustedGateway,
   type PairingPreview,
@@ -37,6 +39,7 @@ import {
   type TrustedGateway,
 } from "./pairing";
 import {
+  CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
   signedGatewayDeviceRotationSchema,
   jsonValueSchema,
   signedSecureEnvelopeSchema,
@@ -795,7 +798,22 @@ export async function connectMatrix(
     if (!client.isRoomEncrypted(config.roomId)) {
       throw new Error("Refusing to connect: the selected Matrix room is not encrypted.");
     }
-    const configuredGateway = gatewayPin(config);
+    if (activeTrust) {
+      handlers.onStatus(
+        "connecting",
+        "Checking the durable Gateway profile snapshot…",
+      );
+      const recoveredTrust = await recoverGatewayTransportSnapshot(
+        client,
+        config,
+        activeTrust,
+      );
+      if (recoveredTrust !== activeTrust) {
+        activeTrust = recoveredTrust;
+        handlers.onTrustUpdated?.(recoveredTrust);
+      }
+    }
+    const configuredGateway = activeTrust?.gatewayTransport ?? gatewayPin(config);
     if (configuredGateway && activeTrust) {
       handlers.onStatus("connecting", "Verifying the trusted Gateway device…");
       await withMatrixTimeout(
@@ -2404,9 +2422,7 @@ async function acceptGatewayDeviceRotation(
     {
       gatewayId: trust.gatewayId,
       previousTransport: trust.gatewayTransport,
-      issuedAfter:
-        trust.rotations.at(-1)?.rotation.issuedAt ??
-        trust.certificate.certificate.issuedAt,
+      issuedAfter: latestGatewayTransportIssuedAt(trust),
     },
   );
   assertMatrixEventMatchesTransport(event, rotation.nextTransport);
@@ -2439,6 +2455,57 @@ async function acceptGatewayDeviceRotation(
     format: "plain",
     raw: { type: "gateway.device.rotated", rotationId: rotation.rotationId },
   });
+}
+
+async function recoverGatewayTransportSnapshot(
+  client: MatrixClient,
+  config: MatrixConnectionConfig,
+  trust: TrustedGateway,
+): Promise<TrustedGateway> {
+  let content: Record<string, unknown>;
+  try {
+    const profileValue = await client.getExtendedProfileProperty(
+      trust.gatewayTransport.userId,
+      CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
+    );
+    if (!profileValue || typeof profileValue !== "object") {
+      throw new Error("The Gateway transport recovery profile is malformed.");
+    }
+    content = profileValue as Record<string, unknown>;
+  } catch (error) {
+    if (isMatrixNotFound(error)) return trust;
+    throw error;
+  }
+  const signedSnapshot = content.signed_snapshot;
+  if (content.version !== 1 || !signedSnapshot) {
+    throw new Error("The Gateway transport recovery profile is malformed.");
+  }
+  const nextTrust = await applyGatewayTransportSnapshot(
+    trust,
+    signedSnapshot,
+  );
+  if (nextTrust === trust) return trust;
+  await verifyAndPinGatewayDevice(client, nextTrust.gatewayTransport);
+  saveTrustedGateway(nextTrust);
+  config.gatewayMatrixUserId = nextTrust.gatewayTransport.userId;
+  config.gatewayMatrixDeviceId = nextTrust.gatewayTransport.deviceId;
+  config.gatewayMatrixEd25519 = nextTrust.gatewayTransport.ed25519;
+  saveMatrixConfig(config);
+  return nextTrust;
+}
+
+function isMatrixNotFound(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    errcode?: unknown;
+    httpStatus?: unknown;
+    status?: unknown;
+  };
+  return (
+    candidate.errcode === "M_NOT_FOUND" ||
+    candidate.httpStatus === 404 ||
+    candidate.status === 404
+  );
 }
 
 function assertMatrixEventMatchesTransport(

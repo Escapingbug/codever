@@ -57,6 +57,7 @@ interface PairingState {
   trustedDevices: Record<string, TrustedDeviceRecord>
   gatewayTransport?: MatrixTransportBinding
   gatewayRotationIssuedAt?: number
+  gatewaySnapshotIssuedAt?: number
 }
 
 function initialState(): PairingState {
@@ -361,6 +362,7 @@ export class FileTrustedDeviceRegistry {
   async getGatewayTransportHead(): Promise<{
     transport?: MatrixTransportBinding
     lastRotationIssuedAt?: number
+    lastSnapshotIssuedAt?: number
   }> {
     return this.file.transaction(initialState, (state) => {
       validateState(state)
@@ -370,6 +372,7 @@ export class FileTrustedDeviceRegistry {
             ? structuredClone(state.gatewayTransport)
             : Object.values(state.trustedDevices)[0]?.certificate.certificate.gatewayTransport,
           lastRotationIssuedAt: state.gatewayRotationIssuedAt,
+          lastSnapshotIssuedAt: state.gatewaySnapshotIssuedAt,
         },
         changed: false,
       }
@@ -389,8 +392,10 @@ export class FileTrustedDeviceRegistry {
         throw new Error('Gateway transport changed concurrently')
       }
       if (
-        state.gatewayRotationIssuedAt !== undefined
-        && issuedAt <= state.gatewayRotationIssuedAt
+        issuedAt <= Math.max(
+          state.gatewayRotationIssuedAt ?? -1,
+          state.gatewaySnapshotIssuedAt ?? -1,
+        )
       ) {
         throw new Error('Gateway rotation timestamp did not advance')
       }
@@ -399,6 +404,30 @@ export class FileTrustedDeviceRegistry {
       for (const record of Object.values(state.trustedDevices)) {
         if (record.status === 'active') record.gatewayTransport = structuredClone(next)
       }
+      return { result: undefined, changed: true }
+    })
+  }
+
+  async recordGatewayTransportSnapshot(
+    transport: MatrixTransportBinding,
+    issuedAt: number,
+  ): Promise<void> {
+    await this.file.transaction(initialState, (state) => {
+      validateState(state)
+      const current = state.gatewayTransport
+        ?? Object.values(state.trustedDevices)[0]?.certificate.certificate.gatewayTransport
+      if (current && canonicalJson(current) !== canonicalJson(transport)) {
+        throw new Error('Gateway snapshot transport does not match the current head')
+      }
+      if (
+        issuedAt <= Math.max(
+          state.gatewayRotationIssuedAt ?? -1,
+          state.gatewaySnapshotIssuedAt ?? -1,
+        )
+      ) {
+        throw new Error('Gateway snapshot timestamp did not advance')
+      }
+      state.gatewaySnapshotIssuedAt = issuedAt
       return { result: undefined, changed: true }
     })
   }
@@ -415,5 +444,16 @@ function validateState(state: PairingState): void {
     !state.trustedDevices
   ) {
     throw new TypeError('Pairing registry state is invalid')
+  }
+  for (const timestamp of [
+    state.gatewayRotationIssuedAt,
+    state.gatewaySnapshotIssuedAt,
+  ]) {
+    if (
+      timestamp !== undefined &&
+      (!Number.isSafeInteger(timestamp) || timestamp < 0)
+    ) {
+      throw new TypeError('Pairing registry Gateway timestamp is invalid')
+    }
   }
 }

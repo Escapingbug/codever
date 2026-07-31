@@ -353,6 +353,52 @@ export const signedGatewayDeviceRotationSchema = z
 
 export type SignedGatewayDeviceRotation = z.infer<typeof signedGatewayDeviceRotationSchema>
 
+/**
+ * Durable recovery anchor for the Gateway's current Matrix transport.
+ *
+ * Unlike the incremental rotation chain, this root-signed snapshot can be
+ * recovered from the Gateway's Matrix profile after a PWA was offline across multiple
+ * Gateway restarts.
+ */
+export const gatewayTransportSnapshotSchema = z
+  .object({
+    kind: z.literal('codever.gateway.transport-snapshot'),
+    version: z.literal(PROTOCOL_VERSION),
+    snapshotId: opaqueId,
+    gatewayId: opaqueId,
+    gatewayKeyId: sha256Base64Url,
+    transport: matrixTransportBindingSchema,
+    issuedAt: timestamp,
+    expiresAt: timestamp,
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    if (snapshot.expiresAt <= snapshot.issuedAt) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'expiresAt must be later than issuedAt',
+      })
+    }
+  })
+
+export type GatewayTransportSnapshot = z.infer<typeof gatewayTransportSnapshotSchema>
+
+export const signedGatewayTransportSnapshotSchema = z
+  .object({
+    snapshot: gatewayTransportSnapshotSchema,
+    signature: pairingSignatureSchema,
+  })
+  .strict()
+
+export type SignedGatewayTransportSnapshot = z.infer<
+  typeof signedGatewayTransportSnapshotSchema
+>
+
+/** Public Matrix profile storage is safe here because the payload is root-signed. */
+export const CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD =
+  'io.codever.gateway_transport' as const
+
 export const PAIRING_LINK_PREFIX = 'codever://pair?data=' as const
 
 function encodeBase64Url(value: Uint8Array): string {

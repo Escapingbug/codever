@@ -10,6 +10,7 @@ import {
   generateDeviceKeyPair,
   PairingOfferGuard,
   verifyGatewayDeviceRotation,
+  verifyGatewayTransportSnapshot,
   verifyPairingResponse,
 } from '@codever/security'
 import {
@@ -328,6 +329,32 @@ describe('Gateway pairing', () => {
     ).resolves.toMatchObject({ nextTransport })
   })
 
+  it('signs a durable current-transport snapshot with the stable Gateway key', async () => {
+    const fixture = await pairingFixture()
+    const currentTransport = {
+      ...gatewayTransport(),
+      deviceId: 'GATEWAY_CURRENT',
+      ed25519: 'gateway-ed25519-current-key',
+    }
+    const snapshot = await fixture.service.signMatrixTransportSnapshot(
+      currentTransport,
+      now,
+    )
+
+    await expect(
+      verifyGatewayTransportSnapshot(
+        snapshot,
+        fixture.identity.keys.publicKey,
+        {
+          gatewayId: fixture.identity.gatewayId,
+          currentTransport: gatewayTransport(),
+          issuedAfter: now - 1,
+        },
+        { now },
+      ),
+    ).resolves.toMatchObject({ transport: currentTransport })
+  })
+
   it('persists the acknowledged Gateway transport across restarts', async () => {
     const fixture = await pairingFixture()
     const previousTransport = gatewayTransport()
@@ -352,12 +379,14 @@ describe('Gateway pairing', () => {
       ed25519: 'gateway-ed25519-next-key',
     }
     await fixture.registry.rotateGatewayTransport(previousTransport, nextTransport, now)
+    await fixture.registry.recordGatewayTransportSnapshot(nextTransport, now + 1)
 
     const restarted = new FileTrustedDeviceRegistry(fixture.registryPath)
     await expect(restarted.getGatewayTransport()).resolves.toEqual(nextTransport)
     await expect(restarted.getGatewayTransportHead()).resolves.toMatchObject({
       transport: nextTransport,
       lastRotationIssuedAt: now,
+      lastSnapshotIssuedAt: now + 1,
     })
     await expect(
       restarted.rotateGatewayTransport(previousTransport, {
@@ -370,7 +399,7 @@ describe('Gateway pairing', () => {
         ...nextTransport,
         deviceId: 'GATEWAY_LATER',
         ed25519: 'gateway-ed25519-later-key',
-      }, now),
+      }, now + 1),
     ).rejects.toThrow('timestamp did not advance')
   })
 })

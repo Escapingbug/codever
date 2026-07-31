@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CommandLifecycle } from "../app/commandLifecycle.ts";
+import {
+  CommandLifecycle,
+  waitForCommandCompletion,
+} from "../app/commandLifecycle.ts";
 import {
   acquireMatrixCryptoLock,
   checkpointAndReleaseMatrixSyncStore,
@@ -353,6 +356,14 @@ test("command result permanently replaces a missing explicit ack", async () => {
     revision: 12,
     outcome: "failed",
   });
+});
+
+test("a missing terminal result cannot leave command UI busy forever", async () => {
+  const neverCompletes = new Promise(() => {});
+  await assert.rejects(
+    waitForCommandCompletion(neverCompletes, 10),
+    /accepted this command but did not confirm its final result/i,
+  );
 });
 
 test("Matrix sync databases are isolated by origin, user, device, and room", async () => {

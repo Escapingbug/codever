@@ -35,6 +35,7 @@ export interface MatrixGatewayClient extends MatrixTransport {
     waitUntilReady(timeoutMs?: number): Promise<void>
     assertRoomEncrypted(roomId: string): Promise<void>
     pinTrustedDevices?(devices: MatrixGatewayTrustedDevice[]): Promise<void>
+    setExtendedProfileProperty?(key: string, value: unknown): Promise<void>
     stop(): Promise<void>
 }
 
@@ -173,6 +174,11 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
             request.transactionId,
         )
         return { eventId: result.event_id }
+    }
+
+    async setExtendedProfileProperty(key: string, value: unknown): Promise<void> {
+        if (!this.started) throw new Error('Matrix client is not ready')
+        await this.client.setExtendedProfileProperty(key, value)
     }
 
     async setTyping(roomId: string, typing: boolean, timeoutMs = 30_000): Promise<void> {

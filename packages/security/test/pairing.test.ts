@@ -17,11 +17,13 @@ import {
   pairingRequestDigest,
   PairingOfferGuard,
   signGatewayDeviceRotation,
+  signGatewayTransportSnapshot,
   signPairingCertificate,
   signPairingOffer,
   signPairingRequest,
   signPairingResponse,
   verifyGatewayDeviceRotation,
+  verifyGatewayTransportSnapshot,
   verifyPairingOffer,
   verifyPairingRequest,
   verifyPairingResponse,
@@ -360,6 +362,80 @@ describe('Gateway Matrix device rotation', () => {
         signed,
         legitimate.publicKey,
         { gatewayId: 'gateway-1', previousTransport: gatewayTransport },
+        { now },
+      ),
+    ).rejects.toMatchObject({ code: 'binding_mismatch' })
+  })
+})
+
+describe('Gateway Matrix transport snapshot', () => {
+  it('recovers the current device directly from the stable Gateway key', async () => {
+    const gatewayKeys = await generateDeviceKeyPair()
+    const currentTransport = {
+      ...gatewayTransport,
+      deviceId: 'GATEWAY_CURRENT',
+      ed25519: 'current-gateway-ed25519-fingerprint',
+    }
+    const signed = await signGatewayTransportSnapshot(
+      {
+        kind: 'codever.gateway.transport-snapshot',
+        version: 1,
+        snapshotId: 'snapshot-1',
+        gatewayId: 'gateway-1',
+        gatewayKeyId: gatewayKeys.keyId,
+        transport: currentTransport,
+        issuedAt: now,
+        expiresAt: now + 366 * 24 * 60 * 60_000,
+      },
+      gatewayKeys.privateKey,
+      gatewayKeys.keyId,
+    )
+
+    await expect(
+      verifyGatewayTransportSnapshot(
+        signed,
+        gatewayKeys.publicKey,
+        {
+          gatewayId: 'gateway-1',
+          currentTransport: gatewayTransport,
+          issuedAfter: now - 1,
+        },
+        { now: now + 30 * 24 * 60 * 60_000 },
+      ),
+    ).resolves.toMatchObject({ transport: currentTransport })
+  })
+
+  it('rejects a root-signed snapshot that changes the Matrix room scope', async () => {
+    const gatewayKeys = await generateDeviceKeyPair()
+    const signed = await signGatewayTransportSnapshot(
+      {
+        kind: 'codever.gateway.transport-snapshot',
+        version: 1,
+        snapshotId: 'snapshot-wrong-room',
+        gatewayId: 'gateway-1',
+        gatewayKeyId: gatewayKeys.keyId,
+        transport: {
+          ...gatewayTransport,
+          roomId: '!attacker:example.org',
+          deviceId: 'GATEWAY_CURRENT',
+          ed25519: 'current-gateway-ed25519-fingerprint',
+        },
+        issuedAt: now,
+        expiresAt: now + 60_000,
+      },
+      gatewayKeys.privateKey,
+      gatewayKeys.keyId,
+    )
+
+    await expect(
+      verifyGatewayTransportSnapshot(
+        signed,
+        gatewayKeys.publicKey,
+        {
+          gatewayId: 'gateway-1',
+          currentTransport: gatewayTransport,
+          issuedAfter: now - 1,
+        },
         { now },
       ),
     ).rejects.toMatchObject({ code: 'binding_mismatch' })

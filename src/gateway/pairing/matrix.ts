@@ -1,4 +1,5 @@
 import {
+  CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
   signedPairingRequestSchema,
   type CommandOperation,
   type MatrixTransportBinding,
@@ -47,7 +48,11 @@ export async function announceMatrixDeviceRotation(options: {
   const signedRotation = await options.service.signMatrixRotation(
     previousTransport,
     options.nextTransport,
-    Math.max(Date.now(), (head.lastRotationIssuedAt ?? 0) + 1),
+    Math.max(
+      Date.now(),
+      (head.lastRotationIssuedAt ?? 0) + 1,
+      (head.lastSnapshotIssuedAt ?? 0) + 1,
+    ),
   )
   await options.client.sendEncryptedRoomEvent({
     roomId: options.nextTransport.roomId,
@@ -69,6 +74,42 @@ export async function announceMatrixDeviceRotation(options: {
     signedRotation.rotation.issuedAt,
   )
   return true
+}
+
+/**
+ * Publishes a root-signed, overwrite-in-place recovery anchor. Unlike the
+ * encrypted timeline rotation event, the Gateway's extended Matrix profile
+ * remains fetchable after a PWA was offline across any number of restarts.
+ */
+export async function publishMatrixTransportSnapshot(options: {
+  client: MatrixGatewayClient
+  service: GatewayPairingService
+  registry: FileTrustedDeviceRegistry
+  transport: MatrixTransportBinding
+}): Promise<void> {
+  if (!options.client.setExtendedProfileProperty) {
+    throw new Error('Matrix transport does not support durable profile fields')
+  }
+  const head = await options.registry.getGatewayTransportHead()
+  const signedSnapshot = await options.service.signMatrixTransportSnapshot(
+    options.transport,
+    Math.max(
+      Date.now(),
+      (head.lastRotationIssuedAt ?? 0) + 1,
+      (head.lastSnapshotIssuedAt ?? 0) + 1,
+    ),
+  )
+  await options.client.setExtendedProfileProperty(
+    CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
+    {
+      version: 1,
+      signed_snapshot: signedSnapshot,
+    },
+  )
+  await options.registry.recordGatewayTransportSnapshot(
+    options.transport,
+    signedSnapshot.snapshot.issuedAt,
+  )
 }
 
 export async function waitForMatrixPairing(

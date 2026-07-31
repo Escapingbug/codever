@@ -4,6 +4,7 @@ import {
   encodePairingLink,
   signedPairingRequestSchema,
   type GatewayDeviceRotation,
+  type GatewayTransportSnapshot,
   type MatrixTransportBinding,
   type PairingCertificate,
   type PairingOffer,
@@ -11,6 +12,7 @@ import {
   type PairingRequest,
   type PairingResponse,
   type SignedGatewayDeviceRotation,
+  type SignedGatewayTransportSnapshot,
   type SignedPairingOffer,
   type SignedPairingRequest,
   type SignedPairingResponse,
@@ -24,6 +26,7 @@ import {
   PairingOfferGuard,
   sha256,
   signGatewayDeviceRotation,
+  signGatewayTransportSnapshot,
   signPairingCertificate,
   signPairingOffer,
   signPairingRequest,
@@ -45,6 +48,7 @@ const CERTIFICATE_LIFETIME_MS = 365 * 24 * 60 * 60_000
 // Rotations form a durable chain for clients that may be offline. This matches
 // the maximum pairing-certificate lifetime enforced by the security package.
 const ROTATION_LIFETIME_MS = 366 * 24 * 60 * 60_000
+const TRANSPORT_SNAPSHOT_LIFETIME_MS = ROTATION_LIFETIME_MS
 const allOperations: PairingOperation[] = [
   'prompt',
   'cancel',
@@ -305,6 +309,27 @@ export class GatewayPairingService {
     }
     return signGatewayDeviceRotation(
       rotation,
+      this.identity.keys.privateKey,
+      this.identity.keys.keyId,
+    )
+  }
+
+  async signMatrixTransportSnapshot(
+    transport: MatrixTransportBinding,
+    now = Date.now(),
+  ): Promise<SignedGatewayTransportSnapshot> {
+    const snapshot: GatewayTransportSnapshot = {
+      kind: 'codever.gateway.transport-snapshot',
+      version: 1,
+      snapshotId: randomUUID(),
+      gatewayId: this.identity.gatewayId,
+      gatewayKeyId: this.identity.keys.keyId,
+      transport,
+      issuedAt: now,
+      expiresAt: now + TRANSPORT_SNAPSHOT_LIFETIME_MS,
+    }
+    return signGatewayTransportSnapshot(
+      snapshot,
       this.identity.keys.privateKey,
       this.identity.keys.keyId,
     )

@@ -114,6 +114,9 @@ display data from encrypted Codever events.
 9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
    device-list changes can therefore be caught up before a Gateway-signed
    transport rotation is pinned; the sync checkpoint itself grants no trust.
+   If incremental rotations fell outside the local timeline, the PWA fetches
+   the Gateway's root-signed current transport from its fixed extended Matrix
+   profile field before it verifies the Matrix device and sends a command.
 
 ## Attachment and artifact flow
 

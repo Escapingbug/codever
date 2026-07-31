@@ -17,6 +17,7 @@ import {
   type CodeverAttachment,
   type CommandPayload,
 } from "@codever/protocol";
+import { waitForCommandCompletion } from "./commandLifecycle";
 import {
   SENDING_AGENT_ACTIVITY,
   STARTING_AGENT_ACTIVITY,
@@ -1641,7 +1642,9 @@ export function CodeverApp() {
           ? { reasoningEffort: input.reasoningEffort }
           : {}),
       });
-      const completion = sent ? await sent.completion : null;
+      const completion = sent
+        ? await waitForCommandCompletion(sent.completion)
+        : null;
       if (completion?.outcome === "succeeded") {
         if (completion.sessionId) {
           pendingCreatedSessionIdRef.current = completion.sessionId;
@@ -1649,6 +1652,8 @@ export function CodeverApp() {
         setNewSessionOpen(false);
         setMobileChatOpen(true);
       }
+    } catch (error) {
+      setConnectionError(formatUiError(error));
     } finally {
       setNewSessionBusy(false);
     }

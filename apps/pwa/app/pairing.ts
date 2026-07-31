@@ -5,6 +5,7 @@ import {
   decodePairingLink,
   pairingLinkFromDeviceInvitation as protocolPairingLinkFromDeviceInvitation,
   signedGatewayDeviceRotationSchema,
+  signedGatewayTransportSnapshotSchema,
   signedPairingCertificateSchema,
   signedPairingOfferSchema,
   signedPairingRequestSchema,
@@ -15,6 +16,7 @@ import {
   type MatrixLoginInvitation,
   type PairingPublicKey,
   type SignedGatewayDeviceRotation,
+  type SignedGatewayTransportSnapshot,
   type SignedPairingCertificate,
   type SignedPairingOffer,
   type SignedPairingRequest,
@@ -25,6 +27,7 @@ import {
   pairingOfferDigest,
   signPairingRequest,
   verifyGatewayDeviceRotation,
+  verifyGatewayTransportSnapshot,
   verifyPairingCertificate,
   verifyPairingOffer,
   verifyPairingRequest,
@@ -64,6 +67,7 @@ export type TrustedGateway = {
   request: SignedPairingRequest;
   certificate: SignedPairingCertificate;
   rotations: SignedGatewayDeviceRotation[];
+  transportSnapshots: SignedGatewayTransportSnapshot[];
   pairedAt: number;
 };
 
@@ -207,6 +211,7 @@ export async function completePairing(
     request: signedRequest,
     certificate,
     rotations: [],
+    transportSnapshots: [],
     pairedAt: Date.now(),
   };
   clearPendingPairing();
@@ -292,28 +297,55 @@ export async function loadTrustedGateway(
     const rotations = (parsed.rotations ?? []).map((rotation) =>
       signedGatewayDeviceRotationSchema.parse(rotation),
     );
+    const transportSnapshots = (parsed.transportSnapshots ?? []).map(
+      (snapshot) => signedGatewayTransportSnapshotSchema.parse(snapshot),
+    );
     let expectedTransport = certificate.certificate.gatewayTransport;
     let previousIssuedAt = certificate.certificate.issuedAt;
     const rotationIds = new Set<string>();
-    for (const signedRotation of rotations) {
-      const rotation = await verifyGatewayDeviceRotation(
-        signedRotation,
-        parsed.gatewayKey.publicKey,
-        {
-          gatewayId: parsed.gatewayId,
-          previousTransport: expectedTransport,
-        },
-        { now: signedRotation.rotation.issuedAt },
-      );
-      if (
-        rotationIds.has(rotation.rotationId) ||
-        rotation.issuedAt <= previousIssuedAt
-      ) {
-        return null;
+    const snapshotIds = new Set<string>();
+    const updates = [
+      ...rotations.map((signed) => ({
+        kind: "rotation" as const,
+        issuedAt: signed.rotation.issuedAt,
+        signed,
+      })),
+      ...transportSnapshots.map((signed) => ({
+        kind: "snapshot" as const,
+        issuedAt: signed.snapshot.issuedAt,
+        signed,
+      })),
+    ].sort((left, right) => left.issuedAt - right.issuedAt);
+    for (const update of updates) {
+      if (update.issuedAt <= previousIssuedAt) return null;
+      if (update.kind === "rotation") {
+        const rotation = await verifyGatewayDeviceRotation(
+          update.signed,
+          parsed.gatewayKey.publicKey,
+          {
+            gatewayId: parsed.gatewayId,
+            previousTransport: expectedTransport,
+          },
+          { now: update.issuedAt },
+        );
+        if (rotationIds.has(rotation.rotationId)) return null;
+        rotationIds.add(rotation.rotationId);
+        expectedTransport = rotation.nextTransport;
+      } else {
+        const snapshot = await verifyGatewayTransportSnapshot(
+          update.signed,
+          parsed.gatewayKey.publicKey,
+          {
+            gatewayId: parsed.gatewayId,
+            currentTransport: expectedTransport,
+          },
+          { now: update.issuedAt },
+        );
+        if (snapshotIds.has(snapshot.snapshotId)) return null;
+        snapshotIds.add(snapshot.snapshotId);
+        expectedTransport = snapshot.transport;
       }
-      rotationIds.add(rotation.rotationId);
-      previousIssuedAt = rotation.issuedAt;
-      expectedTransport = rotation.nextTransport;
+      previousIssuedAt = update.issuedAt;
     }
     if (
       parsed.version !== 1 ||
@@ -332,10 +364,57 @@ export async function loadTrustedGateway(
     ) {
       return null;
     }
-    return { ...parsed, offer, request, certificate, rotations };
+    return {
+      ...parsed,
+      offer,
+      request,
+      certificate,
+      rotations,
+      transportSnapshots,
+    };
   } catch {
     return null;
   }
+}
+
+export function latestGatewayTransportIssuedAt(trust: TrustedGateway): number {
+  return Math.max(
+    trust.certificate.certificate.issuedAt,
+    ...trust.rotations.map((rotation) => rotation.rotation.issuedAt),
+    ...trust.transportSnapshots.map((snapshot) => snapshot.snapshot.issuedAt),
+  );
+}
+
+export async function applyGatewayTransportSnapshot(
+  trust: TrustedGateway,
+  input: unknown,
+  now = Date.now(),
+): Promise<TrustedGateway> {
+  const signedSnapshot = signedGatewayTransportSnapshotSchema.parse(input);
+  const lastIssuedAt = latestGatewayTransportIssuedAt(trust);
+  const snapshot = await verifyGatewayTransportSnapshot(
+    signedSnapshot,
+    trust.gatewayKey.publicKey,
+    {
+      gatewayId: trust.gatewayId,
+      currentTransport: trust.gatewayTransport,
+      ...(signedSnapshot.snapshot.issuedAt > lastIssuedAt
+        ? { issuedAfter: lastIssuedAt }
+        : {}),
+    },
+    { now },
+  );
+  if (snapshot.issuedAt <= lastIssuedAt) return trust;
+  return {
+    ...trust,
+    gatewayTransport: snapshot.transport,
+    // A root snapshot supersedes all older incremental anchors. Retain only
+    // updates that could have followed it (normally none at fetch time).
+    rotations: trust.rotations.filter(
+      (rotation) => rotation.rotation.issuedAt > snapshot.issuedAt,
+    ),
+    transportSnapshots: [signedSnapshot],
+  };
 }
 
 export function saveTrustedGateway(trust: TrustedGateway): void {

@@ -147,15 +147,16 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
 - The localhost Gateway intentionally uses an in-memory Matrix crypto store and
   a fresh Matrix device on every start. This is allowed only by the explicit
   local-test flag. The fresh device is signed by the persistent Gateway P-256
-  application key, so the PWA updates its Matrix pin automatically without
-  another user pairing action.
+  application key. The live encrypted rotation is the fast path; a root-signed
+  current-transport snapshot in the Gateway's extended Matrix profile lets an
+  offline PWA catch up without another user pairing action or room state power.
 - The local Gateway's application delivery outbox is durable. Restart and
   short Matrix outages should recover only missing recipient copies, using
   their original stable transactions and certificate generation.
 - An already paired PWA follows that signed rotation. A pairing request that
   has not yet received its first certificate cannot survive this local
-  Gateway's fresh Matrix-device restart; rescan the new QR. Production desktop
-  packaging must persist the Gateway Matrix crypto device.
+  Gateway's fresh Matrix-device restart; rescan the new QR. Paired-device
+  recovery requires a homeserver with the Matrix `m.profile_fields` capability.
 - The Gateway application identity, trusted devices, one-time offer replay
   ledger and current rotation head are persisted independently of Matrix.
   The local fixture stores them in ignored `dev/matrix/gateway-data`.

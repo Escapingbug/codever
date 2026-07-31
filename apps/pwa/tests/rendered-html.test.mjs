@@ -345,6 +345,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
   assert.match(matrix, /kind: "pairing_request"/);
   assert.match(matrix, /verifyGatewayDeviceRotation/);
+  assert.match(matrix, /CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD/);
+  assert.match(matrix, /recoverGatewayTransportSnapshot/);
+  assert.match(matrix, /applyGatewayTransportSnapshot/);
+  assert.match(pairing, /verifyGatewayTransportSnapshot/);
+  assert.match(pairing, /transportSnapshots/);
+  assert.match(app, /waitForCommandCompletion\(sent\.completion\)/);
   assert.match(
     matrix,
     /verifyGatewayDeviceRotation[\s\S]*assertMatrixEventMatchesTransport\(event, rotation\.nextTransport\)/,

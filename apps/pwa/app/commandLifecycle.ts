@@ -9,6 +9,33 @@ export type CommandCompletion = {
   result?: JsonValue;
 };
 
+export const COMMAND_COMPLETION_TIMEOUT_MS = 60_000;
+
+export function waitForCommandCompletion(
+  completion: Promise<CommandCompletion>,
+  timeoutMs = COMMAND_COMPLETION_TIMEOUT_MS,
+): Promise<CommandCompletion> {
+  return new Promise((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      reject(
+        new Error(
+          "The Gateway accepted this command but did not confirm its final result. Reconnect to recover the command before retrying.",
+        ),
+      );
+    }, timeoutMs);
+    completion.then(
+      (result) => {
+        globalThis.clearTimeout(timeout);
+        resolve(result);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 type Acknowledgement = {
   sequence: number;
   revision: number;

@@ -12,6 +12,7 @@ import {
     GatewayPairingService,
     listenForMatrixPairingRequests,
     announceMatrixDeviceRotation,
+    publishMatrixTransportSnapshot,
     pairingVerificationCode,
     trustedDeviceFromRecord,
     waitForMatrixPairing,
@@ -182,6 +183,13 @@ if (active.length === 0) {
     if (rotated) {
         process.stdout.write('Gateway Matrix transport key rotated and signed automatically.\n')
     }
+    await publishMatrixTransportSnapshot({
+        client,
+        service: pairingService,
+        registry,
+        transport: currentTransport,
+    })
+    process.stdout.write('Published the durable Gateway profile recovery snapshot.\n')
     if (process.env.CODEVER_PAIR_NEW_DEVICE === '1') {
         const created = await invitationCoordinator.create({
             source: { kind: 'gateway-startup' },

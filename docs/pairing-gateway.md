@@ -72,6 +72,13 @@ certificate verification.
 - A new ephemeral Gateway Matrix device can be announced with a rotation
   statement signed by the persistent Gateway P-256 key. The PWA therefore does
   not need to pair again after a Gateway Matrix crypto restart.
+- The Gateway also publishes a root-signed current-transport snapshot in its
+  `io.codever.gateway_transport` extended Matrix profile field. A PWA that was
+  offline across multiple rotations fetches that fixed field, verifies the
+  persistent Gateway key and Matrix device fingerprint, and then rotates its
+  outbound Megolm session before sending a command. The profile contains only
+  public routing keys and requires homeserver support for `m.profile_fields`;
+  it does not require room moderator power.
 
 Protect the directory containing `gateway-identity.json`; it contains the
 Gateway private application key. Unix systems set the identity file to mode
@@ -87,7 +94,9 @@ Gateway private application key. Unix systems set the identity file to mode
   `io.codever.kind = "pairing_response"` /
   `io.codever.pairing_response`;
 - publish signed Gateway device rotations before using a replacement Matrix
-  device identity.
+  device identity;
+- publish the root-signed current transport in the Gateway user's extended
+  Matrix profile after the replacement device is active.
 
 Cryptographic checks never accept Matrix room membership or homeserver claims
 as authorization.

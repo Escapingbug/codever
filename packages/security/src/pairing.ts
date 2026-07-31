@@ -2,16 +2,19 @@ import {
   canonicalJson,
   canonicalJsonBytes,
   gatewayDeviceRotationSchema,
+  gatewayTransportSnapshotSchema,
   pairingCertificateSchema,
   pairingOfferSchema,
   pairingRequestSchema,
   pairingResponseSchema,
   signedGatewayDeviceRotationSchema,
+  signedGatewayTransportSnapshotSchema,
   signedPairingCertificateSchema,
   signedPairingOfferSchema,
   signedPairingRequestSchema,
   signedPairingResponseSchema,
   type GatewayDeviceRotation,
+  type GatewayTransportSnapshot,
   type MatrixTransportBinding,
   type PairingCertificate,
   type PairingOffer,
@@ -19,6 +22,7 @@ import {
   type PairingRequest,
   type PairingResponse,
   type SignedGatewayDeviceRotation,
+  type SignedGatewayTransportSnapshot,
   type SignedPairingCertificate,
   type SignedPairingOffer,
   type SignedPairingRequest,
@@ -485,6 +489,97 @@ export async function signGatewayDeviceRotation(
       ),
     },
   }
+}
+
+export async function signGatewayTransportSnapshot(
+  input: GatewayTransportSnapshot,
+  gatewayPrivateKey: CryptoKey,
+  gatewayKeyId: string,
+): Promise<SignedGatewayTransportSnapshot> {
+  const snapshot = gatewayTransportSnapshotSchema.parse(input)
+  if (snapshot.gatewayKeyId !== gatewayKeyId) {
+    throw new SecurityError('key_mismatch', 'Transport snapshot Gateway key does not match its signer')
+  }
+  return {
+    snapshot,
+    signature: {
+      algorithm: 'ES256',
+      keyId: gatewayKeyId,
+      value: await signDocument(
+        'codever.gateway.transport-snapshot.v1',
+        snapshot,
+        gatewayPrivateKey,
+      ),
+    },
+  }
+}
+
+export async function verifyGatewayTransportSnapshot(
+  input: unknown,
+  trustedGatewayKey: CryptoKey | JsonWebKey,
+  expected: {
+    gatewayId: string
+    currentTransport: MatrixTransportBinding
+    issuedAfter?: number
+  },
+  clock: PairingVerificationClock = {},
+): Promise<GatewayTransportSnapshot> {
+  const signed = signedGatewayTransportSnapshotSchema.parse(input)
+  const expectedKeyId = await publicKeyId(trustedGatewayKey)
+  if (
+    signed.snapshot.gatewayId !== expected.gatewayId ||
+    signed.snapshot.gatewayKeyId !== expectedKeyId
+  ) {
+    throw new SecurityError(
+      'binding_mismatch',
+      'Gateway transport snapshot is not bound to the pinned identity',
+    )
+  }
+  if (
+    signed.snapshot.transport.homeserver !== expected.currentTransport.homeserver ||
+    signed.snapshot.transport.roomId !== expected.currentTransport.roomId ||
+    signed.snapshot.transport.userId !== expected.currentTransport.userId
+  ) {
+    throw new SecurityError(
+      'binding_mismatch',
+      'Gateway transport snapshot changed the pinned Matrix scope',
+    )
+  }
+  if (
+    expected.issuedAfter !== undefined &&
+    signed.snapshot.issuedAt <= expected.issuedAfter
+  ) {
+    throw new SecurityError(
+      'replay',
+      'Gateway transport snapshot does not advance the trusted transport',
+    )
+  }
+  const trustedPublicKey =
+    isCryptoKey(trustedGatewayKey)
+      ? trustedGatewayKey
+      : await webCrypto().subtle.importKey(
+          'jwk',
+          trustedGatewayKey,
+          { name: 'ECDSA', namedCurve: 'P-256' },
+          false,
+          ['verify'],
+        )
+  if (
+    signed.signature.keyId !== expectedKeyId ||
+    !(await verifyDocument(
+      'codever.gateway.transport-snapshot.v1',
+      signed.snapshot,
+      signed.signature.value,
+      trustedPublicKey,
+    ))
+  ) {
+    throw new SecurityError(
+      'invalid_signature',
+      'Gateway transport snapshot signature is invalid',
+    )
+  }
+  assertWindow(signed.snapshot, clock, DEFAULT_ROTATION_LIFETIME_MS)
+  return signed.snapshot
 }
 
 export async function verifyGatewayDeviceRotation(

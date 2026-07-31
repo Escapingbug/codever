@@ -2,7 +2,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { generateDeviceKeyPair, PairingOfferGuard } from '@codever/security'
+import {
+  generateDeviceKeyPair,
+  PairingOfferGuard,
+  verifyGatewayTransportSnapshot,
+} from '@codever/security'
+import { CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD } from '@codever/protocol'
 import { FileReplayStore } from '@codever/security/node'
 import {
   CODEVER_MATRIX_EXTENSION,
@@ -21,6 +26,7 @@ import {
   FileTrustedDeviceRegistry,
   GatewayPairingService,
   listenForMatrixPairingRequests,
+  publishMatrixTransportSnapshot,
 } from '@/gateway/pairing'
 
 const temporaryDirectories: string[] = []
@@ -34,6 +40,55 @@ afterEach(async () => {
 })
 
 describe('long-lived Matrix pairing recovery', () => {
+  it('publishes a root-signed current transport in the durable Gateway profile', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-transport-state-'))
+    temporaryDirectories.push(directory)
+    const gatewayTransport = {
+      homeserver: 'http://localhost:8008',
+      roomId: '!secure:localhost',
+      userId: '@gateway:localhost',
+      deviceId: 'GATEWAY_MATRIX',
+      ed25519: 'gateway-matrix-ed25519',
+    }
+    const identity = await new FileGatewayIdentityStore(
+      join(directory, 'identity.json'),
+    ).loadOrCreate('gateway-one')
+    const registry = new FileTrustedDeviceRegistry(join(directory, 'registry.json'))
+    const service = new GatewayPairingService(
+      identity,
+      registry,
+      new PairingOfferGuard(new FileReplayStore(join(directory, 'offers.json'))),
+    )
+    const client = new FakePairingClient()
+
+    await publishMatrixTransportSnapshot({
+      client,
+      service,
+      registry,
+      transport: gatewayTransport,
+    })
+
+    expect(client.profile).toEqual({
+      key: CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
+      value: expect.objectContaining({ version: 1 }),
+    })
+    const profileValue = client.profile?.value as Record<string, unknown>
+    const signedSnapshot = profileValue.signed_snapshot
+    await expect(
+      verifyGatewayTransportSnapshot(
+        signedSnapshot,
+        identity.keys.publicKey,
+        {
+          gatewayId: identity.gatewayId,
+          currentTransport: gatewayTransport,
+        },
+      ),
+    ).resolves.toMatchObject({ transport: gatewayTransport })
+    await expect(registry.getGatewayTransportHead()).resolves.toMatchObject({
+      lastSnapshotIssuedAt: expect.any(Number),
+    })
+  })
+
   it('resends the exact persisted response for an already approved request', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codever-pairing-recovery-'))
     temporaryDirectories.push(directory)
@@ -188,6 +243,7 @@ describe('long-lived Matrix pairing recovery', () => {
 
 class FakePairingClient implements MatrixGatewayClient {
   readonly sent: MatrixSendEventRequest[] = []
+  profile: { key: string; value: unknown } | null = null
   readonly pinned: MatrixGatewayTrustedDevice[][] = []
   private readonly listeners = new Set<MatrixGatewayEventListener>()
 
@@ -220,6 +276,11 @@ class FakePairingClient implements MatrixGatewayClient {
   sendEncryptedRoomEvent(request: MatrixSendEventRequest) {
     this.sent.push(request)
     return Promise.resolve({ eventId: `$sent-${this.sent.length}` })
+  }
+
+  setExtendedProfileProperty(key: string, value: unknown) {
+    this.profile = { key, value }
+    return Promise.resolve()
   }
 
   stop(): Promise<void> {
