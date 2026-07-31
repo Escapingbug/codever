@@ -484,7 +484,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
   assert.match(matrix, /loadRecentHistory\(sessionId/);
-  assert.match(matrix, /client\.scrollback\(room/);
+  assert.match(matrix, /kind: "codever\.history\.request"/);
+  assert.match(matrix, /kind: "history_request"/);
+  assert.match(matrix, /historyPageSchema\.parse/);
+  assert.doesNotMatch(matrix, /client\.scrollback\(room/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
   assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
   assert.match(matrix, /sessionId: effectiveExtension\.session_id/);

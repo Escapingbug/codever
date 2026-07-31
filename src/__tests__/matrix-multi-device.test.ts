@@ -271,6 +271,164 @@ describe('multi-device Matrix collaboration', () => {
         ).not.toHaveProperty('replaces_event_id')
     })
 
+    it('replays late-join history to one device and preserves future edit targets', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const first = await generateDeviceKeyPair()
+        const late = await generateDeviceKeyPair()
+        const firstPolicy = trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A')
+        const latePolicy = trusted('device-c', 'Carol tablet', late.publicJwk, 'MATRIX_C')
+        let active: MatrixGatewayTrustedDevice[] = [firstPolicy]
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            active,
+            async () => active,
+        )
+        await layer.initialize(now)
+        const sent: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                sent.push(request)
+                return { eventId: `$history-${sent.length}` }
+            },
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const secureTransport = layer.transportForRoom(room, transport)
+        const original = await secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'history-original',
+            content: {
+                msgtype: 'm.text',
+                body: 'original answer',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    session_id: 'session-history',
+                    format: 'markdown',
+                    attachments: [{ id: 'attachment-metadata' }],
+                },
+            },
+        })
+        await secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'history-edit',
+            content: {
+                msgtype: 'm.text',
+                body: '* edited answer',
+                'm.relates_to': { rel_type: 'm.replace', event_id: original.eventId },
+                'm.new_content': {
+                    msgtype: 'm.text',
+                    body: 'edited answer',
+                    [CODEVER_MATRIX_EXTENSION]: {
+                        version: 1,
+                        kind: 'message',
+                        session_id: 'session-history',
+                        replaces_event_id: original.eventId,
+                    },
+                },
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    session_id: 'session-history',
+                    replaces_event_id: original.eventId,
+                },
+            },
+        })
+
+        active = [firstPolicy, latePolicy]
+        await layer.sendHistoryPage(room, 'device-c', {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'history-request-1',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'device-c',
+            sessionId: 'session-history',
+            limit: 1,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+
+        const lateRequests = sent.filter(request => envelopeRecipient(request) === 'device-c')
+        expect(lateRequests).toHaveLength(3)
+        const [replayedOriginalRequest, replayedEditRequest, pageRequest] = lateRequests
+        const replayedOriginal = await openFor(
+            replayedOriginalRequest!, late, gateway, 'device-c',
+        )
+        const replayedEdit = await openFor(replayedEditRequest!, late, gateway, 'device-c')
+        const page = await openFor(pageRequest!, late, gateway, 'device-c')
+        expect(replayedOriginal[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            kind: 'message',
+            session_id: 'session-history',
+            attachments: [{ id: 'attachment-metadata' }],
+            history_replay: {
+                request_id: 'history-request-1',
+                display_only: true,
+                timestamp: expect.any(Number),
+            },
+        })
+        expect(replayedEdit['m.relates_to']).toEqual({
+            rel_type: 'm.replace',
+            event_id: '$history-3',
+        })
+        expect(page[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            kind: 'history_page',
+            history_page: {
+                requestId: 'history-request-1',
+                sessionId: 'session-history',
+                hasMore: true,
+                replayed: 2,
+            },
+        })
+
+        await secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'history-live-edit',
+            content: {
+                msgtype: 'm.text',
+                body: '* live answer',
+                'm.relates_to': { rel_type: 'm.replace', event_id: original.eventId },
+                'm.new_content': {
+                    msgtype: 'm.text',
+                    body: 'live answer',
+                    [CODEVER_MATRIX_EXTENSION]: {
+                        version: 1,
+                        kind: 'message',
+                        session_id: 'session-history',
+                        replaces_event_id: original.eventId,
+                    },
+                },
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    session_id: 'session-history',
+                    replaces_event_id: original.eventId,
+                },
+            },
+        })
+        const liveLateRequest = sent
+            .filter(request => envelopeRecipient(request) === 'device-c')
+            .at(-1)!
+        const liveLate = await openFor(liveLateRequest, late, gateway, 'device-c')
+        expect(liveLate['m.relates_to']).toEqual({
+            rel_type: 'm.replace',
+            event_id: '$history-3',
+        })
+    })
+
     it('persists collaboration/result gaps and recovers only the missing command recipient after restart', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
@@ -710,6 +868,7 @@ async function openFor(
     recipient: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     gateway: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     recipientDeviceId: string,
+    replayStore = new InMemoryReplayStore(),
 ) {
     const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
     const opened = await openSecureEnvelope(extension.secure_envelope, {
@@ -724,7 +883,7 @@ async function openFor(
             senderKeyId: gateway.keyId,
             recipientKeyId: recipient.keyId,
         },
-        replayStore: new InMemoryReplayStore(),
+        replayStore,
     })
     return opened.plaintext as Record<string, unknown>
 }

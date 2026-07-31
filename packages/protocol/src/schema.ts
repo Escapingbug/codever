@@ -24,6 +24,59 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([jsonPrimitive, z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)]),
 )
 
+/**
+ * Read-only transcript recovery travels inside an authenticated secure
+ * envelope. It is intentionally separate from CodeverCommand so browsing
+ * history cannot consume a command sequence or advance the room revision.
+ */
+export const historyRequestSchema = z
+  .object({
+    kind: z.literal('codever.history.request'),
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: opaqueId,
+    gatewayId: opaqueId,
+    conversationId: opaqueId,
+    deviceId: opaqueId,
+    sessionId: opaqueId,
+    before: z.string().min(1).max(256).optional(),
+    limit: z.number().int().min(1).max(100),
+    issuedAt: timestamp,
+    expiresAt: timestamp,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.expiresAt <= request.issuedAt) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'expiresAt must be later than issuedAt',
+      })
+    }
+    if (request.expiresAt - request.issuedAt > 2 * 60_000) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'History request lifetime cannot exceed two minutes',
+      })
+    }
+  })
+
+export type HistoryRequest = z.infer<typeof historyRequestSchema>
+
+export const historyPageSchema = z
+  .object({
+    kind: z.literal('codever.history.page'),
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: opaqueId,
+    sessionId: opaqueId,
+    nextBefore: z.string().min(1).max(256).optional(),
+    hasMore: z.boolean(),
+    replayed: z.number().int().nonnegative(),
+  })
+  .strict()
+
+export type HistoryPage = z.infer<typeof historyPageSchema>
+
 export const encryptedMediaSchema = z
   .object({
     url: z.string().regex(/^mxc:\/\/[^/\s]+\/[^/\s]+$/),

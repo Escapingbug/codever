@@ -9,6 +9,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { FileReplayStore } from '@codever/security/node'
 import type {
     CodeverAttachment,
+    HistoryPage,
+    HistoryRequest,
     JsonValue,
     SignedSecureEnvelope,
 } from '@codever/protocol'
@@ -382,6 +384,118 @@ export class GatewaySecureContentLayer {
                 [CODEVER_MATRIX_EXTENSION]: extension,
             },
         }, room, transport)
+    }
+
+    /**
+     * Re-addresses a canonical transcript page to one paired device. Each
+     * replayed event keeps its original logical delivery key, which gives
+     * future Matrix edits a physical target on the newly joined device.
+     */
+    async sendHistoryPage(
+        room: MatrixGatewayRoomConfig,
+        deviceId: string,
+        request: HistoryRequest,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        await this.retryPendingForRoom(room, transport).catch(() => undefined)
+        const now = Date.now()
+        const active = (await this.currentTrustedDevices(now)).filter(device =>
+            device.allowedRoomIds.includes(room.roomId),
+        )
+        const recipient = active.find(device => device.deviceId === deviceId)
+        if (!recipient) throw new Error(`History recipient ${deviceId} is not active for this room`)
+        const identity = await recipientIdentity(recipient)
+        const page = this.deliveryOutbox.historyPage(
+            room.roomId,
+            request.sessionId,
+            request.before,
+            request.limit,
+        )
+        let replayed = 0
+        for (const entry of page.deliveries) {
+            const prior = this.deliveryOutbox.recipientDelivery(
+                entry.logicalKey,
+                recipient.deviceId,
+            )
+            if (prior && !sameRecipientIdentity(prior, identity)) {
+                await this.deliveryOutbox.markAbandoned(
+                    prior.deliveryId,
+                    'recipient_identity_changed',
+                    now,
+                )
+            } else if (prior) {
+                // A live or earlier recovery copy already provides the Matrix
+                // edit target and will be restored from this device's timeline.
+                continue
+            }
+
+            const logicalTargetId = entry.replacementLogicalKey
+                ? this.deliveryOutbox.logicalEventId(entry.replacementLogicalKey)
+                : undefined
+            const physicalTargetId = logicalTargetId
+                ? this.deliveryIds.get(logicalTargetId)?.get(recipient.deviceId)
+                : undefined
+            const originalTargetId = replacementTargetId(entry.content)
+            const addressed = originalTargetId
+                ? contentForRecipient(entry.content, originalTargetId, physicalTargetId)
+                : structuredClone(entry.content)
+            const content = withHistoryReplay(
+                withActiveDeviceCount(addressed, active.length),
+                request.requestId,
+                entry.createdAt,
+            )
+            const recipientRequest: MatrixSendEventRequest = {
+                roomId: room.roomId,
+                eventType: 'm.room.message',
+                transactionId: recipientTransactionId(
+                    `codever.history.replay.${request.requestId}.${entry.cursor}`,
+                    recipient.deviceId,
+                ),
+                content,
+            }
+            const delivery = durableDelivery(
+                entry.logicalKey,
+                recipient.deviceId,
+                identity,
+                recipientRequest,
+                entry.createdAt,
+            )
+            await this.deliveryOutbox.stage(delivery)
+            let result: MatrixSendEventResult
+            try {
+                result = await this.deliverDurable(delivery, room, recipient, transport)
+            } catch (error) {
+                this.schedulePendingRetry(room, transport)
+                throw error
+            }
+            const logicalEventId = this.deliveryOutbox.logicalEventId(entry.logicalKey)
+                ?? result.eventId
+            await this.deliveryOutbox.recordLogicalEvent(
+                entry.logicalKey,
+                logicalEventId,
+                entry.createdAt,
+            )
+            this.deliveryIds.set(
+                logicalEventId,
+                this.deliveryOutbox.recipientEvents(entry.logicalKey),
+            )
+            replayed += 1
+        }
+
+        const response: HistoryPage = {
+            kind: 'codever.history.page',
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            requestId: request.requestId,
+            sessionId: request.sessionId,
+            ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+            hasMore: page.hasMore,
+            replayed,
+        }
+        return this.sendToDevice(room, deviceId, {
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            kind: 'history_page',
+            history_page: response,
+        }, `codever.history.page.${request.requestId}`, transport)
     }
 
     /**
@@ -833,5 +947,20 @@ function withActiveDeviceCount(
     const newContent = asRecord(copy['m.new_content'])
     const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
     if (newExtension) newExtension.active_device_count = activeDeviceCount
+    return copy
+}
+
+function withHistoryReplay(
+    content: MatrixRoomMessageContent,
+    requestId: string,
+    timestamp: number,
+): MatrixRoomMessageContent {
+    const copy = structuredClone(content)
+    const marker = { request_id: requestId, display_only: true, timestamp }
+    const extension = asRecord(copy[CODEVER_MATRIX_EXTENSION])
+    if (extension) extension.history_replay = marker
+    const newContent = asRecord(copy['m.new_content'])
+    const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
+    if (newExtension) newExtension.history_replay = marker
     return copy
 }

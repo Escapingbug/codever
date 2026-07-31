@@ -117,6 +117,13 @@ display data from encrypted Codever events.
    If incremental rotations fell outside the local timeline, the PWA fetches
    the Gateway's root-signed current transport from its fixed extended Matrix
    profile field before it verifies the Matrix device and sends a command.
+10. Late-joining devices recover transcripts through a read-only, expiring
+   request inside the authenticated application envelope. The Gateway pages
+   canonical logical events from its durable delivery outbox, re-encrypts each
+   event for only the requesting device, and records the resulting physical
+   event IDs so later Matrix edits keep working. Replayed decisions are
+   display-only and history reads never consume a command sequence or advance
+   the conversation revision.
 
 ## Attachment and artifact flow
 

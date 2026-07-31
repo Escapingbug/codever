@@ -9,6 +9,7 @@ import {
     generateDeviceKeyPair,
     InMemoryReplayStore,
     openSecureEnvelope,
+    sealSecureEnvelope,
     signCommand,
 } from '@codever/security'
 import type { AgentProvider, AgentQueryHandle } from '@/providers/provider'
@@ -238,6 +239,118 @@ describe('strict Matrix command authorization', () => {
 })
 
 describe('MatrixGatewayRunner', () => {
+    it('serves authenticated history without consuming command revision or sequence', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        const requestNow = Date.now()
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = requestNow + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => requestNow,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+        await runner.start()
+
+        const historyRequest = {
+            kind: 'codever.history.request' as const,
+            version: 1 as const,
+            requestId: 'history-read-only',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'pwa-device-1',
+            sessionId: 'app-session-1',
+            limit: 30,
+            issuedAt: requestNow,
+            expiresAt: requestNow + 60_000,
+        }
+        const secureEnvelope = await sealSecureEnvelope({
+            plaintext: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever history request',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'history_request',
+                    history_request: historyRequest,
+                },
+            },
+            senderPrivateKey: fixture.keys.privateKey,
+            recipientPublicKey: gatewayKeys.publicKey,
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            direction: 'device_to_gateway',
+            senderDeviceId: 'pwa-device-1',
+            recipientDeviceId: 'gateway-1',
+            senderKeyId: fixture.keys.keyId,
+            recipientKeyId: gatewayKeys.keyId,
+            now: requestNow,
+        })
+        client.emit({
+            roomId: '!room:example.org',
+            eventId: '$history-request',
+            eventType: 'm.room.message',
+            sender: '@alice:example.org',
+            senderDeviceId: 'matrix-ed25519-key',
+            encrypted: true,
+            encryptedPayloadFingerprint: 'history-request-ciphertext',
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever message',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'secure_envelope',
+                    secure_envelope: secureEnvelope,
+                },
+            },
+        })
+
+        await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+        const responseOuter = client.sent[1]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const response = await openSecureEnvelope(responseOuter.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: gatewayKeys.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: requestNow,
+        })
+        expect(response.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'history_page',
+                history_page: {
+                    requestId: 'history-read-only',
+                    sessionId: 'app-session-1',
+                    hasMore: false,
+                    replayed: 0,
+                },
+            },
+        })
+        const replayStore = Reflect.get(runner, 'replayStore') as FileCommandReplayStore
+        await expect(replayStore.getConversationRevision(
+            'gateway-1',
+            'conversation-1',
+            REVISION_EPOCH,
+        )).resolves.toBe(0)
+        await runner.stop()
+    })
+
     it('lets an authenticated device create a short-lived pairing invitation', async () => {
         const fixture = await securityFixture()
         const session = fakeTopicSession([])

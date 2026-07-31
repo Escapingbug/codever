@@ -1,9 +1,13 @@
 import {
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
+  historyPageSchema,
+  historyRequestSchema,
   type CodeverAttachment,
   type CodeverCommand,
   type CommandPayload,
+  type HistoryPage,
+  type HistoryRequest,
   type JsonValue,
   type SignedCommand,
 } from "@codever/protocol";
@@ -27,6 +31,7 @@ import type {
   MatrixEvent,
   MsgType,
   Room,
+  RoomMessageEventContent,
 } from "matrix-js-sdk";
 import {
   applyGatewayTransportSnapshot,
@@ -109,6 +114,7 @@ const LOCAL_STORE_TIMEOUT_MS = 10_000;
 const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
 const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
 const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
+const HISTORY_REQUEST_TIMEOUT_MS = 20_000;
 
 export type MatrixConnectionConfig = {
   homeserver: string;
@@ -531,6 +537,21 @@ export async function connectMatrix(
   const historySeen = new Set<string>();
   const historyBySession = new Map<string, IncomingCodeverMessage[]>();
   const deliveredHistory = new Map<string, Set<string>>();
+  const gatewayHistoryState = new Map<
+    string,
+    { before?: string; complete: boolean }
+  >();
+  const pendingHistoryRequests = new Map<
+    string,
+    {
+      sessionId: string;
+      messages: IncomingCodeverMessage[];
+      page?: HistoryPage;
+      resolve: (page: MatrixHistoryPage) => void;
+      reject: (error: Error) => void;
+      timeout: number;
+    }
+  >();
   let legacyHistorySessionHint: string | null = null;
   let historyInitialized = false;
   let historyChain: Promise<unknown> = Promise.resolve();
@@ -645,6 +666,46 @@ export async function connectMatrix(
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
   };
+  const finishHistoryRequest = (requestId: string): void => {
+    const pending = pendingHistoryRequests.get(requestId);
+    const page = pending?.page;
+    if (!pending || !page || pending.messages.length < page.replayed) return;
+    window.clearTimeout(pending.timeout);
+    pendingHistoryRequests.delete(requestId);
+    gatewayHistoryState.set(page.sessionId, {
+      ...(page.nextBefore ? { before: page.nextBefore } : {}),
+      complete: !page.hasMore,
+    });
+    pending.messages.sort(compareIncomingMessages);
+    pending.resolve({
+      messages: pending.messages,
+      hasMore: page.hasMore,
+    });
+  };
+  const onHistoryReplay = (
+    requestId: string,
+    message: IncomingCodeverMessage,
+  ): boolean => {
+    const pending = pendingHistoryRequests.get(requestId);
+    if (!pending || message.sessionId !== pending.sessionId) return false;
+    if (!pending.messages.some((candidate) => candidate.eventId === message.eventId)) {
+      pending.messages.push(message);
+    }
+    finishHistoryRequest(requestId);
+    return true;
+  };
+  const onHistoryPage = (page: HistoryPage): void => {
+    const pending = pendingHistoryRequests.get(page.requestId);
+    if (!pending) return;
+    if (pending.sessionId !== page.sessionId) {
+      window.clearTimeout(pending.timeout);
+      pendingHistoryRequests.delete(page.requestId);
+      pending.reject(new Error("Gateway history response targeted the wrong session."));
+      return;
+    }
+    pending.page = page;
+    finishHistoryRequest(page.requestId);
+  };
   const processInboundEvent = (
     event: MatrixEvent,
     historical: boolean,
@@ -671,6 +732,8 @@ export async function connectMatrix(
           onKnownRevision,
           onAuthenticatedCommandResult,
           onGatewayState,
+          onHistoryReplay,
+          onHistoryPage,
           historical,
         ),
       reportInboundError,
@@ -1124,6 +1187,96 @@ export async function connectMatrix(
     );
     return response.event_id;
   };
+  const requestGatewayHistoryPage = async (
+    sessionId: string,
+    limit: number,
+  ): Promise<MatrixHistoryPage> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    assertPersistenceHealthy();
+    const trust = activeTrust;
+    if (!trust) {
+      throw new Error("Pair and verify the Gateway before restoring history.");
+    }
+    const state = gatewayHistoryState.get(sessionId);
+    if (state?.complete) return { messages: [], hasMore: false };
+    if (!client.isRoomEncrypted(config.roomId)) {
+      throw new Error("Refusing to request history from an unencrypted Matrix room.");
+    }
+    const now = Date.now();
+    const request: HistoryRequest = historyRequestSchema.parse({
+      kind: "codever.history.request",
+      version: 1,
+      requestId: crypto.randomUUID(),
+      gatewayId: trust.gatewayId,
+      conversationId: config.conversationId,
+      deviceId: trust.certificate.certificate.deviceId,
+      sessionId,
+      ...(state?.before ? { before: state.before } : {}),
+      limit: Math.max(1, Math.min(limit, 100)),
+      issuedAt: now,
+      expiresAt: now + 60_000,
+    });
+    const response = new Promise<MatrixHistoryPage>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        pendingHistoryRequests.delete(request.requestId);
+        reject(new Error("The Gateway did not return the requested history page in time."));
+      }, HISTORY_REQUEST_TIMEOUT_MS);
+      pendingHistoryRequests.set(request.requestId, {
+        sessionId,
+        messages: [],
+        resolve,
+        reject,
+        timeout,
+      });
+    });
+    try {
+      const certificate = trust.certificate.certificate;
+      const plaintext = {
+        msgtype: sdk.MsgType.Notice,
+        body: "Encrypted Codever history request",
+        "io.codever": {
+          version: 1,
+          kind: "history_request",
+          history_request: request,
+        },
+      } as const;
+      const secureEnvelope = await sealSecureEnvelope({
+        plaintext,
+        senderPrivateKey: identity.privateKey,
+        recipientPublicKey: trust.gatewayKey.publicKey,
+        gatewayId: trust.gatewayId,
+        conversationId: config.conversationId,
+        direction: "device_to_gateway",
+        senderDeviceId: certificate.deviceId,
+        recipientDeviceId: certificate.gatewayId,
+        senderKeyId: identity.keyId,
+        recipientKeyId: trust.gatewayKey.keyId,
+      });
+      await client.sendMessage(
+        config.roomId,
+        {
+          msgtype: sdk.MsgType.Notice,
+          body: "Encrypted Codever message",
+          "io.codever": {
+            version: 1,
+            kind: "secure_envelope",
+            secure_envelope: secureEnvelope,
+          },
+        } as unknown as RoomMessageEventContent,
+        `codever.history.request.${request.requestId}`,
+      );
+    } catch (error) {
+      const pending = pendingHistoryRequests.get(request.requestId);
+      if (pending) {
+        window.clearTimeout(pending.timeout);
+        pendingHistoryRequests.delete(request.requestId);
+        pending.reject(
+          error instanceof Error ? error : new Error(formatError(error)),
+        );
+      }
+    }
+    return response;
+  };
   const scanHistoryTimeline = async (
     room: Room,
     initialSessionId: string,
@@ -1200,25 +1353,15 @@ export async function connectMatrix(
     if (!room) throw new Error("The Matrix room is not available.");
     const pageLimit = Math.max(1, Math.min(limit, 100));
     await scanHistoryTimeline(room, sessionId);
-    let messages = takeHistory(sessionId, pageLimit);
-    if (
-      messages.length < pageLimit &&
-      room.oldState.paginationToken !== null
-    ) {
-      // One Matrix request per pull keeps recovery progressive even when the
-      // room contains traffic for several Codever sessions.
-      await client.scrollback(room, Math.max(30, pageLimit));
-      await scanHistoryTimeline(room, sessionId);
-      messages = [
-        ...takeHistory(sessionId, pageLimit - messages.length),
-        ...messages,
-      ].sort(compareIncomingMessages);
-    }
+    const local = takeHistory(sessionId, pageLimit);
+    const gateway = await requestGatewayHistoryPage(sessionId, pageLimit);
+    const messages = deduplicateIncomingMessages([
+      ...local,
+      ...gateway.messages,
+    ]).sort(compareIncomingMessages);
     return {
       messages,
-      hasMore:
-        hasPendingHistory(sessionId) ||
-        room.oldState.paginationToken !== null,
+      hasMore: hasPendingHistory(sessionId) || gateway.hasMore,
     };
   };
   const loadRecentHistory = async (
@@ -1230,11 +1373,14 @@ export async function connectMatrix(
     if (!room) throw new Error("The Matrix room is not available.");
     const pageLimit = Math.max(1, Math.min(limit, 100));
     await scanHistoryTimeline(room, sessionId);
+    const local = takeHistory(sessionId, pageLimit);
+    const gateway = await requestGatewayHistoryPage(sessionId, pageLimit);
     return {
-      messages: takeHistory(sessionId, pageLimit),
-      hasMore:
-        hasPendingHistory(sessionId) ||
-        room.oldState.paginationToken !== null,
+      messages: deduplicateIncomingMessages([
+        ...local,
+        ...gateway.messages,
+      ]).sort(compareIncomingMessages),
+      hasMore: hasPendingHistory(sessionId) || gateway.hasMore,
     };
   };
   const enqueueHistoryOperation = (
@@ -1456,6 +1602,11 @@ export async function connectMatrix(
     stop() {
       if (stopped) return;
       stopped = true;
+      for (const pending of pendingHistoryRequests.values()) {
+        window.clearTimeout(pending.timeout);
+        pending.reject(new Error("Matrix connection closed during history recovery."));
+      }
+      pendingHistoryRequests.clear();
       client.off(sdk.RoomEvent.Timeline, onTimeline);
       client.off(sdk.ClientEvent.Sync, onSync);
       client.stopClient();
@@ -1972,6 +2123,69 @@ export function parseCodeverEvent(
   }
 }
 
+export function parseHistoryReplayEvent(
+  eventId: string,
+  sender: string,
+  timestamp: number,
+  content: Record<string, unknown>,
+): { requestId: string; message: IncomingCodeverMessage } | null {
+  const extension = asRecord(content["io.codever"]);
+  const marker = asRecord(extension?.history_replay);
+  if (
+    marker?.display_only !== true ||
+    typeof marker.request_id !== "string" ||
+    !marker.request_id
+  ) {
+    return null;
+  }
+  const replayTimestamp = isNonnegativeInteger(marker.timestamp)
+    ? marker.timestamp
+    : timestamp;
+  if (
+    extension?.kind === "command_result" &&
+    extension.outcome === "failed" &&
+    typeof extension.command_id === "string"
+  ) {
+    return {
+      requestId: marker.request_id,
+      message: {
+        eventId,
+        sender,
+        timestamp: replayTimestamp,
+        encrypted: true,
+        kind: "error",
+        text:
+          typeof extension.error === "string"
+            ? extension.error
+            : "The Gateway accepted the command but could not complete it.",
+        format: "plain",
+        commandId: extension.command_id,
+        ...(isPositiveInteger(extension.revision)
+          ? { revision: extension.revision }
+          : {}),
+        ...(typeof extension.session_id === "string" && extension.session_id
+          ? { sessionId: extension.session_id }
+          : {}),
+        historical: true,
+        raw: extension,
+      },
+    };
+  }
+  const parsed = parseCodeverEvent(
+    eventId,
+    sender,
+    replayTimestamp,
+    true,
+    content,
+  );
+  return parsed
+    ? {
+        requestId: marker.request_id,
+        message: { ...parsed, historical: true },
+      }
+    : null;
+}
+
 type DecodedHistoricalEvent = {
   gatewaySessionId?: string | null;
   message?: IncomingCodeverMessage;
@@ -2109,6 +2323,14 @@ function compareIncomingMessages(
   );
 }
 
+function deduplicateIncomingMessages(
+  messages: readonly IncomingCodeverMessage[],
+): IncomingCodeverMessage[] {
+  const byEventId = new Map<string, IncomingCodeverMessage>();
+  for (const message of messages) byEventId.set(message.eventId, message);
+  return [...byEventId.values()];
+}
+
 function parseAttachments(value: unknown): CodeverAttachment[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const attachments = value.flatMap((candidate) => {
@@ -2152,6 +2374,11 @@ async function forwardEvent(
     activeDeviceCount?: number,
   ) => Promise<void>,
   onGatewayState?: (state: GatewayStateSnapshot) => Promise<void>,
+  onHistoryReplay?: (
+    requestId: string,
+    message: IncomingCodeverMessage,
+  ) => boolean,
+  onHistoryPage?: (page: HistoryPage) => void,
   historical = false,
 ): Promise<void> {
   const eventId = event.getId();
@@ -2258,6 +2485,27 @@ async function forwardEvent(
     throw new Error("The secure Gateway envelope did not contain Matrix content.");
   }
   const decryptedExtension = asRecord(decryptedContent["io.codever"]);
+  const historyReplay = parseHistoryReplayEvent(
+    eventId,
+    trust.gatewayId,
+    event.getTs(),
+    decryptedContent,
+  );
+  if (historyReplay) {
+    seen.add(eventId);
+    const consumed = onHistoryReplay?.(
+      historyReplay.requestId,
+      historyReplay.message,
+    ) ?? false;
+    if (!consumed) onMessage(historyReplay.message);
+    return;
+  }
+  if (decryptedExtension?.kind === "history_page") {
+    const page = historyPageSchema.parse(decryptedExtension.history_page);
+    onHistoryPage?.(page);
+    seen.add(eventId);
+    return;
+  }
   const gatewayState = parseGatewayStateExtension(decryptedExtension);
   if (gatewayState) {
     await onGatewayState?.(gatewayState);
