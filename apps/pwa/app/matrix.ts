@@ -68,6 +68,11 @@ import {
   type MessageFormat,
   type ToolGroupPresentation,
 } from "./presentation";
+import {
+  MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL,
+  MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS,
+  MATRIX_CRYPTO_LOADING_DETAIL,
+} from "./matrixStartup";
 export {
   parseGatewayStateExtension,
   type GatewayCapabilities,
@@ -87,7 +92,6 @@ const COMMAND_SEQUENCE_STORE = "command-sequences";
 const COMMAND_TTL_MS = 2 * 60_000;
 const INCOMPLETE_OUTBOX_LEASE_MS = 30_000;
 const LOCAL_STORE_TIMEOUT_MS = 10_000;
-const CRYPTO_INITIALIZATION_TIMEOUT_MS = 30_000;
 const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
 const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
 const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
@@ -700,15 +704,15 @@ export async function connectMatrix(
     assertPersistenceHealthy();
     handlers.onStatus(
       "connecting",
-      "Initializing end-to-end encryption on this device…",
+      MATRIX_CRYPTO_LOADING_DETAIL,
     );
     await withMatrixTimeout(
       client.initRustCrypto({
         useIndexedDB: true,
         cryptoDatabasePrefix: cryptoStoreScope,
       }),
-      CRYPTO_INITIALIZATION_TIMEOUT_MS,
-      "Matrix encryption initialization did not finish in time. Close other Codever tabs and scan a new invitation.",
+      MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS,
+      MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL,
     );
     const cryptoApi = client.getCrypto();
     if (!cryptoApi) {

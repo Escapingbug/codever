@@ -1,3 +1,5 @@
+import { CODEVER_BUILD_VERSION } from "./buildInfo";
+
 type UpdateRegistration = {
   update(): Promise<unknown>;
 };
@@ -24,6 +26,7 @@ export type PwaUpdateEnvironment = {
 
 export function installPwaUpdateFlow(
   environment: PwaUpdateEnvironment,
+  buildVersion = CODEVER_BUILD_VERSION,
 ): () => void {
   const hadController = Boolean(environment.serviceWorker.controller);
   let registration: UpdateRegistration | undefined;
@@ -56,7 +59,10 @@ export function installPwaUpdateFlow(
   environment.addOnlineListener(checkForUpdate);
 
   void environment.serviceWorker
-    .register("/sw.js", { updateViaCache: "none" })
+    .register(
+      `/sw.js?v=${encodeURIComponent(buildVersion)}`,
+      { updateViaCache: "none" },
+    )
     .then((nextRegistration) => {
       if (disposed) return;
       registration = nextRegistration;

@@ -1,0 +1,4 @@
+encode zstd gzip
+
+@codever_service_worker path /sw.js
+header @codever_service_worker Cache-Control "no-cache, no-store, must-revalidate"

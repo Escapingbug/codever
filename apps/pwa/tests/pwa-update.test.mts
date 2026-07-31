@@ -70,11 +70,11 @@ async function settleRegistration(): Promise<void> {
 
 test("bypasses the browser cache and reloads once when an update takes control", async () => {
   const harness = updateHarness({ controller: {} });
-  const dispose = installPwaUpdateFlow(harness.environment);
+  const dispose = installPwaUpdateFlow(harness.environment, "b3075af2+dirty");
   await settleRegistration();
 
   assert.deepEqual(harness.registration(), {
-    scriptURL: "/sw.js",
+    scriptURL: "/sw.js?v=b3075af2%2Bdirty",
     options: { updateViaCache: "none" },
   });
   assert.equal(harness.updateCount(), 1);
