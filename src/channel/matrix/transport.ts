@@ -8,6 +8,8 @@
 export interface MatrixTransport {
     sendEncryptedRoomEvent(request: MatrixSendEventRequest): Promise<MatrixSendEventResult>
     setTyping?(roomId: string, typing: boolean, timeoutMs?: number): Promise<void>
+    uploadEncryptedMedia?(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult>
+    downloadEncryptedMedia?(request: MatrixDownloadMediaRequest): Promise<Uint8Array>
 }
 
 export interface MatrixSendEventRequest {
@@ -23,6 +25,19 @@ export interface MatrixSendEventRequest {
 
 export interface MatrixSendEventResult {
     eventId: string
+}
+
+export interface MatrixUploadMediaRequest {
+    ciphertext: Uint8Array
+}
+
+export interface MatrixUploadMediaResult {
+    url: string
+}
+
+export interface MatrixDownloadMediaRequest {
+    url: string
+    maxBytes: number
 }
 
 export interface MatrixRoomMessageContent extends Record<string, unknown> {

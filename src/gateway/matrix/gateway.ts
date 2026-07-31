@@ -29,6 +29,7 @@ import {
 } from './fileRuntimeState'
 import { GatewaySecureContentLayer } from './secureContent'
 import { gatewayProjectIdentity } from './project'
+import { materializePromptInput } from './media'
 
 type WorkspaceState = PersistedRoomRuntimeState['workspace']
 
@@ -393,7 +394,9 @@ export class MatrixGatewayRunner {
                 )
                 if (appSession.record.title === 'New session') {
                     appSession.record.title = sessionTitle(
-                        authorized.command.payload.text,
+                        authorized.command.payload.text
+                        || authorized.command.payload.attachments?.[0]?.name
+                        || '',
                     )
                 }
                 await this.persistRuntime(runtime)
@@ -406,6 +409,7 @@ export class MatrixGatewayRunner {
                         ?? opened?.trustedDevice.deviceId
                         ?? authorized.command.deviceId,
                     text: authorized.command.payload.text,
+                    attachments: authorized.command.payload.attachments,
                 }, this.client).catch(error => {
                     this.log(`[matrix-gateway] collaboration broadcast failed: ${formatError(error)}`)
                 })
@@ -523,11 +527,21 @@ export class MatrixGatewayRunner {
                     command.payload.sessionId,
                 )
                 if (appSession.record.title === 'New session') {
-                    appSession.record.title = sessionTitle(command.payload.text)
+                    appSession.record.title = sessionTitle(
+                        command.payload.text
+                        || command.payload.attachments?.[0]?.name
+                        || '',
+                    )
                 }
+                const richInput = await materializePromptInput(
+                    command.payload,
+                    this.client,
+                    `${this.config.replayLedgerPath}.attachments`,
+                )
                 await appSession.session.dispatch({
                     kind: 'user_message',
                     text: command.payload.text,
+                    richInput,
                     source: 'channel',
                     user: { id: command.deviceId, username: command.deviceId },
                 })

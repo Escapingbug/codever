@@ -115,6 +115,31 @@ display data from encrypted Codever events.
    device-list changes can therefore be caught up before a Gateway-signed
    transport rotation is pinned; the sync checkpoint itself grants no trust.
 
+## Attachment and artifact flow
+
+Matrix media is storage only. Codever encrypts every attachment with a fresh
+AES-256-GCM key before upload, then carries the `mxc://` locator, key, IV,
+ciphertext hash, plaintext hash, name, MIME type and bounded size inside the
+signed application secure envelope. Matrix never receives a Gateway local path
+or a plaintext filename.
+
+For PWA-to-agent input:
+
+1. The PWA encrypts and uploads the selected file.
+2. The signed prompt binds its structured attachment descriptor.
+3. The Gateway downloads only the signed `mxc://` object, enforces count and
+   size limits, authenticates/decrypts it, and verifies the plaintext hash.
+4. Images and audio become ACP rich-content blocks. Other files are written to
+   a private content-addressed Gateway cache and exposed to the provider as a
+   local uploaded-file reference.
+
+For agent-to-PWA output, `send_file` remains the explicit delivery signal.
+`MatrixPort` reads the already-authorized local file, encrypts/uploads it, and
+places the structured descriptor in the application-encrypted message. The PWA
+can then decrypt an image preview or download the original bytes. Telegram-only
+`/file_f1` hints are disabled for the first-party Matrix client; incidental
+`file://` text is not treated as permission to exfiltrate a local file.
+
 ## Compatibility modes
 
 Strict mode is the default. Only Codever-signed commands may invoke the local

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ChangeEvent,
   FormEvent,
   KeyboardEvent,
   useEffect,
@@ -9,7 +10,13 @@ import {
   useRef,
   useState,
 } from "react";
-import type { CommandPayload } from "@codever/protocol";
+import {
+  MAX_CODEVER_ATTACHMENTS,
+  MAX_CODEVER_ATTACHMENT_BYTES,
+  MAX_CODEVER_PROMPT_ATTACHMENT_BYTES,
+  type CodeverAttachment,
+  type CommandPayload,
+} from "@codever/protocol";
 import {
   SENDING_AGENT_ACTIVITY,
   STARTING_AGENT_ACTIVITY,
@@ -138,10 +145,119 @@ function Icon({ children }: { children: React.ReactNode }) {
   );
 }
 
+function AttachmentList({
+  attachments,
+  connection,
+}: {
+  attachments?: CodeverAttachment[];
+  connection: MatrixConnection | null;
+}) {
+  if (!attachments?.length) return null;
+  return (
+    <div className="message-attachments">
+      {attachments.map((attachment) => (
+        <AttachmentCard
+          attachment={attachment}
+          connection={connection}
+          key={attachment.id}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AttachmentCard({
+  attachment,
+  connection,
+}: {
+  attachment: CodeverAttachment;
+  connection: MatrixConnection | null;
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"preview" | "download" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(
+    () => () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    },
+    [previewUrl],
+  );
+
+  async function load(mode: "preview" | "download") {
+    if (!connection || busy) return;
+    setBusy(mode);
+    setError(null);
+    try {
+      const blob = await connection.downloadAttachment(attachment);
+      const url = URL.createObjectURL(blob);
+      if (mode === "preview") {
+        setPreviewUrl((current) => {
+          if (current) URL.revokeObjectURL(current);
+          return url;
+        });
+      } else {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = attachment.name;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
+    } catch (loadError) {
+      setError(formatUiError(loadError));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const isImage = attachment.mimeType.startsWith("image/");
+  return (
+    <section className="attachment-card">
+      {previewUrl && isImage && (
+        // Decrypted attachments use short-lived local blob: URLs, which are
+        // intentionally outside the Next image optimization pipeline.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={previewUrl} alt={attachment.name} />
+      )}
+      <div className="attachment-card-copy">
+        <span aria-hidden="true">{isImage ? "▧" : "▤"}</span>
+        <span>
+          <b title={attachment.name}>{attachment.name}</b>
+          <small>
+            {attachment.mimeType} · {formatFileSize(attachment.size)}
+          </small>
+        </span>
+      </div>
+      <div className="attachment-card-actions">
+        {isImage && !previewUrl && (
+          <button
+            type="button"
+            disabled={!connection || busy !== null}
+            onClick={() => void load("preview")}
+          >
+            {busy === "preview" ? "Decrypting…" : "Preview"}
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={!connection || busy !== null}
+          onClick={() => void load("download")}
+        >
+          {busy === "download" ? "Decrypting…" : "Download"}
+        </button>
+      </div>
+      {error && <small className="attachment-error">{error}</small>}
+    </section>
+  );
+}
+
 export function CodeverApp() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
@@ -191,6 +307,7 @@ export function CodeverApp() {
     Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
@@ -1390,6 +1507,7 @@ export function CodeverApp() {
       }
       if (conflict.payload.operation === "prompt") {
         const sessionId = conflict.payload.sessionId;
+        setPendingFiles([]);
         if (completedCommandResultsRef.current.delete(result.commandId)) {
           setSessionRunning(sessionId, false);
           setSessionAgentActivity(sessionId, null);
@@ -1536,12 +1654,50 @@ export function CodeverApp() {
     }
   }
 
+  function selectAttachments(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = [...(event.target.files ?? [])];
+    event.target.value = "";
+    if (selectedFiles.length === 0) return;
+    const availableSlots = MAX_CODEVER_ATTACHMENTS - pendingFiles.length;
+    if (availableSlots <= 0) {
+      setConnectionError(
+        `A message can include up to ${MAX_CODEVER_ATTACHMENTS} attachments.`,
+      );
+      return;
+    }
+    const accepted: File[] = [];
+    let totalBytes = pendingFiles.reduce((total, file) => total + file.size, 0);
+    for (const file of selectedFiles.slice(0, availableSlots)) {
+      if (file.size > MAX_CODEVER_ATTACHMENT_BYTES) {
+        setConnectionError(
+          `${file.name} exceeds the ${formatFileSize(MAX_CODEVER_ATTACHMENT_BYTES)} attachment limit.`,
+        );
+        continue;
+      }
+      if (totalBytes + file.size > MAX_CODEVER_PROMPT_ATTACHMENT_BYTES) {
+        setConnectionError(
+          `Attachments in one message cannot exceed ${formatFileSize(MAX_CODEVER_PROMPT_ATTACHMENT_BYTES)}.`,
+        );
+        continue;
+      }
+      accepted.push(file);
+      totalBytes += file.size;
+    }
+    if (selectedFiles.length > availableSlots) {
+      setConnectionError(
+        `Only the first ${availableSlots} selected attachment(s) were added.`,
+      );
+    }
+    setPendingFiles((current) => [...current, ...accepted]);
+  }
+
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const value = draft.trim();
-    if (!value) return;
+    if (!value && pendingFiles.length === 0) return;
     const sessionId = selectedSessionIdRef.current;
     if (
+      attachmentBusy ||
       isStreaming ||
       (sessionId && pendingPromptSessionIdsRef.current.has(sessionId))
     ) {
@@ -1560,6 +1716,32 @@ export function CodeverApp() {
       setSettingsOpen(true);
       return;
     }
+    const connection = matrixConnectionRef.current;
+    if (!connection) {
+      setConnectionError("The Matrix connection is not ready for attachment upload.");
+      return;
+    }
+    const submittedFiles = [...pendingFiles];
+    let attachments: CodeverAttachment[] | undefined;
+    if (submittedFiles.length > 0) {
+      setAttachmentBusy(true);
+      setSessionAgentActivity(sessionId, {
+        phase: "sending",
+        label: "Encrypting attachments",
+        detail: `${submittedFiles.length} file${submittedFiles.length === 1 ? "" : "s"}`,
+      });
+      try {
+        attachments = await Promise.all(
+          submittedFiles.map((file) => connection.uploadAttachment(file)),
+        );
+      } catch (error) {
+        setConnectionError(`Attachment upload failed: ${formatUiError(error)}`);
+        setSessionAgentActivity(sessionId, null);
+        return;
+      } finally {
+        setAttachmentBusy(false);
+      }
+    }
     const submissionHistoryScope = historyScopeRef.current;
     const submissionOriginDeviceId = deviceKeyId ?? undefined;
     const submissionOriginDeviceName =
@@ -1574,6 +1756,7 @@ export function CodeverApp() {
       sessionId,
       optimistic: true,
       deliveryState: "sending",
+      attachments,
     };
     optimisticMessagesRef.current.set(optimisticId, {
       id: optimisticId,
@@ -1605,6 +1788,7 @@ export function CodeverApp() {
       operation: "prompt",
       sessionId,
       text: value,
+      attachments,
     });
     pendingPromptSessionIdsRef.current.delete(sessionId);
     if (!result) {
@@ -1708,6 +1892,7 @@ export function CodeverApp() {
         originDeviceName: submissionOriginDeviceName,
         deliveryState: "sent",
       };
+      setPendingFiles([]);
       const wasAlreadyReconciled =
         reconciledOptimisticMessageIdsRef.current.delete(optimisticId);
       if (
@@ -2179,8 +2364,12 @@ export function CodeverApp() {
                         <span className="collaborator-label">
                           {message.originDeviceName}
                         </span>
-                      )}
+                    )}
                     <p>{message.text}</p>
+                    <AttachmentList
+                      attachments={message.attachments}
+                      connection={matrixConnectionRef.current}
+                    />
                     <time>
                       {message.revision !== undefined
                         ? `r${message.revision} · ${message.time ?? ""}`
@@ -2316,6 +2505,10 @@ export function CodeverApp() {
                       )}
                     </p>
                   )}
+                  <AttachmentList
+                    attachments={message.attachments}
+                    connection={matrixConnectionRef.current}
+                  />
                   <time>{message.time}</time>
                 </div>
               </div>
@@ -2392,6 +2585,34 @@ export function CodeverApp() {
             </section>
           )}
 
+          {pendingFiles.length > 0 && (
+            <div className="pending-attachments" aria-label="Pending attachments">
+              {pendingFiles.map((file, index) => (
+                <span className="pending-attachment" key={`${file.name}:${file.size}:${index}`}>
+                  <span aria-hidden="true">
+                    {file.type.startsWith("image/") ? "▧" : "▤"}
+                  </span>
+                  <span>
+                    <b>{file.name}</b>
+                    <small>{formatFileSize(file.size)}</small>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${file.name}`}
+                    disabled={attachmentBusy}
+                    onClick={() =>
+                      setPendingFiles((current) =>
+                        current.filter((_, candidateIndex) => candidateIndex !== index),
+                      )
+                    }
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
           <form
             className="composer"
             onSubmit={(event) => void sendMessage(event)}
@@ -2409,20 +2630,25 @@ export function CodeverApp() {
               }
               aria-label={`Message ${activeProvider}`}
               rows={1}
-              disabled={!matrixConnected}
+              disabled={!matrixConnected || attachmentBusy}
             />
             <div className="composer-actions">
+              <input
+                ref={attachmentInputRef}
+                className="attachment-input"
+                type="file"
+                multiple
+                onChange={selectAttachments}
+                tabIndex={-1}
+              />
               <button
                 type="button"
                 className="attachment-button"
                 aria-label="Attach a file"
-                onClick={() =>
-                  setConnectionError(
-                    "Encrypted attachment upload is not available in this milestone.",
-                  )
-                }
+                disabled={!sessionReady || attachmentBusy}
+                onClick={() => attachmentInputRef.current?.click()}
               >
-                +
+                {attachmentBusy ? "…" : "+"}
               </button>
               <div className="agent-controls">
                 <label>
@@ -2525,7 +2751,11 @@ export function CodeverApp() {
                   key="send-message"
                   type="submit"
                   className="send-button mount-feedback"
-                  disabled={!draft.trim() || !sessionReady}
+                  disabled={
+                    (!draft.trim() && pendingFiles.length === 0) ||
+                    !sessionReady ||
+                    attachmentBusy
+                  }
                   aria-label="Send message"
                 >
                   ↑
@@ -2665,6 +2895,7 @@ function chatMessageFromIncoming(
     originDeviceName: incoming.originDeviceName,
     format: incoming.format,
     toolGroup: incoming.toolGroup,
+    attachments: incoming.attachments,
     sessionId,
     historical: incoming.historical,
     raw: incoming.raw,
@@ -2729,6 +2960,18 @@ function formatMessageTime(timestamp: number): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(timestamp));
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${unit}`;
 }
 
 function formatSessionTime(timestamp: number): string {

@@ -9,17 +9,22 @@ import {
 import { AllDevicesIsolationMode } from 'matrix-js-sdk/lib/crypto-api'
 import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js'
 import { canonicalJson } from '@codever/protocol'
+import { toArrayBuffer } from '@codever/security'
 import type {
     MatrixGatewayConnectionConfig,
     MatrixGatewayCryptoConfig,
     MatrixGatewayTrustedDevice,
 } from './config'
 import type {
+    MatrixDownloadMediaRequest,
     MatrixIncomingEvent,
     MatrixSendEventRequest,
     MatrixSendEventResult,
     MatrixTransport,
+    MatrixUploadMediaRequest,
+    MatrixUploadMediaResult,
 } from '@/channel/matrix'
+import { downloadMatrixMedia } from '@/channel/matrix/sdkTransport'
 
 export type MatrixGatewayEventListener = (event: MatrixIncomingEvent) => void
 
@@ -172,6 +177,23 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
 
     async setTyping(roomId: string, typing: boolean, timeoutMs = 30_000): Promise<void> {
         await this.client.sendTyping(roomId, typing, timeoutMs)
+    }
+
+    async uploadEncryptedMedia(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult> {
+        if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
+        const response = await this.client.uploadContent(
+            new Blob([toArrayBuffer(request.ciphertext)], { type: 'application/octet-stream' }),
+            {
+                type: 'application/octet-stream',
+                includeFilename: false,
+            },
+        )
+        return { url: response.content_uri }
+    }
+
+    async downloadEncryptedMedia(request: MatrixDownloadMediaRequest): Promise<Uint8Array> {
+        if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
+        return downloadMatrixMedia(this.client, request)
     }
 
     async stop(): Promise<void> {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -16,7 +16,14 @@ import {
     type MatrixIncomingEvent,
     type MatrixRoomSessionTarget,
 } from '@/channel/matrix'
-import { InMemoryReplayStore, ReplayGuard, generateDeviceKeyPair, signCommand } from '@codever/security'
+import {
+    InMemoryReplayStore,
+    ReplayGuard,
+    decryptMedia,
+    generateDeviceKeyPair,
+    sha256,
+    signCommand,
+} from '@codever/security'
 
 const temporaryDirectories: string[] = []
 
@@ -96,6 +103,44 @@ describe('MatrixPort', () => {
         expect(transport.attempts).toHaveLength(2)
         expect(transport.attempts[0].transactionId).toBe(transport.attempts[1].transactionId)
         expect(transport.delivered).toHaveLength(1)
+    })
+
+    it('uploads agent files as application-encrypted structured attachments', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-matrix-port-media-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'plot.png')
+        const plaintext = new TextEncoder().encode('fake png bytes')
+        await writeFile(path, plaintext)
+        const transport = new InMemoryMatrixTransport()
+        const port = createPort(transport)
+
+        await port.send({
+            text: 'Generated plot',
+            format: 'plain',
+            attachments: [{ type: 'photo', path, filename: 'plot.png' }],
+        })
+
+        const extension = transport.delivered[0].content[CODEVER_MATRIX_EXTENSION] as {
+            attachments: Array<{
+                name: string
+                mimeType: string
+                size: number
+                sha256: string
+                media: { url: string; key: string; iv: string; sha256: string; size: number }
+            }>
+        }
+        const attachment = extension.attachments[0]
+        expect(attachment).toMatchObject({
+            name: 'plot.png',
+            mimeType: 'image/png',
+            size: plaintext.byteLength,
+            sha256: await sha256(plaintext),
+            media: { url: expect.stringMatching(/^mxc:\/\//u) },
+        })
+        expect(JSON.stringify(extension)).not.toContain(path)
+        const ciphertext = transport.media.get(attachment.media.url)
+        expect(ciphertext).toBeDefined()
+        await expect(decryptMedia(ciphertext!, attachment.media)).resolves.toEqual(plaintext)
     })
 
     it('keeps every delayed delivery bound to its owning app session', async () => {

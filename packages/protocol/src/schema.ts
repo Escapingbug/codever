@@ -1,6 +1,9 @@
 import { z } from 'zod'
 
 export const PROTOCOL_VERSION = 1 as const
+export const MAX_CODEVER_ATTACHMENT_BYTES = 50 * 1024 * 1024
+export const MAX_CODEVER_ATTACHMENTS = 10
+export const MAX_CODEVER_PROMPT_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
 const opaqueId = z.string().min(1).max(256)
 const timestamp = z.number().int().nonnegative()
@@ -21,15 +24,30 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([jsonPrimitive, z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)]),
 )
 
+export const encryptedMediaSchema = z
+  .object({
+    url: z.string().regex(/^mxc:\/\/[^/\s]+\/[^/\s]+$/),
+    key: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    iv: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
+    sha256: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    size: z.number().int().positive().max(MAX_CODEVER_ATTACHMENT_BYTES + 16),
+  })
+  .strict()
+
+export type EncryptedMedia = z.infer<typeof encryptedMediaSchema>
+
 export const attachmentSchema = z
   .object({
     id: opaqueId,
     name: z.string().min(1).max(1024),
     mimeType: z.string().min(1).max(256),
-    size: z.number().int().nonnegative(),
+    size: z.number().int().nonnegative().max(MAX_CODEVER_ATTACHMENT_BYTES),
     sha256: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    media: encryptedMediaSchema,
   })
   .strict()
+
+export type CodeverAttachment = z.infer<typeof attachmentSchema>
 
 export const commandPayloadSchema = z.discriminatedUnion('operation', [
   z
@@ -37,7 +55,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       operation: z.literal('prompt'),
       sessionId: opaqueId,
       text: z.string(),
-      attachments: z.array(attachmentSchema).max(100).optional(),
+      attachments: z.array(attachmentSchema).max(MAX_CODEVER_ATTACHMENTS).optional(),
     })
     .strict(),
   z
@@ -141,6 +159,27 @@ export const commandSchema = z
         path: ['expiresAt'],
         message: 'expiresAt must be later than issuedAt',
       })
+    }
+    if (command.payload.operation === 'prompt') {
+      const attachments = command.payload.attachments ?? []
+      const totalBytes = attachments.reduce(
+        (total, attachment) => total + attachment.size,
+        0,
+      )
+      if (totalBytes > MAX_CODEVER_PROMPT_ATTACHMENT_BYTES) {
+        context.addIssue({
+          code: 'custom',
+          path: ['payload', 'attachments'],
+          message: `Prompt attachments exceed ${MAX_CODEVER_PROMPT_ATTACHMENT_BYTES} bytes`,
+        })
+      }
+      if (command.payload.text.length === 0 && attachments.length === 0) {
+        context.addIssue({
+          code: 'custom',
+          path: ['payload'],
+          message: 'A prompt requires text or at least one attachment',
+        })
+      }
     }
   })
 

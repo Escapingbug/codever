@@ -1,15 +1,22 @@
-import type {
-  CodeverCommand,
-  CommandPayload,
-  JsonValue,
-  SignedCommand,
+import {
+  MAX_CODEVER_ATTACHMENT_BYTES,
+  attachmentSchema,
+  type CodeverAttachment,
+  type CodeverCommand,
+  type CommandPayload,
+  type JsonValue,
+  type SignedCommand,
 } from "@codever/protocol";
 import {
   generateDeviceKeyPair,
+  decryptMedia,
+  encryptMedia,
   openSecureEnvelope,
   sealSecureEnvelope,
   SecurityError,
+  sha256,
   signCommand,
+  toArrayBuffer,
   type ReplayStore,
   verifyGatewayDeviceRotation,
   verifyPairingResponse,
@@ -173,6 +180,7 @@ export type IncomingCodeverMessage = {
   replacesEventId?: string;
   format: MessageFormat;
   toolGroup?: ToolGroupPresentation;
+  attachments?: CodeverAttachment[];
   raw: Record<string, unknown>;
 };
 
@@ -256,6 +264,8 @@ export type MatrixConnection = {
     signal?: AbortSignal,
   ): Promise<TrustedGateway>;
   send(payload: CommandPayload): Promise<CommandSendResult>;
+  uploadAttachment(file: File): Promise<CodeverAttachment>;
+  downloadAttachment(attachment: CodeverAttachment): Promise<Blob>;
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
   markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
@@ -1219,6 +1229,87 @@ export async function connectMatrix(
     );
     return queued;
   };
+  const uploadAttachment = async (file: File): Promise<CodeverAttachment> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    assertPersistenceHealthy();
+    if (!client.isRoomEncrypted(config.roomId)) {
+      throw new Error("Refusing to upload an attachment for an unencrypted Matrix room.");
+    }
+    if (!file.name || file.name.length > 1_024) {
+      throw new Error("Attachment name must contain between 1 and 1024 characters.");
+    }
+    if (file.size > MAX_CODEVER_ATTACHMENT_BYTES) {
+      throw new Error(
+        `Attachment exceeds the ${formatByteCount(MAX_CODEVER_ATTACHMENT_BYTES)} limit.`,
+      );
+    }
+    const plaintext = new Uint8Array(await file.arrayBuffer());
+    const encrypted = await encryptMedia(plaintext);
+    const uploaded = await client.uploadContent(
+      new Blob([toArrayBuffer(encrypted.ciphertext)], { type: "application/octet-stream" }),
+      {
+        type: "application/octet-stream",
+        includeFilename: false,
+      },
+    );
+    return attachmentSchema.parse({
+      id: crypto.randomUUID(),
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      size: plaintext.byteLength,
+      sha256: await sha256(plaintext),
+      media: {
+        url: uploaded.content_uri,
+        ...encrypted.descriptor,
+      },
+    });
+  };
+  const downloadAttachment = async (
+    input: CodeverAttachment,
+  ): Promise<Blob> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    const attachment = attachmentSchema.parse(input);
+    const url = client.mxcUrlToHttp(
+      attachment.media.url,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      true,
+    );
+    if (!url) throw new Error("Matrix media URL could not be resolved.");
+    const accessToken = client.getAccessToken();
+    if (!accessToken) {
+      throw new Error("Matrix access token is unavailable for media download.");
+    }
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`Matrix media download failed with HTTP ${response.status}.`);
+    }
+    const declaredSize = Number(response.headers.get("content-length"));
+    if (
+      Number.isFinite(declaredSize) &&
+      declaredSize > attachment.media.size
+    ) {
+      throw new Error("Encrypted attachment is larger than its signed metadata.");
+    }
+    const ciphertext = await readBoundedResponse(
+      response,
+      attachment.media.size,
+    );
+    const plaintext = await decryptMedia(ciphertext, attachment.media);
+    if (
+      plaintext.byteLength !== attachment.size ||
+      (await sha256(plaintext)) !== attachment.sha256
+    ) {
+      throw new Error("Attachment content does not match its signed metadata.");
+    }
+    return new Blob([toArrayBuffer(plaintext)], { type: attachment.mimeType });
+  };
   return {
     identity,
     matrixDeviceKeys,
@@ -1281,6 +1372,8 @@ export async function connectMatrix(
       );
       return operation;
     },
+    uploadAttachment,
+    downloadAttachment,
     confirmRevisionRetry(commandId) {
       const operation = outboundChain.then(async () => {
         assertPersistenceHealthy();
@@ -1686,6 +1779,7 @@ export function parseCodeverEvent(
       revision: effectiveExtension.revision,
       originDeviceId: effectiveExtension.origin_device_id,
       originDeviceName: effectiveExtension.origin_device_name,
+      attachments: parseAttachments(effectiveExtension.attachments),
       ...(isPositiveInteger(effectiveExtension.active_device_count)
         ? { activeDeviceCount: effectiveExtension.active_device_count }
         : {}),
@@ -1713,6 +1807,7 @@ export function parseCodeverEvent(
       text: body,
       format: messageFormat(effectiveExtension.format),
       ...(toolGroup ? { toolGroup } : {}),
+      attachments: parseAttachments(effectiveExtension.attachments),
       ...(typeof relation?.event_id === "string"
         ? { replacesEventId: relation.event_id }
         : {}),
@@ -1994,6 +2089,15 @@ function compareIncomingMessages(
     left.timestamp - right.timestamp ||
     left.eventId.localeCompare(right.eventId)
   );
+}
+
+function parseAttachments(value: unknown): CodeverAttachment[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const attachments = value.flatMap((candidate) => {
+    const parsed = attachmentSchema.safeParse(candidate);
+    return parsed.success ? [parsed.data] : [];
+  });
+  return attachments.length > 0 ? attachments : undefined;
 }
 
 async function forwardEvent(
@@ -3360,4 +3464,49 @@ function humanizeField(value: string): string {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${unit}`;
+}
+
+async function readBoundedResponse(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      throw new Error("Encrypted attachment exceeds its signed size.");
+    }
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error("Encrypted attachment exceeds its signed size.");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }

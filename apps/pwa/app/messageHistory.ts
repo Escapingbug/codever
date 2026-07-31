@@ -2,6 +2,7 @@ import type {
   MessageFormat,
   ToolGroupPresentation,
 } from "./presentation";
+import type { CodeverAttachment } from "@codever/protocol";
 
 export type PersistedChatMessage = {
   id: string;
@@ -22,6 +23,7 @@ export type PersistedChatMessage = {
   originDeviceName?: string;
   format?: MessageFormat;
   toolGroup?: ToolGroupPresentation;
+  attachments?: CodeverAttachment[];
   raw?: Record<string, unknown>;
 };
 

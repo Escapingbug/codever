@@ -87,6 +87,12 @@ export interface ChannelSendResult {
 }
 
 export interface ChannelPort {
+    /**
+     * Whether tool-output file:// references should receive channel command
+     * hints such as `/file_f1`. First-party clients use structured artifacts.
+     */
+    readonly fileReferenceHints?: boolean
+
     /** Send a message to the channel */
     send(message: ChannelMessage): Promise<ChannelSendResult>
 

@@ -15,6 +15,60 @@ describe('canonicalJson', () => {
 })
 
 describe('protocol schemas', () => {
+  it('accepts only bounded application-encrypted Matrix prompt attachments', () => {
+    const attachment = {
+      id: 'attachment-1',
+      name: 'diagram.png',
+      mimeType: 'image/png',
+      size: 12,
+      sha256: 'A'.repeat(43),
+      media: {
+        url: 'mxc://example.org/media-1',
+        key: 'B'.repeat(43),
+        iv: 'C'.repeat(16),
+        sha256: 'D'.repeat(43),
+        size: 28,
+      },
+    }
+    const command = {
+      kind: 'codever.command',
+      version: 1,
+      commandId: 'cmd-attachment',
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      sequence: 1,
+      baseRevision: 0,
+      operation: 'prompt',
+      issuedAt: 1,
+      expiresAt: 2,
+      nonce: '0123456789abcdef-attachment',
+      payload: {
+        operation: 'prompt',
+        sessionId: 'app-session-1',
+        text: '',
+        attachments: [attachment],
+      },
+    }
+
+    expect(commandSchema.parse(command).payload).toMatchObject({
+      operation: 'prompt',
+      attachments: [attachment],
+    })
+    expect(commandSchema.safeParse({
+      ...command,
+      payload: {
+        ...command.payload,
+        attachments: [{
+          ...attachment,
+          media: { ...attachment.media, url: 'https://example.org/media-1' },
+        }],
+      },
+    }).success).toBe(false)
+  })
+
   it('requires commands to bind the pairing-certificate sequence epoch', () => {
     const result = commandSchema.safeParse({
       kind: 'codever.command',

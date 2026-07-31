@@ -1,12 +1,16 @@
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@codever/protocol'
+import { toArrayBuffer } from '@codever/security'
 import type { EventType, MatrixClient, MatrixEvent, Room, RoomEvent } from 'matrix-js-sdk'
 import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js'
 import type {
+    MatrixDownloadMediaRequest,
     MatrixIncomingEvent,
     MatrixSendEventRequest,
     MatrixSendEventResult,
     MatrixTransport,
+    MatrixUploadMediaRequest,
+    MatrixUploadMediaResult,
 } from './transport'
 
 const MATRIX_ROOM_TIMELINE = 'Room.timeline' as RoomEvent.Timeline
@@ -65,6 +69,21 @@ export class MatrixSdkTransport implements MatrixTransport {
         await this.options.client.sendTyping(roomId, typing, timeoutMs)
     }
 
+    async uploadEncryptedMedia(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult> {
+        const response = await this.options.client.uploadContent(
+            new Blob([toArrayBuffer(request.ciphertext)], { type: 'application/octet-stream' }),
+            {
+                type: 'application/octet-stream',
+                includeFilename: false,
+            },
+        )
+        return { url: response.content_uri }
+    }
+
+    async downloadEncryptedMedia(request: MatrixDownloadMediaRequest): Promise<Uint8Array> {
+        return downloadMatrixMedia(this.options.client, request)
+    }
+
     private readonly onTimeline = (
         event: MatrixEvent,
         room: Room | undefined,
@@ -110,6 +129,69 @@ export class MatrixSdkTransport implements MatrixTransport {
             originServerTs: event.getTs(),
         })
     }
+}
+
+export async function downloadMatrixMedia(
+    client: MatrixClient,
+    request: MatrixDownloadMediaRequest,
+): Promise<Uint8Array> {
+    if (!/^mxc:\/\/[^/\s]+\/[^/\s]+$/u.test(request.url)) {
+        throw new Error('Refusing to download a non-Matrix media URL')
+    }
+    const url = client.mxcUrlToHttp(
+        request.url,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        true,
+    )
+    if (!url) throw new Error('Matrix media URL could not be resolved')
+    const accessToken = client.getAccessToken()
+    if (!accessToken) throw new Error('Matrix access token is unavailable for media download')
+    const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        redirect: 'error',
+    })
+    if (!response.ok) {
+        throw new Error(`Matrix media download failed with HTTP ${response.status}`)
+    }
+    const declaredSize = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declaredSize) && declaredSize > request.maxBytes) {
+        throw new Error(`Matrix media exceeds the ${request.maxBytes} byte download limit`)
+    }
+    return readBoundedResponse(response, request.maxBytes)
+}
+
+async function readBoundedResponse(response: Response, maxBytes: number): Promise<Uint8Array> {
+    if (!response.body) {
+        const bytes = new Uint8Array(await response.arrayBuffer())
+        if (bytes.byteLength > maxBytes) {
+            throw new Error(`Matrix media exceeds the ${maxBytes} byte download limit`)
+        }
+        return bytes
+    }
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        total += value.byteLength
+        if (total > maxBytes) {
+            await reader.cancel()
+            throw new Error(`Matrix media exceeds the ${maxBytes} byte download limit`)
+        }
+        chunks.push(value)
+    }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return bytes
 }
 
 function fingerprintEncryptedContent(content: Record<string, unknown>): string {

@@ -1116,6 +1116,98 @@ select:focus-visible {
   letter-spacing: -2px;
 }
 
+.message-attachments {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.attachment-card {
+  display: grid;
+  min-width: min(320px, 68vw);
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid #e0e3ea;
+  border-radius: 10px;
+  background: #f8f9fb;
+}
+
+.user-bubble .attachment-card {
+  border-color: rgb(255 255 255 / 20%);
+  background: rgb(255 255 255 / 10%);
+}
+
+.attachment-card > img {
+  width: 100%;
+  max-height: 280px;
+  border-radius: 7px;
+  object-fit: contain;
+  background: rgb(0 0 0 / 6%);
+}
+
+.attachment-card-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.attachment-card-copy > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.attachment-card-copy b,
+.attachment-card-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card-copy b {
+  font-size: 11px;
+}
+
+.attachment-card-copy small {
+  color: #838b9c;
+  font-size: 9px;
+}
+
+.user-bubble .attachment-card-copy small {
+  color: rgb(255 255 255 / 66%);
+}
+
+.attachment-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.attachment-card-actions button {
+  padding: 4px 8px;
+  border: 1px solid #d9dce5;
+  border-radius: 6px;
+  background: white;
+  color: #596175;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.user-bubble .attachment-card-actions button {
+  border-color: rgb(255 255 255 / 26%);
+  background: rgb(255 255 255 / 12%);
+  color: white;
+}
+
+.attachment-error {
+  color: #b64a54;
+  font-size: 9px;
+}
+
+.user-bubble .attachment-error {
+  color: #ffd0d4;
+}
+
 .delivery-indicator {
   display: inline-block;
   min-width: 14px;
@@ -1774,6 +1866,57 @@ select:focus-visible {
   background: linear-gradient(transparent, #f9f9fc 18%);
 }
 
+.pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid #e3e5eb;
+  border-bottom: 0;
+  background: #fafafd;
+}
+
+.pending-attachment {
+  display: flex;
+  min-width: 0;
+  max-width: min(300px, 72vw);
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 1px solid #e1e3ea;
+  border-radius: 8px;
+  background: white;
+  color: #555e71;
+}
+
+.pending-attachment > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.pending-attachment b,
+.pending-attachment small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-attachment b {
+  font-size: 10px;
+}
+
+.pending-attachment small {
+  color: #9299a8;
+  font-size: 8px;
+}
+
+.pending-attachment button {
+  padding: 0 2px;
+  background: transparent;
+  color: #8b92a1;
+  font-size: 15px;
+}
+
 .context-strip {
   display: flex;
   height: 35px;
@@ -1947,6 +2090,10 @@ select:focus-visible {
   color: #848c9d;
   font-size: 20px;
   font-weight: 300;
+}
+
+.attachment-input {
+  display: none;
 }
 
 .attachment-button:hover {

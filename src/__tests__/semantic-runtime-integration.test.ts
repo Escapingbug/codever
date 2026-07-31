@@ -172,6 +172,42 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
+    it('does not add Telegram /file commands for first-party structured clients', async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'codever-pwa-file-ref-'))
+        try {
+            const planPath = join(tempDir, 'plan.md')
+            const planUri = pathToFileURL(planPath).href
+            writeFileSync(planPath, '# Plan', 'utf8')
+            const provider = createProvider([
+                {
+                    kind: 'tool_use',
+                    toolName: 'tool_call',
+                    toolUseId: 'create-plan',
+                    input: {},
+                    status: 'running',
+                    displayTitle: 'Create Plan',
+                    content: [{ type: 'content', contentType: 'text', text: `Plan file: ${planUri}` }],
+                },
+                { kind: 'result', status: 'success' },
+            ])
+            const channel = Object.assign(createChannel(), { fileReferenceHints: false as const })
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: tempDir,
+                provider,
+                providerName: 'mock-acp',
+                channelPort: channel,
+            })
+
+            await runtime.dispatch({ kind: 'user_message', text: 'create a plan', source: 'channel' })
+
+            expect(channel.sent.map(message => message.text).join('\n')).not.toContain('/file_')
+            expect(channel.sent.every(message => message.replyMarkup === undefined)).toBe(true)
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+        }
+    })
+
     it('keeps file reference hints when a later tool completion edit reuses merged content', async () => {
         const tempDir = mkdtempSync(join(tmpdir(), 'codever-file-ref-edit-'))
         try {

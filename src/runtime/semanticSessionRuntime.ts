@@ -764,6 +764,7 @@ export class SemanticSessionRuntime {
     }
 
     private withFileReferenceHints(message: ChannelMessage, event?: ConversationEvent): ChannelMessage {
+        if (this.config.channelPort.fileReferenceHints === false) return message
         const refs = this.registerFileReferencesFromEvent(event, message.text)
         if (refs.length === 0) return message
 

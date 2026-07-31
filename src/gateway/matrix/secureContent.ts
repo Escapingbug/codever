@@ -7,7 +7,11 @@ import {
 } from '@codever/security'
 import { createHash, randomUUID } from 'node:crypto'
 import { FileReplayStore } from '@codever/security/node'
-import type { JsonValue, SignedSecureEnvelope } from '@codever/protocol'
+import type {
+    CodeverAttachment,
+    JsonValue,
+    SignedSecureEnvelope,
+} from '@codever/protocol'
 import {
     CODEVER_MATRIX_EXTENSION,
     CODEVER_MATRIX_PROTOCOL_VERSION,
@@ -119,6 +123,12 @@ export class GatewaySecureContentLayer {
             sendEncryptedRoomEvent: request =>
                 this.sealOutgoingToAll(request, room, transport),
             ...(transport.setTyping ? { setTyping: transport.setTyping.bind(transport) } : {}),
+            ...(transport.uploadEncryptedMedia
+                ? { uploadEncryptedMedia: transport.uploadEncryptedMedia.bind(transport) }
+                : {}),
+            ...(transport.downloadEncryptedMedia
+                ? { downloadEncryptedMedia: transport.downloadEncryptedMedia.bind(transport) }
+                : {}),
         }
     }
 
@@ -229,6 +239,7 @@ export class GatewaySecureContentLayer {
             originDeviceId: string
             originDeviceName: string
             text: string
+            attachments?: CodeverAttachment[]
         },
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
@@ -249,6 +260,7 @@ export class GatewaySecureContentLayer {
                     origin_device_name: input.originDeviceName,
                     operation: 'prompt',
                     text: input.text,
+                    ...(input.attachments?.length ? { attachments: input.attachments } : {}),
                 },
             },
         }, room, transport)

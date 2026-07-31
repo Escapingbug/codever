@@ -1,4 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { readFile, stat } from 'node:fs/promises'
+import { extname } from 'node:path'
+import {
+    MAX_CODEVER_ATTACHMENT_BYTES,
+    attachmentSchema,
+    type CodeverAttachment,
+} from '@codever/protocol'
+import { encryptMedia, sha256 } from '@codever/security'
 import type {
     ChannelMessage,
     ChannelPort,
@@ -44,8 +52,10 @@ interface PendingDecision {
 }
 
 export class MatrixPort implements ChannelPort {
+    readonly fileReferenceHints = false
     private readonly pendingDecisions = new Map<string, PendingDecision>()
     private readonly messageOperationIds = new WeakMap<ChannelMessage, string>()
+    private readonly attachmentUploads = new Map<string, Promise<CodeverAttachment[]>>()
 
     constructor(private readonly options: MatrixPortOptions) {}
 
@@ -53,21 +63,13 @@ export class MatrixPort implements ChannelPort {
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
         const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
+        const attachments = await this.uploadAttachments(operationId, message.attachments)
         const content = buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
             ...this.sessionMetadata(),
             format: message.format,
-            ...(message.attachments?.length ? {
-                attachments: message.attachments.map(attachment => ({
-                    type: attachment.type,
-                    filename: attachment.filename,
-                    // Local paths are intentionally not placed in the standard
-                    // Matrix fallback body. A real transport uploads them as
-                    // encrypted media before materializing the final event.
-                    local_path: attachment.path,
-                })),
-            } : {}),
+            ...(attachments.length ? { attachments } : {}),
             ...(presentation === undefined ? {} : { ui: presentation }),
         })
         const transactionId = this.transactionId('send', operationId)
@@ -85,12 +87,14 @@ export class MatrixPort implements ChannelPort {
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
         const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
+        const attachments = await this.uploadAttachments(operationId, message.attachments)
         const replacement = buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
             ...this.sessionMetadata(),
             format: message.format,
             replaces_event_id: targetEventId,
+            ...(attachments.length ? { attachments } : {}),
             ...(presentation === undefined ? {} : { ui: presentation }),
         })
         const content: MatrixRoomMessageContent = {
@@ -251,6 +255,49 @@ export class MatrixPort implements ChannelPort {
         this.messageOperationIds.set(message, operationId)
         return operationId
     }
+
+    private uploadAttachments(
+        operationId: string,
+        attachments: ChannelMessage['attachments'],
+    ): Promise<CodeverAttachment[]> {
+        if (!attachments?.length) return Promise.resolve([])
+        const existing = this.attachmentUploads.get(operationId)
+        if (existing) return existing
+        const upload = Promise.all(attachments.map(async attachment => {
+            const uploadMedia = this.options.transport.uploadEncryptedMedia
+            if (!uploadMedia) {
+                throw new Error('Matrix transport does not support encrypted media upload')
+            }
+            const metadata = await stat(attachment.path)
+            if (!metadata.isFile()) {
+                throw new Error(`Attachment is not a regular file: ${attachment.path}`)
+            }
+            if (metadata.size > MAX_CODEVER_ATTACHMENT_BYTES) {
+                throw new Error(
+                    `Attachment exceeds the ${MAX_CODEVER_ATTACHMENT_BYTES} byte limit: ${attachment.path}`,
+                )
+            }
+            const plaintext = new Uint8Array(await readFile(attachment.path))
+            const encrypted = await encryptMedia(plaintext)
+            const uploaded = await uploadMedia.call(this.options.transport, {
+                ciphertext: encrypted.ciphertext,
+            })
+            return attachmentSchema.parse({
+                id: randomUUID(),
+                name: attachment.filename ?? attachment.path.split(/[\\/]/u).at(-1) ?? 'attachment',
+                mimeType: attachmentMimeType(attachment.path),
+                size: plaintext.byteLength,
+                sha256: await sha256(plaintext),
+                media: {
+                    url: uploaded.url,
+                    ...encrypted.descriptor,
+                },
+            })
+        }))
+        this.attachmentUploads.set(operationId, upload)
+        void upload.catch(() => this.attachmentUploads.delete(operationId))
+        return upload
+    }
 }
 
 function matrixSessionStatus(
@@ -326,6 +373,30 @@ function htmlToPlainText(value: string): string {
         .replace(/&#39;|&apos;/g, "'")
         .replace(/&amp;/g, '&')
         .trim()
+}
+
+function attachmentMimeType(path: string): string {
+    switch (extname(path).toLowerCase()) {
+        case '.png': return 'image/png'
+        case '.jpg':
+        case '.jpeg': return 'image/jpeg'
+        case '.gif': return 'image/gif'
+        case '.webp': return 'image/webp'
+        case '.svg': return 'image/svg+xml'
+        case '.pdf': return 'application/pdf'
+        case '.json': return 'application/json'
+        case '.md':
+        case '.markdown': return 'text/markdown'
+        case '.txt':
+        case '.log': return 'text/plain'
+        case '.csv': return 'text/csv'
+        case '.mp3': return 'audio/mpeg'
+        case '.wav': return 'audio/wav'
+        case '.m4a': return 'audio/mp4'
+        case '.mp4': return 'video/mp4'
+        case '.zip': return 'application/zip'
+        default: return 'application/octet-stream'
+    }
 }
 
 

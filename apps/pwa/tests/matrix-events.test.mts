@@ -100,3 +100,39 @@ test("exposes a failed terminal tool status", () => {
     },
   );
 });
+
+test("parses signed structured attachments without relying on fallback text", () => {
+  const attachment = {
+    id: "artifact-1",
+    name: "diagram.png",
+    mimeType: "image/png",
+    size: 12,
+    sha256: "A".repeat(43),
+    media: {
+      url: "mxc://example.com/media-1",
+      key: "B".repeat(43),
+      iv: "C".repeat(16),
+      sha256: "D".repeat(43),
+      size: 28,
+    },
+  };
+  const message = parseCodeverEvent(
+    "$artifact",
+    "@gateway:example.com",
+    1_700_000_000_300,
+    true,
+    {
+      msgtype: "m.text",
+      body: "Generated image",
+      "io.codever": {
+        version: 1,
+        kind: "message",
+        format: "plain",
+        attachments: [attachment],
+      },
+    },
+  );
+
+  assert.ok(message);
+  assert.deepEqual(message.attachments, [attachment]);
+});
