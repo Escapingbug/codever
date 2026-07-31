@@ -36,6 +36,18 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
 
+  const requestUrl = new URL(event.request.url);
+  if (
+    requestUrl.origin === self.location.origin &&
+    requestUrl.pathname.startsWith("/_matrix/")
+  ) {
+    // The homeserver shares this origin in production. Matrix /sync is a
+    // credentialed long poll and must never be cached or replayed by the app
+    // shell worker; leaving the request unhandled sends it directly to the
+    // network.
+    return;
+  }
+
   if (event.request.mode === "navigate") {
     event.respondWith(
       fetch(event.request, { cache: "no-store" })
@@ -56,7 +68,7 @@ self.addEventListener("fetch", (event) => {
       .then((response) => {
         if (
           response.ok &&
-          new URL(event.request.url).origin === self.location.origin
+          requestUrl.origin === self.location.origin
         ) {
           const copy = response.clone();
           caches

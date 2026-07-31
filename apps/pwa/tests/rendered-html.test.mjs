@@ -61,6 +61,11 @@ test("ships a complete installable offline shell", async () => {
   assert.match(serviceWorker, /caches\.open\(CACHE_NAME\)/);
   assert.match(serviceWorker, /event\.request\.mode === "navigate"/);
   assert.match(serviceWorker, /cache:\s*"no-store"/);
+  assert.match(serviceWorker, /pathname\.startsWith\("\/_matrix\/"\)/);
+  assert.match(
+    serviceWorker,
+    /pathname\.startsWith\("\/_matrix\/"\)[\s\S]*?return;/,
+  );
   assert.match(source, /registerPwaUpdates\(\)/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);

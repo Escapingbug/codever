@@ -76,6 +76,7 @@ import {
   matrixInitialSyncLimit,
   shouldRecoverMatrixSyncCheckpoint,
 } from "./matrixStartup";
+import { processMatrixEventWithDecryptionRetry } from "./matrixDecryptionRetry";
 export {
   parseGatewayStateExtension,
   type GatewayCapabilities,
@@ -628,6 +629,39 @@ export async function connectMatrix(
       gatewayState,
     });
   };
+  const reportInboundError = (error: unknown) => {
+    handlers.onStatus("error", formatError(error));
+  };
+  const processInboundEvent = (
+    event: MatrixEvent,
+    historical: boolean,
+  ): Promise<void> =>
+    processMatrixEventWithDecryptionRetry(
+      event,
+      sdk.MatrixEventEvent.Decrypted,
+      (candidate) =>
+        forwardEvent(
+          client,
+          candidate,
+          seen,
+          config,
+          handlers.onMessage,
+          (trust) => {
+            activeTrust = trust;
+            handlers.onTrustUpdated?.(trust);
+          },
+          identity,
+          () => activeTrust,
+          replayStore,
+          onCommandAcknowledged,
+          onRevisionConflict,
+          onKnownRevision,
+          onAuthenticatedCommandResult,
+          onGatewayState,
+          historical,
+        ),
+      reportInboundError,
+    );
   const onTimeline = (
     event: MatrixEvent,
     room: Room | undefined,
@@ -636,28 +670,9 @@ export async function connectMatrix(
     if (stopped || !room || room.roomId !== config.roomId || toStartOfTimeline) {
       return;
     }
-    void forwardEvent(
-      client,
-      event,
-      seen,
-      config,
-      handlers.onMessage,
-      (trust) => {
-        activeTrust = trust;
-        handlers.onTrustUpdated?.(trust);
-      },
-      identity,
-      () => activeTrust,
-      replayStore,
-      onCommandAcknowledged,
-      onRevisionConflict,
-      onKnownRevision,
-      onAuthenticatedCommandResult,
-      onGatewayState,
-      !initialSyncComplete,
-    ).catch((error) => {
-      handlers.onStatus("error", formatError(error));
-    });
+    void processInboundEvent(event, !initialSyncComplete).catch(
+      reportInboundError,
+    );
   };
   const onSync = (state: string) => {
     if (stopped) return;
@@ -816,26 +831,7 @@ export async function connectMatrix(
     }
 
     for (const event of room.getLiveTimeline().getEvents()) {
-      await forwardEvent(
-        client,
-        event,
-        seen,
-        config,
-        handlers.onMessage,
-        (trust) => {
-          activeTrust = trust;
-          handlers.onTrustUpdated?.(trust);
-        },
-        identity,
-        () => activeTrust,
-        replayStore,
-        onCommandAcknowledged,
-        onRevisionConflict,
-        onKnownRevision,
-        onAuthenticatedCommandResult,
-        onGatewayState,
-        true,
-      );
+      await processInboundEvent(event, true);
     }
     assertPersistenceHealthy();
     connectionReady = true;
@@ -2043,8 +2039,9 @@ async function forwardEvent(
   }
   if (event.isDecryptionFailure()) {
     // A fresh Matrix device cannot decrypt room history sent before it joined.
-    // Undecryptable events must not prevent pairing or become a homeserver DoS.
-    seen.add(eventId);
+    // Live events remain eligible for Event.decrypted after the matching
+    // Megolm key arrives. The outer live-event processor bounds that retry;
+    // marking the event seen here would permanently lose command acks/results.
     return;
   }
   if (event.getType() !== "m.room.message") return;
