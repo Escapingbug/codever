@@ -47,7 +47,6 @@ import {
   acquireMatrixCryptoLock,
   checkpointAndReleaseMatrixSyncStore,
   checkpointMatrixSyncStore,
-  destroyAndReleaseMatrixSyncStore,
   matrixCryptoLockName,
   matrixSyncDatabaseName,
   waitForMatrixSyncStoreClose,
@@ -72,6 +71,10 @@ import {
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL,
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS,
   MATRIX_CRYPTO_LOADING_DETAIL,
+  MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL,
+  MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL,
+  matrixInitialSyncLimit,
+  shouldRecoverMatrixSyncCheckpoint,
 } from "./matrixStartup";
 export {
   parseGatewayStateExtension,
@@ -476,6 +479,7 @@ export async function connectMatrix(
 
   let stopped = false;
   let initialSyncComplete = false;
+  let connectionReady = false;
   let persistenceFailure: string | null = null;
   const failPersistence = (detail: string) => {
     if (persistenceFailure) return;
@@ -677,7 +681,7 @@ export async function connectMatrix(
           );
         }
       });
-      handlers.onStatus("connected");
+      if (connectionReady) handlers.onStatus("connected");
     } else if (state === "RECONNECTING" || state === "CATCHUP") {
       handlers.onStatus("reconnecting");
     } else if (state === "ERROR") {
@@ -696,11 +700,11 @@ export async function connectMatrix(
       LOCAL_STORE_TIMEOUT_MS,
       "The Matrix sync database did not open in time.",
     );
-    if (activeTrust && !(await syncStore.getSavedSyncToken())) {
-      throw new Error(
-        "This trusted browser has no persisted Matrix sync checkpoint, so its device list may be stale. Log in as a new Matrix device and pair this browser again.",
-      );
-    }
+    const savedSyncToken = await syncStore.getSavedSyncToken();
+    const recoveringSyncCheckpoint = shouldRecoverMatrixSyncCheckpoint(
+      Boolean(activeTrust),
+      savedSyncToken,
+    );
     assertPersistenceHealthy();
     handlers.onStatus(
       "connecting",
@@ -733,8 +737,18 @@ export async function connectMatrix(
     }
     client.on(sdk.RoomEvent.Timeline, onTimeline);
     client.on(sdk.ClientEvent.Sync, onSync);
-    handlers.onStatus("connecting", "Starting the first encrypted sync…");
-    await client.startClient({ initialSyncLimit: activeTrust ? 30 : 1 });
+    handlers.onStatus(
+      "connecting",
+      recoveringSyncCheckpoint
+        ? MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL
+        : "Starting the first encrypted sync…",
+    );
+    await client.startClient({
+      initialSyncLimit: matrixInitialSyncLimit(
+        Boolean(activeTrust),
+        recoveringSyncCheckpoint,
+      ),
+    });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
     initialSyncComplete = true;
     handlers.onStatus(
@@ -770,6 +784,20 @@ export async function connectMatrix(
         LOCAL_STORE_TIMEOUT_MS,
         "The encrypted Matrix session could not be rotated in time.",
       );
+    }
+
+    if (recoveringSyncCheckpoint) {
+      handlers.onStatus("connecting", MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL);
+      await withMatrixTimeout(
+        checkpointMatrixSyncStore(syncStoreDatabaseName, syncStore),
+        LOCAL_STORE_TIMEOUT_MS,
+        "The rebuilt Matrix sync checkpoint could not be saved in time.",
+      );
+      if (!(await syncStore.getSavedSyncToken())) {
+        throw new Error(
+          "The Matrix sync checkpoint was rebuilt but could not be persisted. Check this browser’s storage settings and try again.",
+        );
+      }
     }
 
     if (activeTrust) {
@@ -810,6 +838,7 @@ export async function connectMatrix(
       );
     }
     assertPersistenceHealthy();
+    connectionReady = true;
     handlers.onStatus("connected");
   } catch (error) {
     stopped = true;
@@ -819,7 +848,7 @@ export async function connectMatrix(
     let detail = formatError(error);
     try {
       await withMatrixTimeout(
-        destroyAndReleaseMatrixSyncStore(
+        checkpointAndReleaseMatrixSyncStore(
           syncStoreDatabaseName,
           syncStore,
           cryptoLock,
@@ -829,15 +858,15 @@ export async function connectMatrix(
       );
     } catch (cleanupError) {
       await cryptoLock.release().catch(() => undefined);
-      detail = `${detail} The local Matrix stores did not close cleanly: ${formatError(
+      detail = `${detail} The local Matrix stores could not be checkpointed or closed cleanly: ${formatError(
         cleanupError,
-      )} Reload this page before trying another invitation.`;
+      )} Reload this page before retrying.`;
     }
     handlers.onStatus("error", detail);
     throw new Error(detail);
   }
   if (!matrixDeviceKeys) {
-    await destroyAndReleaseMatrixSyncStore(
+    await checkpointAndReleaseMatrixSyncStore(
       syncStoreDatabaseName,
       syncStore,
       cryptoLock,

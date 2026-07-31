@@ -214,7 +214,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(packageJson, /"jsqr": "1\.4\.0"/);
   assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
-  assert.match(matrix, /initialSyncLimit: activeTrust \? 30 : 1/);
+  assert.match(matrix, /initialSyncLimit: matrixInitialSyncLimit/);
   assert.match(matrix, /Publishing this device’s encryption keys/);
   assert.match(matrix, /await waitForOwnMatrixDeviceKeys\(/);
   assert.match(matrix, /CRYPTO_INITIALIZATION_TIMEOUT_MS/);
@@ -234,6 +234,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /checkpointMatrixSyncStore/);
   assert.match(matrix, /checkpointAndReleaseMatrixSyncStore/);
+  assert.doesNotMatch(matrix, /destroyAndReleaseMatrixSyncStore/);
+  assert.match(matrix, /shouldRecoverMatrixSyncCheckpoint/);
   assert.match(matrix, /acquireMatrixCryptoLock/);
   assert.match(matrix, /getSavedSyncToken\(\)/);
   assert.match(matrix, /assertPersistenceHealthy\(\)/);
