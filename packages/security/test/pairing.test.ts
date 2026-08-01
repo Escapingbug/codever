@@ -3,6 +3,7 @@ import type {
   MatrixTransportBinding,
   PairingCertificate,
   PairingOffer,
+  PairingRejection,
   PairingRequest,
   PairingResponse,
   SignedPairingOffer,
@@ -20,11 +21,13 @@ import {
   signGatewayTransportSnapshot,
   signPairingCertificate,
   signPairingOffer,
+  signPairingRejection,
   signPairingRequest,
   signPairingResponse,
   verifyGatewayDeviceRotation,
   verifyGatewayTransportSnapshot,
   verifyPairingOffer,
+  verifyPairingRejection,
   verifyPairingRequest,
   verifyPairingResponse,
 } from '../src/index.js'
@@ -45,7 +48,12 @@ const deviceTransport: MatrixTransportBinding = {
   ed25519: 'phone-ed25519-fingerprint',
 }
 
-async function handshake() {
+async function handshake(timestamps: {
+  offerIssuedAt?: number
+  requestIssuedAt?: number
+  certificateIssuedAt?: number
+  responseIssuedAt?: number
+} = {}) {
   const gatewayKeys = await generateDeviceKeyPair()
   const deviceKeys = await generateDeviceKeyPair()
   const offerDocument: PairingOffer = {
@@ -58,7 +66,7 @@ async function handshake() {
     gatewayTransport,
     challenge: generatePairingChallenge(),
     allowedOperations: ['prompt', 'cancel'],
-    issuedAt: now - 1_000,
+    issuedAt: timestamps.offerIssuedAt ?? now - 1_000,
     expiresAt: now + 60_000,
   }
   const offer = await signPairingOffer(
@@ -66,6 +74,7 @@ async function handshake() {
     gatewayKeys.privateKey,
     gatewayKeys.keyId,
   )
+  const requestIssuedAt = timestamps.requestIssuedAt ?? now
   const requestDocument: PairingRequest = {
     kind: 'codever.pairing.request',
     version: 1,
@@ -78,8 +87,8 @@ async function handshake() {
     deviceKey: await exportPairingPublicKey(deviceKeys.publicKey),
     deviceTransport,
     requestedOperations: ['prompt'],
-    issuedAt: now,
-    expiresAt: now + 30_000,
+    issuedAt: requestIssuedAt,
+    expiresAt: Math.min(offer.offer.expiresAt, requestIssuedAt + 30_000),
   }
   const request = await signPairingRequest(
     requestDocument,
@@ -103,7 +112,7 @@ async function handshake() {
     deviceKey: request.request.deviceKey,
     deviceTransport,
     allowedOperations: ['prompt'],
-    issuedAt: now + 1,
+    issuedAt: timestamps.certificateIssuedAt ?? now + 1,
     expiresAt: now + 24 * 60 * 60_000,
   }
   const certificate = await signPairingCertificate(
@@ -121,7 +130,7 @@ async function handshake() {
     requestDigest: await pairingRequestDigest(request),
     gatewayId: offer.offer.gatewayId,
     certificate,
-    issuedAt: now + 2,
+    issuedAt: timestamps.responseIssuedAt ?? now + 2,
     expiresAt: now + 90_000,
   }
   const response = await signPairingResponse(
@@ -159,6 +168,80 @@ describe('independent Codever pairing', () => {
         now: offer.offer.expiresAt + 1,
       }),
     ).resolves.toMatchObject({ requestId: request.request.requestId })
+  })
+
+  it('uses signed digests instead of cross-device clock order for causality', async () => {
+    const joiningDeviceAhead = await handshake({
+      requestIssuedAt: now + 113,
+      certificateIssuedAt: now,
+      responseIssuedAt: now,
+    })
+    await expect(
+      verifyPairingResponse(
+        joiningDeviceAhead.response,
+        joiningDeviceAhead.offer,
+        joiningDeviceAhead.request,
+        { now: now + 113 },
+      ),
+    ).resolves.toMatchObject({ requestId: 'request-1' })
+
+    const joiningDeviceBehind = await handshake({
+      offerIssuedAt: now,
+      requestIssuedAt: now - 10_000,
+      certificateIssuedAt: now,
+      responseIssuedAt: now,
+    })
+    await expect(
+      verifyPairingResponse(
+        joiningDeviceBehind.response,
+        joiningDeviceBehind.offer,
+        joiningDeviceBehind.request,
+        { now },
+      ),
+    ).resolves.toMatchObject({ requestId: 'request-1' })
+  })
+
+  it('still rejects independently signed documents beyond the future-skew policy', async () => {
+    const atBoundary = await handshake({ requestIssuedAt: now + 30_000 })
+    await expect(
+      verifyPairingRequest(atBoundary.request, atBoundary.offer, { now }),
+    ).resolves.toMatchObject({ requestId: 'request-1' })
+
+    const { offer, request } = await handshake({ requestIssuedAt: now + 30_001 })
+    await expect(
+      verifyPairingRequest(request, offer, { now }),
+    ).rejects.toMatchObject({ code: 'issued_in_future' })
+  })
+
+  it('accepts only Gateway-signed rejections bound to the exact request digest', async () => {
+    const { gatewayKeys, offer, request } = await handshake()
+    const document: PairingRejection = {
+      kind: 'codever.pairing.rejection',
+      version: 1,
+      offerId: offer.offer.offerId,
+      requestId: request.request.requestId,
+      requestDigest: await pairingRequestDigest(request),
+      gatewayId: offer.offer.gatewayId,
+      code: 'gateway_error',
+      message: 'The Gateway could not complete secure pairing.',
+      retryable: true,
+      issuedAt: now,
+      expiresAt: now + 60_000,
+    }
+    const rejection = await signPairingRejection(
+      document,
+      gatewayKeys.privateKey,
+      gatewayKeys.keyId,
+    )
+    await expect(
+      verifyPairingRejection(rejection, offer, request, { now }),
+    ).resolves.toMatchObject({ code: 'gateway_error', retryable: true })
+
+    const rebound = structuredClone(rejection)
+    rebound.rejection.requestId = 'another-request'
+    await expect(
+      verifyPairingRejection(rebound, offer, request, { now }),
+    ).rejects.toMatchObject({ code: 'binding_mismatch' })
   })
 
   it('never sends the one-time challenge in the Matrix request or response', async () => {

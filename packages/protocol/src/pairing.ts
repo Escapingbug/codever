@@ -295,6 +295,54 @@ export const signedPairingResponseSchema = z
 export type SignedPairingResponse = z.infer<typeof signedPairingResponseSchema>
 
 /**
+ * A request-bound failure acknowledgement. The Gateway signs rejections so a
+ * room member or homeserver cannot make a PWA abandon a valid pairing attempt.
+ */
+export const pairingRejectionCodeSchema = z.enum([
+  'gateway_rejected',
+  'device_conflict',
+  'gateway_error',
+])
+
+export type PairingRejectionCode = z.infer<typeof pairingRejectionCodeSchema>
+
+export const pairingRejectionSchema = z
+  .object({
+    kind: z.literal('codever.pairing.rejection'),
+    version: z.literal(PROTOCOL_VERSION),
+    offerId: opaqueId,
+    requestId: opaqueId,
+    requestDigest: sha256Base64Url,
+    gatewayId: opaqueId,
+    code: pairingRejectionCodeSchema,
+    message: z.string().min(1).max(256),
+    retryable: z.boolean(),
+    issuedAt: timestamp,
+    expiresAt: timestamp,
+  })
+  .strict()
+  .superRefine((rejection, context) => {
+    if (rejection.expiresAt <= rejection.issuedAt) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'expiresAt must be later than issuedAt',
+      })
+    }
+  })
+
+export type PairingRejection = z.infer<typeof pairingRejectionSchema>
+
+export const signedPairingRejectionSchema = z
+  .object({
+    rejection: pairingRejectionSchema,
+    signature: pairingSignatureSchema,
+  })
+  .strict()
+
+export type SignedPairingRejection = z.infer<typeof signedPairingRejectionSchema>
+
+/**
  * A Gateway may rotate its Matrix transport device without asking the user to
  * pair again. The stable Gateway application key authorizes the replacement.
  */

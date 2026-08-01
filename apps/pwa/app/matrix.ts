@@ -26,6 +26,7 @@ import {
   signCommand,
   toArrayBuffer,
   type ReplayStore,
+  verifyPairingRejection,
   verifyPairingResponse,
 } from "@codever/security";
 import type {
@@ -41,6 +42,7 @@ import {
   applyGatewayTransportSnapshot,
   completePairing,
   loadTrustedGateway,
+  PairingRejectedError,
   saveTrustedGateway,
   type PairingPreview,
   type PairingTransport,
@@ -50,6 +52,7 @@ import {
   CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
   signedGatewayDeviceRotationSchema,
   jsonValueSchema,
+  signedPairingRejectionSchema,
   signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
   type SignedPairingOffer,
@@ -1818,6 +1821,34 @@ function waitForPairingResponse(
         }
         const content = asRecord(event.getContent());
         const extension = asRecord(content?.["io.codever"]);
+        if (extension?.kind === "pairing_rejection") {
+          const candidate = extension.pairing_rejection;
+          if (!candidate) return;
+          try {
+            const parsed = signedPairingRejectionSchema.parse(candidate);
+            if (
+              parsed.rejection.offerId !== offer.offer.offerId ||
+              parsed.rejection.requestId !== request.request.requestId
+            ) {
+              return;
+            }
+            const rejection = await verifyPairingRejection(
+              parsed,
+              offer,
+              request,
+            );
+            finish({
+              error: new PairingRejectedError(
+                rejection.message,
+                rejection.code,
+                rejection.retryable,
+              ),
+            });
+          } catch {
+            // Only the pinned Gateway application key may reject pairing.
+          }
+          return;
+        }
         const candidate = extension?.pairing_response;
         if (extension?.kind !== "pairing_response" || !candidate) return;
         const parsed = candidate as SignedPairingResponse;

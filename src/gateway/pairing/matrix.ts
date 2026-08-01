@@ -163,7 +163,9 @@ export function listenForMatrixPairingRequests(
         const extension = asRecord(event.content[CODEVER_MATRIX_EXTENSION])
         const request = signedPairingRequestSchema.parse(extension?.pairing_request)
         const persisted = await options.registry.getPending(request.request.requestId)
-        const recoverable = persisted?.status === 'approved' && persisted.response
+        // A verified pending request may be retried after an approval or
+        // process failure; an approved request replays its persisted response.
+        const recoverable = Boolean(persisted)
         const openOffer = options.acceptNewOffers
           ? await options.registry.getOffer(request.request.offerId)
           : undefined
@@ -192,7 +194,38 @@ async function acceptMatrixPairing(
   // GatewayPairingService is the single durable state machine. It validates
   // and consumes a first request, then returns the exact persisted response
   // for an identical signed request whose Matrix delivery was interrupted.
-  const accepted = await options.service.receiveRequest(signedRequest)
+  let accepted: Awaited<ReturnType<GatewayPairingService['receiveRequest']>>
+  try {
+    accepted = await options.service.receiveRequest(signedRequest)
+  } catch (error) {
+    const rejection = await options.service.createRejectionForVerifiedRequest(
+      signedRequest,
+      error,
+    )
+    if (rejection) {
+      // Matrix encryption blacklists unverified devices. The signed request
+      // proves the observed Matrix fingerprint, so verify transport delivery
+      // without granting application command authority in the registry.
+      await options.client.pinTrustedDevices?.([
+        trustedDeviceFromRequest(signedRequest),
+      ])
+      await options.client.sendEncryptedRoomEvent({
+        roomId: options.gatewayTransport.roomId,
+        eventType: 'm.room.message',
+        content: {
+          msgtype: 'm.notice',
+          body: 'Codever secure pairing could not be completed',
+          [CODEVER_MATRIX_EXTENSION]: {
+            version: 1,
+            kind: 'pairing_rejection',
+            pairing_rejection: rejection,
+          },
+        },
+        transactionId: `codever.pair.rejection.${signedRequest.request.requestId}`,
+      })
+    }
+    throw error
+  }
   const trustedDevice = trustedDeviceFromRequest(signedRequest)
   await options.client.pinTrustedDevices?.([trustedDevice])
   await options.client.sendEncryptedRoomEvent({

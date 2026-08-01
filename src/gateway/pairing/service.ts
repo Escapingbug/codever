@@ -9,11 +9,13 @@ import {
   type PairingCertificate,
   type PairingOffer,
   type PairingOperation,
+  type PairingRejection,
   type PairingRequest,
   type PairingResponse,
   type SignedGatewayDeviceRotation,
   type SignedGatewayTransportSnapshot,
   type SignedPairingOffer,
+  type SignedPairingRejection,
   type SignedPairingRequest,
   type SignedPairingResponse,
 } from '@codever/protocol'
@@ -29,6 +31,7 @@ import {
   signGatewayTransportSnapshot,
   signPairingCertificate,
   signPairingOffer,
+  signPairingRejection,
   signPairingRequest,
   signPairingResponse,
   verifyPairingOffer,
@@ -44,6 +47,7 @@ const DEFAULT_OFFER_LIFETIME_MS = 5 * 60_000
 const MAX_OFFER_LIFETIME_MS = 10 * 60_000
 const REQUEST_LIFETIME_MS = 2 * 60_000
 const RESPONSE_LIFETIME_MS = 10 * 60_000
+const REJECTION_LIFETIME_MS = 2 * 60_000
 const CERTIFICATE_LIFETIME_MS = 365 * 24 * 60 * 60_000
 // Rotations form a durable chain for clients that may be offline. This matches
 // the maximum pairing-certificate lifetime enforced by the security package.
@@ -103,6 +107,7 @@ export class GatewayPairingService {
     ) {
       throw new RangeError('Pairing offer lifetime must be between 30 seconds and 10 minutes')
     }
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(now)
     const offer: PairingOffer = {
       kind: 'codever.pairing.offer',
       version: 1,
@@ -113,8 +118,8 @@ export class GatewayPairingService {
       gatewayTransport: input.gatewayTransport,
       challenge: generatePairingChallenge(),
       allowedOperations: unique(input.allowedOperations ?? allOperations),
-      issuedAt: now,
-      expiresAt: now + lifetimeMs,
+      issuedAt,
+      expiresAt: issuedAt + lifetimeMs,
     }
     const signedOffer = await signPairingOffer(
       offer,
@@ -216,6 +221,13 @@ export class GatewayPairingService {
     ) {
       throw new RangeError('Certificate lifetime is outside policy')
     }
+    // Keep Gateway documents monotonic across restarts. The request minimum is
+    // a compatibility concession for older PWAs; protocol causality itself is
+    // established by signed digests, not this timestamp.
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(
+      now,
+      request.request.issuedAt,
+    )
     const certificateDocument: PairingCertificate = {
       kind: 'codever.pairing.certificate',
       version: 1,
@@ -232,8 +244,8 @@ export class GatewayPairingService {
       deviceKey: request.request.deviceKey,
       deviceTransport: request.request.deviceTransport,
       allowedOperations,
-      issuedAt: now,
-      expiresAt: now + certificateLifetimeMs,
+      issuedAt,
+      expiresAt: issuedAt + certificateLifetimeMs,
     }
     const certificate = await signPairingCertificate(
       certificateDocument,
@@ -265,10 +277,10 @@ export class GatewayPairingService {
       gatewayId: this.identity.gatewayId,
       activeDeviceCount: activeDevices.length + (replacesActiveDevice ? 0 : 1),
       certificate,
-      issuedAt: now,
+      issuedAt,
       // The offer is already atomically consumed. Keep the exact persisted
       // response retryable after that short invitation window closes.
-      expiresAt: now + RESPONSE_LIFETIME_MS,
+      expiresAt: issuedAt + RESPONSE_LIFETIME_MS,
     }
     const response = await signPairingResponse(
       responseDocument,
@@ -277,6 +289,43 @@ export class GatewayPairingService {
     )
     await this.registry.approve(requestId, certificate, response, now)
     return response
+  }
+
+  /**
+   * Returns a signed, request-bound failure only after the exact request was
+   * durably verified. Invalid room traffic therefore cannot turn the Gateway
+   * into a signing oracle, while a real PWA no longer waits for a timeout.
+   */
+  async createRejectionForVerifiedRequest(
+    input: SignedPairingRequest,
+    error: unknown,
+    now = Date.now(),
+  ): Promise<SignedPairingRejection | undefined> {
+    const request = signedPairingRequestSchema.parse(input)
+    const pending = await this.registry.getPending(request.request.requestId)
+    if (!pending || canonicalJson(pending.request) !== canonicalJson(request)) {
+      return undefined
+    }
+    const details = pairingRejectionDetails(error)
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(now)
+    const rejection: PairingRejection = {
+      kind: 'codever.pairing.rejection',
+      version: 1,
+      offerId: request.request.offerId,
+      requestId: request.request.requestId,
+      requestDigest: await pairingRequestDigest(request),
+      gatewayId: this.identity.gatewayId,
+      code: details.code,
+      message: details.message,
+      retryable: details.retryable,
+      issuedAt,
+      expiresAt: issuedAt + REJECTION_LIFETIME_MS,
+    }
+    return signPairingRejection(
+      rejection,
+      this.identity.keys.privateKey,
+      this.identity.keys.keyId,
+    )
   }
 
   async deny(requestId: string, now = Date.now()): Promise<void> {
@@ -296,6 +345,7 @@ export class GatewayPairingService {
     nextTransport: MatrixTransportBinding,
     now = Date.now(),
   ): Promise<SignedGatewayDeviceRotation> {
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(now)
     const rotation: GatewayDeviceRotation = {
       kind: 'codever.gateway.device-rotation',
       version: 1,
@@ -304,8 +354,8 @@ export class GatewayPairingService {
       gatewayKeyId: this.identity.keys.keyId,
       previousTransport,
       nextTransport,
-      issuedAt: now,
-      expiresAt: now + ROTATION_LIFETIME_MS,
+      issuedAt,
+      expiresAt: issuedAt + ROTATION_LIFETIME_MS,
     }
     return signGatewayDeviceRotation(
       rotation,
@@ -318,6 +368,7 @@ export class GatewayPairingService {
     transport: MatrixTransportBinding,
     now = Date.now(),
   ): Promise<SignedGatewayTransportSnapshot> {
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(now)
     const snapshot: GatewayTransportSnapshot = {
       kind: 'codever.gateway.transport-snapshot',
       version: 1,
@@ -325,14 +376,41 @@ export class GatewayPairingService {
       gatewayId: this.identity.gatewayId,
       gatewayKeyId: this.identity.keys.keyId,
       transport,
-      issuedAt: now,
-      expiresAt: now + TRANSPORT_SNAPSHOT_LIFETIME_MS,
+      issuedAt,
+      expiresAt: issuedAt + TRANSPORT_SNAPSHOT_LIFETIME_MS,
     }
     return signGatewayTransportSnapshot(
       snapshot,
       this.identity.keys.privateKey,
       this.identity.keys.keyId,
     )
+  }
+}
+
+function pairingRejectionDetails(error: unknown): {
+  code: PairingRejection['code']
+  message: string
+  retryable: boolean
+} {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/different application key|already uses this application key/iu.test(message)) {
+    return {
+      code: 'device_conflict',
+      message: 'This device identity conflicts with an active paired device. Scan a new invitation.',
+      retryable: false,
+    }
+  }
+  if (/denied|rejected/iu.test(message)) {
+    return {
+      code: 'gateway_rejected',
+      message: 'The Gateway rejected this pairing request. Scan a new invitation.',
+      retryable: false,
+    }
+  }
+  return {
+    code: 'gateway_error',
+    message: 'The Gateway could not complete secure pairing. Retry this invitation.',
+    retryable: true,
   }
 }
 

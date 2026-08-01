@@ -11,6 +11,7 @@ import {
   signPairingOffer,
 } from "@codever/security";
 import {
+  completePairing,
   createDeviceInvitationLink,
   decodeDeviceInvitationLink,
   pairingLinkFromDeviceInvitation,
@@ -79,7 +80,59 @@ test("rejects Matrix credentials for a different homeserver", async () => {
   );
 });
 
-async function signedOffer() {
+test("does not start a new handshake when the invitation has under 15 seconds left", async () => {
+  const now = 1_800_000_000_000;
+  const offer = await signedOffer({
+    issuedAt: now - 1_000,
+    expiresAt: now + 14_999,
+  });
+  const deviceKeys = await generateDeviceKeyPair();
+  let exchanged = false;
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    await assert.rejects(
+      completePairing(
+        {
+          signedOffer: offer,
+          gatewayName: offer.offer.gatewayName,
+          gatewayId: offer.offer.gatewayId,
+          verificationCode: "000 000",
+          expiresAt: offer.offer.expiresAt,
+          transport: offer.offer.gatewayTransport,
+        },
+        {
+          keyId: deviceKeys.keyId,
+          privateKey: deviceKeys.privateKey,
+          publicKey: deviceKeys.publicKey,
+          publicJwk: await crypto.subtle.exportKey("jwk", deviceKeys.publicKey),
+        },
+        {
+          ...offer.offer.gatewayTransport,
+          userId: "@alice:example",
+          deviceId: "PWA_DEVICE",
+          ed25519: "pwa-ed25519-public-key",
+        },
+        "Alice laptop",
+        {
+          async exchange() {
+            exchanged = true;
+            throw new Error("exchange must not run");
+          },
+        },
+      ),
+      /too close to expiry/,
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(exchanged, false);
+});
+
+async function signedOffer(timestamps: {
+  issuedAt?: number;
+  expiresAt?: number;
+} = {}) {
   const keys = await generateDeviceKeyPair();
   const offer: PairingOffer = {
     kind: "codever.pairing.offer",
@@ -105,8 +158,8 @@ async function signedOffer() {
       "session.create",
       "device.invite",
     ],
-    issuedAt: 1_800_000_000_000,
-    expiresAt: 1_800_000_300_000,
+    issuedAt: timestamps.issuedAt ?? 1_800_000_000_000,
+    expiresAt: timestamps.expiresAt ?? 1_800_000_300_000,
   };
   return signPairingOffer(offer, keys.privateKey, keys.keyId);
 }

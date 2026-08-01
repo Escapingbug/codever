@@ -107,6 +107,63 @@ describe('Gateway pairing', () => {
       .toBe(accepted.response.response.certificate.certificate.certificateId)
   })
 
+  it('completes pairing when the joining device clock is 113ms ahead', async () => {
+    const fixture = await pairingFixture()
+    const { signedOffer } = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now,
+    })
+    const request = await createSignedPairingRequest({
+      signedOffer,
+      deviceId: 'ahead-device',
+      deviceName: 'Clock-ahead laptop',
+      deviceKeys: await generateDeviceKeyPair(),
+      deviceTransport: deviceTransport(),
+      now: now + 113,
+    })
+
+    const accepted = await fixture.service.receiveRequest(request.signedRequest, now)
+
+    expect(accepted.response.response.issuedAt).toBeGreaterThanOrEqual(
+      request.signedRequest.request.issuedAt,
+    )
+    await expect(
+      verifyPairingResponse(
+        accepted.response,
+        signedOffer,
+        request.signedRequest,
+        { now: now + 113 },
+      ),
+    ).resolves.toMatchObject({ requestId: request.signedRequest.request.requestId })
+  })
+
+  it('keeps Gateway signing timestamps monotonic across a clock rollback and restart', async () => {
+    const fixture = await pairingFixture()
+    const first = await fixture.service.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now: now + 5_000,
+    })
+    const restartedRegistry = new FileTrustedDeviceRegistry(fixture.registryPath)
+    const restartedService = new GatewayPairingService(
+      fixture.identity,
+      restartedRegistry,
+      new PairingOfferGuard(
+        new FileReplayStore(join(fixture.directory, 'offers-replay-restarted.json')),
+      ),
+    )
+
+    const second = await restartedService.createOffer({
+      gatewayName: 'Development Gateway',
+      gatewayTransport: gatewayTransport(),
+      now,
+    })
+
+    expect(second.signedOffer.offer.issuedAt)
+      .toBe(first.signedOffer.offer.issuedAt + 1)
+  })
+
   it('rejects a tampered request without consuming the offer', async () => {
     const fixture = await pairingFixture()
     const { signedOffer } = await fixture.service.createOffer({
@@ -416,7 +473,7 @@ async function pairingFixture() {
     registry,
     new PairingOfferGuard(new FileReplayStore(join(directory, 'offers-replay.json'))),
   )
-  return { identity, registry, registryPath, service }
+  return { directory, identity, registry, registryPath, service }
 }
 
 async function temporaryDirectory(): Promise<string> {

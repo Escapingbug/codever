@@ -6,6 +6,7 @@ describe('Matrix Gateway control event filtering', () => {
   it.each([
     'pairing_request',
     'pairing_response',
+    'pairing_rejection',
     'gateway_device_rotation',
   ])('ignores %s before application content decryption', kind => {
     expect(isMatrixGatewayControlEvent({

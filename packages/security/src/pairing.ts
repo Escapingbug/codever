@@ -5,12 +5,14 @@ import {
   gatewayTransportSnapshotSchema,
   pairingCertificateSchema,
   pairingOfferSchema,
+  pairingRejectionSchema,
   pairingRequestSchema,
   pairingResponseSchema,
   signedGatewayDeviceRotationSchema,
   signedGatewayTransportSnapshotSchema,
   signedPairingCertificateSchema,
   signedPairingOfferSchema,
+  signedPairingRejectionSchema,
   signedPairingRequestSchema,
   signedPairingResponseSchema,
   type GatewayDeviceRotation,
@@ -19,12 +21,14 @@ import {
   type PairingCertificate,
   type PairingOffer,
   type PairingPublicKey,
+  type PairingRejection,
   type PairingRequest,
   type PairingResponse,
   type SignedGatewayDeviceRotation,
   type SignedGatewayTransportSnapshot,
   type SignedPairingCertificate,
   type SignedPairingOffer,
+  type SignedPairingRejection,
   type SignedPairingRequest,
   type SignedPairingResponse,
 } from '@codever/protocol'
@@ -46,6 +50,7 @@ const DEFAULT_FUTURE_SKEW_MS = 30_000
 const DEFAULT_OFFER_LIFETIME_MS = 10 * 60_000
 const DEFAULT_REQUEST_LIFETIME_MS = 2 * 60_000
 const DEFAULT_RESPONSE_LIFETIME_MS = 10 * 60_000
+const DEFAULT_REJECTION_LIFETIME_MS = 2 * 60_000
 const DEFAULT_CERTIFICATE_LIFETIME_MS = 366 * 24 * 60 * 60_000
 // A rotation is part of the durable transport-key chain, not a short-lived
 // command. Keep it verifiable for as long as the longest certificate it can
@@ -269,10 +274,11 @@ async function assertRequestBindings(
     throw new SecurityError('binding_mismatch', 'Pairing request is not bound to this offer')
   }
   assertOperationsSubset(request.requestedOperations, offer.offer.allowedOperations)
-  if (
-    request.issuedAt < offer.offer.issuedAt ||
-    request.expiresAt > offer.offer.expiresAt
-  ) {
+  // The Gateway and joining device have independent wall clocks. Causality is
+  // established by offerId + offerDigest + the hidden-challenge signature,
+  // never by comparing their issuedAt values. The request still cannot extend
+  // the Gateway-controlled offer expiry.
+  if (request.expiresAt > offer.offer.expiresAt) {
     throw new SecurityError('binding_mismatch', 'Pairing request is outside the offer window')
   }
 }
@@ -336,9 +342,8 @@ async function assertCertificateBindings(
     'Certificate device transport does not match the signed request',
   )
   assertOperationsSubset(certificate.allowedOperations, request.request.requestedOperations)
-  if (certificate.issuedAt < request.request.issuedAt) {
-    throw new SecurityError('binding_mismatch', 'Certificate predates the signed pairing request')
-  }
+  // requestDigest and both signatures establish the request -> certificate
+  // edge. Cross-device wall-clock ordering is not a security boundary.
 }
 
 export async function signPairingCertificate(
@@ -448,9 +453,6 @@ export async function verifyPairingResponse(
   ) {
     throw new SecurityError('binding_mismatch', 'Pairing response is not bound to this handshake')
   }
-  if (signed.response.issuedAt < request.request.issuedAt) {
-    throw new SecurityError('binding_mismatch', 'Pairing response predates the signed request')
-  }
   const gatewayKey = await checkedPairingKey(offer.offer.gatewayKey)
   if (
     signed.signature.keyId !== offer.offer.gatewayKey.keyId ||
@@ -466,6 +468,68 @@ export async function verifyPairingResponse(
   assertWindow(signed.response, clock, DEFAULT_RESPONSE_LIFETIME_MS)
   await verifyPairingCertificate(signed.response.certificate, offer, request, clock)
   return signed.response
+}
+
+export async function signPairingRejection(
+  input: PairingRejection,
+  gatewayPrivateKey: CryptoKey,
+  gatewayKeyId: string,
+): Promise<SignedPairingRejection> {
+  const rejection = pairingRejectionSchema.parse(input)
+  return {
+    rejection,
+    signature: {
+      algorithm: 'ES256',
+      keyId: gatewayKeyId,
+      value: await signDocument(
+        'codever.pairing.rejection.v1',
+        rejection,
+        gatewayPrivateKey,
+      ),
+    },
+  }
+}
+
+export async function verifyPairingRejection(
+  input: unknown,
+  offerInput: SignedPairingOffer,
+  requestInput: SignedPairingRequest,
+  clock: PairingVerificationClock = {},
+): Promise<PairingRejection> {
+  const signed = signedPairingRejectionSchema.parse(input)
+  const offer = signedPairingOfferSchema.parse(offerInput)
+  const request = signedPairingRequestSchema.parse(requestInput)
+  await verifyPairingOffer(offer, undefined, {
+    ...clock,
+    now: offer.offer.issuedAt,
+  })
+  await verifyPairingRequest(request, offer, {
+    ...clock,
+    now: request.request.issuedAt,
+  })
+  const requestDigest = await pairingRequestDigest(request)
+  if (
+    signed.rejection.offerId !== offer.offer.offerId ||
+    signed.rejection.requestId !== request.request.requestId ||
+    signed.rejection.requestDigest !== requestDigest ||
+    signed.rejection.gatewayId !== offer.offer.gatewayId
+  ) {
+    throw new SecurityError('binding_mismatch', 'Pairing rejection is not bound to this handshake')
+  }
+  const gatewayKey = await checkedPairingKey(offer.offer.gatewayKey)
+  if (
+    signed.signature.keyId !== offer.offer.gatewayKey.keyId ||
+    !(await verifyDocument(
+      'codever.pairing.rejection.v1',
+      signed.rejection,
+      signed.signature.value,
+      gatewayKey,
+    ))
+  ) {
+    throw new SecurityError('invalid_signature', 'Pairing rejection signature is invalid')
+  }
+  assertWindow(signed.rejection, clock, DEFAULT_REJECTION_LIFETIME_MS)
+  return signed.rejection
 }
 
 export async function signGatewayDeviceRotation(

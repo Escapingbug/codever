@@ -39,6 +39,7 @@ export const PAIRING_TRUST_STORAGE_KEY = "codever.pairing.trust.v1";
 export const PENDING_PAIRING_STORAGE_KEY = "codever.pairing.pending.v1";
 const PAIRING_REQUEST_TTL_MS = 2 * 60_000;
 const PENDING_PAIRING_RETENTION_MS = 10 * 60_000;
+const MIN_PAIRING_START_WINDOW_MS = 15_000;
 const MAX_CLOCK_SKEW_MS = 30_000;
 
 export type PairingPreview = {
@@ -88,6 +89,18 @@ export interface PairingTransport {
     offer: SignedPairingOffer,
     signal?: AbortSignal,
   ): Promise<SignedPairingResponse>;
+}
+
+export class PairingRejectedError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+
+  constructor(message: string, code: string, retryable: boolean) {
+    super(message);
+    this.name = "PairingRejectedError";
+    this.code = code;
+    this.retryable = retryable;
+  }
 }
 
 export async function inspectPairingLink(
@@ -150,8 +163,10 @@ export async function completePairing(
   let signedRequest = reusable?.request ?? null;
   const pendingSavedAt = reusable?.savedAt ?? now;
   if (!signedRequest) {
-    if (preview.signedOffer.offer.expiresAt <= now) {
-      throw new Error("This pairing invitation expired before it was confirmed.");
+    if (preview.signedOffer.offer.expiresAt <= now + MIN_PAIRING_START_WINDOW_MS) {
+      throw new Error(
+        "This pairing invitation is expired or too close to expiry. Scan a new invitation.",
+      );
     }
     const offerDigest = await pairingOfferDigest(preview.signedOffer);
     const request = {
@@ -183,9 +198,20 @@ export async function completePairing(
     savedAt: pendingSavedAt,
   });
 
-  const signedResponse = signedPairingResponseSchema.parse(
-    await transport.exchange(signedRequest, preview.signedOffer, signal),
-  );
+  let exchanged: SignedPairingResponse;
+  try {
+    exchanged = await transport.exchange(
+      signedRequest,
+      preview.signedOffer,
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof PairingRejectedError && !error.retryable) {
+      clearPendingPairing();
+    }
+    throw error;
+  }
+  const signedResponse = signedPairingResponseSchema.parse(exchanged);
   if (signedResponse.response.expiresAt <= Date.now()) {
     clearPendingPairing();
     throw new Error(

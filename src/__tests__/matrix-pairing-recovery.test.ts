@@ -6,6 +6,7 @@ import {
   generateDeviceKeyPair,
   PairingOfferGuard,
   verifyGatewayTransportSnapshot,
+  verifyPairingRejection,
 } from '@codever/security'
 import { CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD } from '@codever/protocol'
 import { FileReplayStore } from '@codever/security/node'
@@ -238,6 +239,123 @@ describe('long-lived Matrix pairing recovery', () => {
     })
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(client.sent).toHaveLength(2)
+  })
+
+  it('returns an immediate signed rejection for a verified approval failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-pairing-rejection-'))
+    temporaryDirectories.push(directory)
+    const gatewayTransport = {
+      homeserver: 'http://localhost:8008',
+      roomId: '!secure:localhost',
+      userId: '@gateway:localhost',
+      deviceId: 'GATEWAY_MATRIX',
+      ed25519: 'gateway-matrix-ed25519',
+    }
+    const sharedKeys = await generateDeviceKeyPair()
+    const identity = await new FileGatewayIdentityStore(
+      join(directory, 'identity.json'),
+    ).loadOrCreate('gateway-one')
+    const registry = new FileTrustedDeviceRegistry(join(directory, 'registry.json'))
+    const service = new GatewayPairingService(
+      identity,
+      registry,
+      new PairingOfferGuard(new FileReplayStore(join(directory, 'offers.json'))),
+    )
+    const firstOffer = await service.createOffer({
+      gatewayName: 'Gateway',
+      gatewayTransport,
+    })
+    const firstRequest = await createSignedPairingRequest({
+      signedOffer: firstOffer.signedOffer,
+      deviceId: 'phone-one',
+      deviceName: 'Alice phone',
+      deviceKeys: sharedKeys,
+      deviceTransport: {
+        ...gatewayTransport,
+        userId: '@alice:localhost',
+        deviceId: 'PHONE_MATRIX',
+        ed25519: 'phone-matrix-ed25519',
+      },
+    })
+    await service.receiveRequest(firstRequest.signedRequest)
+
+    const secondOffer = await service.createOffer({
+      gatewayName: 'Gateway',
+      gatewayTransport,
+    })
+    const secondRequest = await createSignedPairingRequest({
+      signedOffer: secondOffer.signedOffer,
+      deviceId: 'laptop-two',
+      deviceName: 'Alice laptop',
+      deviceKeys: sharedKeys,
+      deviceTransport: {
+        ...gatewayTransport,
+        userId: '@alice:localhost',
+        deviceId: 'LAPTOP_MATRIX',
+        ed25519: 'laptop-matrix-ed25519',
+      },
+    })
+    const client = new FakePairingClient()
+    const onRejected = vi.fn()
+    const stop = listenForMatrixPairingRequests({
+      client,
+      service,
+      registry,
+      gatewayTransport,
+      acceptNewOffers: true,
+      onRejected,
+    })
+
+    client.emit({
+      roomId: gatewayTransport.roomId,
+      eventId: '$conflicting-request',
+      eventType: 'm.room.message',
+      sender: secondRequest.signedRequest.request.deviceTransport.userId,
+      senderDeviceId: secondRequest.signedRequest.request.deviceTransport.ed25519,
+      encrypted: true,
+      content: {
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 1,
+          kind: 'pairing_request',
+          pairing_request: secondRequest.signedRequest,
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1))
+    const extension = client.sent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    expect(extension.kind).toBe('pairing_rejection')
+    await expect(
+      verifyPairingRejection(
+        extension.pairing_rejection,
+        secondOffer.signedOffer,
+        secondRequest.signedRequest,
+      ),
+    ).resolves.toMatchObject({ code: 'device_conflict', retryable: false })
+    expect(client.pinned).toHaveLength(1)
+    await vi.waitFor(() => expect(onRejected).toHaveBeenCalledOnce())
+
+    // The consumed offer remains recoverable through its durable pending
+    // request, so an exact Matrix redelivery receives a prompt signed failure
+    // instead of being ignored until the PWA times out.
+    client.emit({
+      roomId: gatewayTransport.roomId,
+      eventId: '$conflicting-request-retry',
+      eventType: 'm.room.message',
+      sender: secondRequest.signedRequest.request.deviceTransport.userId,
+      senderDeviceId: secondRequest.signedRequest.request.deviceTransport.ed25519,
+      encrypted: true,
+      content: {
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 1,
+          kind: 'pairing_request',
+          pairing_request: secondRequest.signedRequest,
+        },
+      },
+    })
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+    await vi.waitFor(() => expect(onRejected).toHaveBeenCalledTimes(2))
+    stop()
   })
 })
 

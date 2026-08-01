@@ -1146,6 +1146,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 const MATRIX_GATEWAY_CONTROL_KINDS = new Set([
     'pairing_request',
     'pairing_response',
+    'pairing_rejection',
     'gateway_device_rotation',
 ])
 

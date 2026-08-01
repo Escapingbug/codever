@@ -55,6 +55,8 @@ interface PairingState {
   offers: Record<string, StoredPairingOffer>
   pending: Record<string, StoredPendingPairing>
   trustedDevices: Record<string, TrustedDeviceRecord>
+  /** Last timestamp reserved for any Gateway-root-signed document. */
+  gatewayIssuedAt?: number
   gatewayTransport?: MatrixTransportBinding
   gatewayRotationIssuedAt?: number
   gatewaySnapshotIssuedAt?: number
@@ -325,6 +327,33 @@ export class FileTrustedDeviceRegistry {
     })
   }
 
+  /**
+   * Reserves a strictly increasing Gateway timestamp in the same durable file
+   * as pairing state. Gaps are harmless; going backwards after a restart is
+   * not. `minimum` is used only for compatibility with older clients that
+   * compared a joining device's request clock with the Gateway response clock.
+   */
+  async reserveGatewayIssuedAt(
+    now = Date.now(),
+    minimum = 0,
+  ): Promise<number> {
+    for (const [label, value] of [['now', now], ['minimum', minimum]] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new RangeError(`Gateway ${label} timestamp is invalid`)
+      }
+    }
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      const previous = latestGatewayIssuedAt(state)
+      const issuedAt = Math.max(now, minimum, previous + 1)
+      if (!Number.isSafeInteger(issuedAt)) {
+        throw new RangeError('Gateway timestamp exceeds the safe integer range')
+      }
+      state.gatewayIssuedAt = issuedAt
+      return { result: issuedAt, changed: true }
+    })
+  }
+
   async updateGatewayTransport(
     deviceId: string,
     previous: MatrixTransportBinding,
@@ -401,6 +430,7 @@ export class FileTrustedDeviceRegistry {
       }
       state.gatewayTransport = structuredClone(next)
       state.gatewayRotationIssuedAt = issuedAt
+      state.gatewayIssuedAt = Math.max(state.gatewayIssuedAt ?? -1, issuedAt)
       for (const record of Object.values(state.trustedDevices)) {
         if (record.status === 'active') record.gatewayTransport = structuredClone(next)
       }
@@ -428,6 +458,7 @@ export class FileTrustedDeviceRegistry {
         throw new Error('Gateway snapshot timestamp did not advance')
       }
       state.gatewaySnapshotIssuedAt = issuedAt
+      state.gatewayIssuedAt = Math.max(state.gatewayIssuedAt ?? -1, issuedAt)
       return { result: undefined, changed: true }
     })
   }
@@ -448,6 +479,7 @@ function validateState(state: PairingState): void {
   for (const timestamp of [
     state.gatewayRotationIssuedAt,
     state.gatewaySnapshotIssuedAt,
+    state.gatewayIssuedAt,
   ]) {
     if (
       timestamp !== undefined &&
@@ -456,4 +488,27 @@ function validateState(state: PairingState): void {
       throw new TypeError('Pairing registry Gateway timestamp is invalid')
     }
   }
+}
+
+function latestGatewayIssuedAt(state: PairingState): number {
+  let latest = Math.max(
+    state.gatewayIssuedAt ?? -1,
+    state.gatewayRotationIssuedAt ?? -1,
+    state.gatewaySnapshotIssuedAt ?? -1,
+  )
+  for (const offer of Object.values(state.offers)) {
+    latest = Math.max(latest, offer.signedOffer.offer.issuedAt)
+  }
+  for (const pending of Object.values(state.pending)) {
+    if (!pending.response) continue
+    latest = Math.max(
+      latest,
+      pending.response.response.issuedAt,
+      pending.response.response.certificate.certificate.issuedAt,
+    )
+  }
+  for (const record of Object.values(state.trustedDevices)) {
+    latest = Math.max(latest, record.certificate.certificate.issuedAt)
+  }
+  return latest
 }

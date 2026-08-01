@@ -429,9 +429,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(pairing, /PAIRING_TRUST_STORAGE_KEY/);
   assert.match(pairing, /PENDING_PAIRING_STORAGE_KEY/);
   assert.match(pairing, /PENDING_PAIRING_RETENTION_MS = 10 \* 60_000/);
+  assert.match(pairing, /MIN_PAIRING_START_WINDOW_MS = 15_000/);
   assert.match(
     pairing,
-    /savePendingPairing\([\s\S]*transport\.exchange\(signedRequest/,
+    /savePendingPairing\([\s\S]*transport\.exchange\(\s*signedRequest/,
   );
   assert.match(pairing, /clearPendingPairing\(\);\s*saveTrustedGateway/);
   assert.match(pairing, /loadPendingPairingRecovery/);
@@ -443,6 +444,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     pairing,
     /signedResponse\.response\.expiresAt <= Date\.now\(\)/,
   );
+  assert.match(matrix, /pairing_rejection/);
+  assert.match(matrix, /verifyPairingRejection/);
+  assert.match(pairing, /error instanceof PairingRejectedError/);
   assert.match(
     pairing,
     /previous pairing request expired\. Scan a new Gateway QR code/i,
