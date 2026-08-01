@@ -85,10 +85,14 @@ export function mergeChatMessage(
     const incomingIsCanonical = Boolean(message.eventId);
     if (existingIsCanonical && !incomingIsCanonical) return [...current];
     if (!incomingIsCanonical && !message.optimistic) return [...current];
+    const timelineCopy = preferredTimelineCopy(existing, message);
     return replaceAndReorder(current, commandIndex, {
       ...existing,
       ...message,
       id: existing.id,
+      timestamp: timelineCopy.timestamp ?? existing.timestamp ?? message.timestamp,
+      time: timelineCopy.time ?? existing.time ?? message.time,
+      raw: preferredTimelineRaw(timelineCopy, message),
       optimistic: !incomingIsCanonical && message.optimistic,
     });
   }
@@ -184,6 +188,7 @@ function mergeLogicalCopies(
 ): ChatMessage[] {
   const existing = current[index];
   const preferred = preferredLogicalCopy(existing, message);
+  const timelineCopy = preferredTimelineCopy(existing, message);
   const liveCopy = !existing.historical
     ? existing
     : !message.historical
@@ -198,11 +203,51 @@ function mergeLogicalCopies(
       liveCopy?.eventId ?? preferred.eventId ?? existing.eventId ?? message.eventId,
     eventAliases: mergeEventAliases(existing, message),
     mergedOperationIds: mergeOperationIds(existing, message),
-    timestamp: existing.timestamp ?? message.timestamp,
-    time: existing.time ?? message.time,
+    timestamp: timelineCopy.timestamp ?? existing.timestamp ?? message.timestamp,
+    time: timelineCopy.time ?? existing.time ?? message.time,
+    raw: preferredTimelineRaw(timelineCopy, preferred),
     historical: Boolean(existing.historical && message.historical),
   };
   return next;
+}
+
+function preferredTimelineCopy(
+  existing: ChatMessage,
+  incoming: ChatMessage,
+): ChatMessage {
+  // Gateway recovery carries the original outbox timestamp. A Matrix timeline
+  // copy carries its later homeserver arrival timestamp, so mixing the two can
+  // place a fast agent reply before the user prompt that caused it.
+  const existingRank = timelineAuthorityRank(existing);
+  const incomingRank = timelineAuthorityRank(incoming);
+  return incomingRank > existingRank ? incoming : existing;
+}
+
+function timelineAuthorityRank(message: ChatMessage): number {
+  if (isGatewayHistoryCopy(message)) return 2;
+  if (message.eventId) return 1;
+  return 0;
+}
+
+function isGatewayHistoryCopy(message: ChatMessage): boolean {
+  const marker = message.raw?.history_replay;
+  return Boolean(
+    marker &&
+      typeof marker === "object" &&
+      !Array.isArray(marker) &&
+      (marker as Record<string, unknown>).display_only === true,
+  );
+}
+
+function preferredTimelineRaw(
+  timelineCopy: ChatMessage,
+  contentCopy: ChatMessage,
+): Record<string, unknown> | undefined {
+  if (!isGatewayHistoryCopy(timelineCopy)) return contentCopy.raw;
+  return {
+    ...(contentCopy.raw ?? {}),
+    ...(timelineCopy.raw ?? {}),
+  };
 }
 
 function preferredLogicalCopy(

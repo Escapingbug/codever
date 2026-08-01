@@ -171,6 +171,124 @@ test("canonical history wins over a persisted optimistic duplicate", () => {
   assert.equal(messages[0].eventId, "$canonical-user");
 });
 
+test("Gateway history timestamps win over later Matrix delivery timestamps", () => {
+  const historyMarker = {
+    history_replay: {
+      request_id: "history-1",
+      display_only: true,
+    },
+  };
+  const messages = mergeChatMessages([], [
+    {
+      id: "history-user",
+      eventId: "history-user",
+      kind: "user",
+      text: "Run the checks",
+      timestamp: 1_000,
+      commandId: "command-1",
+      raw: historyMarker,
+      historical: true,
+    },
+    {
+      id: "history-agent",
+      eventId: "history-agent",
+      operationId: "operation-1",
+      kind: "agent",
+      text: "All checks passed",
+      timestamp: 2_000,
+      raw: historyMarker,
+      historical: true,
+    },
+    {
+      id: "$matrix-user",
+      eventId: "$matrix-user",
+      kind: "user",
+      text: "Run the checks",
+      timestamp: 3_000,
+      commandId: "command-1",
+      historical: true,
+    },
+    {
+      id: "$matrix-agent",
+      eventId: "$matrix-agent",
+      operationId: "operation-1",
+      kind: "agent",
+      text: "All checks passed",
+      timestamp: 3_100,
+      historical: true,
+    },
+  ]);
+
+  assert.deepEqual(
+    messages.map((message: { kind: string }) => message.kind),
+    ["user", "agent"],
+  );
+  assert.deepEqual(
+    messages.map((message: { timestamp?: number }) => message.timestamp),
+    [1_000, 2_000],
+  );
+});
+
+test("Gateway history repairs timestamps already loaded from the local cache", () => {
+  const cached = [
+    {
+      id: "$matrix-user",
+      eventId: "$matrix-user",
+      kind: "user",
+      text: "Run the checks",
+      timestamp: 3_000,
+      commandId: "command-1",
+      historical: true,
+    },
+    {
+      id: "$matrix-agent",
+      eventId: "$matrix-agent",
+      operationId: "operation-1",
+      kind: "agent",
+      text: "All checks passed",
+      timestamp: 3_100,
+      historical: true,
+    },
+  ];
+  const recovered = [
+    {
+      ...cached[0],
+      id: "history-user",
+      eventId: "history-user",
+      timestamp: 1_000,
+      raw: {
+        history_replay: {
+          request_id: "history-1",
+          display_only: true,
+        },
+      },
+    },
+    {
+      ...cached[1],
+      id: "history-agent",
+      eventId: "history-agent",
+      timestamp: 2_000,
+      raw: {
+        history_replay: {
+          request_id: "history-1",
+          display_only: true,
+        },
+      },
+    },
+  ];
+
+  const messages = mergeChatMessages(cached, recovered);
+
+  assert.deepEqual(
+    messages.map((message: { kind: string }) => message.kind),
+    ["user", "agent"],
+  );
+  assert.deepEqual(
+    messages.map((message: { timestamp?: number }) => message.timestamp),
+    [1_000, 2_000],
+  );
+});
+
 test("live and history copies of one logical Matrix message stay in one bubble", () => {
   const liveOriginal = {
     id: "$physical-original",
