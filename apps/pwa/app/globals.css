@@ -1115,6 +1115,29 @@ select:focus-visible {
   color: #6654c6;
 }
 
+.history-loader.has-error {
+  min-height: 34px;
+  color: #a64856;
+}
+
+.history-inline-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.history-inline-error > span {
+  max-width: 560px;
+}
+
+.history-inline-error button {
+  flex: 0 0 auto;
+  border-color: rgb(166 72 86 / 25%);
+  color: #963f4c;
+}
+
 .date-divider {
   display: flex;
   align-items: center;

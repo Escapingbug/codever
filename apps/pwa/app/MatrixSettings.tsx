@@ -25,6 +25,7 @@ type Props = {
   pairingBusy: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;
+  invitationError: string | null;
   invitationReauthRequired: boolean;
   updateState: PwaUpdateState;
   onChange(config: MatrixConnectionConfig): void;
@@ -52,6 +53,7 @@ export function MatrixSettings({
   pairingBusy,
   deviceInvitation,
   invitationBusy,
+  invitationError,
   invitationReauthRequired,
   updateState,
   onChange,
@@ -125,6 +127,7 @@ export function MatrixSettings({
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}
           invitationBusy={invitationBusy}
+          invitationError={invitationError}
           invitationReauthRequired={invitationReauthRequired}
           onLink={onPairingLink}
           onClear={onClearPairing}

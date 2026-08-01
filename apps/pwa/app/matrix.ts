@@ -65,6 +65,11 @@ import {
   type CommandCompletion,
 } from "./commandLifecycle";
 import {
+  LateResponseLifecycle,
+  createDetachedSerialDispatcher,
+} from "./lateResponseLifecycle";
+import { advanceHistoryCursor } from "./historyCursor";
+import {
   acquireMatrixCryptoLock,
   checkpointAndReleaseMatrixSyncStore,
   checkpointMatrixSyncStore,
@@ -122,6 +127,7 @@ const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
 const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
 const HISTORY_REQUEST_TIMEOUT_MS = 30_000;
 const HISTORY_BATCH_DOWNLOAD_TIMEOUT_MS = 60_000;
+const HISTORY_REQUEST_EXPIRY_GRACE_MS = 5_000;
 
 export type MatrixConnectionConfig = {
   homeserver: string;
@@ -229,6 +235,10 @@ export type MatrixHistoryPage = {
   hasMore: boolean;
 };
 
+export type MatrixHistoryRecovery = MatrixHistoryPage & {
+  sessionId: string;
+};
+
 class RevisionConflictError extends Error {
   constructor(
     readonly commandId: string,
@@ -291,6 +301,11 @@ export type MatrixConnection = {
     limit?: number,
   ): Promise<MatrixHistoryPage>;
   loadHistoryPage(sessionId: string, limit?: number): Promise<MatrixHistoryPage>;
+  observeCommandCompletion(
+    commandId: string,
+    timeoutMs: number,
+  ): Promise<CommandCompletion>;
+  releaseCommand(commandId: string): void;
   stop(): void;
 };
 
@@ -470,6 +485,7 @@ export async function connectMatrix(
     onTrustUpdated?(trust: TrustedGateway): void;
     onCollaborationState?(state: CollaborationState): void;
     onCommandResult?(result: CommandResultState): void;
+    onHistoryRecovered?(page: MatrixHistoryRecovery): void;
   },
 ): Promise<MatrixConnection> {
   const config = normalizeMatrixConfig(configInput);
@@ -553,13 +569,16 @@ export async function connectMatrix(
     string,
     {
       sessionId: string;
+      before?: string;
       messages: IncomingCodeverMessage[];
       page?: HistoryPage;
-      resolve: (page: MatrixHistoryPage) => void;
-      reject: (error: Error) => void;
-      timeout: number;
     }
   >();
+  const historyRequestLifecycle = new LateResponseLifecycle<MatrixHistoryPage>(
+    (requestId) => {
+      pendingHistoryRequests.delete(requestId);
+    },
+  );
   let legacyHistorySessionHint: string | null = null;
   let historyInitialized = false;
   let historyChain: Promise<unknown> = Promise.resolve();
@@ -676,18 +695,32 @@ export async function connectMatrix(
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
   };
+  const resolveHistoryRequest = (
+    requestId: string,
+    page: MatrixHistoryPage,
+  ): void => {
+    const pending = pendingHistoryRequests.get(requestId);
+    if (!pending) return;
+    pendingHistoryRequests.delete(requestId);
+    const delivery = historyRequestLifecycle.resolve(requestId, page);
+    if (delivery?.late && delivery.activeWaiters === 0) {
+      handlers.onHistoryRecovered?.({
+        sessionId: pending.sessionId,
+        ...page,
+      });
+    }
+  };
+  const rejectHistoryRequest = (requestId: string, error: Error): void => {
+    pendingHistoryRequests.delete(requestId);
+    historyRequestLifecycle.reject(requestId, error);
+  };
   const finishHistoryRequest = (requestId: string): void => {
     const pending = pendingHistoryRequests.get(requestId);
     const page = pending?.page;
     if (!pending || !page || pending.messages.length < page.replayed) return;
-    window.clearTimeout(pending.timeout);
-    pendingHistoryRequests.delete(requestId);
-    gatewayHistoryState.set(page.sessionId, {
-      ...(page.nextBefore ? { before: page.nextBefore } : {}),
-      complete: !page.hasMore,
-    });
+    advanceGatewayHistoryCursor(pending, page);
     pending.messages.sort(compareIncomingMessages);
-    pending.resolve({
+    resolveHistoryRequest(requestId, {
       messages: pending.messages,
       hasMore: page.hasMore,
     });
@@ -708,14 +741,18 @@ export async function connectMatrix(
     const pending = pendingHistoryRequests.get(page.requestId);
     if (!pending) return;
     if (pending.sessionId !== page.sessionId) {
-      window.clearTimeout(pending.timeout);
-      pendingHistoryRequests.delete(page.requestId);
-      pending.reject(new Error("Gateway history response targeted the wrong session."));
+      rejectHistoryRequest(
+        page.requestId,
+        new Error("Gateway history response targeted the wrong session."),
+      );
       return;
     }
-    // The Gateway response has arrived. A media-backed page gets its own
-    // bounded download timeout below, so the request timer must not race it.
-    window.clearTimeout(pending.timeout);
+    // Once an authenticated response arrives, retain it for the bounded media
+    // download even if the original request's protocol expiry is near.
+    historyRequestLifecycle.extend(
+      page.requestId,
+      Date.now() + HISTORY_BATCH_DOWNLOAD_TIMEOUT_MS,
+    );
     let items: HistoryItem[] | null;
     try {
       items = await withMatrixTimeout(
@@ -724,13 +761,13 @@ export async function connectMatrix(
         "The encrypted history page could not be downloaded in time.",
       );
     } catch (error) {
-      window.clearTimeout(pending.timeout);
-      pendingHistoryRequests.delete(page.requestId);
-      pending.reject(error instanceof Error ? error : new Error(formatError(error)));
+      rejectHistoryRequest(
+        page.requestId,
+        error instanceof Error ? error : new Error(formatError(error)),
+      );
       return;
     }
     if (items) {
-      window.clearTimeout(pending.timeout);
       try {
         const messages = items.map((item) => {
           const replay = parseHistoryReplayEvent(
@@ -744,24 +781,37 @@ export async function connectMatrix(
           }
           return replay.message;
         });
-        pendingHistoryRequests.delete(page.requestId);
-        gatewayHistoryState.set(page.sessionId, {
-          ...(page.nextBefore ? { before: page.nextBefore } : {}),
-          complete: !page.hasMore,
-        });
-        pending.resolve({
+        advanceGatewayHistoryCursor(pending, page);
+        resolveHistoryRequest(page.requestId, {
           messages: deduplicateHistoryMessages(messages).sort(compareIncomingMessages),
           hasMore: page.hasMore,
         });
       } catch (error) {
-        pendingHistoryRequests.delete(page.requestId);
-        pending.reject(error instanceof Error ? error : new Error(formatError(error)));
+        rejectHistoryRequest(
+          page.requestId,
+          error instanceof Error ? error : new Error(formatError(error)),
+        );
       }
       return;
     }
     pending.page = page;
     finishHistoryRequest(page.requestId);
   };
+  const advanceGatewayHistoryCursor = (
+    pending: { sessionId: string; before?: string },
+    page: HistoryPage,
+  ): void => {
+    const current = gatewayHistoryState.get(pending.sessionId);
+    const next = advanceHistoryCursor(current, pending.before, {
+      ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+      hasMore: page.hasMore,
+    });
+    if (next !== current) gatewayHistoryState.set(page.sessionId, next!);
+  };
+  const dispatchHistoryPage = createDetachedSerialDispatcher(
+    onHistoryPage,
+    reportInboundError,
+  );
   const processInboundEvent = (
     event: MatrixEvent,
     historical: boolean,
@@ -789,7 +839,7 @@ export async function connectMatrix(
           onAuthenticatedCommandResult,
           onGatewayState,
           onHistoryReplay,
-          onHistoryPage,
+          dispatchHistoryPage,
           historical,
         ),
       reportInboundError,
@@ -1265,6 +1315,7 @@ export async function connectMatrix(
   const performGatewayHistoryPage = async (
     sessionId: string,
     limit: number,
+    key: string,
   ): Promise<MatrixHistoryPage> => {
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
@@ -1292,19 +1343,24 @@ export async function connectMatrix(
       issuedAt: now,
       expiresAt: now + 60_000,
     });
-    const response = new Promise<MatrixHistoryPage>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        pendingHistoryRequests.delete(request.requestId);
-        reject(new Error("The Gateway did not return the requested history page in time."));
-      }, HISTORY_REQUEST_TIMEOUT_MS);
-      pendingHistoryRequests.set(request.requestId, {
-        sessionId,
-        messages: [],
-        resolve,
-        reject,
-        timeout,
-      });
+    pendingHistoryRequests.set(request.requestId, {
+      sessionId,
+      ...(state?.before ? { before: state.before } : {}),
+      messages: [],
     });
+    historyRequestLifecycle.register(
+      request.requestId,
+      key,
+      request.expiresAt + HISTORY_REQUEST_EXPIRY_GRACE_MS,
+    );
+    const response = historyRequestLifecycle.wait(
+      request.requestId,
+      HISTORY_REQUEST_TIMEOUT_MS,
+      () =>
+        new Error(
+          "The Gateway is still preparing this history page. Retry to keep waiting for the same request.",
+        ),
+    );
     try {
       const certificate = trust.certificate.certificate;
       const plaintext = {
@@ -1342,14 +1398,10 @@ export async function connectMatrix(
         `codever.history.request.${request.requestId}`,
       );
     } catch (error) {
-      const pending = pendingHistoryRequests.get(request.requestId);
-      if (pending) {
-        window.clearTimeout(pending.timeout);
-        pendingHistoryRequests.delete(request.requestId);
-        pending.reject(
-          error instanceof Error ? error : new Error(formatError(error)),
-        );
-      }
+      rejectHistoryRequest(
+        request.requestId,
+        error instanceof Error ? error : new Error(formatError(error)),
+      );
     }
     return response;
   };
@@ -1359,9 +1411,20 @@ export async function connectMatrix(
   ): Promise<MatrixHistoryPage> => {
     const state = gatewayHistoryState.get(sessionId);
     const key = `${sessionId}\u0000${state?.before ?? "latest"}`;
+    const pendingRequestId = historyRequestLifecycle.idForKey(key);
+    if (pendingRequestId) {
+      return historyRequestLifecycle.wait(
+        pendingRequestId,
+        HISTORY_REQUEST_TIMEOUT_MS,
+        () =>
+          new Error(
+            "The Gateway is still preparing this history page. Retry to keep waiting for the same request.",
+          ),
+      );
+    }
     const existing = inFlightHistoryRequests.get(key);
     if (existing) return existing;
-    const operation = performGatewayHistoryPage(sessionId, limit);
+    const operation = performGatewayHistoryPage(sessionId, limit, key);
     inFlightHistoryRequests.set(key, operation);
     return operation.finally(() => {
       if (inFlightHistoryRequests.get(key) === operation) {
@@ -1704,13 +1767,18 @@ export async function connectMatrix(
         loadHistoryPage(sessionId, pageLimit),
       );
     },
+    observeCommandCompletion(commandId, timeoutMs) {
+      return commandLifecycle.waitForCompletion(commandId, timeoutMs);
+    },
+    releaseCommand(commandId) {
+      commandLifecycle.release(commandId);
+    },
     stop() {
       if (stopped) return;
       stopped = true;
-      for (const pending of pendingHistoryRequests.values()) {
-        window.clearTimeout(pending.timeout);
-        pending.reject(new Error("Matrix connection closed during history recovery."));
-      }
+      historyRequestLifecycle.close(
+        new Error("Matrix connection closed during history recovery."),
+      );
       pendingHistoryRequests.clear();
       client.off(sdk.RoomEvent.Timeline, onTimeline);
       client.off(sdk.ClientEvent.Sync, onSync);
@@ -2609,7 +2677,7 @@ async function forwardEvent(
     requestId: string,
     message: IncomingCodeverMessage,
   ) => boolean,
-  onHistoryPage?: (page: HistoryPage) => Promise<void>,
+  onHistoryPage?: (page: HistoryPage) => void,
   historical = false,
 ): Promise<void> {
   const eventId = event.getId();
@@ -2734,8 +2802,10 @@ async function forwardEvent(
   }
   if (decryptedExtension?.kind === "history_page") {
     const page = historyPageSchema.parse(decryptedExtension.history_page);
-    await onHistoryPage?.(page);
     seen.add(eventId);
+    // Media download and parsing run on their own serial lane. Awaiting them
+    // here would head-of-line block command acknowledgements/results.
+    onHistoryPage?.(page);
     return;
   }
   const gatewayState = parseGatewayStateExtension(decryptedExtension);

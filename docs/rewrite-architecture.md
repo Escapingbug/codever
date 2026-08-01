@@ -141,11 +141,25 @@ display data from encrypted Codever events.
    by that event. Stable logical event IDs preserve edit relationships without
    manufacturing a Matrix timeline event for every recovered item. The PWA
    verifies the whole batch before parsing, caches pages locally, coalesces
-   concurrent reads of the same cursor, and loads older pages lazily. Replayed
+   concurrent reads of the same cursor, and loads older pages lazily. A UI
+   timeout does not discard the protocol request: retries attach to the same
+   request until its signed expiry, and a late page is persisted even when the
+   user has switched sessions. History media verification runs on a separate
+   serial lane after envelope authentication so a slow download cannot block
+   command acknowledgements or invitation results. Cursor advancement uses the
+   request's original `before` value as a compare-and-swap guard. Replayed
    decisions are display-only and history reads never consume a command
    sequence or advance the conversation revision. During rolling upgrades, a
    request without the byte-limit capability retains the legacy per-event
    response so an already-installed PWA is not broken before its worker updates.
+
+Device invitation UI observes the terminal result independently from the
+command acknowledgement. If the acknowledgement wait times out, the PWA keeps
+watching the same command ID and coalesces repeated clicks instead of issuing a
+second offer. The short-lived Matrix login token is requested only after the
+Gateway invitation succeeds, so Gateway queueing cannot consume the token's
+useful lifetime; both the pending observation and rendered link are cleared at
+their explicit expiry.
 
 ## Attachment and artifact flow
 

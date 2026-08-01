@@ -16,6 +16,7 @@ import {
   decodeDeviceInvitationLink,
   pairingLinkFromDeviceInvitation,
 } from "../app/pairing.ts";
+import { DeviceInvitationLifecycle } from "../app/deviceInvitationLifecycle.ts";
 
 test("combines one signed Gateway offer and one-time Matrix login into a fragment link", async () => {
   const offer = await signedOffer();
@@ -127,6 +128,49 @@ test("does not start a new handshake when the invitation has under 15 seconds le
     Date.now = originalNow;
   }
   assert.equal(exchanged, false);
+});
+
+test("duplicate invitation requests share one Gateway operation and reuse its result", async () => {
+  const lifecycle = new DeviceInvitationLifecycle<{
+    link: string;
+    expiresAt: number;
+  }>();
+  let creates = 0;
+  let finish!: (value: { link: string; expiresAt: number }) => void;
+  const create = () => {
+    creates += 1;
+    return new Promise<{ link: string; expiresAt: number }>((resolve) => {
+      finish = resolve;
+    });
+  };
+
+  const first = lifecycle.request(create);
+  const duplicate = lifecycle.request(create);
+  assert.equal(creates, 1);
+  finish({ link: "https://codever.example/i/same", expiresAt: Date.now() + 60_000 });
+  assert.deepEqual(await first, await duplicate);
+
+  const reused = await lifecycle.request(create);
+  assert.equal(reused.link, "https://codever.example/i/same");
+  assert.equal(creates, 1);
+});
+
+test("clearing an invitation invalidates an in-flight late result", async () => {
+  const lifecycle = new DeviceInvitationLifecycle<{
+    link: string;
+    expiresAt: number;
+  }>();
+  let finish!: (value: { link: string; expiresAt: number }) => void;
+  const pending = lifecycle.request(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  lifecycle.clear();
+  finish({ link: "https://codever.example/i/stale", expiresAt: Date.now() + 60_000 });
+  await assert.rejects(pending, /request was cleared/);
+  assert.equal(lifecycle.current(), null);
 });
 
 async function signedOffer(timestamps: {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CommandAcknowledgementTimeoutError,
+  CommandCompletionExpiredError,
   CommandLifecycle,
   waitForCommandCompletion,
 } from "../app/commandLifecycle.ts";
@@ -381,6 +383,51 @@ test("command result permanently replaces a missing explicit ack", async () => {
     revision: 12,
     outcome: "failed",
   });
+});
+
+test("an acknowledgement timeout keeps the terminal result observable", async () => {
+  const lifecycle = new CommandLifecycle();
+  const acknowledgement = lifecycle.waitForAcknowledgement(
+    "late-invitation",
+    8,
+    5,
+  );
+  const error = await acknowledgement.catch((candidate) => candidate);
+  assert.ok(error instanceof CommandAcknowledgementTimeoutError);
+  assert.equal(error.commandId, "late-invitation");
+  assert.equal(error.sequence, 8);
+
+  const lateCompletion = lifecycle.waitForCompletion("late-invitation", 100);
+  lifecycle.recordResult({
+    commandId: "late-invitation",
+    sequence: 8,
+    revision: 14,
+    outcome: "succeeded",
+    result: { pairingLink: "codever://pair?data=late" },
+  });
+  assert.equal((await lateCompletion).revision, 14);
+  lifecycle.release("late-invitation");
+});
+
+test("bounded command observation removes its waiter at expiry", async () => {
+  const lifecycle = new CommandLifecycle();
+  await assert.rejects(
+    lifecycle.waitForCompletion("never-finishes", 5),
+    CommandCompletionExpiredError,
+  );
+
+  // A later result remains recordable and can be observed independently.
+  lifecycle.recordResult({
+    commandId: "never-finishes",
+    sequence: 2,
+    revision: 3,
+    outcome: "failed",
+  });
+  assert.equal(
+    (await lifecycle.waitForCompletion("never-finishes")).outcome,
+    "failed",
+  );
+  lifecycle.release("never-finishes");
 });
 
 test("a missing terminal result cannot leave command UI busy forever", async () => {

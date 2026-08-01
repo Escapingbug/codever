@@ -22,6 +22,7 @@ type Props = {
   canConfirm: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;
+  invitationError: string | null;
   invitationReauthRequired: boolean;
   onLink(link: string): void;
   onClear(): void;
@@ -38,6 +39,7 @@ export function PairingWizard({
   canConfirm,
   deviceInvitation,
   invitationBusy,
+  invitationError,
   invitationReauthRequired,
   onLink,
   onClear,
@@ -93,14 +95,21 @@ export function PairingWizard({
         </section>
 
         {!deviceInvitation && !invitationReauthRequired && (
-          <button
-            className="create-device-invitation-button"
-            type="button"
-            disabled={invitationBusy}
-            onClick={() => onCreateInvitation()}
-          >
-            {invitationBusy ? "Creating invitation…" : "Add another device"}
-          </button>
+          <>
+            <button
+              className="create-device-invitation-button"
+              type="button"
+              disabled={invitationBusy}
+              onClick={() => onCreateInvitation()}
+            >
+              {invitationBusy ? "Creating invitation…" : "Add another device"}
+            </button>
+            {invitationError && (
+              <p className="pairing-inline-error" role="status">
+                {invitationError}
+              </p>
+            )}
+          </>
         )}
 
         {invitationReauthRequired && !deviceInvitation && (
@@ -128,6 +137,11 @@ export function PairingWizard({
                 ? "Authorizing…"
                 : "Create secure invitation"}
             </button>
+            {invitationError && (
+              <p className="pairing-inline-error" role="status">
+                {invitationError}
+              </p>
+            )}
           </section>
         )}
 

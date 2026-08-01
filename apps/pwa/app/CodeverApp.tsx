@@ -17,7 +17,12 @@ import {
   type CodeverAttachment,
   type CommandPayload,
 } from "@codever/protocol";
-import { waitForCommandCompletion } from "./commandLifecycle";
+import {
+  CommandAcknowledgementTimeoutError,
+  waitForCommandCompletion,
+  type CommandCompletion,
+} from "./commandLifecycle";
+import { DeviceInvitationLifecycle } from "./deviceInvitationLifecycle";
 import {
   SENDING_AGENT_ACTIVITY,
   STARTING_AGENT_ACTIVITY,
@@ -85,6 +90,7 @@ import {
   type MatrixConnection,
   type MatrixConnectionConfig,
   type MatrixConnectionStatus,
+  type MatrixHistoryRecovery,
 } from "./matrix";
 import {
   clearPendingPairing,
@@ -127,6 +133,15 @@ const emptyMatrixConfig: MatrixConnectionConfig = {
   gatewayMatrixDeviceId: "",
   gatewayMatrixEd25519: "",
 };
+
+const DEVICE_INVITATION_RESULT_TIMEOUT_MS = 95_000;
+
+class InvitationReauthenticationRequiredError extends Error {
+  constructor() {
+    super("Matrix reauthentication is required for this invitation.");
+    this.name = "InvitationReauthenticationRequiredError";
+  }
+}
 
 function bindCredentialsToHomeserver(
   config: MatrixConnectionConfig,
@@ -273,6 +288,10 @@ export function CodeverApp() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRetryMode, setHistoryRetryMode] = useState<
+    "restore" | "older" | null
+  >(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -315,6 +334,7 @@ export function CodeverApp() {
   const [deviceInvitation, setDeviceInvitation] =
     useState<GeneratedDeviceInvitation | null>(null);
   const [invitationBusy, setInvitationBusy] = useState(false);
+  const [invitationError, setInvitationError] = useState<string | null>(null);
   const [invitationReauthRequired, setInvitationReauthRequired] =
     useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
@@ -357,6 +377,14 @@ export function CodeverApp() {
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
   const historyGenerationRef = useRef(0);
   const historyLoadingRef = useRef(false);
+  const deviceInvitationLifecycleRef = useRef(
+    new DeviceInvitationLifecycle<GeneratedDeviceInvitation>(),
+  );
+  const invitationExpiryTimeoutRef = useRef<number | null>(null);
+  const pendingGatewayInvitationRef = useRef<{
+    pairingLink: string;
+    expiresAt: number;
+  } | null>(null);
   const followLatestRef = useRef(true);
   const prependScrollRef = useRef<{
     scrollHeight: number;
@@ -746,6 +774,39 @@ export function CodeverApp() {
     );
   }
 
+  function recoverLateHistory(page: MatrixHistoryRecovery): void {
+    const scope = historyScopeRef.current;
+    if (!scope) return;
+    const recovered = page.messages.map((incoming) =>
+      chatMessageFromIncoming(
+        { ...incoming, historical: true },
+        incoming.sessionId ?? page.sessionId,
+      ),
+    );
+    // Persist before checking the selected-session generation. A response may
+    // arrive after the user switched conversations and must still be visible
+    // when they return.
+    void persistMessageHistoryPage(scope, page.sessionId, recovered)
+      .then(() => {
+        if (historySessionIdRef.current !== page.sessionId) return;
+        historyCursorRef.current = olderHistoryCursor(
+          historyCursorRef.current,
+          recovered,
+        );
+        setMessages((current) => mergeChatMessages(current, recovered));
+        setHistoryHasMore(page.hasMore);
+        setHistoryError(null);
+        setHistoryRetryMode(null);
+      })
+      .catch((error) => {
+        if (historySessionIdRef.current === page.sessionId) {
+          setHistoryError(
+            `Recovered history could not be saved: ${formatUiError(error)}`,
+          );
+        }
+      });
+  }
+
   async function restoreSessionHistory(
     sessionId: string,
     connection: MatrixConnection | null = matrixConnectionRef.current,
@@ -758,6 +819,8 @@ export function CodeverApp() {
     followLatestRef.current = true;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
+    setHistoryError(null);
+    setHistoryRetryMode(null);
     setHistoryHasMore(false);
     setMessages([]);
     setDecisionStates({});
@@ -819,12 +882,6 @@ export function CodeverApp() {
         cachedMessages.length > 0
           ? await connection.loadRecentHistory(sessionId)
           : await connection.loadHistoryPage(sessionId);
-      if (
-        generation !== historyGenerationRef.current ||
-        historySessionIdRef.current !== sessionId
-      ) {
-        return;
-      }
       const remoteMessages = remote.messages.map((incoming) =>
         chatMessageFromIncoming(
           { ...incoming, historical: true },
@@ -833,6 +890,14 @@ export function CodeverApp() {
       );
       if (remoteMessages.length > 0) {
         await persistMessageHistoryPage(scope, sessionId, remoteMessages);
+      }
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      if (remoteMessages.length > 0) {
         historyCursorRef.current = olderHistoryCursor(
           historyCursorRef.current,
           remoteMessages,
@@ -843,9 +908,15 @@ export function CodeverApp() {
       }
       setHistoryHasMore(cached.hasMore || remote.hasMore);
     } catch (error) {
-      setConnectionError(
-        `Conversation history could not be restored: ${formatUiError(error)}`,
-      );
+      if (
+        generation === historyGenerationRef.current &&
+        historySessionIdRef.current === sessionId
+      ) {
+        setHistoryError(
+          `Conversation history could not be restored: ${formatUiError(error)}`,
+        );
+        setHistoryRetryMode("restore");
+      }
     } finally {
       if (generation === historyGenerationRef.current) {
         historyLoadingRef.current = false;
@@ -868,6 +939,8 @@ export function CodeverApp() {
     const generation = historyGenerationRef.current;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
+    setHistoryError(null);
+    setHistoryRetryMode(null);
     try {
       const cached = await loadMessageHistoryPage(scope, sessionId, {
         before: historyCursorRef.current,
@@ -904,12 +977,6 @@ export function CodeverApp() {
           ),
         );
         const prefetched = await connection.loadHistoryPage(sessionId);
-        if (
-          generation !== historyGenerationRef.current ||
-          historySessionIdRef.current !== sessionId
-        ) {
-          return;
-        }
         const prefetchedMessages = prefetched.messages.map((incoming) =>
           chatMessageFromIncoming(
             { ...incoming, historical: true },
@@ -923,6 +990,12 @@ export function CodeverApp() {
             prefetchedMessages,
           );
         }
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
         setHistoryHasMore(cached.hasMore || prefetched.hasMore);
         return;
       }
@@ -933,12 +1006,6 @@ export function CodeverApp() {
         return;
       }
       const remote = await connection.loadHistoryPage(sessionId);
-      if (
-        generation !== historyGenerationRef.current ||
-        historySessionIdRef.current !== sessionId
-      ) {
-        return;
-      }
       const olderMessages = remote.messages.map((incoming) =>
         chatMessageFromIncoming(
           { ...incoming, historical: true },
@@ -947,6 +1014,14 @@ export function CodeverApp() {
       );
       if (olderMessages.length > 0) {
         await persistMessageHistoryPage(scope, sessionId, olderMessages);
+      }
+      if (
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      if (olderMessages.length > 0) {
         prepareHistoryPrepend(feedRef.current, prependScrollRef);
         historyCursorRef.current = olderHistoryCursor(
           historyCursorRef.current,
@@ -958,9 +1033,15 @@ export function CodeverApp() {
       }
       setHistoryHasMore(remote.hasMore);
     } catch (error) {
-      setConnectionError(
-        `Older history could not be loaded: ${formatUiError(error)}`,
-      );
+      if (
+        generation === historyGenerationRef.current &&
+        historySessionIdRef.current === sessionId
+      ) {
+        setHistoryError(
+          `Older history could not be loaded: ${formatUiError(error)}`,
+        );
+        setHistoryRetryMode("older");
+      }
     } finally {
       if (generation === historyGenerationRef.current) {
         historyLoadingRef.current = false;
@@ -996,6 +1077,8 @@ export function CodeverApp() {
     setMessages([]);
     setDecisionStates({});
     setHistoryHasMore(Boolean(sessionId));
+    setHistoryError(null);
+    setHistoryRetryMode(null);
     if (!sessionId) {
       historyLoadingRef.current = false;
       setHistoryLoading(false);
@@ -1037,6 +1120,8 @@ export function CodeverApp() {
     historyLoadingRef.current = false;
     setHistoryLoading(false);
     setHistoryHasMore(false);
+    setHistoryError(null);
+    setHistoryRetryMode(null);
     try {
       const normalized = normalizeMatrixConfig(configInput);
       historyScopeRef.current = matrixHistoryScope({
@@ -1169,6 +1254,7 @@ export function CodeverApp() {
             completedCommandResultsRef.current.add(result.commandId);
           }
         },
+        onHistoryRecovered: recoverLateHistory,
       });
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
@@ -1225,6 +1311,17 @@ export function CodeverApp() {
     historyLoadingRef.current = false;
     setHistoryLoading(false);
     setHistoryHasMore(false);
+    setHistoryError(null);
+    setHistoryRetryMode(null);
+    deviceInvitationLifecycleRef.current.clear();
+    pendingGatewayInvitationRef.current = null;
+    if (invitationExpiryTimeoutRef.current !== null) {
+      window.clearTimeout(invitationExpiryTimeoutRef.current);
+      invitationExpiryTimeoutRef.current = null;
+    }
+    setDeviceInvitation(null);
+    setInvitationBusy(false);
+    setInvitationError(null);
   }
 
   function forgetMatrixConfig() {
@@ -1371,65 +1468,138 @@ export function CodeverApp() {
   }
 
   async function createDeviceInvitation(password?: string) {
-    if (invitationBusy) return;
     if (!trustedGateway || !matrixConnectionRef.current) {
       setConnectionError(
         "Connect to the trusted Gateway before authorizing another device.",
       );
       return;
     }
+    const reusable = deviceInvitationLifecycleRef.current.current();
+    if (reusable) {
+      showDeviceInvitation(reusable);
+      return;
+    }
     setInvitationBusy(true);
-    setConnectionError(null);
+    setInvitationError(null);
     try {
-      const tokenResult = await requestMatrixLoginToken(
-        matrixConfig,
-        password,
-      );
-      if (
-        tokenResult.status === "reauth-required" &&
-        tokenResult.passwordSupported
-      ) {
-        setInvitationReauthRequired(true);
-        return;
-      }
-
-      const sent = await sendRealCommand({
-        operation: "device.invite",
-        lifetimeMs: 5 * 60_000,
-      });
-      if (!sent) return;
-      const completion = await sent.completion;
-      if (completion.outcome !== "succeeded") {
-        throw new Error("The Gateway could not create the device invitation.");
-      }
-      const gatewayInvitation = parseGatewayInvitationResult(
-        completion.result,
-      );
-      const fullInvitation = createDeviceInvitationLink({
-        pairingLink: gatewayInvitation.pairingLink,
-        appUrl: window.location.href,
-        ...(tokenResult.status === "ready"
-          ? {
-              matrixLogin: {
-                homeserver: matrixConfig.homeserver,
-                userId: matrixConfig.userId,
-                loginToken: tokenResult.loginToken,
-                expiresAt: tokenResult.expiresAt,
-              },
+      const generated = await deviceInvitationLifecycleRef.current.request(
+        async () => {
+          const connection = matrixConnectionRef.current;
+          if (!connection) throw new Error("The Matrix connection was closed.");
+          let gatewayInvitation = pendingGatewayInvitationRef.current;
+          if (
+            !gatewayInvitation ||
+            gatewayInvitation.expiresAt <= Date.now() + 15_000
+          ) {
+            pendingGatewayInvitationRef.current = null;
+            let completion: CommandCompletion;
+            let commandId: string | null = null;
+            try {
+              try {
+                const sent = await sendRealCommand({
+                  operation: "device.invite",
+                  lifetimeMs: 5 * 60_000,
+                });
+                if (!sent) {
+                  throw new Error(
+                    "The invitation request is waiting for revision conflict review.",
+                  );
+                }
+                commandId = sent.commandId;
+                completion = await waitForCommandCompletion(
+                  sent.completion,
+                  DEVICE_INVITATION_RESULT_TIMEOUT_MS,
+                );
+              } catch (error) {
+                if (!(error instanceof CommandAcknowledgementTimeoutError)) {
+                  throw error;
+                }
+                commandId = error.commandId;
+                setInvitationError(
+                  "The request is still queued on the Gateway. Codever will keep waiting for this same invitation instead of creating another one.",
+                );
+                completion = await connection.observeCommandCompletion(
+                  error.commandId,
+                  DEVICE_INVITATION_RESULT_TIMEOUT_MS,
+                );
+              }
+            } finally {
+              if (commandId) {
+                completedCommandResultsRef.current.delete(commandId);
+                connection.releaseCommand(commandId);
+              }
             }
-          : {}),
-      });
-      const generated = await shortenDeviceInvitation(
-        fullInvitation,
-        window.location.href,
+            if (completion.outcome !== "succeeded") {
+              throw new Error(
+                "The Gateway could not create the device invitation.",
+              );
+            }
+            gatewayInvitation = parseGatewayInvitationResult(
+              completion.result,
+            );
+            pendingGatewayInvitationRef.current = gatewayInvitation;
+          }
+
+          // Request the one-time Matrix credential only after the potentially
+          // slow Gateway command completes, so queue delay cannot consume most
+          // of the credential's useful lifetime.
+          const tokenResult = await requestMatrixLoginToken(
+            matrixConfig,
+            password,
+          );
+          if (
+            tokenResult.status === "reauth-required" &&
+            tokenResult.passwordSupported
+          ) {
+            setInvitationReauthRequired(true);
+            throw new InvitationReauthenticationRequiredError();
+          }
+          const fullInvitation = createDeviceInvitationLink({
+            pairingLink: gatewayInvitation.pairingLink,
+            appUrl: window.location.href,
+            ...(tokenResult.status === "ready"
+              ? {
+                  matrixLogin: {
+                    homeserver: matrixConfig.homeserver,
+                    userId: matrixConfig.userId,
+                    loginToken: tokenResult.loginToken,
+                    expiresAt: tokenResult.expiresAt,
+                  },
+                }
+              : {}),
+          });
+          const shortened = await shortenDeviceInvitation(
+            fullInvitation,
+            window.location.href,
+          );
+          pendingGatewayInvitationRef.current = null;
+          return shortened;
+        },
       );
-      setDeviceInvitation(generated);
+      showDeviceInvitation(generated);
       setInvitationReauthRequired(false);
+      setInvitationError(null);
     } catch (error) {
-      setConnectionError(formatUiError(error));
+      if (!(error instanceof InvitationReauthenticationRequiredError)) {
+        setInvitationError(formatUiError(error));
+      }
     } finally {
       setInvitationBusy(false);
     }
+  }
+
+  function showDeviceInvitation(invitation: GeneratedDeviceInvitation): void {
+    if (invitationExpiryTimeoutRef.current !== null) {
+      window.clearTimeout(invitationExpiryTimeoutRef.current);
+    }
+    setDeviceInvitation(invitation);
+    invitationExpiryTimeoutRef.current = window.setTimeout(() => {
+      invitationExpiryTimeoutRef.current = null;
+      deviceInvitationLifecycleRef.current.clear();
+      pendingGatewayInvitationRef.current = null;
+      setDeviceInvitation(null);
+      setInvitationError("This device invitation expired. Create a new one.");
+    }, Math.max(0, invitation.expiresAt - Date.now()));
   }
 
   async function confirmPairing(
@@ -1510,6 +1680,7 @@ export function CodeverApp() {
       revisionConflictRef.current = null;
       return result;
     } catch (error) {
+      if (error instanceof CommandAcknowledgementTimeoutError) throw error;
       if (error instanceof CommandRevisionConflictError) {
         const notice: RevisionConflictNotice = {
           commandId: error.commandId,
@@ -2592,11 +2763,26 @@ export function CodeverApp() {
           onScroll={handleFeedScroll}
         >
           <div
-            className={`history-loader ${historyLoading ? "is-loading" : ""}`}
+            className={`history-loader ${historyLoading ? "is-loading" : ""} ${historyError ? "has-error" : ""}`}
             aria-live="polite"
           >
             {historyLoading ? (
               <span>Loading earlier messages…</span>
+            ) : historyError ? (
+              <span className="history-inline-error">
+                <span>{historyError}</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    historyRetryMode === "restore" &&
+                    historySessionIdRef.current
+                      ? void restoreSessionHistory(historySessionIdRef.current)
+                      : void loadOlderHistory()
+                  }
+                >
+                  Retry
+                </button>
+              </span>
             ) : historyHasMore ? (
               <button type="button" onClick={() => void loadOlderHistory()}>
                 Load earlier messages
@@ -3149,6 +3335,7 @@ export function CodeverApp() {
         pairingBusy={pairingBusy}
         deviceInvitation={deviceInvitation}
         invitationBusy={invitationBusy}
+        invitationError={invitationError}
         invitationReauthRequired={invitationReauthRequired}
         updateState={pwaUpdateState}
         onChange={setMatrixConfig}
@@ -3170,9 +3357,15 @@ export function CodeverApp() {
           void createDeviceInvitation(password)
         }
         onClearInvitation={() => {
+          deviceInvitationLifecycleRef.current.clear();
+          pendingGatewayInvitationRef.current = null;
+          if (invitationExpiryTimeoutRef.current !== null) {
+            window.clearTimeout(invitationExpiryTimeoutRef.current);
+            invitationExpiryTimeoutRef.current = null;
+          }
           setDeviceInvitation(null);
           setInvitationReauthRequired(false);
-          setConnectionError(null);
+          setInvitationError(null);
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
       />

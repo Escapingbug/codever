@@ -375,6 +375,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(settings, /Sign in to Matrix/);
   assert.match(settings, /Advanced: use an access token/);
   assert.match(app, /operation: "device\.invite"/);
+  assert.match(app, /error instanceof CommandAcknowledgementTimeoutError/);
+  assert.match(app, /observeCommandCompletion/);
+  assert.match(
+    app,
+    /parseGatewayInvitationResult\([\s\S]*requestMatrixLoginToken\(/,
+  );
   assert.match(matrix, /sender === config\.userId/);
   assert.match(matrix, /error instanceof SecurityError && error\.code === "replay"/);
   assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
@@ -532,6 +538,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /kind: "codever\.history\.request"/);
   assert.match(matrix, /kind: "history_request"/);
   assert.match(matrix, /historyPageSchema\.parse/);
+  assert.match(matrix, /createDetachedSerialDispatcher/);
+  assert.doesNotMatch(matrix, /await onHistoryPage\?\.\(page\)/);
+  assert.match(matrix, /historyRequestLifecycle\.idForKey\(key\)/);
+  assert.match(app, /onHistoryRecovered: recoverLateHistory/);
+  assert.match(app, /setHistoryError/);
   assert.doesNotMatch(matrix, /client\.scrollback\(room/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
   assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
