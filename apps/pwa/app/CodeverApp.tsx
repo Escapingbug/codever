@@ -36,7 +36,12 @@ import { gatewayProjectKey } from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
 import { legacyToolGroupPresentation } from "./presentation";
-import { registerPwaUpdates } from "./pwaUpdate";
+import { CODEVER_BUILD_VERSION } from "./buildInfo";
+import {
+  registerPwaUpdates,
+  type PwaUpdateHandle,
+  type PwaUpdateState,
+} from "./pwaUpdate";
 import {
   hasShortDeviceInvitation,
   resolveShortDeviceInvitation,
@@ -283,6 +288,10 @@ export function CodeverApp() {
     useState<MatrixConnectionStatus>("offline");
   const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [pwaUpdateState, setPwaUpdateState] = useState<PwaUpdateState>({
+    phase: "current",
+    currentVersion: CODEVER_BUILD_VERSION,
+  });
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
   const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
     null,
@@ -310,6 +319,7 @@ export function CodeverApp() {
   const feedRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
+  const pwaUpdateRef = useRef<PwaUpdateHandle | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
     (
@@ -477,7 +487,14 @@ export function CodeverApp() {
     );
   }
 
-  useEffect(() => registerPwaUpdates(), []);
+  useEffect(() => {
+    const updater = registerPwaUpdates(setPwaUpdateState);
+    pwaUpdateRef.current = updater;
+    return () => {
+      pwaUpdateRef.current = null;
+      updater.dispose();
+    };
+  }, []);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -2774,6 +2791,34 @@ export function CodeverApp() {
         </div>
       </section>
 
+      {pwaUpdateState.phase === "updating" && (
+        <div className="pwa-update-overlay" role="alert" aria-live="assertive">
+          <span className="pwa-update-spinner" aria-hidden="true" />
+          <strong>Updating Codever…</strong>
+          <small>
+            Loading build {pwaUpdateState.latestVersion}. This page will reopen
+            automatically.
+          </small>
+        </div>
+      )}
+
+      {pwaUpdateState.phase === "updated" && (
+        <div className="pwa-update-toast" role="status" aria-live="polite">
+          <span aria-hidden="true">✓</span>
+          <span>
+            <strong>Codever updated</strong>
+            <small>Now running build {pwaUpdateState.currentVersion}</small>
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss update notice"
+            onClick={() => pwaUpdateRef.current?.dismissUpdatedNotice()}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {connectionError && !settingsOpen && (
         <button
           className="connection-toast"
@@ -2817,6 +2862,7 @@ export function CodeverApp() {
         deviceInvitation={deviceInvitation}
         invitationBusy={invitationBusy}
         invitationReauthRequired={invitationReauthRequired}
+        updateState={pwaUpdateState}
         onChange={setMatrixConfig}
         onPairingLink={(link) => void openPairingLink(link)}
         onClearPairing={() => {
@@ -2840,6 +2886,7 @@ export function CodeverApp() {
           setInvitationReauthRequired(false);
           setConnectionError(null);
         }}
+        onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
       />
     </main>
   );

@@ -12,6 +12,7 @@ import type {
   TrustedGateway,
 } from "./pairing";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
+import type { PwaUpdateState } from "./pwaUpdate";
 
 type Props = {
   open: boolean;
@@ -25,6 +26,7 @@ type Props = {
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;
   invitationReauthRequired: boolean;
+  updateState: PwaUpdateState;
   onChange(config: MatrixConnectionConfig): void;
   onPairingLink(link: string): void;
   onClearPairing(): void;
@@ -36,6 +38,7 @@ type Props = {
   onPasswordLogin(userId: string, password: string): void;
   onCreateInvitation(password?: string): void;
   onClearInvitation(): void;
+  onCheckForUpdates(): void;
 };
 
 export function MatrixSettings({
@@ -50,6 +53,7 @@ export function MatrixSettings({
   deviceInvitation,
   invitationBusy,
   invitationReauthRequired,
+  updateState,
   onChange,
   onPairingLink,
   onClearPairing,
@@ -61,6 +65,7 @@ export function MatrixSettings({
   onPasswordLogin,
   onCreateInvitation,
   onClearInvitation,
+  onCheckForUpdates,
 }: Props) {
   const [loginPassword, setLoginPassword] = useState("");
 
@@ -245,9 +250,22 @@ export function MatrixSettings({
           </div>
         )}
 
-        <p className="settings-build-version">
-          PWA build <code>{CODEVER_BUILD_VERSION}</code>
-        </p>
+        <div className="settings-build-version">
+          <span>
+            PWA build <code>{CODEVER_BUILD_VERSION}</code>
+            <small>{updateStatusText(updateState)}</small>
+          </span>
+          <button
+            type="button"
+            onClick={onCheckForUpdates}
+            disabled={
+              updateState.phase === "checking" ||
+              updateState.phase === "updating"
+            }
+          >
+            {updateState.phase === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        </div>
 
         <footer>
           <button className="forget-button" onClick={onForget}>
@@ -276,4 +294,19 @@ export function MatrixSettings({
       </section>
     </div>
   );
+}
+
+function updateStatusText(state: PwaUpdateState): string {
+  switch (state.phase) {
+    case "checking":
+      return "Checking the deployed version…";
+    case "updating":
+      return `Updating to ${state.latestVersion}…`;
+    case "updated":
+      return `Updated from ${state.previousVersion}`;
+    case "unavailable":
+      return "Could not check right now";
+    case "current":
+      return state.checkedAt ? "Up to date" : "Automatic updates enabled";
+  }
 }

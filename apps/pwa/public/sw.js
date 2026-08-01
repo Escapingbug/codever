@@ -1,4 +1,7 @@
-const CACHE_NAME = "codever-shell-v6";
+// v7 is the migration boundary for server-authoritative build checks. Changing
+// the worker bytes makes existing v6 installations activate the updater once;
+// subsequent application builds are detected through /api/version.
+const CACHE_NAME = "codever-shell-v7";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -39,12 +42,16 @@ self.addEventListener("fetch", (event) => {
   const requestUrl = new URL(event.request.url);
   if (
     requestUrl.origin === self.location.origin &&
-    requestUrl.pathname.startsWith("/_matrix/")
+    (
+      requestUrl.pathname.startsWith("/_matrix/") ||
+      requestUrl.pathname === "/api/version"
+    )
   ) {
     // The homeserver shares this origin in production. Matrix /sync is a
     // credentialed long poll and must never be cached or replayed by the app
-    // shell worker; leaving the request unhandled sends it directly to the
-    // network.
+    // shell worker. The deployment version is also authoritative and must
+    // never fall back to a cached response; leaving these requests unhandled
+    // sends them directly to the network.
     return;
   }
 

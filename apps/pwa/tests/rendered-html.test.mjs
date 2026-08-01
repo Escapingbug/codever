@@ -25,6 +25,24 @@ async function render() {
   );
 }
 
+async function fetchBuiltRoute(pathname) {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${pathname}`);
+  const { default: worker } = await import(workerUrl.href);
+  return worker.fetch(
+    new Request(`http://localhost${pathname}`),
+    {
+      ASSETS: {
+        fetch: async () => new Response("Not found", { status: 404 }),
+      },
+    },
+    {
+      waitUntil() {},
+      passThroughOnException() {},
+    },
+  );
+}
+
 test("server-renders the Codever agent workspace", async () => {
   const response = await render();
   assert.equal(response.status, 200);
@@ -57,7 +75,7 @@ test("ships a complete installable offline shell", async () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/");
   assert.ok(manifest.icons.length > 0);
-  assert.match(serviceWorker, /codever-shell-v6/);
+  assert.match(serviceWorker, /codever-shell-v7/);
   assert.match(serviceWorker, /caches\.open\(CACHE_NAME\)/);
   assert.match(serviceWorker, /event\.request\.mode === "navigate"/);
   assert.match(serviceWorker, /cache:\s*"no-store"/);
@@ -66,7 +84,10 @@ test("ships a complete installable offline shell", async () => {
     serviceWorker,
     /pathname\.startsWith\("\/_matrix\/"\)[\s\S]*?return;/,
   );
-  assert.match(source, /registerPwaUpdates\(\)/);
+  assert.match(serviceWorker, /pathname === "\/api\/version"/);
+  assert.match(source, /registerPwaUpdates\(setPwaUpdateState\)/);
+  assert.match(source, /Updating Codever/);
+  assert.match(source, /onCheckForUpdates/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
   assert.match(
@@ -118,6 +139,16 @@ test("ships a complete installable offline shell", async () => {
     /@media \(max-width: 900px\)[\s\S]*?\.composer textarea,[\s\S]*?font-size: 16px/,
   );
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
+});
+
+test("publishes an authoritative uncached build version", async () => {
+  const response = await fetchBuiltRoute("/api/version");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/i);
+  assert.match(response.headers.get("cache-control") ?? "", /no-store/i);
+  assert.equal(response.headers.get("cdn-cache-control"), "no-store");
+  const body = await response.json();
+  assert.match(body.buildVersion, /^[A-Za-z0-9._+-]+$/u);
 });
 
 test("keeps conversations inside the viewport with an independently scrollable feed", async () => {

@@ -2254,6 +2254,96 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.pwa-update-overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  place-items: center;
+  gap: 10px;
+  padding: 28px;
+  background: rgb(25 27 44 / 92%);
+  color: white;
+  text-align: center;
+  backdrop-filter: blur(10px);
+}
+
+.pwa-update-overlay strong {
+  font-size: 18px;
+}
+
+.pwa-update-overlay small {
+  max-width: 360px;
+  color: rgb(255 255 255 / 72%);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pwa-update-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgb(255 255 255 / 24%);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: motion-spin 700ms linear infinite;
+}
+
+.pwa-update-toast {
+  position: fixed;
+  z-index: 46;
+  right: 22px;
+  bottom: 22px;
+  display: flex;
+  width: min(340px, calc(100vw - 32px));
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid #cfeade;
+  border-radius: 12px;
+  background: #f7fffb;
+  box-shadow: 0 12px 34px rgb(31 73 57 / 17%);
+  color: #315e4d;
+  animation: toast-enter var(--motion-panel) var(--motion-ease-out);
+}
+
+.pwa-update-toast > span:first-child {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #dff4eb;
+  color: #288b69;
+  font-weight: 800;
+}
+
+.pwa-update-toast > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pwa-update-toast strong {
+  font-size: 10px;
+}
+
+.pwa-update-toast small {
+  color: #668174;
+  font-size: 9px;
+}
+
+.pwa-update-toast button {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: #688477;
+  font-size: 18px;
+}
+
 .settings-backdrop {
   position: fixed;
   z-index: 60;
@@ -2317,10 +2407,41 @@ select:focus-visible {
 }
 
 .settings-build-version {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
   margin: 0;
   color: var(--muted);
   font-size: 10px;
   text-align: right;
+}
+
+.settings-build-version > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-build-version small {
+  color: #8c93a1;
+  font-size: 9px;
+}
+
+.settings-build-version button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #dfe2e9;
+  border-radius: 8px;
+  background: white;
+  color: #626b7c;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.settings-build-version button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .settings-build-version code {
@@ -3888,7 +4009,8 @@ body {
     animation-name: mobile-sheet-enter;
   }
 
-  .connection-toast {
+  .connection-toast,
+  .pwa-update-toast {
     right: 12px;
     bottom: calc(12px + env(safe-area-inset-bottom));
   }
