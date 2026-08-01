@@ -1,18 +1,22 @@
 import {
+    encryptMedia,
     importDeviceKeyPair,
     openSecureEnvelope,
     publicKeyId,
     sealSecureEnvelope,
+    sha256,
     type DeviceKeyPair,
 } from '@codever/security'
 import { createHash, randomUUID } from 'node:crypto'
 import { FileReplayStore } from '@codever/security/node'
-import type {
-    CodeverAttachment,
-    HistoryPage,
-    HistoryRequest,
-    JsonValue,
-    SignedSecureEnvelope,
+import {
+    MAX_HISTORY_PAGE_BYTES,
+    MAX_INLINE_HISTORY_PAGE_BYTES,
+    type HistoryPage,
+    type HistoryRequest,
+    type CodeverAttachment,
+    type JsonValue,
+    type SignedSecureEnvelope,
 } from '@codever/protocol'
 import {
     CODEVER_MATRIX_EXTENSION,
@@ -30,6 +34,7 @@ import type {
 import {
     FileMatrixDeliveryOutbox,
     type DurableMatrixDelivery,
+    type MatrixHistoryDeliveryPage,
 } from './fileDeliveryOutbox'
 
 export interface OpenedGatewayMatrixContent {
@@ -386,10 +391,9 @@ export class GatewaySecureContentLayer {
         }, room, transport)
     }
 
-    /**
-     * Re-addresses a canonical transcript page to one paired device. Each
-     * replayed event keeps its original logical delivery key, which gives
-     * future Matrix edits a physical target on the newly joined device.
+    /** Sends one bounded transcript page instead of replaying every item as a
+     * separate Matrix event. Stable logical item IDs keep later edits working
+     * without manufacturing recipient-specific timeline history.
      */
     async sendHistoryPage(
         room: MatrixGatewayRoomConfig,
@@ -397,20 +401,89 @@ export class GatewaySecureContentLayer {
         request: HistoryRequest,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
-        await this.retryPendingForRoom(room, transport).catch(() => undefined)
         const now = Date.now()
         const active = (await this.currentTrustedDevices(now)).filter(device =>
             device.allowedRoomIds.includes(room.roomId),
         )
         const recipient = active.find(device => device.deviceId === deviceId)
         if (!recipient) throw new Error(`History recipient ${deviceId} is not active for this room`)
-        const identity = await recipientIdentity(recipient)
         const page = this.deliveryOutbox.historyPage(
             room.roomId,
             request.sessionId,
             request.before,
             request.limit,
+            request.maxBytes ?? MAX_HISTORY_PAGE_BYTES,
         )
+        if (request.maxBytes === undefined) {
+            return this.sendLegacyHistoryPage(
+                room,
+                recipient,
+                request,
+                page,
+                active.length,
+                now,
+                transport,
+            )
+        }
+        const encodedItems = new TextEncoder().encode(JSON.stringify(page.items))
+        if (encodedItems.byteLength !== page.byteLength) {
+            throw new Error('Matrix history page byte accounting mismatch')
+        }
+        const baseResponse = {
+            kind: 'codever.history.page',
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            requestId: request.requestId,
+            sessionId: request.sessionId,
+            ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+            hasMore: page.hasMore,
+            replayed: page.items.length,
+        } as const
+        let response: HistoryPage
+        if (encodedItems.byteLength <= MAX_INLINE_HISTORY_PAGE_BYTES) {
+            response = { ...baseResponse, items: page.items }
+        } else {
+            const upload = transport.uploadEncryptedMedia
+            if (!upload) {
+                throw new Error('Matrix transport does not support encrypted history batch upload')
+            }
+            const encrypted = await encryptMedia(encodedItems)
+            const uploaded = await upload.call(transport, {
+                ciphertext: encrypted.ciphertext,
+            })
+            response = {
+                ...baseResponse,
+                batch: {
+                    encoding: 'json',
+                    itemCount: page.items.length,
+                    plaintextSize: encodedItems.byteLength,
+                    plaintextSha256: await sha256(encodedItems),
+                    media: {
+                        url: uploaded.url,
+                        ...encrypted.descriptor,
+                    },
+                },
+            }
+        }
+        return this.sendToDevice(room, deviceId, {
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            kind: 'history_page',
+            history_page: response,
+        }, `codever.history.page.${request.requestId}`, transport, {
+            retryPending: false,
+        })
+    }
+
+    private async sendLegacyHistoryPage(
+        room: MatrixGatewayRoomConfig,
+        recipient: MatrixGatewayTrustedDevice,
+        request: HistoryRequest,
+        page: MatrixHistoryDeliveryPage,
+        activeDeviceCount: number,
+        now: number,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        await this.retryPendingForRoom(room, transport).catch(() => undefined)
+        const identity = await recipientIdentity(recipient)
         let replayed = 0
         for (const entry of page.deliveries) {
             const prior = this.deliveryOutbox.recipientDelivery(
@@ -424,8 +497,6 @@ export class GatewaySecureContentLayer {
                     now,
                 )
             } else if (prior) {
-                // A live or earlier recovery copy already provides the Matrix
-                // edit target and will be restored from this device's timeline.
                 continue
             }
 
@@ -440,7 +511,7 @@ export class GatewaySecureContentLayer {
                 ? contentForRecipient(entry.content, originalTargetId, physicalTargetId)
                 : structuredClone(entry.content)
             const content = withHistoryReplay(
-                withActiveDeviceCount(addressed, active.length),
+                withActiveDeviceCount(addressed, activeDeviceCount),
                 request.requestId,
                 entry.createdAt,
             )
@@ -491,7 +562,7 @@ export class GatewaySecureContentLayer {
             hasMore: page.hasMore,
             replayed,
         }
-        return this.sendToDevice(room, deviceId, {
+        return this.sendToDevice(room, recipient.deviceId, {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             kind: 'history_page',
             history_page: response,
@@ -540,11 +611,14 @@ export class GatewaySecureContentLayer {
         const targetDeliveries = replacementTarget
             ? this.deliveryIds.get(replacementTarget)
             : undefined
+        const stableTarget = replacementTarget
+            ? this.deliveryOutbox.historyEventIdForEvent(replacementTarget)
+            : undefined
         const logicalKey = logicalDeliveryKey(request)
         const candidates = await Promise.all(recipients.map(async recipient => {
-            const physicalTarget = targetDeliveries?.get(recipient.deviceId)
+            const recipientTarget = targetDeliveries?.get(recipient.deviceId) ?? stableTarget
             const recipientContent = replacementTarget
-                ? contentForRecipient(request.content, replacementTarget, physicalTarget)
+                ? contentForRecipient(request.content, replacementTarget, recipientTarget)
                 : request.content
             const content = withActiveDeviceCount(recipientContent, recipients.length)
             const recipientRequest = {
@@ -615,8 +689,11 @@ export class GatewaySecureContentLayer {
         extension: Record<string, unknown>,
         transactionId: string,
         transport: MatrixTransport,
+        options: { retryPending?: boolean } = {},
     ): Promise<MatrixSendEventResult> {
-        await this.retryPendingForRoom(room, transport).catch(() => undefined)
+        if (options.retryPending !== false) {
+            await this.retryPendingForRoom(room, transport).catch(() => undefined)
+        }
         const active = (await this.currentTrustedDevices()).filter(device =>
             device.allowedRoomIds.includes(room.roomId),
         )

@@ -1,12 +1,16 @@
 import {
+  DEFAULT_HISTORY_PAGE_BYTES,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
+  historyItemsSchema,
   historyPageSchema,
   historyRequestSchema,
   type CodeverAttachment,
   type CodeverCommand,
   type CommandPayload,
+  type HistoryBatch,
   type HistoryPage,
+  type HistoryItem,
   type HistoryRequest,
   type JsonValue,
   type SignedCommand,
@@ -114,7 +118,8 @@ const LOCAL_STORE_TIMEOUT_MS = 10_000;
 const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
 const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
 const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
-const HISTORY_REQUEST_TIMEOUT_MS = 20_000;
+const HISTORY_REQUEST_TIMEOUT_MS = 30_000;
+const HISTORY_BATCH_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export type MatrixConnectionConfig = {
   homeserver: string;
@@ -555,6 +560,8 @@ export async function connectMatrix(
   let legacyHistorySessionHint: string | null = null;
   let historyInitialized = false;
   let historyChain: Promise<unknown> = Promise.resolve();
+  const inFlightHistoryLoads = new Map<string, Promise<MatrixHistoryPage>>();
+  const inFlightHistoryRequests = new Map<string, Promise<MatrixHistoryPage>>();
   const onCommandAcknowledged = async (
     commandId: string,
     sequence: number,
@@ -694,13 +701,59 @@ export async function connectMatrix(
     finishHistoryRequest(requestId);
     return true;
   };
-  const onHistoryPage = (page: HistoryPage): void => {
+  const onHistoryPage = async (page: HistoryPage): Promise<void> => {
     const pending = pendingHistoryRequests.get(page.requestId);
     if (!pending) return;
     if (pending.sessionId !== page.sessionId) {
       window.clearTimeout(pending.timeout);
       pendingHistoryRequests.delete(page.requestId);
       pending.reject(new Error("Gateway history response targeted the wrong session."));
+      return;
+    }
+    // The Gateway response has arrived. A media-backed page gets its own
+    // bounded download timeout below, so the request timer must not race it.
+    window.clearTimeout(pending.timeout);
+    let items: HistoryItem[] | null;
+    try {
+      items = await withMatrixTimeout(
+        historyItemsFromPage(page, client),
+        HISTORY_BATCH_DOWNLOAD_TIMEOUT_MS,
+        "The encrypted history page could not be downloaded in time.",
+      );
+    } catch (error) {
+      window.clearTimeout(pending.timeout);
+      pendingHistoryRequests.delete(page.requestId);
+      pending.reject(error instanceof Error ? error : new Error(formatError(error)));
+      return;
+    }
+    if (items) {
+      window.clearTimeout(pending.timeout);
+      try {
+        const messages = items.map((item) => {
+          const replay = parseHistoryReplayEvent(
+            item.eventId,
+            config.gatewayId,
+            item.timestamp,
+            withHistoryReplayMarker(item.content, page.requestId, item.timestamp),
+          );
+          if (!replay || replay.message.sessionId !== pending.sessionId) {
+            throw new Error("Gateway history page contained an invalid session item.");
+          }
+          return replay.message;
+        });
+        pendingHistoryRequests.delete(page.requestId);
+        gatewayHistoryState.set(page.sessionId, {
+          ...(page.nextBefore ? { before: page.nextBefore } : {}),
+          complete: !page.hasMore,
+        });
+        pending.resolve({
+          messages: deduplicateHistoryMessages(messages).sort(compareIncomingMessages),
+          hasMore: page.hasMore,
+        });
+      } catch (error) {
+        pendingHistoryRequests.delete(page.requestId);
+        pending.reject(error instanceof Error ? error : new Error(formatError(error)));
+      }
       return;
     }
     pending.page = page;
@@ -1187,7 +1240,7 @@ export async function connectMatrix(
     );
     return response.event_id;
   };
-  const requestGatewayHistoryPage = async (
+  const performGatewayHistoryPage = async (
     sessionId: string,
     limit: number,
   ): Promise<MatrixHistoryPage> => {
@@ -1213,6 +1266,7 @@ export async function connectMatrix(
       sessionId,
       ...(state?.before ? { before: state.before } : {}),
       limit: Math.max(1, Math.min(limit, 100)),
+      maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
       issuedAt: now,
       expiresAt: now + 60_000,
     });
@@ -1276,6 +1330,22 @@ export async function connectMatrix(
       }
     }
     return response;
+  };
+  const requestGatewayHistoryPage = (
+    sessionId: string,
+    limit: number,
+  ): Promise<MatrixHistoryPage> => {
+    const state = gatewayHistoryState.get(sessionId);
+    const key = `${sessionId}\u0000${state?.before ?? "latest"}`;
+    const existing = inFlightHistoryRequests.get(key);
+    if (existing) return existing;
+    const operation = performGatewayHistoryPage(sessionId, limit);
+    inFlightHistoryRequests.set(key, operation);
+    return operation.finally(() => {
+      if (inFlightHistoryRequests.get(key) === operation) {
+        inFlightHistoryRequests.delete(key);
+      }
+    });
   };
   const scanHistoryTimeline = async (
     room: Room,
@@ -1384,14 +1454,25 @@ export async function connectMatrix(
     };
   };
   const enqueueHistoryOperation = (
+    sessionId: string,
+    limit: number,
     operation: () => Promise<MatrixHistoryPage>,
   ): Promise<MatrixHistoryPage> => {
+    const state = gatewayHistoryState.get(sessionId);
+    const key = `${sessionId}\u0000${state?.before ?? "latest"}\u0000${limit}`;
+    const existing = inFlightHistoryLoads.get(key);
+    if (existing) return existing;
     const queued = historyChain.then(operation);
     historyChain = queued.then(
       () => undefined,
       () => undefined,
     );
-    return queued;
+    inFlightHistoryLoads.set(key, queued);
+    return queued.finally(() => {
+      if (inFlightHistoryLoads.get(key) === queued) {
+        inFlightHistoryLoads.delete(key);
+      }
+    });
   };
   const uploadAttachment = async (file: File): Promise<CodeverAttachment> => {
     if (stopped) throw new Error("Matrix connection is closed.");
@@ -1590,13 +1671,15 @@ export async function connectMatrix(
       for (const eventId of eventIds) delivered.add(eventId);
     },
     loadRecentHistory(sessionId, limit) {
-      return enqueueHistoryOperation(() =>
-        loadRecentHistory(sessionId, limit),
+      const pageLimit = Math.max(1, Math.min(limit ?? 30, 100));
+      return enqueueHistoryOperation(sessionId, pageLimit, () =>
+        loadRecentHistory(sessionId, pageLimit),
       );
     },
     loadHistoryPage(sessionId, limit) {
-      return enqueueHistoryOperation(() =>
-        loadHistoryPage(sessionId, limit),
+      const pageLimit = Math.max(1, Math.min(limit ?? 30, 100));
+      return enqueueHistoryOperation(sessionId, pageLimit, () =>
+        loadHistoryPage(sessionId, pageLimit),
       );
     },
     stop() {
@@ -2191,6 +2274,96 @@ type DecodedHistoricalEvent = {
   message?: IncomingCodeverMessage;
 };
 
+async function historyItemsFromPage(
+  page: HistoryPage,
+  client: MatrixClient,
+): Promise<HistoryItem[] | null> {
+  if (page.items) return page.items;
+  if (!page.batch) return null;
+  const batch = page.batch;
+  const url = client.mxcUrlToHttp(
+    batch.media.url,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    false,
+    true,
+  );
+  if (!url) throw new Error("Matrix history media URL could not be resolved.");
+  const accessToken = client.getAccessToken();
+  if (!accessToken) {
+    throw new Error("Matrix access token is unavailable for history download.");
+  }
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: "error",
+  });
+  if (!response.ok) {
+    throw new Error(`Matrix history download failed with HTTP ${response.status}.`);
+  }
+  const declaredSize = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredSize) && declaredSize > batch.media.size) {
+    throw new Error("Encrypted history page is larger than its signed metadata.");
+  }
+  const ciphertext = await readBoundedResponse(response, batch.media.size);
+  const plaintext = await decryptMedia(ciphertext, batch.media);
+  return decodeHistoryBatchPayload(plaintext, batch);
+}
+
+export async function decodeHistoryBatchPayload(
+  plaintext: Uint8Array,
+  batch: HistoryBatch,
+): Promise<HistoryItem[]> {
+  if (
+    plaintext.byteLength !== batch.plaintextSize ||
+    (await sha256(plaintext)) !== batch.plaintextSha256
+  ) {
+    throw new Error("History page content does not match its signed metadata.");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(plaintext),
+    ) as unknown;
+  } catch (error) {
+    throw new Error("Encrypted history page is not valid JSON.", { cause: error });
+  }
+  const items = historyItemsSchema.parse(decoded);
+  if (items.length !== batch.itemCount) {
+    throw new Error("Encrypted history page item count does not match.");
+  }
+  return items;
+}
+
+function withHistoryReplayMarker(
+  content: Record<string, JsonValue>,
+  requestId: string,
+  timestamp: number,
+): Record<string, unknown> {
+  const copy = structuredClone(content) as Record<string, unknown>;
+  const extension = asRecord(copy["io.codever"]);
+  if (extension) {
+    extension.history_replay = {
+      request_id: requestId,
+      display_only: true,
+      timestamp,
+    };
+  }
+  return copy;
+}
+
+function deduplicateHistoryMessages(
+  messages: readonly IncomingCodeverMessage[],
+): IncomingCodeverMessage[] {
+  const seenEventIds = new Set<string>();
+  return messages.filter((message) => {
+    if (seenEventIds.has(message.eventId)) return false;
+    seenEventIds.add(message.eventId);
+    return true;
+  });
+}
+
 /**
  * Opens an archived Gateway envelope on a display-only path. This function
  * cannot acknowledge commands, advance revisions, resolve results, rotate
@@ -2378,7 +2551,7 @@ async function forwardEvent(
     requestId: string,
     message: IncomingCodeverMessage,
   ) => boolean,
-  onHistoryPage?: (page: HistoryPage) => void,
+  onHistoryPage?: (page: HistoryPage) => Promise<void>,
   historical = false,
 ): Promise<void> {
   const eventId = event.getId();
@@ -2502,7 +2675,7 @@ async function forwardEvent(
   }
   if (decryptedExtension?.kind === "history_page") {
     const page = historyPageSchema.parse(decryptedExtension.history_page);
-    onHistoryPage?.(page);
+    await onHistoryPage?.(page);
     seen.add(eventId);
     return;
   }

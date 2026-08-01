@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  decodeHistoryBatchPayload,
   parseCodeverEvent,
   parseHistoryReplayEvent,
 } from "../app/matrix";
@@ -226,5 +228,51 @@ test("restores an authenticated failed command result as transcript history", ()
       sessionId: "session-1",
       historical: true,
     },
+  );
+});
+
+test("validates a downloaded history batch against its signed metadata", async () => {
+  const items = [
+    {
+      eventId: "E".repeat(43),
+      timestamp: 1_700_000_000_600,
+      content: {
+        msgtype: "m.text",
+        body: "Recovered response",
+        "io.codever": {
+          version: 1,
+          kind: "message",
+          session_id: "session-1",
+          format: "markdown",
+        },
+      },
+    },
+  ];
+  const plaintext = new TextEncoder().encode(JSON.stringify(items));
+  const batch = {
+    encoding: "json" as const,
+    itemCount: 1,
+    plaintextSize: plaintext.byteLength,
+    plaintextSha256: createHash("sha256").update(plaintext).digest("base64url"),
+    media: {
+      url: "mxc://example.org/history-1",
+      key: "K".repeat(43),
+      iv: "I".repeat(16),
+      sha256: "S".repeat(43),
+      size: plaintext.byteLength + 16,
+    },
+  };
+
+  assert.deepEqual(await decodeHistoryBatchPayload(plaintext, batch), items);
+  await assert.rejects(
+    decodeHistoryBatchPayload(plaintext, {
+      ...batch,
+      plaintextSha256: "X".repeat(43),
+    }),
+    /signed metadata/,
+  );
+  await assert.rejects(
+    decodeHistoryBatchPayload(plaintext, { ...batch, itemCount: 2 }),
+    /item count/,
   );
 });

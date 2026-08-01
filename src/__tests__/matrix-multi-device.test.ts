@@ -2,12 +2,18 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { CodeverCommand } from '@codever/protocol'
 import {
+    DEFAULT_HISTORY_PAGE_BYTES,
+    historyItemsSchema,
+    type CodeverCommand,
+} from '@codever/protocol'
+import {
+    decryptMedia,
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
     openSecureEnvelope,
+    sha256,
     signCommand,
 } from '@codever/security'
 import {
@@ -165,7 +171,7 @@ describe('multi-device Matrix collaboration', () => {
         })
     })
 
-    it('returns partial fan-out success, retries only the missing recipient, and downgrades edits for a newly joined device', async () => {
+    it('returns partial fan-out success, retries only the missing recipient, and uses stable edit IDs for a newly joined device', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -264,11 +270,14 @@ describe('multi-device Matrix collaboration', () => {
             .slice(-3)
             .find(request => envelopeRecipient(request) === 'device-c')!
         const thirdEdit = await openFor(thirdEditRequest, third, gateway, 'device-c')
-        expect(thirdEdit).not.toHaveProperty('m.relates_to')
-        expect(thirdEdit[CODEVER_MATRIX_EXTENSION]).not.toHaveProperty('replaces_event_id')
+        const stableTarget = (thirdEdit['m.relates_to'] as Record<string, unknown>).event_id
+        expect(stableTarget).toMatch(/^[A-Za-z0-9_-]{43}$/u)
+        expect(thirdEdit[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            replaces_event_id: stableTarget,
+        })
         expect(
             (thirdEdit['m.new_content'] as Record<string, unknown>)[CODEVER_MATRIX_EXTENSION],
-        ).not.toHaveProperty('replaces_event_id')
+        ).toMatchObject({ replaces_event_id: stableTarget })
     })
 
     it('replays late-join history to one device and preserves future edit targets', async () => {
@@ -276,8 +285,10 @@ describe('multi-device Matrix collaboration', () => {
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
         const late = await generateDeviceKeyPair()
+        const legacy = await generateDeviceKeyPair()
         const firstPolicy = trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A')
         const latePolicy = trusted('device-c', 'Carol tablet', late.publicJwk, 'MATRIX_C')
+        const legacyPolicy = trusted('device-d', 'Dana phone', legacy.publicJwk, 'MATRIX_D')
         let active: MatrixGatewayTrustedDevice[] = [firstPolicy]
         const layer = new GatewaySecureContentLayer(
             'gateway-1',
@@ -357,38 +368,38 @@ describe('multi-device Matrix collaboration', () => {
             deviceId: 'device-c',
             sessionId: 'session-history',
             limit: 1,
+            maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
             issuedAt: now,
             expiresAt: now + 60_000,
         }, transport)
 
         const lateRequests = sent.filter(request => envelopeRecipient(request) === 'device-c')
-        expect(lateRequests).toHaveLength(3)
-        const [replayedOriginalRequest, replayedEditRequest, pageRequest] = lateRequests
-        const replayedOriginal = await openFor(
-            replayedOriginalRequest!, late, gateway, 'device-c',
-        )
-        const replayedEdit = await openFor(replayedEditRequest!, late, gateway, 'device-c')
-        const page = await openFor(pageRequest!, late, gateway, 'device-c')
-        expect(replayedOriginal[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+        expect(lateRequests).toHaveLength(1)
+        const page = await openFor(lateRequests[0]!, late, gateway, 'device-c')
+        const pageExtension = page[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const historyPage = pageExtension.history_page as Record<string, unknown>
+        const items = historyPage.items as Array<Record<string, unknown>>
+        expect(items).toHaveLength(2)
+        const originalItem = items[0]!
+        const editItem = items[1]!
+        const originalContent = originalItem.content as Record<string, unknown>
+        const editContent = editItem.content as Record<string, unknown>
+        expect(originalContent[CODEVER_MATRIX_EXTENSION]).toMatchObject({
             kind: 'message',
             session_id: 'session-history',
             attachments: [{ id: 'attachment-metadata' }],
-            history_replay: {
-                request_id: 'history-request-1',
-                display_only: true,
-                timestamp: expect.any(Number),
-            },
         })
-        expect(replayedEdit['m.relates_to']).toEqual({
+        expect(editContent['m.relates_to']).toEqual({
             rel_type: 'm.replace',
-            event_id: '$history-3',
+            event_id: originalItem.eventId,
         })
         expect(page[CODEVER_MATRIX_EXTENSION]).toMatchObject({
             kind: 'history_page',
             history_page: {
                 requestId: 'history-request-1',
                 sessionId: 'session-history',
-                hasMore: true,
+                nextBefore: originalItem.eventId,
+                hasMore: false,
                 replayed: 2,
             },
         })
@@ -425,8 +436,175 @@ describe('multi-device Matrix collaboration', () => {
         const liveLate = await openFor(liveLateRequest, late, gateway, 'device-c')
         expect(liveLate['m.relates_to']).toEqual({
             rel_type: 'm.replace',
-            event_id: '$history-3',
+            event_id: originalItem.eventId,
         })
+
+        active = [firstPolicy, latePolicy, legacyPolicy]
+        await layer.sendHistoryPage(room, 'device-d', {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'legacy-history-request',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'device-d',
+            sessionId: 'session-history',
+            limit: 30,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+        const legacyRequests = sent.filter(request => envelopeRecipient(request) === 'device-d')
+        expect(legacyRequests).toHaveLength(4)
+        const legacyReplay = await openFor(legacyRequests[0]!, legacy, gateway, 'device-d')
+        expect(legacyReplay[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            kind: 'message',
+            history_replay: {
+                request_id: 'legacy-history-request',
+                display_only: true,
+            },
+        })
+        const legacyPage = await openFor(legacyRequests.at(-1)!, legacy, gateway, 'device-d')
+        expect(legacyPage[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            kind: 'history_page',
+            history_page: {
+                requestId: 'legacy-history-request',
+                replayed: 3,
+                hasMore: false,
+            },
+        })
+        const legacyPageContent = (
+            legacyPage[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        ).history_page
+        expect(legacyPageContent).not.toHaveProperty('items')
+        expect(legacyPageContent).not.toHaveProperty('batch')
+    })
+
+    it('paginates large encrypted history without per-item Matrix events or duplicates', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const first = await generateDeviceKeyPair()
+        const late = await generateDeviceKeyPair()
+        const firstPolicy = trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A')
+        const latePolicy = trusted('device-c', 'Carol tablet', late.publicJwk, 'MATRIX_C')
+        let active: MatrixGatewayTrustedDevice[] = [firstPolicy]
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            active,
+            async () => active,
+        )
+        await layer.initialize(now)
+        const sent: MatrixSendEventRequest[] = []
+        const uploadedCiphertexts: Uint8Array[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                sent.push(request)
+                return { eventId: `$batch-${sent.length}` }
+            },
+            async uploadEncryptedMedia(request) {
+                uploadedCiphertexts.push(request.ciphertext)
+                return { url: `mxc://localhost/history-batch-${uploadedCiphertexts.length}` }
+            },
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const secureTransport = layer.transportForRoom(room, transport)
+        for (let index = 0; index < 36; index += 1) {
+            await secureTransport.sendEncryptedRoomEvent({
+                roomId: room.roomId,
+                eventType: 'm.room.message',
+                transactionId: `history-batch-${index}`,
+                content: {
+                    msgtype: 'm.text',
+                    body: `${index}:${'x'.repeat(2_048)}`,
+                    [CODEVER_MATRIX_EXTENSION]: {
+                        version: 1,
+                        kind: 'message',
+                        session_id: 'session-batch',
+                    },
+                },
+            })
+        }
+
+        active = [firstPolicy, latePolicy]
+        await layer.sendHistoryPage(room, 'device-c', {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'history-batch-request',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'device-c',
+            sessionId: 'session-batch',
+            limit: 100,
+            maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+
+        const lateRequests = sent.filter(request => envelopeRecipient(request) === 'device-c')
+        expect(lateRequests).toHaveLength(1)
+        expect(uploadedCiphertexts).toHaveLength(1)
+        const content = await openFor(lateRequests[0]!, late, gateway, 'device-c')
+        const extension = content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const page = extension.history_page as Record<string, unknown>
+        expect(page).not.toHaveProperty('items')
+        const batch = page.batch as {
+            itemCount: number
+            plaintextSize: number
+            plaintextSha256: string
+            media: Parameters<typeof decryptMedia>[1]
+        }
+        const plaintext = await decryptMedia(uploadedCiphertexts[0]!, batch.media)
+        expect(plaintext.byteLength).toBe(batch.plaintextSize)
+        expect(await sha256(plaintext)).toBe(batch.plaintextSha256)
+        expect(plaintext.byteLength).toBeLessThanOrEqual(DEFAULT_HISTORY_PAGE_BYTES)
+        const firstItems = historyItemsSchema.parse(
+            JSON.parse(new TextDecoder().decode(plaintext)),
+        )
+        expect(firstItems).toHaveLength(batch.itemCount)
+        expect(firstItems.length).toBeLessThan(36)
+        expect(page).toMatchObject({ hasMore: true, replayed: firstItems.length })
+        expect(typeof page.nextBefore).toBe('string')
+
+        await layer.sendHistoryPage(room, 'device-c', {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'history-batch-request-2',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'device-c',
+            sessionId: 'session-batch',
+            before: page.nextBefore as string,
+            limit: 100,
+            maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+
+        const allLateRequests = sent.filter(request => envelopeRecipient(request) === 'device-c')
+        expect(allLateRequests).toHaveLength(2)
+        expect(uploadedCiphertexts).toHaveLength(2)
+        const secondContent = await openFor(allLateRequests[1]!, late, gateway, 'device-c')
+        const secondExtension = secondContent[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const secondPage = secondExtension.history_page as Record<string, unknown>
+        const secondBatch = secondPage.batch as typeof batch
+        const secondPlaintext = await decryptMedia(uploadedCiphertexts[1]!, secondBatch.media)
+        expect(secondPlaintext.byteLength).toBeLessThanOrEqual(DEFAULT_HISTORY_PAGE_BYTES)
+        const secondItems = historyItemsSchema.parse(
+            JSON.parse(new TextDecoder().decode(secondPlaintext)),
+        )
+        expect(secondPage).toMatchObject({ hasMore: false, replayed: secondItems.length })
+        expect(new Set([
+            ...firstItems.map(item => item.eventId),
+            ...secondItems.map(item => item.eventId),
+        ]).size).toBe(36)
     })
 
     it('persists collaboration/result gaps and recovers only the missing command recipient after restart', async () => {

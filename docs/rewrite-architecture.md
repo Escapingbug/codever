@@ -119,11 +119,18 @@ display data from encrypted Codever events.
    profile field before it verifies the Matrix device and sends a command.
 10. Late-joining devices recover transcripts through a read-only, expiring
    request inside the authenticated application envelope. The Gateway pages
-   canonical logical events from its durable delivery outbox, re-encrypts each
-   event for only the requesting device, and records the resulting physical
-   event IDs so later Matrix edits keep working. Replayed decisions are
-   display-only and history reads never consume a command sequence or advance
-   the conversation revision.
+   canonical logical events from its durable delivery outbox into one
+   byte-bounded history page (48 KiB target, 256 KiB hard maximum). Pages up to
+   20 KiB travel inline in one application-encrypted Matrix event; larger pages
+   use one AES-GCM-encrypted Matrix media object whose size and hashes are bound
+   by that event. Stable logical event IDs preserve edit relationships without
+   manufacturing a Matrix timeline event for every recovered item. The PWA
+   verifies the whole batch before parsing, caches pages locally, coalesces
+   concurrent reads of the same cursor, and loads older pages lazily. Replayed
+   decisions are display-only and history reads never consume a command
+   sequence or advance the conversation revision. During rolling upgrades, a
+   request without the byte-limit capability retains the legacy per-event
+   response so an already-installed PWA is not broken before its worker updates.
 
 ## Attachment and artifact flow
 

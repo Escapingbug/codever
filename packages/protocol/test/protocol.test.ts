@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalJson, commandSchema, eventSchema } from '../src/index.js'
+import {
+  MAX_HISTORY_PAGE_BYTES,
+  canonicalJson,
+  commandSchema,
+  eventSchema,
+  historyPageSchema,
+  historyRequestSchema,
+} from '../src/index.js'
 
 describe('canonicalJson', () => {
   it('sorts nested object keys deterministically', () => {
@@ -15,6 +22,79 @@ describe('canonicalJson', () => {
 })
 
 describe('protocol schemas', () => {
+  it('accepts exactly one bounded history page representation', () => {
+    const item = {
+      eventId: 'E'.repeat(43),
+      timestamp: 1,
+      content: { msgtype: 'm.text', body: 'Recovered response' },
+    }
+    const inline = {
+      kind: 'codever.history.page',
+      version: 1,
+      requestId: 'history-1',
+      sessionId: 'session-1',
+      hasMore: false,
+      replayed: 1,
+      items: [item],
+    }
+    const batch = {
+      encoding: 'json',
+      itemCount: 1,
+      plaintextSize: 1024,
+      plaintextSha256: 'P'.repeat(43),
+      media: {
+        url: 'mxc://example.org/history-1',
+        key: 'K'.repeat(43),
+        iv: 'I'.repeat(16),
+        sha256: 'S'.repeat(43),
+        size: 1040,
+      },
+    }
+
+    expect(historyPageSchema.parse(inline).items).toEqual([item])
+    expect(historyPageSchema.safeParse({ ...inline, batch }).success).toBe(false)
+    expect(historyPageSchema.safeParse({ ...inline, replayed: 2 }).success).toBe(false)
+    expect(historyPageSchema.safeParse({
+      ...inline,
+      items: [{ ...item, content: { body: 'x'.repeat(21 * 1024) } }],
+    }).success).toBe(false)
+    expect(historyPageSchema.parse({
+      ...inline,
+      items: undefined,
+      batch,
+    }).batch).toEqual(batch)
+    expect(historyPageSchema.safeParse({
+      ...inline,
+      items: undefined,
+      batch: {
+        ...batch,
+        media: { ...batch.media, size: batch.plaintextSize + 15 },
+      },
+    }).success).toBe(false)
+  })
+
+  it('bounds requested history pages by plaintext bytes', () => {
+    const request = {
+      kind: 'codever.history.request',
+      version: 1,
+      requestId: 'history-1',
+      gatewayId: 'gateway-1',
+      conversationId: 'conversation-1',
+      deviceId: 'device-1',
+      sessionId: 'session-1',
+      limit: 30,
+      maxBytes: 48 * 1024,
+      issuedAt: 1,
+      expiresAt: 2,
+    }
+
+    expect(historyRequestSchema.parse(request).maxBytes).toBe(48 * 1024)
+    expect(historyRequestSchema.safeParse({
+      ...request,
+      maxBytes: MAX_HISTORY_PAGE_BYTES + 1,
+    }).success).toBe(false)
+  })
+
   it('accepts only bounded application-encrypted Matrix prompt attachments', () => {
     const attachment = {
       id: 'attachment-1',

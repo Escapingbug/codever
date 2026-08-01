@@ -4,6 +4,9 @@ export const PROTOCOL_VERSION = 1 as const
 export const MAX_CODEVER_ATTACHMENT_BYTES = 50 * 1024 * 1024
 export const MAX_CODEVER_ATTACHMENTS = 10
 export const MAX_CODEVER_PROMPT_ATTACHMENT_BYTES = 100 * 1024 * 1024
+export const DEFAULT_HISTORY_PAGE_BYTES = 48 * 1024
+export const MAX_INLINE_HISTORY_PAGE_BYTES = 20 * 1024
+export const MAX_HISTORY_PAGE_BYTES = 256 * 1024
 
 const opaqueId = z.string().min(1).max(256)
 const timestamp = z.number().int().nonnegative()
@@ -40,6 +43,12 @@ export const historyRequestSchema = z
     sessionId: opaqueId,
     before: z.string().min(1).max(256).optional(),
     limit: z.number().int().min(1).max(100),
+    maxBytes: z
+      .number()
+      .int()
+      .min(4 * 1024)
+      .max(MAX_HISTORY_PAGE_BYTES)
+      .optional(),
     issuedAt: timestamp,
     expiresAt: timestamp,
   })
@@ -63,20 +72,6 @@ export const historyRequestSchema = z
 
 export type HistoryRequest = z.infer<typeof historyRequestSchema>
 
-export const historyPageSchema = z
-  .object({
-    kind: z.literal('codever.history.page'),
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: opaqueId,
-    sessionId: opaqueId,
-    nextBefore: z.string().min(1).max(256).optional(),
-    hasMore: z.boolean(),
-    replayed: z.number().int().nonnegative(),
-  })
-  .strict()
-
-export type HistoryPage = z.infer<typeof historyPageSchema>
-
 export const encryptedMediaSchema = z
   .object({
     url: z.string().regex(/^mxc:\/\/[^/\s]+\/[^/\s]+$/),
@@ -88,6 +83,89 @@ export const encryptedMediaSchema = z
   .strict()
 
 export type EncryptedMedia = z.infer<typeof encryptedMediaSchema>
+
+export const historyItemSchema = z
+  .object({
+    eventId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    timestamp,
+    content: z.record(z.string(), jsonValueSchema),
+  })
+  .strict()
+
+export type HistoryItem = z.infer<typeof historyItemSchema>
+
+export const historyItemsSchema = z.array(historyItemSchema).max(100)
+
+export const historyBatchSchema = z
+  .object({
+    encoding: z.literal('json'),
+    itemCount: z.number().int().min(1).max(100),
+    plaintextSize: z.number().int().positive().max(MAX_HISTORY_PAGE_BYTES),
+    plaintextSha256: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    media: encryptedMediaSchema,
+  })
+  .strict()
+  .superRefine((batch, context) => {
+    if (batch.media.size !== batch.plaintextSize + 16) {
+      context.addIssue({
+        code: 'custom',
+        path: ['media', 'size'],
+        message: 'Encrypted history media must be exactly plaintextSize plus the AES-GCM tag',
+      })
+    }
+  })
+
+export type HistoryBatch = z.infer<typeof historyBatchSchema>
+
+export const historyPageSchema = z
+  .object({
+    kind: z.literal('codever.history.page'),
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: opaqueId,
+    sessionId: opaqueId,
+    nextBefore: z.string().min(1).max(256).optional(),
+    hasMore: z.boolean(),
+    replayed: z.number().int().nonnegative(),
+    items: historyItemsSchema.optional(),
+    batch: historyBatchSchema.optional(),
+  })
+  .strict()
+  .superRefine((page, context) => {
+    if (page.items && page.batch) {
+      context.addIssue({
+        code: 'custom',
+        path: ['batch'],
+        message: 'History page cannot contain both inline items and a media batch',
+      })
+    }
+    if (page.items && page.replayed !== page.items.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['replayed'],
+        message: 'replayed must match the inline history item count',
+      })
+    }
+    if (
+      page.items
+      && new TextEncoder().encode(JSON.stringify(page.items)).byteLength
+        > MAX_INLINE_HISTORY_PAGE_BYTES
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['items'],
+        message: `Inline history pages cannot exceed ${MAX_INLINE_HISTORY_PAGE_BYTES} bytes`,
+      })
+    }
+    if (page.batch && page.replayed !== page.batch.itemCount) {
+      context.addIssue({
+        code: 'custom',
+        path: ['replayed'],
+        message: 'replayed must match the encrypted history batch item count',
+      })
+    }
+  })
+
+export type HistoryPage = z.infer<typeof historyPageSchema>
 
 export const attachmentSchema = z
   .object({
