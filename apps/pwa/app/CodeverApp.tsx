@@ -2938,6 +2938,7 @@ function chatMessageFromIncoming(
     text: incoming.text,
     time: formatMessageTime(incoming.timestamp),
     timestamp: incoming.timestamp,
+    operationId: incoming.operationId,
     requestId: incoming.requestId,
     streamId: incoming.streamId,
     toolCallId: incoming.toolCallId,

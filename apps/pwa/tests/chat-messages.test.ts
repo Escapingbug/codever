@@ -171,6 +171,114 @@ test("canonical history wins over a persisted optimistic duplicate", () => {
   assert.equal(messages[0].eventId, "$canonical-user");
 });
 
+test("live and history copies of one logical Matrix message stay in one bubble", () => {
+  const liveOriginal = {
+    id: "$physical-original",
+    eventId: "$physical-original",
+    operationId: "operation-original",
+    kind: "tool",
+    text: "Editing files",
+    timestamp: 1_000,
+  };
+  const liveEdit = {
+    id: "$physical-edit",
+    eventId: "$physical-edit",
+    operationId: "operation-edit",
+    replacesEventId: "$physical-original",
+    kind: "tool",
+    text: "Editing files",
+    timestamp: 1_100,
+  };
+  const historyOriginal = {
+    ...liveOriginal,
+    id: "history-original",
+    eventId: "history-original",
+    historical: true,
+  };
+  const historyEdit = {
+    ...liveEdit,
+    id: "history-edit",
+    eventId: "history-edit",
+    replacesEventId: "history-original",
+    historical: true,
+  };
+
+  const merged = mergeChatMessages([], [
+    liveOriginal,
+    liveEdit,
+    historyOriginal,
+    historyEdit,
+  ]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, liveOriginal.id);
+  assert.equal(merged[0].eventId, liveEdit.eventId);
+  assert.deepEqual(
+    new Set(merged[0].mergedOperationIds),
+    new Set(["operation-original", "operation-edit"]),
+  );
+  assert.ok(merged[0].eventAliases?.includes("history-original"));
+});
+
+test("a history edit can target the alias learned from its live original", () => {
+  const liveOriginal = {
+    id: "$physical-original",
+    eventId: "$physical-original",
+    operationId: "operation-original",
+    kind: "agent",
+    text: "Before",
+    timestamp: 1_000,
+  };
+  const historyOriginal = {
+    ...liveOriginal,
+    id: "history-original",
+    eventId: "history-original",
+    historical: true,
+  };
+  const historyOnlyEdit = {
+    id: "history-edit",
+    eventId: "history-edit",
+    operationId: "operation-edit",
+    replacesEventId: "history-original",
+    kind: "agent",
+    text: "After",
+    timestamp: 1_100,
+    historical: true,
+  };
+
+  const merged = mergeChatMessages([], [
+    liveOriginal,
+    historyOriginal,
+    historyOnlyEdit,
+  ]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].text, "After");
+});
+
+test("identical text from different operations remains distinct", () => {
+  const merged = mergeChatMessages([], [
+    {
+      id: "$first",
+      eventId: "$first",
+      operationId: "operation-first",
+      kind: "agent",
+      text: "Same text",
+      timestamp: 1_000,
+    },
+    {
+      id: "$second",
+      eventId: "$second",
+      operationId: "operation-second",
+      kind: "agent",
+      text: "Same text",
+      timestamp: 1_100,
+    },
+  ]);
+
+  assert.equal(merged.length, 2);
+});
+
 test("optimistic echo matching prefers command id and falls back to session text", () => {
   const references = [
     {

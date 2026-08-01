@@ -11,6 +11,7 @@ export type PersistedChatMessage = {
   time?: string;
   timestamp?: number;
   eventId?: string;
+  operationId?: string;
   requestId?: string;
   streamId?: string;
   toolCallId?: string;

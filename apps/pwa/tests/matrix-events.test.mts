@@ -132,6 +132,7 @@ test("parses signed structured attachments without relying on fallback text", ()
       "io.codever": {
         version: 1,
         kind: "message",
+        operation_id: "operation-artifact",
         format: "plain",
         attachments: [attachment],
       },
@@ -140,6 +141,41 @@ test("parses signed structured attachments without relying on fallback text", ()
 
   assert.ok(message);
   assert.deepEqual(message.attachments, [attachment]);
+  assert.equal(message.operationId, "operation-artifact");
+});
+
+test("preserves operation and replacement identities for status edits", () => {
+  const message = parseCodeverEvent(
+    "$status-edit",
+    "@gateway:example.com",
+    1_700_000_000_350,
+    true,
+    {
+      msgtype: "m.notice",
+      body: "* Agent is ready",
+      "io.codever": {
+        version: 1,
+        kind: "status",
+      },
+      "m.new_content": {
+        msgtype: "m.notice",
+        body: "Agent is ready",
+        "io.codever": {
+          version: 1,
+          kind: "status",
+          operation_id: "operation-status-edit",
+        },
+      },
+      "m.relates_to": {
+        rel_type: "m.replace",
+        event_id: "$status-original",
+      },
+    },
+  );
+
+  assert.ok(message);
+  assert.equal(message.operationId, "operation-status-edit");
+  assert.equal(message.replacesEventId, "$status-original");
 });
 
 test("marks replayed decisions as display-only historical messages", () => {

@@ -4,6 +4,8 @@ export type ChatMessage = PersistedChatMessage & {
   sessionId?: string;
   historical?: boolean;
   optimistic?: boolean;
+  eventAliases?: string[];
+  mergedOperationIds?: string[];
 };
 
 export type OptimisticMessageReference = {
@@ -64,7 +66,12 @@ export function mergeChatMessage(
     });
   }
 
-  if (current.some((entry) => entry.id === message.id)) return [...current];
+  const exactIndex = current.findIndex((entry) => entry.id === message.id);
+  const operationIndex = findOperationIndex(current, message);
+  if (operationIndex >= 0) {
+    return mergeLogicalCopies(current, operationIndex, message);
+  }
+  if (exactIndex >= 0) return [...current];
 
   const commandIndex = message.commandId
     ? current.findIndex((entry) => entry.commandId === message.commandId)
@@ -86,11 +93,13 @@ export function mergeChatMessage(
     });
   }
 
-  const replaceIndex = message.replacesEventId
+  const replacementTarget = message.replacesEventId;
+  const replaceIndex = replacementTarget
     ? current.findIndex(
         (entry) =>
-          entry.eventId === message.replacesEventId ||
-          entry.id === message.replacesEventId,
+          entry.eventId === replacementTarget ||
+          entry.id === replacementTarget ||
+          entry.eventAliases?.includes(replacementTarget),
       )
     : -1;
   const streamIndex = message.streamId
@@ -123,6 +132,8 @@ export function mergeChatMessage(
         ...existing,
         ...message,
         id: existing.id,
+        eventAliases: mergeEventAliases(existing, message),
+        mergedOperationIds: mergeOperationIds(existing, message),
         text: existing.text || message.text,
         raw: { ...(existing.raw ?? {}), ...(message.raw ?? {}) },
         timestamp: existing.timestamp ?? message.timestamp,
@@ -140,6 +151,8 @@ export function mergeChatMessage(
       ...message,
       id: existing.id,
       eventId: message.eventId ?? existing.eventId,
+      eventAliases: mergeEventAliases(existing, message),
+      mergedOperationIds: mergeOperationIds(existing, message),
       // A Matrix edit or stream delta updates one logical message. Preserve
       // the first event's timeline position instead of moving the bubble to
       // every later update timestamp.
@@ -151,6 +164,106 @@ export function mergeChatMessage(
   }
 
   return insertChatMessage(current, message);
+}
+
+function findOperationIndex(
+  current: readonly ChatMessage[],
+  message: ChatMessage,
+): number {
+  const incoming = new Set(operationIds(message));
+  if (incoming.size === 0) return -1;
+  return current.findIndex((entry) =>
+    operationIds(entry).some((operationId) => incoming.has(operationId)),
+  );
+}
+
+function mergeLogicalCopies(
+  current: readonly ChatMessage[],
+  index: number,
+  message: ChatMessage,
+): ChatMessage[] {
+  const existing = current[index];
+  const preferred = preferredLogicalCopy(existing, message);
+  const liveCopy = !existing.historical
+    ? existing
+    : !message.historical
+      ? message
+      : undefined;
+  const next = [...current];
+  next[index] = {
+    ...existing,
+    ...preferred,
+    id: existing.id,
+    eventId:
+      liveCopy?.eventId ?? preferred.eventId ?? existing.eventId ?? message.eventId,
+    eventAliases: mergeEventAliases(existing, message),
+    mergedOperationIds: mergeOperationIds(existing, message),
+    timestamp: existing.timestamp ?? message.timestamp,
+    time: existing.time ?? message.time,
+    historical: Boolean(existing.historical && message.historical),
+  };
+  return next;
+}
+
+function preferredLogicalCopy(
+  existing: ChatMessage,
+  incoming: ChatMessage,
+): ChatMessage {
+  const existingOperations = new Set(operationIds(existing));
+  const incomingOperations = new Set(operationIds(incoming));
+  const incomingAddsOperations = [...incomingOperations].some(
+    (operationId) => !existingOperations.has(operationId),
+  );
+  const existingAddsOperations = [...existingOperations].some(
+    (operationId) => !incomingOperations.has(operationId),
+  );
+  if (incomingAddsOperations && !existingAddsOperations) return incoming;
+  if (existingAddsOperations && !incomingAddsOperations) return existing;
+  if (existing.historical !== incoming.historical) {
+    return existing.historical ? incoming : existing;
+  }
+  return latestToolUpdate(incoming) > latestToolUpdate(existing)
+    ? incoming
+    : existing;
+}
+
+function latestToolUpdate(message: ChatMessage): number {
+  return Math.max(
+    0,
+    ...(message.toolGroup?.tools.map((tool) => tool.updatedAt) ?? []),
+  );
+}
+
+function mergeEventAliases(
+  existing: ChatMessage,
+  incoming: ChatMessage,
+): string[] {
+  return uniqueStrings([
+    existing.id,
+    existing.eventId,
+    ...(existing.eventAliases ?? []),
+    incoming.id,
+    incoming.eventId,
+    ...(incoming.eventAliases ?? []),
+  ]);
+}
+
+function mergeOperationIds(
+  existing: ChatMessage,
+  incoming: ChatMessage,
+): string[] {
+  return uniqueStrings([...operationIds(existing), ...operationIds(incoming)]);
+}
+
+function operationIds(message: ChatMessage): string[] {
+  return uniqueStrings([
+    message.operationId,
+    ...(message.mergedOperationIds ?? []),
+  ]);
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
 export function compareChatMessages(

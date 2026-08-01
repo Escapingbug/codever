@@ -184,6 +184,7 @@ export type IncomingCodeverMessage = {
   text: string;
   sessionId?: string;
   historical?: boolean;
+  operationId?: string;
   commandId?: string;
   revision?: number;
   originDeviceId?: string;
@@ -2055,7 +2056,15 @@ export function parseCodeverEvent(
     ...(isPositiveInteger(effectiveExtension.active_device_count)
       ? { activeDeviceCount: effectiveExtension.active_device_count }
       : {}),
+    ...(typeof effectiveExtension.operation_id === "string" &&
+    effectiveExtension.operation_id
+      ? { operationId: effectiveExtension.operation_id }
+      : {}),
   };
+  const replacementMetadata =
+    typeof relation?.event_id === "string"
+      ? { replacesEventId: relation.event_id }
+      : {};
 
   if (effectiveExtension.kind === "signed_command") return null;
   if (
@@ -2109,9 +2118,7 @@ export function parseCodeverEvent(
       format: messageFormat(effectiveExtension.format),
       ...(toolGroup ? { toolGroup } : {}),
       attachments: parseAttachments(effectiveExtension.attachments),
-      ...(typeof relation?.event_id === "string"
-        ? { replacesEventId: relation.event_id }
-        : {}),
+      ...replacementMetadata,
       raw: effectiveExtension,
     };
   }
@@ -2144,6 +2151,7 @@ export function parseCodeverEvent(
       kind: "notice",
       text: body || "Gateway status updated.",
       format: "plain",
+      ...replacementMetadata,
       raw: effectiveExtension,
     };
   }
@@ -2161,6 +2169,7 @@ export function parseCodeverEvent(
     timestamp,
     encrypted,
     ...collaborationMetadata,
+    ...replacementMetadata,
     raw: payload,
   };
 
