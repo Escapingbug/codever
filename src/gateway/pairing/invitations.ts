@@ -1,7 +1,9 @@
 import {
   createDeviceInvitationLink,
+  encodePairingLink,
   type MatrixLoginInvitation,
   type MatrixTransportBinding,
+  type SignedPairingOffer,
 } from '@codever/protocol'
 import { FileTrustedDeviceRegistry, type PairingOfferSource } from './registry.js'
 import { GatewayPairingService, pairingVerificationCode } from './service.js'
@@ -110,6 +112,10 @@ export class DeviceInvitationCoordinator {
   ): Promise<CreatedDeviceInvitation> {
     const now = this.options.now?.() ?? Date.now()
     await this.registry.pruneOffers(now)
+    if (input.source.kind === 'paired-device' && input.source.commandId) {
+      const existing = await this.registry.findOpenOfferBySource(input.source, now)
+      if (existing) return recoveredPairedDeviceInvitation(existing)
+    }
     const openOffers = (await this.registry.listOffers(now))
       .filter((offer) => offer.status === 'open')
     if (openOffers.length >= this.maxOpenInvitations) {
@@ -221,6 +227,26 @@ export class DeviceInvitationCoordinator {
       source,
       errorCode: error.code,
     })
+  }
+}
+
+async function recoveredPairedDeviceInvitation(
+  signedOffer: SignedPairingOffer,
+): Promise<CreatedDeviceInvitation> {
+  const offer = signedOffer.offer
+  const pairingLink = encodePairingLink(signedOffer)
+  return {
+    invitationId: offer.offerId,
+    pairingLink,
+    invitationLink: pairingLink,
+    expiresAt: offer.expiresAt,
+    verificationCode: await pairingVerificationCode(
+      offer.offerId,
+      offer.challenge,
+      offer.gatewayKey.keyId,
+    ),
+    includesMatrixLogin: false,
+    matrixLoginStatus: 'disabled',
   }
 }
 

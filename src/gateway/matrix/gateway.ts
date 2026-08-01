@@ -25,7 +25,11 @@ import {
     createMatrixJsSdkGatewayClient,
     type MatrixGatewayClient,
 } from './client'
-import { FileCommandReplayStore, RevisionConflictError } from './fileReplayLedger'
+import {
+    FileCommandReplayStore,
+    RevisionConflictError,
+    type DurableCommandResult,
+} from './fileReplayLedger'
 import {
     FileGatewayRuntimeStateStore,
     type PersistedAppSession,
@@ -94,6 +98,7 @@ export interface MatrixGatewayDependencies {
     /** Creates a short-lived pairing offer authorized by an active PWA. */
     createDeviceInvitation?: (input: {
         requestedByDeviceId: string
+        commandId: string
         lifetimeMs?: number
     }) => Promise<{
         pairingLink: string
@@ -462,19 +467,40 @@ export class MatrixGatewayRunner {
                 collaborationDelivery,
             )
         } else if (this.secureContent) {
-            // A retried signed command is never executed twice, but it is also
-            // an explicit recovery opportunity for this command's missing
-            // collaboration/result recipient copies.
-            void this.secureContent.retryPendingForRoom(
-                runtime.config,
-                this.client,
-                authorized.command.commandId,
-            ).catch(error => {
-                this.log(
-                    `[matrix-gateway] command ${authorized.command.commandId} delivery recovery failed: `
-                    + formatError(error),
+            const terminal = await this.replayStore.getCommandResult(
+                authorized.command,
+                authorized.command.sequenceEpoch,
+            )
+            if (terminal) {
+                const task = this.deliverCommandResult(runtime, authorized.command, terminal)
+                    .finally(() => this.executionTasks.delete(task))
+                this.executionTasks.add(task)
+            } else if (authorized.command.payload.operation === 'device.invite') {
+                // Invitation creation is keyed by commandId in the durable
+                // pairing registry. It is therefore safe to resume the only
+                // side effect whose result may have been interrupted between
+                // offer creation and command-result journaling.
+                this.scheduleExecution(
+                    event,
+                    runtime,
+                    authorized.command,
+                    authorized.revision,
                 )
-            })
+            } else {
+                // A retried signed command is never executed twice, but it is
+                // an explicit recovery opportunity for missing recipient
+                // copies already staged in the delivery WAL.
+                void this.secureContent.retryPendingForRoom(
+                    runtime.config,
+                    this.client,
+                    authorized.command.commandId,
+                ).catch(error => {
+                    this.log(
+                        `[matrix-gateway] command ${authorized.command.commandId} delivery recovery failed: `
+                        + formatError(error),
+                    )
+                })
+            }
         }
         if (this.secureContent) {
             // Matrix delivery is deliberately off the authorization lane. A
@@ -524,20 +550,34 @@ export class MatrixGatewayRunner {
                 this.log(`[matrix-gateway] command ${command.commandId} failed: ${formatError(error)}`)
             }
 
+            const terminal: DurableCommandResult = {
+                revision,
+                outcome,
+                ...(executionError === undefined
+                    ? {}
+                    : { error: formatError(executionError) }),
+                sessionId: executionResult.sessionId,
+                ...(executionResult.result === undefined
+                    ? {}
+                    : { result: executionResult.result }),
+            }
             try {
-                await this.secureContent?.sendCommandResult(
-                    runtime.config,
-                    command.deviceId,
-                    command.commandId,
-                    command.sequence,
-                    revision,
-                    runtime.revisionEpoch,
-                    outcome,
-                    this.client,
-                    executionError === undefined ? undefined : formatError(executionError),
-                    executionResult.sessionId,
-                    executionResult.result,
+                // Persist the terminal result before staging any Matrix copy.
+                // An exact duplicate command can then recover after a Gateway
+                // restart without repeating the side effect.
+                await this.replayStore.recordCommandResult(
+                    command,
+                    terminal,
+                    command.sequenceEpoch,
                 )
+            } catch (persistenceError) {
+                this.log(
+                    `[matrix-gateway] ${outcome} result persistence failed: `
+                    + formatError(persistenceError),
+                )
+            }
+            try {
+                await this.deliverCommandResult(runtime, command, terminal)
             } catch (deliveryError) {
                 this.log(
                     `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
@@ -554,6 +594,26 @@ export class MatrixGatewayRunner {
                 this.executionTasks.delete(task)
             })
         this.executionTasks.add(task)
+    }
+
+    private async deliverCommandResult(
+        runtime: RoomRuntime,
+        command: CodeverCommand,
+        terminal: DurableCommandResult,
+    ): Promise<void> {
+        await this.secureContent?.sendCommandResult(
+            runtime.config,
+            command.deviceId,
+            command.commandId,
+            command.sequence,
+            terminal.revision,
+            runtime.revisionEpoch,
+            terminal.outcome,
+            this.client,
+            terminal.error,
+            terminal.sessionId,
+            terminal.result,
+        )
     }
 
     private async execute(
@@ -674,6 +734,7 @@ export class MatrixGatewayRunner {
                 }
                 const invitation = await this.dependencies.createDeviceInvitation({
                     requestedByDeviceId: command.deviceId,
+                    commandId: command.commandId,
                     ...(command.payload.lifetimeMs === undefined
                         ? {}
                         : { lifetimeMs: command.payload.lifetimeMs }),

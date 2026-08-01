@@ -400,6 +400,7 @@ describe('MatrixGatewayRunner', () => {
 
         expect(createDeviceInvitation).toHaveBeenCalledWith({
             requestedByDeviceId: 'pwa-device-1',
+            commandId: 'invite-device',
             lifetimeMs: 5 * 60_000,
         })
         expect(result).toEqual({

@@ -312,6 +312,49 @@ describe('Gateway local admin', () => {
     ).resolves.toEqual({ expired: 1, deleted: 1 })
     await expect(fixture.registry.listOffers(now + 30_001)).resolves.toEqual([])
   })
+
+  it('recovers the same paired-device invitation by command id after restart', async () => {
+    const fixture = await gatewayFixture()
+    const input = {
+      source: {
+        kind: 'paired-device' as const,
+        deviceId: 'trusted-device-1',
+        commandId: 'device-invite-command-1',
+      },
+      matrixLogin: 'disabled' as const,
+      lifetimeMs: 5 * 60_000,
+    }
+    const firstCoordinator = new DeviceInvitationCoordinator(
+      fixture.service,
+      fixture.registry,
+      {
+        gatewayName: 'Mac Gateway',
+        gatewayTransport,
+        now: () => now,
+      },
+    )
+    const first = await firstCoordinator.create(input)
+
+    const restartedCoordinator = new DeviceInvitationCoordinator(
+      fixture.service,
+      fixture.registry,
+      {
+        gatewayName: 'Mac Gateway',
+        gatewayTransport,
+        now: () => now + 1,
+      },
+    )
+    const recovered = await restartedCoordinator.create(input)
+
+    expect(recovered).toEqual(first)
+    await expect(fixture.registry.listOffers(now + 1)).resolves.toEqual([
+      expect.objectContaining({
+        offerId: first.invitationId,
+        status: 'open',
+        source: input.source,
+      }),
+    ])
+  })
 })
 
 async function gatewayFixture() {

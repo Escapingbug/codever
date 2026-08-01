@@ -262,9 +262,13 @@ runner = new MatrixGatewayRunner(config, {
         (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
         (await registry.get(deviceId))?.status === 'active',
-    createDeviceInvitation: async ({ requestedByDeviceId, lifetimeMs }) => {
+    createDeviceInvitation: async ({ requestedByDeviceId, commandId, lifetimeMs }) => {
         const created = await invitationCoordinator.create({
-            source: { kind: 'paired-device', deviceId: requestedByDeviceId },
+            source: {
+                kind: 'paired-device',
+                deviceId: requestedByDeviceId,
+                commandId,
+            },
             matrixLogin: 'disabled',
             ...(lifetimeMs === undefined ? {} : { lifetimeMs }),
         })

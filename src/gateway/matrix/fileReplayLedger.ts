@@ -1,7 +1,7 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { canonicalJson, type CodeverCommand } from '@codever/protocol'
+import { canonicalJson, type CodeverCommand, type JsonValue } from '@codever/protocol'
 import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
 interface PersistedClaimBatch {
@@ -36,6 +36,22 @@ interface PersistedLedgerGeneration {
     generation: string
 }
 
+export interface DurableCommandResult {
+    revision: number
+    outcome: 'succeeded' | 'failed'
+    error?: string
+    sessionId?: string | null
+    result?: JsonValue
+}
+
+interface PersistedCommandResultEntry {
+    version: 1
+    kind: 'command_result'
+    commandKey: string
+    fingerprint: string
+    terminal: DurableCommandResult
+}
+
 export interface CommandClaimResult {
     status: 'accepted' | 'duplicate'
     revision: number
@@ -65,6 +81,10 @@ export class FileCommandReplayStore implements ReplayStore {
     private readonly sequences = new Map<string, number>()
     private readonly revisions = new Map<string, number>()
     private readonly commandOutcomes = new Map<string, PersistedCommandOutcome>()
+    private readonly commandResults = new Map<string, {
+        fingerprint: string
+        terminal: DurableCommandResult
+    }>()
     private initialized = false
     private generation: string | null = null
     private chain: Promise<unknown> = Promise.resolve()
@@ -216,6 +236,69 @@ export class FileCommandReplayStore implements ReplayStore {
         return operation
     }
 
+    recordCommandResult(
+        command: CodeverCommand,
+        terminal: DurableCommandResult,
+        sequenceEpoch = 'legacy-v1',
+    ): Promise<void> {
+        const operation = this.chain.then(async () => {
+            if (!this.initialized) await this.load()
+            const commandKey = commandKeyFor(command, sequenceEpoch)
+            const accepted = this.commandOutcomes.get(commandKey)
+            const fingerprint = commandFingerprint(command)
+            if (!accepted || accepted.fingerprint !== fingerprint) {
+                throw new Error('Cannot record a result for a command without an exact durable acceptance')
+            }
+            if (terminal.revision !== accepted.revision) {
+                throw new Error('Command result revision does not match its durable acceptance')
+            }
+            const existing = this.commandResults.get(commandKey)
+            if (existing) {
+                if (
+                    existing.fingerprint !== fingerprint
+                    || canonicalJson(existing.terminal) !== canonicalJson(terminal)
+                ) {
+                    throw new Error('Command already has a different durable terminal result')
+                }
+                return
+            }
+            const record: PersistedCommandResultEntry = {
+                version: 1,
+                kind: 'command_result',
+                commandKey,
+                fingerprint,
+                terminal: structuredClone(terminal),
+            }
+            await this.append(record)
+            this.commandResults.set(commandKey, {
+                fingerprint,
+                terminal: structuredClone(terminal),
+            })
+        })
+        this.chain = operation.then(() => undefined, () => undefined)
+        return operation
+    }
+
+    getCommandResult(
+        command: CodeverCommand,
+        sequenceEpoch = 'legacy-v1',
+    ): Promise<DurableCommandResult | undefined> {
+        const operation = this.chain.then(async () => {
+            if (!this.initialized) await this.load()
+            const stored = this.commandResults.get(commandKeyFor(command, sequenceEpoch))
+            if (!stored) return undefined
+            if (stored.fingerprint !== commandFingerprint(command)) {
+                throw new SecurityError(
+                    'replay',
+                    'Command result does not match the authenticated command fingerprint',
+                )
+            }
+            return structuredClone(stored.terminal)
+        })
+        this.chain = operation.then(() => undefined, () => undefined)
+        return operation
+    }
+
     prune(now: number): Promise<void> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
@@ -270,6 +353,30 @@ export class FileCommandReplayStore implements ReplayStore {
                     throw new Error(`Duplicate command replay ledger generation at line ${index + 1}`)
                 }
                 this.generation = value.generation
+                continue
+            }
+            if (isPersistedCommandResultEntry(value)) {
+                const accepted = this.commandOutcomes.get(value.commandKey)
+                if (!accepted || accepted.fingerprint !== value.fingerprint) {
+                    throw new Error(`Command result has no matching acceptance at line ${index + 1}`)
+                }
+                if (accepted.revision !== value.terminal.revision) {
+                    throw new Error(`Command result revision mismatch at line ${index + 1}`)
+                }
+                const existing = this.commandResults.get(value.commandKey)
+                if (
+                    existing
+                    && (
+                        existing.fingerprint !== value.fingerprint
+                        || canonicalJson(existing.terminal) !== canonicalJson(value.terminal)
+                    )
+                ) {
+                    throw new Error(`Conflicting command result at line ${index + 1}`)
+                }
+                this.commandResults.set(value.commandKey, {
+                    fingerprint: value.fingerprint,
+                    terminal: structuredClone(value.terminal),
+                })
                 continue
             }
             if (!isPersistedClaimBatch(value)) {
@@ -330,7 +437,9 @@ export class FileCommandReplayStore implements ReplayStore {
         this.generation = generation
     }
 
-    private async append(record: PersistedClaimBatch | PersistedLedgerGeneration): Promise<void> {
+    private async append(
+        record: PersistedClaimBatch | PersistedLedgerGeneration | PersistedCommandResultEntry,
+    ): Promise<void> {
         await mkdir(dirname(this.filePath), { recursive: true })
         const handle = await open(this.filePath, 'a')
         try {
@@ -340,6 +449,41 @@ export class FileCommandReplayStore implements ReplayStore {
             await handle.close()
         }
     }
+}
+
+function isPersistedCommandResultEntry(value: unknown): value is PersistedCommandResultEntry {
+    if (!value || typeof value !== 'object') return false
+    const record = value as Record<string, unknown>
+    if (
+        record.version !== 1
+        || record.kind !== 'command_result'
+        || typeof record.commandKey !== 'string'
+        || record.commandKey.length === 0
+        || typeof record.fingerprint !== 'string'
+        || record.fingerprint.length === 0
+        || !record.terminal
+        || typeof record.terminal !== 'object'
+        || Array.isArray(record.terminal)
+    ) return false
+    const terminal = record.terminal as Record<string, unknown>
+    if (
+        typeof terminal.revision !== 'number'
+        || !Number.isSafeInteger(terminal.revision)
+        || terminal.revision < 1
+        || (terminal.outcome !== 'succeeded' && terminal.outcome !== 'failed')
+        || (terminal.error !== undefined && typeof terminal.error !== 'string')
+        || (
+            terminal.sessionId !== undefined
+            && terminal.sessionId !== null
+            && typeof terminal.sessionId !== 'string'
+        )
+    ) return false
+    try {
+        canonicalJson(terminal)
+    } catch {
+        return false
+    }
+    return true
 }
 
 function isPersistedLedgerGeneration(value: unknown): value is PersistedLedgerGeneration {
@@ -428,6 +572,17 @@ function conversationRevisionScope(
     revisionEpoch: string,
 ): string {
     return canonicalJson([gatewayId, conversationId, revisionEpoch])
+}
+
+function commandKeyFor(command: CodeverCommand, sequenceEpoch: string): string {
+    const scope = canonicalJson([
+        command.gatewayId,
+        command.deviceId,
+        command.conversationId,
+        command.revisionEpoch,
+        sequenceEpoch,
+    ])
+    return `${scope}:command:${command.commandId}`
 }
 
 function commandFingerprint(command: CodeverCommand): string {

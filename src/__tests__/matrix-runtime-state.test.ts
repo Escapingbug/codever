@@ -316,3 +316,66 @@ describe('FileGatewayRuntimeStateStore', () => {
         ).resolves.toEqual({ status: 'duplicate', revision: 1 })
     })
 })
+
+describe('FileCommandReplayStore terminal results', () => {
+    it('recovers an exact terminal result after restart and rejects conflicts', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-command-result-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'replay.jsonl')
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'device-invite-command',
+            gatewayId: 'gateway-1',
+            deviceId: 'device-1',
+            sequenceEpoch: 'legacy-v1',
+            conversationId: 'conversation-1',
+            revisionEpoch: 'runtime-epoch-1',
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'device.invite',
+            issuedAt: 1_000,
+            expiresAt: 61_000,
+            nonce: '0123456789abcdef-command-result',
+            payload: {
+                operation: 'device.invite',
+                lifetimeMs: 300_000,
+            },
+        }
+        const store = new FileCommandReplayStore(path)
+        await store.initialize(1_000)
+        await expect(store.claimCommandInOrder(command, 1_000)).resolves.toEqual({
+            status: 'accepted',
+            revision: 1,
+        })
+        const terminal = {
+            revision: 1,
+            outcome: 'succeeded' as const,
+            sessionId: null,
+            result: {
+                pairingLink: 'codever://pair?data=stable',
+                expiresAt: 301_000,
+            },
+        }
+        await store.recordCommandResult(command, terminal)
+        await store.recordCommandResult(command, terminal)
+
+        const restarted = new FileCommandReplayStore(path)
+        await restarted.initialize(2_000)
+        await expect(restarted.getCommandResult(command)).resolves.toEqual(terminal)
+        await expect(restarted.claimCommandInOrder(command, 2_000)).resolves.toEqual({
+            status: 'duplicate',
+            revision: 1,
+        })
+        await expect(restarted.recordCommandResult(command, {
+            ...terminal,
+            result: {
+                pairingLink: 'codever://pair?data=different',
+                expiresAt: 301_000,
+            },
+        })).rejects.toThrow('different durable terminal result')
+
+        const ledger = await readFile(path, 'utf8')
+        expect(ledger.match(/"kind":"command_result"/gu)).toHaveLength(1)
+    })
+})

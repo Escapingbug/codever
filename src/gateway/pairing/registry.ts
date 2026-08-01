@@ -21,7 +21,7 @@ export interface StoredPairingOffer {
 export type PairingOfferSource =
   | { kind: 'gateway-startup' }
   | { kind: 'local-admin' }
-  | { kind: 'paired-device'; deviceId: string }
+  | { kind: 'paired-device'; deviceId: string; commandId?: string }
 
 export interface PairingOfferSummary {
   offerId: string
@@ -114,6 +114,32 @@ export class FileTrustedDeviceRegistry {
       validateState(state)
       const stored = state.offers[offerId]
       return { result: stored ? structuredClone(stored.signedOffer) : undefined, changed: false }
+    })
+  }
+
+  async findOpenOfferBySource(
+    source: PairingOfferSource,
+    now = Date.now(),
+  ): Promise<SignedPairingOffer | undefined> {
+    return this.file.transaction(initialState, (state) => {
+      validateState(state)
+      let changed = false
+      for (const stored of Object.values(state.offers)) {
+        if (stored.status !== 'open') continue
+        if (stored.signedOffer.offer.expiresAt <= now) {
+          stored.status = 'expired'
+          stored.expiredAt = now
+          changed = true
+          continue
+        }
+        if (stored.source && canonicalJson(stored.source) === canonicalJson(source)) {
+          return {
+            result: structuredClone(stored.signedOffer),
+            changed,
+          }
+        }
+      }
+      return { result: undefined, changed }
     })
   }
 
