@@ -55,6 +55,7 @@ import {
   type ChatMessage,
   type OptimisticMessageReference,
 } from "./chatMessages";
+import { createPromptCommandPayload } from "./commandPayloads";
 import {
   clearMessageHistoryScope,
   deleteMessageHistory,
@@ -1806,12 +1807,13 @@ export function CodeverApp() {
     setSessionRunning(sessionId, true);
     setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
     pendingPromptSessionIdsRef.current.add(sessionId);
-    const result = await sendRealCommand({
-      operation: "prompt",
-      sessionId,
-      text: value,
-      attachments,
-    });
+    const result = await sendRealCommand(
+      createPromptCommandPayload({
+        sessionId,
+        text: value,
+        attachments,
+      }),
+    );
     pendingPromptSessionIdsRef.current.delete(sessionId);
     if (!result) {
       setSessionRunning(sessionId, false);
