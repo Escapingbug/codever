@@ -482,7 +482,7 @@ describe('multi-device Matrix collaboration', () => {
         restarted.stopRetries()
     })
 
-    it('releases a hung recipient attempt and confirms the same durable transaction on retry', async () => {
+    it('keeps a hung transport promise in flight so watchdog retries cannot duplicate it', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const device = await generateDeviceKeyPair()
@@ -507,14 +507,20 @@ describe('multi-device Matrix collaboration', () => {
         )
         await layer.initialize(now)
         const attemptedTransactions: string[] = []
+        let releaseHung!: () => void
+        const hung = new Promise<void>(resolve => {
+            releaseHung = resolve
+        })
+        const originalTransport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                attemptedTransactions.push(request.transactionId)
+                await hung
+                return { eventId: '$hung-late-confirmation' }
+            },
+        }
         let queued!: ChannelDeliveryQueuedError
         try {
-            await layer.transportForRoom(room, {
-                async sendEncryptedRoomEvent(request) {
-                    attemptedTransactions.push(request.transactionId)
-                    return await new Promise(() => {})
-                },
-            }).sendEncryptedRoomEvent({
+            await layer.transportForRoom(room, originalTransport).sendEncryptedRoomEvent({
                 roomId: room.roomId,
                 eventType: 'm.room.message',
                 transactionId: 'hung-logical',
@@ -530,16 +536,424 @@ describe('multi-device Matrix collaboration', () => {
         }
         layer.stopRetries()
 
-        await layer.retryPendingForRoom(room, {
+        let recoveryTransportCalls = 0
+        const recovery = layer.retryPendingForRoom(room, {
             async sendEncryptedRoomEvent(request) {
+                recoveryTransportCalls += 1
                 attemptedTransactions.push(request.transactionId)
-                return { eventId: '$hung-recovered' }
+                return { eventId: '$must-not-duplicate' }
+            },
+        })
+        await new Promise(resolve => setTimeout(resolve, 5))
+        expect(attemptedTransactions).toHaveLength(1)
+        expect(recoveryTransportCalls).toBe(0)
+
+        releaseHung()
+        await recovery
+
+        await expect(queued.confirmation).resolves.toEqual({
+            messageId: '$hung-late-confirmation',
+        })
+        expect(attemptedTransactions).toHaveLength(1)
+        expect(new Set(attemptedTransactions)).toHaveLength(1)
+        layer.stopRetries()
+    })
+
+    it('recovers a confirmation already persisted before the queued waiter is installed', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            deliveryAttemptTimeoutMs: 20,
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        let releaseMarkDelivered!: () => void
+        const markDeliveredGate = new Promise<void>(resolve => {
+            releaseMarkDelivered = resolve
+        })
+        const originalMarkDelivered = FileMatrixDeliveryOutbox.prototype.markDelivered
+        const markDelivered = vi.spyOn(
+            FileMatrixDeliveryOutbox.prototype,
+            'markDelivered',
+        ).mockImplementation(async function (
+            this: FileMatrixDeliveryOutbox,
+            deliveryId,
+            eventId,
+            deliveredAt,
+        ) {
+            await originalMarkDelivered.call(this, deliveryId, eventId, deliveredAt)
+            await markDeliveredGate
+        })
+        try {
+            let queued!: ChannelDeliveryQueuedError
+            try {
+                await layer.transportForRoom(room, {
+                    async sendEncryptedRoomEvent() {
+                        return { eventId: '$persisted-before-waiter' }
+                    },
+                }).sendEncryptedRoomEvent({
+                    roomId: room.roomId,
+                    eventType: 'm.room.message',
+                    transactionId: 'confirmation-race',
+                    content: {
+                        msgtype: 'm.text',
+                        body: 'persisted before waiter',
+                        [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+                    },
+                })
+            } catch (error) {
+                expect(error).toBeInstanceOf(ChannelDeliveryQueuedError)
+                queued = error as ChannelDeliveryQueuedError
+            }
+            layer.stopRetries()
+
+            await expect(queued.confirmation).resolves.toEqual({
+                messageId: '$persisted-before-waiter',
+            })
+        } finally {
+            releaseMarkDelivered()
+            markDelivered.mockRestore()
+            layer.stopRetries()
+        }
+    })
+
+    it('lets control responses bypass a hung bounded recovery queue', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const outbox = new FileMatrixDeliveryOutbox(
+            `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+        )
+        await outbox.initialize()
+        for (let index = 0; index < 4; index += 1) {
+            await outbox.stage({
+                deliveryId: `old-bulk-${index}`,
+                logicalKey: `old-bulk-logical-${index}`,
+                recipientDeviceId: policy.deviceId,
+                recipientSequenceEpoch: policy.sequenceEpoch!,
+                recipientPublicKeyId: device.keyId,
+                request: {
+                    roomId: room.roomId,
+                    eventType: 'm.room.message',
+                    transactionId: `old-bulk-transaction-${index}`,
+                    content: { msgtype: 'm.text', body: `old bulk ${index}` },
+                },
+                createdAt: now - 10_000 + index,
+            })
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        let releaseRecovery!: () => void
+        const recoveryGate = new Promise<void>(resolve => {
+            releaseRecovery = resolve
+        })
+        const attempted: string[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                attempted.push(request.transactionId)
+                if (request.transactionId === 'old-bulk-transaction-0') {
+                    await recoveryGate
+                }
+                return { eventId: `$priority-${attempted.length}` }
+            },
+        }
+
+        const recovery = layer.retryPendingForRoom(room, transport)
+        await vi.waitFor(() => expect(attempted).toEqual(['old-bulk-transaction-0']))
+
+        await layer.sendCommandAccepted(
+            room,
+            policy.deviceId,
+            'priority-command',
+            1,
+            1,
+            'runtime-epoch-1',
+            transport,
+        )
+        await layer.sendCommandResult(
+            room,
+            policy.deviceId,
+            'priority-command',
+            1,
+            1,
+            'runtime-epoch-1',
+            'succeeded',
+            transport,
+        )
+        await layer.sendHistoryPage(room, policy.deviceId, {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'priority-history',
+            gatewayId: 'gateway-1',
+            conversationId: room.conversationId,
+            deviceId: policy.deviceId,
+            sessionId: 'priority-session',
+            limit: 20,
+            maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+        await layer.transportForRoom(room, transport).sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'priority-decision',
+            content: {
+                msgtype: 'm.text',
+                body: 'permission required',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'decision_request',
+                    session_id: 'priority-session',
+                    decision_id: 'decision-priority',
+                },
             },
         })
 
-        await expect(queued.confirmation).resolves.toEqual({ messageId: '$hung-recovered' })
-        expect(attemptedTransactions).toHaveLength(2)
-        expect(new Set(attemptedTransactions)).toHaveLength(1)
+        expect(attempted).toHaveLength(5)
+        expect(attempted[1]).toBe('codever.command.ack.priority-command')
+        expect(attempted[2]).toMatch(/^codever\.command\.result\.priority-command\.succeeded\./u)
+        expect(attempted[3]).toMatch(/^codever\.history\.page\.priority-history\./u)
+        expect(attempted[4]).toMatch(/^priority-decision\./u)
+        releaseRecovery()
+        await recovery
+        expect(attempted.filter(transactionId =>
+            transactionId.startsWith('old-bulk-transaction-'),
+        )).toHaveLength(4)
+        layer.stopRetries()
+    })
+
+    it('coalesces a queued replacement per recipient and tombstones the superseded WAL copy', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const first = await generateDeviceKeyPair()
+        const second = await generateDeviceKeyPair()
+        const third = await generateDeviceKeyPair()
+        const policies = [
+            trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A'),
+            trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B'),
+            trusted('device-c', 'Carol tablet', third.publicJwk, 'MATRIX_C'),
+        ]
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            policies,
+            async () => policies,
+        )
+        await layer.initialize(now)
+        let releaseFirstEdit!: () => void
+        const firstEditGate = new Promise<void>(resolve => {
+            releaseFirstEdit = resolve
+        })
+        const sent: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                sent.push(request)
+                if (
+                    request.transactionId.startsWith('coalesce-edit-one.')
+                    && envelopeRecipient(request) !== 'device-c'
+                ) {
+                    await firstEditGate
+                }
+                return { eventId: `$coalesce-${sent.length}` }
+            },
+        }
+        const secureTransport = layer.transportForRoom(room, transport)
+        const original = await secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'coalesce-original',
+            content: {
+                msgtype: 'm.text',
+                body: 'original',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })
+        await vi.waitFor(() => expect(sent).toHaveLength(3))
+        const replacement = (transactionId: string, body: string): MatrixSendEventRequest => ({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId,
+            content: {
+                msgtype: 'm.text',
+                body: `* ${body}`,
+                'm.relates_to': { rel_type: 'm.replace', event_id: original.eventId },
+                'm.new_content': {
+                    msgtype: 'm.text',
+                    body,
+                    [CODEVER_MATRIX_EXTENSION]: {
+                        version: 1,
+                        kind: 'message',
+                        replaces_event_id: original.eventId,
+                    },
+                },
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    replaces_event_id: original.eventId,
+                },
+            },
+        })
+
+        const firstEdit = secureTransport.sendEncryptedRoomEvent(
+            replacement('coalesce-edit-one', 'intermediate'),
+        )
+        await vi.waitFor(() => expect(sent.filter(request =>
+            request.transactionId.startsWith('coalesce-edit-one.'),
+        )).toHaveLength(2))
+        const finalEdit = secureTransport.sendEncryptedRoomEvent(
+            replacement('coalesce-edit-two', 'final'),
+        )
+        await vi.waitFor(async () => {
+            const ledger = await readFile(
+                `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+                'utf8',
+            )
+            expect(ledger).toContain('"reason":"superseded"')
+        })
+        expect(sent.some(request =>
+            request.transactionId.startsWith('coalesce-edit-one.')
+            && envelopeRecipient(request) === 'device-c',
+        )).toBe(false)
+
+        releaseFirstEdit()
+        await Promise.all([firstEdit, finalEdit])
+        await vi.waitFor(() => expect(sent.filter(request =>
+            request.transactionId.startsWith('coalesce-edit-two.'),
+        )).toHaveLength(3))
+        layer.stopRetries()
+    })
+
+    it('keeps only the latest queued gateway state for each recipient', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const first = await generateDeviceKeyPair()
+        const second = await generateDeviceKeyPair()
+        const third = await generateDeviceKeyPair()
+        const policies = [
+            trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A'),
+            trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B'),
+            trusted('device-c', 'Carol tablet', third.publicJwk, 'MATRIX_C'),
+        ]
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            policies,
+            async () => policies,
+        )
+        await layer.initialize(now)
+        let releaseFirstState!: () => void
+        const firstStateGate = new Promise<void>(resolve => {
+            releaseFirstState = resolve
+        })
+        const sent: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                sent.push(request)
+                if (request.transactionId.startsWith('codever.gateway.state.1.')) {
+                    await firstStateGate
+                }
+                return { eventId: `$state-${sent.length}` }
+            },
+        }
+        const state = (revision: number) => ({
+            revision,
+            revisionEpoch: 'runtime-epoch-1',
+            revisionEpochGeneration: 1,
+            stateVersion: revision,
+            currentSessionId: null,
+            sessions: [],
+            workspace: {
+                projectId: 'project-1',
+                projectName: 'Project',
+                cwd: 'C:\\repo',
+                provider: 'test',
+                permissionMode: 'default',
+            },
+            capabilities: {
+                models: [],
+                permissionModes: [],
+                canCreateSession: true,
+                canSelectSession: true,
+            },
+        })
+
+        const firstState = layer.sendGatewayState(room, state(1), transport)
+        await vi.waitFor(() => expect(sent.filter(request =>
+            request.transactionId.startsWith('codever.gateway.state.1.'),
+        )).toHaveLength(2))
+        const latestState = layer.sendGatewayState(room, state(2), transport)
+        await vi.waitFor(async () => {
+            const ledger = await readFile(
+                `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+                'utf8',
+            )
+            expect(ledger).toContain('"reason":"superseded"')
+        })
+        expect(sent.some(request =>
+            request.transactionId.startsWith('codever.gateway.state.1.')
+            && envelopeRecipient(request) === 'device-c',
+        )).toBe(false)
+
+        releaseFirstState()
+        await Promise.all([firstState, latestState])
+        await vi.waitFor(() => expect(sent.filter(request =>
+            request.transactionId.startsWith('codever.gateway.state.2.'),
+        )).toHaveLength(3))
         layer.stopRetries()
     })
 
@@ -931,11 +1345,9 @@ describe('multi-device Matrix collaboration', () => {
                 expiresAt: now + 300_000,
             },
         )).rejects.toThrow('device-b offline')
-        await vi.waitFor(() => {
-            expect(firstAttempts.filter(request =>
-                request.transactionId.startsWith('codever.command.result.command-durable.'),
-            ).length).toBeGreaterThanOrEqual(2)
-        })
+        expect(firstAttempts.filter(request =>
+            request.transactionId.startsWith('codever.command.result.command-durable.'),
+        )).toHaveLength(1)
         firstActive = []
 
         const restarted = new GatewaySecureContentLayer(

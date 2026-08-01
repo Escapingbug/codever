@@ -117,9 +117,15 @@ display data from encrypted Codever events.
 8. Gateway fan-out is staged in a durable, certificate-bound per-recipient
    outbox before older gaps are recovered or any network attempt begins. The
    first recipient confirmation completes the logical send; remaining copies
-   continue in the background. A recipient attempt has a bounded watchdog and
-   is retried with the same stable Matrix transaction, so weak-network timeouts
-   remain queued instead of becoming user-visible failures or duplicates.
+   continue in the background. Before matrix-js-sdk, one Gateway-wide scheduler
+   reserves a lane for acknowledgements, command results, revision conflicts,
+   decisions and history pages; normal fan-out is admitted with bounded
+   concurrency (at most two Matrix SDK calls) and durable recovery is globally
+   serial and lower priority. A recipient
+   watchdog bounds only the caller's wait: the raw transport promise remains
+   in-flight until it really settles, so a timeout cannot submit the same stable
+   Matrix transaction twice. Queued replacements and Gateway/status snapshots
+   use last-write-wins coalescing and leave a durable `superseded` tombstone.
 9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
    device-list changes can therefore be caught up before a Gateway-signed
    transport rotation is pinned; the sync checkpoint itself grants no trust.

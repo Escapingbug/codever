@@ -42,7 +42,7 @@ interface AbandonedEntry {
     version: 1
     kind: 'abandoned'
     deliveryId: string
-    reason: 'recipient_identity_changed'
+    reason: 'recipient_identity_changed' | 'superseded'
     abandonedAt: number
 }
 
@@ -91,6 +91,7 @@ export interface MatrixHistoryDeliveryPage {
  */
 export class FileMatrixDeliveryOutbox {
     private readonly deliveries = new Map<string, DurableMatrixDelivery>()
+    private readonly recipientDeliveries = new Map<string, DurableMatrixDelivery>()
     private readonly pending = new Map<string, DurableMatrixDelivery>()
     private readonly delivered = new Map<string, string>()
     private readonly abandoned = new Set<string>()
@@ -129,6 +130,13 @@ export class FileMatrixDeliveryOutbox {
             }
             if (entry.kind === 'pending') {
                 this.deliveries.set(entry.deliveryId, entry)
+                const recipientKey = recipientDeliveryKey(
+                    entry.logicalKey,
+                    entry.recipientDeviceId,
+                )
+                if (!this.recipientDeliveries.has(recipientKey)) {
+                    this.recipientDeliveries.set(recipientKey, entry)
+                }
                 if (
                     !this.delivered.has(entry.deliveryId)
                     && !this.abandoned.has(entry.deliveryId)
@@ -169,6 +177,13 @@ export class FileMatrixDeliveryOutbox {
             }
             await this.append(entry)
             this.deliveries.set(delivery.deliveryId, delivery)
+            const recipientKey = recipientDeliveryKey(
+                delivery.logicalKey,
+                delivery.recipientDeviceId,
+            )
+            if (!this.recipientDeliveries.has(recipientKey)) {
+                this.recipientDeliveries.set(recipientKey, delivery)
+            }
             this.pending.set(delivery.deliveryId, delivery)
         })
     }
@@ -264,9 +279,8 @@ export class FileMatrixDeliveryOutbox {
         logicalKey: string,
         recipientDeviceId: string,
     ): Pick<DurableMatrixDelivery, 'recipientSequenceEpoch' | 'recipientPublicKeyId'> | undefined {
-        const delivery = [...this.deliveries.values()].find(candidate =>
-            candidate.logicalKey === logicalKey
-            && candidate.recipientDeviceId === recipientDeviceId,
+        const delivery = this.recipientDeliveries.get(
+            recipientDeliveryKey(logicalKey, recipientDeviceId),
         )
         return delivery && {
             recipientSequenceEpoch: delivery.recipientSequenceEpoch,
@@ -278,9 +292,8 @@ export class FileMatrixDeliveryOutbox {
         logicalKey: string,
         recipientDeviceId: string,
     ): DurableMatrixDelivery | undefined {
-        return [...this.deliveries.values()].find(candidate =>
-            candidate.logicalKey === logicalKey
-            && candidate.recipientDeviceId === recipientDeviceId,
+        return this.recipientDeliveries.get(
+            recipientDeliveryKey(logicalKey, recipientDeviceId),
         )
     }
 
@@ -526,6 +539,10 @@ function replacementTargetId(content: MatrixRoomMessageContent): string | undefi
         : undefined
 }
 
+function recipientDeliveryKey(logicalKey: string, recipientDeviceId: string): string {
+    return JSON.stringify([logicalKey, recipientDeviceId])
+}
+
 function isDisplayHistoryContent(
     content: MatrixRoomMessageContent,
     sessionId: string,
@@ -588,7 +605,10 @@ function validateEntry(value: unknown): DeliveryEntry {
     if (entry.kind === 'abandoned') {
         if (
             typeof entry.deliveryId !== 'string'
-            || entry.reason !== 'recipient_identity_changed'
+            || (
+                entry.reason !== 'recipient_identity_changed'
+                && entry.reason !== 'superseded'
+            )
             || typeof entry.abandonedAt !== 'number'
         ) {
             throw new TypeError('invalid abandoned record')
