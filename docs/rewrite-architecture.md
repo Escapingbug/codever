@@ -156,10 +156,17 @@ display data from encrypted Codever events.
 Device invitation UI observes the terminal result independently from the
 command acknowledgement. If the acknowledgement wait times out, the PWA keeps
 watching the same command ID and coalesces repeated clicks instead of issuing a
-second offer. The short-lived Matrix login token is requested only after the
-Gateway invitation succeeds, so Gateway queueing cannot consume the token's
-useful lifetime; both the pending observation and rendered link are cleared at
-their explicit expiry.
+second offer. The Gateway fsyncs an authenticated command's terminal result
+before staging Matrix delivery; an exact duplicate can therefore replay that
+result after restart. Pairing offers additionally persist their originating
+command ID, closing the crash window between offer creation and terminal-result
+journaling. For `device.invite`, the PWA retains both the signed command and any
+authenticated terminal result in its IndexedDB outbox until the final link is
+successfully rendered or explicitly cleared, so a reload resumes the same
+invitation. The short-lived Matrix login token is requested only after the
+Gateway invitation succeeds and is never persisted, so Gateway queueing cannot
+consume the token's useful lifetime; both the pending observation and rendered
+link are cleared at their explicit expiry.
 
 ## Attachment and artifact flow
 

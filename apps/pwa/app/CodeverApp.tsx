@@ -382,6 +382,7 @@ export function CodeverApp() {
   );
   const invitationExpiryTimeoutRef = useRef<number | null>(null);
   const pendingGatewayInvitationRef = useRef<{
+    commandId: string;
     pairingLink: string;
     expiresAt: number;
   } | null>(null);
@@ -1526,17 +1527,26 @@ export function CodeverApp() {
             } finally {
               if (commandId) {
                 completedCommandResultsRef.current.delete(commandId);
-                connection.releaseCommand(commandId);
               }
             }
             if (completion.outcome !== "succeeded") {
+              if (commandId) await connection.releaseCommand(commandId);
               throw new Error(
                 "The Gateway could not create the device invitation.",
               );
             }
-            gatewayInvitation = parseGatewayInvitationResult(
-              completion.result,
-            );
+            if (!commandId) {
+              throw new Error("The invitation command identity was lost.");
+            }
+            try {
+              gatewayInvitation = {
+                commandId,
+                ...parseGatewayInvitationResult(completion.result),
+              };
+            } catch (error) {
+              await connection.releaseCommand(commandId);
+              throw error;
+            }
             pendingGatewayInvitationRef.current = gatewayInvitation;
           }
 
@@ -1572,7 +1582,15 @@ export function CodeverApp() {
             fullInvitation,
             window.location.href,
           );
+          if (shortened.expiresAt <= Date.now() + 15_000) {
+            await connection.releaseCommand(gatewayInvitation.commandId);
+            pendingGatewayInvitationRef.current = null;
+            throw new Error(
+              "The recovered device invitation expired before it could be displayed. Create a new one.",
+            );
+          }
           pendingGatewayInvitationRef.current = null;
+          await connection.releaseCommand(gatewayInvitation.commandId);
           return shortened;
         },
       );
@@ -3358,6 +3376,12 @@ export function CodeverApp() {
         }
         onClearInvitation={() => {
           deviceInvitationLifecycleRef.current.clear();
+          const pendingGatewayInvitation = pendingGatewayInvitationRef.current;
+          if (pendingGatewayInvitation) {
+            void matrixConnectionRef.current?.releaseCommand(
+              pendingGatewayInvitation.commandId,
+            );
+          }
           pendingGatewayInvitationRef.current = null;
           if (invitationExpiryTimeoutRef.current !== null) {
             window.clearTimeout(invitationExpiryTimeoutRef.current);

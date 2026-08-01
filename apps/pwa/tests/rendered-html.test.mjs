@@ -325,7 +325,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /const expired = command\.expiresAt <= Date\.now\(\)/);
   assert.match(
     matrix,
-    /!recovered\.expired &&[\s\S]*JSON\.stringify\(recovered\.payload\)/,
+    /const samePayload =[\s\S]*JSON\.stringify\(recovered\.payload\) === JSON\.stringify\(payload\)/,
+  );
+  assert.match(
+    matrix,
+    /\(!recovered\.expired \|\|[\s\S]*retainsCommandUntilResultConsumed\(recovered\.payload\)[\s\S]*samePayload/,
   );
   assert.doesNotMatch(
     matrix,

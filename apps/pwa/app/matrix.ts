@@ -68,6 +68,10 @@ import {
   LateResponseLifecycle,
   createDetachedSerialDispatcher,
 } from "./lateResponseLifecycle";
+import {
+  isValidPendingCommandSequence,
+  retainsCommandUntilResultConsumed,
+} from "./durableCommandRecovery";
 import { advanceHistoryCursor } from "./historyCursor";
 import {
   acquireMatrixCryptoLock,
@@ -160,6 +164,7 @@ type PendingOutboundCommand = CommandReservation & {
   createdAt: number;
   payload: CommandPayload;
   plaintext?: Record<string, unknown>;
+  completion?: CommandCompletion;
 };
 
 type CommandSequenceState = {
@@ -305,7 +310,7 @@ export type MatrixConnection = {
     commandId: string,
     timeoutMs: number,
   ): Promise<CommandCompletion>;
-  releaseCommand(commandId: string): void;
+  releaseCommand(commandId: string): Promise<void>;
   stop(): void;
 };
 
@@ -651,6 +656,15 @@ export async function connectMatrix(
       revisionEpoch,
       activeDeviceCount,
     );
+    const trust = activeTrust;
+    if (trust) {
+      await savePendingCommandCompletion(
+        config,
+        identity,
+        trust.certificate.certificate.certificateId,
+        result,
+      );
+    }
     commandLifecycle.recordResult(result);
     handlers.onCommandResult?.(result);
   };
@@ -1165,37 +1179,72 @@ export async function connectMatrix(
       trust,
     );
     if (recovered) {
-      try {
-        const revision = await waitForCommandAcknowledgement(
-          recovered.reservation,
-        );
-        if (
-          !recovered.expired &&
-          JSON.stringify(recovered.payload) === JSON.stringify(payload)
-        ) {
+      if (recovered.completion) {
+        commandLifecycle.recordResult(recovered.completion);
+        if (JSON.stringify(recovered.payload) === JSON.stringify(payload)) {
           return {
             eventId: recovered.eventId,
             commandId: recovered.reservation.commandId,
             sequence: recovered.reservation.sequence,
-            revision,
-            completion: commandLifecycle.waitForCompletion(
-              recovered.reservation.commandId,
-            ),
+            revision: recovered.completion.revision,
+            completion: Promise.resolve(recovered.completion),
           };
         }
-        // An expired command can only be replayed to recover its durable
-        // acknowledgement. Its original result may already have fallen out of
-        // this client's Matrix timeline, so the user's current action must be
-        // sent as a fresh command after the sequence is repaired.
-      } catch (error) {
-        if (!(error instanceof RevisionConflictError)) throw error;
-        holdRevisionConflict(
-          error,
-          recovered.reservation,
-          recovered.payload,
+        await discardPendingCommand(
+          config,
+          identity,
           sequenceEpoch,
-          trust,
+          recovered.reservation.commandId,
         );
+        commandLifecycle.release(recovered.reservation.commandId);
+      } else {
+        try {
+          const revision = await waitForCommandAcknowledgement(
+            recovered.reservation,
+          );
+          const samePayload =
+            JSON.stringify(recovered.payload) === JSON.stringify(payload);
+          if (
+            (!recovered.expired ||
+              retainsCommandUntilResultConsumed(recovered.payload)) &&
+            samePayload
+          ) {
+            return {
+              eventId: recovered.eventId,
+              commandId: recovered.reservation.commandId,
+              sequence: recovered.reservation.sequence,
+              revision,
+              completion: commandLifecycle.waitForCompletion(
+                recovered.reservation.commandId,
+              ),
+            };
+          }
+          if (retainsCommandUntilResultConsumed(recovered.payload)) {
+            await commandLifecycle.waitForCompletion(
+              recovered.reservation.commandId,
+              COMMAND_TTL_MS,
+            );
+            await discardPendingCommand(
+              config,
+              identity,
+              sequenceEpoch,
+              recovered.reservation.commandId,
+            );
+            commandLifecycle.release(recovered.reservation.commandId);
+          }
+          // An expired ordinary command is replayed only to repair its
+          // durable sequence. A recoverable invitation additionally waits for
+          // its terminal result before allowing a different command through.
+        } catch (error) {
+          if (!(error instanceof RevisionConflictError)) throw error;
+          holdRevisionConflict(
+            error,
+            recovered.reservation,
+            recovered.payload,
+            sequenceEpoch,
+            trust,
+          );
+        }
       }
     }
 
@@ -1770,8 +1819,24 @@ export async function connectMatrix(
     observeCommandCompletion(commandId, timeoutMs) {
       return commandLifecycle.waitForCompletion(commandId, timeoutMs);
     },
-    releaseCommand(commandId) {
+    async releaseCommand(commandId) {
       commandLifecycle.release(commandId);
+      const trust = activeTrust;
+      if (!trust) return;
+      try {
+        await discardPendingCommand(
+          config,
+          identity,
+          trust.certificate.certificate.certificateId,
+          commandId,
+        );
+      } catch (error) {
+        handlers.onStatus(
+          "error",
+          `The completed command could not be released from the durable outbox: ${formatError(error)}`,
+        );
+        throw error;
+      }
     },
     stop() {
       if (stopped) return;
@@ -3376,18 +3441,43 @@ async function acknowledgePendingCommand(
         state.pending.commandId === reservation.commandId &&
         state.pending.sequence === reservation.sequence
       ) {
+        const retainForResult = retainsCommandUntilResultConsumed(
+          state.pending.payload,
+        );
         return {
           ...state,
           lastAcknowledged: reservation.sequence,
           lastRevision: Math.max(state.lastRevision, revision),
           revisionInitialized: true,
-          pending: undefined,
+          pending: retainForResult ? state.pending : undefined,
         };
       }
       // A historical acknowledgement for a different command must not clear
       // the current outbox reservation.
       return state;
     },
+  );
+}
+
+async function savePendingCommandCompletion(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  completion: CommandCompletion,
+): Promise<void> {
+  await updateCommandSequenceState(
+    commandSequenceScope(config, identity, sequenceEpoch),
+    (state) =>
+      state.pending?.commandId === completion.commandId &&
+      retainsCommandUntilResultConsumed(state.pending.payload)
+        ? {
+            ...state,
+            pending: {
+              ...state.pending,
+              completion: structuredClone(completion),
+            },
+          }
+        : state,
   );
 }
 
@@ -3697,6 +3787,7 @@ async function retryPendingCommand(
   payload: CommandPayload;
   reservation: CommandReservation;
   expired: boolean;
+  completion?: CommandCompletion;
 } | null> {
   const scope = commandSequenceScope(config, identity, sequenceEpoch);
   const state = await readCommandSequenceState(scope);
@@ -3728,6 +3819,15 @@ async function retryPendingCommand(
     );
   }
   const expired = command.expiresAt <= Date.now();
+  if (pending.completion) {
+    return {
+      eventId: `$codever.durable.${pending.commandId}`,
+      payload: pending.payload,
+      reservation: pending,
+      expired,
+      completion: pending.completion,
+    };
+  }
   const certificate = trust.certificate.certificate;
   const secureEnvelope = await sealSecureEnvelope({
     plaintext: pending.plaintext,
@@ -3907,12 +4007,20 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
     typeof pending.commandId !== "string" ||
     typeof pending.sequence !== "number" ||
     !Number.isSafeInteger(pending.sequence) ||
-    pending.sequence !== lastAcknowledged + 1 ||
+    !isValidPendingCommandSequence(
+      pending.sequence,
+      lastAcknowledged,
+      pending.payload as CommandPayload,
+    ) ||
     typeof pending.createdAt !== "number" ||
     !Number.isSafeInteger(pending.createdAt)
   ) {
     throw new Error("The persistent command outbox is corrupt.");
   }
+  const completion = parsePersistedCommandCompletion(
+    pending.completion,
+    pending.commandId,
+  );
   return {
     lastAcknowledged,
     lastRevision,
@@ -3941,7 +4049,45 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
       ...(asRecord(pending.plaintext)
         ? { plaintext: pending.plaintext as Record<string, unknown> }
         : {}),
+      ...(completion ? { completion } : {}),
     },
+  };
+}
+
+function parsePersistedCommandCompletion(
+  value: unknown,
+  commandId: string,
+): CommandCompletion | undefined {
+  const completion = asRecord(value);
+  if (!completion) return undefined;
+  if (
+    completion.commandId !== commandId ||
+    typeof completion.sequence !== "number" ||
+    !Number.isSafeInteger(completion.sequence) ||
+    completion.sequence < 1 ||
+    typeof completion.revision !== "number" ||
+    !Number.isSafeInteger(completion.revision) ||
+    completion.revision < 0 ||
+    (completion.outcome !== "succeeded" && completion.outcome !== "failed")
+  ) {
+    throw new Error("The persistent command result is corrupt.");
+  }
+  const result =
+    completion.result === undefined
+      ? undefined
+      : jsonValueSchema.safeParse(completion.result);
+  if (result && !result.success) {
+    throw new Error("The persistent command result payload is corrupt.");
+  }
+  return {
+    commandId,
+    sequence: completion.sequence,
+    revision: completion.revision,
+    outcome: completion.outcome,
+    ...(typeof completion.sessionId === "string"
+      ? { sessionId: completion.sessionId }
+      : {}),
+    ...(result ? { result: result.data } : {}),
   };
 }
 
