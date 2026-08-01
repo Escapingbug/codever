@@ -115,8 +115,11 @@ display data from encrypted Codever events.
    explicit confirmation creates a new signature against the revision returned
    by the Gateway.
 8. Gateway fan-out is staged in a durable, certificate-bound per-recipient
-   outbox. Missing copies are retried with stable Matrix transactions, while
-   already delivered devices never receive a logical duplicate.
+   outbox before older gaps are recovered or any network attempt begins. The
+   first recipient confirmation completes the logical send; remaining copies
+   continue in the background. A recipient attempt has a bounded watchdog and
+   is retried with the same stable Matrix transaction, so weak-network timeouts
+   remain queued instead of becoming user-visible failures or duplicates.
 9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
    device-list changes can therefore be caught up before a Gateway-signed
    transport rotation is pinned; the sync checkpoint itself grants no trust.

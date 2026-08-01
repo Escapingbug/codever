@@ -222,6 +222,8 @@ Responsibilities:
 
 - order send/edit operations;
 - retry Telegram rate-limit errors;
+- distinguish delayed confirmation (`queued`) from a final delivery failure;
+- observe late confirmations without issuing a duplicate resend;
 - fall back from edit to send when appropriate;
 - record delivery failures for debugging.
 

@@ -1,6 +1,11 @@
-import type { ChannelMessage, ChannelPort, ChannelSendResult } from '@/bridge/channelPort'
+import {
+    ChannelDeliveryQueuedError,
+    type ChannelMessage,
+    type ChannelPort,
+    type ChannelSendResult,
+} from '@/bridge/channelPort'
 
-export type DeliveryStatus = 'pending' | 'sent' | 'edited' | 'failed' | 'skipped'
+export type DeliveryStatus = 'pending' | 'queued' | 'sent' | 'edited' | 'failed' | 'skipped'
 export type DeliveryLane = 'control' | 'normal' | 'progressive-edit'
 
 export interface DeliveryRecord {
@@ -45,6 +50,7 @@ export interface DeliveryOutboxState {
     pendingControl: number
     pendingNormal: number
     pendingProgressiveEdits: number
+    queuedUnconfirmed: number
     progressiveEditBlockedUntil?: number
     lastRateLimitError?: string
     lastFailure?: string
@@ -92,11 +98,20 @@ export class DeliveryOutbox {
                 }
                 onSent?.(result)
             } catch (error) {
+                if (this.deferTimedOutDelivery(record, error, 'sent', (result) => {
+                    const sent = result as ChannelSendResult
+                    record.messageId = sent.messageId
+                    if (original?.status === 'failed') {
+                        original.resolvedBy = record.id
+                        original.resolvedAt = Date.now()
+                    }
+                    onSent?.(sent)
+                })) return
                 record.status = 'failed'
                 record.error = error
                 this.config.onFailure?.(record)
             } finally {
-                record.completedAt = Date.now()
+                if (record.status !== 'queued') record.completedAt = Date.now()
             }
         })
         return { record, completion }
@@ -105,6 +120,9 @@ export class DeliveryOutbox {
     retry(deliveryId: string, options: DeliveryOptions = {}): Promise<DeliveryRecord | undefined> {
         const original = this.find(deliveryId)
         if (!original) return Promise.resolve(undefined)
+        if (original.status === 'pending' || original.status === 'queued') {
+            return Promise.resolve(original)
+        }
         return this.send(original.message, undefined, {
             lane: options.lane ?? (original.lane === 'control' ? 'control' : 'normal'),
             retryOf: original.id,
@@ -134,6 +152,7 @@ export class DeliveryOutbox {
                 await this.withRateLimitRetry(() => this.config.channelPort.edit!(messageId, message))
                 record.status = 'edited'
             } catch (error) {
+                if (this.deferTimedOutDelivery(record, error, 'edited')) return
                 record.status = 'failed'
                 record.error = error
                 this.config.onFailure?.(record)
@@ -141,7 +160,7 @@ export class DeliveryOutbox {
                     await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
                 }
             } finally {
-                record.completedAt = Date.now()
+                if (record.status !== 'queued') record.completedAt = Date.now()
             }
         })
     }
@@ -163,6 +182,9 @@ export class DeliveryOutbox {
                     record.status = 'sent'
                     record.messageId = result.messageId
                 } catch (error) {
+                    if (this.deferTimedOutDelivery(record, error, 'sent', (result) => {
+                        record.messageId = (result as ChannelSendResult).messageId
+                    })) return
                     record.status = 'failed'
                     record.error = error
                     this.config.onFailure?.(record)
@@ -177,6 +199,7 @@ export class DeliveryOutbox {
                 await this.withRateLimitRetry(() => edit(messageId, message))
                 record.status = 'edited'
             } catch (error) {
+                if (this.deferTimedOutDelivery(record, error, 'edited')) return
                 record.status = 'failed'
                 record.error = error
                 this.config.onFailure?.(record)
@@ -186,7 +209,7 @@ export class DeliveryOutbox {
                     record.messageId = result.messageId
                 }
             } finally {
-                record.completedAt = Date.now()
+                if (record.status !== 'queued') record.completedAt = Date.now()
             }
         })
     }
@@ -222,6 +245,7 @@ export class DeliveryOutbox {
             pendingControl: this.pendingControl,
             pendingNormal: this.pendingNormal,
             pendingProgressiveEdits: this.progressiveEdits.size,
+            queuedUnconfirmed: this.records.filter(record => record.status === 'queued').length,
             ...(this.progressiveEditBlockedUntil > Date.now() ? { progressiveEditBlockedUntil: this.progressiveEditBlockedUntil } : {}),
             ...(this.lastRateLimitError ? { lastRateLimitError: this.lastRateLimitError } : {}),
             ...(lastUnresolvedFailure ? { lastFailure: this.formatFailureSummary(lastUnresolvedFailure) } : {}),
@@ -339,6 +363,7 @@ export class DeliveryOutbox {
             await withTimeout(this.config.channelPort.edit!(task.messageId, task.message), this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS)
             task.record.status = 'edited'
         } catch (error) {
+            if (this.deferTimedOutDelivery(task.record, error, 'edited')) return
             const retryAfterMs = getRetryAfterMs(error)
             if (retryAfterMs !== null) {
                 const delayMs = Math.min(retryAfterMs, this.config.maxRateLimitDelayMs ?? DEFAULT_MAX_RATE_LIMIT_DELAY_MS)
@@ -369,9 +394,13 @@ export class DeliveryOutbox {
                     task.record.status = 'sent'
                     task.record.messageId = result.messageId
                 } catch (sendError) {
-                    task.record.status = 'failed'
-                    task.record.error = sendError
-                    this.config.onFailure?.(task.record)
+                    if (!this.deferTimedOutDelivery(task.record, sendError, 'sent', (result) => {
+                        task.record.messageId = (result as ChannelSendResult).messageId
+                    })) {
+                        task.record.status = 'failed'
+                        task.record.error = sendError
+                        this.config.onFailure?.(task.record)
+                    }
                 }
             }
         } finally {
@@ -379,7 +408,7 @@ export class DeliveryOutbox {
                 this.lastFailure = task.record.error instanceof Error ? task.record.error.message : String(task.record.error)
             }
             if (requeued) return
-            task.record.completedAt = Date.now()
+            if (task.record.status !== 'queued') task.record.completedAt = Date.now()
             task.resolve(task.record)
         }
     }
@@ -415,6 +444,7 @@ export class DeliveryOutbox {
             try {
                 return await withTimeout(operation(), timeoutMs)
             } catch (error) {
+                if (isDeferredDelivery(error)) throw error
                 const retryAfterMs = getRetryAfterMs(error)
                 if (retryAfterMs === null || attempt >= maxRetries) {
                     if (retryAfterMs === null && isRetryableNetworkError(error) && networkAttempts < maxNetworkRetries) {
@@ -430,6 +460,63 @@ export class DeliveryOutbox {
             }
         }
     }
+
+    private deferTimedOutDelivery<T>(
+        record: DeliveryRecord,
+        error: unknown,
+        successStatus: Extract<DeliveryStatus, 'sent' | 'edited'>,
+        onResolved?: (result: T) => void,
+    ): boolean {
+        if (!isDeferredDelivery(error)) return false
+
+        record.status = 'queued'
+        record.error = error
+        this.log(`[delivery] confirmation delayed id=${record.id}: ${formatError(error)}`)
+
+        const confirmation = error instanceof DeliveryTimeoutError
+            ? error.lateCompletion
+            : error.confirmation
+        if (confirmation) {
+            this.observeLateConfirmation(record, confirmation, successStatus, onResolved)
+        }
+        return true
+    }
+
+    private observeLateConfirmation<T>(
+        record: DeliveryRecord,
+        confirmation: Promise<unknown>,
+        successStatus: Extract<DeliveryStatus, 'sent' | 'edited'>,
+        onResolved?: (result: T) => void,
+    ): void {
+        void confirmation.then((result) => {
+            if (record.status !== 'queued') return
+            record.status = successStatus
+            record.error = undefined
+            record.completedAt = Date.now()
+            onResolved?.(result as T)
+            this.log(`[delivery] late confirmation received id=${record.id}`)
+        }).catch((lateError) => {
+            if (record.status !== 'queued') return
+            if (lateError instanceof ChannelDeliveryQueuedError) {
+                record.error = lateError
+                this.log(`[delivery] durable retry remains queued id=${record.id}: ${formatError(lateError)}`)
+                if (lateError.confirmation) {
+                    this.observeLateConfirmation(
+                        record,
+                        lateError.confirmation,
+                        successStatus,
+                        onResolved,
+                    )
+                }
+                return
+            }
+            record.status = 'failed'
+            record.error = lateError
+            record.completedAt = Date.now()
+            this.lastFailure = formatError(lateError)
+            this.config.onFailure?.(record)
+        })
+    }
 }
 
 interface ProgressiveEditTask {
@@ -443,7 +530,7 @@ interface ProgressiveEditTask {
 }
 
 class DeliveryTimeoutError extends Error {
-    constructor(timeoutMs: number) {
+    constructor(timeoutMs: number, readonly lateCompletion: Promise<unknown>) {
         super(`Delivery operation timed out after ${timeoutMs}ms`)
         this.name = 'DeliveryTimeoutError'
     }
@@ -485,6 +572,14 @@ function isRetryableNetworkError(error: unknown): boolean {
     return false
 }
 
+function isDeferredDelivery(error: unknown): error is DeliveryTimeoutError | ChannelDeliveryQueuedError {
+    return error instanceof DeliveryTimeoutError || error instanceof ChannelDeliveryQueuedError
+}
+
+function formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -494,7 +589,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 
     let timeout: ReturnType<typeof setTimeout> | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new DeliveryTimeoutError(timeoutMs)), timeoutMs)
+        timeout = setTimeout(() => reject(new DeliveryTimeoutError(timeoutMs, promise)), timeoutMs)
     })
 
     return Promise.race([promise, timeoutPromise]).finally(() => {

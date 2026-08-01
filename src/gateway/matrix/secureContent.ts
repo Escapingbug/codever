@@ -26,6 +26,10 @@ import {
     type MatrixSendEventResult,
     type MatrixTransport,
 } from '@/channel/matrix'
+import {
+    ChannelDeliveryQueuedError,
+    type ChannelSendResult,
+} from '@/bridge/channelPort'
 import type {
     MatrixGatewayApplicationSecurityConfig,
     MatrixGatewayRoomConfig,
@@ -44,6 +48,8 @@ export interface OpenedGatewayMatrixContent {
 }
 
 export type TrustedDeviceProvider = () => Promise<readonly MatrixGatewayTrustedDevice[]>
+
+const DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS = 25_000
 
 export interface GatewayStateSnapshot {
     revision: number
@@ -100,6 +106,11 @@ export class GatewaySecureContentLayer {
     private readonly retryingRooms = new Map<string, Promise<void>>()
     private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
     private readonly retryAttempts = new Map<string, number>()
+    private readonly inFlightDeliveries = new Map<string, Promise<MatrixSendEventResult>>()
+    private readonly deliveryConfirmations = new Map<string, {
+        promise: Promise<ChannelSendResult>
+        resolve: (result: ChannelSendResult) => void
+    }>()
 
     constructor(
         private readonly gatewayId: string,
@@ -607,7 +618,6 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         const now = Date.now()
-        await this.retryPendingForRoom(room, transport).catch(() => undefined)
         const recipients = (await this.currentTrustedDevices(now))
             .filter(device => device.allowedRoomIds.includes(room.roomId))
         if (recipients.length === 0) {
@@ -655,38 +665,106 @@ export class GatewaySecureContentLayer {
         const deliveries = candidates.filter(
             (candidate): candidate is NonNullable<typeof candidate> => candidate !== null,
         )
-        const settled = await Promise.allSettled(deliveries.map(async ({ recipient, delivery }) => ({
+        if (deliveries.length === 0) {
+            throw new Error(`No eligible application-layer recipients for room ${room.roomId}`)
+        }
+
+        // Stage the current logical message before touching older gaps. A slow
+        // or offline device must never keep the newest reply outside the WAL.
+        this.schedulePendingRetry(room, transport)
+        const attempts = deliveries.map(async ({ recipient, delivery }) => ({
             deviceId: recipient.deviceId,
             result: await this.deliverDurable(delivery, room, recipient, transport),
-        })))
-        const successful = settled
-            .filter((delivery): delivery is PromiseFulfilledResult<{
-                deviceId: string
-                result: MatrixSendEventResult
-            }> => delivery.status === 'fulfilled')
-            .map(delivery => delivery.value)
+        }))
+        const completion = Promise.allSettled(attempts)
         const existingLogicalEventId = this.deliveryOutbox.logicalEventId(logicalKey)
-        const primaryEventId = existingLogicalEventId ?? successful[0]?.result.eventId
-        if (!primaryEventId) {
-            const firstFailure = settled.find(
-                (delivery): delivery is PromiseRejectedResult => delivery.status === 'rejected',
+        if (existingLogicalEventId) {
+            this.observeFanoutCompletion(
+                logicalKey,
+                existingLogicalEventId,
+                deliveries,
+                completion,
+                room,
+                transport,
             )
-            throw firstFailure?.reason ?? new Error(`No Matrix delivery completed for room ${room.roomId}`)
+            return { eventId: existingLogicalEventId }
         }
+
+        let firstSuccess: { deviceId: string; result: MatrixSendEventResult }
+        try {
+            firstSuccess = await Promise.any(attempts)
+        } catch {
+            const settled = await completion
+            await this.retirePermanentFailures(deliveries, settled)
+            const transientFailure = firstTransientFailure(settled)
+            if (!transientFailure) {
+                throw firstRejectedReason(settled)
+                    ?? new Error(`No Matrix delivery completed for room ${room.roomId}`)
+            }
+            this.schedulePendingRetry(room, transport)
+            throw new ChannelDeliveryQueuedError(
+                `Matrix delivery is durably queued for retry: ${formatError(transientFailure)}`,
+                logicalKey,
+                transientFailure,
+                this.waitForDeliveryConfirmation(logicalKey),
+            )
+        }
+
+        const primaryEventId = firstSuccess.result.eventId
         await this.deliveryOutbox.recordLogicalEvent(logicalKey, primaryEventId, now)
         this.deliveryIds.set(
             primaryEventId,
             this.deliveryOutbox.recipientEvents(logicalKey),
         )
-        // A partial fan-out is a successful logical delivery. Missing device
-        // copies remain durable and keep their original recipient transaction
-        // IDs; they are retried at startup, on duplicate commands, or on the
-        // next explicit recovery pass. This prevents DeliveryOutbox from
-        // emitting a room-wide fallback message for an edit.
-        if (settled.some(delivery => delivery.status === 'rejected')) {
-            this.schedulePendingRetry(room, transport)
-        }
+        this.observeFanoutCompletion(
+            logicalKey,
+            primaryEventId,
+            deliveries,
+            completion,
+            room,
+            transport,
+        )
         return { eventId: primaryEventId }
+    }
+
+    private observeFanoutCompletion(
+        logicalKey: string,
+        primaryEventId: string,
+        deliveries: Array<{ recipient: MatrixGatewayTrustedDevice; delivery: DurableMatrixDelivery }>,
+        completion: Promise<PromiseSettledResult<{
+            deviceId: string
+            result: MatrixSendEventResult
+        }>[]>,
+        room: MatrixGatewayRoomConfig,
+        transport: MatrixTransport,
+    ): void {
+        void completion.then(async settled => {
+            await this.retirePermanentFailures(deliveries, settled)
+            this.deliveryIds.set(
+                primaryEventId,
+                this.deliveryOutbox.recipientEvents(logicalKey),
+            )
+            if (firstTransientFailure(settled)) {
+                this.schedulePendingRetry(room, transport)
+            }
+        }).catch(() => this.schedulePendingRetry(room, transport))
+    }
+
+    private async retirePermanentFailures(
+        deliveries: Array<{ recipient: MatrixGatewayTrustedDevice; delivery: DurableMatrixDelivery }>,
+        settled: PromiseSettledResult<unknown>[],
+    ): Promise<void> {
+        await Promise.all(settled.map(async (result, index) => {
+            if (result.status !== 'rejected' || !(result.reason instanceof PermanentMatrixDeliveryError)) {
+                return
+            }
+            const delivery = deliveries[index]?.delivery
+            if (!delivery) return
+            await this.deliveryOutbox.markFailed(
+                delivery.deliveryId,
+                formatError(result.reason.deliveryCause),
+            )
+        }))
     }
 
     private async sendToDevice(
@@ -821,9 +899,54 @@ export class GatewaySecureContentLayer {
     ): Promise<MatrixSendEventResult> {
         const deliveredEventId = this.deliveryOutbox.deliveredEventId(delivery.deliveryId)
         if (deliveredEventId) return { eventId: deliveredEventId }
-        const result = await this.sealOutgoing(delivery.request, room, recipient, transport)
-        await this.deliveryOutbox.markDelivered(delivery.deliveryId, result.eventId)
-        return result
+        const inFlight = this.inFlightDeliveries.get(delivery.deliveryId)
+        if (inFlight) return inFlight
+
+        const lateCompletion = (async () => {
+            const result = await this.sealOutgoing(delivery.request, room, recipient, transport)
+            await this.deliveryOutbox.markDelivered(delivery.deliveryId, result.eventId)
+            this.confirmDelivery(delivery.logicalKey, result.eventId)
+            return result
+        })()
+        void lateCompletion.catch(async error => {
+            if (error instanceof PermanentMatrixDeliveryError) {
+                await this.deliveryOutbox.markFailed(
+                    delivery.deliveryId,
+                    formatError(error.deliveryCause),
+                )
+            }
+        }).catch(() => undefined)
+        const attempt = withDeliveryAttemptTimeout(
+            lateCompletion,
+            this.config.deliveryAttemptTimeoutMs ?? DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS,
+        )
+        this.inFlightDeliveries.set(delivery.deliveryId, attempt)
+        try {
+            return await attempt
+        } finally {
+            if (this.inFlightDeliveries.get(delivery.deliveryId) === attempt) {
+                this.inFlightDeliveries.delete(delivery.deliveryId)
+            }
+        }
+    }
+
+    private waitForDeliveryConfirmation(logicalKey: string): Promise<ChannelSendResult> {
+        const existing = this.deliveryConfirmations.get(logicalKey)
+        if (existing) return existing.promise
+
+        let resolve!: (result: ChannelSendResult) => void
+        const promise = new Promise<ChannelSendResult>(accept => {
+            resolve = accept
+        })
+        this.deliveryConfirmations.set(logicalKey, { promise, resolve })
+        return promise
+    }
+
+    private confirmDelivery(logicalKey: string, eventId: string): void {
+        const confirmation = this.deliveryConfirmations.get(logicalKey)
+        if (!confirmation) return
+        this.deliveryConfirmations.delete(logicalKey)
+        confirmation.resolve({ messageId: eventId })
     }
 
     private async sealOutgoing(
@@ -832,31 +955,36 @@ export class GatewaySecureContentLayer {
         recipient: MatrixGatewayTrustedDevice,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
-        const now = Date.now()
-        this.assertCertificateActive(recipient, now)
-        const keys = this.requireGatewayKeys()
-        const certificateExpiresAt = recipient.certificateExpiresAt
-        if (certificateExpiresAt === undefined) {
-            throw new Error(`Trusted device ${recipient.deviceId} has no certificate expiry`)
+        let secureEnvelope: SignedSecureEnvelope
+        try {
+            const now = Date.now()
+            this.assertCertificateActive(recipient, now)
+            const keys = this.requireGatewayKeys()
+            const certificateExpiresAt = recipient.certificateExpiresAt
+            if (certificateExpiresAt === undefined) {
+                throw new Error(`Trusted device ${recipient.deviceId} has no certificate expiry`)
+            }
+            secureEnvelope = await sealSecureEnvelope({
+                plaintext: toJsonValue(request.content),
+                gatewayId: this.gatewayId,
+                conversationId: room.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: this.config.gatewayDeviceId,
+                recipientDeviceId: recipient.deviceId,
+                senderKeyId: keys.keyId,
+                recipientKeyId: await publicKeyId(recipient.publicKey),
+                senderPrivateKey: keys.privateKey,
+                recipientPublicKey: recipient.publicKey,
+                envelopeId: request.transactionId,
+                now,
+                lifetimeMs: Math.min(
+                    certificateExpiresAt - now,
+                    366 * 24 * 60 * 60_000,
+                ),
+            })
+        } catch (error) {
+            throw new PermanentMatrixDeliveryError(error)
         }
-        const secureEnvelope = await sealSecureEnvelope({
-            plaintext: toJsonValue(request.content),
-            gatewayId: this.gatewayId,
-            conversationId: room.conversationId,
-            direction: 'gateway_to_device',
-            senderDeviceId: this.config.gatewayDeviceId,
-            recipientDeviceId: recipient.deviceId,
-            senderKeyId: keys.keyId,
-            recipientKeyId: await publicKeyId(recipient.publicKey),
-            senderPrivateKey: keys.privateKey,
-            recipientPublicKey: recipient.publicKey,
-            envelopeId: request.transactionId,
-            now,
-            lifetimeMs: Math.min(
-                certificateExpiresAt - now,
-                366 * 24 * 60 * 60_000,
-            ),
-        })
         return transport.sendEncryptedRoomEvent({
             ...request,
             content: {
@@ -1046,4 +1174,58 @@ function withHistoryReplay(
     const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
     if (newExtension) newExtension.history_replay = marker
     return copy
+}
+
+class PermanentMatrixDeliveryError extends Error {
+    constructor(readonly deliveryCause: unknown) {
+        super(formatError(deliveryCause))
+        this.name = 'PermanentMatrixDeliveryError'
+    }
+}
+
+class MatrixDeliveryAttemptTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`Matrix recipient delivery attempt timed out after ${timeoutMs}ms`)
+        this.name = 'MatrixDeliveryAttemptTimeoutError'
+    }
+}
+
+function withDeliveryAttemptTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+            () => reject(new MatrixDeliveryAttemptTimeoutError(timeoutMs)),
+            timeoutMs,
+        )
+    })
+    return Promise.race([promise, deadline]).finally(() => {
+        if (timeout) clearTimeout(timeout)
+    })
+}
+
+function firstTransientFailure(
+    settled: readonly PromiseSettledResult<unknown>[],
+): unknown | undefined {
+    const rejected = settled.find(result =>
+        result.status === 'rejected'
+        && !(result.reason instanceof PermanentMatrixDeliveryError),
+    ) as PromiseRejectedResult | undefined
+    if (!rejected) return undefined
+    return rejected.reason ?? new Error('Matrix delivery failed without an error')
+}
+
+function firstRejectedReason(
+    settled: readonly PromiseSettledResult<unknown>[],
+): unknown | undefined {
+    const rejected = settled.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+    )
+    if (!rejected) return undefined
+    return rejected.reason instanceof PermanentMatrixDeliveryError
+        ? rejected.reason.deliveryCause
+        : rejected.reason
+}
+
+function formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
 }

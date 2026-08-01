@@ -59,6 +59,8 @@ export interface MatrixGatewayApplicationSecurityConfig {
     gatewayDeviceId: string
     gatewayKeyPair: SerializedDeviceKeyPair
     envelopeReplayLedgerPath: string
+    /** Timeout for one recipient attempt; durable retry continues afterward. */
+    deliveryAttemptTimeoutMs?: number
 }
 
 export interface MatrixGatewayConfig {
@@ -91,6 +93,15 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
     if (config.applicationSecurity) {
         requireText(config.applicationSecurity.gatewayDeviceId, 'applicationSecurity.gatewayDeviceId')
         requireText(config.applicationSecurity.envelopeReplayLedgerPath, 'applicationSecurity.envelopeReplayLedgerPath')
+        if (
+            config.applicationSecurity.deliveryAttemptTimeoutMs !== undefined
+            && (
+                !Number.isFinite(config.applicationSecurity.deliveryAttemptTimeoutMs)
+                || config.applicationSecurity.deliveryAttemptTimeoutMs <= 0
+            )
+        ) {
+            throw new Error('applicationSecurity.deliveryAttemptTimeoutMs must be positive')
+        }
         if (config.applicationSecurity.gatewayDeviceId !== config.gatewayId) {
             throw new Error('applicationSecurity.gatewayDeviceId must equal gatewayId in protocol v1')
         }

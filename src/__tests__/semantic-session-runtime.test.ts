@@ -3,7 +3,12 @@ import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
-import type { ChannelMessage, ChannelPort, SessionStatus } from '@/bridge/channelPort'
+import type {
+    ChannelMessage,
+    ChannelPort,
+    ChannelSendResult,
+    SessionStatus,
+} from '@/bridge/channelPort'
 
 interface DeliveryOperation {
     kind: 'send' | 'edit'
@@ -216,11 +221,58 @@ describe('SemanticSessionRuntime', () => {
         const rendered = sent.map(message => message.text).join('\n')
         expect(rendered).toContain('Delivery warning')
         expect(rendered).toContain('telegram rejected markdown entities')
+        expect(rendered).toContain('messaging channel permanently rejected')
+        expect(rendered).not.toContain('Telegram delivery')
         expect(rendered).toContain('/delivery delivery-1')
         expect(runtime.getDeliveryStatus('delivery-1').deliveries[0].message.text).toBe('final answer')
 
         await runtime.dispatch({ kind: 'command', name: 'progress', source: 'channel' })
         expect(sent.at(-1)?.text).toContain('Last delivery failure')
+    })
+
+    it('does not emit a failure warning or duplicate retry while confirmation is delayed', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: ChannelMessage[] = []
+            const statuses: SessionStatus[] = []
+            const channel = createChannel(sent, statuses)
+            channel.send = vi.fn(async () => await new Promise<ChannelSendResult>(() => {}))
+            const provider = createProvider([
+                { kind: 'text', text: 'durably queued answer' },
+                { kind: 'result', status: 'success' },
+            ])
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                deliveryTimeoutMs: 100,
+            })
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+                outbox,
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(100)
+            await running
+
+            const delayed = runtime.getDeliveryStatus('delivery-1').deliveries[0]
+            expect(delayed).toMatchObject({
+                status: 'queued',
+                message: { text: 'durably queued answer' },
+            })
+            expect(sent.map(message => message.text).join('\n')).not.toContain('Delivery warning')
+
+            await expect(runtime.retryDelivery('delivery-1')).resolves.toMatchObject({
+                status: 'queued',
+                deliveryId: 'delivery-1',
+            })
+            expect(channel.send).toHaveBeenCalledTimes(1)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it('can retrieve and retry a failed assistant delivery', async () => {

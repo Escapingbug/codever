@@ -46,7 +46,15 @@ interface AbandonedEntry {
     abandonedAt: number
 }
 
-type DeliveryEntry = PendingEntry | DeliveredEntry | LogicalEventEntry | AbandonedEntry
+interface FailedEntry {
+    version: 1
+    kind: 'failed'
+    deliveryId: string
+    error: string
+    failedAt: number
+}
+
+type DeliveryEntry = PendingEntry | DeliveredEntry | LogicalEventEntry | AbandonedEntry | FailedEntry
 
 export interface DurableMatrixDelivery {
     deliveryId: string
@@ -86,9 +94,11 @@ export class FileMatrixDeliveryOutbox {
     private readonly pending = new Map<string, DurableMatrixDelivery>()
     private readonly delivered = new Map<string, string>()
     private readonly abandoned = new Set<string>()
+    private readonly failed = new Set<string>()
     private readonly logicalEvents = new Map<string, string>()
     private readonly eventLogicalKeys = new Map<string, string>()
     private writeChain: Promise<void> = Promise.resolve()
+    private readonly transitionChains = new Map<string, Promise<void>>()
 
     constructor(private readonly path: string) {}
 
@@ -119,7 +129,11 @@ export class FileMatrixDeliveryOutbox {
             }
             if (entry.kind === 'pending') {
                 this.deliveries.set(entry.deliveryId, entry)
-                if (!this.delivered.has(entry.deliveryId) && !this.abandoned.has(entry.deliveryId)) {
+                if (
+                    !this.delivered.has(entry.deliveryId)
+                    && !this.abandoned.has(entry.deliveryId)
+                    && !this.failed.has(entry.deliveryId)
+                ) {
                     this.pending.set(entry.deliveryId, entry)
                 }
             } else if (entry.kind === 'delivered') {
@@ -130,42 +144,54 @@ export class FileMatrixDeliveryOutbox {
             } else if (entry.kind === 'logical_event') {
                 this.logicalEvents.set(entry.logicalKey, entry.eventId)
                 this.eventLogicalKeys.set(entry.eventId, entry.logicalKey)
-            } else {
+            } else if (entry.kind === 'abandoned') {
                 this.pending.delete(entry.deliveryId)
                 this.abandoned.add(entry.deliveryId)
+            } else {
+                this.pending.delete(entry.deliveryId)
+                this.failed.add(entry.deliveryId)
             }
         }
     }
 
     async stage(delivery: DurableMatrixDelivery): Promise<void> {
-        if (
-            this.pending.has(delivery.deliveryId)
-            || this.delivered.has(delivery.deliveryId)
-            || this.abandoned.has(delivery.deliveryId)
-        ) return
-        const entry: PendingEntry = {
-            version: 1,
-            kind: 'pending',
-            ...delivery,
-        }
-        await this.append(entry)
-        this.deliveries.set(delivery.deliveryId, delivery)
-        this.pending.set(delivery.deliveryId, delivery)
+        await this.serializeTransition(`delivery:${delivery.deliveryId}`, async () => {
+            if (
+                this.pending.has(delivery.deliveryId)
+                || this.delivered.has(delivery.deliveryId)
+                || this.abandoned.has(delivery.deliveryId)
+                || this.failed.has(delivery.deliveryId)
+            ) return
+            const entry: PendingEntry = {
+                version: 1,
+                kind: 'pending',
+                ...delivery,
+            }
+            await this.append(entry)
+            this.deliveries.set(delivery.deliveryId, delivery)
+            this.pending.set(delivery.deliveryId, delivery)
+        })
     }
 
     async markDelivered(deliveryId: string, eventId: string, deliveredAt = Date.now()): Promise<void> {
-        if (this.delivered.has(deliveryId) || this.abandoned.has(deliveryId)) return
-        await this.append({
-            version: 1,
-            kind: 'delivered',
-            deliveryId,
-            eventId,
-            deliveredAt,
+        await this.serializeTransition(`delivery:${deliveryId}`, async () => {
+            if (
+                this.delivered.has(deliveryId)
+                || this.abandoned.has(deliveryId)
+                || this.failed.has(deliveryId)
+            ) return
+            await this.append({
+                version: 1,
+                kind: 'delivered',
+                deliveryId,
+                eventId,
+                deliveredAt,
+            })
+            this.pending.delete(deliveryId)
+            this.delivered.set(deliveryId, eventId)
+            const delivery = this.deliveries.get(deliveryId)
+            if (delivery) this.eventLogicalKeys.set(eventId, delivery.logicalKey)
         })
-        this.pending.delete(deliveryId)
-        this.delivered.set(deliveryId, eventId)
-        const delivery = this.deliveries.get(deliveryId)
-        if (delivery) this.eventLogicalKeys.set(eventId, delivery.logicalKey)
     }
 
     async markAbandoned(
@@ -173,29 +199,56 @@ export class FileMatrixDeliveryOutbox {
         reason: AbandonedEntry['reason'],
         abandonedAt = Date.now(),
     ): Promise<void> {
-        if (this.delivered.has(deliveryId) || this.abandoned.has(deliveryId)) return
-        await this.append({
-            version: 1,
-            kind: 'abandoned',
-            deliveryId,
-            reason,
-            abandonedAt,
+        await this.serializeTransition(`delivery:${deliveryId}`, async () => {
+            if (
+                this.delivered.has(deliveryId)
+                || this.abandoned.has(deliveryId)
+                || this.failed.has(deliveryId)
+            ) return
+            await this.append({
+                version: 1,
+                kind: 'abandoned',
+                deliveryId,
+                reason,
+                abandonedAt,
+            })
+            this.pending.delete(deliveryId)
+            this.abandoned.add(deliveryId)
         })
-        this.pending.delete(deliveryId)
-        this.abandoned.add(deliveryId)
+    }
+
+    async markFailed(deliveryId: string, error: string, failedAt = Date.now()): Promise<void> {
+        await this.serializeTransition(`delivery:${deliveryId}`, async () => {
+            if (
+                this.delivered.has(deliveryId)
+                || this.abandoned.has(deliveryId)
+                || this.failed.has(deliveryId)
+            ) return
+            await this.append({
+                version: 1,
+                kind: 'failed',
+                deliveryId,
+                error,
+                failedAt,
+            })
+            this.pending.delete(deliveryId)
+            this.failed.add(deliveryId)
+        })
     }
 
     async recordLogicalEvent(logicalKey: string, eventId: string, recordedAt = Date.now()): Promise<void> {
-        if (this.logicalEvents.has(logicalKey)) return
-        await this.append({
-            version: 1,
-            kind: 'logical_event',
-            logicalKey,
-            eventId,
-            recordedAt,
+        await this.serializeTransition(`logical:${logicalKey}`, async () => {
+            if (this.logicalEvents.has(logicalKey)) return
+            await this.append({
+                version: 1,
+                kind: 'logical_event',
+                logicalKey,
+                eventId,
+                recordedAt,
+            })
+            this.logicalEvents.set(logicalKey, eventId)
+            this.eventLogicalKeys.set(eventId, logicalKey)
         })
-        this.logicalEvents.set(logicalKey, eventId)
-        this.eventLogicalKeys.set(eventId, logicalKey)
     }
 
     listPending(roomId?: string): DurableMatrixDelivery[] {
@@ -374,6 +427,19 @@ export class FileMatrixDeliveryOutbox {
         })
         return this.writeChain
     }
+
+    private async serializeTransition(key: string, transition: () => Promise<void>): Promise<void> {
+        const previous = this.transitionChains.get(key) ?? Promise.resolve()
+        const current = previous.catch(() => undefined).then(transition)
+        this.transitionChains.set(key, current)
+        try {
+            await current
+        } finally {
+            if (this.transitionChains.get(key) === current) {
+                this.transitionChains.delete(key)
+            }
+        }
+    }
 }
 
 function expandHistoryDeliveries(
@@ -528,6 +594,16 @@ function validateEntry(value: unknown): DeliveryEntry {
             throw new TypeError('invalid abandoned record')
         }
         return entry as unknown as AbandonedEntry
+    }
+    if (entry.kind === 'failed') {
+        if (
+            typeof entry.deliveryId !== 'string'
+            || typeof entry.error !== 'string'
+            || typeof entry.failedAt !== 'number'
+        ) {
+            throw new TypeError('invalid failed record')
+        }
+        return entry as unknown as FailedEntry
     }
     throw new TypeError('unknown record kind')
 }

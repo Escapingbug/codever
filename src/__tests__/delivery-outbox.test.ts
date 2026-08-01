@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
-import type { ChannelPort, ChannelMessage } from '@/bridge/channelPort'
+import {
+    ChannelDeliveryQueuedError,
+    type ChannelPort,
+    type ChannelMessage,
+    type ChannelSendResult,
+} from '@/bridge/channelPort'
 
 function createChannelPort(sent: string[]): ChannelPort {
     return {
@@ -129,16 +134,19 @@ describe('DeliveryOutbox', () => {
         expect(sent).toEqual(['lost answer body'])
     })
 
-    it('times out a stuck delivery and continues later sends', async () => {
+    it('keeps a timed-out delivery queued, continues later sends, and accepts a late confirmation', async () => {
         vi.useFakeTimers()
         try {
             const sent: string[] = []
             let calls = 0
+            let confirmFirst!: (result: ChannelSendResult) => void
             const channel = createChannelPort(sent)
             vi.mocked(channel.send).mockImplementation(async (message: ChannelMessage) => {
                 calls += 1
                 if (calls === 1) {
-                    return await new Promise(() => {})
+                    return await new Promise<ChannelSendResult>(resolve => {
+                        confirmFirst = resolve
+                    })
                 }
                 sent.push(message.text)
                 return { messageId: calls }
@@ -154,10 +162,17 @@ describe('DeliveryOutbox', () => {
             const next = outbox.send({ text: 'next', format: 'plain' })
 
             await vi.advanceTimersByTimeAsync(100)
-            await expect(stuck).resolves.toMatchObject({ status: 'failed' })
+            const delayed = await stuck
+            expect(delayed).toMatchObject({ status: 'queued' })
             await expect(next).resolves.toMatchObject({ status: 'sent' })
             expect(sent).toEqual(['next'])
-            expect(failures[0]).toContain('timed out')
+            expect(failures).toEqual([])
+            expect(outbox.getState().queuedUnconfirmed).toBe(1)
+
+            confirmFirst({ messageId: 99 })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(delayed).toMatchObject({ status: 'sent', messageId: 99 })
+            expect(outbox.getState().queuedUnconfirmed).toBe(0)
         } finally {
             vi.useRealTimers()
         }
@@ -188,11 +203,48 @@ describe('DeliveryOutbox', () => {
             expect(record.status).toBe('pending')
 
             await vi.advanceTimersByTimeAsync(400)
-            await expect(completion).resolves.toMatchObject({ status: 'failed' })
-            expect(failures[0]).toContain('500ms')
+            await expect(completion).resolves.toMatchObject({ status: 'queued' })
+            expect(failures).toEqual([])
         } finally {
             vi.useRealTimers()
         }
+    })
+
+    it('does not duplicate a delivery already accepted by a durable channel queue', async () => {
+        const sent: string[] = []
+        const channel = createChannelPort(sent)
+        let confirm!: (result: ChannelSendResult) => void
+        const confirmation = new Promise<ChannelSendResult>(resolve => {
+            confirm = resolve
+        })
+        vi.mocked(channel.send).mockRejectedValue(
+            new ChannelDeliveryQueuedError(
+                'durably queued',
+                'logical-1',
+                undefined,
+                confirmation,
+            ),
+        )
+        const failures: string[] = []
+        const outbox = new DeliveryOutbox({
+            channelPort: channel,
+            onFailure: record => failures.push(String(record.error)),
+        })
+
+        const queued = await outbox.send({ text: 'safe answer', format: 'markdown' })
+        const retry = await outbox.retry(queued.id)
+
+        expect(queued.status).toBe('queued')
+        expect(retry).toBe(queued)
+        expect(channel.send).toHaveBeenCalledTimes(1)
+        expect(failures).toEqual([])
+
+        confirm({ messageId: 42 })
+        await confirmation
+        await vi.waitFor(() => expect(queued).toMatchObject({
+            status: 'sent',
+            messageId: 42,
+        }))
     })
 
     it('does not let a rate-limited progressive edit block control sends', async () => {

@@ -47,7 +47,7 @@ export interface SendFileCommandResult {
 }
 
 export interface RetryDeliveryCommandResult {
-    status: 'sent' | 'failed' | 'not_found'
+    status: 'sent' | 'queued' | 'failed' | 'not_found'
     deliveryId?: string
     retryOf?: string
     messageId?: string | number
@@ -652,7 +652,7 @@ export class SemanticSessionRuntime {
         const error = record.error instanceof Error ? record.error.message : String(record.error)
         return [
             '<b>Delivery warning</b>',
-            'Codever received the agent reply, but Telegram delivery failed before it could be shown.',
+            'Codever received the agent reply, but the messaging channel permanently rejected its delivery.',
             `Delivery: <code>${escapeHtml(record.id)}</code>`,
             `<pre>${escapeHtml(truncateForNotice(error))}</pre>`,
             `The reply is retained in Codever. Use <code>/delivery ${escapeHtml(record.id)}</code> to read it or <code>/retry_delivery ${escapeHtml(record.id)}</code> to resend it.`,
@@ -1053,6 +1053,9 @@ export class SemanticSessionRuntime {
         if (progress.outbox.pendingControl || progress.outbox.pendingNormal || progress.outbox.pendingProgressiveEdits) {
             lines.push(`Outbox pending: control=${progress.outbox.pendingControl}, normal=${progress.outbox.pendingNormal}, edits=${progress.outbox.pendingProgressiveEdits}`)
         }
+        if (progress.outbox.queuedUnconfirmed) {
+            lines.push(`Delivery confirmation pending: <code>${progress.outbox.queuedUnconfirmed}</code>`)
+        }
         if (progress.outbox.lastRateLimitError) {
             lines.push(`Last rate limit: <pre>${escapeHtml(truncateForNotice(progress.outbox.lastRateLimitError))}</pre>`)
         }
@@ -1122,7 +1125,11 @@ export class SemanticSessionRuntime {
     private formatRetryDeliveryResult(record: DeliveryRecord): RetryDeliveryCommandResult {
         const message = record.error instanceof Error ? record.error.message : record.error ? String(record.error) : undefined
         return {
-            status: record.status === 'sent' ? 'sent' : 'failed',
+            status: record.status === 'sent'
+                ? 'sent'
+                : record.status === 'queued' || record.status === 'pending'
+                    ? 'queued'
+                    : 'failed',
             deliveryId: record.id,
             ...(record.retryOf ? { retryOf: record.retryOf } : {}),
             ...(record.messageId !== undefined ? { messageId: record.messageId } : {}),
@@ -1139,7 +1146,14 @@ export class SemanticSessionRuntime {
                 '<b>Delivery resent</b>',
                 result.retryOf ? `Original: <code>${escapeHtml(result.retryOf)}</code>` : undefined,
                 result.deliveryId ? `Retry: <code>${escapeHtml(result.deliveryId)}</code>` : undefined,
-                result.messageId !== undefined ? `Telegram message: <code>${escapeHtml(String(result.messageId))}</code>` : undefined,
+                result.messageId !== undefined ? `Channel message: <code>${escapeHtml(String(result.messageId))}</code>` : undefined,
+            ].filter(Boolean).join('\n')
+        }
+        if (result.status === 'queued') {
+            return [
+                '<b>Delivery still queued</b>',
+                result.deliveryId ? `Delivery: <code>${escapeHtml(result.deliveryId)}</code>` : undefined,
+                'No duplicate retry was started. Codever will keep waiting for the original delivery confirmation.',
             ].filter(Boolean).join('\n')
         }
         return [
@@ -1178,7 +1192,7 @@ export class SemanticSessionRuntime {
         ]
         if (record.retryOf) lines.push(`Retry of: <code>${escapeHtml(record.retryOf)}</code>`)
         if (record.resolvedBy) lines.push(`Resolved by: <code>${escapeHtml(record.resolvedBy)}</code>`)
-        if (record.messageId !== undefined) lines.push(`Telegram message: <code>${escapeHtml(String(record.messageId))}</code>`)
+        if (record.messageId !== undefined) lines.push(`Channel message: <code>${escapeHtml(String(record.messageId))}</code>`)
         if (record.message.attachments?.length) {
             lines.push(`Attachments: <code>${record.message.attachments.length}</code>`)
         }

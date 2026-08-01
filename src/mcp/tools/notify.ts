@@ -371,7 +371,7 @@ export function createSendFileHandler() {
                 return {
                     content: [{
                         type: 'text' as const,
-                        text: `File delivery queued: "${args.path}" (delivery ID: ${result.deliveryId}). The upload may still be in progress; call get_delivery_status with this delivery ID to check whether it is pending, sent, or failed.`,
+                        text: `File delivery queued: "${args.path}" (delivery ID: ${result.deliveryId}). The upload may still be in progress; call get_delivery_status with this delivery ID to check whether it is pending, queued, sent, or failed.`,
                     }],
                 }
             }
@@ -612,7 +612,7 @@ export function registerNotifyTools(server: any): void {
         'Check asynchronous channel delivery status for files or messages queued by Codever. Pass deliveryId to inspect a specific delivery; set includeText to recover retained message text.',
         {
             deliveryId: z.string().optional().describe('Optional delivery ID returned by send_file. If omitted, recent deliveries for the session are listed.'),
-            includeText: z.boolean().optional().describe('Include retained message text in the response. Use for failed deliveries whose Telegram message was not shown.'),
+            includeText: z.boolean().optional().describe('Include retained message text in the response. Use for failed deliveries whose channel message was not shown.'),
         },
         createGetDeliveryStatusHandler(),
     )

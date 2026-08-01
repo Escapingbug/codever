@@ -21,6 +21,7 @@ import {
     type MatrixSendEventRequest,
     type MatrixTransport,
 } from '@/channel/matrix'
+import { ChannelDeliveryQueuedError } from '@/bridge/channelPort'
 import {
     FileCommandReplayStore,
     FileMatrixDeliveryOutbox,
@@ -100,7 +101,7 @@ describe('multi-device Matrix collaboration', () => {
         const originalB = sent.find(item => envelopeRecipient(item) === 'device-b')!
         const physicalA = `$event-${sent.indexOf(originalA) + 1}`
         const physicalB = `$event-${sent.indexOf(originalB) + 1}`
-        expect(original.eventId).toBe(physicalA)
+        expect([physicalA, physicalB]).toContain(original.eventId)
         await expect(openFor(originalA, first, gateway, 'device-a'))
             .resolves.toMatchObject({
                 body: 'shared answer',
@@ -278,6 +279,268 @@ describe('multi-device Matrix collaboration', () => {
         expect(
             (thirdEdit['m.new_content'] as Record<string, unknown>)[CODEVER_MATRIX_EXTENSION],
         ).toMatchObject({ replaces_event_id: stableTarget })
+    })
+
+    it('returns after the first device confirms while the slow device remains durably queued', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const first = await generateDeviceKeyPair()
+        const second = await generateDeviceKeyPair()
+        const policies = [
+            trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A'),
+            trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B'),
+        ]
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            policies,
+            async () => policies,
+        )
+        await layer.initialize(now)
+        let releaseSlow!: () => void
+        const slow = new Promise<void>(resolve => {
+            releaseSlow = resolve
+        })
+        const attempted: string[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                const recipient = envelopeRecipient(request)!
+                attempted.push(recipient)
+                if (recipient === 'device-b') await slow
+                return { eventId: `$event-${recipient}` }
+            },
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+
+        const result = await layer.transportForRoom(room, transport).sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'logical-slow-fanout',
+            content: {
+                msgtype: 'm.text',
+                body: 'reply survives a slow device',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })
+
+        expect(result.eventId).toBe('$event-device-a')
+        expect(new Set(attempted)).toEqual(new Set(['device-a', 'device-b']))
+        const beforeSlowConfirmation = await readFile(
+            `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+            'utf8',
+        )
+        expect(beforeSlowConfirmation.match(/"kind":"pending"/gu)).toHaveLength(2)
+        expect(beforeSlowConfirmation.match(/"kind":"delivered"/gu)).toHaveLength(1)
+
+        releaseSlow()
+        await vi.waitFor(async () => {
+            const ledger = await readFile(
+                `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+                'utf8',
+            )
+            expect(ledger.match(/"kind":"delivered"/gu)).toHaveLength(2)
+        })
+        layer.stopRetries()
+    })
+
+    it('persists a new reply before recovering an older stuck delivery', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const ledgerPath = `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`
+        const oldOutbox = new FileMatrixDeliveryOutbox(ledgerPath)
+        await oldOutbox.initialize()
+        await oldOutbox.stage({
+            deliveryId: 'old-stuck-delivery',
+            logicalKey: 'old-stuck-logical',
+            recipientDeviceId: policy.deviceId,
+            recipientSequenceEpoch: policy.sequenceEpoch!,
+            recipientPublicKeyId: device.keyId,
+            request: {
+                roomId: '!room:localhost',
+                eventType: 'm.room.message',
+                transactionId: 'old-stuck-transaction',
+                content: { msgtype: 'm.text', body: 'old stuck reply' },
+            },
+            createdAt: now - 1_000,
+        })
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        const attempted: string[] = []
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+
+        await layer.transportForRoom(room, {
+            async sendEncryptedRoomEvent(request) {
+                attempted.push(request.transactionId)
+                if (request.transactionId === 'old-stuck-transaction') {
+                    return await new Promise(() => {})
+                }
+                return { eventId: '$new-reply' }
+            },
+        }).sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'new-logical-transaction',
+            content: {
+                msgtype: 'm.text',
+                body: 'new reply is staged first',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })
+
+        expect(attempted.some(transactionId => transactionId.startsWith('new-logical-transaction.'))).toBe(true)
+        const ledger = await readFile(ledgerPath, 'utf8')
+        expect(ledger).toContain('new reply is staged first')
+        layer.stopRetries()
+    })
+
+    it('keeps an all-device network failure durable and recovers it after restart', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const original = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await original.initialize(now)
+        const secureTransport = original.transportForRoom(room, {
+            async sendEncryptedRoomEvent() {
+                throw new Error('temporary weak network')
+            },
+        })
+
+        await expect(secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'weak-network-logical',
+            content: {
+                msgtype: 'm.text',
+                body: 'recover this reply',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        original.stopRetries()
+
+        const restarted = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await restarted.initialize(now)
+        const recovered: MatrixSendEventRequest[] = []
+        await restarted.retryPendingForRoom(room, {
+            async sendEncryptedRoomEvent(request) {
+                recovered.push(request)
+                return { eventId: '$recovered-weak-network' }
+            },
+        })
+
+        expect(recovered).toHaveLength(1)
+        const plaintext = await openFor(recovered[0]!, device, gateway, 'device-a')
+        expect(plaintext).toMatchObject({ body: 'recover this reply' })
+        restarted.stopRetries()
+    })
+
+    it('releases a hung recipient attempt and confirms the same durable transaction on retry', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            deliveryAttemptTimeoutMs: 20,
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        const attemptedTransactions: string[] = []
+        let queued!: ChannelDeliveryQueuedError
+        try {
+            await layer.transportForRoom(room, {
+                async sendEncryptedRoomEvent(request) {
+                    attemptedTransactions.push(request.transactionId)
+                    return await new Promise(() => {})
+                },
+            }).sendEncryptedRoomEvent({
+                roomId: room.roomId,
+                eventType: 'm.room.message',
+                transactionId: 'hung-logical',
+                content: {
+                    msgtype: 'm.text',
+                    body: 'hung but durable reply',
+                    [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+                },
+            })
+        } catch (error) {
+            expect(error).toBeInstanceOf(ChannelDeliveryQueuedError)
+            queued = error as ChannelDeliveryQueuedError
+        }
+        layer.stopRetries()
+
+        await layer.retryPendingForRoom(room, {
+            async sendEncryptedRoomEvent(request) {
+                attemptedTransactions.push(request.transactionId)
+                return { eventId: '$hung-recovered' }
+            },
+        })
+
+        await expect(queued.confirmation).resolves.toEqual({ messageId: '$hung-recovered' })
+        expect(attemptedTransactions).toHaveLength(2)
+        expect(new Set(attemptedTransactions)).toHaveLength(1)
+        layer.stopRetries()
     })
 
     it('replays late-join history to one device and preserves future edit targets', async () => {
@@ -910,6 +1173,64 @@ describe('multi-device Matrix collaboration', () => {
         await expect(corrupt.initialize()).rejects.toThrow(
             'Invalid Matrix delivery outbox record at line 2',
         )
+    })
+
+    it('persists permanent delivery failures so restart recovery does not retry them', async () => {
+        const directory = await temporaryDirectory()
+        const path = join(directory, 'delivery-outbox.jsonl')
+        const outbox = new FileMatrixDeliveryOutbox(path)
+        await outbox.initialize()
+        await outbox.stage({
+            deliveryId: 'delivery-permanent',
+            logicalKey: 'logical-permanent',
+            recipientDeviceId: 'device-a',
+            recipientSequenceEpoch: 'certificate-a',
+            recipientPublicKeyId: 'key-a',
+            request: {
+                roomId: '!room:localhost',
+                eventType: 'm.room.message',
+                transactionId: 'txn-permanent',
+                content: { msgtype: 'm.text', body: 'invalid forever' },
+            },
+            createdAt: now,
+        })
+        await outbox.markFailed('delivery-permanent', 'canonical JSON rejected the payload')
+
+        const recovered = new FileMatrixDeliveryOutbox(path)
+        await recovered.initialize()
+
+        expect(recovered.listPending()).toEqual([])
+        expect(await readFile(path, 'utf8')).toContain('"kind":"failed"')
+    })
+
+    it('writes one delivered transition when a late attempt and its retry confirm together', async () => {
+        const directory = await temporaryDirectory()
+        const path = join(directory, 'delivery-outbox.jsonl')
+        const outbox = new FileMatrixDeliveryOutbox(path)
+        await outbox.initialize()
+        await outbox.stage({
+            deliveryId: 'delivery-race',
+            logicalKey: 'logical-race',
+            recipientDeviceId: 'device-a',
+            recipientSequenceEpoch: 'certificate-a',
+            recipientPublicKeyId: 'key-a',
+            request: {
+                roomId: '!room:localhost',
+                eventType: 'm.room.message',
+                transactionId: 'txn-race',
+                content: { msgtype: 'm.text', body: 'race safely' },
+            },
+            createdAt: now,
+        })
+
+        await Promise.all([
+            outbox.markDelivered('delivery-race', '$same-event'),
+            outbox.markDelivered('delivery-race', '$same-event'),
+        ])
+
+        const ledger = await readFile(path, 'utf8')
+        expect(ledger.match(/"kind":"delivered"/gu)).toHaveLength(1)
+        expect(outbox.deliveredEventId('delivery-race')).toBe('$same-event')
     })
 
     it('keeps per-device command sequences but CAS-orders a shared conversation revision', async () => {

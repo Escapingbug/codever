@@ -98,7 +98,7 @@ export interface RetryDeliveryRequest {
 }
 
 export interface RetryDeliveryResponse {
-    status: 'sent' | 'failed' | 'not_found'
+    status: 'sent' | 'queued' | 'failed' | 'not_found'
     deliveryId?: string
     retryOf?: string
     messageId?: string | number

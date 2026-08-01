@@ -86,6 +86,23 @@ export interface ChannelSendResult {
     messageId?: string | number
 }
 
+/**
+ * The channel accepted the message into a durable delivery queue, but no
+ * remote recipient has confirmed it yet. Callers must not resend solely
+ * because of this result: the channel owns the eventual, idempotent retry.
+ */
+export class ChannelDeliveryQueuedError extends Error {
+    constructor(
+        message: string,
+        readonly deliveryKey?: string,
+        readonly deliveryCause?: unknown,
+        readonly confirmation?: Promise<ChannelSendResult>,
+    ) {
+        super(message)
+        this.name = 'ChannelDeliveryQueuedError'
+    }
+}
+
 export interface ChannelPort {
     /**
      * Whether tool-output file:// references should receive channel command
@@ -141,6 +158,7 @@ export interface TopicSession {
             pendingControl: number
             pendingNormal: number
             pendingProgressiveEdits: number
+            queuedUnconfirmed: number
             progressiveEditBlockedUntil?: number
             lastRateLimitError?: string
             lastFailure?: string
