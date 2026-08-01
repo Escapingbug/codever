@@ -26,7 +26,6 @@ import {
   signCommand,
   toArrayBuffer,
   type ReplayStore,
-  verifyGatewayDeviceRotation,
   verifyPairingResponse,
 } from "@codever/security";
 import type {
@@ -38,9 +37,9 @@ import type {
   RoomMessageEventContent,
 } from "matrix-js-sdk";
 import {
+  applyGatewayDeviceRotation,
   applyGatewayTransportSnapshot,
   completePairing,
-  latestGatewayTransportIssuedAt,
   loadTrustedGateway,
   saveTrustedGateway,
   type PairingPreview,
@@ -791,6 +790,20 @@ export async function connectMatrix(
         ),
       reportInboundError,
     );
+  let inboundChain: Promise<void> = Promise.resolve();
+  const enqueueInboundEvent = (
+    event: MatrixEvent,
+    historical: boolean,
+  ): Promise<void> => {
+    const operation = inboundChain.then(() =>
+      processInboundEvent(event, historical),
+    );
+    // A rejected live event is reported by its caller but must not poison the
+    // queue. Serial processing ensures every rotation observes the trust state
+    // persisted by the preceding snapshot or rotation.
+    inboundChain = operation.catch(() => undefined);
+    return operation;
+  };
   const onTimeline = (
     event: MatrixEvent,
     room: Room | undefined,
@@ -799,7 +812,7 @@ export async function connectMatrix(
     if (stopped || !room || room.roomId !== config.roomId || toStartOfTimeline) {
       return;
     }
-    void processInboundEvent(event, !initialSyncComplete).catch(
+    void enqueueInboundEvent(event, !initialSyncComplete).catch(
       reportInboundError,
     );
   };
@@ -879,7 +892,6 @@ export async function connectMatrix(
     if (!matrixDeviceKeys) {
       throw new Error("Matrix device keys were not initialized.");
     }
-    client.on(sdk.RoomEvent.Timeline, onTimeline);
     client.on(sdk.ClientEvent.Sync, onSync);
     handlers.onStatus(
       "connecting",
@@ -974,9 +986,15 @@ export async function connectMatrix(
       }
     }
 
-    for (const event of room.getLiveTimeline().getEvents()) {
-      await processInboundEvent(event, true);
-    }
+    // Buffer the complete initial timeline before enabling live delivery. No
+    // await occurs between taking this snapshot and registering the listener,
+    // so new events are appended behind the initial batch without a gap.
+    const initialTimeline = [...room.getLiveTimeline().getEvents()];
+    const initialTimelineOperations = initialTimeline.map((event) =>
+      enqueueInboundEvent(event, true),
+    );
+    client.on(sdk.RoomEvent.Timeline, onTimeline);
+    await Promise.all(initialTimelineOperations);
     assertPersistenceHealthy();
     connectionReady = true;
     handlers.onStatus("connected");
@@ -2589,6 +2607,7 @@ async function forwardEvent(
       onMessage,
       onTrustUpdated,
       identity,
+      getTrust,
     );
     seen.add(eventId);
     return;
@@ -2823,43 +2842,22 @@ async function acceptGatewayDeviceRotation(
   onMessage: (message: IncomingCodeverMessage) => void,
   onTrustUpdated?: (trust: TrustedGateway) => void,
   identity?: DeviceIdentity,
+  getTrust?: () => TrustedGateway | null,
 ): Promise<void> {
-  const trust = await loadTrustedGateway(identity);
+  const trust = getTrust?.() ?? (await loadTrustedGateway(identity));
   if (!trust) return;
   const signedRotation = signedGatewayDeviceRotationSchema.parse(input);
-  if (
-    trust.rotations.some(
-      (known) =>
-        known.rotation.rotationId === signedRotation.rotation.rotationId,
-    )
-  ) {
-    return;
-  }
+  const nextTrust = await applyGatewayDeviceRotation(trust, signedRotation);
+  if (nextTrust === trust) return;
+  const rotation = signedRotation.rotation;
   // The replacement device sends this event, so transport identity is checked
   // only after the persistent Gateway application key authorizes the rotation.
-  const rotation = await verifyGatewayDeviceRotation(
-    signedRotation,
-    trust.gatewayKey.publicKey,
-    {
-      gatewayId: trust.gatewayId,
-      previousTransport: trust.gatewayTransport,
-      issuedAfter: latestGatewayTransportIssuedAt(trust),
-    },
-  );
   assertMatrixEventMatchesTransport(event, rotation.nextTransport);
   await verifyAndPinGatewayDevice(client, rotation.nextTransport);
   // The existing Megolm outbound session was created before the replacement
   // Gateway Matrix device existed, so it has no room key for that device.
   // Rotate the transport session after the application-signed device rotation.
   await client.getCrypto()?.forceDiscardSession(config.roomId);
-  const nextTrust: TrustedGateway = {
-    ...trust,
-    gatewayTransport: rotation.nextTransport,
-    rotations: [
-      ...trust.rotations,
-      signedRotation,
-    ],
-  };
   saveTrustedGateway(nextTrust);
   config.gatewayMatrixUserId = rotation.nextTransport.userId;
   config.gatewayMatrixDeviceId = rotation.nextTransport.deviceId;

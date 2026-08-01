@@ -375,16 +375,22 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /error instanceof SecurityError && error\.code === "replay"/);
   assert.match(matrix, /Refusing to send to an unencrypted Matrix room/);
   assert.match(matrix, /kind: "pairing_request"/);
-  assert.match(matrix, /verifyGatewayDeviceRotation/);
+  assert.match(matrix, /applyGatewayDeviceRotation/);
+  assert.match(pairing, /verifyGatewayDeviceRotation/);
   assert.match(matrix, /CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD/);
   assert.match(matrix, /recoverGatewayTransportSnapshot/);
   assert.match(matrix, /applyGatewayTransportSnapshot/);
   assert.match(pairing, /verifyGatewayTransportSnapshot/);
   assert.match(pairing, /transportSnapshots/);
+  assert.match(matrix, /enqueueInboundEvent/);
+  assert.ok(
+    matrix.indexOf("client.on(sdk.RoomEvent.Timeline, onTimeline)") >
+      matrix.indexOf("const recoveredTrust = await recoverGatewayTransportSnapshot"),
+  );
   assert.match(app, /waitForCommandCompletion\(sent\.completion\)/);
   assert.match(
     matrix,
-    /verifyGatewayDeviceRotation[\s\S]*assertMatrixEventMatchesTransport\(event, rotation\.nextTransport\)/,
+    /applyGatewayDeviceRotation\(trust, signedRotation\)[\s\S]*assertMatrixEventMatchesTransport\(event, rotation\.nextTransport\)/,
   );
   assert.match(
     matrix,
@@ -396,7 +402,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /saveTrustedGateway\(nextTrust\)/);
   assert.match(
-    matrix,
+    pairing,
     /trust\.rotations\.some[\s\S]*rotationId === signedRotation\.rotation\.rotationId/,
   );
   assert.match(

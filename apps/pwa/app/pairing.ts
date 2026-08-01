@@ -385,6 +385,42 @@ export function latestGatewayTransportIssuedAt(trust: TrustedGateway): number {
   );
 }
 
+export async function applyGatewayDeviceRotation(
+  trust: TrustedGateway,
+  input: unknown,
+  now = Date.now(),
+): Promise<TrustedGateway> {
+  const signedRotation = signedGatewayDeviceRotationSchema.parse(input);
+  if (
+    trust.rotations.some(
+      (known) =>
+        known.rotation.rotationId === signedRotation.rotation.rotationId,
+    )
+  ) {
+    return trust;
+  }
+  const lastIssuedAt = latestGatewayTransportIssuedAt(trust);
+  // A durable root snapshot supersedes every incremental rotation at or before
+  // its issue time. Those events can still be present in the Matrix timeline
+  // after recovery and must not be interpreted as a new chain discontinuity.
+  if (signedRotation.rotation.issuedAt <= lastIssuedAt) return trust;
+  const rotation = await verifyGatewayDeviceRotation(
+    signedRotation,
+    trust.gatewayKey.publicKey,
+    {
+      gatewayId: trust.gatewayId,
+      previousTransport: trust.gatewayTransport,
+      issuedAfter: lastIssuedAt,
+    },
+    { now },
+  );
+  return {
+    ...trust,
+    gatewayTransport: rotation.nextTransport,
+    rotations: [...trust.rotations, signedRotation],
+  };
+}
+
 export async function applyGatewayTransportSnapshot(
   trust: TrustedGateway,
   input: unknown,
