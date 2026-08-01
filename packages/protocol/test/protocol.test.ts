@@ -243,6 +243,38 @@ describe('protocol schemas', () => {
     })
   })
 
+  it('accepts strict session lifecycle commands', () => {
+    const base = {
+      kind: 'codever.command',
+      version: 1,
+      gatewayId: 'gateway-1',
+      deviceId: 'device-1',
+      sequenceEpoch: 'certificate-device-1',
+      conversationId: 'conversation-1',
+      revisionEpoch: 'runtime-epoch-1',
+      baseRevision: 0,
+      issuedAt: 1,
+      expiresAt: 2,
+    }
+    for (const [sequence, operation] of [
+      [1, 'session.archive'],
+      [2, 'session.restore'],
+      [3, 'session.delete'],
+    ] as const) {
+      expect(commandSchema.parse({
+        ...base,
+        commandId: `${operation}-${sequence}`,
+        sequence,
+        operation,
+        nonce: `0123456789abcdef-${operation}`,
+        payload: {
+          operation,
+          sessionId: 'app-session-1',
+        },
+      }).payload).toEqual({ operation, sessionId: 'app-session-1' })
+    }
+  })
+
   it('accepts a bounded device invitation request without a session target', () => {
     expect(commandSchema.parse({
       kind: 'codever.command',

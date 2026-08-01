@@ -61,14 +61,20 @@ Project identity is the pair `(gatewayId, projectId)`. Project display names
 are intentionally non-unique; the Gateway derives a stable `projectId` from
 the local working directory, so two different paths may both be displayed
 with the same project name. Each app session persists its own project, model,
-reasoning effort and provider-session binding.
+reasoning effort, provider-session binding and archive state.
 
 An app session is an independently live execution address, not a saved profile
 that is installed into one room-level runtime when selected:
 
-- every persisted app session owns its own `TopicSession`,
+- every active app session owns its own `TopicSession`,
   `SemanticSessionRuntime`, provider instance and fixed-session `MatrixPort`;
+- an archived app session retains its metadata and provider-session binding but
+  releases those runtime resources until a signed restore command recreates
+  them;
 - prompt, cancel, decision and settings commands carry the target `sessionId`;
+- archive, restore and delete are signed, revision-checked Gateway mutations.
+  Delete removes the app-session record from Codever, but does not claim to
+  redact append-only Matrix history or data retained by the provider;
 - sessions may run and receive provider events concurrently;
 - output remains tagged with the runtime's immutable app-session ID, including
   delayed edits, decisions and status events;

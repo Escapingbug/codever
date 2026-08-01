@@ -16,6 +16,7 @@ export interface PersistedAppSession {
     reasoningEffort: string | null
     permissionMode: string
     providerSessionId: string | null
+    archivedAt: number | null
 }
 
 export interface PersistedRoomRuntimeState {
@@ -298,6 +299,11 @@ function validateAppSession(
         || !(session.cwd === undefined || typeof session.cwd === 'string')
         || !(session.projectId === undefined || typeof session.projectId === 'string')
         || !(session.projectName === undefined || typeof session.projectName === 'string')
+        || !(
+            session.archivedAt === undefined
+            || session.archivedAt === null
+            || (Number.isSafeInteger(session.archivedAt) && (session.archivedAt as number) >= 0)
+        )
     ) {
         throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
     }
@@ -325,6 +331,9 @@ function validateAppSession(
             ? session.permissionMode
             : fallback.permissionMode,
         providerSessionId: session.providerSessionId as string | null,
+        archivedAt: typeof session.archivedAt === 'number'
+            ? session.archivedAt
+            : null,
     }
 }
 

@@ -50,6 +50,7 @@ interface RoomRuntime {
     workspace: WorkspaceState
     capabilityProvider: AgentProvider | null
     appSessions: Map<string, AppSessionRuntime>
+    archivedSessions: Map<string, AppSessionRecord>
     revisionEpoch: string
     revisionEpochGeneration: number
     replayGeneration: string
@@ -114,6 +115,7 @@ export class MatrixGatewayRunner {
     private startupEvents: MatrixIncomingEvent[] = []
     private eventChain: Promise<void> = Promise.resolve()
     private readonly executionTasks = new Set<Promise<void>>()
+    private readonly sessionMutationChains = new Map<string, Promise<void>>()
     private startupFailure: Error | null = null
     private stopPromise: Promise<void> | null = null
 
@@ -206,20 +208,12 @@ export class MatrixGatewayRunner {
                 // Session selection is a per-device PWA view concern. It is
                 // deliberately absent from Gateway-authoritative state.
                 currentSessionId: null,
-                sessions: [...runtime.appSessions.values()].map(({ record, session }) => ({
-                    id: record.id,
-                    title: record.title,
-                    updatedAt: record.updatedAt,
-                    status: gatewaySessionStatus(session.state),
-                    projectId: record.projectId,
-                    projectName: record.projectName,
-                    cwd: record.cwd,
-                    provider: record.provider,
-                    ...(record.model ? { model: record.model } : {}),
-                    ...(record.reasoningEffort
-                        ? { reasoningEffort: record.reasoningEffort }
-                        : {}),
-                })),
+                sessions: [
+                    ...[...runtime.appSessions.values()].map(({ record, session }) =>
+                        gatewaySessionSummary(record, gatewaySessionStatus(session.state))),
+                    ...[...runtime.archivedSessions.values()].map(record =>
+                        gatewaySessionSummary(record, 'idle', true)),
+                ].sort((left, right) => right.updatedAt - left.updatedAt),
                 workspace: {
                     projectId: runtime.workspace.projectId,
                     projectName: runtime.workspace.projectName,
@@ -238,6 +232,8 @@ export class MatrixGatewayRunner {
                     permissionModes: [{ id: 'default', name: 'Default' }],
                     canCreateSession: true,
                     canSelectSession: false,
+                    canArchiveSession: true,
+                    canDeleteSession: true,
                 },
             }, this.client)
         }))
@@ -648,6 +644,30 @@ export class MatrixGatewayRunner {
                 }
                 return { sessionId: record.id }
             }
+            case 'session.archive': {
+                const { sessionId } = command.payload
+                return this.serializeSessionMutation(
+                    runtime,
+                    sessionId,
+                    () => this.archiveAppSession(runtime, sessionId),
+                )
+            }
+            case 'session.restore': {
+                const { sessionId } = command.payload
+                return this.serializeSessionMutation(
+                    runtime,
+                    sessionId,
+                    () => this.restoreAppSession(runtime, sessionId),
+                )
+            }
+            case 'session.delete': {
+                const { sessionId } = command.payload
+                return this.serializeSessionMutation(
+                    runtime,
+                    sessionId,
+                    () => this.deleteAppSession(runtime, sessionId),
+                )
+            }
             case 'device.invite': {
                 if (!this.dependencies.createDeviceInvitation) {
                     throw new Error('This Gateway host does not support PWA-created device invitations')
@@ -789,6 +809,135 @@ export class MatrixGatewayRunner {
         return appSession
     }
 
+    private requireArchivedSession(
+        runtime: RoomRuntime,
+        sessionId: string,
+    ): AppSessionRecord {
+        const record = runtime.archivedSessions.get(sessionId)
+        if (!record) throw new Error(`App session ${sessionId} is not archived`)
+        return record
+    }
+
+    private serializeSessionMutation<T>(
+        runtime: RoomRuntime,
+        sessionId: string,
+        operation: () => Promise<T>,
+    ): Promise<T> {
+        const key = `${runtime.config.roomId}\0${sessionId}`
+        const previous = this.sessionMutationChains.get(key) ?? Promise.resolve()
+        const result = previous.then(operation)
+        const settled = result.then(() => undefined, () => undefined)
+        this.sessionMutationChains.set(key, settled)
+        void settled.then(() => {
+            if (this.sessionMutationChains.get(key) === settled) {
+                this.sessionMutationChains.delete(key)
+            }
+        })
+        return result
+    }
+
+    private async archiveAppSession(
+        runtime: RoomRuntime,
+        sessionId: string,
+    ): Promise<CommandExecutionResult> {
+        const appSession = this.requireAppSession(runtime, sessionId)
+        this.updateAppSessionRecord(appSession)
+        try {
+            await this.destroyAppSessionRuntime(appSession)
+        } catch (error) {
+            runtime.appSessions.set(
+                appSession.record.id,
+                this.createAppSessionRuntime(runtime, appSession.record),
+            )
+            throw error
+        }
+        runtime.appSessions.delete(appSession.record.id)
+        appSession.record.archivedAt = this.now()
+        appSession.record.updatedAt = appSession.record.archivedAt
+        runtime.archivedSessions.set(appSession.record.id, appSession.record)
+        try {
+            await this.persistRuntime(runtime)
+        } catch (error) {
+            runtime.archivedSessions.delete(appSession.record.id)
+            appSession.record.archivedAt = null
+            runtime.appSessions.set(
+                appSession.record.id,
+                this.createAppSessionRuntime(runtime, appSession.record),
+            )
+            throw error
+        }
+        return { sessionId: appSession.record.id }
+    }
+
+    private async restoreAppSession(
+        runtime: RoomRuntime,
+        sessionId: string,
+    ): Promise<CommandExecutionResult> {
+        const record = this.requireArchivedSession(runtime, sessionId)
+        const archivedAt = record.archivedAt
+        const updatedAt = record.updatedAt
+        record.archivedAt = null
+        record.updatedAt = this.now()
+        const appSession = this.createAppSessionRuntime(runtime, record)
+        runtime.archivedSessions.delete(record.id)
+        runtime.appSessions.set(record.id, appSession)
+        try {
+            await this.persistRuntime(runtime)
+        } catch (error) {
+            runtime.appSessions.delete(record.id)
+            record.archivedAt = archivedAt
+            record.updatedAt = updatedAt
+            runtime.archivedSessions.set(record.id, record)
+            await this.destroyAppSessionRuntime(appSession).catch(destroyError => {
+                this.log(
+                    `[matrix-gateway] rolled-back restored session ${record.id} destroy failed: `
+                    + formatError(destroyError),
+                )
+            })
+            throw error
+        }
+        return { sessionId: record.id }
+    }
+
+    private async deleteAppSession(
+        runtime: RoomRuntime,
+        sessionId: string,
+    ): Promise<CommandExecutionResult> {
+        const active = runtime.appSessions.get(sessionId)
+        const archived = runtime.archivedSessions.get(sessionId)
+        if (!active && !archived) throw new Error(`Unknown app session ${sessionId}`)
+        const record = active?.record ?? archived!
+        if (active) {
+            this.updateAppSessionRecord(active)
+            try {
+                await this.destroyAppSessionRuntime(active)
+            } catch (error) {
+                runtime.appSessions.set(
+                    record.id,
+                    this.createAppSessionRuntime(runtime, record),
+                )
+                throw error
+            }
+            runtime.appSessions.delete(record.id)
+        } else {
+            runtime.archivedSessions.delete(record.id)
+        }
+        try {
+            await this.persistRuntime(runtime)
+        } catch (error) {
+            if (record.archivedAt === null) {
+                runtime.appSessions.set(
+                    record.id,
+                    this.createAppSessionRuntime(runtime, record),
+                )
+            } else {
+                runtime.archivedSessions.set(record.id, record)
+            }
+            throw error
+        }
+        return { sessionId: record.id }
+    }
+
     private async createAppSessionRecord(
         runtime: RoomRuntime,
         settings: WorkspaceSettingsInput,
@@ -810,6 +959,7 @@ export class MatrixGatewayRunner {
             reasoningEffort: workspace.reasoningEffort,
             permissionMode: workspace.permissionMode,
             providerSessionId: null,
+            archivedAt: null,
         }
     }
 
@@ -834,6 +984,7 @@ export class MatrixGatewayRunner {
                 capabilityProvider: getProvider(restored.workspace.provider) ?? null,
                 workspace: structuredClone(restored.workspace),
                 appSessions: new Map(),
+                archivedSessions: new Map(),
                 revisionEpoch: restored.revisionEpoch,
                 revisionEpochGeneration: restored.revisionEpochGeneration,
                 replayGeneration: restored.replayGeneration,
@@ -844,10 +995,14 @@ export class MatrixGatewayRunner {
             this.rooms.set(room.roomId, runtime)
             for (const persisted of restored.appSessions) {
                 const record = { ...persisted }
-                runtime.appSessions.set(
-                    record.id,
-                    this.createAppSessionRuntime(runtime, record),
-                )
+                if (record.archivedAt !== null) {
+                    runtime.archivedSessions.set(record.id, record)
+                } else {
+                    runtime.appSessions.set(
+                        record.id,
+                        this.createAppSessionRuntime(runtime, record),
+                    )
+                }
             }
         }
     }
@@ -916,6 +1071,14 @@ export class MatrixGatewayRunner {
         return createTopicSession({ sessionRecord, provider, channelPort: port })
     }
 
+    private async destroyAppSessionRuntime(appSession: AppSessionRuntime): Promise<void> {
+        try {
+            await appSession.session.destroy()
+        } finally {
+            appSession.port.close()
+        }
+    }
+
     private async cleanup(): Promise<void> {
         this.unsubscribe?.()
         this.unsubscribe = null
@@ -937,6 +1100,7 @@ export class MatrixGatewayRunner {
         }
         await Promise.allSettled([...this.executionTasks])
         this.executionTasks.clear()
+        this.sessionMutationChains.clear()
     }
 
     private now(): number {
@@ -985,7 +1149,7 @@ function runtimeStateWithoutVersion(
         currentSessionId: null,
         appSessions: [...runtime.appSessions.values()].map(({ record }) => ({
             ...record,
-        })),
+        })).concat([...runtime.archivedSessions.values()].map(record => ({ ...record }))),
         workspace: structuredClone(runtime.workspace),
     }
 }
@@ -999,7 +1163,32 @@ function commandSessionId(command: CodeverCommand): string | null {
         case 'cancel':
         case 'decision':
         case 'session.settings':
+        case 'session.archive':
+        case 'session.restore':
+        case 'session.delete':
             return command.payload.sessionId
+    }
+}
+
+function gatewaySessionSummary(
+    record: AppSessionRecord,
+    status: 'idle' | 'running' | 'stopping' | 'failed',
+    archived = false,
+) {
+    return {
+        id: record.id,
+        title: record.title,
+        updatedAt: record.updatedAt,
+        status,
+        ...(archived ? { archived: true } : {}),
+        projectId: record.projectId,
+        projectName: record.projectName,
+        cwd: record.cwd,
+        provider: record.provider,
+        ...(record.model ? { model: record.model } : {}),
+        ...(record.reasoningEffort
+            ? { reasoningEffort: record.reasoningEffort }
+            : {}),
     }
 }
 

@@ -31,3 +31,18 @@ test("preserves defined attachments in prompt commands", () => {
   assert.deepEqual(payload.attachments, []);
   assert.doesNotThrow(() => canonicalJson(payload));
 });
+
+test("creates canonical session lifecycle commands", () => {
+  for (const operation of [
+    "session.archive",
+    "session.restore",
+    "session.delete",
+  ] as const) {
+    const payload = commandPayloadSchema.parse({
+      operation,
+      sessionId: "session-1",
+    });
+    assert.deepEqual(payload, { operation, sessionId: "session-1" });
+    assert.doesNotThrow(() => canonicalJson(payload));
+  }
+});

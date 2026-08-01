@@ -32,7 +32,11 @@ import {
   NewSessionDialog,
   type NewSessionInput,
 } from "./NewSessionDialog";
-import { gatewayProjectKey } from "./gatewayState";
+import { SessionDeleteDialog } from "./SessionDeleteDialog";
+import {
+  gatewayProjectKey,
+  type GatewaySessionSummary,
+} from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
 import { legacyToolGroupPresentation } from "./presentation";
@@ -58,6 +62,7 @@ import {
 import { createPromptCommandPayload } from "./commandPayloads";
 import {
   clearMessageHistoryScope,
+  clearSessionMessageHistory,
   deleteMessageHistory,
   loadMessageHistoryPage,
   matrixHistoryScope,
@@ -314,6 +319,13 @@ export function CodeverApp() {
     useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<{
+    sessionId: string;
+    action: "archive" | "restore" | "delete";
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] =
+    useState<GatewaySessionSummary | null>(null);
   const [decisionStates, setDecisionStates] = useState<
     Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
@@ -338,6 +350,7 @@ export function CodeverApp() {
   const pendingPromptSessionIdsRef = useRef(new Set<string>());
   const selectedSessionIdRef = useRef<string | null>(null);
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
+  const knownGatewaySessionIdsRef = useRef(new Set<string>());
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
@@ -354,6 +367,10 @@ export function CodeverApp() {
     gatewayState?.sessions.find(
       (session) => session.id === selectedSessionId,
     ) ?? null;
+  const selectedArchived = selected?.status === "archived";
+  const selectedLifecycleBusy = Boolean(
+    selected && sessionLifecycleBusy?.sessionId === selected.id,
+  );
   const filteredSessions = useMemo(
     () =>
       (gatewayState?.sessions ?? []).filter((session) =>
@@ -363,6 +380,20 @@ export function CodeverApp() {
       ),
     [gatewayState, search],
   );
+  const activeFilteredSessions = useMemo(
+    () => filteredSessions.filter((session) => session.status !== "archived"),
+    [filteredSessions],
+  );
+  const archivedFilteredSessions = useMemo(
+    () => filteredSessions.filter((session) => session.status === "archived"),
+    [filteredSessions],
+  );
+  const activeSessionCount =
+    gatewayState?.sessions.filter((session) => session.status !== "archived")
+      .length ?? 0;
+  const archivedSessionCount =
+    gatewayState?.sessions.filter((session) => session.status === "archived")
+      .length ?? 0;
   const projectGroups = useMemo(() => {
     const groups = new Map<
       string,
@@ -374,7 +405,7 @@ export function CodeverApp() {
         sessions: NonNullable<typeof gatewayState>["sessions"];
       }
     >();
-    for (const session of filteredSessions) {
+    for (const session of activeFilteredSessions) {
       const key = gatewayProjectKey(matrixConfig.gatewayId, session.projectId);
       const group = groups.get(key) ?? {
         key,
@@ -387,7 +418,7 @@ export function CodeverApp() {
       groups.set(key, group);
     }
     return [...groups.values()];
-  }, [filteredSessions, matrixConfig.gatewayId]);
+  }, [activeFilteredSessions, matrixConfig.gatewayId]);
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
   const isStreaming = Boolean(
@@ -399,7 +430,9 @@ export function CodeverApp() {
   const agentActivity = selectedSessionId
     ? agentActivitiesBySession.get(selectedSessionId) ?? null
     : null;
-  const sessionReady = Boolean(matrixConnected && gatewayState && selected);
+  const sessionReady = Boolean(
+    matrixConnected && gatewayState && selected && !selectedArchived,
+  );
   const conversationTitle =
     selected?.title ??
     (trustedGateway
@@ -993,6 +1026,7 @@ export function CodeverApp() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
+    knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
     setGatewayRevision(null);
@@ -1038,6 +1072,31 @@ export function CodeverApp() {
             );
           }
           if (state.gatewayState) {
+            const nextSessionIds = new Set(
+              state.gatewayState.sessions.map((session) => session.id),
+            );
+            for (const previousSessionId of knownGatewaySessionIdsRef.current) {
+              if (nextSessionIds.has(previousSessionId)) continue;
+              liveMessagesBySessionRef.current.delete(previousSessionId);
+              if (historyScopeRef.current) {
+                void clearSessionMessageHistory(
+                  historyScopeRef.current,
+                  previousSessionId,
+                ).catch((error) => {
+                  setConnectionError(
+                    `Deleted session history could not be cleared locally: ${formatUiError(error)}`,
+                  );
+                });
+              }
+            }
+            knownGatewaySessionIdsRef.current = nextSessionIds;
+            setDeleteTarget((current) =>
+              current
+                ? state.gatewayState!.sessions.find(
+                    (session) => session.id === current.id,
+                  ) ?? null
+                : null,
+            );
             setGatewayState(state.gatewayState);
             const runningIds = new Set(
               state.gatewayState.sessions
@@ -1072,6 +1131,12 @@ export function CodeverApp() {
             const availableIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
+            const activeSessions = state.gatewayState.sessions.filter(
+              (session) => session.status !== "archived",
+            );
+            const activeIds = new Set(
+              activeSessions.map((session) => session.id),
+            );
             const pendingCreated = pendingCreatedSessionIdRef.current;
             const nextSessionId =
               pendingCreated && availableIds.has(pendingCreated)
@@ -1079,10 +1144,12 @@ export function CodeverApp() {
                 : selectedSessionIdRef.current &&
                     availableIds.has(selectedSessionIdRef.current)
                   ? selectedSessionIdRef.current
-                  : state.gatewayState.currentSessionId &&
-                      availableIds.has(state.gatewayState.currentSessionId)
+                : state.gatewayState.currentSessionId &&
+                      activeIds.has(state.gatewayState.currentSessionId)
                     ? state.gatewayState.currentSessionId
-                    : state.gatewayState.sessions[0]?.id ?? null;
+                    : activeSessions[0]?.id ??
+                      state.gatewayState.sessions[0]?.id ??
+                      null;
             if (pendingCreated === nextSessionId) {
               pendingCreatedSessionIdRef.current = null;
             }
@@ -1140,6 +1207,7 @@ export function CodeverApp() {
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     pendingCreatedSessionIdRef.current = null;
+    knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     setConnectionStatus("offline");
@@ -1677,6 +1745,78 @@ export function CodeverApp() {
     }
   }
 
+  async function runSessionLifecycle(
+    action: "archive" | "restore" | "delete",
+    sessionId: string,
+  ): Promise<boolean> {
+    const capabilities = gatewayState?.capabilities;
+    const supported =
+      action === "delete"
+        ? capabilities?.canDeleteSession
+        : capabilities?.canArchiveSession;
+    if (!supported) {
+      setConnectionError(
+        `This Gateway does not support session ${action}. Update and reconnect the Gateway first.`,
+      );
+      return false;
+    }
+    setSessionLifecycleBusy({ sessionId, action });
+    try {
+      const sent = await sendRealCommand(
+        sessionLifecyclePayload(action, sessionId),
+      );
+      const completion = sent
+        ? await waitForCommandCompletion(sent.completion)
+        : null;
+      if (completion?.outcome !== "succeeded") {
+        if (sent) {
+          setConnectionError(`The session could not be ${lifecyclePastTense(action)}.`);
+        }
+        return false;
+      }
+      setDetailsOpen(false);
+      return true;
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+      return false;
+    } finally {
+      setSessionLifecycleBusy(null);
+    }
+  }
+
+  async function archiveSession(sessionId: string) {
+    await runSessionLifecycle("archive", sessionId);
+  }
+
+  async function restoreSession(sessionId: string) {
+    if (await runSessionLifecycle("restore", sessionId)) {
+      setMobileChatOpen(true);
+      activateLocalSession(sessionId);
+    }
+  }
+
+  async function deleteSession() {
+    const target = deleteTarget;
+    if (!target) return;
+    if (!(await runSessionLifecycle("delete", target.id))) return;
+    liveMessagesBySessionRef.current.delete(target.id);
+    knownGatewaySessionIdsRef.current.delete(target.id);
+    if (historyScopeRef.current) {
+      try {
+        await clearSessionMessageHistory(historyScopeRef.current, target.id);
+      } catch (error) {
+        setConnectionError(
+          `The session was deleted, but its local history could not be cleared: ${formatUiError(error)}`,
+        );
+      }
+    }
+    if (selectedSessionIdRef.current === target.id) {
+      activateLocalSession(null);
+      setMobileChatOpen(false);
+    }
+    setDeleteTarget(null);
+  }
+
   function selectAttachments(event: ChangeEvent<HTMLInputElement>) {
     const selectedFiles = [...(event.target.files ?? [])];
     event.target.value = "";
@@ -2139,7 +2279,7 @@ export function CodeverApp() {
 
         <div className="session-section-label">
           <span>Recent</span>
-          <span>{gatewayState?.sessions.length ?? 0}</span>
+          <span>{activeSessionCount}</span>
         </div>
 
         <div className="session-list">
@@ -2198,6 +2338,49 @@ export function CodeverApp() {
               ))}
             </section>
           ))}
+          {archivedSessionCount > 0 && (
+            <section className="archived-session-section">
+              <button
+                type="button"
+                className="archived-session-toggle"
+                aria-expanded={archivedOpen || Boolean(search.trim())}
+                onClick={() => setArchivedOpen((value) => !value)}
+              >
+                <span className="archive-mark" aria-hidden="true">▣</span>
+                <span>Archived</span>
+                <b>{archivedSessionCount}</b>
+                <span className="archive-chevron" aria-hidden="true">
+                  {archivedOpen || search.trim() ? "⌃" : "⌄"}
+                </span>
+              </button>
+              {(archivedOpen || Boolean(search.trim())) && (
+                <div className="archived-session-list">
+                  {archivedFilteredSessions.map((session) => (
+                    <button
+                      type="button"
+                      key={session.id}
+                      className={`archived-session-row ${
+                        selectedSessionId === session.id ? "selected" : ""
+                      }`}
+                      onClick={() => void chooseSession(session.id)}
+                    >
+                      <span className="archived-session-icon" aria-hidden="true">
+                        ▣
+                      </span>
+                      <span>
+                        <strong>{session.title}</strong>
+                        <small>{session.projectName} · {session.provider}</small>
+                      </span>
+                      <time>{formatSessionTime(session.updatedAt)}</time>
+                    </button>
+                  ))}
+                  {archivedFilteredSessions.length === 0 && search.trim() && (
+                    <small className="archived-empty">No archived matches</small>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
           {!trustedGateway && (
             <div className="empty-search">
               <span>G</span>
@@ -2224,6 +2407,15 @@ export function CodeverApp() {
               Create your first secure conversation
             </div>
           )}
+          {gatewayState &&
+            activeSessionCount === 0 &&
+            archivedSessionCount > 0 &&
+            !search.trim() && (
+              <div className="empty-search compact-empty">
+                <span>＋</span>
+                No active conversations
+              </div>
+            )}
         </div>
 
         <footer className="trust-footer">
@@ -2279,7 +2471,9 @@ export function CodeverApp() {
               />{" "}
               {connectionStatus === "connected"
                 ? gatewayState
-                  ? `${activeProvider} · encrypted sync active`
+                  ? selectedArchived
+                    ? `${activeProvider} · archived`
+                    : `${activeProvider} · encrypted sync active`
                   : "Syncing Gateway state…"
                 : connectionStatus}
             </span>
@@ -2312,7 +2506,84 @@ export function CodeverApp() {
             <span className="verified-line">
               <b>✓</b> Commands signed locally
             </span>
+            {selected && (
+              <div className="session-menu-actions">
+                {selectedArchived ? (
+                  <button
+                    type="button"
+                    className="session-menu-primary"
+                    disabled={
+                      selectedLifecycleBusy ||
+                      !gatewayState?.capabilities.canArchiveSession
+                    }
+                    onClick={() => void restoreSession(selected.id)}
+                  >
+                    <span aria-hidden="true">↺</span>
+                    <span>
+                      <strong>Restore session</strong>
+                      <small>Return it to Recent</small>
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="session-menu-primary"
+                    disabled={
+                      selectedLifecycleBusy ||
+                      !gatewayState?.capabilities.canArchiveSession
+                    }
+                    onClick={() => void archiveSession(selected.id)}
+                  >
+                    <span aria-hidden="true">▣</span>
+                    <span>
+                      <strong>
+                        {isStreaming ? "Archive & stop agent" : "Archive session"}
+                      </strong>
+                      <small>Keep it available to restore</small>
+                    </span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="session-menu-danger"
+                  disabled={
+                    selectedLifecycleBusy ||
+                    !gatewayState?.capabilities.canDeleteSession
+                  }
+                  onClick={() => {
+                    setDetailsOpen(false);
+                    setDeleteTarget(selected);
+                  }}
+                >
+                  <span aria-hidden="true">×</span>
+                  <span>
+                    <strong>Delete session</strong>
+                    <small>Remove it from Codever</small>
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
+        )}
+
+        {selectedArchived && selected && (
+          <section className="archived-session-banner" role="status">
+            <span className="archive-banner-icon" aria-hidden="true">▣</span>
+            <span>
+              <strong>This session is archived</strong>
+              <small>Its history remains available. Restore it to continue working.</small>
+            </span>
+            <button
+              type="button"
+              disabled={
+                selectedLifecycleBusy ||
+                !gatewayState?.capabilities.canArchiveSession
+              }
+              onClick={() => void restoreSession(selected.id)}
+            >
+              {selectedLifecycleBusy ? "Restoring…" : "Restore"}
+            </button>
+          </section>
         )}
 
         <div
@@ -2646,7 +2917,9 @@ export function CodeverApp() {
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}
               placeholder={
-                matrixConnected
+                selectedArchived
+                  ? "Restore this session to continue"
+                  : matrixConnected
                   ? `Message ${activeProvider}…`
                   : trustedGateway
                     ? "Reconnect your Gateway to send messages"
@@ -2654,7 +2927,7 @@ export function CodeverApp() {
               }
               aria-label={`Message ${activeProvider}`}
               rows={1}
-              disabled={!matrixConnected || attachmentBusy}
+              disabled={!sessionReady || attachmentBusy}
             />
             <div className="composer-actions">
               <input
@@ -2851,6 +3124,19 @@ export function CodeverApp() {
           onCreate={(input) => void createSession(input)}
         />
       )}
+
+      <SessionDeleteDialog
+        session={deleteTarget}
+        busy={
+          deleteTarget !== null &&
+          sessionLifecycleBusy?.sessionId === deleteTarget.id &&
+          sessionLifecycleBusy.action === "delete"
+        }
+        onClose={() => {
+          if (sessionLifecycleBusy?.action !== "delete") setDeleteTarget(null);
+        }}
+        onConfirm={() => void deleteSession()}
+      />
 
       <MatrixSettings
         open={settingsOpen}
@@ -3066,8 +3352,49 @@ function describeConflictedAction(payload: CommandPayload): string {
       return "The session settings change";
     case "session.create":
       return "The new session request";
+    case "session.archive":
+      return "The archive request";
+    case "session.restore":
+      return "The restore request";
+    case "session.delete":
+      return "The delete request";
     case "device.invite":
       return "The device invitation request";
+  }
+}
+
+function lifecyclePastTense(
+  action: "archive" | "restore" | "delete",
+): string {
+  switch (action) {
+    case "archive":
+      return "archived";
+    case "restore":
+      return "restored";
+    case "delete":
+      return "deleted";
+  }
+}
+
+function sessionLifecyclePayload(
+  action: "archive" | "restore" | "delete",
+  sessionId: string,
+): Extract<
+  CommandPayload,
+  {
+    operation:
+      | "session.archive"
+      | "session.restore"
+      | "session.delete";
+  }
+> {
+  switch (action) {
+    case "archive":
+      return { operation: "session.archive", sessionId };
+    case "restore":
+      return { operation: "session.restore", sessionId };
+    case "delete":
+      return { operation: "session.delete", sessionId };
   }
 }
 

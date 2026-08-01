@@ -3945,6 +3945,12 @@ function fallbackBody(payload: CommandPayload): string {
       return "Update agent session settings";
     case "session.create":
       return "Create a new agent session";
+    case "session.archive":
+      return "Archive an agent session";
+    case "session.restore":
+      return "Restore an archived agent session";
+    case "session.delete":
+      return "Delete an agent session from Codever";
     case "device.invite":
       return "Authorize a new Codever device";
   }

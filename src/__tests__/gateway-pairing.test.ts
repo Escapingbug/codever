@@ -265,6 +265,12 @@ describe('Gateway pairing', () => {
       .not.toContain('session.select')
     expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
       .toContain('device.invite')
+    expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
+      .toEqual(expect.arrayContaining([
+        'session.archive',
+        'session.restore',
+        'session.delete',
+      ]))
     expect(renewed.response.response.certificate.certificate.certificateId)
       .not.toBe(first.response.response.certificate.certificate.certificateId)
     await expect(fixture.registry.listActive(now + 5_000)).resolves.toHaveLength(1)

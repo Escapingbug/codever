@@ -297,6 +297,48 @@ export async function clearMessageHistoryScope(scope: string): Promise<void> {
   });
 }
 
+export async function clearSessionMessageHistory(
+  scope: string,
+  sessionId: string,
+): Promise<void> {
+  if (!scope || !sessionId) return;
+  return enqueueHistoryWrite(async () => {
+    const database = await openHistoryDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        const index = transaction
+          .objectStore(MESSAGE_STORE)
+          .index(BY_SESSION_INDEX);
+        const range = IDBKeyRange.bound(
+          [scope, sessionId, 0, ""],
+          [scope, sessionId, Number.MAX_SAFE_INTEGER, "\uffff"],
+        );
+        const request = index.openCursor(range);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return;
+          cursor.delete();
+          cursor.continue();
+        };
+        request.onerror = () => transaction.abort();
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () =>
+          reject(
+            transaction.error ??
+              request.error ??
+              new Error("Could not clear this session's local history."),
+          );
+        transaction.onerror = () => {
+          // onabort reports the final transaction error.
+        };
+      });
+    } finally {
+      database.close();
+    }
+  });
+}
+
 function historyMessageKey(scope: string, messageId: string): string {
   return `${scope}\u0000${messageId}`;
 }

@@ -490,6 +490,129 @@ select:focus-visible {
   background: var(--violet-soft);
 }
 
+.archived-session-section {
+  margin: 10px 9px 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.archived-session-toggle {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: transparent;
+  color: #737c8f;
+  text-align: left;
+}
+
+.archived-session-toggle:hover,
+.archived-session-toggle[aria-expanded="true"] {
+  background: #f2f3f7;
+  color: #4f596d;
+}
+
+.archive-mark {
+  color: #9299a8;
+  font-size: 13px;
+}
+
+.archived-session-toggle > span:nth-child(2) {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.archived-session-toggle b {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 10px;
+  background: #e7e9ef;
+  color: #747c8d;
+  font-size: 8px;
+}
+
+.archive-chevron {
+  width: 12px;
+  color: #a0a6b2;
+  font-size: 11px;
+  text-align: center;
+}
+
+.archived-session-list {
+  display: grid;
+  gap: 2px;
+  padding: 3px 0 4px;
+}
+
+.archived-session-row {
+  display: grid;
+  min-height: 54px;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: transparent;
+  color: #687184;
+  text-align: left;
+}
+
+.archived-session-row:hover,
+.archived-session-row.selected {
+  background: #eeeff4;
+}
+
+.archived-session-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 9px;
+  background: #e4e6ec;
+  color: #7d8493;
+  font-size: 11px;
+}
+
+.archived-session-row > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.archived-session-row strong,
+.archived-session-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archived-session-row strong {
+  color: #4f586b;
+  font-size: 11px;
+}
+
+.archived-session-row small,
+.archived-session-row time,
+.archived-empty {
+  color: #9aa1af;
+  font-size: 9px;
+}
+
+.archived-empty {
+  padding: 8px 10px;
+}
+
+.compact-empty {
+  min-height: 70px;
+}
+
 .session-avatar,
 .conversation-avatar {
   position: relative;
@@ -757,7 +880,9 @@ select:focus-visible {
   right: 18px;
   display: grid;
   width: 250px;
+  max-height: calc(100dvh - 82px);
   gap: 5px;
+  overflow-y: auto;
   padding: 15px;
   border: 1px solid var(--line);
   border-radius: 13px;
@@ -794,6 +919,126 @@ select:focus-visible {
   border-top: 1px solid var(--line);
   color: #348669;
   font-size: 10px;
+}
+
+.session-menu-actions {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.session-menu-actions button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+}
+
+.session-menu-actions button > span:first-child {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: #f0f1f6;
+  color: #687186;
+  font-size: 13px;
+}
+
+.session-menu-actions button > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-menu-actions button strong {
+  font-size: 10px;
+}
+
+.session-menu-actions button small {
+  color: #9aa1b0;
+  font-size: 8px;
+}
+
+.session-menu-actions button:hover {
+  background: #f3f4f7;
+}
+
+.session-menu-actions button:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
+
+.session-menu-danger {
+  color: #b94b58;
+}
+
+.session-menu-actions .session-menu-danger > span:first-child {
+  background: #fff0f1;
+  color: #c34d5b;
+}
+
+.archived-session-banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 12px clamp(20px, 4vw, 65px) 0;
+  padding: 11px 12px;
+  border: 1px solid #dfe2ea;
+  border-radius: 12px;
+  background: #f7f8fa;
+  color: #596276;
+}
+
+.archive-banner-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: #e6e8ee;
+  color: #70798b;
+}
+
+.archived-session-banner > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.archived-session-banner strong {
+  font-size: 10px;
+}
+
+.archived-session-banner small {
+  color: #8a92a2;
+  font-size: 9px;
+}
+
+.archived-session-banner button {
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 9px;
+  background: #e9e7fb;
+  color: var(--violet);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.archived-session-banner button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .chat-feed {
@@ -3216,6 +3461,94 @@ select:focus-visible {
   cursor: wait;
 }
 
+.session-delete-dialog {
+  display: grid;
+  width: min(440px, 100%);
+  justify-items: center;
+  padding: 25px 25px 21px;
+  border: 1px solid #eadfe1;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 28px 90px rgb(26 31 52 / 28%);
+  text-align: center;
+  transform-origin: center;
+  animation: dialog-enter var(--motion-panel) var(--motion-ease-out);
+}
+
+.danger-symbol {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 12px;
+  place-items: center;
+  border-radius: 13px;
+  background: #fff0f1;
+  color: #bd4654;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.session-delete-dialog h2 {
+  max-width: 100%;
+  margin: 5px 0 8px;
+  overflow: hidden;
+  color: #292d3b;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-delete-dialog > p {
+  max-width: 350px;
+  margin: 0;
+  color: #727a8c;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.delete-boundary-note {
+  margin-top: 15px;
+  padding: 10px 12px;
+  border: 1px solid #ece4e5;
+  border-radius: 10px;
+  background: #fcf8f8;
+  color: #8a7075;
+  font-size: 9px;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.session-delete-dialog footer {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.session-delete-dialog footer button {
+  height: 40px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.session-delete-dialog .secondary-button {
+  background: #f0f1f5;
+  color: #5e6678;
+}
+
+.session-delete-dialog .danger-button {
+  background: #bf4755;
+  color: white;
+}
+
+.session-delete-dialog footer button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .scanner-dialog {
   width: min(460px, 100%);
   overflow: hidden;
@@ -3617,6 +3950,7 @@ body {
 }
 
 .details-popover {
+  width: 280px;
   font-size: 14px;
 }
 
@@ -3627,6 +3961,40 @@ body {
 
 .details-popover code,
 .verified-line {
+  font-size: 12px;
+}
+
+.archived-session-toggle > span:nth-child(2),
+.archived-session-row strong {
+  font-size: 13px;
+}
+
+.archived-session-row small,
+.archived-session-row time,
+.archived-empty {
+  font-size: 11px;
+}
+
+.session-menu-actions button strong,
+.archived-session-banner strong {
+  font-size: 12px;
+}
+
+.session-menu-actions button small,
+.archived-session-banner small,
+.archived-session-banner button {
+  font-size: 11px;
+}
+
+.session-delete-dialog > p {
+  font-size: 13px;
+}
+
+.delete-boundary-note {
+  font-size: 11px;
+}
+
+.session-delete-dialog footer button {
   font-size: 12px;
 }
 
@@ -4026,6 +4394,17 @@ body {
     border-radius: 20px 20px 0 0;
     transform-origin: bottom center;
     animation-name: mobile-sheet-enter;
+  }
+
+  .session-delete-dialog {
+    width: 100%;
+    border-radius: 20px 20px 0 0;
+    transform-origin: bottom center;
+    animation-name: mobile-sheet-enter;
+  }
+
+  .archived-session-banner {
+    margin: 10px 11px 0;
   }
 }
 

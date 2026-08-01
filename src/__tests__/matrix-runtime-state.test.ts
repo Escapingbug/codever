@@ -66,6 +66,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                     reasoningEffort: null,
                     permissionMode: 'default',
                     providerSessionId: 'provider-session-1',
+                    archivedAt: null,
                 }],
                 currentSessionId: 'app-session-1',
             }),
@@ -82,6 +83,7 @@ describe('FileGatewayRuntimeStateStore', () => {
             appSessions: [{
                 id: 'app-session-1',
                 providerSessionId: 'provider-session-1',
+                archivedAt: null,
             }],
         })
     })
@@ -119,6 +121,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 reasoningEffort: null,
                 permissionMode: 'default',
                 providerSessionId: 'provider-session-1',
+                archivedAt: null,
             }],
         })
 
@@ -208,6 +211,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 cwd: 'C:\\repo',
                 reasoningEffort: null,
                 permissionMode: 'default',
+                archivedAt: null,
             }],
         })
         expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({

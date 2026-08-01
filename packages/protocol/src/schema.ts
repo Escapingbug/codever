@@ -239,6 +239,24 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
     .strict(),
   z
     .object({
+      operation: z.literal('session.archive'),
+      sessionId: opaqueId,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal('session.restore'),
+      sessionId: opaqueId,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal('session.delete'),
+      sessionId: opaqueId,
+    })
+    .strict(),
+  z
+    .object({
       operation: z.literal('device.invite'),
       lifetimeMs: z.number().int().min(30_000).max(10 * 60_000).optional(),
     })
@@ -268,6 +286,9 @@ export const commandSchema = z
       'decision',
       'session.settings',
       'session.create',
+      'session.archive',
+      'session.restore',
+      'session.delete',
       'device.invite',
     ]),
     issuedAt: timestamp,

@@ -492,6 +492,74 @@ describe('MatrixGatewayRunner', () => {
         ])
     })
 
+    it('archives, restores, and permanently removes an app session', async () => {
+        const fixture = await securityFixture()
+        const dispatched: SessionInput[] = []
+        const session = fakeTopicSession(dispatched)
+        session.sessionRecord.setConversationId('provider-session-1')
+        const runtime = directRoomRuntime(fixture.config.rooms[0]!, session)
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client: new FakeMatrixGatewayClient(),
+            sessionFactory: () => session,
+            now: () => fixture.now,
+        })
+        await initializeDirectRuntime(runner, fixture.config)
+        const command = (
+            operation: 'session.archive' | 'session.restore' | 'session.delete',
+            sequence: number,
+        ): CodeverCommand => ({
+            kind: 'codever.command',
+            version: 1,
+            commandId: `${operation}-${sequence}`,
+            gatewayId: fixture.config.gatewayId,
+            deviceId: 'pwa-device-1',
+            sequenceEpoch: 'legacy-v1',
+            conversationId: fixture.config.rooms[0]!.conversationId,
+            revisionEpoch: REVISION_EPOCH,
+            sequence,
+            baseRevision: sequence - 1,
+            operation,
+            issuedAt: fixture.now,
+            expiresAt: fixture.now + 60_000,
+            nonce: `0123456789abcdef-${operation}-${sequence}`,
+            payload: { operation, sessionId: 'app-session-1' },
+        })
+        const execute = (lifecycleCommand: CodeverCommand) =>
+            (runner as unknown as {
+                execute(
+                    roomRuntime: typeof runtime,
+                    command: CodeverCommand,
+                ): Promise<{ sessionId: string | null }>
+            }).execute(runtime, lifecycleCommand)
+
+        await expect(execute(command('session.archive', 1))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
+        expect(runtime.appSessions.size).toBe(0)
+        expect(runtime.archivedSessions.get('app-session-1')).toMatchObject({
+            archivedAt: fixture.now,
+            providerSessionId: 'provider-session-1',
+        })
+        expect(session.destroy).toHaveBeenCalledTimes(1)
+
+        await expect(execute(command('session.restore', 2))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
+        expect(runtime.archivedSessions.size).toBe(0)
+        expect(runtime.appSessions.get('app-session-1')?.record.archivedAt).toBeNull()
+
+        await expect(execute(command('session.delete', 3))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
+        expect(runtime.appSessions.size).toBe(0)
+        expect(runtime.archivedSessions.size).toBe(0)
+        const runtimeStateStore = Reflect.get(runner, 'runtimeStateStore') as {
+            getRoom(roomId: string): { appSessions: unknown[] }
+        }
+        expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
+            .toEqual([])
+    })
+
     it('routes two concurrently running prompts to independent app session runtimes', async () => {
         const fixture = await securityFixture()
         const firstDispatches: SessionInput[] = []
@@ -1380,7 +1448,7 @@ function fakeTopicSession(dispatched: SessionInput[]): TopicSession {
         destroy: vi.fn(async () => undefined),
         state: 'idle',
         sessionRecord,
-        channelPort: {} as TopicSession['channelPort'],
+        channelPort: { close: vi.fn() } as unknown as TopicSession['channelPort'],
         getProgress: vi.fn(() => null),
         getDeliveryStatus: vi.fn(() => ({ deliveries: [] })),
         retryDelivery: vi.fn(async deliveryId => ({
@@ -1409,6 +1477,7 @@ function directRoomRuntime(
         reasoningEffort: null,
         permissionMode: 'default',
         providerSessionId: null,
+        archivedAt: null,
     }
     return {
         config,
@@ -1430,6 +1499,7 @@ function directRoomRuntime(
                 capabilityProvider: null,
             }]]
             : []),
+        archivedSessions: new Map(),
         revisionEpoch: REVISION_EPOCH,
         revisionEpochGeneration: 1,
         replayGeneration: REPLAY_GENERATION,

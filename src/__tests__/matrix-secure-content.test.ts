@@ -149,6 +149,8 @@ describe('Gateway application-layer Matrix content', () => {
                 permissionModes: [{ id: 'default', name: 'Default' }],
                 canCreateSession: true,
                 canSelectSession: true,
+                canArchiveSession: true,
+                canDeleteSession: true,
             },
         }, matrix)
         const stateExtension = sent[2]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
@@ -190,6 +192,8 @@ describe('Gateway application-layer Matrix content', () => {
                     permission_modes: [{ id: 'default', name: 'Default' }],
                     can_create_session: true,
                     can_select_session: true,
+                    can_archive_session: true,
+                    can_delete_session: true,
                 },
             },
         })

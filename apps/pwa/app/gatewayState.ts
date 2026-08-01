@@ -17,7 +17,7 @@ export type GatewaySessionSummary = {
   id: string;
   title: string;
   updatedAt: number;
-  status: "idle" | "running" | "stopping" | "failed";
+  status: "idle" | "running" | "stopping" | "failed" | "archived";
   projectId: string;
   projectName: string;
   cwd: string;
@@ -41,6 +41,8 @@ export type GatewayCapabilities = {
   permissionModes: GatewayCapabilityOption[];
   canCreateSession: boolean;
   canSelectSession: boolean;
+  canArchiveSession?: boolean;
+  canDeleteSession?: boolean;
 };
 
 export type GatewayStateSnapshot = {
@@ -133,6 +135,7 @@ export function parseGatewayStateExtension(
         session.status === "stopping" ||
         session.status === "failed"
       ) ||
+      !(session.archived === undefined || typeof session.archived === "boolean") ||
       typeof session.provider !== "string" ||
       !session.provider ||
       !(
@@ -157,16 +160,18 @@ export function parseGatewayStateExtension(
     ) {
       throw new Error("The authenticated Gateway session summary is malformed.");
     }
+    const status: GatewaySessionSummary["status"] = session.archived === true
+      ? "archived"
+      : session.status === "running" ||
+          session.status === "stopping" ||
+          session.status === "failed"
+        ? session.status
+        : "idle";
     return {
       id: session.id,
       title: session.title,
       updatedAt: session.updated_at,
-      status:
-        session.status === "running" ||
-        session.status === "stopping" ||
-        session.status === "failed"
-          ? session.status
-          : "idle",
+      status,
       provider: session.provider,
       ...(typeof session.model === "string" ? { model: session.model } : {}),
       ...(typeof session.reasoning_effort === "string"
@@ -364,6 +369,12 @@ export function parseGatewayStateExtension(
       ),
       canCreateSession: capabilities.can_create_session,
       canSelectSession: capabilities.can_select_session,
+      ...(typeof capabilities.can_archive_session === "boolean"
+        ? { canArchiveSession: capabilities.can_archive_session }
+        : {}),
+      ...(typeof capabilities.can_delete_session === "boolean"
+        ? { canDeleteSession: capabilities.can_delete_session }
+        : {}),
     },
   };
 }
@@ -440,7 +451,8 @@ function gatewayStateExtension(
       id: session.id,
       title: session.title,
       updated_at: session.updatedAt,
-      status: session.status,
+      status: session.status === "archived" ? "idle" : session.status,
+      ...(session.status === "archived" ? { archived: true } : {}),
       project_id: session.projectId,
       project_name: session.projectName,
       cwd: session.cwd,
@@ -481,6 +493,12 @@ function gatewayStateExtension(
       })),
       can_create_session: state.capabilities.canCreateSession,
       can_select_session: state.capabilities.canSelectSession,
+      ...(state.capabilities.canArchiveSession === undefined
+        ? {}
+        : { can_archive_session: state.capabilities.canArchiveSession }),
+      ...(state.capabilities.canDeleteSession === undefined
+        ? {}
+        : { can_delete_session: state.capabilities.canDeleteSession }),
     },
   };
 }

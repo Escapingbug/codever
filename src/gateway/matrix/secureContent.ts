@@ -56,6 +56,7 @@ export interface GatewayStateSnapshot {
         title: string
         updatedAt: number
         status: 'idle' | 'running' | 'stopping' | 'failed'
+        archived?: boolean
         projectId: string
         projectName: string
         cwd: string
@@ -85,6 +86,8 @@ export interface GatewayStateSnapshot {
         permissionModes: Array<{ id: string; name: string }>
         canCreateSession: boolean
         canSelectSession: boolean
+        canArchiveSession?: boolean
+        canDeleteSession?: boolean
     }
 }
 
@@ -330,6 +333,7 @@ export class GatewaySecureContentLayer {
                 title: session.title,
                 updated_at: session.updatedAt,
                 status: session.status,
+                ...(session.archived ? { archived: true } : {}),
                 project_id: session.projectId,
                 project_name: session.projectName,
                 cwd: session.cwd,
@@ -375,6 +379,8 @@ export class GatewaySecureContentLayer {
                 })),
                 can_create_session: state.capabilities.canCreateSession,
                 can_select_session: state.capabilities.canSelectSession,
+                can_archive_session: state.capabilities.canArchiveSession ?? false,
+                can_delete_session: state.capabilities.canDeleteSession ?? false,
             },
         }
         return this.sealOutgoingToAll({

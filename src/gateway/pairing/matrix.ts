@@ -258,10 +258,11 @@ export function trustedDeviceFromRecord(
     deviceName: certificate.deviceName,
     publicKey: certificate.deviceKey.publicKey,
     allowedRoomIds: [certificate.deviceTransport.roomId],
-    // Device invitations are a local Gateway management capability granted
-    // to every active paired device. Adding it here also upgrades certificates
-    // issued before device.invite existed without weakening the trust root.
-    allowedOperations: withDeviceInvitation(
+    // Session lifecycle and device invitations are local Gateway management
+    // capabilities granted to every active paired device. Adding current
+    // operations here keeps certificates issued by earlier Gateway builds
+    // usable without weakening the paired-device trust root.
+    allowedOperations: withCurrentGatewayOperations(
       executableOperations(certificate.allowedOperations),
     ),
     matrixUserId: certificate.deviceTransport.userId,
@@ -291,16 +292,24 @@ function executableOperations(
   operations: readonly PairingOperation[],
 ): CommandOperation[] {
   return operations.filter(
-    (operation): operation is CommandOperation => operation !== 'session.select',
+    (operation): operation is Exclude<PairingOperation, 'session.select'> =>
+      operation !== 'session.select',
   )
 }
 
-function withDeviceInvitation(
+function withCurrentGatewayOperations(
   operations: readonly CommandOperation[],
 ): CommandOperation[] {
-  return operations.includes('device.invite')
-    ? [...operations]
-    : [...operations, 'device.invite']
+  const currentOperations: CommandOperation[] = [
+    'session.archive',
+    'session.restore',
+    'session.delete',
+    'device.invite',
+  ]
+  return [
+    ...operations,
+    ...currentOperations.filter(operation => !operations.includes(operation)),
+  ]
 }
 
 function isPairingEvent(event: MatrixIncomingEvent, roomId: string): boolean {

@@ -123,6 +123,10 @@ function commandToSessionInputs(command: CodeverCommand, sender: string): readon
         }
         case 'session.create':
             return [{ kind: 'command', name: 'new', source: 'channel', user }]
+        case 'session.archive':
+        case 'session.restore':
+        case 'session.delete':
+            throw new Error('Session lifecycle commands must be handled by the Matrix Gateway')
         case 'device.invite':
             throw new Error('Device invitations must be handled by the Matrix Gateway pairing service')
     }
