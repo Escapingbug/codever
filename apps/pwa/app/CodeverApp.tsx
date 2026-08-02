@@ -68,6 +68,7 @@ import {
   type OptimisticMessageReference,
 } from "./chatMessages";
 import { createPromptCommandPayload } from "./commandPayloads";
+import { deriveComposerState } from "./composerState";
 import {
   clearMessageHistoryScope,
   clearSessionMessageHistory,
@@ -305,6 +306,9 @@ export function CodeverApp() {
   const [stoppingSessionIds, setStoppingSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [submittingPromptSessionIds, setSubmittingPromptSessionIds] = useState<
+    Set<string>
+  >(() => new Set());
   const [agentActivitiesBySession, setAgentActivitiesBySession] = useState<
     Map<string, AgentActivity>
   >(() => new Map());
@@ -463,9 +467,26 @@ export function CodeverApp() {
   const agentActivity = selectedSessionId
     ? agentActivitiesBySession.get(selectedSessionId) ?? null
     : null;
-  const sessionReady = Boolean(
-    matrixConnected && gatewayState && selected && !selectedArchived,
+  const isPromptSubmitting = Boolean(
+    selectedSessionId && submittingPromptSessionIds.has(selectedSessionId),
   );
+  const sessionReady = Boolean(
+    connectionStatus === "connected" &&
+      gatewayState &&
+      selected &&
+      !selectedArchived,
+  );
+  const composerState = deriveComposerState({
+    connectionStatus,
+    hasGatewayState: Boolean(gatewayState),
+    hasSelectedSession: Boolean(selected),
+    selectedArchived,
+    attachmentBusy,
+    promptSubmitting: isPromptSubmitting,
+    isStreaming,
+    isStopping,
+    hasContent: Boolean(draft.trim() || pendingFiles.length > 0),
+  });
   const conversationTitle =
     selected?.title ??
     (trustedGateway
@@ -506,6 +527,36 @@ export function CodeverApp() {
       else next.delete(sessionId);
       return next;
     });
+  }
+
+  function setSessionPromptSubmitting(sessionId: string, submitting: boolean) {
+    if (submitting) pendingPromptSessionIdsRef.current.add(sessionId);
+    else pendingPromptSessionIdsRef.current.delete(sessionId);
+    setSubmittingPromptSessionIds((current) => {
+      const next = new Set(current);
+      if (submitting) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }
+
+  function hasActivePromptCommand(sessionId: string): boolean {
+    return [...activePromptCommandsRef.current.values()].some(
+      (candidate) => candidate === sessionId,
+    );
+  }
+
+  function finishLocalPromptCommand(sessionId: string): void {
+    if (
+      hasActivePromptCommand(sessionId) ||
+      pendingPromptSessionIdsRef.current.has(sessionId)
+    ) {
+      setSessionRunning(sessionId, true);
+      return;
+    }
+    setSessionRunning(sessionId, false);
+    setSessionStopping(sessionId, false);
+    setSessionAgentActivity(sessionId, null);
   }
 
   function setSessionAgentActivity(
@@ -1132,6 +1183,7 @@ export function CodeverApp() {
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
     pendingPromptSessionIdsRef.current.clear();
+    setSubmittingPromptSessionIds(new Set());
     revisionConflictRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
@@ -1291,9 +1343,7 @@ export function CodeverApp() {
           if (promptSessionId) {
             activePromptCommandsRef.current.delete(result.commandId);
             completedCommandResultsRef.current.delete(result.commandId);
-            setSessionRunning(promptSessionId, false);
-            setSessionStopping(promptSessionId, false);
-            setSessionAgentActivity(promptSessionId, null);
+            finishLocalPromptCommand(promptSessionId);
           } else {
             completedCommandResultsRef.current.add(result.commandId);
           }
@@ -1333,6 +1383,7 @@ export function CodeverApp() {
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
     pendingPromptSessionIdsRef.current.clear();
+    setSubmittingPromptSessionIds(new Set());
     revisionConflictRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
@@ -1867,12 +1918,16 @@ export function CodeverApp() {
         const sessionId = conflict.payload.sessionId;
         setPendingFiles([]);
         if (completedCommandResultsRef.current.delete(result.commandId)) {
-          setSessionRunning(sessionId, false);
-          setSessionAgentActivity(sessionId, null);
+          finishLocalPromptCommand(sessionId);
         } else {
           activePromptCommandsRef.current.set(result.commandId, sessionId);
           setSessionRunning(sessionId, true);
-          setSessionAgentActivity(sessionId, STARTING_AGENT_ACTIVITY);
+          setSessionAgentActivity(
+            sessionId,
+            runningSessionIds.has(sessionId)
+              ? WORKING_AGENT_ACTIVITY
+              : STARTING_AGENT_ACTIVITY,
+          );
         }
       }
       const completion =
@@ -2145,24 +2200,12 @@ export function CodeverApp() {
     const value = draft.trim();
     if (!value && pendingFiles.length === 0) return;
     const sessionId = selectedSessionIdRef.current;
-    if (
-      attachmentBusy ||
-      isStreaming ||
-      (sessionId && pendingPromptSessionIdsRef.current.has(sessionId))
-    ) {
+    if (!composerState.canSend || !sessionId) {
+      setConnectionError(composerState.reason);
       return;
     }
-    if (!matrixConnected || !gatewayState || !sessionId) {
-      setConnectionError(
-        !gatewayState && matrixConnected
-          ? "Waiting for the current Gateway session state."
-          : gatewayState && !sessionId
-          ? "Create or select a session before sending a message."
-          : trustedGateway
-          ? "The Gateway is offline. Reconnect before sending."
-          : "Add and pair a Gateway before sending your first message.",
-      );
-      setSettingsOpen(true);
+    if (pendingPromptSessionIdsRef.current.has(sessionId)) {
+      setConnectionError("Securing the previous message…");
       return;
     }
     const connection = matrixConnectionRef.current;
@@ -2170,6 +2213,8 @@ export function CodeverApp() {
       setConnectionError("The Matrix connection is not ready for attachment upload.");
       return;
     }
+    const queueBehindActiveTurn = isStreaming;
+    const activityBeforeSubmission = agentActivity;
     const submittedFiles = [...pendingFiles];
     let attachments: CodeverAttachment[] | undefined;
     if (submittedFiles.length > 0) {
@@ -2185,7 +2230,7 @@ export function CodeverApp() {
         );
       } catch (error) {
         setConnectionError(`Attachment upload failed: ${formatUiError(error)}`);
-        setSessionAgentActivity(sessionId, null);
+        setSessionAgentActivity(sessionId, activityBeforeSubmission);
         return;
       } finally {
         setAttachmentBusy(false);
@@ -2231,19 +2276,57 @@ export function CodeverApp() {
     }
     setDraft("");
     setSessionRunning(sessionId, true);
-    setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
-    pendingPromptSessionIdsRef.current.add(sessionId);
-    const result = await sendRealCommand(
-      createPromptCommandPayload({
-        sessionId,
-        text: value,
-        attachments,
-      }),
-    );
-    pendingPromptSessionIdsRef.current.delete(sessionId);
+    if (!queueBehindActiveTurn) {
+      setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
+    }
+    setSessionPromptSubmitting(sessionId, true);
+    let result: CommandSendResult | null;
+    let acknowledgementTimeout: CommandAcknowledgementTimeoutError | null = null;
+    try {
+      result = await sendRealCommand(
+        createPromptCommandPayload({
+          sessionId,
+          text: value,
+          attachments,
+        }),
+      );
+    } catch (error) {
+      if (!(error instanceof CommandAcknowledgementTimeoutError)) throw error;
+      acknowledgementTimeout = error;
+      result = null;
+    } finally {
+      setSessionPromptSubmitting(sessionId, false);
+    }
+    if (acknowledgementTimeout) {
+      const optimisticReference =
+        optimisticMessagesRef.current.get(optimisticId);
+      if (optimisticReference) {
+        optimisticReference.commandId = acknowledgementTimeout.commandId;
+      }
+      if (
+        completedCommandResultsRef.current.delete(
+          acknowledgementTimeout.commandId,
+        )
+      ) {
+        finishLocalPromptCommand(sessionId);
+      } else {
+        activePromptCommandsRef.current.set(
+          acknowledgementTimeout.commandId,
+          sessionId,
+        );
+        setSessionAgentActivity(
+          sessionId,
+          queueBehindActiveTurn
+            ? activityBeforeSubmission ?? WORKING_AGENT_ACTIVITY
+            : STARTING_AGENT_ACTIVITY,
+        );
+      }
+      setPendingFiles([]);
+      setConnectionError(acknowledgementTimeout.message);
+      return;
+    }
     if (!result) {
-      setSessionRunning(sessionId, false);
-      setSessionAgentActivity(sessionId, null);
+      finishLocalPromptCommand(sessionId);
       if (revisionConflictRef.current) {
         const conflict = revisionConflictRef.current;
         const matchesCurrentPrompt =
@@ -2328,11 +2411,15 @@ export function CodeverApp() {
         optimisticReference.commandId = result.commandId;
       }
       if (completedCommandResultsRef.current.delete(result.commandId)) {
-        setSessionRunning(sessionId, false);
-        setSessionAgentActivity(sessionId, null);
+        finishLocalPromptCommand(sessionId);
       } else {
         activePromptCommandsRef.current.set(result.commandId, sessionId);
-        setSessionAgentActivity(sessionId, STARTING_AGENT_ACTIVITY);
+        setSessionAgentActivity(
+          sessionId,
+          queueBehindActiveTurn
+            ? activityBeforeSubmission ?? WORKING_AGENT_ACTIVITY
+            : STARTING_AGENT_ACTIVITY,
+        );
       }
       const sentMessage: ChatMessage = {
         ...optimisticMessage,
@@ -3228,7 +3315,7 @@ export function CodeverApp() {
               }
               aria-label={`Message ${activeProvider}`}
               rows={1}
-              disabled={!sessionReady || attachmentBusy}
+              disabled={!composerState.canType}
             />
             <div className="composer-actions">
               <input
@@ -3333,36 +3420,44 @@ export function CodeverApp() {
                   </>
                 )}
               </div>
-              {isStreaming ? (
-                <button
-                  type="button"
-                  className="send-button stop-button mount-feedback"
-                  onClick={() => void stopStreaming()}
-                  aria-label={isStopping ? "Stopping agent" : "Stop agent"}
-                  aria-busy={isStopping}
-                  disabled={isStopping}
-                >
-                  {isStopping ? <span className="button-spinner" /> : "■"}
-                </button>
-              ) : (
+              <div className="composer-submit-actions">
+                {isStreaming && (
+                  <button
+                    type="button"
+                    className="send-button stop-button mount-feedback"
+                    onClick={() => void stopStreaming()}
+                    aria-label={isStopping ? "Stopping agent" : "Stop agent"}
+                    aria-busy={isStopping}
+                    disabled={isStopping}
+                  >
+                    {isStopping ? <span className="button-spinner" /> : "■"}
+                  </button>
+                )}
                 <button
                   key="send-message"
                   type="submit"
                   className="send-button mount-feedback"
-                  disabled={
-                    (!draft.trim() && pendingFiles.length === 0) ||
-                    !sessionReady ||
-                    attachmentBusy
+                  disabled={!composerState.canSend}
+                  aria-label={
+                    composerState.mode === "queue"
+                      ? "Queue message"
+                      : "Send message"
                   }
-                  aria-label="Send message"
+                  aria-describedby="composer-status"
+                  title={composerState.reason}
                 >
                   ↑
                 </button>
-              )}
+              </div>
             </div>
           </form>
-          <p className="composer-hint">
-            Signed locally · Matrix E2EE transport · Enter to send
+          <p
+            id="composer-status"
+            className={`composer-hint composer-hint-${composerState.mode}`}
+            role="status"
+            aria-live="polite"
+          >
+            {composerState.reason}
           </p>
         </div>
       </section>

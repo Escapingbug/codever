@@ -2425,6 +2425,17 @@ select:focus-visible {
     opacity var(--motion-fast) ease;
 }
 
+.composer-submit-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.composer-submit-actions .send-button {
+  margin-left: 0;
+}
+
 .send-button:disabled {
   background: #e1dff4;
   cursor: default;
@@ -2463,6 +2474,11 @@ select:focus-visible {
   color: #a1a7b4;
   font-size: 8px;
   text-align: center;
+}
+
+.composer-hint-queue {
+  color: #7468a9;
+  font-weight: 600;
 }
 
 .connection-toast {
@@ -4383,7 +4399,7 @@ body {
     max-width: 190px;
   }
 
-  .composer-hint {
+  .composer-hint-ready {
     display: none;
   }
 

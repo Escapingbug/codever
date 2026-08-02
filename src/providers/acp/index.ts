@@ -919,10 +919,10 @@ export class AcpProvider implements AgentProvider {
     /**
      * Cancel the active prompt with grace period.
      * 1. Send session/cancel and wait up to 2.5s for prompt to return
-     * 2. If agent doesn't respond, log a warning but DO NOT kill the subprocess.
-     *    cancel() must never kill the subprocess — only destroy() does.
-     * The caller owns ending the event stream so the consumer loop can break
-     * even when the agent does not acknowledge cancel.
+     * 2. If the agent does not respond, close the wedged ACP connection. A
+     *    later query uses the provider's existing reinit path. Keeping the
+     *    connection alive would allow the cancelled turn to accumulate an
+     *    unbounded queue of updates with no consumer.
      */
     private async forceCancelActivePrompt(): Promise<void> {
         const clientManager = this.clientManager
@@ -940,12 +940,14 @@ export class AcpProvider implements AgentProvider {
                 console.error(`[acp:${this.name}] cancelActivePrompt error: ${e instanceof Error ? e.message : String(e)}`)
             }
 
-            // Agent didn't respond to cancel within grace period.
-            // We intentionally do NOT close the client here — cancel() must never
-            // kill the subprocess. The agent may still be processing, and the
-            // next prompt can reuse the same session. If the agent is truly
-            // stuck, the user can /archive to destroy the session.
-            console.error(`[acp:${this.name}] Agent did not respond to cancel within grace period, leaving connection open`)
+            console.error(`[acp:${this.name}] Agent did not respond to cancel within grace period; closing the ACP connection to discard the cancelled turn`)
+            try {
+                await clientManager.close()
+            } catch (error) {
+                console.error(`[acp:${this.name}] Failed to close unresponsive ACP connection: ${error instanceof Error ? error.message : String(error)}`)
+                clientManager.dispose()
+            }
+            this.activeSessionId = null
         }
     }
 }

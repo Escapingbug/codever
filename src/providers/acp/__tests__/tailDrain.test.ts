@@ -215,6 +215,47 @@ describe('AcpProvider tail drain', () => {
         ]))
         expect(clientManager.pendingWaiterCount).toBe(0)
     })
+
+    it('closes an unresponsive ACP connection after cancel instead of retaining ghost updates', async () => {
+        class HangingCancelClientManager extends FakeAcpClientManager {
+            closeCalls = 0
+
+            async prompt(): Promise<{ stopReason: string }> {
+                return new Promise(() => {})
+            }
+
+            async cancelActivePrompt(): Promise<undefined> {
+                return undefined
+            }
+
+            async close(): Promise<void> {
+                this.closeCalls += 1
+                this.connected = false
+            }
+        }
+
+        const provider = new AcpProvider({ name: 'test-acp', command: 'fake', args: [] })
+        const clientManager = new HangingCancelClientManager()
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            signal: new AbortController().signal,
+        })
+        const iterator = handle.events[Symbol.asyncIterator]()
+        await expect(iterator.next()).resolves.toMatchObject({
+            done: false,
+            value: { kind: 'session_init', sessionId: 'session-1' },
+        })
+
+        await handle.interrupt()
+
+        expect(clientManager.closeCalls).toBe(1)
+        expect(provider.isReady()).toBe(false)
+        expect(provider.wasReady()).toBe(true)
+        await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    })
 })
 
 describe('formatAgentQueryError', () => {

@@ -102,6 +102,16 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /agentActivitiesBySession/);
   assert.match(source, /setSessionAgentActivity\(sessionId/);
   assert.match(source, /pendingPromptSessionIdsRef\.current\.has\(sessionId\)/);
+  assert.match(source, /deriveComposerState/);
+  assert.match(source, /composerState\.mode === "queue"/);
+  assert.match(source, /aria-label="Stop agent"|"Stop agent"/);
+  assert.match(source, /disabled=\{!composerState\.canSend\}/);
+  assert.match(styles, /\.composer-hint-ready\s*\{\s*display: none;/);
+  assert.doesNotMatch(styles, /\.composer-hint\s*\{\s*display: none;/);
+  assert.doesNotMatch(
+    source,
+    /\{isStreaming \? \([\s\S]{0,700}?key="send-message"/,
+  );
   assert.doesNotMatch(source, /const \[isStreaming, setIsStreaming\]/);
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
@@ -587,10 +597,18 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /completion\?\.outcome === "succeeded"/);
   assert.match(
     app,
-    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*setSessionRunning\(sessionId, false\)/,
+    /completedCommandResultsRef\.current\.delete\(result\.commandId\)[\s\S]*finishLocalPromptCommand\(sessionId\)/,
   );
   assert.match(
     app,
-    /activePromptCommandsRef\.current\.get\(result\.commandId\)[\s\S]*setSessionRunning\(promptSessionId, false\)/,
+    /activePromptCommandsRef\.current\.get\(result\.commandId\)[\s\S]*finishLocalPromptCommand\(promptSessionId\)/,
+  );
+  assert.match(
+    app,
+    /function finishLocalPromptCommand\(sessionId: string\)[\s\S]*hasActivePromptCommand\(sessionId\)/,
+  );
+  assert.match(
+    app,
+    /acknowledgementTimeout\.commandId[\s\S]*activePromptCommandsRef\.current\.set/,
   );
 });
