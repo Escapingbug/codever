@@ -490,6 +490,30 @@ select:focus-visible {
   background: var(--violet-soft);
 }
 
+.session-create-pending {
+  cursor: wait;
+  background: var(--violet-soft);
+}
+
+.session-create-pending .session-avatar {
+  opacity: 0.82;
+}
+
+.session-create-spinner {
+  width: 17px;
+  height: 17px;
+  border: 2px solid rgb(255 255 255 / 42%);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: session-create-spin 700ms linear infinite;
+}
+
+@keyframes session-create-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .archived-session-section {
   margin: 10px 9px 4px;
   border-top: 1px solid var(--line);

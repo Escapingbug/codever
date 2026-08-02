@@ -347,6 +347,8 @@ export function CodeverApp() {
     useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const [pendingSessionCreate, setPendingSessionCreate] =
+    useState<NewSessionInput | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<{
     sessionId: string;
@@ -428,6 +430,8 @@ export function CodeverApp() {
   const activeSessionCount =
     gatewayState?.sessions.filter((session) => session.status !== "archived")
       .length ?? 0;
+  const visibleActiveSessionCount =
+    activeSessionCount + (pendingSessionCreate ? 1 : 0);
   const archivedSessionCount =
     gatewayState?.sessions.filter((session) => session.status === "archived")
       .length ?? 0;
@@ -1197,6 +1201,8 @@ export function CodeverApp() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
+    setPendingSessionCreate(null);
+    setNewSessionBusy(false);
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
@@ -1333,6 +1339,8 @@ export function CodeverApp() {
                       null;
             if (pendingCreated === nextSessionId) {
               pendingCreatedSessionIdRef.current = null;
+              setPendingSessionCreate(null);
+              setMobileChatOpen(true);
             }
             activateLocalSession(nextSessionId);
           }
@@ -1388,6 +1396,8 @@ export function CodeverApp() {
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     pendingCreatedSessionIdRef.current = null;
+    setPendingSessionCreate(null);
+    setNewSessionBusy(false);
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
@@ -1820,9 +1830,13 @@ export function CodeverApp() {
       if (completion.outcome !== "succeeded") return;
       if (completion.sessionId) {
         pendingCreatedSessionIdRef.current = completion.sessionId;
+        if (knownGatewaySessionIdsRef.current.has(completion.sessionId)) {
+          setPendingSessionCreate(null);
+          activateLocalSession(completion.sessionId, connection);
+          setMobileChatOpen(true);
+        }
       }
       setNewSessionOpen(false);
-      setMobileChatOpen(true);
     } finally {
       // Receiving an acknowledgement is not enough for session.create: the
       // terminal sessionId must survive reloads until this UI has consumed it.
@@ -2058,7 +2072,15 @@ export function CodeverApp() {
       return;
     }
     setNewSessionBusy(true);
+    setPendingSessionCreate(input);
+    setNewSessionOpen(false);
+    setMobileChatOpen(false);
+    setConnectionError(null);
+    let waitingForGatewayState = false;
     try {
+      // Let React commit the pending row before Matrix encryption, IndexedDB,
+      // acknowledgement, and command-result work begins.
+      await waitForNextPaint();
       const connection = matrixConnectionRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
@@ -2079,10 +2101,13 @@ export function CodeverApp() {
         sent.commandId,
         completion,
       );
+      waitingForGatewayState =
+        completion.outcome === "succeeded" && Boolean(completion.sessionId);
     } catch (error) {
       setConnectionError(formatUiError(error));
     } finally {
       setNewSessionBusy(false);
+      if (!waitingForGatewayState) setPendingSessionCreate(null);
     }
   }
 
@@ -2602,6 +2627,7 @@ export function CodeverApp() {
             aria-label="New conversation"
             onClick={() => setNewSessionOpen(true)}
             disabled={
+              newSessionBusy ||
               !matrixConnected ||
               !gatewayState?.capabilities.canCreateSession
             }
@@ -2652,10 +2678,35 @@ export function CodeverApp() {
 
         <div className="session-section-label">
           <span>Recent</span>
-          <span>{activeSessionCount}</span>
+          <span>{visibleActiveSessionCount}</span>
         </div>
 
         <div className="session-list">
+          {pendingSessionCreate && (
+            <div
+              className="session-row session-create-pending"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="session-avatar violet" aria-hidden="true">
+                <i className="session-create-spinner" />
+              </span>
+              <span className="session-copy">
+                <span className="session-title-line">
+                  <strong>Creating session…</strong>
+                  <time>now</time>
+                </span>
+                <span className="session-preview-line">
+                  <span>
+                    {pendingSessionCreate.projectName}
+                    {pendingSessionCreate.model
+                      ? ` · ${pendingSessionCreate.model}`
+                      : ""}
+                  </span>
+                </span>
+              </span>
+            </div>
+          )}
           {projectGroups.length > 0 && (
             <div className="gateway-group-heading">
               <span className="gateway-group-mark">G</span>
@@ -2774,12 +2825,14 @@ export function CodeverApp() {
               No matching conversations
             </div>
           )}
-          {gatewayState && gatewayState.sessions.length === 0 && (
-            <div className="empty-search">
-              <span>+</span>
-              Create your first secure conversation
-            </div>
-          )}
+          {gatewayState &&
+            gatewayState.sessions.length === 0 &&
+            !pendingSessionCreate && (
+              <div className="empty-search">
+                <span>+</span>
+                Create your first secure conversation
+              </div>
+            )}
           {gatewayState &&
             activeSessionCount === 0 &&
             archivedSessionCount > 0 &&
@@ -3587,6 +3640,12 @@ export function CodeverApp() {
       />
     </main>
   );
+}
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
 }
 
 function agentLifecycleFailureText(

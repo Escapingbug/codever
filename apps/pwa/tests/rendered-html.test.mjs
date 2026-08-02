@@ -90,6 +90,13 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /onCheckForUpdates/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
+  assert.match(source, /className="session-row session-create-pending"/);
+  assert.match(source, /<strong>Creating session…<\/strong>/);
+  assert.match(
+    source,
+    /setPendingSessionCreate\(input\);[\s\S]*?setNewSessionOpen\(false\);[\s\S]*?await waitForNextPaint\(\);[\s\S]*?operation: "session\.create"/,
+  );
+  assert.match(styles, /\.session-create-spinner\s*\{/);
   assert.match(
     source,
     /<button[\s\S]{0,160}?aria-label="Settings"[\s\S]{0,160}?onClick=\{\(\) => setSettingsOpen\(true\)\}/,
