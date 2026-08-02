@@ -14,6 +14,7 @@ import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
+    openSecureEnvelopeBundle,
     openSecureEnvelope,
     sealSecureEnvelope,
     signCommand,
@@ -705,7 +706,7 @@ describe('MatrixGatewayRunner', () => {
         expect(client.sent[0]!.transactionId).not.toBe(client.sent[1]!.transactionId)
 
         const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const opened = await openSecureEnvelope(outer.secure_envelope, {
+        const opened = await openSecureEnvelopeBundle(outer.secure_envelope_bundle, {
             recipientPrivateKey: fixture.keys.privateKey,
             senderPublicKey: gatewayKeys.publicKey,
             expected: {
@@ -801,7 +802,7 @@ describe('MatrixGatewayRunner', () => {
         expect(restoredRoom?.cwd).toBe('D:\\restored')
         expect(session.sessionRecord.conversationId).toBe('provider-session-1')
         const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const opened = await openSecureEnvelope(outer.secure_envelope, {
+        const opened = await openSecureEnvelopeBundle(outer.secure_envelope_bundle, {
             recipientPrivateKey: fixture.keys.privateKey,
             senderPublicKey: gatewayKeys.publicKey,
             expected: {

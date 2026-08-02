@@ -22,6 +22,27 @@ Each `trustedDevices` record binds two independent identities:
 The gateway requires both the Codever signature and the locally pinned Matrix
 sender/user plus Ed25519 fingerprint to match.
 
+## Gateway event delivery shape
+
+One logical Gateway broadcast is one Matrix room event, regardless of the
+number of paired application devices. Its `io.codever` extension has kind
+`secure_envelope_bundle`: the message ciphertext is shared, while every
+recipient has a separately ECDH-derived wrapped content key. The durable
+Matrix outbox persists one bundle record with a snapshot of all recipient
+certificate epochs and application key IDs. Restart recovery therefore retries
+one stable Matrix transaction and abandons the bundle if any staged recipient
+identity has rotated or been revoked.
+
+Application messages carry a stable `logical_event_id`; edits additionally
+carry `replaces_logical_event_id`. These IDs, not recipient-specific Matrix
+event IDs, join live delivery to late-join history and are the PWA's message and
+replacement identities. Matrix event IDs remain transport receipts only.
+
+Targeted acknowledgements, command results, and history pages remain
+single-recipient envelopes. PWA clients accept both formats during migration.
+Deploy the dual-read PWA before enabling the bundle-sending Gateway; rolling
+the Gateway back is safe because the upgraded PWA retains the legacy read path.
+
 ## Command event shape
 
 Commands are encrypted `m.room.message` events. Their decrypted content uses a

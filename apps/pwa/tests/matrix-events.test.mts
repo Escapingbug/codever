@@ -312,3 +312,32 @@ test("validates a downloaded history batch against its signed metadata", async (
     /item count/,
   );
 });
+
+test("uses authenticated logical event identities instead of Matrix transport IDs", () => {
+  const logicalEventId = "L".repeat(43);
+  const logicalTargetId = "T".repeat(43);
+  const message = parseCodeverEvent(
+    "$physical-event",
+    "@gateway:example.org",
+    1_700_000_000_700,
+    true,
+    {
+      msgtype: "m.text",
+      body: "updated once for every device",
+      "m.relates_to": {
+        rel_type: "m.replace",
+        event_id: "$physical-target",
+      },
+      "io.codever": {
+        version: 1,
+        kind: "message",
+        logical_event_id: logicalEventId,
+        replaces_logical_event_id: logicalTargetId,
+      },
+    },
+  );
+
+  assert.ok(message);
+  assert.equal(message.eventId, logicalEventId);
+  assert.equal(message.replacesEventId, logicalTargetId);
+});

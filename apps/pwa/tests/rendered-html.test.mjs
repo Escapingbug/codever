@@ -291,6 +291,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /signed_command: envelope/);
   assert.match(matrix, /sealSecureEnvelope\(\{/);
   assert.match(matrix, /openSecureEnvelope\(extension\.secure_envelope/);
+  assert.match(matrix, /openSecureEnvelopeBundle\(/);
+  assert.match(matrix, /kind === "secure_envelope_bundle"/);
+  assert.match(matrix, /secure_envelope_bundle/);
+  assert.match(matrix, /replaces_logical_event_id/);
   assert.match(matrix, /kind: "secure_envelope"/);
   assert.match(matrix, /body: "Encrypted Codever message"/);
   assert.match(matrix, /kind === "command_ack"/);
@@ -339,11 +343,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /direction: "device_to_gateway"/);
   assert.match(matrix, /direction: "gateway_to_device"/);
   assert.match(matrix, /signedSecureEnvelopeSchema\.safeParse/);
-  assert.match(
-    matrix,
-    /recipientDeviceId !==[\s\S]*certificate\.certificate\.deviceId/,
-  );
-  assert.match(matrix, /recipientKeyId !== identity\.keyId/);
+  assert.match(matrix, /signedSecureEnvelopeBundleSchema\.safeParse/);
+  assert.match(matrix, /recipient\.recipientDeviceId === expected\.recipientDeviceId/);
+  assert.match(matrix, /routed\.data\.envelope\.recipientDeviceId !== expected\.recipientDeviceId/);
+  assert.match(matrix, /recipient\.recipientKeyId === expected\.recipientKeyId/);
+  assert.match(matrix, /routed\.data\.envelope\.recipientKeyId !== expected\.recipientKeyId/);
   assert.match(matrix, /senderPublicKey: trust\.gatewayKey\.publicKey/);
   assert.match(matrix, /replayStore/);
   assert.match(

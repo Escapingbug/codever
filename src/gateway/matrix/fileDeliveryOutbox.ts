@@ -22,6 +22,16 @@ interface PendingEntry {
     createdAt: number
 }
 
+interface PendingBundleEntry {
+    version: 2
+    kind: 'pending_bundle'
+    deliveryId: string
+    logicalKey: string
+    recipients: DurableMatrixBundleRecipient[]
+    request: MatrixSendEventRequest
+    createdAt: number
+}
+
 interface DeliveredEntry {
     version: 1
     kind: 'delivered'
@@ -54,7 +64,13 @@ interface FailedEntry {
     failedAt: number
 }
 
-type DeliveryEntry = PendingEntry | DeliveredEntry | LogicalEventEntry | AbandonedEntry | FailedEntry
+type DeliveryEntry =
+    | PendingEntry
+    | PendingBundleEntry
+    | DeliveredEntry
+    | LogicalEventEntry
+    | AbandonedEntry
+    | FailedEntry
 
 export interface DurableMatrixDelivery {
     deliveryId: string
@@ -62,6 +78,20 @@ export interface DurableMatrixDelivery {
     recipientDeviceId: string
     recipientSequenceEpoch: string
     recipientPublicKeyId: string
+    request: MatrixSendEventRequest
+    createdAt: number
+}
+
+export interface DurableMatrixBundleRecipient {
+    recipientDeviceId: string
+    recipientSequenceEpoch: string
+    recipientPublicKeyId: string
+}
+
+export interface DurableMatrixBundleDelivery {
+    deliveryId: string
+    logicalKey: string
+    recipients: DurableMatrixBundleRecipient[]
     request: MatrixSendEventRequest
     createdAt: number
 }
@@ -82,17 +112,27 @@ export interface MatrixHistoryDeliveryPage {
     hasMore: boolean
 }
 
+type MatrixHistoryDeliverySource = Pick<
+    DurableMatrixDelivery,
+    'deliveryId' | 'logicalKey' | 'request' | 'createdAt'
+>
+
 /**
- * Append-only per-recipient Matrix delivery ledger.
+ * Append-only Matrix delivery ledger for legacy recipient copies and shared
+ * multi-recipient bundles.
  *
  * A pending record is fsynced through the filesystem API before the network
  * attempt starts. Completion records retain the physical Matrix event ID, so
- * stable transaction retries and per-device edit targets survive a restart.
+ * stable transaction retries and logical edit/history mappings survive a
+ * restart.
  */
 export class FileMatrixDeliveryOutbox {
     private readonly deliveries = new Map<string, DurableMatrixDelivery>()
+    private readonly bundleDeliveries = new Map<string, DurableMatrixBundleDelivery>()
+    private readonly logicalBundleDeliveries = new Map<string, DurableMatrixBundleDelivery>()
     private readonly recipientDeliveries = new Map<string, DurableMatrixDelivery>()
     private readonly pending = new Map<string, DurableMatrixDelivery>()
+    private readonly pendingBundles = new Map<string, DurableMatrixBundleDelivery>()
     private readonly delivered = new Map<string, string>()
     private readonly abandoned = new Set<string>()
     private readonly failed = new Set<string>()
@@ -144,19 +184,33 @@ export class FileMatrixDeliveryOutbox {
                 ) {
                     this.pending.set(entry.deliveryId, entry)
                 }
+            } else if (entry.kind === 'pending_bundle') {
+                this.bundleDeliveries.set(entry.deliveryId, entry)
+                this.logicalBundleDeliveries.set(entry.logicalKey, entry)
+                if (
+                    !this.delivered.has(entry.deliveryId)
+                    && !this.abandoned.has(entry.deliveryId)
+                    && !this.failed.has(entry.deliveryId)
+                ) {
+                    this.pendingBundles.set(entry.deliveryId, entry)
+                }
             } else if (entry.kind === 'delivered') {
                 this.pending.delete(entry.deliveryId)
+                this.pendingBundles.delete(entry.deliveryId)
                 this.delivered.set(entry.deliveryId, entry.eventId)
                 const delivery = this.deliveries.get(entry.deliveryId)
+                    ?? this.bundleDeliveries.get(entry.deliveryId)
                 if (delivery) this.eventLogicalKeys.set(entry.eventId, delivery.logicalKey)
             } else if (entry.kind === 'logical_event') {
                 this.logicalEvents.set(entry.logicalKey, entry.eventId)
                 this.eventLogicalKeys.set(entry.eventId, entry.logicalKey)
             } else if (entry.kind === 'abandoned') {
                 this.pending.delete(entry.deliveryId)
+                this.pendingBundles.delete(entry.deliveryId)
                 this.abandoned.add(entry.deliveryId)
             } else {
                 this.pending.delete(entry.deliveryId)
+                this.pendingBundles.delete(entry.deliveryId)
                 this.failed.add(entry.deliveryId)
             }
         }
@@ -188,6 +242,26 @@ export class FileMatrixDeliveryOutbox {
         })
     }
 
+    async stageBundle(delivery: DurableMatrixBundleDelivery): Promise<void> {
+        await this.serializeTransition(`delivery:${delivery.deliveryId}`, async () => {
+            if (
+                this.pendingBundles.has(delivery.deliveryId)
+                || this.delivered.has(delivery.deliveryId)
+                || this.abandoned.has(delivery.deliveryId)
+                || this.failed.has(delivery.deliveryId)
+            ) return
+            const entry: PendingBundleEntry = {
+                version: 2,
+                kind: 'pending_bundle',
+                ...delivery,
+            }
+            await this.append(entry)
+            this.bundleDeliveries.set(delivery.deliveryId, delivery)
+            this.logicalBundleDeliveries.set(delivery.logicalKey, delivery)
+            this.pendingBundles.set(delivery.deliveryId, delivery)
+        })
+    }
+
     async markDelivered(deliveryId: string, eventId: string, deliveredAt = Date.now()): Promise<void> {
         await this.serializeTransition(`delivery:${deliveryId}`, async () => {
             if (
@@ -203,8 +277,10 @@ export class FileMatrixDeliveryOutbox {
                 deliveredAt,
             })
             this.pending.delete(deliveryId)
+            this.pendingBundles.delete(deliveryId)
             this.delivered.set(deliveryId, eventId)
             const delivery = this.deliveries.get(deliveryId)
+                ?? this.bundleDeliveries.get(deliveryId)
             if (delivery) this.eventLogicalKeys.set(eventId, delivery.logicalKey)
         })
     }
@@ -228,6 +304,7 @@ export class FileMatrixDeliveryOutbox {
                 abandonedAt,
             })
             this.pending.delete(deliveryId)
+            this.pendingBundles.delete(deliveryId)
             this.abandoned.add(deliveryId)
         })
     }
@@ -247,6 +324,7 @@ export class FileMatrixDeliveryOutbox {
                 failedAt,
             })
             this.pending.delete(deliveryId)
+            this.pendingBundles.delete(deliveryId)
             this.failed.add(deliveryId)
         })
     }
@@ -268,6 +346,11 @@ export class FileMatrixDeliveryOutbox {
 
     listPending(roomId?: string): DurableMatrixDelivery[] {
         return [...this.pending.values()]
+            .filter(delivery => roomId === undefined || delivery.request.roomId === roomId)
+    }
+
+    listPendingBundles(roomId?: string): DurableMatrixBundleDelivery[] {
+        return [...this.pendingBundles.values()]
             .filter(delivery => roomId === undefined || delivery.request.roomId === roomId)
     }
 
@@ -295,6 +378,10 @@ export class FileMatrixDeliveryOutbox {
         return this.recipientDeliveries.get(
             recipientDeliveryKey(logicalKey, recipientDeviceId),
         )
+    }
+
+    bundleDelivery(logicalKey: string): DurableMatrixBundleDelivery | undefined {
+        return this.logicalBundleDeliveries.get(logicalKey)
     }
 
     logicalEventId(logicalKey: string): string | undefined {
@@ -325,6 +412,14 @@ export class FileMatrixDeliveryOutbox {
             const eventId = this.delivered.get(delivery.deliveryId)
             if (eventId) result.set(delivery.recipientDeviceId, eventId)
         }
+        for (const delivery of this.bundleDeliveries.values()) {
+            if (delivery.logicalKey !== logicalKey) continue
+            const eventId = this.delivered.get(delivery.deliveryId)
+            if (!eventId) continue
+            for (const recipient of delivery.recipients) {
+                result.set(recipient.recipientDeviceId, eventId)
+            }
+        }
         return result
     }
 
@@ -343,14 +438,19 @@ export class FileMatrixDeliveryOutbox {
         const eventToLogicalKey = new Map<string, string>()
         for (const [logicalKey, eventId] of this.logicalEvents) {
             eventToLogicalKey.set(eventId, logicalKey)
+            eventToLogicalKey.set(historyCursor(logicalKey), logicalKey)
         }
-        for (const delivery of this.deliveries.values()) {
+        const allDeliveries = [
+            ...this.deliveries.values(),
+            ...this.bundleDeliveries.values(),
+        ]
+        for (const delivery of allDeliveries) {
             const eventId = this.delivered.get(delivery.deliveryId)
             if (eventId) eventToLogicalKey.set(eventId, delivery.logicalKey)
         }
 
-        const canonical = new Map<string, DurableMatrixDelivery>()
-        for (const delivery of this.deliveries.values()) {
+        const canonical = new Map<string, MatrixHistoryDeliverySource>()
+        for (const delivery of allDeliveries) {
             if (delivery.request.roomId !== roomId) continue
             const current = canonical.get(delivery.logicalKey)
             if (
@@ -561,10 +661,15 @@ function isDisplayHistoryContent(
 
 function validateEntry(value: unknown): DeliveryEntry {
     const entry = asRecord(value)
-    if (entry?.version !== 1 || typeof entry.kind !== 'string') {
+    if (
+        !entry
+        || typeof entry.kind !== 'string'
+        || (entry.version !== 1 && entry.version !== 2)
+    ) {
         throw new TypeError('unsupported record')
     }
     if (entry.kind === 'pending') {
+        if (entry.version !== 1) throw new TypeError('unsupported pending record version')
         const request = asRecord(entry.request)
         if (
             typeof entry.deliveryId !== 'string'
@@ -582,6 +687,39 @@ function validateEntry(value: unknown): DeliveryEntry {
         }
         return entry as unknown as PendingEntry
     }
+    if (entry.kind === 'pending_bundle') {
+        if (entry.version !== 2) throw new TypeError('unsupported pending bundle record version')
+        const request = asRecord(entry.request)
+        if (
+            typeof entry.deliveryId !== 'string'
+            || typeof entry.logicalKey !== 'string'
+            || !Array.isArray(entry.recipients)
+            || entry.recipients.length === 0
+            || entry.recipients.length > 256
+            || typeof entry.createdAt !== 'number'
+            || typeof request?.roomId !== 'string'
+            || request.eventType !== 'm.room.message'
+            || typeof request.transactionId !== 'string'
+            || !asRecord(request.content)
+        ) {
+            throw new TypeError('invalid pending bundle record')
+        }
+        const deviceIds = new Set<string>()
+        for (const value of entry.recipients) {
+            const recipient = asRecord(value)
+            if (
+                typeof recipient?.recipientDeviceId !== 'string'
+                || typeof recipient.recipientSequenceEpoch !== 'string'
+                || typeof recipient.recipientPublicKeyId !== 'string'
+                || deviceIds.has(recipient.recipientDeviceId)
+            ) {
+                throw new TypeError('invalid pending bundle recipient')
+            }
+            deviceIds.add(recipient.recipientDeviceId)
+        }
+        return entry as unknown as PendingBundleEntry
+    }
+    if (entry.version !== 1) throw new TypeError('unsupported transition record version')
     if (entry.kind === 'delivered') {
         if (
             typeof entry.deliveryId !== 'string'

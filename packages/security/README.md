@@ -45,3 +45,12 @@ The gateway should process an incoming command in this order:
 
 Matrix sender IDs, room membership, power levels, and homeserver responses are
 transport data only and must not replace application signature verification.
+
+Gateway-to-device broadcasts use `secure-envelope-bundle` rather than one
+room event per application device. The Gateway encrypts the JSON payload once
+with a random AES-256-GCM content key, wraps that key independently for each
+recipient with P-256 ECDH/HKDF/AES-GCM, and signs the complete bundle. Opening
+a bundle still requires the locally paired device ID, application key ID,
+Gateway signing key, conversation binding, validity window, and replay claims.
+The legacy single-recipient envelope remains the device-to-Gateway command
+format and a PWA compatibility read path.

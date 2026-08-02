@@ -19,6 +19,7 @@ import {
   generateDeviceKeyPair,
   decryptMedia,
   encryptMedia,
+  openSecureEnvelopeBundle,
   openSecureEnvelope,
   sealSecureEnvelope,
   SecurityError,
@@ -53,6 +54,7 @@ import {
   signedGatewayDeviceRotationSchema,
   jsonValueSchema,
   signedPairingRejectionSchema,
+  signedSecureEnvelopeBundleSchema,
   signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
   type SignedPairingOffer,
@@ -2255,6 +2257,12 @@ export function parseCodeverEvent(
   const effectiveContent = replacement ?? content;
   const effectiveExtension =
     asRecord(effectiveContent["io.codever"]) ?? extension;
+  if (
+    typeof effectiveExtension.logical_event_id === "string" &&
+    effectiveExtension.logical_event_id
+  ) {
+    eventId = effectiveExtension.logical_event_id;
+  }
   const body =
     typeof effectiveContent.body === "string" ? effectiveContent.body : "";
   const collaborationMetadata = {
@@ -2273,10 +2281,16 @@ export function parseCodeverEvent(
       ? { operationId: effectiveExtension.operation_id }
       : {}),
   };
-  const replacementMetadata =
-    typeof relation?.event_id === "string"
-      ? { replacesEventId: relation.event_id }
-      : {};
+  const replacementEventId =
+    typeof effectiveExtension.replaces_logical_event_id === "string" &&
+    effectiveExtension.replaces_logical_event_id
+      ? effectiveExtension.replaces_logical_event_id
+      : typeof relation?.event_id === "string"
+        ? relation.event_id
+        : undefined;
+  const replacementMetadata = replacementEventId
+    ? { replacesEventId: replacementEventId }
+    : {};
 
   if (effectiveExtension.kind === "signed_command") return null;
   if (
@@ -2634,6 +2648,92 @@ function deduplicateHistoryMessages(
   });
 }
 
+function isGatewaySecureEnvelopeExtension(
+  extension: Record<string, unknown> | null,
+): boolean {
+  return Boolean(
+    (extension?.kind === "secure_envelope" && extension.secure_envelope) ||
+      (extension?.kind === "secure_envelope_bundle" &&
+        extension.secure_envelope_bundle),
+  );
+}
+
+async function openGatewaySecureEnvelope(
+  extension: Record<string, unknown>,
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  trust: TrustedGateway,
+  replayStore: ReplayStore,
+  historical: boolean,
+): Promise<JsonValue | null> {
+  const expected = {
+    gatewayId: trust.gatewayId,
+    conversationId: config.conversationId,
+    direction: "gateway_to_device" as const,
+    senderDeviceId: trust.certificate.certificate.gatewayId,
+    senderKeyId: trust.gatewayKey.keyId,
+    recipientDeviceId: trust.certificate.certificate.deviceId,
+    recipientKeyId: identity.keyId,
+  };
+  if (
+    extension.kind === "secure_envelope_bundle" &&
+    extension.secure_envelope_bundle
+  ) {
+    const routed = signedSecureEnvelopeBundleSchema.safeParse(
+      extension.secure_envelope_bundle,
+    );
+    if (!routed.success) {
+      throw new Error(
+        historical
+          ? "An archived Gateway envelope bundle is malformed."
+          : "The secure Gateway envelope bundle is malformed.",
+      );
+    }
+    const addressed = routed.data.bundle.recipients.some(
+      (recipient) =>
+        recipient.recipientDeviceId === expected.recipientDeviceId &&
+        recipient.recipientKeyId === expected.recipientKeyId,
+    );
+    if (!addressed) return null;
+    const opened = await openSecureEnvelopeBundle(
+      extension.secure_envelope_bundle,
+      {
+        recipientPrivateKey: identity.privateKey,
+        senderPublicKey: trust.gatewayKey.publicKey,
+        expected,
+        replayStore,
+        ...(historical ? { now: routed.data.bundle.issuedAt } : {}),
+      },
+    );
+    return opened.plaintext;
+  }
+
+  const routed = signedSecureEnvelopeSchema.safeParse(
+    extension.secure_envelope,
+  );
+  if (!routed.success) {
+    throw new Error(
+      historical
+        ? "An archived Gateway envelope is malformed."
+        : "The secure Gateway envelope is malformed.",
+    );
+  }
+  if (
+    routed.data.envelope.recipientDeviceId !== expected.recipientDeviceId ||
+    routed.data.envelope.recipientKeyId !== expected.recipientKeyId
+  ) {
+    return null;
+  }
+  const opened = await openSecureEnvelope(extension.secure_envelope, {
+    recipientPrivateKey: identity.privateKey,
+    senderPublicKey: trust.gatewayKey.publicKey,
+    expected,
+    replayStore,
+    ...(historical ? { now: routed.data.envelope.issuedAt } : {}),
+  });
+  return opened.plaintext;
+}
+
 /**
  * Opens an archived Gateway envelope on a display-only path. This function
  * cannot acknowledge commands, advance revisions, resolve results, rotate
@@ -2660,42 +2760,19 @@ async function decodeHistoricalEvent(
   }
   const content = asRecord(event.getContent());
   const extension = asRecord(content?.["io.codever"]);
-  if (
-    !content ||
-    extension?.kind !== "secure_envelope" ||
-    !extension.secure_envelope
-  ) {
+  if (!content || !isGatewaySecureEnvelopeExtension(extension)) {
     return null;
   }
-  const routed = signedSecureEnvelopeSchema.safeParse(
-    extension.secure_envelope,
-  );
-  if (!routed.success) {
-    throw new Error("An archived Gateway envelope is malformed.");
-  }
-  if (
-    routed.data.envelope.recipientDeviceId !==
-      trust.certificate.certificate.deviceId ||
-    routed.data.envelope.recipientKeyId !== identity.keyId
-  ) {
-    return null;
-  }
-  const opened = await openSecureEnvelope(extension.secure_envelope, {
-    recipientPrivateKey: identity.privateKey,
-    senderPublicKey: trust.gatewayKey.publicKey,
-    expected: {
-      gatewayId: trust.gatewayId,
-      conversationId: config.conversationId,
-      direction: "gateway_to_device",
-      senderDeviceId: trust.certificate.certificate.gatewayId,
-      recipientDeviceId: trust.certificate.certificate.deviceId,
-      senderKeyId: trust.gatewayKey.keyId,
-      recipientKeyId: identity.keyId,
-    },
+  const plaintext = await openGatewaySecureEnvelope(
+    extension!,
+    config,
+    identity,
+    trust,
     replayStore,
-    now: routed.data.envelope.issuedAt,
-  });
-  const decryptedContent = asRecord(opened.plaintext);
+    true,
+  );
+  if (plaintext === null) return null;
+  const decryptedContent = asRecord(plaintext);
   if (!decryptedContent) {
     throw new Error(
       "An archived Gateway envelope did not contain Matrix content.",
@@ -2865,8 +2942,7 @@ async function forwardEvent(
     return;
   }
   if (
-    extension?.kind !== "secure_envelope" ||
-    !extension.secure_envelope ||
+    !isGatewaySecureEnvelopeExtension(extension) ||
     !identity ||
     !getTrust ||
     !replayStore
@@ -2881,40 +2957,16 @@ async function forwardEvent(
     seen.add(eventId);
     return;
   }
-  const routedEnvelope = signedSecureEnvelopeSchema.safeParse(
-    extension.secure_envelope,
-  );
-  if (
-    routedEnvelope.success &&
-    (routedEnvelope.data.envelope.recipientDeviceId !==
-      trust.certificate.certificate.deviceId ||
-      routedEnvelope.data.envelope.recipientKeyId !== identity.keyId)
-  ) {
-    // A shared room contains one independently encrypted copy per paired
-    // browser. The authenticated open below remains mandatory for messages
-    // addressed to us; this untrusted header is used only to route away
-    // another device's ciphertext without turning the connection red.
-    seen.add(eventId);
-    return;
-  }
-  let opened;
+  let plaintext: JsonValue | null;
   try {
-    opened = await openSecureEnvelope(extension.secure_envelope, {
-      // Device IDs are certificate identities. They are intentionally separate
-      // from both Matrix transport IDs and application key IDs.
-      recipientPrivateKey: identity.privateKey,
-      senderPublicKey: trust.gatewayKey.publicKey,
-      expected: {
-        gatewayId: trust.gatewayId,
-        conversationId: config.conversationId,
-        direction: "gateway_to_device",
-        senderDeviceId: trust.certificate.certificate.gatewayId,
-        recipientDeviceId: trust.certificate.certificate.deviceId,
-        senderKeyId: trust.gatewayKey.keyId,
-        recipientKeyId: identity.keyId,
-      },
+    plaintext = await openGatewaySecureEnvelope(
+      extension!,
+      config,
+      identity,
+      trust,
       replayStore,
-    });
+      false,
+    );
   } catch (error) {
     if (error instanceof SecurityError && error.code === "replay") {
       // Initial sync includes already-rendered history. Persistent replay state
@@ -2924,7 +2976,14 @@ async function forwardEvent(
     }
     throw error;
   }
-  const decryptedContent = asRecord(opened.plaintext);
+  if (plaintext === null) {
+    // This untrusted header is used only to route away another device's
+    // ciphertext. Every entry addressed to this device is still opened and
+    // authenticated before any plaintext or control callback is accepted.
+    seen.add(eventId);
+    return;
+  }
+  const decryptedContent = asRecord(plaintext);
   if (!decryptedContent) {
     throw new Error("The secure Gateway envelope did not contain Matrix content.");
   }

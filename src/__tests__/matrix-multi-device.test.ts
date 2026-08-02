@@ -12,6 +12,7 @@ import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
+    openSecureEnvelopeBundle,
     openSecureEnvelope,
     sha256,
     signCommand,
@@ -42,7 +43,7 @@ afterEach(async () => {
 })
 
 describe('multi-device Matrix collaboration', () => {
-    it('fans out independently, rewrites edit targets, and stops revoked recipients immediately', async () => {
+    it('sends one shared ciphertext, preserves stable edit identities, and stops revoked recipients immediately', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -62,18 +63,9 @@ describe('multi-device Matrix collaboration', () => {
         )
         await layer.initialize(now)
         const sent: MatrixSendEventRequest[] = []
-        let failSecondEditOnce = true
         const transport: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
-                if (
-                    request.transactionId.startsWith('logical-edit.')
-                    && envelopeRecipient(request) === 'device-b'
-                    && failSecondEditOnce
-                ) {
-                    failSecondEditOnce = false
-                    throw new Error('temporary device-b edit failure')
-                }
                 return { eventId: `$event-${sent.length}` }
             },
         }
@@ -95,23 +87,25 @@ describe('multi-device Matrix collaboration', () => {
                 [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
             },
         })
-        expect(sent).toHaveLength(2)
-        expect(new Set(sent.map(item => item.transactionId)).size).toBe(2)
-        const originalA = sent.find(item => envelopeRecipient(item) === 'device-a')!
-        const originalB = sent.find(item => envelopeRecipient(item) === 'device-b')!
-        const physicalA = `$event-${sent.indexOf(originalA) + 1}`
-        const physicalB = `$event-${sent.indexOf(originalB) + 1}`
-        expect([physicalA, physicalB]).toContain(original.eventId)
-        await expect(openFor(originalA, first, gateway, 'device-a'))
-            .resolves.toMatchObject({
+        expect(sent).toHaveLength(1)
+        expect(sent[0]!.transactionId).toBe('logical-send')
+        expect(original.eventId).toBe('$event-1')
+        const originalA = await openFor(sent[0]!, first, gateway, 'device-a')
+        const originalB = await openFor(sent[0]!, second, gateway, 'device-b')
+        expect(originalA)
+            .toMatchObject({
                 body: 'shared answer',
                 [CODEVER_MATRIX_EXTENSION]: { active_device_count: 2 },
             })
-        await expect(openFor(originalB, second, gateway, 'device-b'))
-            .resolves.toMatchObject({
+        expect(originalB)
+            .toMatchObject({
                 body: 'shared answer',
                 [CODEVER_MATRIX_EXTENSION]: { active_device_count: 2 },
             })
+        const stableOriginalId = (
+            originalA[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        ).logical_event_id
+        expect(stableOriginalId).toMatch(/^[A-Za-z0-9_-]{43}$/u)
 
         await expect(secureTransport.sendEncryptedRoomEvent({
             roomId: room.roomId,
@@ -137,22 +131,14 @@ describe('multi-device Matrix collaboration', () => {
                 },
             },
         })).resolves.toBeDefined()
-        await layer.retryPendingForRoom(room, transport)
-        const editAttempts = sent.filter(item => item.transactionId.startsWith('logical-edit.'))
-        const editARequests = editAttempts.filter(item => envelopeRecipient(item) === 'device-a')
-        const editBRequests = editAttempts.filter(item => envelopeRecipient(item) === 'device-b')
-        expect(editARequests).toHaveLength(1)
-        expect(editBRequests).toHaveLength(2)
-        expect(new Set(editBRequests.map(item => item.transactionId))).toHaveLength(1)
-        const editA = editARequests[0]!
-        const editB = editBRequests.at(-1)!
-        const firstEdit = await openFor(editA, first, gateway, 'device-a')
-        const secondEdit = await openFor(editB, second, gateway, 'device-b')
-        expect(firstEdit['m.relates_to']).toMatchObject({ event_id: physicalA })
-        expect(secondEdit['m.relates_to']).toMatchObject({ event_id: physicalB })
+        expect(sent).toHaveLength(2)
+        const firstEdit = await openFor(sent[1]!, first, gateway, 'device-a')
+        const secondEdit = await openFor(sent[1]!, second, gateway, 'device-b')
+        expect(firstEdit['m.relates_to']).toMatchObject({ event_id: stableOriginalId })
+        expect(secondEdit['m.relates_to']).toMatchObject({ event_id: stableOriginalId })
         expect(
             (secondEdit['m.new_content'] as Record<string, unknown>)[CODEVER_MATRIX_EXTENSION],
-        ).toMatchObject({ replaces_event_id: physicalB })
+        ).toMatchObject({ replaces_logical_event_id: stableOriginalId })
 
         active = [firstPolicy]
         await secureTransport.sendEncryptedRoomEvent({
@@ -165,14 +151,110 @@ describe('multi-device Matrix collaboration', () => {
                 [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
             },
         })
-        expect(sent).toHaveLength(6)
-        const afterRevoke = await openFor(sent[5]!, first, gateway, 'device-a')
+        expect(sent).toHaveLength(3)
+        const afterRevoke = await openFor(sent[2]!, first, gateway, 'device-a')
         expect(afterRevoke[CODEVER_MATRIX_EXTENSION]).toMatchObject({
             active_device_count: 1,
         })
     })
 
-    it('returns partial fan-out success, retries only the missing recipient, and uses stable edit IDs for a newly joined device', async () => {
+    it('keeps three normal command lifecycles inside a ten-event Matrix burst budget', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const devices = await Promise.all([
+            generateDeviceKeyPair(),
+            generateDeviceKeyPair(),
+            generateDeviceKeyPair(),
+        ])
+        const policies = devices.map((device, index) => trusted(
+            `device-${index + 1}`,
+            `Device ${index + 1}`,
+            device.publicJwk,
+            `MATRIX_${index + 1}`,
+        ))
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            policies,
+            async () => policies,
+        )
+        await layer.initialize(now)
+        const sent: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                sent.push(request)
+                return { eventId: `$budget-${sent.length}` }
+            },
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+
+        for (let sequence = 1; sequence <= 3; sequence += 1) {
+            const commandId = `budget-command-${sequence}`
+            await layer.sendCommandAccepted(
+                room,
+                'device-1',
+                commandId,
+                sequence,
+                sequence,
+                'runtime-epoch-1',
+                transport,
+            )
+            await layer.sendCommandResult(
+                room,
+                'device-1',
+                commandId,
+                sequence,
+                sequence,
+                'runtime-epoch-1',
+                'succeeded',
+                transport,
+            )
+            await layer.sendGatewayState(room, {
+                revision: sequence,
+                revisionEpoch: 'runtime-epoch-1',
+                revisionEpochGeneration: 1,
+                stateVersion: sequence,
+                currentSessionId: null,
+                sessions: [],
+                workspace: {
+                    projectId: 'project-1',
+                    projectName: 'Project',
+                    cwd: 'C:\\repo',
+                    provider: 'test',
+                    permissionMode: 'default',
+                },
+                capabilities: {
+                    models: [],
+                    permissionModes: [],
+                    canCreateSession: true,
+                    canSelectSession: true,
+                },
+            }, transport)
+        }
+
+        expect(sent).toHaveLength(9)
+        const bundles = sent.filter(request =>
+            (request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).kind
+                === 'secure_envelope_bundle',
+        )
+        expect(bundles).toHaveLength(3)
+        expect(bundles.map(bundleRecipients)).toEqual([
+            ['device-1', 'device-2', 'device-3'],
+            ['device-1', 'device-2', 'device-3'],
+            ['device-1', 'device-2', 'device-3'],
+        ])
+    })
+
+    it('retries one stable bundle transaction and uses logical edit IDs for a newly joined device', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -195,13 +277,13 @@ describe('multi-device Matrix collaboration', () => {
         await layer.initialize(now)
         const sent: MatrixSendEventRequest[] = []
         const eventIds = new Map<string, string>()
-        let failSecondOnce = true
+        let failOnce = true
         const transport: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
-                if (envelopeRecipient(request) === 'device-b' && failSecondOnce) {
-                    failSecondOnce = false
-                    throw new Error('temporary device-b delivery failure')
+                if (failOnce) {
+                    failOnce = false
+                    throw new Error('temporary bundle delivery failure')
                 }
                 const existing = eventIds.get(request.transactionId)
                 if (existing) return { eventId: existing }
@@ -228,21 +310,21 @@ describe('multi-device Matrix collaboration', () => {
             },
         }
 
-        const original = await secureTransport.sendEncryptedRoomEvent(originalRequest)
-        await vi.waitFor(() => expect(eventIds).toHaveLength(2))
-        const attemptsByRecipient = sent.reduce<Record<string, number>>((counts, request) => {
-            const recipient = envelopeRecipient(request)!
-            counts[recipient] = (counts[recipient] ?? 0) + 1
-            return counts
-        }, {})
-        expect(attemptsByRecipient).toEqual({ 'device-a': 1, 'device-b': 2 })
-        const secondTransactions = sent
-            .filter(request => envelopeRecipient(request) === 'device-b')
-            .map(request => request.transactionId)
-        expect(new Set(secondTransactions)).toHaveLength(1)
-        expect(eventIds).toHaveLength(2)
+        await expect(secureTransport.sendEncryptedRoomEvent(originalRequest))
+            .rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        await layer.retryPendingForRoom(room, transport)
+        expect(sent).toHaveLength(2)
+        expect(new Set(sent.map(request => request.transactionId))).toEqual(
+            new Set(['logical-retry']),
+        )
+        expect(eventIds).toEqual(new Map([['logical-retry', '$physical-1']]))
+        expect(bundleRecipients(sent[1]!)).toEqual(['device-a', 'device-b'])
 
         active = [firstPolicy, secondPolicy, thirdPolicy]
+        await expect(secureTransport.sendEncryptedRoomEvent(originalRequest)).resolves.toEqual({
+            eventId: '$physical-1',
+        })
+        expect(sent).toHaveLength(2)
         await secureTransport.sendEncryptedRoomEvent({
             roomId: room.roomId,
             eventType: 'm.room.message',
@@ -250,38 +332,41 @@ describe('multi-device Matrix collaboration', () => {
             content: {
                 msgtype: 'm.text',
                 body: '* updated',
-                'm.relates_to': { rel_type: 'm.replace', event_id: original.eventId },
+                'm.relates_to': { rel_type: 'm.replace', event_id: '$physical-1' },
                 'm.new_content': {
                     msgtype: 'm.text',
                     body: 'updated',
                     [CODEVER_MATRIX_EXTENSION]: {
                         version: 1,
                         kind: 'message',
-                        replaces_event_id: original.eventId,
+                        replaces_event_id: '$physical-1',
                     },
                 },
                 [CODEVER_MATRIX_EXTENSION]: {
                     version: 1,
                     kind: 'message',
-                    replaces_event_id: original.eventId,
+                    replaces_event_id: '$physical-1',
                 },
             },
         })
-        const thirdEditRequest = sent
-            .slice(-3)
-            .find(request => envelopeRecipient(request) === 'device-c')!
+        const thirdEditRequest = sent.at(-1)!
+        expect(bundleRecipients(thirdEditRequest)).toEqual([
+            'device-a',
+            'device-b',
+            'device-c',
+        ])
         const thirdEdit = await openFor(thirdEditRequest, third, gateway, 'device-c')
         const stableTarget = (thirdEdit['m.relates_to'] as Record<string, unknown>).event_id
         expect(stableTarget).toMatch(/^[A-Za-z0-9_-]{43}$/u)
         expect(thirdEdit[CODEVER_MATRIX_EXTENSION]).toMatchObject({
-            replaces_event_id: stableTarget,
+            replaces_logical_event_id: stableTarget,
         })
         expect(
             (thirdEdit['m.new_content'] as Record<string, unknown>)[CODEVER_MATRIX_EXTENSION],
-        ).toMatchObject({ replaces_event_id: stableTarget })
+        ).toMatchObject({ replaces_logical_event_id: stableTarget })
     })
 
-    it('returns after the first device confirms while the slow device remains durably queued', async () => {
+    it('persists one bundle while a slow Matrix attempt completes after the caller timeout', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -294,6 +379,7 @@ describe('multi-device Matrix collaboration', () => {
             gatewayDeviceId: 'gateway-1',
             gatewayKeyPair: await exportDeviceKeyPair(gateway),
             envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            deliveryAttemptTimeoutMs: 20,
         }
         const layer = new GatewaySecureContentLayer(
             'gateway-1',
@@ -309,10 +395,9 @@ describe('multi-device Matrix collaboration', () => {
         const attempted: string[] = []
         const transport: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
-                const recipient = envelopeRecipient(request)!
-                attempted.push(recipient)
-                if (recipient === 'device-b') await slow
-                return { eventId: `$event-${recipient}` }
+                attempted.push(request.transactionId)
+                await slow
+                return { eventId: '$event-bundle' }
             },
         }
         const room = {
@@ -322,7 +407,7 @@ describe('multi-device Matrix collaboration', () => {
             providerName: 'test',
         }
 
-        const result = await layer.transportForRoom(room, transport).sendEncryptedRoomEvent({
+        const result = layer.transportForRoom(room, transport).sendEncryptedRoomEvent({
             roomId: room.roomId,
             eventType: 'm.room.message',
             transactionId: 'logical-slow-fanout',
@@ -333,14 +418,14 @@ describe('multi-device Matrix collaboration', () => {
             },
         })
 
-        expect(result.eventId).toBe('$event-device-a')
-        expect(new Set(attempted)).toEqual(new Set(['device-a', 'device-b']))
+        await expect(result).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        expect(attempted).toEqual(['logical-slow-fanout'])
         const beforeSlowConfirmation = await readFile(
             `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
             'utf8',
         )
-        expect(beforeSlowConfirmation.match(/"kind":"pending"/gu)).toHaveLength(2)
-        expect(beforeSlowConfirmation.match(/"kind":"delivered"/gu)).toHaveLength(1)
+        expect(beforeSlowConfirmation.match(/"kind":"pending_bundle"/gu)).toHaveLength(1)
+        expect(beforeSlowConfirmation.match(/"kind":"delivered"/gu)).toBeNull()
 
         releaseSlow()
         await vi.waitFor(async () => {
@@ -348,7 +433,7 @@ describe('multi-device Matrix collaboration', () => {
                 `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
                 'utf8',
             )
-            expect(ledger.match(/"kind":"delivered"/gu)).toHaveLength(2)
+            expect(ledger.match(/"kind":"delivered"/gu)).toHaveLength(1)
         })
         layer.stopRetries()
     })
@@ -414,7 +499,7 @@ describe('multi-device Matrix collaboration', () => {
             },
         })
 
-        expect(attempted.some(transactionId => transactionId.startsWith('new-logical-transaction.'))).toBe(true)
+        expect(attempted).toContain('new-logical-transaction')
         const ledger = await readFile(ledgerPath, 'utf8')
         expect(ledger).toContain('new reply is staged first')
         layer.stopRetries()
@@ -746,7 +831,7 @@ describe('multi-device Matrix collaboration', () => {
         expect(attempted[1]).toMatch(/^codever\.command\.ack\.priority-command\.[^.]+\./u)
         expect(attempted[2]).toMatch(/^codever\.command\.result\.priority-command\.succeeded\./u)
         expect(attempted[3]).toMatch(/^codever\.history\.page\.priority-history\./u)
-        expect(attempted[4]).toMatch(/^priority-decision\./u)
+        expect(attempted[4]).toBe('priority-decision')
         releaseRecovery()
         await recovery
         expect(attempted.filter(transactionId =>
@@ -865,7 +950,7 @@ describe('multi-device Matrix collaboration', () => {
         layer.stopRetries()
     })
 
-    it('coalesces a queued replacement per recipient and tombstones the superseded WAL copy', async () => {
+    it('coalesces queued replacement bundles and tombstones the superseded WAL copy', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -902,10 +987,7 @@ describe('multi-device Matrix collaboration', () => {
         const transport: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
-                if (
-                    request.transactionId.startsWith('coalesce-edit-one.')
-                    && envelopeRecipient(request) !== 'device-c'
-                ) {
+                if (request.transactionId === 'coalesce-edit-one') {
                     await firstEditGate
                 }
                 return { eventId: `$coalesce-${sent.length}` }
@@ -922,7 +1004,7 @@ describe('multi-device Matrix collaboration', () => {
                 [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
             },
         })
-        await vi.waitFor(() => expect(sent).toHaveLength(3))
+        expect(sent).toHaveLength(1)
         const replacement = (transactionId: string, body: string): MatrixSendEventRequest => ({
             roomId: room.roomId,
             eventType: 'm.room.message',
@@ -949,13 +1031,17 @@ describe('multi-device Matrix collaboration', () => {
         })
 
         const firstEdit = secureTransport.sendEncryptedRoomEvent(
-            replacement('coalesce-edit-one', 'intermediate'),
+            replacement('coalesce-edit-one', 'first'),
         )
         await vi.waitFor(() => expect(sent.filter(request =>
-            request.transactionId.startsWith('coalesce-edit-one.'),
-        )).toHaveLength(2))
+            request.transactionId === 'coalesce-edit-one',
+        )).toHaveLength(1))
+        const intermediateEdit = secureTransport.sendEncryptedRoomEvent(
+            replacement('coalesce-edit-two', 'intermediate'),
+        )
+        const intermediateOutcome = intermediateEdit.catch(error => error as unknown)
         const finalEdit = secureTransport.sendEncryptedRoomEvent(
-            replacement('coalesce-edit-two', 'final'),
+            replacement('coalesce-edit-three', 'final'),
         )
         await vi.waitFor(async () => {
             const ledger = await readFile(
@@ -964,20 +1050,18 @@ describe('multi-device Matrix collaboration', () => {
             )
             expect(ledger).toContain('"reason":"superseded"')
         })
-        expect(sent.some(request =>
-            request.transactionId.startsWith('coalesce-edit-one.')
-            && envelopeRecipient(request) === 'device-c',
-        )).toBe(false)
+        expect(sent.some(request => request.transactionId === 'coalesce-edit-two')).toBe(false)
 
         releaseFirstEdit()
         await Promise.all([firstEdit, finalEdit])
+        expect(await intermediateOutcome).toBeInstanceOf(Error)
         await vi.waitFor(() => expect(sent.filter(request =>
-            request.transactionId.startsWith('coalesce-edit-two.'),
-        )).toHaveLength(3))
+            request.transactionId === 'coalesce-edit-three',
+        )).toHaveLength(1))
         layer.stopRetries()
     })
 
-    it('keeps only the latest queued gateway state for each recipient', async () => {
+    it('keeps only the latest queued gateway-state bundle', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -1045,8 +1129,9 @@ describe('multi-device Matrix collaboration', () => {
         const firstState = layer.sendGatewayState(room, state(1), transport)
         await vi.waitFor(() => expect(sent.filter(request =>
             request.transactionId.startsWith('codever.gateway.state.1.'),
-        )).toHaveLength(2))
-        const latestState = layer.sendGatewayState(room, state(2), transport)
+        )).toHaveLength(1))
+        const intermediateState = layer.sendGatewayState(room, state(2), transport)
+        const latestState = layer.sendGatewayState(room, state(3), transport)
         await vi.waitFor(async () => {
             const ledger = await readFile(
                 `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
@@ -1055,15 +1140,14 @@ describe('multi-device Matrix collaboration', () => {
             expect(ledger).toContain('"reason":"superseded"')
         })
         expect(sent.some(request =>
-            request.transactionId.startsWith('codever.gateway.state.1.')
-            && envelopeRecipient(request) === 'device-c',
+            request.transactionId.startsWith('codever.gateway.state.2.'),
         )).toBe(false)
 
         releaseFirstState()
-        await Promise.all([firstState, latestState])
+        await Promise.all([firstState, intermediateState, latestState])
         await vi.waitFor(() => expect(sent.filter(request =>
-            request.transactionId.startsWith('codever.gateway.state.2.'),
-        )).toHaveLength(3))
+            request.transactionId.startsWith('codever.gateway.state.3.'),
+        )).toHaveLength(1))
         layer.stopRetries()
     })
 
@@ -1217,9 +1301,9 @@ describe('multi-device Matrix collaboration', () => {
                 },
             },
         })
-        const liveLateRequest = sent
-            .filter(request => envelopeRecipient(request) === 'device-c')
-            .at(-1)!
+        const liveLateRequest = sent.find(
+            request => request.transactionId === 'history-live-edit',
+        )!
         const liveLate = await openFor(liveLateRequest, late, gateway, 'device-c')
         expect(liveLate['m.relates_to']).toEqual({
             rel_type: 'm.replace',
@@ -1394,7 +1478,7 @@ describe('multi-device Matrix collaboration', () => {
         ]).size).toBe(36)
     })
 
-    it('persists collaboration/result gaps and recovers only the missing command recipient after restart', async () => {
+    it('persists a targeted result gap without replaying an already delivered collaboration bundle', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const first = await generateDeviceKeyPair()
@@ -1476,14 +1560,14 @@ describe('multi-device Matrix collaboration', () => {
         }
         await restarted.retryPendingForRoom(room, recoveredTransport, 'command-durable')
 
-        expect(recovered).toHaveLength(2)
+        expect(recovered).toHaveLength(1)
         expect(new Set(recovered.map(envelopeRecipient))).toEqual(new Set(['device-b']))
         const plaintext = await Promise.all(
             recovered.map(request => openFor(request, second, gateway, 'device-b')),
         )
         expect(plaintext.map(content =>
             (content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).kind,
-        )).toEqual(expect.arrayContaining(['collaboration_command', 'command_result']))
+        )).toEqual(['command_result'])
         const recoveredResult = plaintext
             .map(content => content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>)
             .find(extension => extension.kind === 'command_result')
@@ -1498,11 +1582,6 @@ describe('multi-device Matrix collaboration', () => {
                 expiresAt: now + 300_000,
             },
         })
-        expect(
-            plaintext
-                .map(content => content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>)
-                .find(extension => extension.kind === 'collaboration_command'),
-        ).toMatchObject({ session_id: 'session-durable' })
         expect(recovered.map(request => request.transactionId)).toEqual(
             expect.arrayContaining(
                 firstAttempts
@@ -1552,18 +1631,17 @@ describe('multi-device Matrix collaboration', () => {
             async () => originalActive,
         )
         await original.initialize(now)
-        await original.sendCollaborationPrompt(room, {
+        await expect(original.sendCollaborationPrompt(room, {
             commandId: 'rotated-command',
             revision: 8,
             originDeviceId: 'device-a',
             originDeviceName: 'Alice phone',
             text: 'must remain bound to the old certificate',
         }, {
-            async sendEncryptedRoomEvent(request) {
-                if (envelopeRecipient(request) === 'device-b') throw new Error('old device offline')
-                return { eventId: '$old-first' }
+            async sendEncryptedRoomEvent() {
+                throw new Error('bundle transport offline')
             },
-        })
+        })).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
         originalActive = []
         original.stopRetries()
 
@@ -1582,7 +1660,12 @@ describe('multi-device Matrix collaboration', () => {
             },
         }, 'rotated-command')
 
-        expect(rotatedAttempts).toEqual([])
+        expect(rotatedAttempts).toHaveLength(1)
+        expect(bundleRecipients(rotatedAttempts[0]!)).toEqual(['device-a'])
+        await expect(openFor(rotatedAttempts[0]!, first, gateway, 'device-a'))
+            .resolves.toMatchObject({
+                [CODEVER_MATRIX_EXTENSION]: { command_id: 'rotated-command' },
+            })
         const ledger = await readFile(`${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`, 'utf8')
         expect(ledger).toContain('"kind":"abandoned"')
         expect(ledger).toContain('"reason":"recipient_identity_changed"')
@@ -1892,27 +1975,50 @@ async function openFor(
     replayStore = new InMemoryReplayStore(),
 ) {
     const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-    const opened = await openSecureEnvelope(extension.secure_envelope, {
+    const options = {
         recipientPrivateKey: recipient.privateKey,
         senderPublicKey: gateway.publicKey,
         expected: {
             gatewayId: 'gateway-1',
             conversationId: 'conversation-1',
-            direction: 'gateway_to_device',
+            direction: 'gateway_to_device' as const,
             senderDeviceId: 'gateway-1',
             recipientDeviceId,
             senderKeyId: gateway.keyId,
             recipientKeyId: recipient.keyId,
         },
         replayStore,
-    })
+    }
+    const opened = extension.kind === 'secure_envelope_bundle'
+        ? await openSecureEnvelopeBundle(extension.secure_envelope_bundle, options)
+        : await openSecureEnvelope(extension.secure_envelope, options)
     return opened.plaintext as Record<string, unknown>
 }
 
 function envelopeRecipient(request: MatrixSendEventRequest): string | undefined {
     const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-    const signed = extension.secure_envelope as { envelope?: { recipientDeviceId?: string } }
+    const signed = extension.secure_envelope as {
+        envelope?: { recipientDeviceId?: string }
+    } | undefined
+    if (!signed) {
+        const bundle = extension.secure_envelope_bundle as {
+            bundle?: { recipients?: Array<{ recipientDeviceId?: string }> }
+        } | undefined
+        return bundle?.bundle?.recipients?.length === 1
+            ? bundle.bundle.recipients[0]?.recipientDeviceId
+            : undefined
+    }
     return signed.envelope?.recipientDeviceId
+}
+
+function bundleRecipients(request: MatrixSendEventRequest): string[] {
+    const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const signed = extension.secure_envelope_bundle as {
+        bundle?: { recipients?: Array<{ recipientDeviceId?: string }> }
+    } | undefined
+    return (signed?.bundle?.recipients ?? [])
+        .map(recipient => recipient.recipientDeviceId)
+        .filter((deviceId): deviceId is string => deviceId !== undefined)
 }
 
 function trusted(

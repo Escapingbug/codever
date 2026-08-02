@@ -3,7 +3,9 @@ import type { SecureEnvelopeDirection } from '@codever/protocol'
 import {
   generateDeviceKeyPair,
   InMemoryReplayStore,
+  openSecureEnvelopeBundle,
   openSecureEnvelope,
+  sealSecureEnvelopeBundle,
   sealSecureEnvelope,
   type DeviceKeyPair,
   type SecureEnvelopeBindings,
@@ -162,6 +164,96 @@ describe('application-layer secure envelopes', () => {
       replayStore: new InMemoryReplayStore(),
       now: now + 30 * 24 * 60 * 60_000,
     })).resolves.toMatchObject({ plaintext: { body: 'offline response' } })
+  })
+
+  it('encrypts one payload and wraps its content key independently for every device', async () => {
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const laptop = await generateDeviceKeyPair()
+    const plaintext = { body: 'one logical Gateway response' }
+    const sealed = await sealSecureEnvelopeBundle({
+      plaintext,
+      gatewayId: 'gateway-1',
+      conversationId: 'conversation-1',
+      direction: 'gateway_to_device',
+      senderDeviceId: 'gateway-1',
+      senderKeyId: gateway.keyId,
+      senderPrivateKey: gateway.privateKey,
+      recipients: [
+        {
+          recipientDeviceId: 'phone-1',
+          recipientKeyId: phone.keyId,
+          recipientPublicKey: phone.publicKey,
+        },
+        {
+          recipientDeviceId: 'laptop-1',
+          recipientKeyId: laptop.keyId,
+          recipientPublicKey: laptop.publicKey,
+        },
+      ],
+      envelopeId: 'bundle-1',
+      now,
+    })
+
+    expect(sealed.bundle.recipients).toHaveLength(2)
+    expect(new Set(sealed.bundle.recipients.map(recipient => recipient.wrappedKey)).size).toBe(2)
+    expect(JSON.stringify(sealed)).not.toContain(plaintext.body)
+    const expected = {
+      gatewayId: 'gateway-1',
+      conversationId: 'conversation-1',
+      direction: 'gateway_to_device' as const,
+      senderDeviceId: 'gateway-1',
+      senderKeyId: gateway.keyId,
+    }
+    const phoneReplayStore = new InMemoryReplayStore()
+    await expect(openSecureEnvelopeBundle(sealed, {
+      recipientPrivateKey: phone.privateKey,
+      senderPublicKey: gateway.publicKey,
+      expected: {
+        ...expected,
+        recipientDeviceId: 'phone-1',
+        recipientKeyId: phone.keyId,
+      },
+      replayStore: phoneReplayStore,
+      now: now + 1,
+    })).resolves.toMatchObject({ plaintext })
+    await expect(openSecureEnvelopeBundle(sealed, {
+      recipientPrivateKey: phone.privateKey,
+      senderPublicKey: gateway.publicKey,
+      expected: {
+        ...expected,
+        recipientDeviceId: 'phone-1',
+        recipientKeyId: phone.keyId,
+      },
+      replayStore: phoneReplayStore,
+      now: now + 1,
+    })).rejects.toMatchObject({ code: 'replay' })
+    await expect(openSecureEnvelopeBundle(sealed, {
+      recipientPrivateKey: laptop.privateKey,
+      senderPublicKey: gateway.publicKey,
+      expected: {
+        ...expected,
+        recipientDeviceId: 'laptop-1',
+        recipientKeyId: laptop.keyId,
+      },
+      replayStore: new InMemoryReplayStore(),
+      now: now + 1,
+    })).resolves.toMatchObject({ plaintext })
+
+    const tampered = structuredClone(sealed)
+    tampered.bundle.recipients[0]!.wrappedKey =
+      `${tampered.bundle.recipients[0]!.wrappedKey.slice(0, -1)}A`
+    await expect(openSecureEnvelopeBundle(tampered, {
+      recipientPrivateKey: phone.privateKey,
+      senderPublicKey: gateway.publicKey,
+      expected: {
+        ...expected,
+        recipientDeviceId: 'phone-1',
+        recipientKeyId: phone.keyId,
+      },
+      replayStore: new InMemoryReplayStore(),
+      now: now + 1,
+    })).rejects.toMatchObject({ code: 'invalid_signature' })
   })
 })
 

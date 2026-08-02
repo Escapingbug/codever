@@ -107,6 +107,32 @@ sign an invitation for a stale Matrix device. Long-lived Matrix access tokens
 remain server-side and may only be exchanged for short-lived one-time device
 login tokens.
 
+### 3.6 Matrix Multi-Recipient Delivery
+
+The Matrix room timeline is a logical conversation log, not a per-device
+mailbox. Gateway broadcasts are encoded as one signed multi-recipient secure
+envelope: one shared payload ciphertext plus a wrapped content key for each
+currently trusted application device. Adding a trusted device increases the
+event size slightly but does not multiply Matrix sends or consume additional
+homeserver message-rate tokens.
+
+The recipient set is every non-expired, non-revoked device trusted for the
+room, not only devices with a recent browser heartbeat. This preserves Matrix
+store-and-forward for offline devices without increasing the event count;
+revocation removes a device from all newly created bundles immediately.
+
+`FileMatrixDeliveryOutbox` stores one durable bundle and its recipient identity
+snapshot before the transport attempt. Retry and restart recovery preserve the
+same Matrix transaction ID. Targeted command acknowledgements/results and
+history responses continue to use single-recipient envelopes. Both envelope
+formats retain the same application signature, pairing, expiry, and replay
+requirements.
+
+Stable application `logical_event_id` values decouple message/edit identity
+from Matrix event IDs. This lets a live device and a late-joining device apply
+the same edit even when one saw the original live Matrix event and the other
+recovered it from Codever history.
+
 ## 4. Main Components
 
 ### 4.1 `daemon.ts`

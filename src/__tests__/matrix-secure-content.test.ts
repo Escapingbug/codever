@@ -6,6 +6,7 @@ import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
+    openSecureEnvelopeBundle,
     openSecureEnvelope,
     sealSecureEnvelope,
 } from '@codever/security'
@@ -80,7 +81,9 @@ describe('Gateway application-layer Matrix content', () => {
         })
         expect(JSON.stringify(sent[0]?.content)).not.toContain('agent secret reply')
         const outgoingExtension = sent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const openedOutgoing = await openSecureEnvelope(outgoingExtension.secure_envelope, {
+        const openedOutgoing = await openSecureEnvelopeBundle(
+            outgoingExtension.secure_envelope_bundle,
+            {
             recipientPrivateKey: device.privateKey,
             senderPublicKey: gateway.publicKey,
             expected: {
@@ -94,7 +97,8 @@ describe('Gateway application-layer Matrix content', () => {
             },
             replayStore: new InMemoryReplayStore(),
             now: Date.now(),
-        })
+            },
+        )
         expect(openedOutgoing.plaintext).toMatchObject({ body: 'agent secret reply' })
 
         await layer.sendCommandAccepted(
@@ -154,7 +158,9 @@ describe('Gateway application-layer Matrix content', () => {
             },
         }, matrix)
         const stateExtension = sent[2]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const openedState = await openSecureEnvelope(stateExtension.secure_envelope, {
+        const openedState = await openSecureEnvelopeBundle(
+            stateExtension.secure_envelope_bundle,
+            {
             recipientPrivateKey: device.privateKey,
             senderPublicKey: gateway.publicKey,
             expected: {
@@ -168,7 +174,8 @@ describe('Gateway application-layer Matrix content', () => {
             },
             replayStore: new InMemoryReplayStore(),
             now: Date.now(),
-        })
+            },
+        )
         expect(openedState.plaintext).toMatchObject({
             [CODEVER_MATRIX_EXTENSION]: {
                 version: 1,
