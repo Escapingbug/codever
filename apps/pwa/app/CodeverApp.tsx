@@ -19,6 +19,7 @@ import {
 } from "@codever/protocol";
 import {
   CommandAcknowledgementTimeoutError,
+  CommandCompletionTimeoutError,
   waitForCommandCompletion,
   type CommandCompletion,
 } from "./commandLifecycle";
@@ -137,6 +138,7 @@ const emptyMatrixConfig: MatrixConnectionConfig = {
 };
 
 const DEVICE_INVITATION_RESULT_TIMEOUT_MS = 95_000;
+const SESSION_CREATE_RESULT_RECOVERY_MS = 15_000;
 
 class InvitationReauthenticationRequiredError extends Error {
   constructor() {
@@ -1757,6 +1759,45 @@ export function CodeverApp() {
     }
   }
 
+  async function consumeSessionCreateCompletion(
+    connection: MatrixConnection,
+    commandId: string,
+    completion: CommandCompletion,
+  ): Promise<void> {
+    try {
+      completedCommandResultsRef.current.delete(commandId);
+      if (completion.outcome !== "succeeded") return;
+      if (completion.sessionId) {
+        pendingCreatedSessionIdRef.current = completion.sessionId;
+      }
+      setNewSessionOpen(false);
+      setMobileChatOpen(true);
+    } finally {
+      // Receiving an acknowledgement is not enough for session.create: the
+      // terminal sessionId must survive reloads until this UI has consumed it.
+      await connection.releaseCommand(commandId);
+    }
+  }
+
+  async function waitForRecoverableSessionCreateCompletion(
+    connection: MatrixConnection,
+    sent: CommandSendResult,
+  ): Promise<CommandCompletion> {
+    try {
+      return await waitForCommandCompletion(
+        sent.completion,
+        SESSION_CREATE_RESULT_RECOVERY_MS,
+      );
+    } catch (error) {
+      if (!(error instanceof CommandCompletionTimeoutError)) throw error;
+      // Recovery is intentionally keyed by the persisted command ID. The
+      // connection refuses to reserve a new command if that exact outbox entry
+      // is unavailable, so this can never create a second session.
+      const recovered = await connection.recoverCommand(sent.commandId);
+      return waitForCommandCompletion(recovered.completion);
+    }
+  }
+
   async function confirmRevisionRetry() {
     const conflict = revisionConflictRef.current;
     const connection = matrixConnectionRef.current;
@@ -1837,8 +1878,22 @@ export function CodeverApp() {
       const completion =
         conflict.payload.operation === "prompt"
           ? null
-          : await result.completion;
+          : conflict.payload.operation === "session.create"
+            ? await waitForRecoverableSessionCreateCompletion(
+                connection,
+                result,
+              )
+            : await result.completion;
       if (
+        completion &&
+        conflict.payload.operation === "session.create"
+      ) {
+        await consumeSessionCreateCompletion(
+          connection,
+          result.commandId,
+          completion,
+        );
+      } else if (
         completion?.outcome === "succeeded" &&
         conflict.payload.operation === "cancel"
       ) {
@@ -1949,6 +2004,7 @@ export function CodeverApp() {
     }
     setNewSessionBusy(true);
     try {
+      const connection = matrixConnectionRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
         cwd: input.cwd,
@@ -1958,16 +2014,16 @@ export function CodeverApp() {
           ? { reasoningEffort: input.reasoningEffort }
           : {}),
       });
-      const completion = sent
-        ? await waitForCommandCompletion(sent.completion)
-        : null;
-      if (completion?.outcome === "succeeded") {
-        if (completion.sessionId) {
-          pendingCreatedSessionIdRef.current = completion.sessionId;
-        }
-        setNewSessionOpen(false);
-        setMobileChatOpen(true);
-      }
+      if (!sent || !connection) return;
+      const completion = await waitForRecoverableSessionCreateCompletion(
+        connection,
+        sent,
+      );
+      await consumeSessionCreateCompletion(
+        connection,
+        sent.commandId,
+        completion,
+      );
     } catch (error) {
       setConnectionError(formatUiError(error));
     } finally {

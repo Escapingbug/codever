@@ -402,6 +402,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
       matrix.indexOf("const recoveredTrust = await recoverGatewayTransportSnapshot"),
   );
   assert.match(app, /waitForCommandCompletion\(sent\.completion\)/);
+  assert.match(app, /connection\.recoverCommand\(sent\.commandId\)/);
+  assert.match(app, /await connection\.releaseCommand\(commandId\)/);
+  assert.match(
+    matrix,
+    /Refusing to recover command \$\{expectedCommandId\}/,
+  );
   assert.match(
     matrix,
     /applyGatewayDeviceRotation\(trust, signedRotation\)[\s\S]*assertMatrixEventMatchesTransport\(event, rotation\.nextTransport\)/,

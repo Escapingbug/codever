@@ -2,7 +2,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClientEvent, SyncState, type MatrixClient, type MatrixEvent } from 'matrix-js-sdk'
+import {
+    ClientEvent,
+    MatrixScheduler,
+    SyncState,
+    type MatrixClient,
+    type MatrixEvent,
+} from 'matrix-js-sdk'
 import type { CodeverCommand, SignedCommand } from '@codever/protocol'
 import {
     exportDeviceKeyPair,
@@ -23,6 +29,7 @@ import {
 } from '@/channel/matrix'
 import {
     FileCommandReplayStore,
+    createGatewayMatrixScheduler,
     gatewayProjectIdentity,
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
@@ -1096,6 +1103,16 @@ describe('MatrixGatewayRunner', () => {
 })
 
 describe('MatrixJsSdkGatewayClient', () => {
+    it('leaves delivery ordering to the durable Codever scheduler instead of the SDK message FIFO', () => {
+        const message = {
+            getType: () => 'm.room.message',
+            hasAssociation: () => false,
+        } as unknown as MatrixEvent
+
+        expect(MatrixScheduler.QUEUE_MESSAGES(message)).toBe('message')
+        expect(createGatewayMatrixScheduler().queueAlgorithm(message)).toBeNull()
+    })
+
     it('enforces crypto-before-sync and maps the v41 SDK send/decrypt surface', async () => {
         let sdkEventListener: ((event: MatrixEvent) => void) | undefined
         const crypto = {

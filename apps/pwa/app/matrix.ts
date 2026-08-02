@@ -296,6 +296,7 @@ export type MatrixConnection = {
     signal?: AbortSignal,
   ): Promise<TrustedGateway>;
   send(payload: CommandPayload): Promise<CommandSendResult>;
+  recoverCommand(commandId: string): Promise<CommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;
   downloadAttachment(attachment: CodeverAttachment): Promise<Blob>;
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
@@ -1290,6 +1291,76 @@ export async function connectMatrix(
       );
     }
   };
+  const recoverCommand = async (
+    commandId: string,
+  ): Promise<CommandSendResult> => {
+    if (stopped) throw new Error("Matrix connection is closed.");
+    assertPersistenceHealthy();
+    const trust = activeTrust;
+    if (!trust) {
+      throw new Error(
+        "Pair and verify the Gateway application key before recovering a command.",
+      );
+    }
+    if (!client.isRoomEncrypted(config.roomId)) {
+      throw new Error("Refusing to recover through an unencrypted Matrix room.");
+    }
+    if (pendingRevisionConflict) {
+      throw new CommandRevisionConflictError(
+        pendingRevisionConflict.reservation.commandId,
+        pendingRevisionConflict.expectedRevision,
+        pendingRevisionConflict.payload,
+      );
+    }
+    const sequenceEpoch = trust.certificate.certificate.certificateId;
+    await assertRevisionInitialized(config, identity, sequenceEpoch);
+    const recovered = await retryPendingCommand(
+      client,
+      config,
+      identity,
+      sequenceEpoch,
+      trust,
+      commandId,
+    );
+    if (!recovered) {
+      throw new Error(
+        `The durable command ${commandId} is no longer available for recovery.`,
+      );
+    }
+    if (recovered.completion) {
+      commandLifecycle.recordResult(recovered.completion);
+      return {
+        eventId: recovered.eventId,
+        commandId: recovered.reservation.commandId,
+        sequence: recovered.reservation.sequence,
+        revision: recovered.completion.revision,
+        completion: Promise.resolve(recovered.completion),
+      };
+    }
+    try {
+      const revision = await waitForCommandAcknowledgement(
+        recovered.reservation,
+      );
+      return {
+        eventId: recovered.eventId,
+        commandId: recovered.reservation.commandId,
+        sequence: recovered.reservation.sequence,
+        revision,
+        completion: commandLifecycle.waitForCompletion(
+          recovered.reservation.commandId,
+        ),
+      };
+    } catch (error) {
+      if (!(error instanceof RevisionConflictError)) throw error;
+      return holdRevisionConflict(
+        error,
+        recovered.reservation,
+        recovered.payload,
+        sequenceEpoch,
+        trust,
+      );
+    }
+  };
   const transmitReservation = async (
     reservation: CommandReservation,
     payload: CommandPayload,
@@ -1745,6 +1816,14 @@ export async function connectMatrix(
     },
     send(payload) {
       const operation = outboundChain.then(() => sendPayload(payload));
+      outboundChain = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    },
+    recoverCommand(commandId) {
+      const operation = outboundChain.then(() => recoverCommand(commandId));
       outboundChain = operation.then(
         () => undefined,
         () => undefined,
@@ -3782,6 +3861,7 @@ async function retryPendingCommand(
   identity: DeviceIdentity,
   sequenceEpoch: string,
   trust: TrustedGateway,
+  expectedCommandId?: string,
 ): Promise<{
   eventId: string;
   payload: CommandPayload;
@@ -3792,7 +3872,19 @@ async function retryPendingCommand(
   const scope = commandSequenceScope(config, identity, sequenceEpoch);
   const state = await readCommandSequenceState(scope);
   const pending = state.pending;
-  if (!pending) return null;
+  if (!pending) {
+    if (expectedCommandId) {
+      throw new Error(
+        `The durable command ${expectedCommandId} is no longer pending.`,
+      );
+    }
+    return null;
+  }
+  if (expectedCommandId && pending.commandId !== expectedCommandId) {
+    throw new Error(
+      `Refusing to recover command ${expectedCommandId}; command ${pending.commandId} is pending instead.`,
+    );
+  }
   assertMatchingRevisionEpoch(state, pending.revisionEpoch);
   if (!pending.plaintext) {
     if (Date.now() - pending.createdAt < INCOMPLETE_OUTBOX_LEASE_MS) {

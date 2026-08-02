@@ -1,9 +1,10 @@
 import type { CommandPayload } from "@codever/protocol";
 
 /**
- * Device invitations have a terminal result that is still needed after the
- * command acknowledgement. Keep their signed outbox entry until the UI has
- * successfully turned that result into a usable invitation.
+ * Some commands have a terminal result that is still needed after the command
+ * acknowledgement. Keep their signed outbox entry until the UI has consumed
+ * the result, so reconnecting can replay the same command ID without repeating
+ * its side effect.
  */
 export function retainsCommandUntilResultConsumed(
   payload: CommandPayload | unknown,
@@ -12,7 +13,8 @@ export function retainsCommandUntilResultConsumed(
     payload &&
       typeof payload === "object" &&
       "operation" in payload &&
-      payload.operation === "device.invite",
+      (payload.operation === "device.invite" ||
+        payload.operation === "session.create"),
   );
 }
 

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
     ClientEvent,
+    MatrixScheduler,
     SyncState,
     createClient,
     type MatrixClient,
@@ -48,8 +49,22 @@ export function createMatrixJsSdkGatewayClient(
         accessToken: connection.accessToken,
         userId: connection.userId,
         deviceId: connection.deviceId,
+        scheduler: createGatewayMatrixScheduler(),
     })
     return new MatrixJsSdkGatewayClient(client, connection.initialSyncTimeoutMs, onLog)
+}
+
+export function createGatewayMatrixScheduler(): MatrixScheduler {
+    // GatewaySecureContentLayer already owns durable retries, bounded
+    // concurrency, per-recipient serialization, and the control/normal lanes.
+    // Letting the SDK enqueue every m.room.message behind its global FIFO would
+    // erase those priorities and can delay command acks/results behind bulk
+    // timeline traffic. A null queue sends immediately after Matrix E2EE while
+    // the Codever WAL remains the single retry authority.
+    return new MatrixScheduler(
+        MatrixScheduler.RETRY_BACKOFF_RATELIMIT,
+        () => null,
+    )
 }
 
 export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {

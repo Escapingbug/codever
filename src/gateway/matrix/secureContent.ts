@@ -217,31 +217,14 @@ export class GatewaySecureContentLayer {
         revisionEpoch: string,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
-        const active = (await this.currentTrustedDevices()).filter(device =>
-            device.allowedRoomIds.includes(room.roomId),
-        )
-        const recipient = active.find(device =>
-            device.deviceId === deviceId && device.allowedRoomIds.includes(room.roomId),
-        )
-        if (!recipient) throw new Error(`Command recipient ${deviceId} is not trusted for this room`)
-        return this.sealOutgoing({
-            roomId: room.roomId,
-            eventType: 'm.room.message',
-            transactionId: `codever.command.ack.${commandId}`,
-            content: {
-                msgtype: 'm.notice',
-                body: 'Codever command accepted',
-                [CODEVER_MATRIX_EXTENSION]: {
-                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
-                    kind: 'command_ack',
-                    command_id: commandId,
-                    sequence,
-                    revision,
-                    revision_epoch: revisionEpoch,
-                    active_device_count: active.length,
-                },
-            },
-        }, room, recipient, transport, 'control')
+        return this.sendToDevice(room, deviceId, {
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            kind: 'command_ack',
+            command_id: commandId,
+            sequence,
+            revision,
+            revision_epoch: revisionEpoch,
+        }, commandDeliveryTransactionId('ack', commandId), transport)
     }
 
     async sendRevisionConflict(
@@ -260,7 +243,7 @@ export class GatewaySecureContentLayer {
             expected_revision: expectedRevision,
             received_base_revision: receivedBaseRevision,
             revision_epoch: revisionEpoch,
-        }, `codever.command.conflict.${commandId}`, transport)
+        }, commandDeliveryTransactionId('conflict', commandId), transport)
     }
 
     async sendCollaborationPrompt(
@@ -323,7 +306,7 @@ export class GatewaySecureContentLayer {
             outcome,
             ...(error ? { error } : {}),
             ...(result === undefined ? {} : { result }),
-        }, `codever.command.result.${commandId}.${outcome}`, transport)
+        }, commandDeliveryTransactionId('result', commandId, outcome), transport)
     }
 
     async sendGatewayState(
@@ -1134,6 +1117,22 @@ function recipientTransactionId(transactionId: string, deviceId: string): string
     return `${transactionId}.${recipient}`
 }
 
+function commandDeliveryTransactionId(
+    kind: 'ack' | 'conflict' | 'result',
+    commandId: string,
+    outcome?: 'succeeded' | 'failed',
+): string {
+    const semanticIdentity = outcome
+        ? `codever.command.${kind}.${commandId}.${outcome}`
+        : `codever.command.${kind}.${commandId}`
+    // A command ID identifies the idempotent application operation. Matrix
+    // transaction IDs instead identify one physical delivery generation: a
+    // duplicate command must be able to emit a fresh timeline event when the
+    // original recipient copy was not consumed. Retries inside that generation
+    // remain stable because the resulting request is persisted in the WAL.
+    return `${semanticIdentity}.${randomUUID()}`
+}
+
 function logicalDeliveryKey(request: MatrixSendEventRequest): string {
     return JSON.stringify([request.roomId, request.eventType, request.transactionId])
 }
@@ -1198,7 +1197,11 @@ function deliveryBelongsToCommand(
     return (
         transactionId.startsWith('codever.collaboration.')
         && transactionId.includes(`.${commandId}.`)
-    ) || transactionId.startsWith(`codever.command.result.${commandId}.`)
+    ) || [
+        'ack',
+        'conflict',
+        'result',
+    ].some(kind => transactionId.startsWith(`codever.command.${kind}.${commandId}.`))
 }
 
 function replacementTargetId(content: Record<string, unknown>): string | undefined {

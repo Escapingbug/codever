@@ -743,7 +743,7 @@ describe('multi-device Matrix collaboration', () => {
         })
 
         expect(attempted).toHaveLength(5)
-        expect(attempted[1]).toBe('codever.command.ack.priority-command')
+        expect(attempted[1]).toMatch(/^codever\.command\.ack\.priority-command\.[^.]+\./u)
         expect(attempted[2]).toMatch(/^codever\.command\.result\.priority-command\.succeeded\./u)
         expect(attempted[3]).toMatch(/^codever\.history\.page\.priority-history\./u)
         expect(attempted[4]).toMatch(/^priority-decision\./u)
@@ -752,6 +752,116 @@ describe('multi-device Matrix collaboration', () => {
         expect(attempted.filter(transactionId =>
             transactionId.startsWith('old-bulk-transaction-'),
         )).toHaveLength(4)
+        layer.stopRetries()
+    })
+
+    it('uses a fresh Matrix transaction and envelope for each command-status redelivery', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const eventsByTransaction = new Map<string, string>()
+        const timeline: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                const existing = eventsByTransaction.get(request.transactionId)
+                if (existing) return { eventId: existing }
+                const eventId = `$status-${eventsByTransaction.size + 1}`
+                eventsByTransaction.set(request.transactionId, eventId)
+                timeline.push(request)
+                return { eventId }
+            },
+        }
+
+        await layer.sendCommandAccepted(
+            room,
+            policy.deviceId,
+            'recover-command',
+            7,
+            11,
+            'runtime-epoch-1',
+            transport,
+        )
+        await layer.sendCommandAccepted(
+            room,
+            policy.deviceId,
+            'recover-command',
+            7,
+            11,
+            'runtime-epoch-1',
+            transport,
+        )
+        await layer.sendCommandResult(
+            room,
+            policy.deviceId,
+            'recover-command',
+            7,
+            11,
+            'runtime-epoch-1',
+            'succeeded',
+            transport,
+            undefined,
+            'created-session',
+        )
+        await layer.sendCommandResult(
+            room,
+            policy.deviceId,
+            'recover-command',
+            7,
+            11,
+            'runtime-epoch-1',
+            'succeeded',
+            transport,
+            undefined,
+            'created-session',
+        )
+
+        expect(timeline).toHaveLength(4)
+        expect(new Set(timeline.map(request => request.transactionId)).size).toBe(4)
+        expect(timeline.slice(0, 2).every(request =>
+            request.transactionId.startsWith('codever.command.ack.recover-command.'),
+        )).toBe(true)
+        expect(timeline.slice(2).every(request =>
+            request.transactionId.startsWith(
+                'codever.command.result.recover-command.succeeded.',
+            ),
+        )).toBe(true)
+
+        const replayStore = new InMemoryReplayStore()
+        const plaintext = []
+        for (const request of timeline) {
+            plaintext.push(await openFor(
+                request,
+                device,
+                gateway,
+                policy.deviceId,
+                replayStore,
+            ))
+        }
+        expect(plaintext.map(content =>
+            (content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).kind,
+        )).toEqual(['command_ack', 'command_ack', 'command_result', 'command_result'])
+        expect(plaintext.slice(2).every(content =>
+            (content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).session_id
+                === 'created-session',
+        )).toBe(true)
         layer.stopRetries()
     })
 

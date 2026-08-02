@@ -17,6 +17,19 @@ test("device invitations remain recoverable after acknowledgement", () => {
   assert.equal(isValidPendingCommandSequence(4, 5, payload), false);
 });
 
+test("session creation remains recoverable until its session id is consumed", () => {
+  const payload = {
+    operation: "session.create" as const,
+    cwd: "C:/workspace",
+    projectName: "workspace",
+  };
+
+  assert.equal(retainsCommandUntilResultConsumed(payload), true);
+  assert.equal(isValidPendingCommandSequence(4, 3, payload), true);
+  assert.equal(isValidPendingCommandSequence(4, 4, payload), true);
+  assert.equal(isValidPendingCommandSequence(4, 5, payload), false);
+});
+
 test("ordinary commands leave the outbox as soon as they are acknowledged", () => {
   const payload = {
     operation: "prompt" as const,
