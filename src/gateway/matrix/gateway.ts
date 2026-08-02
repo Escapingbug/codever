@@ -8,7 +8,7 @@ import {
 } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
 import { createProviderInstance, getProvider } from '@/providers/registry'
-import type { TopicSession } from '@/bridge/channelPort'
+import type { AgentActivityPhase, SessionStatus, TopicSession } from '@/bridge/channelPort'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import {
     CODEVER_MATRIX_EXTENSION,
@@ -46,6 +46,7 @@ interface AppSessionRuntime {
     port: MatrixPort
     session: TopicSession
     capabilityProvider: AgentProvider | null
+    activity: { phase: AgentActivityPhase }
 }
 
 interface RoomRuntime {
@@ -214,8 +215,13 @@ export class MatrixGatewayRunner {
                 // deliberately absent from Gateway-authoritative state.
                 currentSessionId: null,
                 sessions: [
-                    ...[...runtime.appSessions.values()].map(({ record, session }) =>
-                        gatewaySessionSummary(record, gatewaySessionStatus(session.state))),
+                    ...[...runtime.appSessions.values()].map(({ record, session, activity }) =>
+                        gatewaySessionSummary(
+                            record,
+                            gatewaySessionStatus(session.state, activity.phase),
+                            false,
+                            activity.phase,
+                        )),
                     ...[...runtime.archivedSessions.values()].map(record =>
                         gatewaySessionSummary(record, 'idle', true)),
                 ].sort((left, right) => right.updatedAt - left.updatedAt),
@@ -1073,6 +1079,7 @@ export class MatrixGatewayRunner {
         record: AppSessionRecord,
     ): AppSessionRuntime {
         const effectiveRoom = roomConfigForSession(runtime.config, record)
+        const activity = { phase: 'idle' as AgentActivityPhase }
         const port = new MatrixPort({
             transport: this.secureContent
                 ? this.secureContent.transportForRoom(runtime.config, this.client)
@@ -1081,7 +1088,8 @@ export class MatrixGatewayRunner {
             gatewayId: this.config.gatewayId,
             sessionId: record.id,
             onLog: this.dependencies.onLog,
-            onStatusChange: () => {
+            onStatusChange: status => {
+                activity.phase = status.activity ?? activityForSessionStatus(status)
                 void this.syncState(runtime.config.roomId).catch(error => {
                     this.log(
                         `[matrix-gateway] session status sync failed for ${record.id}: `
@@ -1108,7 +1116,7 @@ export class MatrixGatewayRunner {
             capabilityProvider = provider
             session = this.createDefaultSession(effectiveRoom, port, provider, record)
         }
-        return { record, port, session, capabilityProvider }
+        return { record, port, session, capabilityProvider, activity }
     }
 
     private createDefaultSession(
@@ -1235,12 +1243,14 @@ function gatewaySessionSummary(
     record: AppSessionRecord,
     status: 'idle' | 'running' | 'stopping' | 'failed',
     archived = false,
+    activityPhase?: AgentActivityPhase,
 ) {
     return {
         id: record.id,
         title: record.title,
         updatedAt: record.updatedAt,
         status,
+        ...(activityPhase ? { activityPhase } : {}),
         ...(archived ? { archived: true } : {}),
         projectId: record.projectId,
         projectName: record.projectName,
@@ -1267,10 +1277,27 @@ function workspaceFromRecord(record: AppSessionRecord): WorkspaceState {
 
 function gatewaySessionStatus(
     state: TopicSession['state'],
+    activityPhase?: AgentActivityPhase,
 ): 'idle' | 'running' | 'stopping' | 'failed' {
+    if (activityPhase === 'starting' || activityPhase === 'working') return 'running'
+    if (activityPhase === 'stopping') return 'stopping'
+    if (activityPhase === 'failed') return 'failed'
     switch (state) {
         case 'querying':
             return 'running'
+        case 'canceling':
+            return 'stopping'
+        case 'dead':
+            return 'failed'
+        case 'idle':
+            return 'idle'
+    }
+}
+
+function activityForSessionStatus(status: SessionStatus): AgentActivityPhase {
+    switch (status.state) {
+        case 'querying':
+            return 'working'
         case 'canceling':
             return 'stopping'
         case 'dead':

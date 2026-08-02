@@ -170,6 +170,7 @@ test("cached Gateway state survives reload only for the same trust and durable e
         title: "Cached session",
         updated_at: 1_700_000_000_000,
         status: "running",
+        activity_phase: "starting",
         project_id: "project-cache",
         project_name: "workspace",
         cwd: "/workspace",
@@ -206,6 +207,7 @@ test("cached Gateway state survives reload only for the same trust and durable e
   });
   assert.ok(state);
   assert.equal(state.sessions[0].status, "running");
+  assert.equal(state.sessions[0].activityPhase, "starting");
   const binding = {
     gatewayId: "gateway-1",
     conversationId: "conversation-1",

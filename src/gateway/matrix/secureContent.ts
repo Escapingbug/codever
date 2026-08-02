@@ -65,6 +65,7 @@ export interface GatewayStateSnapshot {
         title: string
         updatedAt: number
         status: 'idle' | 'running' | 'stopping' | 'failed'
+        activityPhase?: 'starting' | 'working' | 'stopping' | 'idle' | 'failed'
         archived?: boolean
         projectId: string
         projectName: string
@@ -355,6 +356,7 @@ export class GatewaySecureContentLayer {
                 title: session.title,
                 updated_at: session.updatedAt,
                 status: session.status,
+                ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
                 ...(session.archived ? { archived: true } : {}),
                 project_id: session.projectId,
                 project_name: session.projectName,

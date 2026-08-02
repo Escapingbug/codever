@@ -72,8 +72,12 @@ export interface DecisionResponse {
     value: string
 }
 
+export type AgentActivityPhase = 'starting' | 'working' | 'stopping' | 'idle' | 'failed'
+
 export interface SessionStatus {
     state: SessionState
+    /** Transient presentation phase. Lifecycle phases never belong in the conversation transcript. */
+    activity?: AgentActivityPhase
     model?: string
     cwd: string
     provider: string

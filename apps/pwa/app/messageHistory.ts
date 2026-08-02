@@ -3,6 +3,7 @@ import type {
   ToolGroupPresentation,
 } from "./presentation";
 import type { CodeverAttachment } from "@codever/protocol";
+import { isTranscriptMessage } from "./chatMessages";
 
 export type PersistedChatMessage = {
   id: string;
@@ -79,6 +80,12 @@ export async function saveMessageHistory(
         const transaction = database.transaction(MESSAGE_STORE, "readwrite");
         const store = transaction.objectStore(MESSAGE_STORE);
         for (const message of messages) {
+          if (!isTranscriptMessage(message)) {
+            if (message.replacesEventId) {
+              store.delete(historyMessageKey(scope, message.replacesEventId));
+            }
+            continue;
+          }
           store.put(storedChatMessage(scope, sessionId, message));
         }
         transaction.oncomplete = () => resolve();
@@ -104,6 +111,12 @@ export async function reconcileMessageHistory(
   optimisticMessageId?: string,
 ): Promise<void> {
   if (!scope || !sessionId) return;
+  if (!isTranscriptMessage(message)) {
+    if (message.replacesEventId) {
+      await deleteMessageHistory(scope, message.replacesEventId);
+    }
+    return;
+  }
   return enqueueHistoryWrite(async () => {
     const database = await openHistoryDatabase();
     try {
@@ -197,10 +210,9 @@ export async function loadMessageHistoryPage(
   try {
     const records = await new Promise<StoredChatMessage[]>(
       (resolve, reject) => {
-        const transaction = database.transaction(MESSAGE_STORE, "readonly");
-        const index = transaction
-          .objectStore(MESSAGE_STORE)
-          .index(BY_SESSION_INDEX);
+        const transaction = database.transaction(MESSAGE_STORE, "readwrite");
+        const store = transaction.objectStore(MESSAGE_STORE);
+        const index = store.index(BY_SESSION_INDEX);
         const lower = [scope, sessionId, 0, ""];
         const upper = options.before
           ? [
@@ -221,7 +233,16 @@ export async function loadMessageHistoryPage(
         request.onsuccess = () => {
           const cursor = request.result;
           if (!cursor || result.length > limit) return;
-          result.push(cursor.value as StoredChatMessage);
+          const message = cursor.value as StoredChatMessage;
+          if (!isTranscriptMessage(message)) {
+            cursor.delete();
+            if (message.replacesEventId) {
+              store.delete(historyMessageKey(scope, message.replacesEventId));
+            }
+            cursor.continue();
+            return;
+          }
+          result.push(message);
           if (result.length <= limit) cursor.continue();
         };
         request.onerror = () => transaction.abort();

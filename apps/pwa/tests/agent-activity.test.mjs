@@ -35,7 +35,18 @@ test("exports stable, human-readable activity for local transitions", () => {
   });
 });
 
-test("derives starting activity from a Matrix io.codever querying status", () => {
+test("derives starting activity from explicit and legacy Matrix status values", () => {
+  assert.equal(
+    reduceAgentActivity(SENDING_AGENT_ACTIVITY, {
+      version: 1,
+      kind: "status",
+      state: "running",
+      activity_phase: "starting",
+      provider: "codex",
+    }),
+    STARTING_AGENT_ACTIVITY,
+  );
+
   assert.equal(
     reduceAgentActivity(SENDING_AGENT_ACTIVITY, {
       version: 1,
@@ -50,6 +61,15 @@ test("derives starting activity from a Matrix io.codever querying status", () =>
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
       kind: "status",
       state: "querying",
+    }),
+    WORKING_AGENT_ACTIVITY,
+  );
+
+  assert.equal(
+    reduceAgentActivity(STARTING_AGENT_ACTIVITY, {
+      kind: "status",
+      state: "running",
+      activity_phase: "working",
     }),
     WORKING_AGENT_ACTIVITY,
   );

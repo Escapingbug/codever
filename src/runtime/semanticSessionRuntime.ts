@@ -131,7 +131,6 @@ export class SemanticSessionRuntime {
     private abortController: AbortController | null = null
     private currentHandle: AgentQueryHandle | null = null
     private toolMessageIds = new Map<string, string | number>()
-    private startingMessageId: string | number | null = null
     private lastToolName: string | null = null
     private turnStartedAt = 0
     private recentTables: string[] = []
@@ -1266,17 +1265,18 @@ export class SemanticSessionRuntime {
         }
 
         if ('init' in this.config.provider && typeof (this.config.provider as any).init === 'function') {
-            const startRecord = await this.outbox.send({ text: '⏳ Agent is starting up, please wait...', format: 'html' })
-            this.startingMessageId = startRecord.messageId ?? null
+            this.notifyStatus('idle', 'starting')
             try {
                 await (this.config.provider as any).init()
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error)
+                this.notifyStatus('idle')
                 await this.send({ text: `❌ Provider "${this.config.provider.name}" is not available: ${message}`, format: 'html' })
                 return
             }
             if (!this.config.provider.isReady()) {
                 const err = this.config.provider.getInitError() ?? 'Initialization failed'
+                this.notifyStatus('idle')
                 await this.send({ text: `❌ Provider "${this.config.provider.name}" is not available: ${err}`, format: 'html' })
             }
             return
@@ -1286,16 +1286,17 @@ export class SemanticSessionRuntime {
         await this.send({ text: `❌ Provider "${this.config.provider.name}" is not available: ${err}`, format: 'html' })
     }
 
-    private notifyStatus(state: SessionStatus['state']): void {
-        const editMessageId = this.startingMessageId
-        this.startingMessageId = null
+    private notifyStatus(
+        state: SessionStatus['state'],
+        activity?: SessionStatus['activity'],
+    ): void {
         const activeModel = this.getActiveModel()
         this.config.channelPort.notifyStatus({
             state,
+            ...(activity ? { activity } : {}),
             ...(activeModel ? { model: activeModel } : {}),
             cwd: this.config.cwd,
             provider: this.config.providerName,
-            ...(editMessageId != null ? { editMessageId } : {}),
         })
     }
 

@@ -59,6 +59,8 @@ import {
 import {
   compareChatMessages,
   findOptimisticMessageId,
+  isLegacyAgentStartupMessage,
+  isTransientAgentLifecycleEvent,
   mergeChatMessage,
   mergeChatMessages,
   type ChatMessage,
@@ -694,11 +696,17 @@ export function CodeverApp() {
     }
     const sessionId =
       incoming.sessionId ?? selectedSessionIdRef.current ?? undefined;
+    const legacyStartup = isLegacyAgentStartupMessage(incoming);
     if (sessionId && !incoming.historical) {
-      setSessionAgentActivity(sessionId, (current) =>
-        reduceAgentActivity(current, incoming.raw),
-      );
-      const executionSignal = agentExecutionSignal(incoming.raw);
+      setSessionAgentActivity(sessionId, (current) => {
+        if (!legacyStartup) return reduceAgentActivity(current, incoming.raw);
+        return current?.phase === "working" || current?.phase === "stopping"
+          ? current
+          : STARTING_AGENT_ACTIVITY;
+      });
+      const executionSignal = legacyStartup
+        ? "running"
+        : agentExecutionSignal(incoming.raw);
       if (executionSignal === "running") {
         setSessionRunning(sessionId, true);
       } else if (executionSignal === "stopping") {
@@ -709,11 +717,36 @@ export function CodeverApp() {
         setSessionStopping(sessionId, false);
       }
     }
+    if (legacyStartup) return;
     const lifecycleFailure = agentLifecycleFailureText(incoming.raw);
     if (
       isTransientAgentLifecycleEvent(incoming.raw) &&
       lifecycleFailure === null
     ) {
+      if (sessionId && incoming.replacesEventId) {
+        const replacementTarget = incoming.replacesEventId;
+        removeLiveMessage(sessionId, replacementTarget);
+        if (selectedSessionIdRef.current === sessionId) {
+          setMessages((current) =>
+            current.filter(
+              (message) =>
+                message.id !== replacementTarget &&
+                message.eventId !== replacementTarget &&
+                !message.eventAliases?.includes(replacementTarget),
+            ),
+          );
+        }
+        if (historyScopeRef.current) {
+          void deleteMessageHistory(
+            historyScopeRef.current,
+            replacementTarget,
+          ).catch((error) => {
+            setConnectionError(
+              `Legacy Agent startup history could not be removed: ${formatUiError(error)}`,
+            );
+          });
+        }
+      }
       return;
     }
     const displayIncoming: IncomingCodeverMessage =
@@ -1203,9 +1236,17 @@ export function CodeverApp() {
             setAgentActivitiesBySession((current) => {
               const next = new Map<string, AgentActivity>();
               for (const session of state.gatewayState!.sessions) {
-                if (session.status === "stopping") {
+                if (session.activityPhase === "starting") {
+                  next.set(session.id, STARTING_AGENT_ACTIVITY);
+                } else if (
+                  session.activityPhase === "stopping" ||
+                  session.status === "stopping"
+                ) {
                   next.set(session.id, STOPPING_AGENT_ACTIVITY);
-                } else if (session.status === "running") {
+                } else if (
+                  session.activityPhase === "working" ||
+                  session.status === "running"
+                ) {
                   next.set(
                     session.id,
                     current.get(session.id) ?? WORKING_AGENT_ACTIVITY,
@@ -3394,17 +3435,6 @@ export function CodeverApp() {
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
       />
     </main>
-  );
-}
-
-function isTransientAgentLifecycleEvent(
-  raw: Record<string, unknown>,
-): boolean {
-  return (
-    raw.kind === "status" ||
-    raw.type === "command.accepted" ||
-    raw.type === "command.completed" ||
-    raw.type === "session.updated"
   );
 }
 

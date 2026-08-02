@@ -444,9 +444,34 @@ describe('Semantic runtime integration chain', () => {
 
         expect((provider as AgentProvider & { init: ReturnType<typeof vi.fn> }).init).toHaveBeenCalled()
         expect(provider.startQuery).toHaveBeenCalledWith('first prompt', expect.any(Object))
-        expect(channel.sent.map(m => m.text)).toEqual([
-            '⏳ Agent is starting up, please wait...',
-            'started',
+        expect(channel.sent.map(m => m.text)).toEqual(['started'])
+        expect(channel.statuses[0]).toMatchObject({ state: 'idle', activity: 'starting' })
+        expect(channel.statuses.map(status => status.state)).toEqual(['idle', 'querying', 'idle'])
+    })
+
+    it('clears startup activity and emits only the provider error when initialization fails', async () => {
+        const provider = createProvider([], {
+            isReady: vi.fn(() => false),
+            init: vi.fn(async () => {
+                throw new Error('missing executable')
+            }),
+        } as Partial<AgentProvider>)
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'mock-acp',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'first prompt', source: 'channel' })
+
+        expect(provider.startQuery).not.toHaveBeenCalled()
+        expect(channel.statuses.map(status => status.activity ?? status.state))
+            .toEqual(['starting', 'idle'])
+        expect(channel.sent.map(message => message.text)).toEqual([
+            '❌ Provider "mock-acp" is not available: missing executable',
         ])
     })
 

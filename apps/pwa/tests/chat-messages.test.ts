@@ -289,6 +289,45 @@ test("Gateway history repairs timestamps already loaded from the local cache", (
   );
 });
 
+test("legacy startup placeholders never enter the visible transcript", () => {
+  const messages = mergeChatMessages([], [
+    {
+      id: "$legacy-startup",
+      eventId: "$legacy-startup",
+      kind: "agent",
+      text: "⏳ Agent is starting up, please wait...",
+      format: "html",
+      attachments: [],
+      timestamp: 1_000,
+      raw: { kind: "message" },
+    },
+  ]);
+
+  assert.deepEqual(messages, []);
+});
+
+test("a transient legacy status edit removes its startup placeholder", () => {
+  const startup = {
+    id: "$legacy-startup",
+    eventId: "$legacy-startup",
+    kind: "agent",
+    text: "Legacy startup placeholder",
+    timestamp: 1_000,
+    raw: { kind: "message" },
+  };
+  const statusEdit = {
+    id: "$status-edit",
+    eventId: "$status-edit",
+    kind: "notice",
+    text: "Agent started working...",
+    timestamp: 1_100,
+    replacesEventId: "$legacy-startup",
+    raw: { kind: "status", state: "working" },
+  };
+
+  assert.deepEqual(mergeChatMessage([startup], statusEdit), []);
+});
+
 test("live and history copies of one logical Matrix message stay in one bubble", () => {
   const liveOriginal = {
     id: "$physical-original",

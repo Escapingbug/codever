@@ -70,7 +70,8 @@ export function reduceAgentActivity(
   if (!event) return current;
 
   if (event.kind === "status") {
-    switch (event.state) {
+    switch (event.activity_phase ?? event.state) {
+      case "starting":
       case "querying":
         // A delayed querying notice must not make an already-visible tool or
         // running state appear to move backwards to "starting".
@@ -78,6 +79,7 @@ export function reduceAgentActivity(
           ? current
           : STARTING_AGENT_ACTIVITY;
       case "running":
+      case "working":
         return WORKING_AGENT_ACTIVITY;
       case "stopping":
       case "canceling":
@@ -137,9 +139,14 @@ export function reduceAgentActivity(
 export function agentExecutionSignal(raw: unknown): AgentExecutionSignal {
   const event = asRecord(raw);
   if (!event) return null;
+  const statusPhase =
+    event.kind === "status" ? event.activity_phase ?? event.state : undefined;
   if (
     (event.kind === "status" &&
-      (event.state === "querying" || event.state === "running")) ||
+      (statusPhase === "starting" ||
+        statusPhase === "querying" ||
+        statusPhase === "running" ||
+        statusPhase === "working")) ||
     (event.type === "session.updated" && event.status === "running") ||
     event.type === "agent.text.delta" ||
     event.type === "agent.tool.started" ||
@@ -149,14 +156,14 @@ export function agentExecutionSignal(raw: unknown): AgentExecutionSignal {
   }
   if (
     (event.kind === "status" &&
-      (event.state === "canceling" || event.state === "stopping")) ||
+      (statusPhase === "canceling" || statusPhase === "stopping")) ||
     (event.type === "session.updated" && event.status === "stopping")
   ) {
     return "stopping";
   }
   if (
     (event.kind === "status" &&
-      (event.state === "idle" || event.state === "failed")) ||
+      (statusPhase === "idle" || statusPhase === "failed")) ||
     (event.type === "session.updated" &&
       (event.status === "idle" || event.status === "failed")) ||
     event.type === "agent.error"

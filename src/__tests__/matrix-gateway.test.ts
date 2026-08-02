@@ -264,20 +264,26 @@ describe('MatrixPort', () => {
             onStatusChange: status => observedStates.push(status.state),
         })
 
+        port.notifyStatus({ state: 'idle', activity: 'starting', cwd: '/repo', provider: 'codex', model: 'gpt' })
         port.notifyStatus({ state: 'querying', cwd: '/repo', provider: 'codex', model: 'gpt' })
         port.notifyStatus({ state: 'canceling', cwd: '/repo', provider: 'codex', model: 'gpt' })
         port.notifyStatus({ state: 'idle', cwd: '/repo', provider: 'codex', model: 'gpt' })
         port.sendChatAction('typing')
 
-        await vi.waitFor(() => expect(transport.delivered).toHaveLength(3))
+        await vi.waitFor(() => expect(transport.delivered).toHaveLength(4))
         await vi.waitFor(() => expect(transport.typing).toHaveLength(1))
         expect(transport.delivered[0].content.body).toContain('Provider: codex')
         expect(
             transport.delivered.map(delivery =>
                 (delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).state,
             ),
-        ).toEqual(['running', 'stopping', 'idle'])
-        expect(observedStates).toEqual(['querying', 'canceling', 'idle'])
+        ).toEqual(['running', 'running', 'stopping', 'idle'])
+        expect(
+            transport.delivered.map(delivery =>
+                (delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>).activity_phase,
+            ),
+        ).toEqual(['starting', 'working', 'stopping', 'idle'])
+        expect(observedStates).toEqual(['idle', 'querying', 'canceling', 'idle'])
         expect(transport.typing[0]).toEqual({
             roomId: '!room:example.org',
             typing: true,

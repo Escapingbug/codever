@@ -1,5 +1,49 @@
 import type { PersistedChatMessage } from "./messageHistory";
 
+export const LEGACY_AGENT_STARTUP_TEXT =
+  "⏳ Agent is starting up, please wait...";
+
+type TranscriptCandidate = {
+  kind?: string;
+  text?: string;
+  format?: string;
+  replacesEventId?: string;
+  attachments?: readonly unknown[];
+  raw?: Record<string, unknown>;
+};
+
+export function isTransientAgentLifecycleEvent(
+  raw: Record<string, unknown> | undefined,
+): boolean {
+  return Boolean(
+    raw &&
+      (raw.kind === "status" ||
+        raw.type === "command.accepted" ||
+        raw.type === "command.completed" ||
+        raw.type === "session.updated"),
+  );
+}
+
+export function isLegacyAgentStartupMessage(
+  message: TranscriptCandidate,
+): boolean {
+  return (
+    message.kind === "agent" &&
+    message.raw?.kind === "message" &&
+    message.text === LEGACY_AGENT_STARTUP_TEXT &&
+    message.format === "html" &&
+    (message.attachments?.length ?? 0) === 0
+  );
+}
+
+export function isTranscriptMessage(message: TranscriptCandidate): boolean {
+  if (message.kind === "error") return true;
+  return (
+    !isTransientAgentLifecycleEvent(message.raw) &&
+    !isLegacyAgentStartupMessage(message)
+  );
+}
+
 export type ChatMessage = PersistedChatMessage & {
   sessionId?: string;
   historical?: boolean;
@@ -54,6 +98,18 @@ export function mergeChatMessage(
     reconcileMessageId?: string;
   } = {},
 ): ChatMessage[] {
+  if (!isTranscriptMessage(message)) {
+    const replacementTarget = message.replacesEventId;
+    return replacementTarget
+      ? current.filter(
+          (entry) =>
+            entry.eventId !== replacementTarget &&
+            entry.id !== replacementTarget &&
+            !entry.eventAliases?.includes(replacementTarget),
+        )
+      : [...current];
+  }
+
   const reconcileIndex = options.reconcileMessageId
     ? current.findIndex((entry) => entry.id === options.reconcileMessageId)
     : -1;

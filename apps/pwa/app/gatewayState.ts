@@ -18,6 +18,12 @@ export type GatewaySessionSummary = {
   title: string;
   updatedAt: number;
   status: "idle" | "running" | "stopping" | "failed" | "archived";
+  activityPhase?:
+    | "starting"
+    | "working"
+    | "stopping"
+    | "idle"
+    | "failed";
   projectId: string;
   projectName: string;
   cwd: string;
@@ -135,7 +141,18 @@ export function parseGatewayStateExtension(
         session.status === "stopping" ||
         session.status === "failed"
       ) ||
-      !(session.archived === undefined || typeof session.archived === "boolean") ||
+      !(
+        session.activity_phase === undefined ||
+        session.activity_phase === "starting" ||
+        session.activity_phase === "working" ||
+        session.activity_phase === "stopping" ||
+        session.activity_phase === "idle" ||
+        session.activity_phase === "failed"
+      ) ||
+      !(
+        session.archived === undefined ||
+        typeof session.archived === "boolean"
+      ) ||
       typeof session.provider !== "string" ||
       !session.provider ||
       !(
@@ -172,6 +189,12 @@ export function parseGatewayStateExtension(
       title: session.title,
       updatedAt: session.updated_at,
       status,
+      ...(typeof session.activity_phase === "string"
+        ? {
+            activityPhase:
+              session.activity_phase as GatewaySessionSummary["activityPhase"],
+          }
+        : {}),
       provider: session.provider,
       ...(typeof session.model === "string" ? { model: session.model } : {}),
       ...(typeof session.reasoning_effort === "string"
@@ -234,6 +257,7 @@ export function parseGatewayStateExtension(
       title: session.title,
       updatedAt: session.updatedAt,
       status: session.status,
+      ...(session.activityPhase ? { activityPhase: session.activityPhase } : {}),
       projectId: session.rawProjectId ?? fallback.id,
       projectName: session.rawProjectName ?? fallback.name,
       cwd,
@@ -452,6 +476,7 @@ function gatewayStateExtension(
       title: session.title,
       updated_at: session.updatedAt,
       status: session.status === "archived" ? "idle" : session.status,
+      ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
       ...(session.status === "archived" ? { archived: true } : {}),
       project_id: session.projectId,
       project_name: session.projectName,

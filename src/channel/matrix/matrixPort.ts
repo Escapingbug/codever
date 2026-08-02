@@ -8,6 +8,7 @@ import {
 } from '@codever/protocol'
 import { encryptMedia, sha256 } from '@codever/security'
 import type {
+    AgentActivityPhase,
     ChannelMessage,
     ChannelPort,
     ChannelSendResult,
@@ -170,9 +171,12 @@ export class MatrixPort implements ChannelPort {
             this.options.onLog?.(`[matrix] status observer failed: ${formatError(error)}`)
         }
 
-        const state = matrixSessionStatus(status.state)
+        const activity = status.activity ?? matrixActivityPhase(status.state)
+        // Keep the established Matrix state vocabulary for older clients;
+        // activity_phase carries the precise presentation lifecycle.
+        const state = activity === 'starting' ? 'running' : matrixSessionStatus(status.state)
         const body = [
-            matrixSessionStatusLabel(state),
+            matrixSessionStatusLabel(activity),
             `Provider: ${status.provider}`,
             `Cwd: ${status.cwd}`,
             ...(status.model ? [`Model: ${status.model}`] : []),
@@ -184,6 +188,7 @@ export class MatrixPort implements ChannelPort {
             ...this.sessionMetadata(),
             operation_id: operationId,
             state,
+            activity_phase: activity,
             provider: status.provider,
             cwd: status.cwd,
             model: status.model,
@@ -315,11 +320,26 @@ function matrixSessionStatus(
     }
 }
 
+function matrixActivityPhase(state: SessionStatus['state']): AgentActivityPhase {
+    switch (state) {
+        case 'querying':
+            return 'working'
+        case 'canceling':
+            return 'stopping'
+        case 'dead':
+            return 'failed'
+        case 'idle':
+            return 'idle'
+    }
+}
+
 function matrixSessionStatusLabel(
-    state: ReturnType<typeof matrixSessionStatus>,
+    state: AgentActivityPhase,
 ): string {
     switch (state) {
-        case 'running':
+        case 'starting':
+            return 'Agent is starting...'
+        case 'working':
             return 'Agent started working...'
         case 'stopping':
             return 'Stopping agent...'
