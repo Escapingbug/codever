@@ -86,6 +86,10 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(serviceWorker, /pathname === "\/api\/version"/);
   assert.match(source, /registerPwaUpdates\(setPwaUpdateState\)/);
+  assert.match(
+    source,
+    /if \(isNativeManagedMatrixConfig\(stored\)\)[\s\S]*connectCodeverClient\(stored, true, true\)/,
+  );
   assert.match(source, /Updating Codever/);
   assert.match(source, /onCheckForUpdates/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
@@ -246,6 +250,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     invitationRoute,
     relayStore,
     packageJson,
+    codeverClient,
+    webCodeverClient,
   ] = await Promise.all([
       readFile(new URL("app/matrix.ts", appRoot), "utf8"),
       readFile(new URL("app/pairing.ts", appRoot), "utf8"),
@@ -264,6 +270,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
         "utf8",
       ),
       readFile(new URL("package.json", appRoot), "utf8"),
+      readFile(new URL("app/client/CodeverClient.ts", appRoot), "utf8"),
+      readFile(
+        new URL("app/client/web/WebCodeverClient.ts", appRoot),
+        "utf8",
+      ),
     ]);
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
@@ -271,6 +282,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(packageJson, /"jsqr": "1\.4\.0"/);
   assert.match(packageJson, /"qrcode": "1\.5\.4"/);
   assert.match(matrix, /initRustCrypto\(\{/);
+  assert.doesNotMatch(matrix, /readonly client: MatrixClient/);
+  assert.match(codeverClient, /disconnect\(\): Promise<void>/);
+  assert.match(codeverClient, /dispose\(\): void/);
+  assert.match(webCodeverClient, /createWebCodeverClient/);
+  assert.match(webCodeverClient, /this\.transport\.stop\(\)/);
+  assert.match(app, /codeverClientRef/);
+  assert.match(app, /codeverClientRef\.current\?\.dispose\(\)/);
+  assert.match(app, /disconnectingClient\?\.disconnect\(\)/);
   assert.match(matrix, /initialSyncLimit: matrixInitialSyncLimit/);
   assert.match(matrix, /Publishing this device’s encryption keys/);
   assert.match(
@@ -591,7 +610,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /assertMatchingRevisionEpoch/);
   assert.match(matrix, /Waiting for the current Gateway session state/);
   assert.doesNotMatch(app, />\s*Demo\s*</);
-  assert.match(app, /connectRealMatrix/);
+  assert.match(app, /connectCodeverClient/);
+  assert.doesNotMatch(app, /connectMatrix/);
   assert.match(app, /confirmPairing/);
   assert.match(app, /const link = hash\.get\("pair"\)/);
   assert.doesNotMatch(app, /searchParams\.get\("pair"\)/);

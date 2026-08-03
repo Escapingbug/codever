@@ -6,10 +6,10 @@ import type {
   MatrixConnectionStatus,
 } from "./matrix";
 import { PairingWizard } from "./PairingWizard";
+import type { CodeverPublicTrust } from "./client/CodeverClient";
 import type {
   GeneratedDeviceInvitation,
   PairingPreview,
-  TrustedGateway,
 } from "./pairing";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
@@ -21,7 +21,7 @@ type Props = {
   progressDetail: string | null;
   error: string | null;
   pairingPreview: PairingPreview | null;
-  trustedGateway: TrustedGateway | null;
+  trustedGateway: CodeverPublicTrust | null;
   pairingBusy: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;

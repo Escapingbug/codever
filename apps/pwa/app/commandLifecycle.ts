@@ -4,9 +4,14 @@ export type CommandCompletion = {
   commandId: string;
   sequence: number;
   revision: number;
-  outcome: "succeeded" | "failed";
+  outcome: "succeeded" | "failed" | "cancelled";
   sessionId?: string;
   result?: JsonValue;
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
 };
 
 export const COMMAND_COMPLETION_TIMEOUT_MS = 60_000;

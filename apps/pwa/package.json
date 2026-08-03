@@ -9,11 +9,12 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "pnpm run build && node --test tests/rendered-html.test.mjs tests/command-lifecycle.test.mjs tests/chat-messages.test.ts tests/agent-activity.test.mjs && tsx --test tests/composer-state.test.mts tests/command-payloads.test.mts tests/durable-command-recovery.test.mts tests/matrix-events.test.mts tests/device-invitation.test.mts tests/gateway-transport-recovery.test.mts tests/invitation-relay.test.mts tests/late-response-lifecycle.test.mts tests/matrix-auth.test.mts tests/matrix-startup.test.mts tests/pwa-update.test.mts tests/qr-scanning.test.mts",
+    "test": "pnpm run build && node --test tests/rendered-html.test.mjs tests/command-lifecycle.test.mjs tests/chat-messages.test.ts tests/agent-activity.test.mjs && tsx --test tests/composer-state.test.mts tests/command-payloads.test.mts tests/durable-command-recovery.test.mts tests/matrix-events.test.mts tests/device-invitation.test.mts tests/gateway-transport-recovery.test.mts tests/invitation-relay.test.mts tests/late-response-lifecycle.test.mts tests/matrix-auth.test.mts tests/matrix-startup.test.mts tests/pwa-update.test.mts tests/qr-scanning.test.mts tests/web-codever-client.test.mts tests/native-rpc-bridge.test.mts tests/native-codever-client.test.mts tests/create-codever-client.test.mts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@codever/native-bridge": "file:../../packages/native-bridge",
     "@codever/protocol": "file:../../packages/protocol",
     "@codever/security": "file:../../packages/security",
     "drizzle-orm": "0.45.2",

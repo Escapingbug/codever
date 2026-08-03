@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Codever</string>
+    <string name="notification_channel_name">Codever connection</string>
+    <string name="notification_title">Codever is running</string>
+    <string name="notification_runtime_pending">Native Matrix connection active</string>
+    <string name="notification_disconnect">Disconnect</string>
+</resources>
