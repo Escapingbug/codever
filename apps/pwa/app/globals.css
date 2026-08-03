@@ -2734,6 +2734,7 @@ select:focus-visible {
 .settings-build-version small {
   color: #8c93a1;
   font-size: 9px;
+  overflow-wrap: anywhere;
 }
 
 .settings-build-version button {
@@ -2754,6 +2755,7 @@ select:focus-visible {
 
 .settings-build-version code {
   font-family: var(--font-geist-mono);
+  word-break: break-all;
 }
 
 .settings-security-note > span {
@@ -2896,6 +2898,13 @@ select:focus-visible {
 .connection-error span {
   font-size: 9px;
   line-height: 1.45;
+}
+
+.connection-error .connection-error-build {
+  margin-top: 2px;
+  color: #a3656d;
+  font-family: var(--font-geist-mono);
+  overflow-wrap: anywhere;
 }
 
 .matrix-settings > footer {

@@ -617,6 +617,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /connectCodeverClient/);
   assert.doesNotMatch(app, /connectMatrix/);
   assert.match(app, /confirmPairing/);
+  assert.match(settings, /Native APK/);
+  assert.match(settings, /connection-error-build/);
+  assert.match(app, /onNativeRuntime/);
   assert.match(app, /const link = hash\.get\("pair"\)/);
   assert.doesNotMatch(app, /searchParams\.get\("pair"\)/);
   assert.match(app, /url\.searchParams\.has\("pair"\)/);

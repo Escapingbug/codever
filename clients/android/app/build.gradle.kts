@@ -1,7 +1,50 @@
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val codeverAndroidRoot = rootProject.projectDir
+
+fun gitOutput(vararg arguments: String): String? = runCatching {
+    val process = ProcessBuilder("git", *arguments)
+        .directory(codeverAndroidRoot)
+        .redirectErrorStream(true)
+        .start()
+    val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+    if (process.waitFor() == 0) output else null
+}.getOrNull()
+
+val androidBaseVersion = "0.1.0"
+val androidVersionCodeEpochMillis = 1_577_836_800_000L // 2020-01-01T00:00:00Z
+val configuredBuildEpochMillis =
+    providers.environmentVariable("CODEVER_ANDROID_BUILD_EPOCH_MS").orNull
+val buildEpochMillis = configuredBuildEpochMillis?.toLongOrNull()
+    ?: System.currentTimeMillis()
+require(configuredBuildEpochMillis == null || configuredBuildEpochMillis.toLongOrNull() != null) {
+    "CODEVER_ANDROID_BUILD_EPOCH_MS must be an integer Unix timestamp in milliseconds."
+}
+val androidVersionCode = ((buildEpochMillis - androidVersionCodeEpochMillis) / 1_000L) + 1L
+require(androidVersionCode in 1L..2_100_000_000L) {
+    "Android versionCode must be between 1 and 2100000000; build timestamp was $buildEpochMillis."
+}
+val sourceRevision = gitOutput("rev-parse", "--short=8", "HEAD")
+    ?.takeIf { it.matches(Regex("[0-9a-fA-F]{8}")) }
+    ?.lowercase()
+    ?: "unknown"
+val sourceDirty = gitOutput("status", "--short", "--untracked-files=no")
+    ?.isNotBlank()
+    ?: true
+val sourceLabel = "$sourceRevision${if (sourceDirty) ".dirty" else ""}"
+val buildTimestamp = DateTimeFormatter
+    .ofPattern("yyyyMMdd'T'HHmmssSSS'Z'")
+    .withZone(ZoneOffset.UTC)
+    .format(Instant.ofEpochMilli(buildEpochMillis))
+val androidVersionName = "$androidBaseVersion-dev.$buildTimestamp+$sourceLabel"
+val androidNativeBuildId = "android-$buildTimestamp-$sourceLabel"
 
 android {
     namespace = "id.my.anciety.codever"
@@ -15,8 +58,12 @@ android {
         // fall back to an exportable software private key.
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Every produced APK carries a visible, monotonic install version and
+        // an exact build identity. CODEVER_ANDROID_BUILD_EPOCH_MS can pin both
+        // values for a reproducible CI/release build.
+        versionCode = androidVersionCode.toInt()
+        versionName = androidVersionName
+        buildConfigField("String", "NATIVE_BUILD_ID", "\"$androidNativeBuildId\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

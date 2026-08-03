@@ -85,12 +85,16 @@ test("falls back explicitly when the native host is only a Matrix scaffold", asy
   const port = new HelloPort();
   const webClient = { runtime: "web" } as CodeverClient;
   const statusDetails: string[] = [];
+  const nativeBuilds: string[] = [];
   const client = await createCodeverClient(
     config,
     {
       ...quietHandlers(),
       onStatus(_status, detail) {
         if (detail) statusDetails.push(detail);
+      },
+      onNativeRuntime(runtime) {
+        if (runtime) nativeBuilds.push(runtime.runtimeBuild);
       },
     },
     {
@@ -102,6 +106,7 @@ test("falls back explicitly when the native host is only a Matrix scaffold", asy
   assert.equal(client, webClient);
   assert.equal(port.onmessage, null);
   assert.match(statusDetails.join("\n"), /complete Codever runtime/i);
+  assert.deepEqual(nativeBuilds, ["android-test"]);
 });
 
 test("keeps a browser-owned Matrix session on Web even with a complete native host", async () => {

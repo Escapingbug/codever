@@ -6,7 +6,10 @@ import type {
   MatrixConnectionStatus,
 } from "./matrix";
 import { PairingWizard } from "./PairingWizard";
-import type { CodeverPublicTrust } from "./client/CodeverClient";
+import type {
+  CodeverNativeRuntimeInfo,
+  CodeverPublicTrust,
+} from "./client/CodeverClient";
 import type {
   GeneratedDeviceInvitation,
   PairingPreview,
@@ -28,6 +31,7 @@ type Props = {
   invitationError: string | null;
   invitationReauthRequired: boolean;
   updateState: PwaUpdateState;
+  nativeRuntime: CodeverNativeRuntimeInfo | null;
   onChange(config: MatrixConnectionConfig): void;
   onPairingLink(link: string): void;
   onClearPairing(): void;
@@ -56,6 +60,7 @@ export function MatrixSettings({
   invitationError,
   invitationReauthRequired,
   updateState,
+  nativeRuntime,
   onChange,
   onPairingLink,
   onClearPairing,
@@ -267,12 +272,27 @@ export function MatrixSettings({
                 : "Connection needs attention"}
             </strong>
             <span>{error}</span>
+            {nativeRuntime && (
+              <span className="connection-error-build">
+                Native APK <code>{nativeRuntime.runtimeVersion}</code>
+              </span>
+            )}
           </div>
         )}
 
         <div className="settings-build-version">
           <span>
             PWA build <code>{CODEVER_BUILD_VERSION}</code>
+            {nativeRuntime && (
+              <>
+                <small>
+                  Native APK <code>{nativeRuntime.runtimeVersion}</code>
+                </small>
+                <small>
+                  Native build <code>{nativeRuntime.runtimeBuild}</code>
+                </small>
+              </>
+            )}
             <small>{updateStatusText(updateState)}</small>
           </span>
           <button

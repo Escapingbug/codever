@@ -89,6 +89,16 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The
 Matrix native libraries make it substantially larger than a WebView-only shell.
 An unstrippable JNA native library is packaged as-is by the current dependency.
 
+Every APK has its own build identity. `versionCode` advances with build time
+(seconds since 2020-01-01), while `versionName` and the native bridge build ID
+include the millisecond UTC build timestamp, Git revision, and a `dirty` suffix
+when tracked source changes were present. Set
+`CODEVER_ANDROID_BUILD_EPOCH_MS` to an epoch timestamp in milliseconds when CI
+needs a reproducible identity. The exact identity is visible in Android App
+info, the persistent notification, and the PWA Gateway settings. This lets a
+pairing failure screenshot identify the installed native binary independently
+of the online PWA build.
+
 The JVM suite covers bridge negotiation and cancellation, pairing/trust and
 cross-language crypto fixtures, transport rotation recovery, durable commands,
 event persistence/replay, encrypted transfers, Matrix login/runtime recovery,

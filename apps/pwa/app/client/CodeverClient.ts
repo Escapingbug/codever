@@ -1,5 +1,6 @@
 import type {
   ClientMessage,
+  HelloResult,
   PairingPreview,
   PublicTrustState,
 } from "@codever/native-bridge";
@@ -14,6 +15,7 @@ import type {
 } from "../matrix";
 
 export type CodeverClientRuntime = "web" | "native";
+export type CodeverNativeRuntimeInfo = HelloResult["native"];
 export type CodeverMessage = ClientMessage;
 export type CodeverPairingPreview = PairingPreview;
 export type CodeverPublicTrust = Extract<
@@ -41,6 +43,7 @@ export type CodeverHistoryRecovery = CodeverHistoryPage & {
 export type CodeverClientHandlers = {
   onMessage(message: CodeverMessage): void;
   onStatus(status: MatrixConnectionStatus, detail?: string): void;
+  onNativeRuntime?(runtime: CodeverNativeRuntimeInfo | null): void;
   onTrustUpdated?(trust: CodeverPublicTrust | null): void;
   onCollaborationState?(state: CollaborationState): void;
   onCommandResult?(result: CommandCompletion): void;

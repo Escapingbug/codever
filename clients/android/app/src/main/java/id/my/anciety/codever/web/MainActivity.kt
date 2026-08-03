@@ -396,7 +396,7 @@ class MainActivity : ComponentActivity() {
 
     private inner class ActivityBridgeRuntime : BridgeRuntime {
         override val runtimeVersion: String = BuildConfig.VERSION_NAME
-        override val runtimeBuild: String = "android-${BuildConfig.VERSION_CODE}"
+        override val runtimeBuild: String = BuildConfig.NATIVE_BUILD_ID
         override val nativeDeviceId: String
             get() = serviceBinder?.clientRuntime()?.deviceId
                 ?: ServicePreferenceStore(this@MainActivity).nativeDeviceId

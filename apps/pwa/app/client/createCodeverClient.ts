@@ -50,6 +50,7 @@ export async function createCodeverClient(
   const nativeManaged = isNativeManagedMatrixConfig(config);
   const port = dependencies.nativePort();
   if (!port) {
+    handlers.onNativeRuntime?.(null);
     if (nativeManaged) throw nativeRuntimeUnavailable();
     return dependencies.createWeb(config, handlers);
   }
@@ -67,6 +68,7 @@ export async function createCodeverClient(
     });
   } catch (error) {
     bridge.close();
+    handlers.onNativeRuntime?.(null);
     if (nativeManaged) throw nativeRuntimeUnavailable(error);
     handlers.onStatus(
       "connecting",
@@ -74,6 +76,7 @@ export async function createCodeverClient(
     );
     return dependencies.createWeb(config, handlers);
   }
+  handlers.onNativeRuntime?.(hello.native);
   const fullNative = REQUIRED_NATIVE_CAPABILITIES.every(
     (name) => hello.capabilities[name]?.version === 1,
   );

@@ -2,7 +2,8 @@
 <resources>
     <string name="app_name">Codever</string>
     <string name="notification_channel_name">Codever connection</string>
-    <string name="notification_title">Codever is running</string>
-    <string name="notification_runtime_pending">Native Matrix connection active</string>
+    <string name="notification_channel_description">Persistent native Matrix connection</string>
+    <string name="notification_title">Codever native is running</string>
+    <string name="notification_runtime_version">%1$s · Matrix connection active</string>
     <string name="notification_disconnect">Disconnect</string>
 </resources>

@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.R
 import id.my.anciety.codever.client.NativeClientRuntime
 import id.my.anciety.codever.client.events.ClientSnapshot
@@ -118,39 +119,43 @@ class CodeverConnectionService : Service() {
                 getString(R.string.notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = getString(R.string.notification_runtime_pending)
+                description = getString(R.string.notification_channel_description)
                 setShowBadge(false)
             },
         )
     }
 
-    private fun buildNotification() = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-        .setSmallIcon(R.drawable.ic_codever_notification)
-        .setContentTitle(getString(R.string.notification_title))
-        .setContentText(getString(R.string.notification_runtime_pending))
-        .setCategory(NotificationCompat.CATEGORY_SERVICE)
-        .setOnlyAlertOnce(true)
-        .setOngoing(true)
-        .setContentIntent(
-            PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            ),
-        )
-        .addAction(
-            0,
-            getString(R.string.notification_disconnect),
-            PendingIntent.getService(
-                this,
-                1,
-                Intent(this, CodeverConnectionService::class.java).setAction(ServiceActions.DISCONNECT),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            ),
-        )
-        .build()
+    private fun buildNotification() =
+        getString(R.string.notification_runtime_version, BuildConfig.NATIVE_BUILD_ID).let { runtimeText ->
+            NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_codever_notification)
+                .setContentTitle(getString(R.string.notification_title))
+                .setContentText(runtimeText)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(runtimeText))
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setOnlyAlertOnce(true)
+                .setOngoing(true)
+                .setContentIntent(
+                    PendingIntent.getActivity(
+                        this,
+                        0,
+                        Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                )
+                .addAction(
+                    0,
+                    getString(R.string.notification_disconnect),
+                    PendingIntent.getService(
+                        this,
+                        1,
+                        Intent(this, CodeverConnectionService::class.java).setAction(ServiceActions.DISCONNECT),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                )
+                .build()
+        }
 
     inner class LocalBinder : Binder() {
         fun clientRuntime(): NativeClientRuntime = this@CodeverConnectionService.clientRuntime

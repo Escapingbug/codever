@@ -75,6 +75,7 @@ import type {
   CodeverCommandSendResult,
   CodeverHistoryRecovery,
   CodeverMessage,
+  CodeverNativeRuntimeInfo,
   CodeverPublicTrust,
 } from "./client/CodeverClient";
 import {
@@ -334,6 +335,8 @@ export function CodeverApp() {
     useState<MatrixConnectionStatus>("offline");
   const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [nativeRuntime, setNativeRuntime] =
+    useState<CodeverNativeRuntimeInfo | null>(null);
   const [pwaUpdateState, setPwaUpdateState] = useState<PwaUpdateState>({
     phase: "current",
     currentVersion: CODEVER_BUILD_VERSION,
@@ -1358,6 +1361,9 @@ export function CodeverApp() {
           if (status === "connected") {
             sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
           }
+        },
+        onNativeRuntime(runtime) {
+          if (isCurrentStartup()) setNativeRuntime(runtime);
         },
         onTrustUpdated(trust) {
           if (!isCurrentStartup()) return;
@@ -3777,6 +3783,7 @@ export function CodeverApp() {
         invitationError={invitationError}
         invitationReauthRequired={invitationReauthRequired}
         updateState={pwaUpdateState}
+        nativeRuntime={nativeRuntime}
         onChange={setMatrixConfig}
         onPairingLink={(link) => void openPairingLink(link)}
         onClearPairing={() => {
