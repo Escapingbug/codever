@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NATIVE_BRIDGE_LIMITS } from "@codever/native-bridge";
 import {
+  NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
+  NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
   NativeRpcBridge,
   injectedNativeBridgePort,
+  nativeBridgeRequestTimeoutMs,
   type NativeBridgePort,
 } from "../app/client/native/NativeRpcBridge.ts";
 
@@ -103,4 +106,17 @@ test("detects only the supported injected bridge surface", () => {
   assert.equal(injectedNativeBridgePort(port), port);
   assert.ok(injectedNativeBridgePort({ postMessage() {} }));
   assert.equal(injectedNativeBridgePort(null), null);
+});
+
+test("allows native confirmation and Matrix response time for pairing", () => {
+  assert.equal(NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS, 15_000);
+  assert.equal(NATIVE_PAIRING_COMPLETE_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(
+    nativeBridgeRequestTimeoutMs("codever.pairing.complete"),
+    NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
+  );
+  assert.equal(
+    nativeBridgeRequestTimeoutMs("codever.client.snapshot"),
+    NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
+  );
 });

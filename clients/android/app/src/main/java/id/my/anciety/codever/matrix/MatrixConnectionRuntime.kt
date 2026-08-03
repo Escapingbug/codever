@@ -91,12 +91,12 @@ class MatrixConnectionRuntime(
         mutex.withLock { bootstrapLocked(input) }
     }.await()
 
-    suspend fun sendRoomMessage(contentJson: String) = scope.async {
+    suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false) = scope.async {
         mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
             val current = driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
-            current.sendRoomMessage(contentJson)
+            current.sendRoomMessage(contentJson, rotateRoomKey)
         }
     }.await()
 

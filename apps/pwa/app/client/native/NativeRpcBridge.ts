@@ -15,6 +15,15 @@ import {
 
 export type NativeBridgeMessageEvent = { data: unknown };
 
+export const NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS = 15_000;
+export const NATIVE_PAIRING_COMPLETE_TIMEOUT_MS = 10 * 60_000;
+
+export function nativeBridgeRequestTimeoutMs(method: RequestMethod): number {
+  return method === "codever.pairing.complete"
+    ? NATIVE_PAIRING_COMPLETE_TIMEOUT_MS
+    : NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS;
+}
+
 /** Shape injected by AndroidX WebKit, WebView2, or WKWebView adapters. */
 export type NativeBridgePort = {
   postMessage(message: string): void;
@@ -91,7 +100,7 @@ export class NativeRpcBridge {
   request<M extends RequestMethod>(
     method: M,
     params: BridgeMethodParams[M],
-    timeoutMs = 15_000,
+    timeoutMs = nativeBridgeRequestTimeoutMs(method),
   ): Promise<BridgeMethodResults[M]> {
     if (this.#closed) {
       return Promise.reject(

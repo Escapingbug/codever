@@ -102,7 +102,7 @@ class AttachmentTransferManagerTest {
         override fun start() = Unit
         override fun publicSession(): PublicMatrixSession? = null
         override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = error("unused")
-        override suspend fun sendRoomMessage(contentJson: String) = Unit
+        override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) = Unit
         override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
             if (failUpload) throw IllegalStateException("upload unavailable")
             media = bytes.copyOf()

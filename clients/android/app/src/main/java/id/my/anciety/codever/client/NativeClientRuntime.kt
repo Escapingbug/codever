@@ -316,7 +316,13 @@ class NativeClientRuntime(
             val response = CompletableDeferred<SignedPairingResponse>()
             pending.request = signedRequest
             pending.response = response
-            matrix.sendRoomMessage(pairingRequestContent(signedRequest).toString())
+            // A failed pre-sync attempt may have created a Megolm session before
+            // the Gateway device list was ready. Pairing starts a fresh session
+            // only after the native Matrix driver has completed its first sync.
+            matrix.sendRoomMessage(
+                pairingRequestContent(signedRequest).toString(),
+                rotateRoomKey = true,
+            )
             Triple(pending, signedRequest, response)
         }
         val signedResponse = try {

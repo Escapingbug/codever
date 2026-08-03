@@ -40,7 +40,7 @@ interface MatrixSdkDriver {
 
     suspend fun setNetworkAvailable(available: Boolean)
 
-    suspend fun sendRoomMessage(contentJson: String)
+    suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
 
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
 
@@ -74,9 +74,10 @@ class OfficialMatrixSdkDriver(
     private var syncTask: TaskHandle? = null
     private var timeline: Timeline? = null
     private var timelineTask: TaskHandle? = null
-    private var boundRoomReady = CompletableDeferred<Unit>()
+    private var syncedBoundRoomReady = CompletableDeferred<Unit>()
     private val active = AtomicBoolean(false)
     private val timelineStarting = AtomicBoolean(false)
+    private val firstSyncFinalizing = AtomicBoolean(false)
     private lateinit var activeSession: StoredMatrixSession
     private lateinit var activeFiles: MatrixAccountFiles
     private var runtimeFailure: (Throwable) -> Unit = {}
@@ -95,7 +96,8 @@ class OfficialMatrixSdkDriver(
     ) {
         check(client == null) { "Matrix SDK driver is already started." }
         check(active.compareAndSet(false, true)) { "Matrix SDK driver is already active." }
-        boundRoomReady = CompletableDeferred()
+        syncedBoundRoomReady = CompletableDeferred()
+        firstSyncFinalizing.set(false)
         activeSession = secrets.session
         activeFiles = files
         runtimeFailure = onRuntimeFailure
@@ -134,7 +136,6 @@ class OfficialMatrixSdkDriver(
         try {
             built.restoreSession(activeSession.toSdkSession())
             client = built
-            signalBoundRoomReady()
             val ownEd25519 = built.encryption().ed25519Key()
                 ?: throw IllegalStateException("Matrix did not publish this device's Ed25519 key.")
             onTransportReady(
@@ -150,10 +151,12 @@ class OfficialMatrixSdkDriver(
                 object : SyncListenerV2 {
                     override fun onUpdate(response: SyncResponseV2) {
                         if (!active.get()) return
-                        signalBoundRoomReady()
                         onSyncUpdate()
                         callbackScope.launch {
-                            runCatching { ensureTimeline() }.onFailure(onRuntimeFailure)
+                            runCatching {
+                                finalizeInitialSync(built)
+                                ensureTimeline()
+                            }.onFailure(onRuntimeFailure)
                         }
                     }
                 },
@@ -171,9 +174,10 @@ class OfficialMatrixSdkDriver(
         client?.enableAllSendQueues(available)
     }
 
-    override suspend fun sendRoomMessage(contentJson: String) {
+    override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) {
         val room = awaitBoundRoom()
         check(room.isEncrypted()) { "Refusing to send Codever data to an unencrypted Matrix room." }
+        if (rotateRoomKey) room.discardRoomKey()
         room.sendRaw("m.room.message", contentJson)
     }
 
@@ -208,13 +212,13 @@ class OfficialMatrixSdkDriver(
         client?.close()
         client = null
         timelineStarting.set(false)
+        firstSyncFinalizing.set(false)
     }
 
     private suspend fun ensureTimeline() {
         if (timeline != null || !timelineStarting.compareAndSet(false, true)) return
         try {
             val room = client?.getRoom(activeSession.roomBinding.roomId) ?: return
-            boundRoomReady.complete(Unit)
             val created = room.timeline()
             val listener = created.addListener(object : TimelineListener {
                 override fun onUpdate(diff: List<TimelineDiff>) {
@@ -275,19 +279,30 @@ class OfficialMatrixSdkDriver(
         )
     }
 
-    private fun signalBoundRoomReady() {
+    private suspend fun finalizeInitialSync(expectedClient: Client) {
+        if (syncedBoundRoomReady.isCompleted || !firstSyncFinalizing.compareAndSet(false, true)) {
+            return
+        }
+        try {
+            expectedClient.encryption().waitForE2eeInitializationTasks()
+            if (client === expectedClient) signalSyncedBoundRoomReady()
+        } finally {
+            firstSyncFinalizing.set(false)
+        }
+    }
+
+    private fun signalSyncedBoundRoomReady() {
         if (client?.getRoom(activeSession.roomBinding.roomId) != null) {
-            boundRoomReady.complete(Unit)
+            syncedBoundRoomReady.complete(Unit)
         }
     }
 
     private suspend fun awaitBoundRoom(): Room {
-        client?.getRoom(activeSession.roomBinding.roomId)?.let { return it }
         try {
-            withTimeout(BOUND_ROOM_READY_TIMEOUT_MS) { boundRoomReady.await() }
+            withTimeout(BOUND_ROOM_READY_TIMEOUT_MS) { syncedBoundRoomReady.await() }
         } catch (_: TimeoutCancellationException) {
             throw IllegalStateException(
-                "The bound Matrix room did not become available after initial sync.",
+                "The bound Matrix room and encryption state did not become ready after initial sync.",
             )
         }
         return client?.getRoom(activeSession.roomBinding.roomId)
