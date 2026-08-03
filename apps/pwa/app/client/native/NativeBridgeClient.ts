@@ -367,13 +367,15 @@ export class NativeBridgeClient implements CodeverClient {
       this.bridge.close();
       return;
     }
-    void this.bridge
-      .request("codever.events.unsubscribe", {
-        context: this.bridge.context(),
-        subscriptionId,
-      })
-      .catch(() => undefined)
-      .finally(() => this.bridge.close());
+    // Posting the unsubscribe is synchronous. Release the injected port
+    // immediately afterwards so a bootstrap/reconnect can acquire it without
+    // racing the asynchronous native acknowledgement.
+    void this.bridge.request("codever.events.unsubscribe", {
+      context: this.bridge.context(),
+      subscriptionId,
+    })
+      .catch(() => undefined);
+    this.bridge.close();
   }
 
   async #initialize(): Promise<void> {

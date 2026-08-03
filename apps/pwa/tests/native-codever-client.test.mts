@@ -13,7 +13,7 @@ import {
   REQUIRED_NATIVE_CAPABILITIES,
 } from "../app/client/native/NativeBridgeClient.ts";
 import {
-  NativeRpcBridge,
+  acquireNativeRpcBridge,
   type NativeBridgePort,
 } from "../app/client/native/NativeRpcBridge.ts";
 
@@ -48,7 +48,7 @@ class RuntimePort implements NativeBridgePort {
 
 test("replays native state, sends a durable command, and acknowledges events", async () => {
   const port = new RuntimePort();
-  const bridge = new NativeRpcBridge(port);
+  const bridge = await acquireNativeRpcBridge(port);
   const hello = await bridge.hello({
     webBuild: "test-build",
     requiredCapabilities: [],
@@ -129,8 +129,12 @@ test("replays native state, sends a durable command, and acknowledges events", a
   assert.ok(port.requests.some((request) => request.method === "codever.events.ack"));
 
   client.dispose();
-  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(port.onmessage, null);
+  assert.ok(
+    port.requests.some((request) => request.method === "codever.events.unsubscribe"),
+  );
+  const replacement = await acquireNativeRpcBridge(port);
+  replacement.close();
 });
 
 function responseFor(request: Request): unknown {

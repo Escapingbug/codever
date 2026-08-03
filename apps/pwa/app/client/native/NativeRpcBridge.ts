@@ -30,6 +30,12 @@ export type NativeBridgePort = {
   onmessage?: ((event: NativeBridgeMessageEvent) => void) | null;
 };
 
+type NativeBridgeLeaseState = {
+  tail: Promise<void>;
+};
+
+const nativeBridgeLeases = new WeakMap<object, NativeBridgeLeaseState>();
+
 type PendingRequest = {
   complete(input: unknown): void;
   reject(error: Error): void;
@@ -59,6 +65,7 @@ export class NativeRpcBridge {
   constructor(
     private readonly port: NativeBridgePort,
     private readonly onProtocolError: (error: unknown) => void = () => {},
+    private readonly onClose: () => void = () => {},
   ) {
     if (port.onmessage != null) {
       throw new BridgeProtocolError(
@@ -175,6 +182,7 @@ export class NativeRpcBridge {
     }
     this.#pending.clear();
     this.#eventListeners.clear();
+    this.onClose();
   }
 
   #receive(input: unknown): void {
@@ -200,6 +208,46 @@ export class NativeRpcBridge {
       // requests. Its request cannot be safely correlated, so none are failed.
       this.onProtocolError(error);
     }
+  }
+}
+
+/**
+ * Serializes ownership of an injected native port. A persistent native client
+ * holds its lease until dispose(), while short bootstrap operations release it
+ * in their finally block. This lets a superseding startup wait for the old Web
+ * client to detach instead of misreporting it as a second WebView.
+ */
+export async function acquireNativeRpcBridge(
+  port: NativeBridgePort,
+  onProtocolError: (error: unknown) => void = () => {},
+): Promise<NativeRpcBridge> {
+  const previous = nativeBridgeLeases.get(port)?.tail ?? Promise.resolve();
+  let releaseLease = () => {};
+  const released = new Promise<void>((resolve) => {
+    releaseLease = resolve;
+  });
+  const tail = previous.catch(() => undefined).then(() => released);
+  nativeBridgeLeases.set(port, { tail });
+
+  await previous.catch(() => undefined);
+
+  let active = true;
+  const release = () => {
+    if (!active) return;
+    active = false;
+    releaseLease();
+    void tail.then(() => {
+      if (nativeBridgeLeases.get(port)?.tail === tail) {
+        nativeBridgeLeases.delete(port);
+      }
+    });
+  };
+
+  try {
+    return new NativeRpcBridge(port, onProtocolError, release);
+  } catch (error) {
+    release();
+    throw error;
   }
 }
 

@@ -128,6 +128,7 @@ import {
 } from "./matrixAuth";
 import {
   MATRIX_STARTUP_RECOVERY_SESSION_KEY,
+  shouldDeferStoredMatrixStartupForPairing,
   shouldReloadInterruptedMatrixStartup,
 } from "./matrixStartup";
 
@@ -701,6 +702,12 @@ export function CodeverApp() {
     const invitation = hash.get("invite");
     const shortInvitation =
       hash.has("i") || hash.has("k") ? url.toString() : null;
+    const deferStoredStartupForPairing =
+      shouldDeferStoredMatrixStartupForPairing({
+        pairingLink: link,
+        deviceInvitation: invitation,
+        shortInvitation,
+      });
     const rejectedQueryPairing =
       url.searchParams.has("pair") ||
       url.searchParams.has("invite") ||
@@ -734,6 +741,10 @@ export function CodeverApp() {
         setSettingsOpen(true);
         return;
       }
+      // The invitation flow owns native bridge startup for this boot. Restoring
+      // a stored native session at the same time would attach a second Web
+      // client before the one-time Matrix bootstrap can acquire the port.
+      if (deferStoredStartupForPairing) return;
       const identity = await getOrCreateDeviceIdentity();
       const trust = await loadTrustedGateway(identity);
       const stored = loadMatrixConfig() ?? emptyMatrixConfig;
@@ -775,7 +786,6 @@ export function CodeverApp() {
         await connectCodeverClient(stored, true, true);
         return;
       }
-      if (link || invitation || shortInvitation) return;
       const pending = await loadPendingPairingRecovery(identity);
       if (!pending) {
         setSettingsOpen(true);
@@ -1587,6 +1597,20 @@ export function CodeverApp() {
     setInvitationError(null);
   }
 
+  function detachClientForNativeBootstrap() {
+    // Supersede any startup that has acquired the native port but has not yet
+    // published its CodeverClient. A stale startup disposes itself once its
+    // current bridge operation settles, releasing the lease to bootstrap.
+    matrixStartupGenerationRef.current += 1;
+    const attachedClient = codeverClientRef.current;
+    codeverClientRef.current = null;
+    attachedClient?.dispose();
+    matrixStartupRef.current = null;
+    sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+    setConnectionStatus("connecting");
+    setConnectionDetail("Transferring the native connection to this invitation…");
+  }
+
   function forgetMatrixConfig() {
     const historyScope = historyScopeRef.current;
     pairingAbortRef.current?.abort();
@@ -1689,6 +1713,7 @@ export function CodeverApp() {
         return;
       }
       try {
+        detachClientForNativeBootstrap();
         const nativeBootstrap = await bootstrapNativeMatrixSessionIfAvailable({
           homeserver: matrixLogin.homeserver,
           oneTimeLoginToken: matrixLogin.loginToken,

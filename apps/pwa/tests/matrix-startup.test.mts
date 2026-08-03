@@ -9,6 +9,7 @@ import {
   MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL,
   MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL,
   matrixInitialSyncLimit,
+  shouldDeferStoredMatrixStartupForPairing,
   shouldReloadInterruptedMatrixStartup,
   shouldRecoverMatrixSyncCheckpoint,
 } from "../app/matrixStartup.ts";
@@ -100,6 +101,33 @@ test("reloads one interrupted startup after returning to the foreground", () => 
       hiddenAt: 20_000,
       now: 90_000,
       visible: false,
+    }),
+    false,
+  );
+});
+
+test("defers stored native startup while an invitation owns the bridge", () => {
+  assert.equal(
+    shouldDeferStoredMatrixStartupForPairing({
+      pairingLink: null,
+      deviceInvitation: "device-invitation",
+      shortInvitation: null,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDeferStoredMatrixStartupForPairing({
+      pairingLink: "gateway-pairing",
+      deviceInvitation: null,
+      shortInvitation: null,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDeferStoredMatrixStartupForPairing({
+      pairingLink: null,
+      deviceInvitation: null,
+      shortInvitation: null,
     }),
     false,
   );

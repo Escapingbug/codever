@@ -5,6 +5,7 @@ import {
   NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
   NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
   NativeRpcBridge,
+  acquireNativeRpcBridge,
   injectedNativeBridgePort,
   nativeBridgeRequestTimeoutMs,
   type NativeBridgePort,
@@ -106,6 +107,42 @@ test("detects only the supported injected bridge surface", () => {
   assert.equal(injectedNativeBridgePort(port), port);
   assert.ok(injectedNativeBridgePort({ postMessage() {} }));
   assert.equal(injectedNativeBridgePort(null), null);
+});
+
+test("serializes ownership while a previous Web client is detaching", async () => {
+  const port = new FakeNativePort();
+  const first = await acquireNativeRpcBridge(port);
+  let secondResolved = false;
+  const secondPromise = acquireNativeRpcBridge(port).then((bridge) => {
+    secondResolved = true;
+    return bridge;
+  });
+
+  await Promise.resolve();
+  assert.equal(secondResolved, false);
+  assert.ok(port.onmessage);
+
+  first.close();
+  const second = await secondPromise;
+  assert.equal(secondResolved, true);
+  assert.ok(port.onmessage);
+
+  second.close();
+  assert.equal(port.onmessage, null);
+});
+
+test("does not poison future handoffs when an unmanaged owner is attached", async () => {
+  const port = new FakeNativePort();
+  const legacyOwner = new NativeRpcBridge(port);
+
+  await assert.rejects(
+    acquireNativeRpcBridge(port),
+    /already attached to another Web client/i,
+  );
+
+  legacyOwner.close();
+  const replacement = await acquireNativeRpcBridge(port);
+  replacement.close();
 });
 
 test("allows native confirmation and Matrix response time for pairing", () => {

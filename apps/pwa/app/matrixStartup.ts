@@ -33,6 +33,16 @@ export function matrixInitialSyncLimit(
   return hasActiveTrust && !recoveringSyncCheckpoint ? 30 : 1;
 }
 
+export function shouldDeferStoredMatrixStartupForPairing(input: {
+  pairingLink: string | null;
+  deviceInvitation: string | null;
+  shortInvitation: string | null;
+}): boolean {
+  return Boolean(
+    input.pairingLink || input.deviceInvitation || input.shortInvitation,
+  );
+}
+
 export function shouldReloadInterruptedMatrixStartup(input: {
   phase: string;
   startedAt: number;

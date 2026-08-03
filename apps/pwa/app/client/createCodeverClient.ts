@@ -12,6 +12,7 @@ import {
   type NativeBootstrapInput,
 } from "./native/NativeBridgeClient";
 import {
+  acquireNativeRpcBridge,
   NativeRpcBridge,
   injectedNativeBridgePort,
   type NativeBridgePort,
@@ -28,13 +29,15 @@ export const NATIVE_MANAGED_ACCESS_TOKEN = "codever-native-managed-session-v1";
 export type CreateCodeverClientDependencies = {
   nativePort(): NativeBridgePort | null;
   createWeb: typeof createWebCodeverClient;
-  createBridge(port: NativeBridgePort): NativeRpcBridge;
+  createBridge(port: NativeBridgePort):
+    | NativeRpcBridge
+    | Promise<NativeRpcBridge>;
 };
 
 const defaultDependencies: CreateCodeverClientDependencies = {
   nativePort: () => injectedNativeBridgePort(),
   createWeb: createWebCodeverClient,
-  createBridge: (port) => new NativeRpcBridge(port),
+  createBridge: (port) => acquireNativeRpcBridge(port),
 };
 
 /**
@@ -55,7 +58,7 @@ export async function createCodeverClient(
     return dependencies.createWeb(config, handlers);
   }
 
-  const bridge = dependencies.createBridge(port);
+  const bridge = await dependencies.createBridge(port);
   let hello: HelloResult;
   try {
     hello = await bridge.hello({
@@ -109,7 +112,7 @@ export async function bootstrapNativeMatrixSessionIfAvailable(
 ): Promise<ClientBootstrapResult | null> {
   const port = dependencies.nativePort();
   if (!port) return null;
-  const bridge = dependencies.createBridge(port);
+  const bridge = await dependencies.createBridge(port);
   try {
     const hello = await bridge.hello({
       webBuild: CODEVER_BUILD_VERSION,
