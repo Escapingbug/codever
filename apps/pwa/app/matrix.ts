@@ -295,7 +295,6 @@ export type MatrixConnection = {
     curve25519: string;
   };
   readonly deviceTransport: MatrixTransportBinding;
-  readonly client: MatrixClient;
   pair(
     preview: PairingPreview,
     deviceName: string,
@@ -1922,7 +1921,6 @@ export async function connectMatrix(
       deviceId: config.matrixDeviceId,
       ed25519: matrixDeviceKeys.ed25519,
     },
-    client,
     async pair(preview, deviceName, signal) {
       await startupReady;
       if (stopped) throw new Error("Matrix connection is closed.");

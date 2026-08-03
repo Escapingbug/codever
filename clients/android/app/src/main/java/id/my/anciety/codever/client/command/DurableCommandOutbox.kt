@@ -1,0 +1,453 @@
+package id.my.anciety.codever.client.command
+
+import id.my.anciety.codever.security.SecretCipher
+import java.io.File
+import java.security.MessageDigest
+import java.util.UUID
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+fun interface CommandClock {
+    fun now(): Long
+}
+
+fun interface CommandIdFactory {
+    fun newId(): String
+}
+
+/**
+ * Durable, single-writer command lifecycle.
+ *
+ * A transmission lease never allocates a replacement command. If delivery is
+ * uncertain, the exact same command id and sequence move to recovery_required
+ * and can be sent again through the transport's idempotent recovery path.
+ */
+class DurableCommandOutbox internal constructor(
+    private val store: CommandOutboxStore,
+    private val clock: CommandClock = CommandClock(System::currentTimeMillis),
+    private val idFactory: CommandIdFactory = CommandIdFactory { UUID.randomUUID().toString() },
+) {
+    private var snapshot: CommandOutboxSnapshot
+
+    init {
+        val loaded = store.load() ?: CommandOutboxSnapshot()
+        val recovered = loaded.copy(
+            commands = loaded.commands.map { command ->
+                if (command.state == CommandState.TRANSMITTING) {
+                    command.copy(
+                        state = CommandState.RECOVERY_REQUIRED,
+                        updatedAt = monotonicNow(command.updatedAt),
+                    )
+                } else {
+                    command
+                }
+            },
+        )
+        if (recovered != loaded) store.save(recovered)
+        snapshot = recovered
+    }
+
+    @Synchronized
+    fun enqueue(
+        idempotencyKey: String,
+        payload: JsonObject,
+        sessionId: String? = null,
+    ): CommandReceipt {
+        requireUuid(idempotencyKey)
+        sessionId?.let { requireOpaqueId(it, "sessionId") }
+        val validatedPayload = CommandPayloadValidator.validate(payload)
+        require(sessionId == null || sessionId == validatedPayload.sessionId) {
+            "The command session id does not match its payload."
+        }
+        val effectiveSessionId = validatedPayload.sessionId
+        val fingerprint = requestFingerprint(payload, effectiveSessionId)
+        snapshot.commands.firstOrNull { it.idempotencyKey == idempotencyKey }?.let { existing ->
+            if (existing.requestFingerprint != fingerprint) {
+                throw CommandIdempotencyConflictException(
+                    "The idempotency key is already associated with a different command.",
+                )
+            }
+            return existing.toView().toReceipt()
+        }
+        snapshot.released.firstOrNull { it.idempotencyKey == idempotencyKey }?.let { released ->
+            if (released.requestFingerprint != fingerprint) {
+                throw CommandIdempotencyConflictException(
+                    "The released idempotency key belongs to a different command.",
+                )
+            }
+            throw ReleasedCommandException(
+                "Command ${released.commandId} was already completed and released; it will not be executed again.",
+            )
+        }
+        val blocking = snapshot.commands.firstOrNull {
+            it.sequence > snapshot.lastAcknowledgedSequence && !it.state.isTerminal
+        }
+        if (blocking != null) {
+            throw CommandBusyException(
+                "Command ${blocking.commandId} must be acknowledged, recovered, or discarded first.",
+            )
+        }
+        require(snapshot.commands.size < MAX_ACTIVE_COMMANDS) {
+            "Release completed commands before adding another command."
+        }
+        val now = nonnegativeNow()
+        val operationId = newUniqueId("operationId")
+        val command = PersistedCommand(
+            operationId = operationId,
+            commandId = newUniqueId("commandId", setOf(operationId)),
+            retiredCommandIds = emptyList(),
+            idempotencyKey = idempotencyKey,
+            requestFingerprint = fingerprint,
+            state = CommandState.QUEUED,
+            submittedAt = now,
+            updatedAt = now,
+            sessionId = effectiveSessionId,
+            sequence = Math.addExact(snapshot.lastAcknowledgedSequence, 1L),
+            baseRevision = snapshot.lastRevision,
+            revision = null,
+            cancelRequested = false,
+            completion = null,
+            expectedRevision = null,
+            payload = payload,
+        )
+        commit(snapshot.copy(commands = snapshot.commands + command))
+        return command.toView().toReceipt()
+    }
+
+    @Synchronized
+    fun claimForTransmission(commandId: String): CommandTransmission? {
+        val command = findCurrent(commandId) ?: return null
+        if (command.state != CommandState.QUEUED) return null
+        val next = command.copy(
+            state = CommandState.TRANSMITTING,
+            updatedAt = monotonicNow(command.updatedAt),
+        )
+        replaceAndCommit(command, next)
+        return next.toTransmission(recovery = false)
+    }
+
+    @Synchronized
+    fun claimRecovery(commandId: String): CommandTransmission? {
+        val command = findCurrent(commandId) ?: return null
+        if (command.state != CommandState.RECOVERY_REQUIRED) return null
+        val next = command.copy(
+            state = CommandState.TRANSMITTING,
+            updatedAt = monotonicNow(command.updatedAt),
+        )
+        replaceAndCommit(command, next)
+        return next.toTransmission(recovery = true)
+    }
+
+    @Synchronized
+    fun markAcknowledgementTimedOut(commandId: String): CommandView? {
+        val command = findCurrent(commandId) ?: return null
+        if (command.state != CommandState.TRANSMITTING) return command.toView()
+        val next = command.copy(
+            state = CommandState.RECOVERY_REQUIRED,
+            updatedAt = monotonicNow(command.updatedAt),
+        )
+        replaceAndCommit(command, next)
+        return next.toView()
+    }
+
+    @Synchronized
+    fun recordAcknowledgement(commandId: String, sequence: Long, revision: Long): Boolean {
+        requirePositiveJsonInteger(sequence, "Command sequence")
+        requireNonnegativeJsonInteger(revision, "Command revision")
+        val command = findCurrent(commandId) ?: return false
+        if (command.sequence != sequence || command.state == CommandState.NEEDS_REVIEW) return false
+        if (command.state.isTerminal) return false
+        val next = command.copy(
+            state = if (command.state == CommandState.RUNNING) CommandState.RUNNING else CommandState.ACCEPTED,
+            updatedAt = monotonicNow(command.updatedAt),
+            revision = maxOf(command.revision ?: 0, revision),
+        )
+        commit(
+            snapshot.copy(
+                lastAcknowledgedSequence = maxOf(snapshot.lastAcknowledgedSequence, sequence),
+                lastRevision = maxOf(snapshot.lastRevision, revision),
+                commands = replace(snapshot.commands, command, next),
+            ),
+        )
+        return true
+    }
+
+    @Synchronized
+    fun recordRunning(
+        commandId: String,
+        sequence: Long,
+        revision: Long,
+        sessionId: String? = null,
+    ): Boolean {
+        requirePositiveJsonInteger(sequence, "Command sequence")
+        requireNonnegativeJsonInteger(revision, "Command revision")
+        sessionId?.let { requireOpaqueId(it, "sessionId") }
+        val command = findCurrent(commandId) ?: return false
+        if (command.sequence != sequence || command.state.isTerminal || command.state == CommandState.NEEDS_REVIEW) {
+            return false
+        }
+        val next = command.copy(
+            state = CommandState.RUNNING,
+            updatedAt = monotonicNow(command.updatedAt),
+            revision = maxOf(command.revision ?: 0, revision),
+            sessionId = sessionId ?: command.sessionId,
+        )
+        commit(
+            snapshot.copy(
+                lastAcknowledgedSequence = maxOf(snapshot.lastAcknowledgedSequence, sequence),
+                lastRevision = maxOf(snapshot.lastRevision, revision),
+                commands = replace(snapshot.commands, command, next),
+            ),
+        )
+        return true
+    }
+
+    @Synchronized
+    fun recordCompletion(completion: CommandCompletion): Boolean {
+        val command = findCurrent(completion.commandId) ?: return false
+        if (command.sequence != completion.sequence) return false
+        if (command.revision != null && completion.revision < command.revision) return false
+        command.completion?.let { existing ->
+            if (existing == completion) return false
+            throw IllegalStateException("A different terminal result is already stored for this command.")
+        }
+        if (command.state == CommandState.NEEDS_REVIEW) return false
+        val terminalState = when (completion.outcome) {
+            CommandOutcome.SUCCEEDED -> CommandState.SUCCEEDED
+            CommandOutcome.FAILED -> CommandState.FAILED
+            CommandOutcome.CANCELLED -> CommandState.CANCELLED
+        }
+        val next = command.copy(
+            state = terminalState,
+            updatedAt = monotonicNow(command.updatedAt),
+            revision = maxOf(command.revision ?: 0, completion.revision),
+            sessionId = completion.sessionId ?: command.sessionId,
+            completion = completion,
+        )
+        commit(
+            snapshot.copy(
+                lastAcknowledgedSequence = maxOf(snapshot.lastAcknowledgedSequence, completion.sequence),
+                lastRevision = maxOf(snapshot.lastRevision, completion.revision),
+                commands = replace(snapshot.commands, command, next),
+            ),
+        )
+        return true
+    }
+
+    @Synchronized
+    fun recordRevisionConflict(commandId: String, sequence: Long, expectedRevision: Long): CommandView? {
+        requirePositiveJsonInteger(sequence, "Command sequence")
+        requireNonnegativeJsonInteger(expectedRevision, "Expected command revision")
+        val command = findCurrent(commandId) ?: return null
+        if (command.sequence != sequence || command.state.isTerminal) return command.toView()
+        val next = command.copy(
+            state = CommandState.NEEDS_REVIEW,
+            updatedAt = monotonicNow(command.updatedAt),
+            expectedRevision = expectedRevision,
+        )
+        replaceAndCommit(command, next)
+        return next.toView()
+    }
+
+    @Synchronized
+    fun resolveRevisionConflict(commandId: String, action: RevisionConflictAction): CommandReceipt {
+        val command = findCurrent(commandId)
+            ?: throw IllegalArgumentException("Command $commandId is not available.")
+        require(command.state == CommandState.NEEDS_REVIEW && command.expectedRevision != null) {
+            "Command $commandId does not have a revision conflict."
+        }
+        val now = monotonicNow(command.updatedAt)
+        val next = when (action) {
+            RevisionConflictAction.RETRY -> command.copy(
+                commandId = newUniqueId("commandId"),
+                retiredCommandIds = command.retiredCommandIds + command.commandId,
+                state = CommandState.QUEUED,
+                updatedAt = now,
+                baseRevision = command.expectedRevision,
+                revision = null,
+                completion = null,
+                expectedRevision = null,
+            )
+
+            RevisionConflictAction.DISCARD -> command.copy(
+                state = CommandState.CANCELLED,
+                updatedAt = now,
+                revision = command.expectedRevision,
+                completion = CommandCompletion(
+                    commandId = command.commandId,
+                    sequence = command.sequence,
+                    revision = command.expectedRevision,
+                    outcome = CommandOutcome.CANCELLED,
+                    sessionId = command.sessionId,
+                    error = PublicCommandError(
+                        code = "revision_conflict_discarded",
+                        message = "The command was discarded after a revision conflict.",
+                        retryable = false,
+                    ),
+                ),
+                expectedRevision = null,
+            )
+        }
+        replaceAndCommit(command, next)
+        return next.toView().toReceipt()
+    }
+
+    @Synchronized
+    fun markCancelRequested(commandId: String): CommandView? {
+        val command = findCurrent(commandId) ?: return null
+        if (command.state.isTerminal || command.cancelRequested) return command.toView()
+        val next = command.copy(
+            cancelRequested = true,
+            updatedAt = monotonicNow(command.updatedAt),
+        )
+        replaceAndCommit(command, next)
+        return next.toView()
+    }
+
+    /**
+     * Applies an authenticated Gateway state snapshot. Revision epochs may
+     * legitimately reset the numeric revision, so this is assignment rather
+     * than max(). Commands that have already left QUEUED retain their signed
+     * base revision and continue through the normal conflict/recovery path.
+     */
+    @Synchronized
+    fun updateKnownRevision(revision: Long): Boolean {
+        requireNonnegativeJsonInteger(revision, "Known Gateway revision")
+        if (snapshot.commands.any { !it.state.isTerminal && it.state != CommandState.QUEUED }) {
+            return false
+        }
+        val commands = snapshot.commands.map { command ->
+            if (command.state == CommandState.QUEUED) command.copy(baseRevision = revision) else command
+        }
+        if (snapshot.lastRevision == revision && commands == snapshot.commands) return false
+        commit(snapshot.copy(lastRevision = revision, commands = commands))
+        return true
+    }
+
+    @Synchronized
+    fun get(commandId: String): CommandView? = findCurrent(commandId)?.toView()
+
+    @Synchronized
+    fun list(): List<CommandView> = snapshot.commands.map(PersistedCommand::toView)
+
+    @Synchronized
+    fun release(commandId: String): Boolean {
+        val command = findCurrent(commandId) ?: return false
+        require(command.state.isTerminal) { "Only completed commands can be released." }
+        val tombstone = ReleasedCommandTombstone(
+            operationId = command.operationId,
+            commandId = command.commandId,
+            idempotencyKey = command.idempotencyKey,
+            requestFingerprint = command.requestFingerprint,
+            releasedAt = nonnegativeNow(),
+        )
+        require(snapshot.released.size < MAX_RELEASED_TOMBSTONES) {
+            "The released-command safety ledger is full; revoke this native account before clearing it."
+        }
+        commit(snapshot.copy(commands = snapshot.commands - command, released = snapshot.released + tombstone))
+        return true
+    }
+
+    @Synchronized
+    fun clear() {
+        store.clear()
+        snapshot = CommandOutboxSnapshot()
+    }
+
+    private fun findCurrent(commandId: String): PersistedCommand? =
+        snapshot.commands.firstOrNull { it.commandId == commandId }
+
+    private fun replaceAndCommit(before: PersistedCommand, after: PersistedCommand) {
+        commit(snapshot.copy(commands = replace(snapshot.commands, before, after)))
+    }
+
+    private fun commit(next: CommandOutboxSnapshot) {
+        store.save(next)
+        snapshot = next
+    }
+
+    private fun nonnegativeNow(): Long = clock.now().also {
+        requireNonnegativeJsonInteger(it, "Command clock timestamp")
+    }
+
+    private fun monotonicNow(previous: Long): Long = maxOf(nonnegativeNow(), previous)
+
+    private fun newUniqueId(
+        field: String,
+        additionallyForbidden: Set<String> = emptySet(),
+    ): String = idFactory.newId().also { candidate ->
+        requireOpaqueId(candidate, field)
+        require(
+            candidate !in additionallyForbidden && snapshot.commands.none {
+                it.operationId == candidate || it.commandId == candidate || candidate in it.retiredCommandIds
+            } && snapshot.released.none { it.operationId == candidate || it.commandId == candidate },
+        ) { "$field collides with an existing durable identifier." }
+    }
+
+    companion object {
+        private const val MAX_ACTIVE_COMMANDS = 128
+        private const val MAX_RELEASED_TOMBSTONES = 4_096
+
+        fun encrypted(
+            file: File,
+            cipher: SecretCipher,
+            accountScope: String,
+        ): DurableCommandOutbox = DurableCommandOutbox(
+            EncryptedAtomicCommandOutboxStore(file, cipher, accountScope),
+        )
+    }
+}
+
+private fun replace(
+    commands: List<PersistedCommand>,
+    before: PersistedCommand,
+    after: PersistedCommand,
+): List<PersistedCommand> = commands.map { if (it === before || it == before) after else it }
+
+private fun PersistedCommand.toTransmission(recovery: Boolean) = CommandTransmission(
+    operationId = operationId,
+    commandId = commandId,
+    idempotencyKey = idempotencyKey,
+    sequence = sequence,
+    baseRevision = baseRevision,
+    payload = payload,
+    recovery = recovery,
+)
+
+private fun requestFingerprint(payload: JsonObject, sessionId: String?): String {
+    val canonical = JsonObject(
+        buildMap {
+            put("payload", canonicalize(payload))
+            put("sessionId", sessionId?.let(::JsonPrimitive) ?: JsonNull)
+        },
+    ).toString().toByteArray(Charsets.UTF_8)
+    return try {
+        val alphabet = "0123456789abcdef"
+        MessageDigest.getInstance("SHA-256").digest(canonical).let { digest ->
+            try {
+                buildString(digest.size * 2) {
+                    digest.forEach { byte ->
+                        val value = byte.toInt() and 0xff
+                        append(alphabet[value ushr 4])
+                        append(alphabet[value and 0x0f])
+                    }
+                }
+            } finally {
+                digest.fill(0)
+            }
+        }
+    } finally {
+        canonical.fill(0)
+    }
+}
+
+private fun canonicalize(value: JsonElement): JsonElement = when (value) {
+    is JsonObject -> JsonObject(value.entries.sortedBy { it.key }.associate { (key, item) ->
+        key to canonicalize(item)
+    })
+    is JsonArray -> JsonArray(value.map(::canonicalize))
+    else -> value
+}

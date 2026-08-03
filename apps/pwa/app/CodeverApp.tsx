@@ -14,6 +14,7 @@ import {
   MAX_CODEVER_ATTACHMENTS,
   MAX_CODEVER_ATTACHMENT_BYTES,
   MAX_CODEVER_PROMPT_ATTACHMENT_BYTES,
+  encodePairingLink,
   type CodeverAttachment,
   type CommandPayload,
 } from "@codever/protocol";
@@ -69,6 +70,20 @@ import {
 } from "./chatMessages";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
+import type {
+  CodeverClient,
+  CodeverCommandSendResult,
+  CodeverHistoryRecovery,
+  CodeverMessage,
+  CodeverPublicTrust,
+} from "./client/CodeverClient";
+import {
+  NATIVE_MANAGED_ACCESS_TOKEN,
+  bootstrapNativeMatrixSessionIfAvailable,
+  createCodeverClient,
+  isNativeManagedMatrixConfig,
+} from "./client/createCodeverClient";
+import { publicTrustFromWeb } from "./client/web/WebCodeverClient";
 import {
   clearMessageHistoryScope,
   clearSessionMessageHistory,
@@ -82,19 +97,15 @@ import {
 import {
   CommandRevisionConflictError,
   clearMatrixConfig,
-  connectMatrix,
   getOrCreateDeviceIdentity,
   loadMatrixConfig,
   normalizeMatrixConfig,
   resolveMatrixSession,
   saveMatrixConfig,
   type IncomingCodeverMessage,
-  type CommandSendResult,
   type GatewayStateSnapshot,
-  type MatrixConnection,
   type MatrixConnectionConfig,
   type MatrixConnectionStatus,
-  type MatrixHistoryRecovery,
 } from "./matrix";
 import {
   clearPendingPairing,
@@ -105,11 +116,9 @@ import {
   loadPendingPairingRecovery,
   loadTrustedGateway,
   pairingLinkFromDeviceInvitation,
-  saveTrustedGateway,
   trustedGatewayConfig,
   type GeneratedDeviceInvitation,
   type PairingPreview,
-  type TrustedGateway,
 } from "./pairing";
 import {
   loginWithMatrixPassword,
@@ -186,7 +195,7 @@ function AttachmentList({
   connection,
 }: {
   attachments?: CodeverAttachment[];
-  connection: MatrixConnection | null;
+  connection: CodeverClient | null;
 }) {
   if (!attachments?.length) return null;
   return (
@@ -207,7 +216,7 @@ function AttachmentCard({
   connection,
 }: {
   attachment: CodeverAttachment;
-  connection: MatrixConnection | null;
+  connection: CodeverClient | null;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState<"preview" | "download" | null>(null);
@@ -341,7 +350,7 @@ export function CodeverApp() {
   const [pairingPreview, setPairingPreview] =
     useState<PairingPreview | null>(null);
   const [trustedGateway, setTrustedGateway] =
-    useState<TrustedGateway | null>(null);
+    useState<CodeverPublicTrust | null>(null);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [deviceInvitation, setDeviceInvitation] =
     useState<GeneratedDeviceInvitation | null>(null);
@@ -365,7 +374,7 @@ export function CodeverApp() {
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const matrixConnectionRef = useRef<MatrixConnection | null>(null);
+  const codeverClientRef = useRef<CodeverClient | null>(null);
   const matrixStartupGenerationRef = useRef(0);
   const matrixStartupRef = useRef<{
     phase: "connecting" | "securing";
@@ -724,12 +733,12 @@ export function CodeverApp() {
       }
       const identity = await getOrCreateDeviceIdentity();
       const trust = await loadTrustedGateway(identity);
+      const stored = loadMatrixConfig() ?? emptyMatrixConfig;
       if (trust) {
         clearPendingPairing();
-        setTrustedGateway(trust);
+        setTrustedGateway(publicTrustFromWeb(trust));
         setActiveDeviceCount(trust.activeDeviceCount ?? null);
         setDeviceKeyId(identity.keyId);
-        const stored = loadMatrixConfig() ?? emptyMatrixConfig;
         const trustedConfig: MatrixConnectionConfig = {
           ...bindCredentialsToHomeserver(
             stored,
@@ -749,11 +758,18 @@ export function CodeverApp() {
           Date.now() - recoveryRequestedAt < 5 * 60_000;
         if (resumeInterruptedStartup) {
           setSettingsOpen(false);
-          await connectRealMatrix(trustedConfig, true, true);
+          await connectCodeverClient(trustedConfig, true, true);
         } else {
           sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
           setSettingsOpen(true);
         }
+        return;
+      }
+      if (isNativeManagedMatrixConfig(stored)) {
+        clearPendingPairing();
+        setMatrixConfig(stored);
+        setSettingsOpen(false);
+        await connectCodeverClient(stored, true, true);
         return;
       }
       if (link || invitation || shortInvitation) return;
@@ -771,7 +787,6 @@ export function CodeverApp() {
       }
       const preview = pending.preview;
       const transport = preview.transport;
-      const stored = loadMatrixConfig() ?? emptyMatrixConfig;
       const recoveryConfig: MatrixConnectionConfig = {
         ...bindCredentialsToHomeserver(stored, transport.homeserver),
         roomId: transport.roomId,
@@ -818,7 +833,7 @@ export function CodeverApp() {
     () => () => {
       matrixStartupGenerationRef.current += 1;
       pairingAbortRef.current?.abort();
-      matrixConnectionRef.current?.stop();
+      codeverClientRef.current?.dispose();
     },
     [],
   );
@@ -892,7 +907,7 @@ export function CodeverApp() {
     const ownUserMessage = Boolean(
       incoming.kind === "user" &&
         incoming.originDeviceId &&
-        incoming.originDeviceId === matrixConnectionRef.current?.identity.keyId,
+        incoming.originDeviceId === codeverClientRef.current?.deviceId,
     );
     const optimisticMessageId = ownUserMessage
       ? findOptimisticMessageId(optimisticMessagesRef.current.values(), message)
@@ -943,13 +958,13 @@ export function CodeverApp() {
     );
   }
 
-  function recoverLateHistory(page: MatrixHistoryRecovery): void {
+  function recoverLateHistory(page: CodeverHistoryRecovery): void {
     const scope = historyScopeRef.current;
     if (!scope) return;
-    const recovered = page.messages.map((incoming) =>
+    const recovered = page.messages.map((message) =>
       chatMessageFromIncoming(
-        { ...incoming, historical: true },
-        incoming.sessionId ?? page.sessionId,
+        { ...incomingMessageFromClient(message), historical: true },
+        message.sessionId ?? page.sessionId,
       ),
     );
     // Persist before checking the selected-session generation. A response may
@@ -978,7 +993,7 @@ export function CodeverApp() {
 
   async function restoreSessionHistory(
     sessionId: string,
-    connection: MatrixConnection | null = matrixConnectionRef.current,
+    connection: CodeverClient | null = codeverClientRef.current,
   ): Promise<void> {
     const scope = historyScopeRef.current;
     if (!scope) return;
@@ -1051,10 +1066,10 @@ export function CodeverApp() {
         cachedMessages.length > 0
           ? await connection.loadRecentHistory(sessionId)
           : await connection.loadHistoryPage(sessionId);
-      const remoteMessages = remote.messages.map((incoming) =>
+      const remoteMessages = remote.messages.map((message) =>
         chatMessageFromIncoming(
-          { ...incoming, historical: true },
-          incoming.sessionId ?? sessionId,
+          { ...incomingMessageFromClient(message), historical: true },
+          message.sessionId ?? sessionId,
         ),
       );
       if (remoteMessages.length > 0) {
@@ -1134,7 +1149,7 @@ export function CodeverApp() {
         // Consume at most one local page per pull. Once the local cache ends,
         // advance Matrix by one page in parallel so a later pull does not need
         // to replay every already-cached server page after a refresh.
-        const connection = matrixConnectionRef.current;
+        const connection = codeverClientRef.current;
         if (!connection) {
           setHistoryHasMore(cached.hasMore);
           return;
@@ -1146,10 +1161,10 @@ export function CodeverApp() {
           ),
         );
         const prefetched = await connection.loadHistoryPage(sessionId);
-        const prefetchedMessages = prefetched.messages.map((incoming) =>
+        const prefetchedMessages = prefetched.messages.map((message) =>
           chatMessageFromIncoming(
-            { ...incoming, historical: true },
-            incoming.sessionId ?? sessionId,
+            { ...incomingMessageFromClient(message), historical: true },
+            message.sessionId ?? sessionId,
           ),
         );
         if (prefetchedMessages.length > 0) {
@@ -1169,16 +1184,16 @@ export function CodeverApp() {
         return;
       }
 
-      const connection = matrixConnectionRef.current;
+      const connection = codeverClientRef.current;
       if (!connection) {
         setHistoryHasMore(false);
         return;
       }
       const remote = await connection.loadHistoryPage(sessionId);
-      const olderMessages = remote.messages.map((incoming) =>
+      const olderMessages = remote.messages.map((message) =>
         chatMessageFromIncoming(
-          { ...incoming, historical: true },
-          incoming.sessionId ?? sessionId,
+          { ...incomingMessageFromClient(message), historical: true },
+          message.sessionId ?? sessionId,
         ),
       );
       if (olderMessages.length > 0) {
@@ -1234,7 +1249,7 @@ export function CodeverApp() {
 
   function activateLocalSession(
     sessionId: string | null,
-    connection: MatrixConnection | null = matrixConnectionRef.current,
+    connection: CodeverClient | null = codeverClientRef.current,
   ) {
     const sessionChanged = selectedSessionIdRef.current !== sessionId;
     selectedSessionIdRef.current = sessionId;
@@ -1256,17 +1271,17 @@ export function CodeverApp() {
     }
   }
 
-  async function connectRealMatrix(
+  async function connectCodeverClient(
     configInput = matrixConfig,
     closeSettings = true,
     recoveringInterruptedStartup = false,
-  ): Promise<MatrixConnection | null> {
+  ): Promise<CodeverClient | null> {
     const startupGeneration = matrixStartupGenerationRef.current + 1;
     matrixStartupGenerationRef.current = startupGeneration;
     const isCurrentStartup = () =>
       matrixStartupGenerationRef.current === startupGeneration;
-    matrixConnectionRef.current?.stop();
-    matrixConnectionRef.current = null;
+    codeverClientRef.current?.dispose();
+    codeverClientRef.current = null;
     if (!recoveringInterruptedStartup) {
       sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
     }
@@ -1316,9 +1331,11 @@ export function CodeverApp() {
       });
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
-      const connection = await connectMatrix(normalized, {
+      const connection = await createCodeverClient(normalized, {
         onMessage(message) {
-          if (isCurrentStartup()) receiveMatrixMessage(message);
+          if (isCurrentStartup()) {
+            receiveMatrixMessage(incomingMessageFromClient(message));
+          }
         },
         onStatus(status, detail) {
           if (!isCurrentStartup()) return;
@@ -1345,10 +1362,7 @@ export function CodeverApp() {
         onTrustUpdated(trust) {
           if (!isCurrentStartup()) return;
           setTrustedGateway(trust);
-          setMatrixConfig((current) => ({
-            ...current,
-            ...trustedGatewayConfig(trust),
-          }));
+          setActiveDeviceCount(trust?.activeDeviceCount ?? null);
         },
         onCollaborationState(state) {
           if (!isCurrentStartup()) return;
@@ -1474,16 +1488,16 @@ export function CodeverApp() {
         },
       });
       if (!isCurrentStartup()) {
-        connection.stop();
+        connection.dispose();
         return null;
       }
-      matrixConnectionRef.current = connection;
-      setDeviceKeyId(connection.identity.keyId);
+      codeverClientRef.current = connection;
+      setDeviceKeyId(connection.deviceId);
       if (closeSettings) setSettingsOpen(false);
       if (selectedSessionIdRef.current) {
         void connection.ready
           .then(() => {
-            if (matrixConnectionRef.current !== connection) return;
+            if (codeverClientRef.current !== connection) return;
             const sessionId = selectedSessionIdRef.current;
             if (sessionId) void restoreSessionHistory(sessionId, connection);
           })
@@ -1491,12 +1505,12 @@ export function CodeverApp() {
       }
       void connection.ready
         .then(() => {
-          if (matrixConnectionRef.current !== connection) return;
+          if (codeverClientRef.current !== connection) return;
           setMessages((current) => [
             {
               id: `matrix-connected-${Date.now()}`,
               kind: "notice",
-              text: "Connected directly to an encrypted Matrix room. Commands are signed by this browser’s P-256 device key.",
+              text: "Connected directly to an encrypted Matrix room. Commands are signed by this device’s P-256 key.",
               time: "now",
             },
             ...current,
@@ -1514,10 +1528,16 @@ export function CodeverApp() {
     }
   }
 
-  function disconnectMatrix() {
+  function disconnectClient() {
     matrixStartupGenerationRef.current += 1;
-    matrixConnectionRef.current?.stop();
-    matrixConnectionRef.current = null;
+    const disconnectingClient = codeverClientRef.current;
+    codeverClientRef.current = null;
+    void disconnectingClient?.disconnect().catch((error) => {
+      setConnectionStatus("error");
+      setConnectionError(
+        `The client could not disconnect cleanly: ${formatUiError(error)}`,
+      );
+    });
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
     pendingPromptSessionIdsRef.current.clear();
@@ -1564,7 +1584,7 @@ export function CodeverApp() {
   function forgetMatrixConfig() {
     const historyScope = historyScopeRef.current;
     pairingAbortRef.current?.abort();
-    disconnectMatrix();
+    disconnectClient();
     clearMatrixConfig();
     clearPendingPairing();
     clearTrustedGateway();
@@ -1663,13 +1683,37 @@ export function CodeverApp() {
         return;
       }
       try {
-        const credentials = await loginWithMatrixToken(
-          matrixLogin.homeserver,
-          matrixLogin.loginToken,
-          matrixLogin.userId,
-          browserDeviceName(),
-        );
-        nextConfig = { ...nextConfig, ...credentials };
+        const nativeBootstrap = await bootstrapNativeMatrixSessionIfAvailable({
+          homeserver: matrixLogin.homeserver,
+          oneTimeLoginToken: matrixLogin.loginToken,
+          expectedUserId: matrixLogin.userId,
+          deviceName: browserDeviceName(),
+          roomBinding: {
+            roomId: transport.roomId,
+            gatewayId: preview.gatewayId,
+            conversationId: transport.roomId,
+            gatewayUserId: transport.userId,
+            gatewayDeviceId: transport.deviceId,
+            gatewayDeviceEd25519: transport.ed25519,
+          },
+        });
+        if (nativeBootstrap) {
+          nextConfig = {
+            ...nextConfig,
+            homeserver: nativeBootstrap.session.homeserver,
+            userId: nativeBootstrap.session.userId,
+            matrixDeviceId: nativeBootstrap.session.matrixDeviceId,
+            accessToken: NATIVE_MANAGED_ACCESS_TOKEN,
+          };
+        } else {
+          const credentials = await loginWithMatrixToken(
+            matrixLogin.homeserver,
+            matrixLogin.loginToken,
+            matrixLogin.userId,
+            browserDeviceName(),
+          );
+          nextConfig = { ...nextConfig, ...credentials };
+        }
         setMatrixConfig(nextConfig);
         saveMatrixConfig(nextConfig);
       } catch (error) {
@@ -1705,7 +1749,7 @@ export function CodeverApp() {
   }
 
   async function createDeviceInvitation(password?: string) {
-    if (!trustedGateway || !matrixConnectionRef.current) {
+    if (!trustedGateway || !codeverClientRef.current) {
       setConnectionError(
         "Connect to the trusted Gateway before authorizing another device.",
       );
@@ -1721,7 +1765,7 @@ export function CodeverApp() {
     try {
       const generated = await deviceInvitationLifecycleRef.current.request(
         async () => {
-          const connection = matrixConnectionRef.current;
+          const connection = codeverClientRef.current;
           if (!connection) throw new Error("The Matrix connection was closed.");
           let gatewayInvitation = pendingGatewayInvitationRef.current;
           if (
@@ -1878,24 +1922,21 @@ export function CodeverApp() {
         gatewayMatrixDeviceId: transport.deviceId,
         gatewayMatrixEd25519: transport.ed25519,
       };
-      const configForPairing = await resolveMatrixSession(unresolvedConfig);
+      const configForPairing = isNativeManagedMatrixConfig(unresolvedConfig)
+        ? normalizeMatrixConfig(unresolvedConfig)
+        : await resolveMatrixSession(unresolvedConfig);
       setMatrixConfig(configForPairing);
-      const connection = await connectRealMatrix(configForPairing, false);
+      const connection = await connectCodeverClient(configForPairing, false);
       if (!connection) return;
       const trust = await connection.pair(
-        previewOverride,
+        encodePairingLink(previewOverride.signedOffer),
         browserDeviceName(),
         abort.signal,
       );
-      const trustedConfig: MatrixConnectionConfig = {
-        ...configForPairing,
-        ...trustedGatewayConfig(trust),
-      };
-      saveTrustedGateway(trust);
-      saveMatrixConfig(trustedConfig);
+      saveMatrixConfig(configForPairing);
       setTrustedGateway(trust);
       setActiveDeviceCount(trust.activeDeviceCount ?? null);
-      setMatrixConfig(trustedConfig);
+      setMatrixConfig(configForPairing);
       setPairingPreview(null);
       setSettingsOpen(false);
       setMessages((current) => [
@@ -1920,8 +1961,8 @@ export function CodeverApp() {
 
   async function sendRealCommand(
     payload: CommandPayload,
-  ): Promise<CommandSendResult | null> {
-    const connection = matrixConnectionRef.current;
+  ): Promise<CodeverCommandSendResult | null> {
+    const connection = codeverClientRef.current;
     if (!connection || connectionStatus !== "connected") {
       setConnectionError(
         "The Gateway is not connected. Open Gateway settings and reconnect.",
@@ -1953,7 +1994,7 @@ export function CodeverApp() {
   }
 
   async function consumeSessionCreateCompletion(
-    connection: MatrixConnection,
+    connection: CodeverClient,
     commandId: string,
     completion: CommandCompletion,
   ): Promise<void> {
@@ -1977,8 +2018,8 @@ export function CodeverApp() {
   }
 
   async function waitForRecoverableSessionCreateCompletion(
-    connection: MatrixConnection,
-    sent: CommandSendResult,
+    connection: CodeverClient,
+    sent: CodeverCommandSendResult,
   ): Promise<CommandCompletion> {
     try {
       return await waitForCommandCompletion(
@@ -1997,7 +2038,7 @@ export function CodeverApp() {
 
   async function confirmRevisionRetry() {
     const conflict = revisionConflictRef.current;
-    const connection = matrixConnectionRef.current;
+    const connection = codeverClientRef.current;
     if (!conflict || !connection || conflict.busy) return;
     const conflictSessionId =
       conflict.payload.operation === "session.create" ||
@@ -2147,7 +2188,7 @@ export function CodeverApp() {
 
   async function discardRevisionConflict() {
     const conflict = revisionConflictRef.current;
-    const connection = matrixConnectionRef.current;
+    const connection = codeverClientRef.current;
     if (!conflict || !connection || conflict.busy) return;
     const busyConflict = { ...conflict, busy: true };
     revisionConflictRef.current = busyConflict;
@@ -2213,7 +2254,7 @@ export function CodeverApp() {
       // Let React commit the pending row before Matrix encryption, IndexedDB,
       // acknowledgement, and command-result work begins.
       await waitForNextPaint();
-      const connection = matrixConnectionRef.current;
+      const connection = codeverClientRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
         cwd: input.cwd,
@@ -2365,7 +2406,7 @@ export function CodeverApp() {
       setConnectionError("Securing the previous message…");
       return;
     }
-    const connection = matrixConnectionRef.current;
+    const connection = codeverClientRef.current;
     if (!connection) {
       setConnectionError("The Matrix connection is not ready for attachment upload.");
       return;
@@ -2395,8 +2436,7 @@ export function CodeverApp() {
     }
     const submissionHistoryScope = historyScopeRef.current;
     const submissionOriginDeviceId = deviceKeyId ?? undefined;
-    const submissionOriginDeviceName =
-      trustedGateway?.certificate.certificate.deviceName;
+    const submissionOriginDeviceName = connection.deviceName;
     const optimisticId = `user-${Date.now()}-${crypto.randomUUID()}`;
     const optimisticMessage: ChatMessage = {
       id: optimisticId,
@@ -2437,7 +2477,7 @@ export function CodeverApp() {
       setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
     }
     setSessionPromptSubmitting(sessionId, true);
-    let result: CommandSendResult | null;
+    let result: CodeverCommandSendResult | null;
     let acknowledgementTimeout: CommandAcknowledgementTimeoutError | null = null;
     try {
       result = await sendRealCommand(
@@ -3240,7 +3280,7 @@ export function CodeverApp() {
                     <p>{message.text}</p>
                     <AttachmentList
                       attachments={message.attachments}
-                      connection={matrixConnectionRef.current}
+                      connection={codeverClientRef.current}
                     />
                     <time>
                       {message.revision !== undefined
@@ -3379,7 +3419,7 @@ export function CodeverApp() {
                   )}
                   <AttachmentList
                     attachments={message.attachments}
-                    connection={matrixConnectionRef.current}
+                    connection={codeverClientRef.current}
                   />
                   <time>{message.time}</time>
                 </div>
@@ -3746,8 +3786,8 @@ export function CodeverApp() {
         }}
         onConfirmPairing={() => void confirmPairing()}
         onClose={() => setSettingsOpen(false)}
-        onConnect={() => void connectRealMatrix()}
-        onDisconnect={() => disconnectMatrix()}
+        onConnect={() => void connectCodeverClient()}
+        onDisconnect={() => disconnectClient()}
         onForget={forgetMatrixConfig}
         onPasswordLogin={(userId, password) =>
           void signInForPairing(userId, password)
@@ -3759,7 +3799,7 @@ export function CodeverApp() {
           deviceInvitationLifecycleRef.current.clear();
           const pendingGatewayInvitation = pendingGatewayInvitationRef.current;
           if (pendingGatewayInvitation) {
-            void matrixConnectionRef.current?.releaseCommand(
+            void codeverClientRef.current?.releaseCommand(
               pendingGatewayInvitation.commandId,
             );
           }
@@ -3833,6 +3873,36 @@ function chatMessageFromIncoming(
     sessionId,
     historical: incoming.historical,
     raw: incoming.raw,
+  };
+}
+
+function incomingMessageFromClient(
+  message: CodeverMessage,
+): IncomingCodeverMessage {
+  return {
+    eventId: message.eventId,
+    sender: message.sender,
+    timestamp: message.timestamp,
+    encrypted: message.encrypted,
+    kind: message.kind,
+    text: message.text ?? "",
+    sessionId: message.sessionId,
+    historical: message.historical,
+    operationId: message.operationId,
+    requestId: message.requestId,
+    streamId: message.streamId,
+    toolCallId: message.toolCallId,
+    toolStatus: message.toolStatus,
+    replacesEventId: message.replacesEventId,
+    commandId: message.commandId,
+    revision: message.revision,
+    originDeviceId: message.originDeviceId,
+    originDeviceName: message.originDeviceName,
+    activeDeviceCount: message.activeDeviceCount,
+    format: message.format,
+    attachments: message.attachments,
+    toolGroup: message.toolGroup,
+    raw: message.semantic ?? {},
   };
 }
 

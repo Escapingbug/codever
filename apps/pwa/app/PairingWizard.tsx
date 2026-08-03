@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
+import type { CodeverPublicTrust } from "./client/CodeverClient";
 import type {
   GeneratedDeviceInvitation,
   PairingPreview,
-  TrustedGateway,
 } from "./pairing";
 import {
   createNativeQrDetector,
@@ -16,7 +16,7 @@ import {
 
 type Props = {
   preview: PairingPreview | null;
-  trustedGateway: TrustedGateway | null;
+  trustedGateway: CodeverPublicTrust | null;
   busy: boolean;
   progressDetail: string | null;
   canConfirm: boolean;
