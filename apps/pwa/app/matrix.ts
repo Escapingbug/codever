@@ -2,12 +2,14 @@ import {
   DEFAULT_HISTORY_PAGE_BYTES,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
+  gatewayStateRequestSchema,
   historyItemsSchema,
   historyPageSchema,
   historyRequestSchema,
   type CodeverAttachment,
   type CodeverCommand,
   type CommandPayload,
+  type GatewayStateRequest,
   type HistoryBatch,
   type HistoryPage,
   type HistoryItem,
@@ -534,6 +536,7 @@ export async function connectMatrix(
   let stopped = false;
   let initialSyncComplete = false;
   let connectionReady = false;
+  let refreshGatewayStateAfterReconnect = false;
   let persistenceFailure: string | null = null;
   const failPersistence = (detail: string) => {
     if (persistenceFailure) return;
@@ -710,6 +713,57 @@ export async function connectMatrix(
       activeDeviceCount: gatewayState.activeDeviceCount,
       gatewayState,
     });
+  };
+  const requestGatewayStateSnapshot = async (): Promise<void> => {
+    assertPersistenceHealthy();
+    const trust = activeTrust;
+    if (!trust) return;
+    const certificate = trust.certificate.certificate;
+    const now = Date.now();
+    const request: GatewayStateRequest = gatewayStateRequestSchema.parse({
+      kind: "codever.gateway.state.request",
+      version: 1,
+      requestId: crypto.randomUUID(),
+      gatewayId: trust.gatewayId,
+      conversationId: config.conversationId,
+      deviceId: certificate.deviceId,
+      issuedAt: now,
+      expiresAt: now + 60_000,
+    });
+    const plaintext = {
+      msgtype: sdk.MsgType.Notice,
+      body: "Encrypted Codever gateway state request",
+      "io.codever": {
+        version: 1,
+        kind: "gateway_state_request",
+        gateway_state_request: request,
+      },
+    } as const;
+    const secureEnvelope = await sealSecureEnvelope({
+      plaintext,
+      senderPrivateKey: identity.privateKey,
+      recipientPublicKey: trust.gatewayKey.publicKey,
+      gatewayId: trust.gatewayId,
+      conversationId: config.conversationId,
+      direction: "device_to_gateway",
+      senderDeviceId: certificate.deviceId,
+      recipientDeviceId: certificate.gatewayId,
+      senderKeyId: identity.keyId,
+      recipientKeyId: trust.gatewayKey.keyId,
+    });
+    await client.sendMessage(
+      config.roomId,
+      {
+        msgtype: sdk.MsgType.Notice,
+        body: "Encrypted Codever message",
+        "io.codever": {
+          version: 1,
+          kind: "secure_envelope",
+          secure_envelope: secureEnvelope,
+        },
+      } as unknown as RoomMessageEventContent,
+      `codever.gateway.state.request.${request.requestId}`,
+    );
   };
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
@@ -911,8 +965,16 @@ export async function connectMatrix(
           );
         }
       });
+      if (connectionReady && refreshGatewayStateAfterReconnect) {
+        refreshGatewayStateAfterReconnect = false;
+        void requestGatewayStateSnapshot().catch((error) => {
+          refreshGatewayStateAfterReconnect = true;
+          reportInboundError(error);
+        });
+      }
       if (connectionReady) handlers.onStatus("connected");
     } else if (state === "RECONNECTING" || state === "CATCHUP") {
+      refreshGatewayStateAfterReconnect = true;
       handlers.onStatus("reconnecting");
     } else if (state === "ERROR") {
       handlers.onStatus("error", "Matrix sync failed. Check the token and server.");
@@ -1137,6 +1199,12 @@ export async function connectMatrix(
           gatewayState: cachedGatewayState,
         });
       }
+      handlers.onStatus(
+        "securing",
+        "Refreshing the current Gateway session list…",
+      );
+      await requestGatewayStateSnapshot();
+      assertStartupActive();
     }
 
     assertPersistenceHealthy();

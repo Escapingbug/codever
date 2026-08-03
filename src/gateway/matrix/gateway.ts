@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 import {
+    gatewayStateRequestSchema,
     historyRequestSchema,
     type CodeverCommand,
     type JsonValue,
@@ -35,7 +36,10 @@ import {
     type PersistedAppSession,
     type PersistedRoomRuntimeState,
 } from './fileRuntimeState'
-import { GatewaySecureContentLayer } from './secureContent'
+import {
+    GatewaySecureContentLayer,
+    type GatewayStateSnapshot,
+} from './secureContent'
 import { gatewayProjectIdentity } from './project'
 import { materializePromptInput } from './media'
 
@@ -166,88 +170,88 @@ export class MatrixGatewayRunner {
                 runtimeStateWithoutVersion(runtime),
             )
             runtime.stateVersion = stateVersion
-            const revision = await this.replayStore.getConversationRevision(
-                this.config.gatewayId,
-                runtime.config.conversationId,
-                runtime.revisionEpoch,
+            await this.secureContent!.sendGatewayState(
+                runtime.config,
+                await this.gatewayStateSnapshot(runtime),
+                this.client,
             )
-            let models: Array<{
-                id: string
-                name: string
-                defaultReasoningLevel?: string
-                supportedReasoningLevels?: Array<{
-                    effort: string
-                    description?: string
-                }>
-            }> = []
-            try {
-                models = (runtime.capabilityProvider?.getAvailableModels() ?? [])
-                    .map(model => ({
-                        id: model.id,
-                        name: model.name,
-                        ...(model.defaultReasoningLevel
-                            ? { defaultReasoningLevel: model.defaultReasoningLevel }
-                            : {}),
-                        ...(model.supportedReasoningLevels
-                            ? {
-                                supportedReasoningLevels:
-                                    model.supportedReasoningLevels.map(level => ({
-                                        effort: level.effort,
-                                        ...(level.description
-                                            ? { description: level.description }
-                                            : {}),
-                                    })),
-                            }
-                            : {}),
-                    }))
-            } catch (error) {
-                this.log(
-                    `[matrix-gateway] model capability discovery failed for ${runtime.workspace.provider}: `
-                    + formatError(error),
-                )
-            }
-            await this.secureContent!.sendGatewayState(runtime.config, {
-                revision,
-                revisionEpoch: runtime.revisionEpoch,
-                revisionEpochGeneration: runtime.revisionEpochGeneration,
-                stateVersion,
-                // Session selection is a per-device PWA view concern. It is
-                // deliberately absent from Gateway-authoritative state.
-                currentSessionId: null,
-                sessions: [
-                    ...[...runtime.appSessions.values()].map(({ record, session, activity }) =>
-                        gatewaySessionSummary(
-                            record,
-                            gatewaySessionStatus(session.state, activity.phase),
-                            false,
-                            activity.phase,
-                        )),
-                    ...[...runtime.archivedSessions.values()].map(record =>
-                        gatewaySessionSummary(record, 'idle', true)),
-                ].sort((left, right) => right.updatedAt - left.updatedAt),
-                workspace: {
-                    projectId: runtime.workspace.projectId,
-                    projectName: runtime.workspace.projectName,
-                    cwd: runtime.workspace.cwd,
-                    provider: runtime.workspace.provider,
-                    ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
-                    ...(runtime.workspace.reasoningEffort
-                        ? { reasoningEffort: runtime.workspace.reasoningEffort }
-                        : {}),
-                    permissionMode: runtime.workspace.permissionMode,
-                },
-                capabilities: {
-                    models,
-                    // The runtime currently always asks for permission. Do not
-                    // advertise modes whose policy is not actually enforced.
-                    permissionModes: [{ id: 'default', name: 'Default' }],
-                    canCreateSession: true,
-                    canSelectSession: false,
-                    canArchiveSession: true,
-                    canDeleteSession: true,
-                },
-            }, this.client)
         }))
+    }
+
+    private async gatewayStateSnapshot(runtime: RoomRuntime): Promise<GatewayStateSnapshot> {
+        const revision = await this.replayStore.getConversationRevision(
+            this.config.gatewayId,
+            runtime.config.conversationId,
+            runtime.revisionEpoch,
+        )
+        let models: GatewayStateSnapshot['capabilities']['models'] = []
+        try {
+            models = (runtime.capabilityProvider?.getAvailableModels() ?? [])
+                .map(model => ({
+                    id: model.id,
+                    name: model.name,
+                    ...(model.defaultReasoningLevel
+                        ? { defaultReasoningLevel: model.defaultReasoningLevel }
+                        : {}),
+                    ...(model.supportedReasoningLevels
+                        ? {
+                            supportedReasoningLevels:
+                                model.supportedReasoningLevels.map(level => ({
+                                    effort: level.effort,
+                                    ...(level.description
+                                        ? { description: level.description }
+                                        : {}),
+                                })),
+                        }
+                        : {}),
+                }))
+        } catch (error) {
+            this.log(
+                `[matrix-gateway] model capability discovery failed for ${runtime.workspace.provider}: `
+                + formatError(error),
+            )
+        }
+        return {
+            revision,
+            revisionEpoch: runtime.revisionEpoch,
+            revisionEpochGeneration: runtime.revisionEpochGeneration,
+            stateVersion: runtime.stateVersion,
+            // Session selection is a per-device PWA view concern. It is
+            // deliberately absent from Gateway-authoritative state.
+            currentSessionId: null,
+            sessions: [
+                ...[...runtime.appSessions.values()].map(({ record, session, activity }) =>
+                    gatewaySessionSummary(
+                        record,
+                        gatewaySessionStatus(session.state, activity.phase),
+                        false,
+                        activity.phase,
+                    )),
+                ...[...runtime.archivedSessions.values()].map(record =>
+                    gatewaySessionSummary(record, 'idle', true)),
+            ].sort((left, right) => right.updatedAt - left.updatedAt),
+            workspace: {
+                projectId: runtime.workspace.projectId,
+                projectName: runtime.workspace.projectName,
+                cwd: runtime.workspace.cwd,
+                provider: runtime.workspace.provider,
+                ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
+                ...(runtime.workspace.reasoningEffort
+                    ? { reasoningEffort: runtime.workspace.reasoningEffort }
+                    : {}),
+                permissionMode: runtime.workspace.permissionMode,
+            },
+            capabilities: {
+                models,
+                // The runtime currently always asks for permission. Do not
+                // advertise modes whose policy is not actually enforced.
+                permissionModes: [{ id: 'default', name: 'Default' }],
+                canCreateSession: true,
+                canSelectSession: false,
+                canArchiveSession: true,
+                canDeleteSession: true,
+            },
+        }
     }
 
     async start(): Promise<void> {
@@ -351,6 +355,48 @@ export class MatrixGatewayRunner {
         const extension = asRecord(
             (opened?.content ?? event.content)[CODEVER_MATRIX_EXTENSION],
         )
+        if (extension?.version === 1 && extension.kind === 'gateway_state_request') {
+            if (!opened || !this.secureContent) {
+                throw new Error('Gateway state recovery requires an authenticated application envelope')
+            }
+            const request = gatewayStateRequestSchema.parse(extension.gateway_state_request)
+            const now = this.now()
+            if (request.expiresAt <= now || request.issuedAt > now + 30_000) {
+                throw new Error('Gateway state request is outside its validity window')
+            }
+            if (
+                request.gatewayId !== this.config.gatewayId
+                || request.conversationId !== runtime.config.conversationId
+                || request.deviceId !== opened.authenticatedDeviceId
+            ) {
+                throw new Error('Gateway state request route does not match its secure envelope')
+            }
+            if (
+                this.dependencies.isTrustedDeviceActive
+                && !(await this.dependencies.isTrustedDeviceActive(request.deviceId))
+            ) {
+                throw new Error(`Codever device ${request.deviceId} has been revoked`)
+            }
+            const task = this.gatewayStateSnapshot(runtime)
+                .then(state => this.secureContent!.sendGatewayStateToDevice(
+                    runtime.config,
+                    opened.authenticatedDeviceId,
+                    state,
+                    request.requestId,
+                    this.client,
+                ))
+                .then(() => undefined)
+                .catch(error => {
+                    this.dependencies.onRejected?.(event, error)
+                    this.log(
+                        `[matrix-gateway] state recovery ${request.requestId} failed: `
+                        + formatError(error),
+                    )
+                })
+                .finally(() => this.executionTasks.delete(task))
+            this.executionTasks.add(task)
+            return
+        }
         if (extension?.version === 1 && extension.kind === 'history_request') {
             if (!opened || !this.secureContent) {
                 throw new Error('History recovery requires an authenticated application envelope')

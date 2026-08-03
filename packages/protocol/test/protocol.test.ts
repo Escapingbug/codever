@@ -4,6 +4,7 @@ import {
   canonicalJson,
   commandSchema,
   eventSchema,
+  gatewayStateRequestSchema,
   historyPageSchema,
   historyRequestSchema,
 } from '../src/index.js'
@@ -92,6 +93,29 @@ describe('protocol schemas', () => {
     expect(historyRequestSchema.safeParse({
       ...request,
       maxBytes: MAX_HISTORY_PAGE_BYTES + 1,
+    }).success).toBe(false)
+  })
+
+  it('accepts only short-lived authenticated Gateway state requests', () => {
+    const request = {
+      kind: 'codever.gateway.state.request',
+      version: 1,
+      requestId: 'state-1',
+      gatewayId: 'gateway-1',
+      conversationId: 'conversation-1',
+      deviceId: 'device-1',
+      issuedAt: 1,
+      expiresAt: 60_001,
+    }
+
+    expect(gatewayStateRequestSchema.parse(request)).toEqual(request)
+    expect(gatewayStateRequestSchema.safeParse({
+      ...request,
+      expiresAt: request.issuedAt + 2 * 60_000 + 1,
+    }).success).toBe(false)
+    expect(gatewayStateRequestSchema.safeParse({
+      ...request,
+      sessionId: 'unexpected-session',
     }).success).toBe(false)
   })
 

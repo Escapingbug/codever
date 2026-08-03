@@ -318,82 +318,7 @@ export class GatewaySecureContentLayer {
         state: GatewayStateSnapshot,
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
-        if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
-            throw new Error('Gateway state revision must be a non-negative integer')
-        }
-        if (
-            !Number.isSafeInteger(state.revisionEpochGeneration)
-            || state.revisionEpochGeneration < 1
-        ) {
-            throw new Error('Gateway revision epoch generation must be a positive integer')
-        }
-        if (!Number.isSafeInteger(state.stateVersion) || state.stateVersion < 1) {
-            throw new Error('Gateway state version must be a positive integer')
-        }
-        const extension = {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
-            kind: 'gateway_state',
-            revision: state.revision,
-            revision_epoch: state.revisionEpoch,
-            revision_epoch_generation: state.revisionEpochGeneration,
-            state_version: state.stateVersion,
-            current_session_id: state.currentSessionId,
-            sessions: state.sessions.map(session => ({
-                id: session.id,
-                title: session.title,
-                updated_at: session.updatedAt,
-                status: session.status,
-                ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
-                ...(session.archived ? { archived: true } : {}),
-                project_id: session.projectId,
-                project_name: session.projectName,
-                cwd: session.cwd,
-                provider: session.provider,
-                ...(session.model ? { model: session.model } : {}),
-                ...(session.reasoningEffort
-                    ? { reasoning_effort: session.reasoningEffort }
-                    : {}),
-            })),
-            workspace: {
-                project_id: state.workspace.projectId,
-                project_name: state.workspace.projectName,
-                cwd: state.workspace.cwd,
-                provider: state.workspace.provider,
-                ...(state.workspace.model ? { model: state.workspace.model } : {}),
-                ...(state.workspace.reasoningEffort
-                    ? { reasoning_effort: state.workspace.reasoningEffort }
-                    : {}),
-                permission_mode: state.workspace.permissionMode,
-            },
-            capabilities: {
-                models: state.capabilities.models.map(model => ({
-                    id: model.id,
-                    name: model.name,
-                    ...(model.defaultReasoningLevel
-                        ? { default_reasoning_level: model.defaultReasoningLevel }
-                        : {}),
-                    ...(model.supportedReasoningLevels
-                        ? {
-                            supported_reasoning_levels:
-                                model.supportedReasoningLevels.map(level => ({
-                                    effort: level.effort,
-                                    ...(level.description
-                                        ? { description: level.description }
-                                        : {}),
-                                })),
-                        }
-                        : {}),
-                })),
-                permission_modes: state.capabilities.permissionModes.map(mode => ({
-                    id: mode.id,
-                    name: mode.name,
-                })),
-                can_create_session: state.capabilities.canCreateSession,
-                can_select_session: state.capabilities.canSelectSession,
-                can_archive_session: state.capabilities.canArchiveSession ?? false,
-                can_delete_session: state.capabilities.canDeleteSession ?? false,
-            },
-        }
+        const extension = gatewayStateExtension(state)
         return this.sealOutgoingToAll({
             roomId: room.roomId,
             eventType: 'm.room.message',
@@ -406,6 +331,23 @@ export class GatewaySecureContentLayer {
                 [CODEVER_MATRIX_EXTENSION]: extension,
             },
         }, room, transport)
+    }
+
+    async sendGatewayStateToDevice(
+        room: MatrixGatewayRoomConfig,
+        deviceId: string,
+        state: GatewayStateSnapshot,
+        requestId: string,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        return this.sendToDevice(
+            room,
+            deviceId,
+            gatewayStateExtension(state),
+            `codever.gateway.state.request.${requestId}`,
+            transport,
+            'Encrypted Codever gateway state',
+        )
     }
 
     /** Sends one bounded transcript page instead of replaying every item as a
@@ -720,6 +662,7 @@ export class GatewaySecureContentLayer {
         extension: Record<string, unknown>,
         transactionId: string,
         transport: MatrixTransport,
+        body = 'Encrypted Codever command status',
     ): Promise<MatrixSendEventResult> {
         const active = (await this.currentTrustedDevices()).filter(device =>
             device.allowedRoomIds.includes(room.roomId),
@@ -732,7 +675,7 @@ export class GatewaySecureContentLayer {
             transactionId: recipientTransactionId(transactionId, deviceId),
             content: {
                 msgtype: 'm.notice',
-                body: 'Encrypted Codever command status',
+                body,
                 [CODEVER_MATRIX_EXTENSION]: {
                     ...extension,
                     active_device_count: active.length,
@@ -1188,6 +1131,85 @@ export class GatewaySecureContentLayer {
         return devices.filter(device =>
             device.certificateExpiresAt === undefined || device.certificateExpiresAt > now,
         )
+    }
+}
+
+function gatewayStateExtension(state: GatewayStateSnapshot): Record<string, unknown> {
+    if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
+        throw new Error('Gateway state revision must be a non-negative integer')
+    }
+    if (
+        !Number.isSafeInteger(state.revisionEpochGeneration)
+        || state.revisionEpochGeneration < 1
+    ) {
+        throw new Error('Gateway revision epoch generation must be a positive integer')
+    }
+    if (!Number.isSafeInteger(state.stateVersion) || state.stateVersion < 1) {
+        throw new Error('Gateway state version must be a positive integer')
+    }
+    return {
+        version: CODEVER_MATRIX_PROTOCOL_VERSION,
+        kind: 'gateway_state',
+        revision: state.revision,
+        revision_epoch: state.revisionEpoch,
+        revision_epoch_generation: state.revisionEpochGeneration,
+        state_version: state.stateVersion,
+        current_session_id: state.currentSessionId,
+        sessions: state.sessions.map(session => ({
+            id: session.id,
+            title: session.title,
+            updated_at: session.updatedAt,
+            status: session.status,
+            ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
+            ...(session.archived ? { archived: true } : {}),
+            project_id: session.projectId,
+            project_name: session.projectName,
+            cwd: session.cwd,
+            provider: session.provider,
+            ...(session.model ? { model: session.model } : {}),
+            ...(session.reasoningEffort
+                ? { reasoning_effort: session.reasoningEffort }
+                : {}),
+        })),
+        workspace: {
+            project_id: state.workspace.projectId,
+            project_name: state.workspace.projectName,
+            cwd: state.workspace.cwd,
+            provider: state.workspace.provider,
+            ...(state.workspace.model ? { model: state.workspace.model } : {}),
+            ...(state.workspace.reasoningEffort
+                ? { reasoning_effort: state.workspace.reasoningEffort }
+                : {}),
+            permission_mode: state.workspace.permissionMode,
+        },
+        capabilities: {
+            models: state.capabilities.models.map(model => ({
+                id: model.id,
+                name: model.name,
+                ...(model.defaultReasoningLevel
+                    ? { default_reasoning_level: model.defaultReasoningLevel }
+                    : {}),
+                ...(model.supportedReasoningLevels
+                    ? {
+                        supported_reasoning_levels:
+                            model.supportedReasoningLevels.map(level => ({
+                                effort: level.effort,
+                                ...(level.description
+                                    ? { description: level.description }
+                                    : {}),
+                            })),
+                    }
+                    : {}),
+            })),
+            permission_modes: state.capabilities.permissionModes.map(mode => ({
+                id: mode.id,
+                name: mode.name,
+            })),
+            can_create_session: state.capabilities.canCreateSession,
+            can_select_session: state.capabilities.canSelectSession,
+            can_archive_session: state.capabilities.canArchiveSession ?? false,
+            can_delete_session: state.capabilities.canDeleteSession ?? false,
+        },
     }
 }
 

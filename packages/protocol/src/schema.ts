@@ -72,6 +72,43 @@ export const historyRequestSchema = z
 
 export type HistoryRequest = z.infer<typeof historyRequestSchema>
 
+/**
+ * Requests the Gateway's current authoritative session inventory after a PWA
+ * reconnect. Like transcript recovery, this is a read-only authenticated
+ * control message and therefore does not consume a command sequence or advance
+ * the conversation revision.
+ */
+export const gatewayStateRequestSchema = z
+  .object({
+    kind: z.literal('codever.gateway.state.request'),
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: opaqueId,
+    gatewayId: opaqueId,
+    conversationId: opaqueId,
+    deviceId: opaqueId,
+    issuedAt: timestamp,
+    expiresAt: timestamp,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.expiresAt <= request.issuedAt) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'expiresAt must be later than issuedAt',
+      })
+    }
+    if (request.expiresAt - request.issuedAt > 2 * 60_000) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expiresAt'],
+        message: 'Gateway state request lifetime cannot exceed two minutes',
+      })
+    }
+  })
+
+export type GatewayStateRequest = z.infer<typeof gatewayStateRequestSchema>
+
 export const encryptedMediaSchema = z
   .object({
     url: z.string().regex(/^mxc:\/\/[^/\s]+\/[^/\s]+$/),

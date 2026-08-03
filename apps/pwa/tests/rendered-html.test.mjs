@@ -558,6 +558,16 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
   assert.match(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
   assert.match(matrix, /loadCachedGatewayState\(/);
+  assert.match(matrix, /gatewayStateRequestSchema\.parse\(\{/);
+  assert.match(matrix, /kind: "gateway_state_request"/);
+  assert.match(
+    matrix,
+    /client\.on\(sdk\.RoomEvent\.Timeline, onTimeline\);[\s\S]*await Promise\.all\(initialTimelineOperations\);[\s\S]*await requestGatewayStateSnapshot\(\)/,
+  );
+  assert.match(
+    matrix,
+    /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshGatewayStateAfterReconnect = true/,
+  );
   assert.match(matrix, /createGatewayStateCacheRecord\(/);
   assert.match(matrix, /parseGatewayStateCacheRecord\(/);
   assert.match(

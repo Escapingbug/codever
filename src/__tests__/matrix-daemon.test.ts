@@ -359,6 +359,131 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
+    it('returns the current authoritative state only to the authenticated requester', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        const secondDeviceKeys = await generateDeviceKeyPair()
+        const requestNow = Date.now()
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = requestNow + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        fixture.config.trustedDevices.push({
+            ...structuredClone(fixture.config.trustedDevices[0]!),
+            deviceId: 'pwa-device-2',
+            publicKey: secondDeviceKeys.publicJwk,
+            sequenceEpoch: 'certificate-pwa-2',
+            matrixDeviceId: 'PWA2',
+            matrixDeviceKeys: ['matrix-ed25519-key-2'],
+        })
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => requestNow,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+        await runner.start()
+
+        const stateRequest = {
+            kind: 'codever.gateway.state.request' as const,
+            version: 1 as const,
+            requestId: 'state-after-reconnect',
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            deviceId: 'pwa-device-1',
+            issuedAt: requestNow,
+            expiresAt: requestNow + 60_000,
+        }
+        const secureEnvelope = await sealSecureEnvelope({
+            plaintext: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever gateway state request',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'gateway_state_request',
+                    gateway_state_request: stateRequest,
+                },
+            },
+            senderPrivateKey: fixture.keys.privateKey,
+            recipientPublicKey: gatewayKeys.publicKey,
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            direction: 'device_to_gateway',
+            senderDeviceId: 'pwa-device-1',
+            recipientDeviceId: 'gateway-1',
+            senderKeyId: fixture.keys.keyId,
+            recipientKeyId: gatewayKeys.keyId,
+            now: requestNow,
+        })
+        client.emit({
+            roomId: '!room:example.org',
+            eventId: '$gateway-state-request',
+            eventType: 'm.room.message',
+            sender: '@alice:example.org',
+            senderDeviceId: 'matrix-ed25519-key',
+            encrypted: true,
+            encryptedPayloadFingerprint: 'gateway-state-request-ciphertext',
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever message',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'secure_envelope',
+                    secure_envelope: secureEnvelope,
+                },
+            },
+        })
+
+        await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+        const responseOuter = client.sent[1]!.content[CODEVER_MATRIX_EXTENSION] as {
+            kind?: string
+            secure_envelope?: {
+                envelope?: { recipientDeviceId?: string }
+            }
+        }
+        expect(responseOuter.kind).toBe('secure_envelope')
+        expect(responseOuter.secure_envelope?.envelope?.recipientDeviceId).toBe('pwa-device-1')
+        const response = await openSecureEnvelope(responseOuter.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: gatewayKeys.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: requestNow,
+        })
+        expect(response.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_state',
+                revision: 0,
+                revision_epoch: REVISION_EPOCH,
+                state_version: 1,
+                active_device_count: 2,
+                sessions: [{ id: 'app-session-1', title: 'Existing session' }],
+            },
+        })
+        const replayStore = Reflect.get(runner, 'replayStore') as FileCommandReplayStore
+        await expect(replayStore.getConversationRevision(
+            'gateway-1',
+            'conversation-1',
+            REVISION_EPOCH,
+        )).resolves.toBe(0)
+        await runner.stop()
+    })
+
     it('lets an authenticated device create a short-lived pairing invitation', async () => {
         const fixture = await securityFixture()
         const session = fakeTopicSession([])
