@@ -13,6 +13,7 @@ import { FileReplayStore } from '@codever/security/node'
 import {
     MAX_HISTORY_PAGE_BYTES,
     MAX_INLINE_HISTORY_PAGE_BYTES,
+    CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     type HistoryPage,
     type HistoryRequest,
     type CodeverAttachment,
@@ -1094,17 +1095,26 @@ export class GatewaySecureContentLayer {
             } catch (error) {
                 throw new PermanentMatrixDeliveryError(error)
             }
+            const content: MatrixRoomMessageContent = {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever message',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
+                    kind: 'secure_envelope',
+                    secure_envelope: secureEnvelope,
+                },
+            }
+            if (isApplicationControlRequest(request) && transport.sendApplicationControlEvent) {
+                return transport.sendApplicationControlEvent({
+                    roomId: request.roomId,
+                    eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+                    transactionId: request.transactionId,
+                    content,
+                })
+            }
             return transport.sendEncryptedRoomEvent({
                 ...request,
-                content: {
-                    msgtype: 'm.notice',
-                    body: 'Encrypted Codever message',
-                    [CODEVER_MATRIX_EXTENSION]: {
-                        version: CODEVER_MATRIX_PROTOCOL_VERSION,
-                        kind: 'secure_envelope',
-                        secure_envelope: secureEnvelope,
-                    },
-                },
+                content,
             })
         }, {
             coalesceKey,
@@ -1450,6 +1460,15 @@ function matrixContentExtension(
 function matrixDeliveryPriority(request: MatrixSendEventRequest): MatrixDeliveryPriority {
     const kind = matrixContentExtension(request.content)?.kind
     return kind === 'decision_request' ? 'control' : 'normal'
+}
+
+function isApplicationControlRequest(request: MatrixSendEventRequest): boolean {
+    const kind = matrixContentExtension(request.content)?.kind
+    return kind === 'command_ack'
+        || kind === 'command_result'
+        || kind === 'revision_conflict'
+        || kind === 'gateway_state'
+        || kind === 'history_page'
 }
 
 function isCoalescibleSnapshot(request: MatrixSendEventRequest): boolean {

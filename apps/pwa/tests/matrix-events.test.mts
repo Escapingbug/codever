@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE } from "@codever/protocol";
 import {
   decodeHistoryBatchPayload,
   parseCodeverEvent,
   parseHistoryReplayEvent,
+  type MatrixConnectionConfig,
+  processGatewayTimelineEvent,
 } from "../app/matrix";
+import {
+  exportPairingPublicKey,
+  generateDeviceKeyPair,
+  InMemoryReplayStore,
+  sealSecureEnvelope,
+} from "@codever/security";
 
 function signedAgentEvent(payload: Record<string, unknown>) {
   return {
@@ -19,6 +28,182 @@ function signedAgentEvent(payload: Record<string, unknown>) {
     },
   };
 }
+
+test("consumes authenticated control results without waiting for Megolm", async () => {
+  const gateway = await generateDeviceKeyPair();
+  const device = await generateDeviceKeyPair();
+  const config: MatrixConnectionConfig = {
+    homeserver: "https://matrix.example.test",
+    userId: "@device:example.test",
+    accessToken: "token",
+    matrixDeviceId: "PWA_MATRIX",
+    roomId: "!room:example.test",
+    gatewayId: "gateway-1",
+    conversationId: "conversation-1",
+    gatewayMatrixUserId: "@gateway:example.test",
+    gatewayMatrixDeviceId: "GATEWAY_MATRIX",
+    gatewayMatrixEd25519: "gateway-ed25519",
+  };
+  const trust = {
+    gatewayId: "gateway-1",
+    gatewayKey: await exportPairingPublicKey(gateway.publicKey),
+    gatewayTransport: {
+      homeserver: config.homeserver,
+      roomId: config.roomId,
+      userId: config.gatewayMatrixUserId,
+      deviceId: config.gatewayMatrixDeviceId,
+      ed25519: config.gatewayMatrixEd25519,
+    },
+    certificate: {
+      certificate: {
+        gatewayId: "gateway-1",
+        deviceId: "device-1",
+      },
+    },
+  };
+  const envelope = await sealSecureEnvelope({
+    plaintext: {
+      msgtype: "m.notice",
+      body: "Encrypted Codever command status",
+      "io.codever": {
+        version: 1,
+        kind: "command_result",
+        command_id: "invite-command-1",
+        sequence: 1,
+        revision: 1,
+        revision_epoch: "epoch-1",
+        outcome: "succeeded",
+        result: { offer_id: "offer-1" },
+      },
+    },
+    gatewayId: config.gatewayId,
+    conversationId: config.conversationId,
+    direction: "gateway_to_device",
+    senderDeviceId: "gateway-1",
+    recipientDeviceId: "device-1",
+    senderKeyId: gateway.keyId,
+    recipientKeyId: device.keyId,
+    senderPrivateKey: gateway.privateKey,
+    recipientPublicKey: device.publicKey,
+    envelopeId: "control-result-1",
+  });
+  let decryptCalls = 0;
+  const client = {
+    async decryptEventIfNeeded() {
+      decryptCalls += 1;
+      throw new Error("Megolm must not be used for application control");
+    },
+  };
+  const event = {
+    getId: () => "$control-result-1",
+    getSender: () => config.gatewayMatrixUserId,
+    getType: () => CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    getTs: () => Date.now(),
+    getContent: () => ({
+      msgtype: "m.notice",
+      body: "Encrypted Codever message",
+      "io.codever": {
+        version: 1,
+        kind: "secure_envelope",
+        secure_envelope: envelope,
+      },
+    }),
+    isEncrypted: () => false,
+    isDecryptionFailure: () => false,
+  };
+  const results: Array<Record<string, unknown>> = [];
+
+  await processGatewayTimelineEvent(
+    client as never,
+    event as never,
+    new Set(),
+    config,
+    () => {},
+    undefined,
+    {
+      keyId: device.keyId,
+      privateKey: device.privateKey,
+      publicKey: device.publicKey,
+      publicJwk: device.publicJwk,
+    },
+    () => trust as never,
+    new InMemoryReplayStore(),
+    undefined,
+    undefined,
+    undefined,
+    async (result) => {
+      results.push(result as unknown as Record<string, unknown>);
+    },
+  );
+
+  assert.equal(decryptCalls, 0);
+  assert.deepEqual(results, [{
+    commandId: "invite-command-1",
+    sequence: 1,
+    revision: 1,
+    outcome: "succeeded",
+    result: { offer_id: "offer-1" },
+  }]);
+
+  let legacyDecrypted = false;
+  await processGatewayTimelineEvent(
+    {
+      async decryptEventIfNeeded() {
+        legacyDecrypted = true;
+      },
+    } as never,
+    {
+      ...event,
+      getId: () => "$legacy-control-result",
+      getType: () => legacyDecrypted ? "m.room.message" : "m.room.encrypted",
+      isEncrypted: () => true,
+    } as never,
+    new Set(),
+    config,
+    () => {},
+    undefined,
+    {
+      keyId: device.keyId,
+      privateKey: device.privateKey,
+      publicKey: device.publicKey,
+      publicJwk: device.publicJwk,
+    },
+    () => trust as never,
+    new InMemoryReplayStore(),
+    undefined,
+    undefined,
+    undefined,
+    async (result) => {
+      results.push(result as unknown as Record<string, unknown>);
+    },
+  );
+  assert.equal(legacyDecrypted, true);
+  assert.equal(results.length, 2);
+
+  await assert.rejects(
+    processGatewayTimelineEvent(
+      client as never,
+      {
+        ...event,
+        getId: () => "$spoofed-control-result",
+        getSender: () => "@attacker:example.test",
+      } as never,
+      new Set(),
+      config,
+      () => {},
+      undefined,
+      {
+        keyId: device.keyId,
+        privateKey: device.privateKey,
+        publicKey: device.publicKey,
+        publicJwk: device.publicJwk,
+      },
+      () => trust as never,
+      new InMemoryReplayStore(),
+    ),
+    /outside the pinned Gateway transport/,
+  );
+});
 
 test("preserves a stable tool call ID and lifecycle status across updates", () => {
   const started = parseCodeverEvent(

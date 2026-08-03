@@ -38,8 +38,14 @@ carry `replaces_logical_event_id`. These IDs, not recipient-specific Matrix
 event IDs, join live delivery to late-join history and are the PWA's message and
 replacement identities. Matrix event IDs remain transport receipts only.
 
-Targeted acknowledgements, command results, and history pages remain
-single-recipient envelopes. PWA clients accept both formats during migration.
+Targeted acknowledgements, command results, state snapshots, and history pages
+remain single-recipient envelopes. Their outer Matrix event type is
+`io.codever.secure_control.v1`: the homeserver can see only envelope routing
+metadata and ciphertext, while the persistent Gateway application key signs
+the envelope and the recipient's application key encrypts its contents. This
+keeps the control path independent from delayed or missing Megolm room keys.
+PWA clients accept both this event type and legacy Megolm-wrapped
+`m.room.message` envelopes during migration.
 Deploy the dual-read PWA before enabling the bundle-sending Gateway; rolling
 the Gateway back is safe because the upgraded PWA retains the legacy read path.
 
@@ -95,6 +101,11 @@ coordinator, invitation limit, persistence, and signing identity. A configured
 Matrix login-token issuer may exchange the PWA account's long-lived access
 token for a short-lived one-time login token. The access token is never returned
 from the admin API, written to logs, or placed in a QR code.
+
+A paired-device invitation is idempotent for the full retained lifetime of its
+source command, including after the offer expires. Recovering an old command
+returns that original expired result; only a new command ID may authorize a new
+offer.
 
 Current routes:
 

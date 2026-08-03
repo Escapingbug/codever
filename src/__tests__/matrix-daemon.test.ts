@@ -1199,7 +1199,9 @@ describe('MatrixGatewayRunner', () => {
 
         await vi.waitFor(() => expect(provider.startQuery).toHaveBeenCalledOnce())
         expect(provider.startQuery).toHaveBeenCalledWith(
-            'hello from PWA',
+            {
+                parts: [{ type: 'text', text: 'hello from PWA' }],
+            },
             expect.objectContaining({ cwd: 'C:\\repo' }),
         )
         await vi.waitFor(() => expect(client.sent.length).toBeGreaterThan(0))
@@ -1262,6 +1264,9 @@ describe('MatrixJsSdkGatewayClient', () => {
             stopClient: vi.fn(),
             getSyncState: vi.fn(() => SyncState.Prepared),
             sendMessage: vi.fn(async () => ({ event_id: '$sent' })),
+            http: {
+                authedRequest: vi.fn(async () => ({ event_id: '$control' })),
+            },
             sendTyping: vi.fn(async () => ({})),
             decryptEventIfNeeded: vi.fn(async () => undefined),
         } as unknown as MatrixClient
@@ -1329,6 +1334,42 @@ describe('MatrixJsSdkGatewayClient', () => {
             expect.objectContaining({ body: 'outgoing' }),
             'txn-1',
         )
+        await expect(client.sendApplicationControlEvent({
+            roomId: '!room:example.org',
+            eventType: 'io.codever.secure_control.v1',
+            content: {
+                msgtype: 'm.notice',
+                body: 'plaintext result',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'command_result',
+                    command_id: 'must-not-send',
+                },
+            },
+            transactionId: 'rejected-control',
+        })).rejects.toThrow('must contain a Codever secure envelope')
+        expect(sdk.http.authedRequest).not.toHaveBeenCalled()
+        await client.sendApplicationControlEvent({
+            roomId: '!room:example.org',
+            eventType: 'io.codever.secure_control.v1',
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever message',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'secure_envelope',
+                    secure_envelope: { envelope: {}, signature: {} },
+                },
+            },
+            transactionId: 'control/txn',
+        })
+        expect(sdk.http.authedRequest).toHaveBeenCalledWith(
+            'PUT',
+            '/rooms/!room%3Aexample.org/send/io.codever.secure_control.v1/control%2Ftxn',
+            undefined,
+            expect.objectContaining({ body: 'Encrypted Codever message' }),
+        )
+        expect(sdk.sendMessage).toHaveBeenCalledTimes(1)
         await client.stop()
         expect(sdk.stopClient).toHaveBeenCalledOnce()
     })

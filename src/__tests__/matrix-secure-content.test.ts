@@ -11,6 +11,7 @@ import {
     sealSecureEnvelope,
 } from '@codever/security'
 import type {
+    MatrixApplicationControlEventRequest,
     MatrixSendEventRequest,
     MatrixTransport,
 } from '@/channel/matrix'
@@ -56,10 +57,15 @@ describe('Gateway application-layer Matrix content', () => {
         )
         await layer.initialize(now)
         const sent: MatrixSendEventRequest[] = []
+        const controlSent: MatrixApplicationControlEventRequest[] = []
         const matrix: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
                 return { eventId: '$event' }
+            },
+            async sendApplicationControlEvent(request) {
+                controlSent.push(request)
+                return { eventId: '$control-event' }
             },
         }
         const room = {
@@ -110,7 +116,10 @@ describe('Gateway application-layer Matrix content', () => {
             'gateway-key-epoch',
             matrix,
         )
-        const ackExtension = sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        expect(controlSent[0]?.eventType).toBe('io.codever.secure_control.v1')
+        expect(controlSent[0]?.content).not.toHaveProperty('io.codever.command_id')
+        expect(JSON.stringify(controlSent[0]?.content)).not.toContain('"command_id"')
+        const ackExtension = controlSent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
         const openedAck = await openSecureEnvelope(ackExtension.secure_envelope, {
             recipientPrivateKey: device.privateKey,
             senderPublicKey: gateway.publicKey,
@@ -157,7 +166,7 @@ describe('Gateway application-layer Matrix content', () => {
                 canDeleteSession: true,
             },
         }, matrix)
-        const stateExtension = sent[2]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const stateExtension = sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
         const openedState = await openSecureEnvelopeBundle(
             stateExtension.secure_envelope_bundle,
             {
@@ -204,7 +213,7 @@ describe('Gateway application-layer Matrix content', () => {
                 },
             },
         })
-        const firstStateTransaction = sent[2]!.transactionId
+        const firstStateTransaction = sent[1]!.transactionId
         await layer.sendGatewayState(room, {
             revision: 0,
             revisionEpoch: 'gateway-key-epoch',
@@ -226,7 +235,7 @@ describe('Gateway application-layer Matrix content', () => {
                 canSelectSession: true,
             },
         }, matrix)
-        expect(sent[3]!.transactionId).not.toBe(firstStateTransaction)
+        expect(sent[2]!.transactionId).not.toBe(firstStateTransaction)
 
         const incoming = await sealSecureEnvelope({
             plaintext: {

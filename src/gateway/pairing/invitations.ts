@@ -113,7 +113,7 @@ export class DeviceInvitationCoordinator {
     const now = this.options.now?.() ?? Date.now()
     await this.registry.pruneOffers(now)
     if (input.source.kind === 'paired-device' && input.source.commandId) {
-      const existing = await this.registry.findOpenOfferBySource(input.source, now)
+      const existing = await this.registry.findOfferBySource(input.source)
       if (existing) return recoveredPairedDeviceInvitation(existing)
     }
     const openOffers = (await this.registry.listOffers(now))

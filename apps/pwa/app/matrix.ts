@@ -1,5 +1,6 @@
 import {
   DEFAULT_HISTORY_PAGE_BYTES,
+  CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
   gatewayStateRequestSchema,
@@ -892,7 +893,7 @@ export async function connectMatrix(
       event,
       sdk.MatrixEventEvent.Decrypted,
       (candidate) =>
-        forwardEvent(
+        processGatewayTimelineEvent(
           client,
           candidate,
           seen,
@@ -3020,7 +3021,7 @@ function parseAttachments(value: unknown): CodeverAttachment[] | undefined {
   return attachments.length > 0 ? attachments : undefined;
 }
 
-async function forwardEvent(
+export async function processGatewayTimelineEvent(
   client: MatrixClient,
   event: MatrixEvent,
   seen: Set<string>,
@@ -3070,7 +3071,10 @@ async function forwardEvent(
     seen.add(eventId);
     return;
   }
-  if (event.getType() === "m.room.encrypted" || event.isEncrypted()) {
+  const applicationControl =
+    event.getType() === CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE;
+  if (!applicationControl &&
+      (event.getType() === "m.room.encrypted" || event.isEncrypted())) {
     await client.decryptEventIfNeeded(event);
   }
   if (event.isDecryptionFailure()) {
@@ -3080,7 +3084,7 @@ async function forwardEvent(
     // marking the event seen here would permanently lose command acks/results.
     return;
   }
-  if (event.getType() !== "m.room.message") return;
+  if (!applicationControl && event.getType() !== "m.room.message") return;
   const content = asRecord(event.getContent());
   if (!content) return;
   const extension = asRecord(content["io.codever"]);
@@ -3116,6 +3120,13 @@ async function forwardEvent(
   if (!trust) {
     seen.add(eventId);
     return;
+  }
+  if (applicationControl) {
+    if (event.isEncrypted() || sender !== trust.gatewayTransport.userId) {
+      throw new Error(
+        "Rejected a Codever control event outside the pinned Gateway transport.",
+      );
+    }
   }
   let plaintext: JsonValue | null;
   try {

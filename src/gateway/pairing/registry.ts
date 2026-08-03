@@ -117,29 +117,29 @@ export class FileTrustedDeviceRegistry {
     })
   }
 
-  async findOpenOfferBySource(
+  /**
+   * Returns the first offer created for an idempotent source, regardless of
+   * terminal status. A retried command must observe its original result rather
+   * than minting a second authorization after the first offer expires.
+   */
+  async findOfferBySource(
     source: PairingOfferSource,
-    now = Date.now(),
   ): Promise<SignedPairingOffer | undefined> {
     return this.file.transaction(initialState, (state) => {
       validateState(state)
-      let changed = false
-      for (const stored of Object.values(state.offers)) {
-        if (stored.status !== 'open') continue
-        if (stored.signedOffer.offer.expiresAt <= now) {
-          stored.status = 'expired'
-          stored.expiredAt = now
-          changed = true
-          continue
-        }
-        if (stored.source && canonicalJson(stored.source) === canonicalJson(source)) {
-          return {
-            result: structuredClone(stored.signedOffer),
-            changed,
-          }
-        }
+      const matches = Object.values(state.offers)
+        .filter((stored) =>
+          stored.source && canonicalJson(stored.source) === canonicalJson(source),
+        )
+        .sort((left, right) =>
+          left.signedOffer.offer.issuedAt - right.signedOffer.offer.issuedAt,
+        )
+      return {
+        result: matches[0]
+          ? structuredClone(matches[0].signedOffer)
+          : undefined,
+        changed: false,
       }
-      return { result: undefined, changed }
     })
   }
 

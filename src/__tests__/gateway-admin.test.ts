@@ -355,6 +355,46 @@ describe('Gateway local admin', () => {
       }),
     ])
   })
+
+  it('does not mint a second invitation when the same command is recovered after expiry', async () => {
+    const fixture = await gatewayFixture()
+    const input = {
+      source: {
+        kind: 'paired-device' as const,
+        deviceId: 'trusted-device-1',
+        commandId: 'expired-device-invite-command',
+      },
+      matrixLogin: 'disabled' as const,
+      lifetimeMs: 30_000,
+    }
+    const first = await new DeviceInvitationCoordinator(
+      fixture.service,
+      fixture.registry,
+      {
+        gatewayName: 'Mac Gateway',
+        gatewayTransport,
+        now: () => now,
+      },
+    ).create(input)
+    const recovered = await new DeviceInvitationCoordinator(
+      fixture.service,
+      fixture.registry,
+      {
+        gatewayName: 'Mac Gateway',
+        gatewayTransport,
+        now: () => now + 30_001,
+      },
+    ).create(input)
+
+    expect(recovered).toEqual(first)
+    await expect(fixture.registry.listOffers(now + 30_001)).resolves.toEqual([
+      expect.objectContaining({
+        offerId: first.invitationId,
+        status: 'expired',
+        source: input.source,
+      }),
+    ])
+  })
 })
 
 async function gatewayFixture() {

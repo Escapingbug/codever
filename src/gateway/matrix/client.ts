@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
     ClientEvent,
+    Method,
     MatrixScheduler,
     SyncState,
     createClient,
@@ -9,7 +10,10 @@ import {
 } from 'matrix-js-sdk'
 import { AllDevicesIsolationMode } from 'matrix-js-sdk/lib/crypto-api'
 import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js'
-import { canonicalJson } from '@codever/protocol'
+import {
+    CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    canonicalJson,
+} from '@codever/protocol'
 import { toArrayBuffer } from '@codever/security'
 import type {
     MatrixGatewayConnectionConfig,
@@ -18,6 +22,7 @@ import type {
 } from './config'
 import type {
     MatrixDownloadMediaRequest,
+    MatrixApplicationControlEventRequest,
     MatrixIncomingEvent,
     MatrixSendEventRequest,
     MatrixSendEventResult,
@@ -191,6 +196,28 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         return { eventId: result.event_id }
     }
 
+    async sendApplicationControlEvent(
+        request: MatrixApplicationControlEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
+        assertSecureApplicationControlContent(request.content)
+        const path = [
+            '/rooms/',
+            encodeURIComponent(request.roomId),
+            '/send/',
+            encodeURIComponent(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE),
+            '/',
+            encodeURIComponent(request.transactionId),
+        ].join('')
+        const result = await this.client.http.authedRequest<{ event_id: string }>(
+            Method.Put,
+            path,
+            undefined,
+            request.content,
+        )
+        return { eventId: result.event_id }
+    }
+
     async setExtendedProfileProperty(key: string, value: unknown): Promise<void> {
         if (!this.started) throw new Error('Matrix client is not ready')
         await this.client.setExtendedProfileProperty(key, value)
@@ -246,6 +273,28 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
             originServerTs: event.getTs(),
         }
     }
+}
+
+function assertSecureApplicationControlContent(content: Record<string, unknown>): void {
+    const extension = asRecord(content['io.codever'])
+    if (
+        extension?.version !== 1
+        || !(
+            (extension.kind === 'secure_envelope' && asRecord(extension.secure_envelope))
+            || (
+                extension.kind === 'secure_envelope_bundle'
+                && asRecord(extension.secure_envelope_bundle)
+            )
+        )
+    ) {
+        throw new Error('Application control events must contain a Codever secure envelope')
+    }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null
 }
 
 function isReadyState(state: SyncState | null): boolean {
