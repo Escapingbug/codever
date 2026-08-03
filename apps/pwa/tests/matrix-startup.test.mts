@@ -4,9 +4,12 @@ import {
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL,
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS,
   MATRIX_CRYPTO_LOADING_DETAIL,
+  MATRIX_STARTUP_BACKGROUND_RECOVERY_MS,
+  MATRIX_STARTUP_FOREGROUND_BUDGET_MS,
   MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL,
   MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL,
   matrixInitialSyncLimit,
+  shouldReloadInterruptedMatrixStartup,
   shouldRecoverMatrixSyncCheckpoint,
 } from "../app/matrixStartup.ts";
 import { processMatrixEventWithDecryptionRetry } from "../app/matrixDecryptionRetry.ts";
@@ -40,11 +43,66 @@ class FakeEncryptedEvent {
   }
 }
 
-test("allows a cold mobile connection enough time to load Matrix crypto", () => {
-  assert.equal(MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS, 120_000);
+test("bounds a cold mobile crypto start instead of blocking for minutes", () => {
+  assert.equal(MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS, 45_000);
   assert.match(MATRIX_CRYPTO_LOADING_DETAIL, /downloads several megabytes/u);
-  assert.match(MATRIX_CRYPTO_LOADING_DETAIL, /two minutes/u);
-  assert.match(MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL, /two minutes/u);
+  assert.match(MATRIX_CRYPTO_LOADING_DETAIL, /45 seconds/u);
+  assert.match(MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL, /45 seconds/u);
+});
+
+test("reloads one interrupted startup after returning to the foreground", () => {
+  assert.equal(MATRIX_STARTUP_BACKGROUND_RECOVERY_MS, 5_000);
+  assert.equal(MATRIX_STARTUP_FOREGROUND_BUDGET_MS, 60_000);
+  assert.equal(
+    shouldReloadInterruptedMatrixStartup({
+      phase: "connecting",
+      startedAt: 10_000,
+      hiddenAt: 20_000,
+      now: 24_999,
+      visible: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldReloadInterruptedMatrixStartup({
+      phase: "connecting",
+      startedAt: 10_000,
+      hiddenAt: 20_000,
+      now: 25_000,
+      visible: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldReloadInterruptedMatrixStartup({
+      phase: "securing",
+      startedAt: 10_000,
+      hiddenAt: null,
+      now: 70_000,
+      visible: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldReloadInterruptedMatrixStartup({
+      phase: "connected",
+      startedAt: 10_000,
+      hiddenAt: 20_000,
+      now: 90_000,
+      visible: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldReloadInterruptedMatrixStartup({
+      phase: "connecting",
+      startedAt: 10_000,
+      hiddenAt: 20_000,
+      now: 90_000,
+      visible: false,
+    }),
+    false,
+  );
 });
 
 test("recovers a trusted browser whose sync checkpoint was evicted", () => {

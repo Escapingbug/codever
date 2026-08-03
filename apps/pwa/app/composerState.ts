@@ -1,5 +1,6 @@
 export type ComposerConnectionStatus =
   | "connecting"
+  | "securing"
   | "connected"
   | "reconnecting"
   | "offline"
@@ -45,6 +46,9 @@ export function deriveComposerState(input: ComposerStateInput): ComposerState {
   }
   if (input.connectionStatus === "connecting") {
     return blocked("Connecting to Matrix… Your draft will be kept.");
+  }
+  if (input.connectionStatus === "securing") {
+    return blocked("Matrix connected · verifying the trusted Gateway…");
   }
   if (input.connectionStatus === "reconnecting") {
     return blocked("Reconnecting to Matrix… Your draft will be kept.");

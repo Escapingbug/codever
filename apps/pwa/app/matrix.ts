@@ -216,6 +216,7 @@ export type IncomingCodeverMessage = {
 
 export type MatrixConnectionStatus =
   | "connecting"
+  | "securing"
   | "connected"
   | "reconnecting"
   | "offline"
@@ -285,6 +286,7 @@ class DisplayOnlyReplayStore implements ReplayStore {
 }
 
 export type MatrixConnection = {
+  readonly ready: Promise<void>;
   readonly identity: DeviceIdentity;
   readonly matrixDeviceKeys: {
     ed25519: string;
@@ -919,6 +921,8 @@ export async function connectMatrix(
     }
   };
 
+  let recoveringSyncCheckpoint = false;
+  let startupRoom: Room | null = null;
   handlers.onStatus("connecting", "Opening the encrypted device store…");
   try {
     // SDK 41 assigns the store's user factory during createClient, so startup
@@ -929,7 +933,7 @@ export async function connectMatrix(
       "The Matrix sync database did not open in time.",
     );
     const savedSyncToken = await syncStore.getSavedSyncToken();
-    const recoveringSyncCheckpoint = shouldRecoverMatrixSyncCheckpoint(
+    recoveringSyncCheckpoint = shouldRecoverMatrixSyncCheckpoint(
       Boolean(activeTrust),
       savedSyncToken,
     );
@@ -978,16 +982,6 @@ export async function connectMatrix(
     });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
     initialSyncComplete = true;
-    handlers.onStatus(
-      "connecting",
-      "Publishing this device’s encryption keys…",
-    );
-    await waitForOwnMatrixDeviceKeys(
-      config,
-      matrixDeviceKeys,
-      DEVICE_KEYS_UPLOAD_TIMEOUT_MS,
-    );
-
     const room = client.getRoom(config.roomId);
     if (!room) {
       throw new Error(
@@ -997,78 +991,13 @@ export async function connectMatrix(
     if (!client.isRoomEncrypted(config.roomId)) {
       throw new Error("Refusing to connect: the selected Matrix room is not encrypted.");
     }
-    if (activeTrust) {
-      handlers.onStatus(
-        "connecting",
-        "Checking the durable Gateway profile snapshot…",
-      );
-      const recoveredTrust = await recoverGatewayTransportSnapshot(
-        client,
-        config,
-        activeTrust,
-      );
-      if (recoveredTrust !== activeTrust) {
-        activeTrust = recoveredTrust;
-        handlers.onTrustUpdated?.(recoveredTrust);
-      }
-    }
-    const configuredGateway = activeTrust?.gatewayTransport ?? gatewayPin(config);
-    if (configuredGateway && activeTrust) {
-      handlers.onStatus("connecting", "Verifying the trusted Gateway device…");
-      await withMatrixTimeout(
-        verifyAndPinGatewayDevice(client, configuredGateway),
-        GATEWAY_DEVICE_TIMEOUT_MS,
-        "The trusted Gateway device could not be verified in time.",
-      );
-      handlers.onStatus("connecting", "Preparing a fresh encrypted session…");
-      await withMatrixTimeout(
-        cryptoApi.forceDiscardSession(config.roomId),
-        LOCAL_STORE_TIMEOUT_MS,
-        "The encrypted Matrix session could not be rotated in time.",
-      );
-    }
-
-    if (recoveringSyncCheckpoint) {
-      handlers.onStatus("connecting", MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL);
-      await withMatrixTimeout(
-        checkpointMatrixSyncStore(syncStoreDatabaseName, syncStore),
-        LOCAL_STORE_TIMEOUT_MS,
-        "The rebuilt Matrix sync checkpoint could not be saved in time.",
-      );
-      if (!(await syncStore.getSavedSyncToken())) {
-        throw new Error(
-          "The Matrix sync checkpoint was rebuilt but could not be persisted. Check this browser’s storage settings and try again.",
-        );
-      }
-    }
-
-    if (activeTrust) {
-      const cachedGatewayState = await loadCachedGatewayState(
-        config,
-        identity,
-        activeTrust.certificate.certificate.certificateId,
-      );
-      if (cachedGatewayState) {
-        handlers.onCollaborationState?.({
-          revision: cachedGatewayState.revision,
-          activeDeviceCount: cachedGatewayState.activeDeviceCount,
-          gatewayState: cachedGatewayState,
-        });
-      }
-    }
-
-    // Buffer the complete initial timeline before enabling live delivery. No
-    // await occurs between taking this snapshot and registering the listener,
-    // so new events are appended behind the initial batch without a gap.
-    const initialTimeline = [...room.getLiveTimeline().getEvents()];
-    const initialTimelineOperations = initialTimeline.map((event) =>
-      enqueueInboundEvent(event, true),
+    startupRoom = room;
+    handlers.onStatus(
+      "securing",
+      activeTrust
+        ? "Matrix connected. Verifying the trusted Gateway and restoring its current state…"
+        : "Matrix connected. Preparing secure pairing…",
     );
-    client.on(sdk.RoomEvent.Timeline, onTimeline);
-    await Promise.all(initialTimelineOperations);
-    assertPersistenceHealthy();
-    connectionReady = true;
-    handlers.onStatus("connected");
   } catch (error) {
     stopped = true;
     client.off(sdk.RoomEvent.Timeline, onTimeline);
@@ -1102,6 +1031,148 @@ export async function connectMatrix(
     );
     throw new Error("Matrix device keys were not initialized.");
   }
+  if (!startupRoom) {
+    await checkpointAndReleaseMatrixSyncStore(
+      syncStoreDatabaseName,
+      syncStore,
+      cryptoLock,
+    );
+    throw new Error("The encrypted Matrix room was not initialized.");
+  }
+
+  let ownMatrixDeviceKeysPublished: Promise<void> | null = null;
+  const ensureOwnMatrixDeviceKeysPublished = (): Promise<void> => {
+    ownMatrixDeviceKeysPublished ??= waitForOwnMatrixDeviceKeys(
+      config,
+      matrixDeviceKeys,
+      DEVICE_KEYS_UPLOAD_TIMEOUT_MS,
+    );
+    return ownMatrixDeviceKeysPublished;
+  };
+  const assertStartupActive = (): void => {
+    if (stopped) throw new Error("Matrix connection closed during startup.");
+  };
+  const finishMatrixStartup = async (): Promise<void> => {
+    assertStartupActive();
+    let gatewayTransportChanged = false;
+    if (activeTrust) {
+      handlers.onStatus(
+        "securing",
+        "Checking the durable Gateway recovery profile…",
+      );
+      const recoveredTrust = await withMatrixTimeout(
+        recoverGatewayTransportSnapshot(client, config, activeTrust),
+        GATEWAY_DEVICE_TIMEOUT_MS,
+        "The Gateway recovery profile could not be checked in time.",
+      );
+      assertStartupActive();
+      if (recoveredTrust !== activeTrust) {
+        gatewayTransportChanged = true;
+        activeTrust = recoveredTrust;
+        handlers.onTrustUpdated?.(recoveredTrust);
+      }
+    }
+    const configuredGateway = activeTrust?.gatewayTransport ?? gatewayPin(config);
+    if (configuredGateway && activeTrust) {
+      if (!gatewayTransportChanged) {
+        handlers.onStatus("securing", "Verifying the trusted Gateway device…");
+        await withMatrixTimeout(
+          verifyAndPinGatewayDevice(client, configuredGateway),
+          GATEWAY_DEVICE_TIMEOUT_MS,
+          "The trusted Gateway device could not be verified in time.",
+        );
+        assertStartupActive();
+      }
+      if (gatewayTransportChanged) {
+        handlers.onStatus(
+          "securing",
+          "Preparing encryption for the recovered Gateway device…",
+        );
+        await withMatrixTimeout(
+          cryptoApi.forceDiscardSession(config.roomId),
+          LOCAL_STORE_TIMEOUT_MS,
+          "The recovered Gateway encryption session could not be prepared in time.",
+        );
+        assertStartupActive();
+      }
+    }
+
+    if (recoveringSyncCheckpoint) {
+      handlers.onStatus("securing", MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL);
+      await withMatrixTimeout(
+        checkpointMatrixSyncStore(syncStoreDatabaseName, syncStore),
+        LOCAL_STORE_TIMEOUT_MS,
+        "The rebuilt Matrix sync checkpoint could not be saved in time.",
+      );
+      assertStartupActive();
+      if (!(await syncStore.getSavedSyncToken())) {
+        throw new Error(
+          "The Matrix sync checkpoint was rebuilt but could not be persisted. Check this browser’s storage settings and try again.",
+        );
+      }
+    }
+
+    // Take the complete timeline snapshot and install the live listener in the
+    // same turn. Events received while Gateway verification was running are in
+    // this snapshot; later events are serialized behind it without a gap.
+    const initialTimeline = [...startupRoom.getLiveTimeline().getEvents()];
+    const initialTimelineOperations = initialTimeline.map((event) =>
+      enqueueInboundEvent(event, true),
+    );
+    client.on(sdk.RoomEvent.Timeline, onTimeline);
+    await Promise.all(initialTimelineOperations);
+    assertStartupActive();
+
+    if (activeTrust) {
+      const cachedGatewayState = await loadCachedGatewayState(
+        config,
+        identity,
+        activeTrust.certificate.certificate.certificateId,
+      );
+      assertStartupActive();
+      if (cachedGatewayState) {
+        handlers.onCollaborationState?.({
+          revision: cachedGatewayState.revision,
+          activeDeviceCount: cachedGatewayState.activeDeviceCount,
+          gatewayState: cachedGatewayState,
+        });
+      }
+    }
+
+    assertPersistenceHealthy();
+    connectionReady = true;
+    handlers.onStatus("connected");
+  };
+  const startupReady = finishMatrixStartup();
+  void startupReady.catch(async (error) => {
+    if (stopped) return;
+    stopped = true;
+    historyRequestLifecycle.close(
+      new Error("Matrix connection closed during secure startup."),
+    );
+    pendingHistoryRequests.clear();
+    client.off(sdk.RoomEvent.Timeline, onTimeline);
+    client.off(sdk.ClientEvent.Sync, onSync);
+    client.stopClient();
+    let detail = formatError(error);
+    try {
+      await withMatrixTimeout(
+        checkpointAndReleaseMatrixSyncStore(
+          syncStoreDatabaseName,
+          syncStore,
+          cryptoLock,
+        ),
+        LOCAL_STORE_TIMEOUT_MS,
+        "Timed out while closing the Matrix stores.",
+      );
+    } catch (cleanupError) {
+      await cryptoLock.release().catch(() => undefined);
+      detail = `${detail} The local Matrix stores could not be closed cleanly: ${formatError(
+        cleanupError,
+      )} Reload this page before retrying.`;
+    }
+    handlers.onStatus("error", detail);
+  });
   const waitForCommandAcknowledgement = (
     reservation: CommandReservation,
     timeoutMs = 30_000,
@@ -1150,6 +1221,7 @@ export async function connectMatrix(
   const sendPayload = async (
     payload: CommandPayload,
   ): Promise<CommandSendResult> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
     const trust = activeTrust;
@@ -1296,6 +1368,7 @@ export async function connectMatrix(
   const recoverCommand = async (
     commandId: string,
   ): Promise<CommandSendResult> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
     const trust = activeTrust;
@@ -1625,6 +1698,7 @@ export async function connectMatrix(
     sessionId: string,
     limit = 30,
   ): Promise<MatrixHistoryPage> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     const room = client.getRoom(config.roomId);
     if (!room) throw new Error("The Matrix room is not available.");
@@ -1645,6 +1719,7 @@ export async function connectMatrix(
     sessionId: string,
     limit = 30,
   ): Promise<MatrixHistoryPage> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     const room = client.getRoom(config.roomId);
     if (!room) throw new Error("The Matrix room is not available.");
@@ -1682,6 +1757,7 @@ export async function connectMatrix(
     });
   };
   const uploadAttachment = async (file: File): Promise<CodeverAttachment> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
     if (!client.isRoomEncrypted(config.roomId)) {
@@ -1719,6 +1795,7 @@ export async function connectMatrix(
   const downloadAttachment = async (
     input: CodeverAttachment,
   ): Promise<Blob> => {
+    await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     const attachment = attachmentSchema.parse(input);
     const url = client.mxcUrlToHttp(
@@ -1763,6 +1840,7 @@ export async function connectMatrix(
     return new Blob([toArrayBuffer(plaintext)], { type: attachment.mimeType });
   };
   return {
+    ready: startupReady,
     identity,
     matrixDeviceKeys,
     deviceTransport: {
@@ -1774,8 +1852,11 @@ export async function connectMatrix(
     },
     client,
     async pair(preview, deviceName, signal) {
+      await startupReady;
       if (stopped) throw new Error("Matrix connection is closed.");
       assertPersistenceHealthy();
+      handlers.onStatus("connected", "Publishing this device’s encryption keys…");
+      await ensureOwnMatrixDeviceKeysPublished();
       const offerTransport = preview.transport;
       assertMatchingPairingRoute(config, offerTransport);
       handlers.onStatus("connected", "Verifying the Gateway device…");
@@ -1836,6 +1917,7 @@ export async function connectMatrix(
     downloadAttachment,
     confirmRevisionRetry(commandId) {
       const operation = outboundChain.then(async () => {
+        await startupReady;
         assertPersistenceHealthy();
         const conflict = pendingRevisionConflict;
         if (!conflict || conflict.reservation.commandId !== commandId) {
@@ -1864,6 +1946,7 @@ export async function connectMatrix(
     },
     discardRevisionConflict(commandId) {
       const operation = outboundChain.then(async () => {
+        await startupReady;
         const conflict = pendingRevisionConflict;
         if (!conflict || conflict.reservation.commandId !== commandId) return;
         await discardPendingCommand(
@@ -1901,6 +1984,7 @@ export async function connectMatrix(
       return commandLifecycle.waitForCompletion(commandId, timeoutMs);
     },
     async releaseCommand(commandId) {
+      await startupReady;
       commandLifecycle.release(commandId);
       const trust = activeTrust;
       if (!trust) return;
@@ -2121,17 +2205,23 @@ async function verifyAndPinGatewayDevice(
 ): Promise<void> {
   const cryptoApi = client.getCrypto();
   if (!cryptoApi) throw new Error("Matrix encryption is not ready.");
+  // Returning devices should already be present in the persisted Rust crypto
+  // store. Verify that local record first so an ordinary reconnect does not
+  // add a network key query to the startup critical path.
+  const localDevices = await cryptoApi.getUserDeviceInfo([gateway.userId], false);
+  let device: Device | undefined = localDevices
+    .get(gateway.userId)
+    ?.get(gateway.deviceId);
   // A newly logged-in Gateway device can appear in /keys/query before the
   // Rust crypto store has processed the corresponding /sync device-list
   // change. Keep the client syncing briefly instead of making the user retry.
-  let device: Device | undefined;
   const deadline = Date.now() + 10_000;
-  do {
+  while (!device && Date.now() < deadline) {
     const devices = await cryptoApi.getUserDeviceInfo([gateway.userId], true);
     device = devices.get(gateway.userId)?.get(gateway.deviceId);
     if (device) break;
     await new Promise((resolve) => window.setTimeout(resolve, 250));
-  } while (Date.now() < deadline);
+  }
   if (!device) {
     throw new Error(
       "The signed Gateway Matrix device is not present in the trusted device list. Log in the Gateway as a new Matrix device, then pair this browser again.",

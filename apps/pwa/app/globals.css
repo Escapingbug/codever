@@ -3739,8 +3739,10 @@ select:focus-visible {
 /* Motion is opt-in for feed items so hydrating history never animates as a
    batch. Overlays animate on mount because they are conditionally rendered. */
 .connection-state-connecting > i,
+.connection-state-securing > i,
 .connection-state-reconnecting > i,
 i.connection-state-connecting,
+i.connection-state-securing,
 i.connection-state-reconnecting {
   background: #d99b36;
   box-shadow: 0 0 0 3px rgb(217 155 54 / 11%);

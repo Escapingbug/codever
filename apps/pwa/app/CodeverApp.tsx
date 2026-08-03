@@ -116,6 +116,10 @@ import {
   loginWithMatrixToken,
   requestMatrixLoginToken,
 } from "./matrixAuth";
+import {
+  MATRIX_STARTUP_RECOVERY_SESSION_KEY,
+  shouldReloadInterruptedMatrixStartup,
+} from "./matrixStartup";
 
 type RevisionConflictNotice = {
   commandId: string;
@@ -362,6 +366,12 @@ export function CodeverApp() {
   const feedRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const matrixConnectionRef = useRef<MatrixConnection | null>(null);
+  const matrixStartupGenerationRef = useRef(0);
+  const matrixStartupRef = useRef<{
+    phase: "connecting" | "securing";
+    startedAt: number;
+    hiddenAt: number | null;
+  } | null>(null);
   const pwaUpdateRef = useRef<PwaUpdateHandle | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
@@ -462,6 +472,8 @@ export function CodeverApp() {
   }, [activeFilteredSessions, matrixConfig.gatewayId]);
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
+  const matrixTransportOnline =
+    matrixConnected || connectionStatus === "securing";
   const isStreaming = Boolean(
     selectedSessionId && runningSessionIds.has(selectedSessionId),
   );
@@ -619,6 +631,58 @@ export function CodeverApp() {
   }, []);
 
   useEffect(() => {
+    const recoverInterruptedStartup = () => {
+      const startup = matrixStartupRef.current;
+      if (!startup) return;
+      const visible = document.visibilityState === "visible";
+      if (
+        !shouldReloadInterruptedMatrixStartup({
+          phase: startup.phase,
+          startedAt: startup.startedAt,
+          hiddenAt: startup.hiddenAt,
+          now: Date.now(),
+          visible,
+        })
+      ) {
+        return;
+      }
+      if (sessionStorage.getItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY)) {
+        setConnectionDetail(
+          "Android interrupted secure startup again. Keep Codever visible; if it does not continue, tap Disconnect and reconnect.",
+        );
+        return;
+      }
+      sessionStorage.setItem(
+        MATRIX_STARTUP_RECOVERY_SESSION_KEY,
+        String(Date.now()),
+      );
+      window.location.reload();
+    };
+    const onVisibilityChange = () => {
+      const startup = matrixStartupRef.current;
+      if (!startup) return;
+      if (document.visibilityState === "hidden") {
+        startup.hiddenAt = Date.now();
+        setConnectionDetail(
+          "Secure startup paused in the background. Return to Codever to resume it.",
+        );
+        return;
+      }
+      recoverInterruptedStartup();
+      if (!sessionStorage.getItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY)) {
+        startup.hiddenAt = null;
+        setConnectionDetail("Resuming secure startup…");
+      }
+    };
+    const interval = window.setInterval(recoverInterruptedStartup, 1_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     const url = new URL(window.location.href);
     const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
     const link = hash.get("pair");
@@ -676,7 +740,20 @@ export function CodeverApp() {
             stored.conversationId || trust.gatewayTransport.roomId,
         };
         setMatrixConfig(trustedConfig);
-        setSettingsOpen(true);
+        const recoveryRequestedAt = Number(
+          sessionStorage.getItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY),
+        );
+        const resumeInterruptedStartup =
+          Number.isFinite(recoveryRequestedAt) &&
+          recoveryRequestedAt > 0 &&
+          Date.now() - recoveryRequestedAt < 5 * 60_000;
+        if (resumeInterruptedStartup) {
+          setSettingsOpen(false);
+          await connectRealMatrix(trustedConfig, true, true);
+        } else {
+          sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+          setSettingsOpen(true);
+        }
         return;
       }
       if (link || invitation || shortInvitation) return;
@@ -739,6 +816,7 @@ export function CodeverApp() {
 
   useEffect(
     () => () => {
+      matrixStartupGenerationRef.current += 1;
       pairingAbortRef.current?.abort();
       matrixConnectionRef.current?.stop();
     },
@@ -1181,9 +1259,22 @@ export function CodeverApp() {
   async function connectRealMatrix(
     configInput = matrixConfig,
     closeSettings = true,
+    recoveringInterruptedStartup = false,
   ): Promise<MatrixConnection | null> {
+    const startupGeneration = matrixStartupGenerationRef.current + 1;
+    matrixStartupGenerationRef.current = startupGeneration;
+    const isCurrentStartup = () =>
+      matrixStartupGenerationRef.current === startupGeneration;
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
+    if (!recoveringInterruptedStartup) {
+      sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+    }
+    matrixStartupRef.current = {
+      phase: "connecting",
+      startedAt: Date.now(),
+      hiddenAt: null,
+    };
     optimisticMessagesRef.current.clear();
     reconciledOptimisticMessageIdsRef.current.clear();
     pendingPromptSessionIdsRef.current.clear();
@@ -1226,13 +1317,33 @@ export function CodeverApp() {
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
       const connection = await connectMatrix(normalized, {
-        onMessage: receiveMatrixMessage,
+        onMessage(message) {
+          if (isCurrentStartup()) receiveMatrixMessage(message);
+        },
         onStatus(status, detail) {
+          if (!isCurrentStartup()) return;
+          if (
+            matrixStartupRef.current &&
+            (status === "connecting" || status === "securing")
+          ) {
+            matrixStartupRef.current.phase = status;
+          }
           setConnectionStatus(status);
           setConnectionDetail(detail ?? null);
           if (status === "error" && detail) setConnectionError(detail);
+          if (
+            status === "connected" ||
+            status === "offline" ||
+            status === "error"
+          ) {
+            matrixStartupRef.current = null;
+          }
+          if (status === "connected") {
+            sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+          }
         },
         onTrustUpdated(trust) {
+          if (!isCurrentStartup()) return;
           setTrustedGateway(trust);
           setMatrixConfig((current) => ({
             ...current,
@@ -1240,6 +1351,7 @@ export function CodeverApp() {
           }));
         },
         onCollaborationState(state) {
+          if (!isCurrentStartup()) return;
           if (state.gatewayState) {
             setActiveDeviceCount(state.gatewayState.activeDeviceCount);
             setGatewayRevision(state.gatewayState.revision);
@@ -1346,6 +1458,7 @@ export function CodeverApp() {
           }
         },
         onCommandResult(result) {
+          if (!isCurrentStartup()) return;
           const promptSessionId =
             activePromptCommandsRef.current.get(result.commandId);
           if (promptSessionId) {
@@ -1356,28 +1469,44 @@ export function CodeverApp() {
             completedCommandResultsRef.current.add(result.commandId);
           }
         },
-        onHistoryRecovered: recoverLateHistory,
+        onHistoryRecovered(page) {
+          if (isCurrentStartup()) recoverLateHistory(page);
+        },
       });
+      if (!isCurrentStartup()) {
+        connection.stop();
+        return null;
+      }
       matrixConnectionRef.current = connection;
       setDeviceKeyId(connection.identity.keyId);
       if (closeSettings) setSettingsOpen(false);
       if (selectedSessionIdRef.current) {
-        await restoreSessionHistory(
-          selectedSessionIdRef.current,
-          connection,
-        );
+        void connection.ready
+          .then(() => {
+            if (matrixConnectionRef.current !== connection) return;
+            const sessionId = selectedSessionIdRef.current;
+            if (sessionId) void restoreSessionHistory(sessionId, connection);
+          })
+          .catch(() => undefined);
       }
-      setMessages((current) => [
-        {
-          id: `matrix-connected-${Date.now()}`,
-          kind: "notice",
-          text: "Connected directly to an encrypted Matrix room. Commands are signed by this browser’s P-256 device key.",
-          time: "now",
-        },
-        ...current,
-      ]);
+      void connection.ready
+        .then(() => {
+          if (matrixConnectionRef.current !== connection) return;
+          setMessages((current) => [
+            {
+              id: `matrix-connected-${Date.now()}`,
+              kind: "notice",
+              text: "Connected directly to an encrypted Matrix room. Commands are signed by this browser’s P-256 device key.",
+              time: "now",
+            },
+            ...current,
+          ]);
+        })
+        .catch(() => undefined);
       return connection;
     } catch (error) {
+      if (!isCurrentStartup()) return null;
+      matrixStartupRef.current = null;
       setConnectionStatus("error");
       setConnectionDetail(null);
       setConnectionError(formatUiError(error));
@@ -1386,6 +1515,7 @@ export function CodeverApp() {
   }
 
   function disconnectMatrix() {
+    matrixStartupGenerationRef.current += 1;
     matrixConnectionRef.current?.stop();
     matrixConnectionRef.current = null;
     optimisticMessagesRef.current.clear();
@@ -1401,6 +1531,8 @@ export function CodeverApp() {
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
+    matrixStartupRef.current = null;
+    sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
     setConnectionStatus("offline");
     setConnectionDetail(null);
     setRunningSessionIds(new Set());
@@ -2666,6 +2798,8 @@ export function CodeverApp() {
               />{" "}
               {connectionStatus === "connected"
                 ? "Securely connected"
+                : connectionStatus === "securing"
+                  ? "Matrix connected · verifying Gateway"
                 : connectionStatus === "reconnecting"
                   ? "Reconnecting securely"
                   : trustedGateway
@@ -2850,7 +2984,7 @@ export function CodeverApp() {
             <strong>Matrix E2EE + P-256</strong>
             <small>
               {deviceKeyId
-                ? `${matrixConnected ? "This device online" : "This device offline"} · ${
+                ? `${matrixTransportOnline ? "This device online" : "This device offline"} · ${
                     activeDeviceCount === null
                       ? "device count pending"
                       : `${activeDeviceCount} trusted ${
@@ -2901,6 +3035,8 @@ export function CodeverApp() {
                     ? `${activeProvider} · archived`
                     : `${activeProvider} · encrypted sync active`
                   : "Syncing Gateway state…"
+                : connectionStatus === "securing"
+                  ? "Matrix connected · securing Gateway"
                 : connectionStatus}
             </span>
           </div>

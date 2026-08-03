@@ -273,8 +273,29 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /initRustCrypto\(\{/);
   assert.match(matrix, /initialSyncLimit: matrixInitialSyncLimit/);
   assert.match(matrix, /Publishing this device’s encryption keys/);
-  assert.match(matrix, /await waitForOwnMatrixDeviceKeys\(/);
+  assert.match(
+    matrix,
+    /async pair[\s\S]*await startupReady[\s\S]*await ensureOwnMatrixDeviceKeysPublished\(\)/,
+  );
+  assert.doesNotMatch(
+    matrix.slice(
+      matrix.indexOf("await waitForInitialSync"),
+      matrix.indexOf("const waitForCommandAcknowledgement"),
+    ),
+    /Publishing this device’s encryption keys/,
+  );
   assert.match(matrix, /CRYPTO_INITIALIZATION_TIMEOUT_MS/);
+  assert.match(
+    matrix,
+    /await waitForInitialSync[\s\S]*handlers\.onStatus\(\s*"securing"/,
+  );
+  assert.match(matrix, /readonly ready: Promise<void>/);
+  assert.match(matrix, /ready: startupReady/);
+  assert.equal(matrix.match(/forceDiscardSession\(/gu)?.length, 3);
+  assert.match(
+    matrix,
+    /if \(gatewayTransportChanged\)[\s\S]*forceDiscardSession\(config\.roomId\)/,
+  );
   assert.match(
     matrix,
     /if \(configuredGateway && activeTrust\)[\s\S]*verifyAndPinGatewayDevice/,
@@ -299,6 +320,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /persistence degraded to memory/);
   assert.match(matrix, /state === "SYNCING" \|\| state === "PREPARED"/);
   assert.match(matrix, /signed Gateway Matrix device is not present/i);
+  assert.ok(
+    matrix.indexOf("getUserDeviceInfo([gateway.userId], false)") <
+      matrix.indexOf("getUserDeviceInfo([gateway.userId], true)"),
+  );
   assert.match(matrix, /useIndexedDB: true/);
   assert.match(matrix, /cryptoDatabasePrefix:/);
   assert.match(matrix, /indexedDB\.open\(DEVICE_DATABASE/);
@@ -418,6 +443,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(pairing, /verifyGatewayTransportSnapshot/);
   assert.match(pairing, /transportSnapshots/);
   assert.match(matrix, /enqueueInboundEvent/);
+  assert.match(
+    matrix,
+    /const startupReady = finishMatrixStartup\(\);[\s\S]*void startupReady\.catch/,
+  );
+  assert.match(app, /shouldReloadInterruptedMatrixStartup/);
+  assert.match(app, /MATRIX_STARTUP_RECOVERY_SESSION_KEY/);
+  assert.match(app, /matrixStartupGenerationRef/);
+  assert.match(app, /window\.location\.reload\(\)/);
   assert.ok(
     matrix.indexOf("client.on(sdk.RoomEvent.Timeline, onTimeline)") >
       matrix.indexOf("const recoveredTrust = await recoverGatewayTransportSnapshot"),
@@ -572,7 +605,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /createDetachedSerialDispatcher/);
   assert.doesNotMatch(matrix, /await onHistoryPage\?\.\(page\)/);
   assert.match(matrix, /historyRequestLifecycle\.idForKey\(key\)/);
-  assert.match(app, /onHistoryRecovered: recoverLateHistory/);
+  assert.match(
+    app,
+    /onHistoryRecovered\(page\)[\s\S]*if \(isCurrentStartup\(\)\) recoverLateHistory\(page\)/,
+  );
   assert.match(app, /setHistoryError/);
   assert.doesNotMatch(matrix, /client\.scrollback\(room/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);

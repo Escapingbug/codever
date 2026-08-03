@@ -72,8 +72,15 @@ export function MatrixSettings({
   const [loginPassword, setLoginPassword] = useState("");
 
   if (!open) return null;
-  const connected = status === "connected" || status === "reconnecting";
-  const busy = status === "connecting" || pairingBusy || invitationBusy;
+  const connected =
+    status === "connected" ||
+    status === "securing" ||
+    status === "reconnecting";
+  const busy =
+    status === "connecting" ||
+    status === "securing" ||
+    pairingBusy ||
+    invitationBusy;
   const needsAccount = Boolean(pairingPreview) && !trustedGateway;
 
   return (
@@ -144,12 +151,22 @@ export function MatrixSettings({
                 <small>
                   {needsAccount
                     ? "Sign in once to complete encrypted pairing"
+                    : status === "securing"
+                      ? "Matrix connected; verifying the trusted Gateway"
                     : connected
                       ? "Connected and end-to-end encrypted"
                       : "Saved on this device"}
                 </small>
               </span>
-              <b>{connected ? "Online" : needsAccount ? "Required" : "Details"}</b>
+              <b>
+                {status === "securing"
+                  ? "Securing"
+                  : connected
+                    ? "Online"
+                    : needsAccount
+                      ? "Required"
+                      : "Details"}
+              </b>
             </summary>
 
             <div className="matrix-form-grid compact-matrix-form">

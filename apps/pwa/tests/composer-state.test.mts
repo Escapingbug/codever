@@ -40,6 +40,10 @@ test("blocks submission while the previous command is waiting for acknowledgemen
 
 test("distinguishes reconnecting, stopping, syncing, archived, and empty states", () => {
   assert.equal(
+    deriveComposerState({ ...ready, connectionStatus: "securing" }).reason,
+    "Matrix connected · verifying the trusted Gateway…",
+  );
+  assert.equal(
     deriveComposerState({ ...ready, connectionStatus: "reconnecting" }).reason,
     "Reconnecting to Matrix… Your draft will be kept.",
   );
@@ -62,6 +66,10 @@ test("distinguishes reconnecting, stopping, syncing, archived, and empty states"
 });
 
 test("keeps the draft editable during reconnecting but not without a usable session", () => {
+  assert.equal(
+    deriveComposerState({ ...ready, connectionStatus: "securing" }).canType,
+    true,
+  );
   assert.equal(
     deriveComposerState({ ...ready, connectionStatus: "reconnecting" }).canType,
     true,
