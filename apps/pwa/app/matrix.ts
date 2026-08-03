@@ -1150,6 +1150,10 @@ export async function connectMatrix(
           "securing",
           "Preparing encryption for the recovered Gateway device…",
         );
+        const cryptoApi = client.getCrypto();
+        if (!cryptoApi) {
+          throw new Error("Matrix encryption is not ready.");
+        }
         await withMatrixTimeout(
           cryptoApi.forceDiscardSession(config.roomId),
           LOCAL_STORE_TIMEOUT_MS,

@@ -292,9 +292,13 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /readonly ready: Promise<void>/);
   assert.match(matrix, /ready: startupReady/);
   assert.equal(matrix.match(/forceDiscardSession\(/gu)?.length, 3);
+  const recoveredGatewayEncryptionBranch = matrix.slice(
+    matrix.indexOf("if (gatewayTransportChanged)"),
+    matrix.indexOf("if (recoveringSyncCheckpoint)"),
+  );
   assert.match(
-    matrix,
-    /if \(gatewayTransportChanged\)[\s\S]*forceDiscardSession\(config\.roomId\)/,
+    recoveredGatewayEncryptionBranch,
+    /const cryptoApi = client\.getCrypto\(\);[\s\S]*if \(!cryptoApi\)[\s\S]*cryptoApi\.forceDiscardSession\(config\.roomId\)/,
   );
   assert.match(
     matrix,
