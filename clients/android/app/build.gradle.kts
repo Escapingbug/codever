@@ -62,6 +62,11 @@ android {
     }
 
     packaging {
+        jniLibs {
+            // Telegram delivery is capped at 50 MiB. Compress the Matrix FFI
+            // library in the APK and let Android extract it during install.
+            useLegacyPackaging = true
+        }
         resources.excludes += setOf(
             "META-INF/AL2.0",
             "META-INF/LGPL2.1",

@@ -1,14 +1,18 @@
 package id.my.anciety.codever.matrix
 
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.MediaSource
+import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncListenerV2
 import org.matrix.rustcomponents.sdk.SyncResponseV2
@@ -70,6 +74,7 @@ class OfficialMatrixSdkDriver(
     private var syncTask: TaskHandle? = null
     private var timeline: Timeline? = null
     private var timelineTask: TaskHandle? = null
+    private var boundRoomReady = CompletableDeferred<Unit>()
     private val active = AtomicBoolean(false)
     private val timelineStarting = AtomicBoolean(false)
     private lateinit var activeSession: StoredMatrixSession
@@ -90,6 +95,7 @@ class OfficialMatrixSdkDriver(
     ) {
         check(client == null) { "Matrix SDK driver is already started." }
         check(active.compareAndSet(false, true)) { "Matrix SDK driver is already active." }
+        boundRoomReady = CompletableDeferred()
         activeSession = secrets.session
         activeFiles = files
         runtimeFailure = onRuntimeFailure
@@ -128,6 +134,7 @@ class OfficialMatrixSdkDriver(
         try {
             built.restoreSession(activeSession.toSdkSession())
             client = built
+            signalBoundRoomReady()
             val ownEd25519 = built.encryption().ed25519Key()
                 ?: throw IllegalStateException("Matrix did not publish this device's Ed25519 key.")
             onTransportReady(
@@ -143,6 +150,7 @@ class OfficialMatrixSdkDriver(
                 object : SyncListenerV2 {
                     override fun onUpdate(response: SyncResponseV2) {
                         if (!active.get()) return
+                        signalBoundRoomReady()
                         onSyncUpdate()
                         callbackScope.launch {
                             runCatching { ensureTimeline() }.onFailure(onRuntimeFailure)
@@ -164,8 +172,7 @@ class OfficialMatrixSdkDriver(
     }
 
     override suspend fun sendRoomMessage(contentJson: String) {
-        val room = client?.getRoom(activeSession.roomBinding.roomId)
-            ?: throw IllegalStateException("The bound Matrix room is unavailable.")
+        val room = awaitBoundRoom()
         check(room.isEncrypted()) { "Refusing to send Codever data to an unencrypted Matrix room." }
         room.sendRaw("m.room.message", contentJson)
     }
@@ -207,6 +214,7 @@ class OfficialMatrixSdkDriver(
         if (timeline != null || !timelineStarting.compareAndSet(false, true)) return
         try {
             val room = client?.getRoom(activeSession.roomBinding.roomId) ?: return
+            boundRoomReady.complete(Unit)
             val created = room.timeline()
             val listener = created.addListener(object : TimelineListener {
                 override fun onUpdate(diff: List<TimelineDiff>) {
@@ -246,7 +254,8 @@ class OfficialMatrixSdkDriver(
         val event = item.asEvent() ?: return
         if (!event.isRemote) return
         val content = event.content as? TimelineItemContent.MsgLike ?: return
-        if (content.content.kind !is MsgLikeKind.Message) return
+        val kind = content.content.kind
+        if (kind !is MsgLikeKind.Message && kind !is MsgLikeKind.Other) return
         val eventId = (event.eventOrTransactionId as? EventOrTransactionId.EventId)?.eventId ?: return
         val rawJson = event.lazyProvider.latestJson() ?: return
         activeFiles.journal.append(
@@ -266,9 +275,34 @@ class OfficialMatrixSdkDriver(
         )
     }
 
+    private fun signalBoundRoomReady() {
+        if (client?.getRoom(activeSession.roomBinding.roomId) != null) {
+            boundRoomReady.complete(Unit)
+        }
+    }
+
+    private suspend fun awaitBoundRoom(): Room {
+        client?.getRoom(activeSession.roomBinding.roomId)?.let { return it }
+        try {
+            withTimeout(BOUND_ROOM_READY_TIMEOUT_MS) { boundRoomReady.await() }
+        } catch (_: TimeoutCancellationException) {
+            throw IllegalStateException(
+                "The bound Matrix room did not become available after initial sync.",
+            )
+        }
+        return client?.getRoom(activeSession.roomBinding.roomId)
+            ?: throw IllegalStateException(
+                "The bound Matrix room disappeared after initial sync.",
+            )
+    }
+
     private fun TaskHandle?.cancelAndClose() {
         this ?: return
         runCatching { cancel() }
         runCatching { close() }
+    }
+
+    private companion object {
+        const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L
     }
 }
