@@ -2,6 +2,7 @@ package id.my.anciety.codever.matrix
 
 import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
@@ -15,8 +16,6 @@ import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.MediaSource
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
-import org.matrix.rustcomponents.sdk.SyncListenerV2
-import org.matrix.rustcomponents.sdk.SyncResponseV2
 import org.matrix.rustcomponents.sdk.SyncSettingsV2
 import org.matrix.rustcomponents.sdk.TaskHandle
 import org.matrix.rustcomponents.sdk.Timeline
@@ -73,13 +72,15 @@ class OfficialMatrixSdkDriver(
     private val diagnostics: DiagnosticRecorder = DiagnosticRecorder.None,
 ) : MatrixSdkDriver {
     private var client: Client? = null
-    private var syncTask: TaskHandle? = null
+    private var syncPump: MatrixSyncPump? = null
     private var timeline: Timeline? = null
     private var timelineTask: TaskHandle? = null
     private var syncedBoundRoomReady = CompletableDeferred<Unit>()
     private val active = AtomicBoolean(false)
     private val timelineStarting = AtomicBoolean(false)
     private val firstSyncFinalizing = AtomicBoolean(false)
+    private val firstSyncWorkScheduled = AtomicBoolean(false)
+    private val transportReadyPublished = AtomicBoolean(false)
     private lateinit var activeSession: StoredMatrixSession
     private lateinit var activeFiles: MatrixAccountFiles
     private var runtimeFailure: (Throwable) -> Unit = {}
@@ -101,6 +102,8 @@ class OfficialMatrixSdkDriver(
         diagnostics.record("matrix.driver.start")
         syncedBoundRoomReady = CompletableDeferred()
         firstSyncFinalizing.set(false)
+        firstSyncWorkScheduled.set(false)
+        transportReadyPublished.set(false)
         activeSession = secrets.session
         activeFiles = files
         runtimeFailure = onRuntimeFailure
@@ -146,34 +149,40 @@ class OfficialMatrixSdkDriver(
             client = built
             val ownEd25519 = built.encryption().ed25519Key()
                 ?: throw IllegalStateException("Matrix did not publish this device's Ed25519 key.")
-            onTransportReady(
-                MatrixTransportIdentity(
-                    userId = activeSession.userId,
-                    deviceId = activeSession.deviceId,
-                    ed25519 = ownEd25519,
-                ),
+            val transportIdentity = MatrixTransportIdentity(
+                userId = activeSession.userId,
+                deviceId = activeSession.deviceId,
+                ed25519 = ownEd25519,
             )
-            // Start network sync before constructing the timeline. A restored
-            // room can exist in the local store while timeline initialization
-            // still waits for fresh sync/encryption state. Awaiting it here
-            // used to prevent syncV2 from ever starting.
+            // Drive sync_once_v2 ourselves instead of using the FFI syncV2
+            // TaskHandle. syncV2 writes terminal failures only to Rust tracing,
+            // which previously left the Android runtime with a stopped task and
+            // no actionable error. A Kotlin-owned loop preserves the exception.
             diagnostics.record("matrix.driver.sync_starting")
-            syncTask = built.syncV2(
-                SyncSettingsV2(timeoutMs = 30_000uL, fullState = false),
-                object : SyncListenerV2 {
-                    override fun onUpdate(response: SyncResponseV2) {
-                        if (!active.get()) return
-                        diagnostics.record("matrix.driver.sync_update")
-                        onSyncUpdate()
-                        callbackScope.launch {
-                            runCatching {
-                                finalizeInitialSync(built)
-                                ensureTimeline()
-                            }.onFailure(onRuntimeFailure)
-                        }
+            val pump = MatrixSyncPump(
+                scope = callbackScope,
+                syncOnce = syncOnce@{
+                    built.syncOnceV2(
+                        SyncSettingsV2(timeoutMs = 30_000uL, fullState = false),
+                    )
+                    if (!active.get() || client !== built) return@syncOnce
+                    diagnostics.record("matrix.driver.sync_update")
+                    onSyncUpdate()
+                    scheduleInitialSyncFinalization(
+                        built,
+                        transportIdentity,
+                        onTransportReady,
+                    )
+                },
+                onFailure = { error ->
+                    if (active.get() && client === built) {
+                        diagnostics.record("matrix.driver.sync_failure", errorAttributes(error))
+                        runtimeFailure(error)
                     }
                 },
             )
+            syncPump = pump
+            pump.start()
             diagnostics.record("matrix.driver.sync_started")
         } catch (error: Exception) {
             active.set(false)
@@ -183,7 +192,7 @@ class OfficialMatrixSdkDriver(
         }
     }
 
-    override fun isSyncRunning(): Boolean = syncTask?.isFinished() == false
+    override fun isSyncRunning(): Boolean = syncPump?.isRunning() == true
 
     override suspend fun setNetworkAvailable(available: Boolean) {
         client?.enableAllSendQueues(available)
@@ -223,12 +232,14 @@ class OfficialMatrixSdkDriver(
         timelineTask = null
         timeline?.close()
         timeline = null
-        syncTask.cancelAndClose()
-        syncTask = null
+        syncPump?.stop()
+        syncPump = null
         client?.close()
         client = null
         timelineStarting.set(false)
         firstSyncFinalizing.set(false)
+        firstSyncWorkScheduled.set(false)
+        transportReadyPublished.set(false)
     }
 
     private suspend fun ensureTimeline() {
@@ -304,10 +315,43 @@ class OfficialMatrixSdkDriver(
         )
     }
 
-    private suspend fun finalizeInitialSync(expectedClient: Client) {
-        if (syncedBoundRoomReady.isCompleted || !firstSyncFinalizing.compareAndSet(false, true)) {
-            return
+    private fun scheduleInitialSyncFinalization(
+        expectedClient: Client,
+        identity: MatrixTransportIdentity,
+        onTransportReady: (MatrixTransportIdentity) -> Unit,
+    ) {
+        if (transportReadyPublished.get() || !firstSyncWorkScheduled.compareAndSet(false, true)) return
+        callbackScope.launch {
+            try {
+                if (!finalizeInitialSync(expectedClient)) {
+                    firstSyncWorkScheduled.set(false)
+                    return@launch
+                }
+                ensureTimeline()
+                if (timeline == null) {
+                    firstSyncWorkScheduled.set(false)
+                    return@launch
+                }
+                if (
+                    active.get() &&
+                    client === expectedClient &&
+                    transportReadyPublished.compareAndSet(false, true)
+                ) {
+                    diagnostics.record("matrix.transport.ready")
+                    onTransportReady(identity)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                diagnostics.record("matrix.driver.initialization_failure", errorAttributes(error))
+                if (active.get() && client === expectedClient) runtimeFailure(error)
+            }
         }
+    }
+
+    private suspend fun finalizeInitialSync(expectedClient: Client): Boolean {
+        if (syncedBoundRoomReady.isCompleted) return true
+        if (!firstSyncFinalizing.compareAndSet(false, true)) return false
         try {
             diagnostics.record("matrix.encryption.initializing")
             expectedClient.encryption().waitForE2eeInitializationTasks()
@@ -315,6 +359,7 @@ class OfficialMatrixSdkDriver(
                 signalSyncedBoundRoomReady()
                 diagnostics.record("matrix.encryption.ready")
             }
+            return syncedBoundRoomReady.isCompleted
         } finally {
             firstSyncFinalizing.set(false)
         }

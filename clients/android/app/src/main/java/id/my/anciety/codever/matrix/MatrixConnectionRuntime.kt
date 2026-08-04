@@ -101,6 +101,10 @@ class MatrixConnectionRuntime(
                             ),
                         )
                         accept(MatrixRuntimeEvent.Failed(reason.detailCode, blocked = false))
+                        val staleDriver = driver
+                        driver = null
+                        driverGeneration += 1
+                        if (staleDriver != null) stopDriver(staleDriver)
                         scheduleRetryLocked()
                     }
                 }
@@ -113,53 +117,66 @@ class MatrixConnectionRuntime(
     }.await()
 
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false) = scope.async {
-        mutex.withLock {
+        val current = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
-            val current = driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+            driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+        }
+        withTimeout(SEND_OPERATION_TIMEOUT_MS) {
             current.sendRoomMessage(contentJson, rotateRoomKey)
         }
     }.await()
 
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String = scope.async {
-        mutex.withLock {
+        val current = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
-            val current = driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+            driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+        }
+        withTimeout(MEDIA_OPERATION_TIMEOUT_MS) {
             current.uploadMedia(mimeType, bytes)
         }
     }.await()
 
     suspend fun downloadMedia(url: String): ByteArray = scope.async {
-        mutex.withLock {
+        val current = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
-            val current = driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+            driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+        }
+        withTimeout(MEDIA_OPERATION_TIMEOUT_MS) {
             current.downloadMedia(url)
         }
     }.await()
 
     suspend fun profileProperty(userId: String, key: String) = scope.async {
-        mutex.withLock {
+        val session = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
-            val session = secrets?.session
+            secrets?.session
                 ?: throw IllegalStateException("The native Matrix session is unavailable.")
+        }
+        withTimeout(PROFILE_OPERATION_TIMEOUT_MS) {
             profileClient.get(session, userId, key)
         }
     }.await()
 
     suspend fun revokeSession() = scope.async {
-        mutex.withLock {
+        val current = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) {
                 throw MatrixOfflineException("The native Matrix session must be online before revocation.")
             }
-            val current = driver
+            driver
                 ?: throw IllegalStateException("The native Matrix session is not ready for revocation.")
-            // Preserve recoverable local credentials until the homeserver
-            // confirms logout. Offline revocation must remain retryable.
+        }
+        // Preserve recoverable local credentials until the homeserver confirms
+        // logout. The network operation must not hold the lifecycle mutex.
+        withTimeout(LOGOUT_OPERATION_TIMEOUT_MS) {
             current.logout()
+        }
+        mutex.withLock {
+            check(driver === current) { "The Matrix connection changed while revocation was in progress." }
             retryJob?.cancel()
             retryJob = null
             watchdogJob?.cancel()
@@ -257,7 +274,7 @@ class MatrixConnectionRuntime(
 
     private fun onNetworkChanged(available: Boolean) {
         scope.launch {
-            mutex.withLock {
+            val currentDriver = mutex.withLock {
                 networkAvailable = available
                 diagnostics.record(
                     "matrix.network.changed",
@@ -265,15 +282,38 @@ class MatrixConnectionRuntime(
                 )
                 if (!available) {
                     accept(MatrixRuntimeEvent.NetworkLost)
-                    runCatching { driver?.setNetworkAvailable(false) }
-                    return@withLock
+                } else {
+                    accept(MatrixRuntimeEvent.NetworkAvailable)
                 }
-                accept(MatrixRuntimeEvent.NetworkAvailable)
-                val currentDriver = driver
-                val sendQueueResumed = runCatching {
+                driver
+            }
+            if (!available) {
+                try {
+                    withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
+                        currentDriver?.setNetworkAvailable(false)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    diagnostics.record("matrix.network.pause_failure", errorAttributes(error))
+                }
+                return@launch
+            }
+            val resumeError = try {
+                withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
                     currentDriver?.setNetworkAvailable(true)
-                }.isSuccess
-                if (!sendQueueResumed && currentDriver != null) {
+                }
+                null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                error
+            }
+            mutex.withLock {
+                if (!started.get() || !networkAvailable) return@withLock
+                if (currentDriver != null && driver !== currentDriver) return@withLock
+                if (resumeError != null && currentDriver != null) {
+                    diagnostics.record("matrix.network.resume_failure", errorAttributes(resumeError))
                     accept(
                         MatrixRuntimeEvent.Failed(
                             "matrix_send_queue_resume_failed",
@@ -468,5 +508,10 @@ class MatrixConnectionRuntime(
         const val WATCHDOG_INTERVAL_MS = 5_000L
         const val DRIVER_START_TIMEOUT_MS = 30_000L
         const val DRIVER_STOP_TIMEOUT_MS = 10_000L
+        const val NETWORK_CONTROL_TIMEOUT_MS = 10_000L
+        const val SEND_OPERATION_TIMEOUT_MS = 45_000L
+        const val PROFILE_OPERATION_TIMEOUT_MS = 45_000L
+        const val MEDIA_OPERATION_TIMEOUT_MS = 120_000L
+        const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
     }
 }
