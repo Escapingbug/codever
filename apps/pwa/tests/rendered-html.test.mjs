@@ -633,6 +633,14 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     app,
     /await pairingRecoveryRef\.current\(preview, recoveryConfig\)/,
   );
+  assert.match(
+    app,
+    /saveMatrixConfig\(nextConfig\);[\s\S]*settleNativeBootstrapTransfer\("offline"\);[\s\S]*catch \(error\) \{[\s\S]*settleNativeBootstrapTransfer\("error"\);/,
+  );
+  assert.match(
+    app,
+    /function settleNativeBootstrapTransfer\(status: "offline" \| "error"\)[\s\S]*setConnectionStatus\(status\);[\s\S]*setConnectionDetail\(null\);/,
+  );
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
   assert.match(matrix, /loadRecentHistory\(sessionId/);

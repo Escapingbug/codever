@@ -1611,6 +1611,11 @@ export function CodeverApp() {
     setConnectionDetail("Transferring the native connection to this invitation…");
   }
 
+  function settleNativeBootstrapTransfer(status: "offline" | "error") {
+    setConnectionStatus(status);
+    setConnectionDetail(null);
+  }
+
   function forgetMatrixConfig() {
     const historyScope = historyScopeRef.current;
     pairingAbortRef.current?.abort();
@@ -1747,7 +1752,9 @@ export function CodeverApp() {
         }
         setMatrixConfig(nextConfig);
         saveMatrixConfig(nextConfig);
+        settleNativeBootstrapTransfer("offline");
       } catch (error) {
+        settleNativeBootstrapTransfer("error");
         setConnectionError(
           `The one-time Matrix sign-in could not be used: ${formatUiError(error)} Sign in below to continue.`,
         );
