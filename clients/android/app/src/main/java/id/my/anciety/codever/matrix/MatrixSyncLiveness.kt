@@ -40,6 +40,7 @@ class MatrixSyncLiveness(
     fun restartReason(
         syncTaskRunning: Boolean,
         phase: MatrixRuntimePhase,
+        internallySupervised: Boolean = false,
     ): MatrixSyncRestartReason? {
         if (phase != MatrixRuntimePhase.CONNECTING && phase != MatrixRuntimePhase.SYNCING) return null
         if (!syncTaskRunning) return MatrixSyncRestartReason.TASK_STOPPED
@@ -48,9 +49,13 @@ class MatrixSyncLiveness(
             MatrixRuntimePhase.CONNECTING -> attemptStartedAt
                 ?.takeIf { currentTime - it >= firstSyncTimeoutMs }
                 ?.let { MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT }
-            MatrixRuntimePhase.SYNCING -> lastSyncUpdateAt
-                ?.takeIf { currentTime - it >= activeSyncTimeoutMs }
-                ?.let { MatrixSyncRestartReason.SYNC_STALE }
+            MatrixRuntimePhase.SYNCING -> if (internallySupervised) {
+                null
+            } else {
+                lastSyncUpdateAt
+                    ?.takeIf { currentTime - it >= activeSyncTimeoutMs }
+                    ?.let { MatrixSyncRestartReason.SYNC_STALE }
+            }
             else -> null
         }
     }

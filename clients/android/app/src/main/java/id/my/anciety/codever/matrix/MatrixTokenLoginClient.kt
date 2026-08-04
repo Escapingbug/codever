@@ -199,7 +199,7 @@ class MatrixTokenLoginClient(
             deviceId = deviceId,
             homeserverUrl = homeserver,
             oauthData = null,
-            slidingSyncVersion = SlidingSyncVersion.NONE,
+            slidingSyncVersion = SlidingSyncVersion.NATIVE,
             roomBinding = MatrixIdentifiers.validateRoomBinding(roomBinding),
         )
     }

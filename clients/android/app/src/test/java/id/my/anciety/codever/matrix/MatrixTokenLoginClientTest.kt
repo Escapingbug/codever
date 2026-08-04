@@ -37,6 +37,7 @@ class MatrixTokenLoginClientTest {
             assertEquals(LOGIN_TOKEN, request.getValue("token").jsonPrimitive.content)
             assertEquals("@alice:example.org", session.userId)
             assertEquals("MATRIX-DEVICE", session.deviceId)
+            assertEquals(SlidingSyncVersion.NATIVE, session.slidingSyncVersion)
             assertTrue(requestReference.all { it == 0.toByte() })
             assertTrue(responseBody.all { it == 0.toByte() })
         }

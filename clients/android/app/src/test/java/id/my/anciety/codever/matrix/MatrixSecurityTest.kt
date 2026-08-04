@@ -48,9 +48,23 @@ class MatrixSecurityTest {
         assertEquals(ACCESS_TOKEN, restored.session.accessToken)
         assertEquals(REFRESH_TOKEN, restored.session.refreshToken)
         assertEquals("!room:example.org", restored.session.roomBinding.roomId)
+        assertEquals(SlidingSyncVersion.NATIVE, restored.session.slidingSyncVersion)
         assertTrue(source.sdkStoreKey.contentEquals(restored.sdkStoreKey))
         plaintext.fill(0)
         decrypted.fill(0)
+    }
+
+    @Test
+    fun `legacy sync v2 session migrates to native sliding sync without changing identity`() {
+        val legacy = session(SlidingSyncVersion.NONE)
+
+        val migrated = legacy.forNativeSlidingSync()
+
+        assertEquals(SlidingSyncVersion.NATIVE, migrated.slidingSyncVersion)
+        assertEquals(legacy.accessToken, migrated.accessToken)
+        assertEquals(legacy.deviceId, migrated.deviceId)
+        assertEquals(legacy.roomBinding, migrated.roomBinding)
+        assertTrue(migrated === migrated.forNativeSlidingSync())
     }
 
     private fun bootstrap() = MatrixBootstrap(
@@ -61,14 +75,16 @@ class MatrixSecurityTest {
         roomBinding = binding(),
     )
 
-    private fun session() = StoredMatrixSession(
+    private fun session(
+        slidingSyncVersion: SlidingSyncVersion = SlidingSyncVersion.NATIVE,
+    ) = StoredMatrixSession(
         accessToken = ACCESS_TOKEN,
         refreshToken = REFRESH_TOKEN,
         userId = "@alice:example.org",
         deviceId = "MATRIX-DEVICE",
         homeserverUrl = "https://matrix.example.org",
         oauthData = OAUTH_DATA,
-        slidingSyncVersion = SlidingSyncVersion.NONE,
+        slidingSyncVersion = slidingSyncVersion,
         roomBinding = binding(),
     )
 

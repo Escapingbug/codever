@@ -86,9 +86,16 @@ class MatrixConnectionRuntime(
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
                 mutex.withLock {
-                    val running = runCatching { driver?.isSyncRunning() == true }.getOrDefault(false)
+                    val currentDriver = driver
+                    val running = runCatching {
+                        currentDriver?.isSyncRunning() == true
+                    }.getOrDefault(false)
                     val reason = if (started.get() && networkAvailable && secrets != null) {
-                        liveness.restartReason(running, stateMachine.status.phase)
+                        liveness.restartReason(
+                            running,
+                            stateMachine.status.phase,
+                            internallySupervised = currentDriver?.hasInternalSyncSupervision() == true,
+                        )
                     } else {
                         null
                     }
@@ -347,8 +354,20 @@ class MatrixConnectionRuntime(
                 loaded.session.userId,
             ) == currentFiles.accountScope,
         ) { "Encrypted Matrix session is bound to a different account scope." }
+        val migratedSession = loaded.session.forNativeSlidingSync()
+        val migrated = if (migratedSession === loaded.session) {
+            loaded
+        } else {
+            PersistedMatrixSecrets(loaded.sdkStoreKey, migratedSession).also {
+                currentFiles.sessionStore.save(it)
+                diagnostics.record(
+                    "matrix.session.migrated",
+                    mapOf("stage" to "NATIVE_SLIDING_SYNC"),
+                )
+            }
+        }
         files = currentFiles
-        secrets = loaded
+        secrets = migrated
         latestJournalCursor = currentFiles.journal.latestCursor()
     }
 
@@ -416,13 +435,17 @@ class MatrixConnectionRuntime(
                         scope.launch {
                             mutex.withLock {
                                 if (driver === nextDriver && driverGeneration == generation) {
+                                    val decision = MatrixRuntimeFailurePolicy.decide(error)
                                     accept(
-                                        MatrixRuntimeEvent.Failed("matrix_runtime_failed", blocked = false),
+                                        MatrixRuntimeEvent.Failed(
+                                            decision.detailCode,
+                                            blocked = decision.blocked,
+                                        ),
                                     )
                                     stopDriver(nextDriver)
                                     driver = null
                                     driverGeneration += 1
-                                    scheduleRetryLocked()
+                                    if (!decision.blocked) scheduleRetryLocked()
                                 }
                             }
                         }
@@ -437,17 +460,15 @@ class MatrixConnectionRuntime(
                 driver = null
                 driverGeneration += 1
             }
-            accept(
-                MatrixRuntimeEvent.Failed(
-                    if (error is TimeoutCancellationException) {
-                        "matrix_driver_start_timeout"
-                    } else {
-                        "matrix_restore_or_sync_failed"
-                    },
-                    blocked = false,
-                ),
-            )
-            scheduleRetryLocked()
+            val decision = if (error is TimeoutCancellationException) {
+                MatrixRuntimeFailureDecision("matrix_driver_start_timeout", blocked = false)
+            } else {
+                MatrixRuntimeFailurePolicy.decide(error).let {
+                    if (it.blocked) it else it.copy(detailCode = "matrix_restore_or_sync_failed")
+                }
+            }
+            accept(MatrixRuntimeEvent.Failed(decision.detailCode, decision.blocked))
+            if (!decision.blocked) scheduleRetryLocked()
             throw error
         }
     }

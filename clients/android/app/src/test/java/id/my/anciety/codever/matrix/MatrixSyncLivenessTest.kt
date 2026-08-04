@@ -39,6 +39,21 @@ class MatrixSyncLivenessTest {
     }
 
     @Test
+    fun `internally supervised sync does not require external response heartbeats`() {
+        liveness.connectionStarted()
+        liveness.syncUpdated()
+        now += 201
+
+        assertNull(
+            liveness.restartReason(
+                true,
+                MatrixRuntimePhase.SYNCING,
+                internallySupervised = true,
+            ),
+        )
+    }
+
+    @Test
     fun `stopped task restarts immediately but inactive phases do not`() {
         liveness.connectionStarted()
         assertEquals(

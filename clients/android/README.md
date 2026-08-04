@@ -17,7 +17,8 @@ one identity from being driven by both transports.
   path without installing another APK.
 - AndroidX WebKit exposes an origin-restricted, main-frame-only JSON-RPC port.
   The application never uses `addJavascriptInterface`.
-- `CodeverConnectionService` owns Matrix SDK login, E2EE, sync v2, the bound
+- `CodeverConnectionService` owns Matrix SDK login, E2EE, native sliding sync,
+  the bound
   room timeline, Codever trust, replay state, commands, history, and transfers.
 - The service is `START_STICKY`, restores after reboot when persistent
   connection is enabled, and stays alive when the Activity/WebView is closed or
@@ -40,11 +41,15 @@ one identity from being driven by both transports.
 Android's explicit force-stop remains a platform override: no application can
 restart itself until the user opens it again.
 
-Matrix v2 sync starts before the bound-room timeline is constructed. Startup has
-a 30-second driver deadline, while the connection watchdog restarts a running
-task that produces no first response within 45 seconds or no later response for
-75 seconds. This prevents a live task handle or blocked timeline initialization
-from leaving the public lifecycle in `connecting` indefinitely.
+The Matrix SDK `SyncService` supervises native sliding sync for both the room
+list and encryption. Existing v2 sessions are migrated in place to the native
+sliding-sync session mode. The bound room is subscribed before the service
+starts, and the room-list state must reach `RUNNING` before E2EE finalization,
+timeline construction, and transport readiness. Startup has a 30-second driver
+deadline, while the connection watchdog still enforces a 45-second first-sync
+deadline and trusts the SDK supervisor for ongoing sync health. This prevents a
+started service or blocked timeline initialization from leaving the public
+lifecycle in `connecting` indefinitely.
 
 ## Native capabilities
 

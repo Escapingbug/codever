@@ -37,6 +37,23 @@ class StoredMatrixSession(
     val slidingSyncVersion: SlidingSyncVersion,
     val roomBinding: MatrixRoomBinding,
 ) {
+    fun forNativeSlidingSync(): StoredMatrixSession {
+        if (slidingSyncVersion == SlidingSyncVersion.NATIVE) return this
+        require(slidingSyncVersion == SlidingSyncVersion.NONE) {
+            "Unsupported Matrix sliding sync version."
+        }
+        return StoredMatrixSession(
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            userId = userId,
+            deviceId = deviceId,
+            homeserverUrl = homeserverUrl,
+            oauthData = oauthData,
+            slidingSyncVersion = SlidingSyncVersion.NATIVE,
+            roomBinding = roomBinding,
+        )
+    }
+
     fun toSdkSession(): Session = Session(
         accessToken = accessToken,
         refreshToken = refreshToken,
