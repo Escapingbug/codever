@@ -62,12 +62,12 @@ class MatrixRuntimeStateMachine(
             MatrixRuntimeEvent.BootstrapStarted ->
                 state(MatrixRuntimePhase.BOOTSTRAPPING, "matrix_token_exchange")
             is MatrixRuntimeEvent.SessionReady -> if (event.networkAvailable) {
-                state(MatrixRuntimePhase.CONNECTING, "matrix_sync_connecting")
+                state(MatrixRuntimePhase.CONNECTING, "matrix_driver_starting")
             } else {
                 state(MatrixRuntimePhase.OFFLINE, "network_unavailable")
             }
             MatrixRuntimeEvent.SyncStarted ->
-                state(MatrixRuntimePhase.CONNECTING, "matrix_sync_connecting")
+                state(MatrixRuntimePhase.CONNECTING, "matrix_first_sync_waiting")
             MatrixRuntimeEvent.SyncUpdated ->
                 state(MatrixRuntimePhase.SYNCING, "matrix_sync_active")
             MatrixRuntimeEvent.NetworkLost -> if (

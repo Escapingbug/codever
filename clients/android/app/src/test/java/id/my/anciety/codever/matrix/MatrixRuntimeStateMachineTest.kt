@@ -21,6 +21,9 @@ class MatrixRuntimeStateMachineTest {
         assertPhase(MatrixRuntimePhase.WAITING_FOR_SESSION, MatrixRuntimeEvent.Start(false, true))
         assertPhase(MatrixRuntimePhase.BOOTSTRAPPING, MatrixRuntimeEvent.BootstrapStarted)
         assertPhase(MatrixRuntimePhase.CONNECTING, MatrixRuntimeEvent.SessionReady(true))
+        assertEquals("matrix_driver_starting", machine.status.detailCode)
+        assertPhase(MatrixRuntimePhase.CONNECTING, MatrixRuntimeEvent.SyncStarted)
+        assertEquals("matrix_first_sync_waiting", machine.status.detailCode)
         assertPhase(MatrixRuntimePhase.STOPPED, MatrixRuntimeEvent.Stop)
     }
 

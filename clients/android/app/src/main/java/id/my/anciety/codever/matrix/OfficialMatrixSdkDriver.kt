@@ -1,5 +1,6 @@
 package id.my.anciety.codever.matrix
 
+import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +70,7 @@ data class MatrixDecryptedEvent(
 class OfficialMatrixSdkDriver(
     private val callbackScope: CoroutineScope,
     private val now: () -> Long = System::currentTimeMillis,
+    private val diagnostics: DiagnosticRecorder = DiagnosticRecorder.None,
 ) : MatrixSdkDriver {
     private var client: Client? = null
     private var syncTask: TaskHandle? = null
@@ -96,6 +98,7 @@ class OfficialMatrixSdkDriver(
     ) {
         check(client == null) { "Matrix SDK driver is already started." }
         check(active.compareAndSet(false, true)) { "Matrix SDK driver is already active." }
+        diagnostics.record("matrix.driver.start")
         syncedBoundRoomReady = CompletableDeferred()
         firstSyncFinalizing.set(false)
         activeSession = secrets.session
@@ -120,6 +123,7 @@ class OfficialMatrixSdkDriver(
         }
         val storeKey = secrets.sdkStoreKey.copyOf()
         val built = try {
+            diagnostics.record("matrix.driver.store_opening")
             val sqliteStore = SqliteStoreBuilder(files.sdkDataPath, files.sdkCachePath)
                 .key(storeKey)
             ClientBuilder()
@@ -127,14 +131,18 @@ class OfficialMatrixSdkDriver(
                 .sqliteStore(sqliteStore)
                 .setSessionDelegate(delegate)
                 .build()
+                .also { diagnostics.record("matrix.driver.store_opened") }
         } catch (error: Exception) {
             active.set(false)
+            diagnostics.record("matrix.driver.store_failure", errorAttributes(error))
             throw error
         } finally {
             storeKey.fill(0)
         }
         try {
+            diagnostics.record("matrix.driver.session_restoring")
             built.restoreSession(activeSession.toSdkSession())
+            diagnostics.record("matrix.driver.session_restored")
             client = built
             val ownEd25519 = built.encryption().ed25519Key()
                 ?: throw IllegalStateException("Matrix did not publish this device's Ed25519 key.")
@@ -145,12 +153,17 @@ class OfficialMatrixSdkDriver(
                     ed25519 = ownEd25519,
                 ),
             )
-            ensureTimeline()
+            // Start network sync before constructing the timeline. A restored
+            // room can exist in the local store while timeline initialization
+            // still waits for fresh sync/encryption state. Awaiting it here
+            // used to prevent syncV2 from ever starting.
+            diagnostics.record("matrix.driver.sync_starting")
             syncTask = built.syncV2(
                 SyncSettingsV2(timeoutMs = 30_000uL, fullState = false),
                 object : SyncListenerV2 {
                     override fun onUpdate(response: SyncResponseV2) {
                         if (!active.get()) return
+                        diagnostics.record("matrix.driver.sync_update")
                         onSyncUpdate()
                         callbackScope.launch {
                             runCatching {
@@ -161,8 +174,10 @@ class OfficialMatrixSdkDriver(
                     }
                 },
             )
+            diagnostics.record("matrix.driver.sync_started")
         } catch (error: Exception) {
             active.set(false)
+            diagnostics.record("matrix.driver.start_failure", errorAttributes(error))
             built.close()
             throw error
         }
@@ -202,6 +217,7 @@ class OfficialMatrixSdkDriver(
     }
 
     override suspend fun stop() {
+        diagnostics.record("matrix.driver.stop")
         active.set(false)
         timelineTask.cancelAndClose()
         timelineTask = null
@@ -217,8 +233,13 @@ class OfficialMatrixSdkDriver(
 
     private suspend fun ensureTimeline() {
         if (timeline != null || !timelineStarting.compareAndSet(false, true)) return
+        diagnostics.record("matrix.timeline.preparing")
         try {
-            val room = client?.getRoom(activeSession.roomBinding.roomId) ?: return
+            val room = client?.getRoom(activeSession.roomBinding.roomId)
+            if (room == null) {
+                diagnostics.record("matrix.timeline.room_unavailable")
+                return
+            }
             val created = room.timeline()
             val listener = created.addListener(object : TimelineListener {
                 override fun onUpdate(diff: List<TimelineDiff>) {
@@ -228,6 +249,10 @@ class OfficialMatrixSdkDriver(
             })
             timeline = created
             timelineTask = listener
+            diagnostics.record("matrix.timeline.ready")
+        } catch (error: Exception) {
+            diagnostics.record("matrix.timeline.failure", errorAttributes(error))
+            throw error
         } finally {
             timelineStarting.set(false)
         }
@@ -284,8 +309,12 @@ class OfficialMatrixSdkDriver(
             return
         }
         try {
+            diagnostics.record("matrix.encryption.initializing")
             expectedClient.encryption().waitForE2eeInitializationTasks()
-            if (client === expectedClient) signalSyncedBoundRoomReady()
+            if (client === expectedClient) {
+                signalSyncedBoundRoomReady()
+                diagnostics.record("matrix.encryption.ready")
+            }
         } finally {
             firstSyncFinalizing.set(false)
         }
@@ -316,6 +345,10 @@ class OfficialMatrixSdkDriver(
         runCatching { cancel() }
         runCatching { close() }
     }
+
+    private fun errorAttributes(error: Throwable): Map<String, String> = mapOf(
+        "error" to error.javaClass.simpleName.replace(Regex("[^A-Za-z0-9._:+/-]"), "_").take(160),
+    )
 
     private companion object {
         const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L

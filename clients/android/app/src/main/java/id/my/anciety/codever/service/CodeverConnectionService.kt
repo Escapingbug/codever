@@ -19,6 +19,7 @@ import id.my.anciety.codever.R
 import id.my.anciety.codever.client.NativeClientRuntime
 import id.my.anciety.codever.client.events.ClientSnapshot
 import id.my.anciety.codever.client.events.PublicTrustState
+import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import id.my.anciety.codever.web.MainActivity
@@ -35,11 +36,14 @@ class CodeverConnectionService : Service() {
     private val binder = LocalBinder()
     private lateinit var preferences: ServicePreferenceStore
     private lateinit var clientRuntime: NativeClientRuntime
+    private lateinit var diagnostics: NativeDiagnosticLog
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
+        diagnostics = NativeDiagnosticLog.get(this)
+        diagnostics.record("service.created")
         preferences = ServicePreferenceStore(this)
         clientRuntime = NativeClientRuntime(
             context = this,
@@ -55,16 +59,19 @@ class CodeverConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
         when (ServiceStartPolicy.decide(intent?.action, preferences.restoreEnabled)) {
             ServiceStartDecision.KEEP_RUNNING -> {
+                diagnostics.record("service.start", mapOf("source" to (intent?.action ?: "sticky")))
                 preferences.restoreEnabled = true
                 enterForeground()
                 clientRuntime.start()
                 START_STICKY
             }
             ServiceStartDecision.STOP_EXPLICITLY -> {
+                diagnostics.record("service.disconnect")
                 disconnectExplicitly()
                 START_NOT_STICKY
             }
             ServiceStartDecision.STOP_DISABLED -> {
+                diagnostics.record("service.stop_disabled")
                 stopSelf(startId)
                 START_NOT_STICKY
             }
@@ -73,6 +80,7 @@ class CodeverConnectionService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
+        diagnostics.record("service.destroyed")
         foregroundStarted = false
         runBlocking(Dispatchers.IO) { clientRuntime.close() }
         serviceScope.cancel()
@@ -81,6 +89,7 @@ class CodeverConnectionService : Service() {
 
     private fun enterForeground() {
         if (foregroundStarted) return
+        diagnostics.record("service.foreground_started")
         val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
         } else {
@@ -140,6 +149,18 @@ class CodeverConnectionService : Service() {
                         this,
                         0,
                         Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                )
+                .addAction(
+                    0,
+                    getString(R.string.notification_export_logs),
+                    PendingIntent.getActivity(
+                        this,
+                        2,
+                        Intent(this, MainActivity::class.java)
+                            .setAction(MainActivity.ACTION_EXPORT_DIAGNOSTICS)
                             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                     ),

@@ -1,12 +1,15 @@
 package id.my.anciety.codever.matrix
 
 import android.content.Context
+import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -14,6 +17,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 
 fun interface MatrixSdkDriverFactory {
     fun create(scope: CoroutineScope): MatrixSdkDriver
@@ -31,8 +35,12 @@ class MatrixConnectionRuntime(
         context,
         AndroidKeystoreSecretCipher(),
     ),
-    private val driverFactory: MatrixSdkDriverFactory = MatrixSdkDriverFactory(::OfficialMatrixSdkDriver),
+    private val diagnostics: DiagnosticRecorder = DiagnosticRecorder.None,
+    private val driverFactory: MatrixSdkDriverFactory = MatrixSdkDriverFactory { scope ->
+        OfficialMatrixSdkDriver(scope, diagnostics = diagnostics)
+    },
     private val stateMachine: MatrixRuntimeStateMachine = MatrixRuntimeStateMachine(),
+    private val liveness: MatrixSyncLiveness = MatrixSyncLiveness(),
     private val retryDelayMs: Long = 5_000,
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onDecryptedEvent: (MatrixDecryptedEvent) -> Unit = {},
@@ -57,17 +65,19 @@ class MatrixConnectionRuntime(
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        stateMachine.accept(MatrixRuntimeEvent.Start(hasSession = true, networkAvailable))
+        diagnostics.record("matrix.runtime.start")
+        accept(MatrixRuntimeEvent.Start(hasSession = true, networkAvailable))
         networkMonitor.start(::onNetworkChanged)
         scope.launch {
             try {
                 mutex.withLock {
                     restorePersistedSessionLocked()
-                    stateMachine.accept(MatrixRuntimeEvent.Start(secrets != null, networkAvailable))
+                    accept(MatrixRuntimeEvent.Start(secrets != null, networkAvailable))
                     if (secrets != null && networkAvailable) runCatching { connectLocked() }
                 }
-            } catch (_: Exception) {
-                stateMachine.accept(
+            } catch (error: Exception) {
+                diagnostics.record("matrix.recovery.failure", errorAttributes(error))
+                accept(
                     MatrixRuntimeEvent.Failed("matrix_recovery_blocked", blocked = true),
                 )
             }
@@ -77,9 +87,20 @@ class MatrixConnectionRuntime(
                 delay(WATCHDOG_INTERVAL_MS)
                 mutex.withLock {
                     val running = runCatching { driver?.isSyncRunning() == true }.getOrDefault(false)
-                    if (started.get() && networkAvailable && secrets != null && !running
-                    ) {
-                        stateMachine.accept(MatrixRuntimeEvent.RetryScheduled)
+                    val reason = if (started.get() && networkAvailable && secrets != null) {
+                        liveness.restartReason(running, stateMachine.status.phase)
+                    } else {
+                        null
+                    }
+                    if (reason != null) {
+                        diagnostics.record(
+                            "matrix.watchdog.restart",
+                            mapOf(
+                                "reason" to reason.name,
+                                "running" to running.toString(),
+                            ),
+                        )
+                        accept(MatrixRuntimeEvent.Failed(reason.detailCode, blocked = false))
                         scheduleRetryLocked()
                     }
                 }
@@ -144,7 +165,7 @@ class MatrixConnectionRuntime(
             watchdogJob?.cancel()
             watchdogJob = null
             networkMonitor.stop()
-            runCatching { current.stop() }
+            stopDriver(current)
             driver = null
             driverGeneration += 1
             files?.let(accountStorage::clear)
@@ -152,8 +173,9 @@ class MatrixConnectionRuntime(
             secrets = null
             files = null
             latestJournalCursor = 0
+            liveness.reset()
             started.set(false)
-            stateMachine.accept(MatrixRuntimeEvent.Stop)
+            accept(MatrixRuntimeEvent.Stop)
         }
     }.await()
 
@@ -171,11 +193,11 @@ class MatrixConnectionRuntime(
             return existing.toPublic()
         }
 
-        stateMachine.accept(MatrixRuntimeEvent.BootstrapStarted)
+        accept(MatrixRuntimeEvent.BootstrapStarted)
         val session = try {
             loginClient.exchange(input)
         } catch (error: Exception) {
-            stateMachine.accept(
+            accept(
                 MatrixRuntimeEvent.Failed(
                     detailCode = if ((error as? MatrixLoginException)?.retryable == true) {
                         "matrix_login_retryable"
@@ -197,7 +219,7 @@ class MatrixConnectionRuntime(
         nextFiles.sessionStore.save(nextSecrets)
         files = nextFiles
         secrets = nextSecrets
-        stateMachine.accept(MatrixRuntimeEvent.SessionReady(networkAvailable))
+        accept(MatrixRuntimeEvent.SessionReady(networkAvailable))
         if (networkAvailable) connectLocked()
         return session.toPublic()
     }
@@ -213,7 +235,7 @@ class MatrixConnectionRuntime(
         watchdogJob?.cancel()
         watchdogJob = null
         networkMonitor.stop()
-        driver?.stop()
+        driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
         if (clearSession) {
@@ -223,7 +245,8 @@ class MatrixConnectionRuntime(
             files = null
             latestJournalCursor = 0
         }
-        stateMachine.accept(MatrixRuntimeEvent.Stop)
+        liveness.reset()
+        accept(MatrixRuntimeEvent.Stop)
     }
 
     suspend fun close() {
@@ -236,24 +259,28 @@ class MatrixConnectionRuntime(
         scope.launch {
             mutex.withLock {
                 networkAvailable = available
+                diagnostics.record(
+                    "matrix.network.changed",
+                    mapOf("available" to available.toString()),
+                )
                 if (!available) {
-                    stateMachine.accept(MatrixRuntimeEvent.NetworkLost)
+                    accept(MatrixRuntimeEvent.NetworkLost)
                     runCatching { driver?.setNetworkAvailable(false) }
                     return@withLock
                 }
-                stateMachine.accept(MatrixRuntimeEvent.NetworkAvailable)
+                accept(MatrixRuntimeEvent.NetworkAvailable)
                 val currentDriver = driver
                 val sendQueueResumed = runCatching {
                     currentDriver?.setNetworkAvailable(true)
                 }.isSuccess
                 if (!sendQueueResumed && currentDriver != null) {
-                    stateMachine.accept(
+                    accept(
                         MatrixRuntimeEvent.Failed(
                             "matrix_send_queue_resume_failed",
                             blocked = false,
                         ),
                     )
-                    runCatching { currentDriver.stop() }
+                    stopDriver(currentDriver)
                     if (driver === currentDriver) {
                         driver = null
                         driverGeneration += 1
@@ -262,6 +289,7 @@ class MatrixConnectionRuntime(
                     return@withLock
                 }
                 val running = runCatching { driver?.isSyncRunning() == true }.getOrDefault(false)
+                if (running) liveness.networkResumed()
                 if (started.get() && secrets != null && !running) {
                     runCatching { connectLocked() }
                 }
@@ -290,79 +318,94 @@ class MatrixConnectionRuntime(
         if (!networkAvailable || !started.get()) return
         retryJob?.cancel()
         retryJob = null
-        driver?.stop()
+        driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
         val generation = driverGeneration
         val nextDriver = try {
             driverFactory.create(scope)
         } catch (error: Exception) {
-            stateMachine.accept(
+            accept(
                 MatrixRuntimeEvent.Failed("matrix_driver_create_failed", blocked = false),
             )
             scheduleRetryLocked()
             throw error
         }
         driver = nextDriver
-        stateMachine.accept(MatrixRuntimeEvent.SessionReady(networkAvailable = true))
+        liveness.connectionStarted()
+        accept(MatrixRuntimeEvent.SessionReady(networkAvailable = true))
         try {
-            nextDriver.start(
-                secrets = currentSecrets,
-                files = currentFiles,
-                onSyncUpdate = {
-                    scope.launch {
-                        mutex.withLock {
-                            if (driver === nextDriver && driverGeneration == generation) {
-                                stateMachine.accept(MatrixRuntimeEvent.SyncUpdated)
+            withTimeout(DRIVER_START_TIMEOUT_MS) {
+                nextDriver.start(
+                    secrets = currentSecrets,
+                    files = currentFiles,
+                    onSyncUpdate = {
+                        scope.launch {
+                            mutex.withLock {
+                                if (driver === nextDriver && driverGeneration == generation) {
+                                    liveness.syncUpdated()
+                                    retryJob?.cancel()
+                                    retryJob = null
+                                    accept(MatrixRuntimeEvent.SyncUpdated)
+                                }
                             }
                         }
-                    }
-                },
-                onSessionUpdated = { updated ->
-                    scope.launch {
-                        mutex.withLock {
-                            if (driver === nextDriver && driverGeneration == generation) {
-                                secrets = PersistedMatrixSecrets(currentSecrets.sdkStoreKey, updated)
+                    },
+                    onSessionUpdated = { updated ->
+                        scope.launch {
+                            mutex.withLock {
+                                if (driver === nextDriver && driverGeneration == generation) {
+                                    secrets = PersistedMatrixSecrets(currentSecrets.sdkStoreKey, updated)
+                                }
                             }
                         }
-                    }
-                },
-                onJournalAdvanced = { cursor ->
-                    scope.launch {
-                        mutex.withLock {
-                            if (driver === nextDriver && driverGeneration == generation) {
-                                latestJournalCursor = cursor
+                    },
+                    onJournalAdvanced = { cursor ->
+                        scope.launch {
+                            mutex.withLock {
+                                if (driver === nextDriver && driverGeneration == generation) {
+                                    latestJournalCursor = cursor
+                                }
                             }
                         }
-                    }
-                },
-                onTransportReady = onTransportReady,
-                onDecryptedEvent = onDecryptedEvent,
-                onRuntimeFailure = {
-                    scope.launch {
-                        mutex.withLock {
-                            if (driver === nextDriver && driverGeneration == generation) {
-                                stateMachine.accept(
-                                    MatrixRuntimeEvent.Failed("matrix_runtime_failed", blocked = false),
-                                )
-                                runCatching { nextDriver.stop() }
-                                driver = null
-                                driverGeneration += 1
-                                scheduleRetryLocked()
+                    },
+                    onTransportReady = onTransportReady,
+                    onDecryptedEvent = onDecryptedEvent,
+                    onRuntimeFailure = { error ->
+                        diagnostics.record("matrix.driver.runtime_failure", errorAttributes(error))
+                        scope.launch {
+                            mutex.withLock {
+                                if (driver === nextDriver && driverGeneration == generation) {
+                                    accept(
+                                        MatrixRuntimeEvent.Failed("matrix_runtime_failed", blocked = false),
+                                    )
+                                    stopDriver(nextDriver)
+                                    driver = null
+                                    driverGeneration += 1
+                                    scheduleRetryLocked()
+                                }
                             }
                         }
-                    }
-                },
-            )
-            stateMachine.accept(MatrixRuntimeEvent.SyncStarted)
+                    },
+                )
+            }
+            accept(MatrixRuntimeEvent.SyncStarted)
         } catch (error: Exception) {
-            runCatching { nextDriver.stop() }
+            diagnostics.record("matrix.driver.start_failure", errorAttributes(error))
+            stopDriver(nextDriver)
             if (driver === nextDriver && driverGeneration == generation) {
                 driver = null
                 driverGeneration += 1
             }
-            stateMachine.accept(
-                MatrixRuntimeEvent.Failed("matrix_restore_or_sync_failed", blocked = false),
+            accept(
+                MatrixRuntimeEvent.Failed(
+                    if (error is TimeoutCancellationException) {
+                        "matrix_driver_start_timeout"
+                    } else {
+                        "matrix_restore_or_sync_failed"
+                    },
+                    blocked = false,
+                ),
             )
             scheduleRetryLocked()
             throw error
@@ -371,6 +414,7 @@ class MatrixConnectionRuntime(
 
     private fun scheduleRetryLocked() {
         if (retryJob?.isActive == true || !networkAvailable || secrets == null || !started.get()) return
+        diagnostics.record("matrix.retry.scheduled")
         retryJob = scope.launch {
             delay(retryDelayMs)
             mutex.withLock {
@@ -382,6 +426,37 @@ class MatrixConnectionRuntime(
         }
     }
 
+    private fun accept(event: MatrixRuntimeEvent): MatrixRuntimeStatus {
+        val previous = stateMachine.status
+        val next = stateMachine.accept(event)
+        if (next != previous) {
+            diagnostics.record(
+                "matrix.state",
+                mapOf(
+                    "phase" to next.phase.name,
+                    "detail" to next.detailCode,
+                ),
+            )
+        }
+        return next
+    }
+
+    private suspend fun stopDriver(current: MatrixSdkDriver) {
+        try {
+            withTimeout(DRIVER_STOP_TIMEOUT_MS) { current.stop() }
+        } catch (_: TimeoutCancellationException) {
+            diagnostics.record("matrix.driver.stop_timeout")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            diagnostics.record("matrix.driver.stop_failure", errorAttributes(error))
+        }
+    }
+
+    private fun errorAttributes(error: Throwable): Map<String, String> = mapOf(
+        "error" to error.javaClass.simpleName.replace(Regex("[^A-Za-z0-9._:+/-]"), "_").take(160),
+    )
+
     private fun StoredMatrixSession.toPublic() = PublicMatrixSession(
         homeserver = homeserverUrl,
         userId = userId,
@@ -390,6 +465,8 @@ class MatrixConnectionRuntime(
     )
 
     private companion object {
-        const val WATCHDOG_INTERVAL_MS = 10_000L
+        const val WATCHDOG_INTERVAL_MS = 5_000L
+        const val DRIVER_START_TIMEOUT_MS = 30_000L
+        const val DRIVER_STOP_TIMEOUT_MS = 10_000L
     }
 }

@@ -3,6 +3,7 @@ package id.my.anciety.codever.web
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.content.ClipData
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
@@ -34,7 +35,9 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import id.my.anciety.codever.BuildConfig
+import id.my.anciety.codever.R
 import id.my.anciety.codever.bridge.BridgeRuntime
 import id.my.anciety.codever.bridge.BridgeError
 import id.my.anciety.codever.bridge.BridgeRuntimeFailure
@@ -44,6 +47,7 @@ import id.my.anciety.codever.client.NativeClientRuntime
 import id.my.anciety.codever.client.NativePairingRejectedException
 import id.my.anciety.codever.client.events.ClientSnapshot
 import id.my.anciety.codever.client.events.PublicTrustState
+import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.service.CodeverConnectionService
 import id.my.anciety.codever.service.ActivityLaunchDecision
 import id.my.anciety.codever.service.ServicePreferenceStore
@@ -63,6 +67,7 @@ class MainActivity : ComponentActivity() {
     private var nativeBridge: NativeWebBridge? = null
     private var foreground = false
     private var pendingForegroundStart = false
+    private val diagnostics by lazy { NativeDiagnosticLog.get(this) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -103,13 +108,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        diagnostics.record("activity.created")
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val current = webView
                 if (current?.canGoBack() == true) current.goBack() else finish()
             }
         })
+        handleIntent(intent)
         ensureHostBound()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onStart() {
@@ -143,6 +156,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        diagnostics.record("activity.destroyed")
         nativeBridge?.close()
         nativeBridge = null
         webView?.apply {
@@ -333,6 +347,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action != ACTION_EXPORT_DIAGNOSTICS) return
+        intent.action = null
+        diagnostics.record("diagnostics.export_requested")
+        runCatching {
+            val report = diagnostics.export()
+            val uri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                report,
+            )
+            val share = Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, "Codever native diagnostics ${BuildConfig.VERSION_NAME}")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            share.clipData = ClipData.newRawUri("Codever diagnostics", uri)
+            startActivity(Intent.createChooser(share, getString(R.string.diagnostics_share_title)))
+            diagnostics.record("diagnostics.export_shared")
+        }.onFailure { error ->
+            diagnostics.record(
+                "diagnostics.export_failure",
+                mapOf(
+                    "error" to error.javaClass.simpleName
+                        .replace(Regex("[^A-Za-z0-9._:+/-]"), "_")
+                        .take(160),
+                ),
+            )
+            showRecoveryPage("The native diagnostic report could not be exported.")
+        }
+    }
+
     private fun showRecoveryPage(detail: String) {
         setContentView(messageView(
             title = "Codever is temporarily unavailable",
@@ -487,7 +533,9 @@ class MainActivity : ComponentActivity() {
         dialog.show()
     }
 
-    private companion object {
-        const val KEY_NOTIFICATION_REQUESTED = "notification-permission-requested"
+    companion object {
+        private const val KEY_NOTIFICATION_REQUESTED = "notification-permission-requested"
+        const val ACTION_EXPORT_DIAGNOSTICS =
+            "id.my.anciety.codever.action.EXPORT_DIAGNOSTICS"
     }
 }

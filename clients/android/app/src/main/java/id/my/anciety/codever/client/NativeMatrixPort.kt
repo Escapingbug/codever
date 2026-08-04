@@ -1,6 +1,7 @@
 package id.my.anciety.codever.client
 
 import android.content.Context
+import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixConnectionRuntime
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
@@ -32,8 +33,10 @@ interface NativeMatrixPort {
 class MatrixNativePort(context: Context) : NativeMatrixPort {
     @Volatile
     private var observer: NativeMatrixObserver? = null
+    private val diagnostics = NativeDiagnosticLog.get(context)
     private val runtime = MatrixConnectionRuntime(
         context = context,
+        diagnostics = diagnostics,
         onTransportReady = { identity -> observer?.onTransportReady(identity) },
         onDecryptedEvent = { event -> observer?.onDecryptedEvent(event) },
     )

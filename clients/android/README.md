@@ -25,6 +25,12 @@ one identity from being driven by both transports.
 - A visible ongoing `remoteMessaging` notification is mandatory. There is no
   battery-saving or connection-mode selector. Refusing notification permission
   blocks native connection startup with a visible explanation.
+- The ongoing notification exposes **Export logs**. It creates a bounded text
+  report that can be shared directly to Telegram even when the hosted Web UI
+  cannot connect. Reports contain the exact APK build, Android version, native
+  lifecycle transitions, Matrix startup stages, timeouts, retries, and exception
+  class names. Tokens, message content, room/user identifiers, device keys, and
+  free-form exception messages are never recorded.
 - Explicit Disconnect finishes the native runtime before stopping the service.
   Remove This Device requires a native confirmation, logs the Matrix device out
   while online, and only then wipes local credentials. A failed remote logout
@@ -33,6 +39,12 @@ one identity from being driven by both transports.
 
 Android's explicit force-stop remains a platform override: no application can
 restart itself until the user opens it again.
+
+Matrix v2 sync starts before the bound-room timeline is constructed. Startup has
+a 30-second driver deadline, while the connection watchdog restarts a running
+task that produces no first response within 45 seconds or no later response for
+75 seconds. This prevents a live task handle or blocked timeline initialization
+from leaving the public lifecycle in `connecting` indefinitely.
 
 ## Native capabilities
 
