@@ -3,6 +3,14 @@ import { normalizeHomeserver } from "./matrix";
 
 const PASSWORD_LOGIN_TYPE = "m.login.password";
 const TOKEN_LOGIN_TYPE = "m.login.token";
+const DEFAULT_MATRIX_RATE_LIMIT_RETRY_MS = 60_000;
+
+export class MatrixRateLimitError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super("Matrix is temporarily limiting new-device sign-ins.");
+    this.name = "MatrixRateLimitError";
+  }
+}
 
 export type MatrixLoginCredentials = Pick<
   MatrixConnectionConfig,
@@ -47,6 +55,7 @@ export async function requestMatrixLoginToken(
   }
   if (initial.response.status !== 401) {
     throw matrixApiError(
+      initial.response.status,
       initial.body,
       "The homeserver could not create a device login token.",
     );
@@ -74,6 +83,7 @@ export async function requestMatrixLoginToken(
   });
   if (!completed.response.ok) {
     throw matrixApiError(
+      completed.response.status,
       completed.body,
       "Matrix reauthentication was not accepted.",
     );
@@ -130,7 +140,11 @@ async function login(
   });
   const result = await readJson(response);
   if (!response.ok) {
-    throw matrixApiError(result, "Matrix sign-in was not accepted.");
+    throw matrixApiError(
+      response.status,
+      result,
+      "Matrix sign-in was not accepted.",
+    );
   }
   const accessToken =
     typeof result?.access_token === "string" ? result.access_token : "";
@@ -226,9 +240,19 @@ async function readJson(
 }
 
 function matrixApiError(
+  status: number,
   body: Record<string, unknown> | null,
   fallback: string,
 ): Error {
+  if (status === 429 || body?.errcode === "M_LIMIT_EXCEEDED") {
+    const retryAfterMs =
+      typeof body?.retry_after_ms === "number" &&
+      Number.isSafeInteger(body.retry_after_ms) &&
+      body.retry_after_ms > 0
+        ? body.retry_after_ms
+        : DEFAULT_MATRIX_RATE_LIMIT_RETRY_MS;
+    return new MatrixRateLimitError(retryAfterMs);
+  }
   return new Error(
     typeof body?.error === "string" && body.error.trim()
       ? body.error

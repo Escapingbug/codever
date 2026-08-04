@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
+  MatrixRateLimitError,
   loginWithMatrixPassword,
   loginWithMatrixToken,
   requestMatrixLoginToken,
@@ -71,6 +72,28 @@ test("reports unsupported get_token so the PWA can offer normal Matrix login", a
     }),
     { status: "unsupported" },
   );
+});
+
+test("preserves the Matrix retry delay instead of exposing a raw 429 message", async () => {
+  globalThis.fetch = async () =>
+    jsonResponse(
+      {
+        errcode: "M_LIMIT_EXCEEDED",
+        error: "Too Many Requests",
+        retry_after_ms: 42_500,
+      },
+      429,
+    );
+
+  const error = await requestMatrixLoginToken({
+    homeserver: "https://matrix.example",
+    userId: "@alice:example",
+    accessToken: "current-access-token",
+  }).catch((reason: unknown) => reason);
+
+  assert.ok(error instanceof MatrixRateLimitError);
+  assert.equal(error.retryAfterMs, 42_500);
+  assert.equal(error.message, "Matrix is temporarily limiting new-device sign-ins.");
 });
 
 test("creates independent Matrix device sessions from token or password login", async () => {

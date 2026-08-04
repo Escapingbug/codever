@@ -24,7 +24,14 @@ import {
   waitForCommandCompletion,
   type CommandCompletion,
 } from "./commandLifecycle";
-import { DeviceInvitationLifecycle } from "./deviceInvitationLifecycle";
+import {
+  DeviceInvitationLifecycle,
+  InvitationRequestCancelledError,
+} from "./deviceInvitationLifecycle";
+import {
+  MatrixLoginTokenLifecycle,
+  MatrixLoginTokenRequestCancelledError,
+} from "./matrixLoginTokenLifecycle";
 import {
   SENDING_AGENT_ACTIVITY,
   STARTING_AGENT_ACTIVITY,
@@ -412,6 +419,9 @@ export function CodeverApp() {
   const historyLoadingRef = useRef(false);
   const deviceInvitationLifecycleRef = useRef(
     new DeviceInvitationLifecycle<GeneratedDeviceInvitation>(),
+  );
+  const matrixLoginTokenLifecycleRef = useRef(
+    new MatrixLoginTokenLifecycle(),
   );
   const invitationExpiryTimeoutRef = useRef<number | null>(null);
   const pendingGatewayInvitationRef = useRef<{
@@ -1587,6 +1597,7 @@ export function CodeverApp() {
     setHistoryError(null);
     setHistoryRetryMode(null);
     deviceInvitationLifecycleRef.current.clear();
+    matrixLoginTokenLifecycleRef.current.clear();
     pendingGatewayInvitationRef.current = null;
     if (invitationExpiryTimeoutRef.current !== null) {
       window.clearTimeout(invitationExpiryTimeoutRef.current);
@@ -1810,6 +1821,7 @@ export function CodeverApp() {
             !gatewayInvitation ||
             gatewayInvitation.expiresAt <= Date.now() + 15_000
           ) {
+            matrixLoginTokenLifecycleRef.current.clear();
             pendingGatewayInvitationRef.current = null;
             let completion: CommandCompletion;
             let commandId: string | null = null;
@@ -1871,10 +1883,23 @@ export function CodeverApp() {
           // Request the one-time Matrix credential only after the potentially
           // slow Gateway command completes, so queue delay cannot consume most
           // of the credential's useful lifetime.
-          const tokenResult = await requestMatrixLoginToken(
-            matrixConfig,
-            password,
-          );
+          const tokenResult =
+            await matrixLoginTokenLifecycleRef.current.request({
+              invitationId: gatewayInvitation.commandId,
+              invitationExpiresAt: gatewayInvitation.expiresAt,
+              issue: () => requestMatrixLoginToken(matrixConfig, password),
+              onRateLimit: (remainingMs) => {
+                if (remainingMs === 0) {
+                  setInvitationError(
+                    "Matrix is accepting another sign-in attempt. Finishing this invitation…",
+                  );
+                  return;
+                }
+                setInvitationError(
+                  `Matrix temporarily limited new-device sign-ins. Codever is keeping this invitation and will retry it in ${Math.ceil(remainingMs / 1_000)} seconds.`,
+                );
+              },
+            });
           if (
             tokenResult.status === "reauth-required" &&
             tokenResult.passwordSupported
@@ -1903,12 +1928,14 @@ export function CodeverApp() {
           if (shortened.expiresAt <= Date.now() + 15_000) {
             await connection.releaseCommand(gatewayInvitation.commandId);
             pendingGatewayInvitationRef.current = null;
+            matrixLoginTokenLifecycleRef.current.clear();
             throw new Error(
               "The recovered device invitation expired before it could be displayed. Create a new one.",
             );
           }
-          pendingGatewayInvitationRef.current = null;
           await connection.releaseCommand(gatewayInvitation.commandId);
+          pendingGatewayInvitationRef.current = null;
+          matrixLoginTokenLifecycleRef.current.clear();
           return shortened;
         },
       );
@@ -1916,7 +1943,11 @@ export function CodeverApp() {
       setInvitationReauthRequired(false);
       setInvitationError(null);
     } catch (error) {
-      if (!(error instanceof InvitationReauthenticationRequiredError)) {
+      if (
+        !(error instanceof InvitationReauthenticationRequiredError) &&
+        !(error instanceof InvitationRequestCancelledError) &&
+        !(error instanceof MatrixLoginTokenRequestCancelledError)
+      ) {
         setInvitationError(formatUiError(error));
       }
     } finally {
@@ -1932,6 +1963,7 @@ export function CodeverApp() {
     invitationExpiryTimeoutRef.current = window.setTimeout(() => {
       invitationExpiryTimeoutRef.current = null;
       deviceInvitationLifecycleRef.current.clear();
+      matrixLoginTokenLifecycleRef.current.clear();
       pendingGatewayInvitationRef.current = null;
       setDeviceInvitation(null);
       setInvitationError("This device invitation expired. Create a new one.");
@@ -3836,6 +3868,7 @@ export function CodeverApp() {
         }
         onClearInvitation={() => {
           deviceInvitationLifecycleRef.current.clear();
+          matrixLoginTokenLifecycleRef.current.clear();
           const pendingGatewayInvitation = pendingGatewayInvitationRef.current;
           if (pendingGatewayInvitation) {
             void codeverClientRef.current?.releaseCommand(
