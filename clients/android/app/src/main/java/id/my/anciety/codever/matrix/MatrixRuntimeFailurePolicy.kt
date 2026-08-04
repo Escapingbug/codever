@@ -19,3 +19,14 @@ internal object MatrixRuntimeFailurePolicy {
         )
     }
 }
+
+internal object MatrixSyncRestartPolicy {
+    fun decide(
+        reason: MatrixSyncRestartReason,
+        syncTaskRunning: Boolean,
+    ): MatrixRuntimeFailureDecision = when {
+        reason == MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT && syncTaskRunning ->
+            MatrixRuntimeFailureDecision(reason.detailCode, blocked = true)
+        else -> MatrixRuntimeFailureDecision(reason.detailCode, blocked = false)
+    }
+}

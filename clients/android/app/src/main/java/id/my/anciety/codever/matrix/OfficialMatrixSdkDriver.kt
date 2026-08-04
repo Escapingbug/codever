@@ -12,6 +12,7 @@ import kotlinx.coroutines.withTimeout
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
+import org.matrix.rustcomponents.sdk.CrossProcessLockConfig
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.MediaSource
@@ -20,6 +21,7 @@ import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
+import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.SyncServiceState
 import org.matrix.rustcomponents.sdk.SyncServiceStateObserver
@@ -144,6 +146,8 @@ class OfficialMatrixSdkDriver(
                 .key(storeKey)
             ClientBuilder()
                 .homeserverUrl(activeSession.homeserverUrl)
+                .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.NATIVE)
+                .crossProcessLockConfig(CrossProcessLockConfig.SingleProcess)
                 .sqliteStore(sqliteStore)
                 .setSessionDelegate(delegate)
                 .build()
@@ -160,6 +164,10 @@ class OfficialMatrixSdkDriver(
             built.restoreSession(activeSession.toSdkSession())
             diagnostics.record("matrix.driver.session_restored")
             client = built
+            diagnostics.record(
+                "matrix.driver.client_ready",
+                mapOf("stage" to "NATIVE_SINGLE_PROCESS"),
+            )
             val ownEd25519 = built.encryption().ed25519Key()
                 ?: throw IllegalStateException("Matrix did not publish this device's Ed25519 key.")
             val transportIdentity = MatrixTransportIdentity(
@@ -169,6 +177,8 @@ class OfficialMatrixSdkDriver(
             )
             diagnostics.record("matrix.driver.sync_service_building")
             val service = built.syncService()
+                .withSharePos(true)
+                .withRoomListConnectionId(ROOM_LIST_CONNECTION_ID)
                 .withRoomListTimelineLimit(1u)
                 .finish()
             val roomList = service.roomListService()
@@ -489,6 +499,7 @@ class OfficialMatrixSdkDriver(
     )
 
     private companion object {
+        const val ROOM_LIST_CONNECTION_ID = "codever-native-v2"
         const val E2EE_INITIALIZATION_TIMEOUT_MS = 45_000L
         const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L
         const val BOUND_ROOM_POLL_INTERVAL_MS = 100L

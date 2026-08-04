@@ -2,10 +2,48 @@ package id.my.anciety.codever.matrix
 
 import java.nio.file.Files
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MatrixAccountWiperTest {
+    @Test
+    fun `native cache migration preserves crypto data and removes only legacy cache`() {
+        val accountRoot = Files.createTempDirectory("codever-matrix-cache-migration").toFile()
+        try {
+            val data = accountRoot.resolve("data").apply { mkdirs() }
+            data.resolve("crypto.db").writeText("preserve-device-identity")
+            val legacyCache = accountRoot.resolve("cache").apply { mkdirs() }
+            legacyCache.resolve("sliding-sync.db").writeText("discard")
+
+            val prepared = MatrixAccountCacheMigration.prepare(accountRoot)
+
+            assertTrue(prepared.migrated)
+            assertEquals(accountRoot.resolve("cache-v2").canonicalFile, prepared.directory)
+            assertTrue(prepared.directory.isDirectory)
+            assertFalse(legacyCache.exists())
+            assertEquals("preserve-device-identity", data.resolve("crypto.db").readText())
+        } finally {
+            accountRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `native cache migration is idempotent`() {
+        val accountRoot = Files.createTempDirectory("codever-matrix-cache-current").toFile()
+        try {
+            val first = MatrixAccountCacheMigration.prepare(accountRoot)
+            first.directory.resolve("current-cache.db").writeText("keep")
+            val second = MatrixAccountCacheMigration.prepare(accountRoot)
+
+            assertFalse(first.migrated)
+            assertFalse(second.migrated)
+            assertEquals("keep", second.directory.resolve("current-cache.db").readText())
+        } finally {
+            accountRoot.deleteRecursively()
+        }
+    }
+
     @Test
     fun `revoke wipe deletes only the validated account sdk directory`() {
         val root = Files.createTempDirectory("codever-matrix-wipe").toFile()

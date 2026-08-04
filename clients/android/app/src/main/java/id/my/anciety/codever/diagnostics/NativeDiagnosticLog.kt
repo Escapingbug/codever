@@ -10,6 +10,7 @@ class NativeDiagnosticLog private constructor(
     context: Context,
     private val now: () -> Long = System::currentTimeMillis,
 ) : DiagnosticRecorder {
+    private val applicationContext = context.applicationContext
     private val lock = Any()
     private val directory = File(context.filesDir, "diagnostics")
     private val current = File(directory, "native-current.log")
@@ -46,6 +47,12 @@ class NativeDiagnosticLog private constructor(
             output.appendLine()
             appendFile(previous, output)
             appendFile(current, output)
+            runCatching {
+                MatrixSdkTraceLog.appendSanitizedSummary(applicationContext, output)
+            }.onFailure {
+                output.appendLine()
+                output.appendLine("Matrix SDK trace summary unavailable")
+            }
         }
         destination
     }

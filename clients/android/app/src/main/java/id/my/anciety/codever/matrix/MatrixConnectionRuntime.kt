@@ -100,19 +100,20 @@ class MatrixConnectionRuntime(
                         null
                     }
                     if (reason != null) {
+                        val decision = MatrixSyncRestartPolicy.decide(reason, running)
                         diagnostics.record(
-                            "matrix.watchdog.restart",
+                            "matrix.watchdog.failure",
                             mapOf(
                                 "reason" to reason.name,
                                 "running" to running.toString(),
                             ),
                         )
-                        accept(MatrixRuntimeEvent.Failed(reason.detailCode, blocked = false))
+                        accept(MatrixRuntimeEvent.Failed(decision.detailCode, decision.blocked))
                         val staleDriver = driver
                         driver = null
                         driverGeneration += 1
                         if (staleDriver != null) stopDriver(staleDriver)
-                        scheduleRetryLocked()
+                        if (!decision.blocked) scheduleRetryLocked()
                     }
                 }
             }
@@ -347,6 +348,12 @@ class MatrixConnectionRuntime(
     private fun restorePersistedSessionLocked() {
         if (secrets != null) return
         val currentFiles = accountStorage.findCurrent() ?: return
+        if (currentFiles.sdkCacheMigrated) {
+            diagnostics.record(
+                "matrix.cache.migrated",
+                mapOf("stage" to "NATIVE_SYNC_CACHE_V2"),
+            )
+        }
         val loaded = currentFiles.sessionStore.load() ?: return
         check(
             MatrixIdentifiers.accountStoreName(

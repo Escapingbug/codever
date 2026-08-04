@@ -30,8 +30,8 @@ one identity from being driven by both transports.
   report that can be shared directly to Telegram even when the hosted Web UI
   cannot connect. Reports contain the exact APK build, Android version, native
   lifecycle transitions, Matrix startup stages, timeouts, retries, and exception
-  class names. Tokens, message content, room/user identifiers, device keys, and
-  free-form exception messages are never recorded.
+  class names. Exported reports never include tokens, message content, room/user
+  identifiers, device keys, raw SDK messages, or free-form exception messages.
 - Explicit Disconnect finishes the native runtime before stopping the service.
   Remove This Device requires a native confirmation, logs the Matrix device out
   while online, and only then wipes local credentials. A failed remote logout
@@ -41,15 +41,25 @@ one identity from being driven by both transports.
 Android's explicit force-stop remains a platform override: no application can
 restart itself until the user opens it again.
 
-The Matrix SDK `SyncService` supervises native sliding sync for both the room
-list and encryption. Existing v2 sessions are migrated in place to the native
-sliding-sync session mode. The bound room is subscribed before the service
-starts, and the room-list state must reach `RUNNING` before E2EE finalization,
-timeline construction, and transport readiness. Startup has a 30-second driver
-deadline, while the connection watchdog still enforces a 45-second first-sync
-deadline and trusts the SDK supervisor for ongoing sync health. This prevents a
-started service or blocked timeline initialization from leaving the public
-lifecycle in `connecting` indefinitely.
+`CodeverApplication` initializes the Matrix FFI platform and its multithreaded
+Tokio runtime before an Activity, boot receiver, or connection service can open
+a client. Every client explicitly uses the SDK's single-process store mode. The
+Matrix SDK `SyncService` then supervises native sliding sync for both the room
+list and encryption.
+
+Existing v2 sessions are migrated to the native sliding-sync session mode while
+preserving the Matrix crypto/data store and Codever pairing identity. Only the
+disposable SDK cache is rotated to `cache-v2`, and the room list uses the
+versioned `codever-native-v2` connection ID. The bound room is subscribed before
+the service starts. `SyncService.RUNNING` means only that its child tasks were
+spawned; readiness requires room-list progress from a completed sync before
+E2EE finalization, timeline construction, and transport publication. A running
+supervisor that produces no first sync within 45 seconds is blocked instead of
+entering an unbounded restart loop.
+
+The SDK writes bounded private sync traces. Diagnostic export converts those
+traces to a fixed vocabulary of levels, targets, categories, and HTTP status
+codes; raw SDK messages and identifiers never enter the shared report.
 
 ## Native capabilities
 

@@ -22,6 +22,7 @@ class MatrixSyncServiceLifecycleTest {
         lifecycle.onServiceState(SyncServiceState.RUNNING)
         lifecycle.markStarted()
         lifecycle.onServiceState(SyncServiceState.IDLE)
+        assertEquals(0, readyCount)
         lifecycle.onRoomListState(RoomListServiceState.SETTING_UP)
         lifecycle.onRoomListState(RoomListServiceState.RUNNING)
 
