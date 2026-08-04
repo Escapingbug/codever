@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import QRCode from "qrcode";
+import QRCode from "qrcode/lib/browser.js";
 import type { CodeverPublicTrust } from "./client/CodeverClient";
 import type {
   GeneratedDeviceInvitation,
