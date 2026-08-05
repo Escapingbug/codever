@@ -34,6 +34,15 @@ import { downloadMatrixMedia } from '@/channel/matrix/sdkTransport'
 
 export type MatrixGatewayEventListener = (event: MatrixIncomingEvent) => void
 
+export interface MatrixSyncWatchdogOptions {
+    /** Maximum time without a completed Matrix /sync cycle. */
+    stallTimeoutMs: number
+    /** Health-check cadence. Defaults to one quarter of the stall timeout. */
+    checkIntervalMs?: number
+    /** Test seam for deterministic elapsed-time checks. */
+    now?: () => number
+}
+
 export interface MatrixGatewayClient extends MatrixTransport {
     initializeCrypto(config: MatrixGatewayCryptoConfig): Promise<void>
     onRoomEvent(listener: MatrixGatewayEventListener): () => void
@@ -70,6 +79,51 @@ export function createGatewayMatrixScheduler(): MatrixScheduler {
         MatrixScheduler.RETRY_BACKOFF_RATELIMIT,
         () => null,
     )
+}
+
+/**
+ * Detects the failure mode where matrix-js-sdk remains started and keeps its
+ * TCP connection open, but its long-running /sync loop no longer completes.
+ * The SDK emits Syncing -> Syncing after every successful response, including
+ * empty long-poll responses, so room traffic is not required for liveness.
+ */
+export function watchMatrixSyncHealth(
+    client: MatrixClient,
+    options: MatrixSyncWatchdogOptions,
+    onStalled: (error: Error) => void,
+): () => void {
+    requirePositiveDuration(options.stallTimeoutMs, 'stallTimeoutMs')
+    const checkIntervalMs = options.checkIntervalMs
+        ?? Math.min(30_000, Math.max(1_000, Math.floor(options.stallTimeoutMs / 4)))
+    requirePositiveDuration(checkIntervalMs, 'checkIntervalMs')
+    const now = options.now ?? Date.now
+    let lastProgressAt = now()
+    let stopped = false
+
+    const onSync = (state: SyncState): void => {
+        if (isReadyState(state)) lastProgressAt = now()
+    }
+    client.on(ClientEvent.Sync, onSync)
+
+    const timer = setInterval(() => {
+        if (stopped) return
+        const elapsedMs = Math.max(0, now() - lastProgressAt)
+        if (elapsedMs < options.stallTimeoutMs) return
+        stopped = true
+        clearInterval(timer)
+        client.off(ClientEvent.Sync, onSync)
+        const state = client.getSyncState() ?? 'unknown'
+        onStalled(new Error(
+            `Matrix sync made no progress for ${elapsedMs}ms (state=${state})`,
+        ))
+    }, checkIntervalMs)
+
+    return () => {
+        if (stopped) return
+        stopped = true
+        clearInterval(timer)
+        client.off(ClientEvent.Sync, onSync)
+    }
 }
 
 export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
@@ -299,6 +353,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isReadyState(state: SyncState | null): boolean {
     return state === SyncState.Prepared || state === SyncState.Syncing || state === SyncState.Catchup
+}
+
+function requirePositiveDuration(value: number, name: string): void {
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`${name} must be a positive duration`)
+    }
 }
 
 function ciphertextFingerprint(value: unknown): string {

@@ -36,6 +36,7 @@ import {
     MatrixJsSdkGatewayClient,
     StrictMatrixCommandAuthorizer,
     validateMatrixGatewayConfig,
+    watchMatrixSyncHealth,
     type MatrixGatewayClient,
     type MatrixGatewayConfig,
     type MatrixGatewayCryptoConfig,
@@ -1372,6 +1373,42 @@ describe('MatrixJsSdkGatewayClient', () => {
         expect(sdk.sendMessage).toHaveBeenCalledTimes(1)
         await client.stop()
         expect(sdk.stopClient).toHaveBeenCalledOnce()
+    })
+
+    it('detects a silent sync stall and resets the deadline after progress', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-08-05T00:00:00.000Z'))
+        try {
+            let syncListener: ((state: SyncState) => void) | undefined
+            const sdk = {
+                getSyncState: vi.fn(() => SyncState.Syncing),
+                on: vi.fn((event: ClientEvent, listener: (state: SyncState) => void) => {
+                    if (event === ClientEvent.Sync) syncListener = listener
+                }),
+                off: vi.fn(),
+            } as unknown as MatrixClient
+            const onStalled = vi.fn()
+            const stop = watchMatrixSyncHealth(sdk, {
+                stallTimeoutMs: 120_000,
+                checkIntervalMs: 10_000,
+            }, onStalled)
+
+            await vi.advanceTimersByTimeAsync(110_000)
+            expect(onStalled).not.toHaveBeenCalled()
+            syncListener?.(SyncState.Syncing)
+            await vi.advanceTimersByTimeAsync(110_000)
+            expect(onStalled).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(10_000)
+
+            expect(onStalled).toHaveBeenCalledOnce()
+            expect(onStalled.mock.calls[0]?.[0]).toMatchObject({
+                message: 'Matrix sync made no progress for 120000ms (state=SYNCING)',
+            })
+            expect(sdk.off).toHaveBeenCalledWith(ClientEvent.Sync, syncListener)
+            stop()
+        } finally {
+            vi.useRealTimers()
+        }
     })
 })
 

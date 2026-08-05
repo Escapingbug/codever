@@ -24,6 +24,7 @@ import {
 import {
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
+    watchMatrixSyncHealth,
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
@@ -306,9 +307,14 @@ process.stdout.write(`Provider: ${providerName}\nWorking directory: ${cwd}\n`)
 process.stdout.write(`Gateway admin socket: ${adminServer.socketPath}\n`)
 process.stdout.write('Press Ctrl+C to stop the Gateway.\n')
 
-await new Promise<void>(resolve => {
+const syncStallTimeoutMs = positiveDurationFromEnvironment(
+    'CODEVER_MATRIX_SYNC_STALL_TIMEOUT_MS',
+    120_000,
+)
+let requestStop: (failure?: Error) => void = () => undefined
+const stopped = new Promise<Error | null>(resolve => {
     let stopping = false
-    const stop = (): void => {
+    requestStop = (failure?: Error): void => {
         if (stopping) return
         stopping = true
         void adminServer.stop()
@@ -318,12 +324,23 @@ await new Promise<void>(resolve => {
                 )
             })
             .then(() => runner!.stop())
-            .finally(resolve)
+            .finally(() => resolve(failure ?? null))
     }
-    process.once('SIGINT', stop)
-    process.once('SIGTERM', stop)
+    process.once('SIGINT', () => requestStop())
+    process.once('SIGTERM', () => requestStop())
 })
+const stopSyncWatchdog = watchMatrixSyncHealth(sdkClient, {
+    stallTimeoutMs: syncStallTimeoutMs,
+}, error => {
+    process.stderr.write(
+        `[matrix-gateway] ${error.message}; stopping for supervisor restart.\n`,
+    )
+    requestStop(error)
+})
+const healthFailure = await stopped
+stopSyncWatchdog()
 stopPairingRecovery()
+if (healthFailure) process.exitCode = 1
 
 async function readJson<T>(path: string): Promise<T> {
     try {
@@ -332,6 +349,16 @@ async function readJson<T>(path: string): Promise<T> {
     } catch (error) {
         throw new Error(`Could not read ${path}: ${formatError(error)}`)
     }
+}
+
+function positiveDurationFromEnvironment(name: string, fallbackMs: number): number {
+    const raw = process.env[name]
+    if (raw === undefined) return fallbackMs
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`${name} must be a positive duration in milliseconds`)
+    }
+    return value
 }
 
 async function loginGateway(
