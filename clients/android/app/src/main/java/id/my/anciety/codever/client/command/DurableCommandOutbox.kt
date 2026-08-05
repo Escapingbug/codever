@@ -331,6 +331,10 @@ class DurableCommandOutbox internal constructor(
     fun get(commandId: String): CommandView? = findCurrent(commandId)?.toView()
 
     @Synchronized
+    fun operation(commandId: String): CommandOperation? =
+        findCurrent(commandId)?.payload?.let(CommandPayloadValidator::validate)?.operation
+
+    @Synchronized
     fun list(): List<CommandView> = snapshot.commands.map(PersistedCommand::toView)
 
     @Synchronized

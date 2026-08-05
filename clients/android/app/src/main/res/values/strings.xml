@@ -7,5 +7,13 @@
     <string name="notification_runtime_version">%1$s · Matrix connection active</string>
     <string name="notification_export_logs">Export logs</string>
     <string name="notification_disconnect">Disconnect</string>
+    <string name="task_notification_channel_name">Agent task updates</string>
+    <string name="task_notification_channel_description">Completion updates for agent tasks while Codever is in the background</string>
+    <string name="task_notification_succeeded_title">Agent task completed</string>
+    <string name="task_notification_succeeded_body">Tap to view the result.</string>
+    <string name="task_notification_failed_title">Agent task failed</string>
+    <string name="task_notification_failed_body">Tap to view the error.</string>
+    <string name="task_notification_cancelled_title">Agent task cancelled</string>
+    <string name="task_notification_cancelled_body">Tap to return to the conversation.</string>
     <string name="diagnostics_share_title">Share Codever diagnostics</string>
 </resources>

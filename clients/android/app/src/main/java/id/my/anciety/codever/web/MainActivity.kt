@@ -67,6 +67,7 @@ class MainActivity : ComponentActivity() {
     private var nativeBridge: NativeWebBridge? = null
     private var foreground = false
     private var pendingForegroundStart = false
+    private var pendingSessionId: String? = null
     private val diagnostics by lazy { NativeDiagnosticLog.get(this) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -85,6 +86,7 @@ class MainActivity : ComponentActivity() {
             bindingRequested = false
             serviceBound = true
             serviceBinder = service as CodeverConnectionService.LocalBinder
+            serviceBinder?.setUiForeground(foreground)
             diagnostics.record(
                 "activity.service_connected",
                 mapOf("stage" to if (webView == null) "create" else "reload"),
@@ -132,6 +134,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         foreground = true
+        serviceBinder?.setUiForeground(true)
         if (pendingForegroundStart && notificationsAvailable()) {
             startForegroundAndBind()
         } else {
@@ -150,6 +153,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         foreground = false
+        serviceBinder?.setUiForeground(false)
         if (serviceBound || bindingRequested) {
             runCatching { unbindService(serviceConnection) }
             serviceBound = false
@@ -278,7 +282,8 @@ class MainActivity : ComponentActivity() {
                 checkNotNull(existing)
                 setContentView(existing)
                 diagnostics.record("activity.web_host_reloading_after_bind")
-                existing.reload()
+                val target = pendingWebAppUrl()
+                if (target == TrustedWebOrigin.APP_URL) existing.reload() else existing.loadUrl(target)
                 return
             }
             WebHostBindingAction.CREATE -> Unit
@@ -296,7 +301,7 @@ class MainActivity : ComponentActivity() {
         }
         nativeBridge = bridge
         setContentView(created)
-        created.loadUrl(TrustedWebOrigin.APP_URL)
+        created.loadUrl(pendingWebAppUrl())
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -362,7 +367,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action != ACTION_EXPORT_DIAGNOSTICS) return
+        when (intent?.action) {
+            ACTION_EXPORT_DIAGNOSTICS -> exportDiagnostics(intent)
+            ACTION_OPEN_SESSION -> openSessionFromNotification(intent)
+        }
+    }
+
+    private fun openSessionFromNotification(intent: Intent) {
+        intent.action = null
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
+            ?.takeIf { it.isNotBlank() && it.length <= 512 && !it.any(Char::isISOControl) }
+            ?: return
+        intent.removeExtra(EXTRA_SESSION_ID)
+        diagnostics.record("notification.task_opened")
+        pendingSessionId = sessionId
+        webView?.loadUrl(pendingWebAppUrl())
+    }
+
+    private fun pendingWebAppUrl(): String {
+        val sessionId = pendingSessionId ?: return TrustedWebOrigin.APP_URL
+        pendingSessionId = null
+        return "${TrustedWebOrigin.APP_URL}#session=${Uri.encode(sessionId)}"
+    }
+
+    private fun exportDiagnostics(intent: Intent) {
         intent.action = null
         diagnostics.record("diagnostics.export_requested")
         runCatching {
@@ -551,5 +579,9 @@ class MainActivity : ComponentActivity() {
         private const val KEY_NOTIFICATION_REQUESTED = "notification-permission-requested"
         const val ACTION_EXPORT_DIAGNOSTICS =
             "id.my.anciety.codever.action.EXPORT_DIAGNOSTICS"
+        const val ACTION_OPEN_SESSION =
+            "id.my.anciety.codever.action.OPEN_SESSION"
+        const val EXTRA_SESSION_ID =
+            "id.my.anciety.codever.extra.SESSION_ID"
     }
 }

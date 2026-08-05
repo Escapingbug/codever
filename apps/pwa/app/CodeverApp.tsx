@@ -410,6 +410,8 @@ export function CodeverApp() {
   const pendingPromptSessionIdsRef = useRef(new Set<string>());
   const selectedSessionIdRef = useRef<string | null>(null);
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
+  const pendingOpenedSessionIdRef = useRef<string | null>(null);
+  const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
   const knownGatewaySessionIdsRef = useRef(new Set<string>());
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
   const historyScopeRef = useRef("");
@@ -703,6 +705,36 @@ export function CodeverApp() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
+  }, []);
+
+  useEffect(() => {
+    const openRequestedSession = () => {
+      const url = new URL(window.location.href);
+      const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+      const requested = hash.get("session");
+      if (!requested) return;
+      hash.delete("session");
+      const nextHash = hash.toString();
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ""}`,
+      );
+      if (
+        requested.length > 512 ||
+        [...requested].some((character) => /\p{Cc}/u.test(character))
+      ) {
+        return;
+      }
+      pendingOpenedSessionIdRef.current = requested;
+      if (!knownGatewaySessionIdsRef.current.has(requested)) return;
+      pendingOpenedSessionIdRef.current = null;
+      activateLocalSessionRef.current(requested);
+      setMobileChatOpen(true);
+    };
+    openRequestedSession();
+    window.addEventListener("hashchange", openRequestedSession);
+    return () => window.removeEventListener("hashchange", openRequestedSession);
   }, []);
 
   useEffect(() => {
@@ -1293,6 +1325,7 @@ export function CodeverApp() {
       void restoreSessionHistory(sessionId, connection);
     }
   }
+  activateLocalSessionRef.current = (sessionId) => activateLocalSession(sessionId);
 
   async function connectCodeverClient(
     configInput = matrixConfig,
@@ -1470,6 +1503,7 @@ export function CodeverApp() {
             const availableIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
+            const openedSession = pendingOpenedSessionIdRef.current;
             const activeSessions = state.gatewayState.sessions.filter(
               (session) => session.status !== "archived",
             );
@@ -1478,7 +1512,9 @@ export function CodeverApp() {
             );
             const pendingCreated = pendingCreatedSessionIdRef.current;
             const nextSessionId =
-              pendingCreated && availableIds.has(pendingCreated)
+              openedSession && availableIds.has(openedSession)
+                ? openedSession
+                : pendingCreated && availableIds.has(pendingCreated)
                 ? pendingCreated
                 : selectedSessionIdRef.current &&
                     availableIds.has(selectedSessionIdRef.current)
@@ -1489,6 +1525,10 @@ export function CodeverApp() {
                     : activeSessions[0]?.id ??
                       state.gatewayState.sessions[0]?.id ??
                       null;
+            if (openedSession) {
+              pendingOpenedSessionIdRef.current = null;
+              if (openedSession === nextSessionId) setMobileChatOpen(true);
+            }
             if (pendingCreated === nextSessionId) {
               pendingCreatedSessionIdRef.current = null;
               setPendingSessionCreate(null);

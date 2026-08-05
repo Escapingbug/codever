@@ -7,6 +7,7 @@ import id.my.anciety.codever.client.command.CommandCompletion as DurableCompleti
 import id.my.anciety.codever.client.command.CommandAuthorizationPolicy
 import id.my.anciety.codever.client.command.CommandPayloadValidator
 import id.my.anciety.codever.client.command.CommandOutcome as DurableOutcome
+import id.my.anciety.codever.client.command.CommandOperation
 import id.my.anciety.codever.client.command.CommandReceipt as DurableReceipt
 import id.my.anciety.codever.client.command.CommandState as DurableState
 import id.my.anciety.codever.client.command.CommandTransmission
@@ -127,6 +128,7 @@ class NativeClientRuntime(
     private val identity: CodeverPrivateIdentity = AndroidKeystoreP256Identity(),
     private val cipher: SecretCipher = AndroidKeystoreSecretCipher(),
     private val foregroundState: () -> Pair<Boolean, Boolean>,
+    private val onCommandCompletion: (CommandOperation, DurableCompletion) -> Unit = { _, _ -> },
     private val now: () -> Long = System::currentTimeMillis,
 ) : NativeMatrixObserver {
     private data class PendingPairing(
@@ -1013,6 +1015,16 @@ class NativeClientRuntime(
         if (outbox.recordCompletion(completion)) {
             ackTimeouts.remove(commandId)?.cancel()
             outbox.get(commandId)?.let(::publishCommand)
+            runCatching {
+                outbox.operation(commandId)?.let { operation ->
+                    onCommandCompletion(operation, completion)
+                }
+            }.onFailure { error ->
+                diagnostics.record(
+                    "command.completion.callback_failed",
+                    mapOf("error" to error.javaClass.simpleName.take(160)),
+                )
+            }
         }
         if (outcome == DurableOutcome.FAILED) {
             val sessionId = extension.string("session_id") ?: currentSessionId() ?: conversationId()

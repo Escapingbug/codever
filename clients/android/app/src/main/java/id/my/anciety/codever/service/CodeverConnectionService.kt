@@ -17,6 +17,8 @@ import androidx.core.content.ContextCompat
 import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.R
 import id.my.anciety.codever.client.NativeClientRuntime
+import id.my.anciety.codever.client.command.CommandCompletion
+import id.my.anciety.codever.client.command.CommandOperation
 import id.my.anciety.codever.client.events.ClientSnapshot
 import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
@@ -37,19 +39,24 @@ class CodeverConnectionService : Service() {
     private lateinit var preferences: ServicePreferenceStore
     private lateinit var clientRuntime: NativeClientRuntime
     private lateinit var diagnostics: NativeDiagnosticLog
+    private lateinit var taskNotifier: AgentTaskNotifier
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var foregroundStarted = false
+    @Volatile private var uiForeground = false
 
     override fun onCreate() {
         super.onCreate()
         diagnostics = NativeDiagnosticLog.get(this)
         diagnostics.record("service.created")
         preferences = ServicePreferenceStore(this)
+        taskNotifier = AgentTaskNotifier(this)
         clientRuntime = NativeClientRuntime(
             context = this,
             foregroundState = { foregroundStarted to foregroundStarted },
+            onCommandCompletion = ::onCommandCompletion,
         )
         createNotificationChannel()
+        taskNotifier.createChannel()
         if (preferences.restoreEnabled) {
             enterForeground()
             clientRuntime.start()
@@ -119,6 +126,24 @@ class CodeverConnectionService : Service() {
 
     private fun snapshot(): ClientSnapshot = clientRuntime.snapshot()
 
+    private fun onCommandCompletion(operation: CommandOperation, completion: CommandCompletion) {
+        val kind = TaskNotificationPolicy.decide(uiForeground, operation, completion.outcome)
+            ?: return
+        runCatching { taskNotifier.show(kind, completion) }
+            .onSuccess {
+                diagnostics.record(
+                    "notification.task_posted",
+                    mapOf("outcome" to completion.outcome.wireName),
+                )
+            }
+            .onFailure { error ->
+                diagnostics.record(
+                    "notification.task_failed",
+                    mapOf("error" to error.javaClass.simpleName.take(160)),
+                )
+            }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java)
@@ -182,6 +207,10 @@ class CodeverConnectionService : Service() {
         fun clientRuntime(): NativeClientRuntime = this@CodeverConnectionService.clientRuntime
 
         fun snapshot(): ClientSnapshot = this@CodeverConnectionService.snapshot()
+
+        fun setUiForeground(value: Boolean) {
+            uiForeground = value
+        }
 
         fun start(): ClientSnapshot {
             preferences.restoreEnabled = true
