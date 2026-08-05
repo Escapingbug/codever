@@ -6,6 +6,7 @@ import { CODEVER_BUILD_VERSION } from "../buildInfo";
 import type { MatrixConnectionConfig } from "../matrix";
 import type { CodeverClient, CodeverClientHandlers } from "./CodeverClient";
 import {
+  OPTIONAL_NATIVE_CAPABILITIES,
   REQUIRED_NATIVE_CAPABILITIES,
   bootstrapNativeSession,
   createNativeBridgeClient,
@@ -64,7 +65,10 @@ export async function createCodeverClient(
     hello = await bridge.hello({
       webBuild: CODEVER_BUILD_VERSION,
       requiredCapabilities: [],
-      optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
+      optionalCapabilities: [
+        ...REQUIRED_NATIVE_CAPABILITIES,
+        ...OPTIONAL_NATIVE_CAPABILITIES,
+      ].map((name) => ({
         name,
         versions: [1],
       })),
@@ -117,7 +121,10 @@ export async function bootstrapNativeMatrixSessionIfAvailable(
     const hello = await bridge.hello({
       webBuild: CODEVER_BUILD_VERSION,
       requiredCapabilities: [],
-      optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
+      optionalCapabilities: [
+        ...REQUIRED_NATIVE_CAPABILITIES,
+        ...OPTIONAL_NATIVE_CAPABILITIES,
+      ].map((name) => ({
         name,
         versions: [1],
       })),

@@ -259,6 +259,55 @@ describe("native bridge JSON-RPC conformance", () => {
     ).toThrow(/Matrix room id/);
   });
 
+  it("issues a bounded one-time Matrix token for a completed invitation", () => {
+    const parsed = parseRpcRequest(request("codever.matrix.loginToken", {
+      context,
+      idempotencyKey,
+      invitationId: "device-invite-command-1",
+    }));
+    expect(parsed.method).toBe("codever.matrix.loginToken");
+
+    const ready = parseMethodRpcResponse(
+      "codever.matrix.loginToken",
+      response({
+        status: "ready",
+        loginToken: "single-use-login-token",
+        expiresAt: 1_722_000_120_000,
+      }),
+    );
+    expect("result" in ready && ready.result.status).toBe("ready");
+
+    const reauth = parseMethodRpcResponse(
+      "codever.matrix.loginToken",
+      response({ status: "reauth-required", passwordSupported: true }),
+    );
+    expect(
+      "result" in reauth &&
+        reauth.result.status === "reauth-required" &&
+        reauth.result.passwordSupported,
+    ).toBe(true);
+
+    expect(() =>
+      parseRpcRequest(request("codever.matrix.loginToken", {
+        context,
+        idempotencyKey,
+        invitationId: "device-invite-command-1",
+        password: "x".repeat(4_097),
+      })),
+    ).toThrow(/password/);
+    expect(() =>
+      parseMethodRpcResponse(
+        "codever.matrix.loginToken",
+        response({
+          status: "ready",
+          loginToken: "single-use-login-token",
+          expiresAt: 1_722_000_120_000,
+          accessToken: "must-never-cross-the-bridge",
+        }),
+      ),
+    ).toThrow(/unknown field: accessToken/);
+  });
+
   it("parses durable command receipts, completion state, and release", () => {
     const receipt = {
       operationId: "operation-1",

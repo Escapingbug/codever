@@ -2,6 +2,10 @@ import type { JsonObject } from "@codever/native-bridge";
 import type { CommandPayload, CodeverAttachment } from "@codever/protocol";
 import type { CommandCompletion } from "../../commandLifecycle";
 import {
+  requestMatrixLoginToken,
+  type MatrixLoginTokenResult,
+} from "../../matrixAuth";
+import {
   connectMatrix,
   saveMatrixConfig,
   type IncomingCodeverMessage,
@@ -69,6 +73,13 @@ export class WebCodeverClient implements CodeverClient {
 
   async send(payload: CommandPayload): Promise<CodeverCommandSendResult> {
     return commandResultFromWeb(await this.transport.send(payload));
+  }
+
+  requestMatrixLoginToken(
+    _invitationId: string,
+    password?: string,
+  ): Promise<MatrixLoginTokenResult> {
+    return requestMatrixLoginToken(this.config, password);
   }
 
   async recoverCommand(commandId: string): Promise<CodeverCommandSendResult> {

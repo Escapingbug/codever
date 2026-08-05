@@ -110,7 +110,10 @@ describe('daemon watchdog', () => {
         installWindowsWatchdogTask(
             '"C:\\Program Files\\nodejs\\node.exe" "C:\\codever\\bin\\codever.js" watchdog --once',
             'CodeverWatchdogTest',
-            { runnerPath: 'C:\\Users\\me\\.config\\codever\\watchdog.vbs' },
+            {
+                platform: 'win32',
+                runnerPath: 'C:\\Users\\me\\.config\\codever\\watchdog.vbs',
+            },
         )
 
         expect(mkdirSyncMock).toHaveBeenCalledWith('C:\\Users\\me\\.config\\codever', { recursive: true })

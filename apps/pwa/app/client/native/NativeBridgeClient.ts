@@ -21,6 +21,10 @@ import {
   type CommandCompletion,
 } from "../../commandLifecycle";
 import { parseGatewayStateExtension } from "../../gatewayState";
+import {
+  MatrixRateLimitError,
+  type MatrixLoginTokenResult,
+} from "../../matrixAuth";
 import type {
   CodeverClient,
   CodeverClientHandlers,
@@ -42,6 +46,8 @@ export const REQUIRED_NATIVE_CAPABILITIES = [
   "matrix.session-bootstrap",
   "background.foreground-service",
 ] as const;
+
+export const OPTIONAL_NATIVE_CAPABILITIES = ["matrix.login-token"] as const;
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
@@ -162,6 +168,37 @@ export class NativeBridgeClient implements CodeverClient {
       payload: { ...jsonObject(payload), operation: payload.operation },
     });
     return this.#sendResult(receipt);
+  }
+
+  async requestMatrixLoginToken(
+    invitationId: string,
+    password?: string,
+  ): Promise<MatrixLoginTokenResult> {
+    await this.ready;
+    if (this.helloResult.capabilities["matrix.login-token"]?.version !== 1) {
+      throw new BridgeProtocolError(
+        "CAPABILITY_UNAVAILABLE",
+        "The installed native app cannot create another-device Matrix sign-ins. Update the native app and retry.",
+        { userAction: "update_native" },
+      );
+    }
+    try {
+      return await this.bridge.request(
+        "codever.matrix.loginToken",
+        {
+          context: this.bridge.context(),
+          idempotencyKey: crypto.randomUUID(),
+          invitationId,
+          ...(password === undefined ? {} : { password }),
+        },
+        45_000,
+      );
+    } catch (error) {
+      if (error instanceof BridgeProtocolError && error.errorCode === "RATE_LIMITED") {
+        throw new MatrixRateLimitError(error.data.retryAfterMs ?? 60_000);
+      }
+      throw error;
+    }
   }
 
   async recoverCommand(commandId: string): Promise<CodeverCommandSendResult> {

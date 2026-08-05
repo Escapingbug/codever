@@ -5,6 +5,7 @@ import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixConnectionRuntime
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRuntimeStatus
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
 import id.my.anciety.codever.matrix.PublicMatrixSession
@@ -21,6 +22,7 @@ interface NativeMatrixPort {
     fun start()
     fun publicSession(): PublicMatrixSession?
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession
+    suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
     suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String)
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
@@ -51,6 +53,8 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
     override fun start() = runtime.start()
     override fun publicSession(): PublicMatrixSession? = runtime.publicSession()
     override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = runtime.bootstrap(input)
+    override suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult =
+        runtime.issueLoginToken(password)
     override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) =
         runtime.sendRoomMessage(contentJson, rotateRoomKey)
     override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) =

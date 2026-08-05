@@ -30,6 +30,7 @@ class MatrixOfflineException(message: String = "The native Matrix connection is 
 class MatrixConnectionRuntime(
     context: Context,
     private val loginClient: MatrixTokenLoginClient = MatrixTokenLoginClient(),
+    private val loginTokenIssueClient: MatrixLoginTokenIssueClient = MatrixLoginTokenIssueClient(),
     private val profileClient: MatrixProfileClient = MatrixProfileClient(),
     private val applicationControlClient: MatrixApplicationControlClient =
         MatrixApplicationControlClient(),
@@ -139,6 +140,18 @@ class MatrixConnectionRuntime(
 
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = scope.async {
         mutex.withLock { bootstrapLocked(input) }
+    }.await()
+
+    suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult = scope.async {
+        val session = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            secrets?.session
+                ?: throw IllegalStateException("The native Matrix session is unavailable.")
+        }
+        withTimeout(LOGIN_TOKEN_OPERATION_TIMEOUT_MS) {
+            loginTokenIssueClient.issue(session, password)
+        }
     }.await()
 
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false) = scope.async {
@@ -711,6 +724,7 @@ class MatrixConnectionRuntime(
         const val NETWORK_CONTROL_TIMEOUT_MS = 10_000L
         const val SEND_OPERATION_TIMEOUT_MS = 45_000L
         const val PROFILE_OPERATION_TIMEOUT_MS = 45_000L
+        const val LOGIN_TOKEN_OPERATION_TIMEOUT_MS = 45_000L
         const val MEDIA_OPERATION_TIMEOUT_MS = 120_000L
         const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
         const val APPLICATION_CONTROL_RETRY_BASE_MS = 1_000L

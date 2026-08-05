@@ -42,6 +42,7 @@ import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRuntimePhase
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
 import id.my.anciety.codever.matrix.PublicMatrixSession
@@ -428,6 +429,24 @@ class NativeClientRuntime(
 
     fun command(commandId: String): CommandView = outbox.get(commandId)?.let(::publicCommand)
         ?: throw IllegalArgumentException("Command was not found.")
+
+    suspend fun issueMatrixLoginToken(
+        invitationId: String,
+        password: String?,
+    ): MatrixLoginTokenIssueResult {
+        mutex.withLock {
+            check(trust != null) { "Pair the Gateway before creating another device invitation." }
+            check(outbox.operation(invitationId) == CommandOperation.DEVICE_INVITE) {
+                "The invitation is not owned by this native bridge."
+            }
+            check(outbox.get(invitationId)?.completion?.outcome == DurableOutcome.SUCCEEDED) {
+                "The Gateway must accept the device invitation before Matrix sign-in is issued."
+            }
+        }
+        // The one-time token is returned directly from the in-memory Matrix
+        // session and is never written to the native command/event stores.
+        return matrix.issueLoginToken(password)
+    }
 
     fun releaseCommand(commandId: String): Boolean {
         ackTimeouts.remove(commandId)?.cancel()

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { registerGroupHandlers } from '@/channel/telegram/handlers/groupCommands'
 import { registerSettingsHandlers } from '@/channel/telegram/handlers/settings'
 import { registerCallbackHandlers } from '@/channel/telegram/handlers/callbacks'
@@ -199,11 +202,16 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         const bot = createBot()
         const sessionManager = createSessionManager()
         registerGroupHandlers(bot, { sessionManager, topicSessions: new Map() })
+        const cwd = mkdtempSync(join(tmpdir(), 'codever-cwd-'))
 
-        await bot.runCommand('cwd', createContext('D:/codever-worktrees/session-actor-runtime'))
+        try {
+            await bot.runCommand('cwd', createContext(cwd))
 
-        expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, 'D:/codever-worktrees/session-actor-runtime')
-        expect(sessionManager.unarchiveGroup).toHaveBeenCalledWith('-100:10')
+            expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, cwd)
+            expect(sessionManager.unarchiveGroup).toHaveBeenCalledWith('-100:10')
+        } finally {
+            rmSync(cwd, { recursive: true, force: true })
+        }
     })
 
     it('/archive should dispatch an archive command before destroying the topic session', async () => {

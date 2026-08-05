@@ -23,6 +23,7 @@ import {
   type JsonObject,
   type JsonValue,
   type MatrixRoomBinding,
+  type MatrixLoginTokenResult,
   type MethodRpcResponse,
   type PairingCompleteResult,
   type PairingPreview,
@@ -417,6 +418,9 @@ function parseMethodResult<M extends RequestMethod>(
     case "codever.client.bootstrap":
       result = parseClientBootstrapResult(input);
       break;
+    case "codever.matrix.loginToken":
+      result = parseMatrixLoginTokenResult(input);
+      break;
     case "codever.client.snapshot":
       result = parseClientSnapshot(input);
       break;
@@ -536,6 +540,42 @@ function parseClientBootstrapResult(input: unknown): ClientBootstrapResult {
     },
     snapshot,
   };
+}
+
+function parseMatrixLoginTokenResult(input: unknown): MatrixLoginTokenResult {
+  const value = strictObject(input, undefined, "Matrix login token result");
+  const status = requiredString(value.status, "login token status", 32);
+  switch (status) {
+    case "ready":
+      strictObject(
+        value,
+        ["status", "loginToken", "expiresAt"],
+        "Matrix login token result",
+      );
+      return {
+        status,
+        loginToken: requiredString(value.loginToken, "loginToken", 4_096),
+        expiresAt: nonnegativeInteger(value.expiresAt, "expiresAt"),
+      };
+    case "reauth-required":
+      strictObject(
+        value,
+        ["status", "passwordSupported"],
+        "Matrix login token result",
+      );
+      return {
+        status,
+        passwordSupported: requiredBoolean(
+          value.passwordSupported,
+          "passwordSupported",
+        ),
+      };
+    case "unsupported":
+      strictObject(value, ["status"], "Matrix login token result");
+      return { status };
+    default:
+      invalidParams("Matrix login token status is unsupported.");
+  }
 }
 
 function parseClientDisconnectResult(input: unknown): ClientDisconnectResult {
@@ -1305,6 +1345,14 @@ function parseMethodParams(method: RequestMethod, input: unknown): JsonObject {
       matrixUserId(params.expectedUserId, "expectedUserId");
       requiredString(params.deviceName, "deviceName", 256);
       parseMatrixRoomBinding(params.roomBinding, "roomBinding");
+      return params;
+    }
+    case "codever.matrix.loginToken": {
+      const params = mutationParams(input, ["invitationId", "password"]);
+      opaqueId(params.invitationId, "invitationId");
+      if (params.password !== undefined) {
+        requiredString(params.password, "password", 4_096);
+      }
       return params;
     }
     case "codever.client.snapshot":

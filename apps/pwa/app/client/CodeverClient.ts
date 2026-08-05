@@ -9,6 +9,7 @@ import type {
   CommandPayload,
 } from "@codever/protocol";
 import type { CommandCompletion } from "../commandLifecycle";
+import type { MatrixLoginTokenResult } from "../matrixAuth";
 import type {
   CollaborationState,
   MatrixConnectionStatus,
@@ -70,6 +71,10 @@ export interface CodeverClient {
     deviceName: string,
     signal?: AbortSignal,
   ): Promise<CodeverPublicTrust>;
+  requestMatrixLoginToken(
+    invitationId: string,
+    password?: string,
+  ): Promise<MatrixLoginTokenResult>;
   send(payload: CommandPayload): Promise<CodeverCommandSendResult>;
   recoverCommand(commandId: string): Promise<CodeverCommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;

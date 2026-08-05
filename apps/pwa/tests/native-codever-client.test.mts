@@ -10,6 +10,7 @@ import {
 } from "@codever/native-bridge";
 import {
   NativeBridgeClient,
+  OPTIONAL_NATIVE_CAPABILITIES,
   REQUIRED_NATIVE_CAPABILITIES,
 } from "../app/client/native/NativeBridgeClient.ts";
 import {
@@ -55,7 +56,10 @@ test("replays native state, sends a durable command, and acknowledges events", a
     optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
       name,
       versions: [1],
-    })),
+    })).concat(OPTIONAL_NATIVE_CAPABILITIES.map((name) => ({
+      name,
+      versions: [1],
+    }))),
   });
   const statuses: string[] = [];
   const commandResults: string[] = [];
@@ -161,6 +165,23 @@ test("replays native state, sends a durable command, and acknowledges events", a
   ]);
   assert.ok(port.requests.some((request) => request.method === "codever.events.ack"));
 
+  const token = await client.requestMatrixLoginToken("invite-command-1");
+  assert.deepEqual(token, {
+    status: "ready",
+    loginToken: "single-use-token",
+    expiresAt: 120_000,
+  });
+  const tokenRequest = port.requests.find(
+    (request) => request.method === "codever.matrix.loginToken",
+  );
+  assert.ok(tokenRequest);
+  assert.equal(
+    (tokenRequest.params as BridgeMethodParams["codever.matrix.loginToken"])
+      .invitationId,
+    "invite-command-1",
+  );
+  assert.equal(JSON.stringify(tokenRequest).includes("accessToken"), false);
+
   client.dispose();
   assert.equal(port.onmessage, null);
   assert.ok(
@@ -207,6 +228,12 @@ function responseFor(request: Request): unknown {
         sequence: 1,
       };
     }
+    case "codever.matrix.loginToken":
+      return {
+        status: "ready",
+        loginToken: "single-use-token",
+        expiresAt: 120_000,
+      };
     default:
       throw new Error(`Unexpected native method in test: ${request.method}`);
   }
@@ -214,7 +241,8 @@ function responseFor(request: Request): unknown {
 
 function helloResult(): HelloResult {
   const capabilities = Object.fromEntries(
-    REQUIRED_NATIVE_CAPABILITIES.map((name) => [name, { version: 1 }]),
+    [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
+      .map((name) => [name, { version: 1 }]),
   ) as Record<CapabilityName, { version: number }>;
   return {
     protocolVersion: 1,

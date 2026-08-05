@@ -109,6 +109,7 @@ export type CapabilityName =
   | "pairing.native"
   | "trust.native"
   | "matrix.session-bootstrap"
+  | "matrix.login-token"
   | "background.foreground-service";
 
 export type CapabilityRequest = {
@@ -497,6 +498,7 @@ export const REQUEST_METHODS = [
   "codever.bridge.hello",
   "codever.client.start",
   "codever.client.bootstrap",
+  "codever.matrix.loginToken",
   "codever.client.snapshot",
   "codever.client.disconnect",
   "codever.events.subscribe",
@@ -528,6 +530,7 @@ export type RequestMethod = (typeof REQUEST_METHODS)[number];
 export const MUTATION_METHODS = [
   "codever.client.start",
   "codever.client.bootstrap",
+  "codever.matrix.loginToken",
   "codever.client.disconnect",
   "codever.command.send",
   "codever.command.cancel",
@@ -543,6 +546,21 @@ export const MUTATION_METHODS = [
 
 export type MutationMethod = (typeof MUTATION_METHODS)[number];
 
+export type MatrixLoginTokenResult =
+  | {
+      status: "ready";
+      /** Single-use secret. Callers must never log or persist this value. */
+      loginToken: string;
+      expiresAt: number;
+    }
+  | {
+      status: "reauth-required";
+      passwordSupported: boolean;
+    }
+  | {
+      status: "unsupported";
+    };
+
 export type BridgeMethodParams = {
   "codever.bridge.hello": HelloParams;
   "codever.client.start": IdempotentMutationParams;
@@ -553,6 +571,12 @@ export type BridgeMethodParams = {
     expectedUserId: string;
     deviceName: string;
     roomBinding: MatrixRoomBinding;
+  };
+  "codever.matrix.loginToken": IdempotentMutationParams & {
+    /** Successful device.invite command whose lifetime bounds this token. */
+    invitationId: string;
+    /** Reauthentication secret: memory-only and never included in diagnostics. */
+    password?: string;
   };
   "codever.client.snapshot": ContextParams;
   "codever.client.disconnect": IdempotentMutationParams & {
@@ -620,6 +644,7 @@ export type BridgeMethodResults = {
   "codever.bridge.hello": HelloResult;
   "codever.client.start": ClientStartResult;
   "codever.client.bootstrap": ClientBootstrapResult;
+  "codever.matrix.loginToken": MatrixLoginTokenResult;
   "codever.client.snapshot": ClientSnapshot;
   "codever.client.disconnect": ClientDisconnectResult;
   "codever.events.subscribe": EventsSubscribeResult;

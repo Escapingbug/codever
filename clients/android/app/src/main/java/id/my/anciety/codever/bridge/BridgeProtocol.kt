@@ -27,6 +27,9 @@ import id.my.anciety.codever.client.events.UnknownSubscriptionException
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixIdentifiers
 import id.my.anciety.codever.matrix.MatrixLoginException
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueException
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
+import id.my.anciety.codever.matrix.MatrixLoginTokenRateLimitException
 import id.my.anciety.codever.matrix.MatrixOfflineException
 import id.my.anciety.codever.matrix.MatrixRoomBinding
 import id.my.anciety.codever.matrix.PublicMatrixSession
@@ -76,6 +79,7 @@ enum class BridgeError(
     IDEMPOTENCY_CONFLICT(-32020, "IDEMPOTENCY_CONFLICT"),
     OPERATION_NOT_FOUND(-32021, "OPERATION_NOT_FOUND"),
     OFFLINE(-32030, "OFFLINE"),
+    RATE_LIMITED(-32032, "RATE_LIMITED"),
     TRUST_REQUIRED(-32040, "TRUST_REQUIRED"),
     PAIRING_EXPIRED(-32042, "PAIRING_EXPIRED"),
     PAIRING_REJECTED(-32043, "PAIRING_REJECTED"),
@@ -126,6 +130,7 @@ object BridgeProtocol {
         "codever.bridge.hello",
         "codever.client.start",
         "codever.client.bootstrap",
+        "codever.matrix.loginToken",
         "codever.client.snapshot",
         "codever.client.disconnect",
         "codever.events.subscribe",
@@ -243,6 +248,7 @@ object BridgeProtocol {
         message: String,
         retryable: Boolean = false,
         userAction: String? = null,
+        retryAfterMs: Long? = null,
     ): String = buildJsonObject {
         put("jsonrpc", "2.0")
         put("id", id?.let(::JsonPrimitive) ?: JsonNull)
@@ -253,6 +259,7 @@ object BridgeProtocol {
                 put("errorCode", error.wireName)
                 put("retryable", retryable)
                 userAction?.let { put("userAction", it) }
+                retryAfterMs?.let { put("retryAfterMs", it) }
             })
         })
     }.toString()
@@ -288,6 +295,11 @@ interface BridgeRuntime {
     suspend fun start(): ClientSnapshot
 
     suspend fun bootstrap(input: MatrixBootstrap): Pair<PublicMatrixSession, ClientSnapshot>
+
+    suspend fun issueMatrixLoginToken(
+        invitationId: String,
+        password: String?,
+    ): MatrixLoginTokenIssueResult = client().issueMatrixLoginToken(invitationId, password)
 
     suspend fun completePairing(
         pairingId: String,
@@ -361,6 +373,29 @@ class BridgeDispatcher(
                         put("session", session.toJson())
                         put("snapshot", PublicClientJson.encodeSnapshot(snapshot))
                     }
+                }
+            }
+            "codever.matrix.loginToken" -> {
+                requireContext(
+                    request.params,
+                    mutation = true,
+                    requiredExtra = setOf("invitationId"),
+                    optionalExtra = setOf("password"),
+                )
+                if (MATRIX_LOGIN_TOKEN_CAPABILITY !in negotiatedCapabilities) {
+                    throw BridgeDispatchException(
+                        BridgeError.CAPABILITY_UNAVAILABLE,
+                        "Matrix login-token issuance was not negotiated.",
+                        userAction = "update_native",
+                    )
+                }
+                mutationResult(request) {
+                    matrixLoginTokenResultToJson(
+                        runtime.issueMatrixLoginToken(
+                            requiredString(request.params, "invitationId", 512),
+                            optionalString(request.params, "password", 4_096),
+                        ),
+                    )
                 }
             }
             "codever.client.snapshot" -> {
@@ -693,6 +728,23 @@ class BridgeDispatcher(
             request.id,
             BridgeError.INVALID_STATE,
             "Matrix sign-in was not accepted.",
+            retryable = error.retryable,
+            userAction = if (error.retryable) "retry" else null,
+        )
+    } catch (error: MatrixLoginTokenRateLimitException) {
+        BridgeProtocol.failure(
+            request.id,
+            BridgeError.RATE_LIMITED,
+            error.message ?: "Matrix is temporarily limiting new-device sign-ins.",
+            retryable = true,
+            userAction = "retry",
+            retryAfterMs = error.retryAfterMs,
+        )
+    } catch (error: MatrixLoginTokenIssueException) {
+        BridgeProtocol.failure(
+            request.id,
+            BridgeError.INVALID_STATE,
+            error.message ?: "Matrix could not create a one-time login token.",
             retryable = error.retryable,
             userAction = if (error.retryable) "retry" else null,
         )
@@ -1187,6 +1239,7 @@ class BridgeDispatcher(
     private companion object {
         const val FOREGROUND_SERVICE_CAPABILITY = "background.foreground-service"
         const val MATRIX_BOOTSTRAP_CAPABILITY = "matrix.session-bootstrap"
+        const val MATRIX_LOGIN_TOKEN_CAPABILITY = "matrix.login-token"
         val SUPPORTED_CAPABILITIES = setOf(
             "client.lifecycle",
             "events.replay",
@@ -1198,6 +1251,7 @@ class BridgeDispatcher(
             "trust.native",
             FOREGROUND_SERVICE_CAPABILITY,
             MATRIX_BOOTSTRAP_CAPABILITY,
+            MATRIX_LOGIN_TOKEN_CAPABILITY,
         )
         const val MAX_IDEMPOTENCY_RECORDS = 128
         const val MAX_RPC_RESULT_BYTES = 480 * 1024
@@ -1234,3 +1288,19 @@ private fun PublicMatrixSession.toJson(): JsonObject = buildJsonObject {
         put("gatewayDeviceEd25519", roomBinding.gatewayDeviceEd25519)
     })
 }
+
+private fun matrixLoginTokenResultToJson(value: MatrixLoginTokenIssueResult): JsonObject =
+    when (value) {
+        is MatrixLoginTokenIssueResult.Ready -> buildJsonObject {
+            put("status", "ready")
+            put("loginToken", value.loginToken)
+            put("expiresAt", value.expiresAt)
+        }
+        is MatrixLoginTokenIssueResult.ReauthenticationRequired -> buildJsonObject {
+            put("status", "reauth-required")
+            put("passwordSupported", value.passwordSupported)
+        }
+        MatrixLoginTokenIssueResult.Unsupported -> buildJsonObject {
+            put("status", "unsupported")
+        }
+    }

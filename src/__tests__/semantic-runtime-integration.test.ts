@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -1092,7 +1092,7 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent[0]).toMatchObject({
                 text: 'latest report',
                 format: 'plain',
-                attachments: [{ type: 'document', path: reportPath, filename: 'report.txt' }],
+                attachments: [{ type: 'document', path: realpathSync(reportPath), filename: 'report.txt' }],
             })
             expect(runtime.journal.list()).toEqual(expect.arrayContaining([
                 expect.objectContaining({ kind: 'command_result', command: 'send_file' }),
@@ -1149,7 +1149,7 @@ describe('Semantic runtime integration chain', () => {
                 expect.objectContaining({
                     text: 'Release APK',
                     format: 'plain',
-                    attachments: [{ type: 'document', path: apkPath, filename: 'falapk-release.apk' }],
+                    attachments: [{ type: 'document', path: realpathSync(apkPath), filename: 'falapk-release.apk' }],
                 }),
             ])
             expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Session identity not available yet')
@@ -1253,7 +1253,7 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent[0]).toMatchObject({
                 text: 'latest plot',
                 format: 'plain',
-                attachments: [{ type: 'photo', path: imagePath, filename: 'plot.png' }],
+                attachments: [{ type: 'photo', path: realpathSync(imagePath), filename: 'plot.png' }],
             })
         } finally {
             rmSync(tempDir, { recursive: true, force: true })

@@ -131,7 +131,6 @@ import {
 import {
   loginWithMatrixPassword,
   loginWithMatrixToken,
-  requestMatrixLoginToken,
 } from "./matrixAuth";
 import {
   MATRIX_STARTUP_RECOVERY_SESSION_KEY,
@@ -1927,7 +1926,11 @@ export function CodeverApp() {
             await matrixLoginTokenLifecycleRef.current.request({
               invitationId: gatewayInvitation.commandId,
               invitationExpiresAt: gatewayInvitation.expiresAt,
-              issue: () => requestMatrixLoginToken(matrixConfig, password),
+              issue: () =>
+                connection.requestMatrixLoginToken(
+                  gatewayInvitation.commandId,
+                  password,
+                ),
               onRateLimit: (remainingMs) => {
                 if (remainingMs === 0) {
                   setInvitationError(
@@ -2359,7 +2362,7 @@ export function CodeverApp() {
     setNewSessionOpen(false);
     setMobileChatOpen(false);
     setConnectionError(null);
-    let waitingForGatewayState = false;
+    let acknowledged = false;
     try {
       // Let React commit the pending row before Matrix encryption, IndexedDB,
       // acknowledgement, and command-result work begins.
@@ -2375,10 +2378,32 @@ export function CodeverApp() {
           : {}),
       });
       if (!sent || !connection) return;
+      acknowledged = true;
+      setNewSessionBusy(false);
+      void settleSessionCreate(connection, sent);
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      if (!acknowledged) {
+        setNewSessionBusy(false);
+        setPendingSessionCreate(null);
+      }
+    }
+  }
+
+  async function settleSessionCreate(
+    connection: CodeverClient,
+    sent: CodeverCommandSendResult,
+  ): Promise<void> {
+    let waitingForGatewayState = false;
+    try {
       const completion = await waitForRecoverableSessionCreateCompletion(
         connection,
         sent,
       );
+      if (completion.outcome !== "succeeded") {
+        setConnectionError("The Gateway could not create the session.");
+      }
       await consumeSessionCreateCompletion(
         connection,
         sent.commandId,
@@ -2389,7 +2414,6 @@ export function CodeverApp() {
     } catch (error) {
       setConnectionError(formatUiError(error));
     } finally {
-      setNewSessionBusy(false);
       if (!waitingForGatewayState) setPendingSessionCreate(null);
     }
   }
@@ -2397,6 +2421,7 @@ export function CodeverApp() {
   async function runSessionLifecycle(
     action: "archive" | "restore" | "delete",
     sessionId: string,
+    onSucceeded?: () => void | Promise<void>,
   ): Promise<boolean> {
     const capabilities = gatewayState?.capabilities;
     const supported =
@@ -2411,25 +2436,61 @@ export function CodeverApp() {
     }
     setSessionLifecycleBusy({ sessionId, action });
     try {
+      const connection = codeverClientRef.current;
       const sent = await sendRealCommand(
         sessionLifecyclePayload(action, sessionId),
       );
-      const completion = sent
-        ? await waitForCommandCompletion(sent.completion)
-        : null;
-      if (completion?.outcome !== "succeeded") {
-        if (sent) {
-          setConnectionError(`The session could not be ${lifecyclePastTense(action)}.`);
-        }
+      if (!sent || !connection) {
+        setSessionLifecycleBusy(null);
         return false;
       }
       setDetailsOpen(false);
+      void settleSessionLifecycle(
+        connection,
+        sent,
+        action,
+        sessionId,
+        onSucceeded,
+      );
       return true;
     } catch (error) {
       setConnectionError(formatUiError(error));
-      return false;
-    } finally {
       setSessionLifecycleBusy(null);
+      return false;
+    }
+  }
+
+  async function settleSessionLifecycle(
+    connection: CodeverClient,
+    sent: CodeverCommandSendResult,
+    action: "archive" | "restore" | "delete",
+    sessionId: string,
+    onSucceeded?: () => void | Promise<void>,
+  ): Promise<void> {
+    try {
+      const completion = await waitForCommandCompletion(sent.completion);
+      if (completion.outcome !== "succeeded") {
+        setConnectionError(
+          `The session could not be ${lifecyclePastTense(action)}.`,
+        );
+        return;
+      }
+      await onSucceeded?.();
+    } catch (error) {
+      setConnectionError(formatUiError(error));
+    } finally {
+      try {
+        await connection.releaseCommand(sent.commandId);
+      } catch (error) {
+        setConnectionError(
+          `The completed session command could not be released locally: ${formatUiError(error)}`,
+        );
+      }
+      setSessionLifecycleBusy((current) =>
+        current?.sessionId === sessionId && current.action === action
+          ? null
+          : current,
+      );
     }
   }
 
@@ -2447,23 +2508,28 @@ export function CodeverApp() {
   async function deleteSession() {
     const target = deleteTarget;
     if (!target) return;
-    if (!(await runSessionLifecycle("delete", target.id))) return;
-    liveMessagesBySessionRef.current.delete(target.id);
-    knownGatewaySessionIdsRef.current.delete(target.id);
-    if (historyScopeRef.current) {
-      try {
-        await clearSessionMessageHistory(historyScopeRef.current, target.id);
-      } catch (error) {
-        setConnectionError(
-          `The session was deleted, but its local history could not be cleared: ${formatUiError(error)}`,
-        );
-      }
-    }
-    if (selectedSessionIdRef.current === target.id) {
-      activateLocalSession(null);
-      setMobileChatOpen(false);
-    }
-    setDeleteTarget(null);
+    const acknowledged = await runSessionLifecycle(
+      "delete",
+      target.id,
+      async () => {
+        liveMessagesBySessionRef.current.delete(target.id);
+        knownGatewaySessionIdsRef.current.delete(target.id);
+        if (historyScopeRef.current) {
+          try {
+            await clearSessionMessageHistory(historyScopeRef.current, target.id);
+          } catch (error) {
+            setConnectionError(
+              `The session was deleted, but its local history could not be cleared: ${formatUiError(error)}`,
+            );
+          }
+        }
+        if (selectedSessionIdRef.current === target.id) {
+          activateLocalSession(null);
+          setMobileChatOpen(false);
+        }
+      },
+    );
+    if (acknowledged) setDeleteTarget(null);
   }
 
   function selectAttachments(event: ChangeEvent<HTMLInputElement>) {

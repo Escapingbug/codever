@@ -12,6 +12,7 @@ import id.my.anciety.codever.client.events.ForegroundServiceState
 import id.my.anciety.codever.client.events.LifecyclePhase
 import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.matrix.MatrixBootstrap
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRoomBinding
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import org.junit.Assert.assertEquals
@@ -222,6 +223,56 @@ class BridgeProtocolTest {
         )
     }
 
+    @Test
+    fun `login token is capability gated bound to an invitation and idempotent in memory`() {
+        val runtime = FakeRuntime()
+        val dispatcher = BridgeDispatcher(runtime, BRIDGE_SESSION_ID)
+        successResult(dispatch(
+            dispatcher,
+            helloRequest(
+                optionalCapabilities =
+                    """[{"name":"matrix.login-token","versions":[1]}]""",
+            ),
+        ))
+
+        val first = dispatch(dispatcher, loginTokenRequest("token-1", IDEMPOTENCY_KEY))
+        val second = dispatch(dispatcher, loginTokenRequest("token-2", IDEMPOTENCY_KEY))
+
+        assertEquals(successResult(first), successResult(second))
+        assertEquals("ready", successResult(first).getValue("status").jsonPrimitive.content)
+        assertEquals("single-use-secret", successResult(first).getValue("loginToken").jsonPrimitive.content)
+        assertEquals(1, runtime.loginTokenIssues)
+        assertEquals(listOf("invite-command-1" to null), runtime.loginTokenInputs)
+
+        val conflict = failure(dispatch(
+            dispatcher,
+            loginTokenRequest("token-3", IDEMPOTENCY_KEY, password = "different"),
+        ))
+        assertEquals(
+            "IDEMPOTENCY_CONFLICT",
+            conflict.getValue("data").jsonObject.getValue("errorCode").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `login-token rate limit exposes only bounded retry metadata`() {
+        val response = json.parseToJsonElement(
+            BridgeProtocol.failure(
+                "token",
+                BridgeError.RATE_LIMITED,
+                "Try later.",
+                retryable = true,
+                userAction = "retry",
+                retryAfterMs = 12_000,
+            ),
+        ).jsonObject.getValue("error").jsonObject
+
+        val data = response.getValue("data").jsonObject
+        assertEquals("RATE_LIMITED", data.getValue("errorCode").jsonPrimitive.content)
+        assertEquals(12_000, data.getValue("retryAfterMs").jsonPrimitive.int)
+        assertFalse(response.toString().contains("single-use-secret"))
+    }
+
     private fun helloRequest(
         requiredCapabilities: String = "[]",
         optionalCapabilities: String =
@@ -273,6 +324,24 @@ class BridgeProtocolTest {
         }
     """.trimIndent()
 
+    private fun loginTokenRequest(
+        id: String,
+        idempotencyKey: String,
+        password: String? = null,
+    ): String = """
+        {
+          "jsonrpc":"2.0",
+          "id":"$id",
+          "method":"codever.matrix.loginToken",
+          "params":{
+            "context":{"bridgeSessionId":"$BRIDGE_SESSION_ID"},
+            "idempotencyKey":"$idempotencyKey",
+            "invitationId":"invite-command-1"
+            ${if (password == null) "" else ",\"password\":\"$password\""}
+          }
+        }
+    """.trimIndent()
+
     private fun successResult(raw: String) = json.parseToJsonElement(raw).jsonObject
         .getValue("result").jsonObject
 
@@ -294,6 +363,8 @@ class BridgeProtocolTest {
         override val nativeDeviceId = "native-device-1"
         var starts = 0
         var bootstraps = 0
+        var loginTokenIssues = 0
+        val loginTokenInputs = mutableListOf<Pair<String, String?>>()
         val disconnects = mutableListOf<String>()
         private var active = true
 
@@ -330,6 +401,15 @@ class BridgeProtocolTest {
                 matrixDeviceId = "MATRIX-DEVICE",
                 roomBinding = input.roomBinding,
             ) to snapshot()
+        }
+
+        override suspend fun issueMatrixLoginToken(
+            invitationId: String,
+            password: String?,
+        ): MatrixLoginTokenIssueResult {
+            loginTokenIssues += 1
+            loginTokenInputs += invitationId to password
+            return MatrixLoginTokenIssueResult.Ready("single-use-secret", 120_000)
         }
 
         override suspend fun completePairing(

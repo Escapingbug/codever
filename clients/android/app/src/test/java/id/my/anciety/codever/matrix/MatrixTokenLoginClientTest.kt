@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.matrix.rustcomponents.sdk.SlidingSyncVersion
@@ -108,6 +109,110 @@ class MatrixTokenLoginClientTest {
             assertEquals(1, result?.getValue("version")?.jsonPrimitive?.content?.toInt())
             assertTrue(responseBody.all { it == 0.toByte() })
         }
+
+    @Test
+    fun `issues one-time login token through the authenticated restricted endpoint`() = runBlocking {
+        lateinit var endpoint: URI
+        var receivedAccessToken: String? = null
+        lateinit var requestReference: ByteArray
+        val responseBody = """{"login_token":"issued-once","expires_in_ms":90000}""".toByteArray()
+        val client = MatrixLoginTokenIssueClient(
+            transport = MatrixLoginTokenTransport { target, accessToken, body ->
+                endpoint = target
+                receivedAccessToken = accessToken
+                requestReference = body
+                MatrixHttpResponse(200, responseBody)
+            },
+            now = { 10_000L },
+        )
+
+        val result = client.issue(storedSession())
+
+        assertEquals(
+            "https://matrix.example.org/_matrix/client/v1/login/get_token",
+            endpoint.toASCIIString(),
+        )
+        assertEquals("secret-access-token", receivedAccessToken)
+        assertEquals(
+            MatrixLoginTokenIssueResult.Ready("issued-once", 100_000L),
+            result,
+        )
+        assertTrue(requestReference.all { it == 0.toByte() })
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `reports supported password reauthentication without requesting a second token`() = runBlocking {
+        var requests = 0
+        val responseBody = """
+            {
+              "session":"uia-session",
+              "flows":[{"stages":["m.login.password"]}]
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixLoginTokenIssueClient(MatrixLoginTokenTransport { _, _, _ ->
+            requests += 1
+            MatrixHttpResponse(401, responseBody)
+        })
+
+        val result = client.issue(storedSession())
+
+        assertEquals(MatrixLoginTokenIssueResult.ReauthenticationRequired(true), result)
+        assertEquals(1, requests)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `completes password reauthentication without retaining password request bytes`() = runBlocking {
+        val requestReferences = mutableListOf<ByteArray>()
+        val requestCopies = mutableListOf<ByteArray>()
+        var requests = 0
+        val client = MatrixLoginTokenIssueClient(
+            MatrixLoginTokenTransport { _, _, body ->
+                requestReferences += body
+                requestCopies += body.copyOf()
+                requests += 1
+                if (requests == 1) {
+                    MatrixHttpResponse(
+                        401,
+                        """{"session":"uia-session","flows":[{"stages":["m.login.password"]}]}"""
+                            .toByteArray(),
+                    )
+                } else {
+                    MatrixHttpResponse(200, """{"login_token":"issued-after-uia"}""".toByteArray())
+                }
+            },
+            now = { 100L },
+        )
+
+        val result = client.issue(storedSession(), "private-password")
+
+        assertEquals(
+            MatrixLoginTokenIssueResult.Ready("issued-after-uia", 120_100L),
+            result,
+        )
+        val auth = Json.parseToJsonElement(
+            requestCopies[1].toString(Charsets.UTF_8),
+        ).jsonObject.getValue("auth").jsonObject
+        assertEquals("private-password", auth.getValue("password").jsonPrimitive.content)
+        assertEquals("uia-session", auth.getValue("session").jsonPrimitive.content)
+        assertTrue(requestReferences.all { bytes -> bytes.all { it == 0.toByte() } })
+    }
+
+    @Test
+    fun `surfaces Matrix login-token retry interval without echoing response`() = runBlocking {
+        val responseBody = """{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":12000}""".toByteArray()
+        val client = MatrixLoginTokenIssueClient(MatrixLoginTokenTransport { _, _, _ ->
+            MatrixHttpResponse(429, responseBody)
+        })
+
+        val error = assertThrows(MatrixLoginTokenRateLimitException::class.java) {
+            runBlocking { client.issue(storedSession()) }
+        }
+
+        assertEquals(12_000L, error.retryAfterMs)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
 
     private fun bootstrap() = MatrixBootstrap(
         homeserver = "https://matrix.example.org/",

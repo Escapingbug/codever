@@ -2,6 +2,7 @@ package id.my.anciety.codever.client
 
 import id.my.anciety.codever.matrix.JvmAesGcmCipher
 import id.my.anciety.codever.matrix.MatrixBootstrap
+import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRuntimePhase
 import id.my.anciety.codever.matrix.MatrixRuntimeStatus
 import id.my.anciety.codever.matrix.PublicMatrixSession
@@ -102,6 +103,8 @@ class AttachmentTransferManagerTest {
         override fun start() = Unit
         override fun publicSession(): PublicMatrixSession? = null
         override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = error("unused")
+        override suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult =
+            error("unused")
         override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) = Unit
         override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) = Unit
         override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
