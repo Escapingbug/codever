@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "codever-android"
 include(":app")
+include(":rustls-platform-verifier")

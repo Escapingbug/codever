@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!--
+        Let's Encrypt ended OCSP service and publishes its CRLs over HTTP.
+        rustls-platform-verifier uses Android's PKIX checker to retrieve those
+        CRLs. Keep cleartext disabled everywhere except the CA-owned CRL host.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">c.lencr.org</domain>
+    </domain-config>
+</network-security-config>

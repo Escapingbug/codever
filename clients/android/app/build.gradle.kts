@@ -132,5 +132,11 @@ dependencies {
     // ABI, and packaging compatibility are continuously exercised together.
     implementation("org.matrix.rustcomponents:sdk-android:26.07.28")
 
+    // sdk-android 26.07.28 links rustls-platform-verifier 0.6.2 but its AAR
+    // does not publish the companion Android verifier as a transitive
+    // dependency. Without this JVM component every native TLS request fails
+    // before reaching the server.
+    implementation(project(":rustls-platform-verifier"))
+
     testImplementation("junit:junit:4.13.2")
 }
