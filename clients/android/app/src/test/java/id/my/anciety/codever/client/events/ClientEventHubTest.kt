@@ -127,6 +127,23 @@ class ClientEventHubTest {
     }
 
     @Test
+    fun `restart restores cached gateway state`() {
+        val persistence = InMemoryClientEventPersistence()
+        val generator = CountingCursorGenerator()
+        val gatewayState = buildJsonObject {
+            put("revision", 7)
+            put("revision_epoch", "epoch-1")
+            put("current_session_id", "session-1")
+        }
+        val firstHub = hub(persistence = persistence, cursorGenerator = generator)
+        firstHub.updateSnapshot(firstHub.snapshot().copy(gatewayState = gatewayState))
+
+        val restored = hub(persistence = persistence, cursorGenerator = generator)
+
+        assertEquals(gatewayState, restored.snapshot().gatewayState)
+    }
+
+    @Test
     fun `history pages are stable and deduplicate message upserts`() {
         val hub = hub()
         repeat(5) { index ->

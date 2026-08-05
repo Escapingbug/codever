@@ -37,6 +37,7 @@ import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.client.events.SubscriptionBootstrap
 import id.my.anciety.codever.client.events.SubscriptionCursorResult
 import id.my.anciety.codever.client.events.compactSnapshotCommands
+import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
@@ -149,6 +150,7 @@ class NativeClientRuntime(
     val deviceId: String = identity.publicIdentity.keyId
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
     private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId)
     private val trustStore = EncryptedGatewayTrustStore(
@@ -167,6 +169,8 @@ class NativeClientRuntime(
     @Volatile private var trust: GatewayTrust? = restoredTrust.getOrNull()
     @Volatile private var trustStorageBlocked = restoredTrust.isFailure
     @Volatile private var gatewayState: JsonObject? = null
+    @Volatile private var gatewayStateSynchronized = false
+    @Volatile private var gatewayStateSyncJob: Job? = null
     @Volatile private var pendingPairing: PendingPairing? = null
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
 
@@ -176,6 +180,8 @@ class NativeClientRuntime(
     )
 
     init {
+        gatewayState = eventHub.snapshot().gatewayState
+        if (gatewayState != null) diagnostics.record("gateway.state.cache.restored")
         matrix.setObserver(this)
         refreshSnapshot(publishLifecycle = false)
         scope.launch {
@@ -357,11 +363,7 @@ class NativeClientRuntime(
             val public = publicTrust() as PublicTrustState.Trusted
             val nextSnapshot = refreshedSnapshot()
             eventHub.publish(ClientEventType.TRUST_CHANGED, PublicClientJson.encodeTrust(public), nextSnapshot)
-            scope.launch {
-                mutex.withLock {
-                    runCatching { requestGatewayStateSnapshotLocked() }
-                }
-            }
+            startGatewayStateSync(recoverTransport = false)
             public to snapshot()
         }
     }
@@ -459,6 +461,9 @@ class NativeClientRuntime(
         }
         ackTimeouts.values.forEach(Job::cancel)
         ackTimeouts.clear()
+        gatewayStateSyncJob?.cancel()
+        gatewayStateSyncJob = null
+        gatewayStateSynchronized = false
         pendingHistory.values.forEach { request ->
             request.response.completeExceptionally(
                 IllegalStateException("The native client disconnected during history recovery."),
@@ -483,6 +488,8 @@ class NativeClientRuntime(
     suspend fun close() {
         matrix.setObserver(null)
         ackTimeouts.values.forEach(Job::cancel)
+        gatewayStateSyncJob?.cancel()
+        gatewayStateSyncJob = null
         transfers.clear()
         matrix.close()
         scope.cancel()
@@ -492,12 +499,7 @@ class NativeClientRuntime(
         transportIdentity = identity
         refreshSnapshot(publishLifecycle = true)
         if (trust != null) {
-            scope.launch {
-                mutex.withLock {
-                    runCatching { recoverGatewayTransportSnapshotLocked() }
-                    runCatching { requestGatewayStateSnapshotLocked() }
-                }
-            }
+            startGatewayStateSync(recoverTransport = true)
         }
     }
 
@@ -639,6 +641,49 @@ class NativeClientRuntime(
             ).toString(),
         )
     }
+
+    private fun startGatewayStateSync(recoverTransport: Boolean) {
+        gatewayStateSynchronized = false
+        gatewayStateSyncJob?.cancel()
+        gatewayStateSyncJob = scope.launch {
+            if (recoverTransport) {
+                mutex.withLock {
+                    runCatching { recoverGatewayTransportSnapshotLocked() }
+                        .onFailure { error ->
+                            diagnostics.record(
+                                "gateway.transport.recovery.failure",
+                                mapOf("error" to diagnosticErrorName(error)),
+                            )
+                        }
+                }
+            }
+            var completedAttempts = 0
+            while (isActive && trust != null && !gatewayStateSynchronized) {
+                mutex.withLock {
+                    if (trust == null || gatewayStateSynchronized) return@withLock
+                    runCatching { requestGatewayStateSnapshotLocked() }
+                        .onSuccess {
+                            diagnostics.record(
+                                "gateway.state.request.sent",
+                                mapOf("stage" to if (completedAttempts == 0) "initial" else "retry"),
+                            )
+                        }
+                        .onFailure { error ->
+                            diagnostics.record(
+                                "gateway.state.request.failure",
+                                mapOf("error" to diagnosticErrorName(error)),
+                            )
+                        }
+                }
+                if (gatewayStateSynchronized || trust == null) break
+                delay(gatewayStateRetryDelayMs(completedAttempts))
+                completedAttempts += 1
+            }
+        }
+    }
+
+    private fun diagnosticErrorName(error: Throwable): String =
+        error::class.simpleName?.take(160)?.takeIf { it.isNotBlank() } ?: "Exception"
 
     private suspend fun requestGatewayHistoryLocked(
         sessionId: String,
@@ -896,6 +941,10 @@ class NativeClientRuntime(
             extension,
             refreshedSnapshot(),
         )
+        gatewayStateSynchronized = true
+        gatewayStateSyncJob?.cancel()
+        gatewayStateSyncJob = null
+        diagnostics.record("gateway.state.response.accepted")
     }
 
     private fun acceptCommandAck(extension: JsonObject) {
@@ -1430,5 +1479,15 @@ class NativeClientRuntime(
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
         const val COMMAND_LIFETIME_MS = 5 * 60_000L
         const val COMMAND_ACK_TIMEOUT_MS = 30_000L
+    }
+}
+
+internal fun gatewayStateRetryDelayMs(completedAttempts: Int): Long {
+    require(completedAttempts >= 0)
+    return when (completedAttempts) {
+        0 -> 5_000L
+        1 -> 15_000L
+        2 -> 30_000L
+        else -> 60_000L
     }
 }
