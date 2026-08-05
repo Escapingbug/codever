@@ -999,20 +999,20 @@ class NativeClientRuntime(
             replayed == 0 -> JsonArray(emptyList())
             else -> return
         }
-        items.forEachIndexed { index, item ->
-            val entry = item as? JsonObject ?: return@forEachIndexed
+        val roomId = matrix.publicSession()?.roomBinding?.roomId
+        val historyMessages = items.mapNotNull { item ->
+            val entry = item as? JsonObject ?: return@mapNotNull null
             require(entry.keys == setOf("eventId", "timestamp", "content")) {
                 "Gateway history item has an invalid shape."
             }
-            val content = entry["content"] as? JsonObject ?: return@forEachIndexed
-            val timestamp = entry.long("timestamp")?.takeIf { it >= 0 } ?: return@forEachIndexed
+            val content = entry["content"] as? JsonObject ?: return@mapNotNull null
+            val timestamp = entry.long("timestamp")?.takeIf { it >= 0 } ?: return@mapNotNull null
             val historyEventId = entry.string("eventId")
                 ?.takeIf { it.length == 43 && runCatching { Base64Url.decode(it).size == 32 }.getOrDefault(false) }
-                ?: return@forEachIndexed
-            val sessionId = pending.sessionId
+                ?: return@mapNotNull null
             parseMessage(
                 MatrixDecryptedEvent(
-                    matrix.publicSession()?.roomBinding?.roomId ?: return@forEachIndexed,
+                    roomId ?: return@mapNotNull null,
                     historyEventId,
                     trust?.gatewayId ?: "gateway",
                     timestamp,
@@ -1020,9 +1020,14 @@ class NativeClientRuntime(
                 ),
                 content,
                 historical = true,
-            )?.let { message ->
-                eventHub.upsertMessage(sessionId, message.copy(sessionId = sessionId), refreshedSnapshot())
-            }
+            )?.copy(sessionId = pending.sessionId)
+        }
+        if (historyMessages.isNotEmpty()) {
+            eventHub.upsertMessages(
+                pending.sessionId,
+                historyMessages,
+                refreshedSnapshot(),
+            )
         }
         val next = GatewayHistoryCursor(nextBefore, complete = !hasMore)
         synchronized(gatewayHistory) { gatewayHistory[pending.sessionId] = next }

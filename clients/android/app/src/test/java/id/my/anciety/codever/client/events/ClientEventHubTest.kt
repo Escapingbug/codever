@@ -153,6 +153,47 @@ class ClientEventHubTest {
     }
 
     @Test
+    fun `history batch persists once and delivers every changed message`() {
+        val persistence = CountingPersistence()
+        val hub = hub(persistence = persistence)
+        val anchor = hub.publish(ClientEventType.STATUS_CHANGED, JsonPrimitive("anchor"))
+        val listener = RecordingListener()
+        val subscription = hub.subscribe(anchor.cursor, listener = listener)
+        hub.activate(subscription.subscriptionId, subscription.barrierCursor)
+        val savesBeforeBatch = persistence.saveCount
+
+        val events = hub.upsertMessages(
+            "session-1",
+            listOf(
+                message("event-1", 1),
+                message("event-2", 2),
+                message("event-3", 3),
+            ),
+        )
+
+        assertEquals(savesBeforeBatch + 1, persistence.saveCount)
+        assertEquals(listOf("event-1", "event-2", "event-3"),
+            hub.historyPage("session-1", limit = 10).messages.map { it.eventId })
+        assertEquals(events.map { it.cursor }, listener.events.map { it.cursor })
+    }
+
+    @Test
+    fun `snapshot timestamp polling does not rewrite unchanged durable state`() {
+        val persistence = CountingPersistence()
+        val hub = hub(persistence = persistence)
+        val savesBeforePoll = persistence.saveCount
+
+        hub.updateSnapshot(snapshot().copy(generatedAt = 2_000L))
+
+        assertEquals(savesBeforePoll, persistence.saveCount)
+        hub.updateSnapshot(snapshot().copy(
+            generatedAt = 3_000L,
+            lifecycle = ClientLifecycle(LifecyclePhase.READY, 3_000L),
+        ))
+        assertEquals(savesBeforePoll + 1, persistence.saveCount)
+    }
+
+    @Test
     fun `late gateway history is ordered by timestamp with sequence tie break`() {
         val hub = hub()
         hub.upsertMessage("session-1", message("newest", 300), occurredAt = 300)
@@ -428,6 +469,22 @@ class ClientEventHubTest {
                 failNext = false
                 throw IllegalStateException("injected persistence failure")
             }
+            bytes = plaintext.copyOf()
+        }
+
+        override fun clear() {
+            bytes = null
+        }
+    }
+
+    private class CountingPersistence : ClientEventPersistence {
+        private var bytes: ByteArray? = null
+        var saveCount = 0
+
+        override fun load(): ByteArray? = bytes?.copyOf()
+
+        override fun save(plaintext: ByteArray) {
+            saveCount += 1
             bytes = plaintext.copyOf()
         }
 

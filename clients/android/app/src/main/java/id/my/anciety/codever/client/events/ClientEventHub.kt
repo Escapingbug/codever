@@ -138,7 +138,12 @@ class ClientEventHub(
     /** Updates public snapshot state without clearing or advancing the event journal. */
     fun updateSnapshot(snapshot: ClientSnapshot): ClientSnapshot = synchronized(lock) {
         val updated = state.copy(snapshot = snapshotAtHead(snapshot))
-        state = persist(updated)
+        // The runtime polls lifecycle state once per second. generatedAt changes
+        // on every poll, but persisting that timestamp alone rewrites and
+        // re-encrypts the entire event/history journal for no semantic change.
+        val samePayload = updated.snapshot.copy(generatedAt = state.snapshot.generatedAt) ==
+            state.snapshot
+        if (!samePayload) state = persist(updated)
         currentSnapshot()
     }
 
@@ -182,59 +187,98 @@ class ClientEventHub(
         message: ClientMessage,
         snapshot: ClientSnapshot? = null,
         occurredAt: Long = now(),
-    ): ClientEvent? {
+    ): ClientEvent? = upsertMessages(
+        sessionId = sessionId,
+        messages = listOf(message),
+        snapshot = snapshot,
+        occurredAt = occurredAt,
+    ).singleOrNull()
+
+    /**
+     * Atomically deduplicates a history page, persists it once, and then
+     * delivers the corresponding message.upserted events in cursor order.
+     */
+    fun upsertMessages(
+        sessionId: String,
+        messages: List<ClientMessage>,
+        snapshot: ClientSnapshot? = null,
+        occurredAt: Long = now(),
+    ): List<ClientEvent> {
         requireOpaqueId(sessionId, "sessionId")
-        require(message.sessionId == null || message.sessionId == sessionId) {
-            "Message session id does not match its history partition."
+        messages.forEach { message ->
+            require(message.sessionId == null || message.sessionId == sessionId) {
+                "Message session id does not match its history partition."
+            }
         }
-        val event: ClientEvent
+        if (messages.isEmpty()) return emptyList()
+
+        val emitted: List<ClientEvent>
         val targets: List<String>
         synchronized(lock) {
-            val existingIndex = state.history.indexOfFirst {
-                it.sessionId == sessionId && it.message.eventId == message.eventId
-            }
-            if (existingIndex >= 0 && state.history[existingIndex].message == message) return null
-
             val mutableHistory = state.history.toMutableList()
-            var nextHistorySequence = state.historySequence
-            if (existingIndex >= 0) {
-                mutableHistory[existingIndex] = mutableHistory[existingIndex].copy(message = message)
-            } else {
-                nextHistorySequence = Math.addExact(nextHistorySequence, 1L)
-                mutableHistory += StoredHistoryMessage(
-                    sequence = nextHistorySequence,
-                    cursor = nextUniqueCursor(
-                        mutableHistory.mapTo(mutableSetOf()) { it.cursor } + state.headCursor,
-                    ),
-                    sessionId = sessionId,
-                    message = message,
-                )
+            val historyIndex = mutableMapOf<String, Int>()
+            mutableHistory.forEachIndexed { index, stored ->
+                if (stored.sessionId == sessionId) historyIndex[stored.message.eventId] = index
             }
-            val boundedHistory = boundHistory(mutableHistory)
-            val nextEventSequence = Math.addExact(state.headSequence, 1L)
-            val cursor = nextUniqueCursor(state.events.mapTo(mutableSetOf()) { it.event.cursor } + state.headCursor)
-            event = ClientEvent(
-                eventId = "evt.${cursor.removePrefix("c1.")}",
-                cursor = cursor,
-                occurredAt = occurredAt,
-                type = ClientEventType.MESSAGE_UPSERTED,
-                payload = PublicClientJson.encodeMessage(message),
-            )
+            val historyCursors = mutableHistory.mapTo(mutableSetOf()) { it.cursor }
+            historyCursors += state.headCursor
+            val eventCursors = state.events.mapTo(mutableSetOf()) { it.event.cursor }
+            eventCursors += state.headCursor
+
+            var nextHistorySequence = state.historySequence
+            var nextEventSequence = state.headSequence
+            var headCursor = state.headCursor
+            val storedEvents = mutableListOf<StoredClientEvent>()
+            val events = mutableListOf<ClientEvent>()
+            messages.forEach { message ->
+                val existingIndex = historyIndex[message.eventId]
+                if (existingIndex != null && mutableHistory[existingIndex].message == message) {
+                    return@forEach
+                }
+                if (existingIndex != null) {
+                    mutableHistory[existingIndex] =
+                        mutableHistory[existingIndex].copy(message = message)
+                } else {
+                    nextHistorySequence = Math.addExact(nextHistorySequence, 1L)
+                    val historyCursor = nextUniqueCursor(historyCursors).also(historyCursors::add)
+                    historyIndex[message.eventId] = mutableHistory.size
+                    mutableHistory += StoredHistoryMessage(
+                        sequence = nextHistorySequence,
+                        cursor = historyCursor,
+                        sessionId = sessionId,
+                        message = message,
+                    )
+                }
+
+                nextEventSequence = Math.addExact(nextEventSequence, 1L)
+                headCursor = nextUniqueCursor(eventCursors).also(eventCursors::add)
+                val event = ClientEvent(
+                    eventId = "evt.${headCursor.removePrefix("c1.")}",
+                    cursor = headCursor,
+                    occurredAt = occurredAt,
+                    type = ClientEventType.MESSAGE_UPSERTED,
+                    payload = PublicClientJson.encodeMessage(message),
+                )
+                events += event
+                storedEvents += StoredClientEvent(nextEventSequence, event)
+            }
+            if (events.isEmpty()) return emptyList()
+
             val baseSnapshot = snapshot ?: state.snapshot
             val updated = state.copy(
                 headSequence = nextEventSequence,
-                headCursor = cursor,
+                headCursor = headCursor,
                 historySequence = nextHistorySequence,
-                events = (state.events + StoredClientEvent(nextEventSequence, event))
-                    .takeLast(maxReplayEvents),
-                history = boundedHistory,
-                snapshot = baseSnapshot.copy(cursor = cursor, generatedAt = now()),
+                events = (state.events + storedEvents).takeLast(maxReplayEvents),
+                history = boundHistory(mutableHistory),
+                snapshot = baseSnapshot.copy(cursor = headCursor, generatedAt = now()),
             )
             state = persist(updated)
+            emitted = events
             targets = subscriptions.values.filter { it.active }.map { it.id }
         }
         targets.forEach(::deliverAvailable)
-        return event
+        return emitted
     }
 
     fun removeMessage(

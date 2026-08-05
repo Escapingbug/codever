@@ -3,6 +3,7 @@ import test from "node:test";
 import { NATIVE_BRIDGE_LIMITS } from "@codever/native-bridge";
 import {
   NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
+  NATIVE_HISTORY_PAGE_TIMEOUT_MS,
   NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
   NativeRpcBridge,
   acquireNativeRpcBridge,
@@ -145,9 +146,14 @@ test("does not poison future handoffs when an unmanaged owner is attached", asyn
   replacement.close();
 });
 
-test("allows native confirmation and Matrix response time for pairing", () => {
+test("allows native Matrix response time for history and pairing", () => {
   assert.equal(NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS, 15_000);
+  assert.equal(NATIVE_HISTORY_PAGE_TIMEOUT_MS, 45_000);
   assert.equal(NATIVE_PAIRING_COMPLETE_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(
+    nativeBridgeRequestTimeoutMs("codever.history.page"),
+    NATIVE_HISTORY_PAGE_TIMEOUT_MS,
+  );
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.pairing.complete"),
     NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
