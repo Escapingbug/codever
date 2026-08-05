@@ -15,6 +15,7 @@ import {
 } from "@codever/native-bridge";
 import type { CodeverAttachment, CommandPayload } from "@codever/protocol";
 import {
+  CommandAcknowledgementTimeoutError,
   CommandCompletionExpiredError,
   CommandCompletionTimeoutError,
   type CommandCompletion,
@@ -43,7 +44,19 @@ export const REQUIRED_NATIVE_CAPABILITIES = [
 ] as const;
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
+const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
 const NATIVE_CURSOR_PREFIX = "codever.native.cursor.v1";
+
+type Acknowledgement = {
+  sequence: number;
+  revision: number;
+};
+
+type AcknowledgementWaiter = {
+  sequence: number;
+  resolve(revision: number): void;
+  reject(error: Error): void;
+};
 
 type CompletionWaiter = {
   resolve(value: CommandCompletion): void;
@@ -81,6 +94,8 @@ export class NativeBridgeClient implements CodeverClient {
   #detachEventListener: (() => void) | null = null;
   #eventChain: Promise<void> = Promise.resolve();
   readonly #historyBefore = new Map<string, string>();
+  readonly #acknowledgements = new Map<string, Acknowledgement>();
+  readonly #acknowledgementWaiters = new Map<string, AcknowledgementWaiter>();
   readonly #completions = new Map<string, CommandCompletion>();
   readonly #completionWaiters = new Map<string, Set<CompletionWaiter>>();
 
@@ -338,6 +353,7 @@ export class NativeBridgeClient implements CodeverClient {
       commandId,
     });
     this.#completions.delete(commandId);
+    this.#acknowledgements.delete(commandId);
     this.#rejectCompletion(commandId, new CommandCompletionExpiredError(commandId));
   }
 
@@ -348,6 +364,9 @@ export class NativeBridgeClient implements CodeverClient {
     this.#detachEventListener?.();
     this.#detachEventListener = null;
     this.#subscriptionId = null;
+    this.#rejectAcknowledgements(
+      new BridgeProtocolError("INVALID_STATE", "The native bridge is closed."),
+    );
     await this.bridge.request("codever.client.disconnect", {
       context: this.bridge.context(),
       idempotencyKey: crypto.randomUUID(),
@@ -359,6 +378,9 @@ export class NativeBridgeClient implements CodeverClient {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#rejectAcknowledgements(
+      new BridgeProtocolError("INVALID_STATE", "The native bridge is closed."),
+    );
     this.#detachEventListener?.();
     this.#detachEventListener = null;
     const subscriptionId = this.#subscriptionId;
@@ -478,6 +500,17 @@ export class NativeBridgeClient implements CodeverClient {
   }
 
   #recordCommand(command: CommandView): void {
+    if (
+      command.commandId &&
+      command.sequence !== undefined &&
+      command.revision !== undefined
+    ) {
+      this.#recordAcknowledgement(
+        command.commandId,
+        command.sequence,
+        command.revision,
+      );
+    }
     const completion = command.completion;
     if (!completion) return;
     const normalized: CommandCompletion = {
@@ -499,28 +532,86 @@ export class NativeBridgeClient implements CodeverClient {
     waiters.forEach((waiter) => waiter.resolve(normalized));
   }
 
-  #sendResult(receipt: CommandReceipt): CodeverCommandSendResult {
-    if (
-      !receipt.commandId ||
-      receipt.sequence === undefined ||
-      receipt.revision === undefined
-    ) {
+  async #sendResult(receipt: CommandReceipt): Promise<CodeverCommandSendResult> {
+    if (!receipt.commandId || receipt.sequence === undefined) {
       throw new BridgeProtocolError(
         "INVALID_REQUEST",
         "Native command receipt omitted its durable command identity.",
       );
     }
+    const commandId = receipt.commandId;
+    const sequence = receipt.sequence;
+    const revision = receipt.revision ?? await this.#waitForAcknowledgement(
+      commandId,
+      sequence,
+    );
+    const completion = this.#waitForCompletion(
+      commandId,
+      DEFAULT_COMMAND_TIMEOUT_MS,
+      () => new CommandCompletionExpiredError(commandId),
+    );
     return {
       operationId: receipt.operationId,
-      commandId: receipt.commandId,
-      sequence: receipt.sequence,
-      revision: receipt.revision,
-      completion: this.#waitForCompletion(
-        receipt.commandId,
-        DEFAULT_COMMAND_TIMEOUT_MS,
-        () => new CommandCompletionExpiredError(receipt.commandId!),
-      ),
+      commandId,
+      sequence,
+      revision,
+      completion,
     };
+  }
+
+  #recordAcknowledgement(
+    commandId: string,
+    sequence: number,
+    revision: number,
+  ): void {
+    const current = this.#acknowledgements.get(commandId);
+    if (
+      !current ||
+      sequence > current.sequence ||
+      (sequence === current.sequence && revision > current.revision)
+    ) {
+      this.#acknowledgements.set(commandId, { sequence, revision });
+    }
+    const waiter = this.#acknowledgementWaiters.get(commandId);
+    if (waiter?.sequence !== sequence) return;
+    this.#acknowledgementWaiters.delete(commandId);
+    waiter.resolve(revision);
+  }
+
+  #waitForAcknowledgement(
+    commandId: string,
+    sequence: number,
+  ): Promise<number> {
+    const acknowledged = this.#acknowledgements.get(commandId);
+    if (acknowledged?.sequence === sequence) {
+      return Promise.resolve(acknowledged.revision);
+    }
+    return new Promise((resolve, reject) => {
+      const accept = (revision: number) => {
+        globalThis.clearTimeout(timeout);
+        resolve(revision);
+      };
+      const timeout = globalThis.setTimeout(() => {
+        if (this.#acknowledgementWaiters.get(commandId)?.resolve === accept) {
+          this.#acknowledgementWaiters.delete(commandId);
+        }
+        reject(new CommandAcknowledgementTimeoutError(commandId, sequence));
+      }, DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS);
+      this.#acknowledgementWaiters.set(commandId, {
+        sequence,
+        resolve: accept,
+        reject: (error) => {
+          globalThis.clearTimeout(timeout);
+          reject(error);
+        },
+      });
+    });
+  }
+
+  #rejectAcknowledgements(error: Error): void {
+    const waiters = [...this.#acknowledgementWaiters.values()];
+    this.#acknowledgementWaiters.clear();
+    waiters.forEach((waiter) => waiter.reject(error));
   }
 
   #waitForCompletion(

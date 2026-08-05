@@ -83,8 +83,37 @@ test("replays native state, sends a durable command, and acknowledges events", a
   assert.deepEqual(statuses, ["connected"]);
   assert.deepEqual(savedCursors, ["cursor-barrier-1"]);
 
-  const sent = await client.send({ operation: "cancel", sessionId: "s1" });
+  const pendingSend = client.send({ operation: "cancel", sessionId: "s1" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  port.deliver({
+    jsonrpc: "2.0",
+    method: "codever.events.deliver",
+    params: {
+      subscriptionId: "subscription-1",
+      events: [
+        {
+          schemaVersion: 1,
+          eventId: "event-command-ack-1",
+          cursor: "cursor-event-ack-1",
+          occurredAt: 2,
+          type: "command.changed",
+          payload: {
+            operationId: "operation-1",
+            commandId: "command-1",
+            idempotencyKey: "00000000-0000-4000-8000-000000000001",
+            state: "accepted",
+            submittedAt: 1,
+            updatedAt: 2,
+            sequence: 1,
+            revision: 4,
+          },
+        },
+      ],
+    },
+  });
+  const sent = await pendingSend;
   assert.equal(sent.commandId, "command-1");
+  assert.equal(sent.revision, 4);
   port.deliver({
     jsonrpc: "2.0",
     method: "codever.events.deliver",
@@ -125,7 +154,11 @@ test("replays native state, sends a durable command, and acknowledges events", a
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(commandResults, ["command-1"]);
-  assert.deepEqual(savedCursors, ["cursor-barrier-1", "cursor-event-2"]);
+  assert.deepEqual(savedCursors, [
+    "cursor-barrier-1",
+    "cursor-event-ack-1",
+    "cursor-event-2",
+  ]);
   assert.ok(port.requests.some((request) => request.method === "codever.events.ack"));
 
   client.dispose();
@@ -167,12 +200,11 @@ function responseFor(request: Request): unknown {
         operationId: "operation-1",
         commandId: "command-1",
         idempotencyKey: params.idempotencyKey,
-        state: "accepted",
+        state: "transmitting",
         submittedAt: 1,
         updatedAt: 1,
         sessionId: "s1",
         sequence: 1,
-        revision: 4,
       };
     }
     default:
