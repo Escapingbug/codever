@@ -311,20 +311,36 @@ const syncStallTimeoutMs = positiveDurationFromEnvironment(
     'CODEVER_MATRIX_SYNC_STALL_TIMEOUT_MS',
     120_000,
 )
+const shutdownTimeoutMs = positiveDurationFromEnvironment(
+    'CODEVER_MATRIX_SHUTDOWN_TIMEOUT_MS',
+    10_000,
+)
 let requestStop: (failure?: Error) => void = () => undefined
-const stopped = new Promise<Error | null>(resolve => {
+const stopped = new Promise<{ failure: Error | null; forced: boolean }>(resolve => {
     let stopping = false
     requestStop = (failure?: Error): void => {
         if (stopping) return
         stopping = true
-        void adminServer.stop()
+        const shutdown = adminServer.stop()
             .catch(error => {
                 process.stderr.write(
                     `[gateway-admin] shutdown failed: ${formatError(error)}\n`,
                 )
             })
             .then(() => runner!.stop())
-            .finally(() => resolve(failure ?? null))
+            .catch(error => {
+                process.stderr.write(
+                    `[matrix-gateway] shutdown failed: ${formatError(error)}\n`,
+                )
+            })
+        void completeWithin(shutdown, shutdownTimeoutMs).then(completed => {
+            if (!completed) {
+                process.stderr.write(
+                    `[matrix-gateway] shutdown exceeded ${shutdownTimeoutMs}ms; forcing exit.\n`,
+                )
+            }
+            resolve({ failure: failure ?? null, forced: !completed })
+        })
     }
     process.once('SIGINT', () => requestStop())
     process.once('SIGTERM', () => requestStop())
@@ -337,10 +353,12 @@ const stopSyncWatchdog = watchMatrixSyncHealth(sdkClient, {
     )
     requestStop(error)
 })
-const healthFailure = await stopped
+const stopResult = await stopped
 stopSyncWatchdog()
 stopPairingRecovery()
-if (healthFailure) process.exitCode = 1
+const exitCode = stopResult.failure ? 1 : 0
+if (stopResult.forced) process.exit(exitCode)
+if (stopResult.failure) process.exitCode = exitCode
 
 async function readJson<T>(path: string): Promise<T> {
     try {
@@ -359,6 +377,20 @@ function positiveDurationFromEnvironment(name: string, fallbackMs: number): numb
         throw new Error(`${name} must be a positive duration in milliseconds`)
     }
     return value
+}
+
+async function completeWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            operation.then(() => true),
+            new Promise<boolean>(resolve => {
+                timeout = setTimeout(() => resolve(false), timeoutMs)
+            }),
+        ])
+    } finally {
+        if (timeout) clearTimeout(timeout)
+    }
 }
 
 async function loginGateway(

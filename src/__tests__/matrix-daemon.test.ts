@@ -9,7 +9,11 @@ import {
     type MatrixClient,
     type MatrixEvent,
 } from 'matrix-js-sdk'
-import type { CodeverCommand, SignedCommand } from '@codever/protocol'
+import {
+    CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    type CodeverCommand,
+    type SignedCommand,
+} from '@codever/protocol'
 import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
@@ -307,11 +311,9 @@ describe('MatrixGatewayRunner', () => {
         client.emit({
             roomId: '!room:example.org',
             eventId: '$history-request',
-            eventType: 'm.room.message',
+            eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
             sender: '@alice:example.org',
-            senderDeviceId: 'matrix-ed25519-key',
-            encrypted: true,
-            encryptedPayloadFingerprint: 'history-request-ciphertext',
+            encrypted: false,
             content: {
                 msgtype: 'm.notice',
                 body: 'Encrypted Codever message',

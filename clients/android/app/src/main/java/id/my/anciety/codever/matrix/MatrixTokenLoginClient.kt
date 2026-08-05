@@ -129,9 +129,15 @@ class MatrixProfileClient(
         val response = transport.getJson(endpoint, session.accessToken)
         return try {
             when (response.status) {
-                HttpsURLConnection.HTTP_OK -> Json.parseToJsonElement(
-                    response.body.toString(Charsets.UTF_8),
-                ).jsonObject
+                HttpsURLConnection.HTTP_OK -> {
+                    val root = Json.parseToJsonElement(
+                        response.body.toString(Charsets.UTF_8),
+                    ).jsonObject
+                    // Matrix returns a custom profile field as
+                    // { "<field-name>": <field-value> }. Keep accepting the
+                    // unwrapped form for compatible homeserver variants.
+                    (root[key] as? JsonObject) ?: root
+                }
                 HttpsURLConnection.HTTP_NOT_FOUND -> null
                 else -> throw IllegalStateException("Matrix profile request failed (${response.status}).")
             }

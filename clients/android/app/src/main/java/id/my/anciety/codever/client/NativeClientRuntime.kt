@@ -224,6 +224,7 @@ class NativeClientRuntime(
     fun unsubscribe(subscriptionId: String): Boolean = eventHub.unsubscribe(subscriptionId)
 
     suspend fun historyPage(sessionId: String, before: String?, limit: Int): HistoryPage {
+        diagnostics.record("history.page.requested")
         val gatewayCursor = synchronized(gatewayHistory) { gatewayHistory[sessionId] }
         var local = eventHub.historyPage(
             sessionId,
@@ -231,7 +232,10 @@ class NativeClientRuntime(
             limit,
             externalHasMore = gatewayCursor?.complete == false,
         )
-        if (local.hasMore || gatewayCursor?.complete == true) return local
+        if (local.hasMore || gatewayCursor?.complete == true) {
+            diagnostics.record("history.page.local")
+            return local
+        }
 
         val pending = mutex.withLock {
             pendingHistory.values.firstOrNull { it.sessionId == sessionId }
@@ -241,6 +245,7 @@ class NativeClientRuntime(
             try {
                 withTimeout(HISTORY_RESPONSE_TIMEOUT_MS) { pending.response.await() }
             } catch (_: TimeoutCancellationException) {
+                diagnostics.record("history.response.timeout")
                 throw IllegalStateException(
                     "The Gateway is still preparing history. Retry to continue recovery.",
                 )
@@ -254,6 +259,7 @@ class NativeClientRuntime(
             limit,
             externalHasMore = !resolvedGatewayCursor.complete,
         )
+        diagnostics.record("history.page.completed")
         return local
     }
 
@@ -527,7 +533,10 @@ class NativeClientRuntime(
         } ?: return
         publishCommand(outbox.get(commandId) ?: return)
         try {
-            matrix.sendRoomMessage(signedCommandContent(transmission).toString())
+            sendTrustedControlMessage(
+                signedCommandContent(transmission).toString(),
+                "codever.command.${transmission.commandId}",
+            )
         } catch (error: Exception) {
             outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
             throw error
@@ -630,7 +639,7 @@ class NativeClientRuntime(
             put("issuedAt", timestamp)
             put("expiresAt", timestamp + CONTROL_REQUEST_LIFETIME_MS)
         }
-        matrix.sendRoomMessage(
+        sendTrustedControlMessage(
             secureControlContent(
                 activeTrust,
                 "gateway_state_request",
@@ -639,6 +648,7 @@ class NativeClientRuntime(
                 "codever.gateway.state.request.$requestId",
                 timestamp,
             ).toString(),
+            "codever.gateway.state.request.$requestId",
         )
     }
 
@@ -719,7 +729,7 @@ class NativeClientRuntime(
         )
         pendingHistory[requestId] = pending
         try {
-            matrix.sendRoomMessage(
+            sendTrustedControlMessage(
                 secureControlContent(
                     activeTrust,
                     "history_request",
@@ -728,7 +738,9 @@ class NativeClientRuntime(
                     "codever.history.request.$requestId",
                     timestamp,
                 ).toString(),
+                "codever.history.request.$requestId",
             )
+            diagnostics.record("history.request.sent")
         } catch (error: Exception) {
             pendingHistory.remove(requestId)
             throw error
@@ -780,6 +792,16 @@ class NativeClientRuntime(
                 put("secure_envelope", envelope.toJson())
             })
         }
+    }
+
+    /**
+     * The content is already signed and encrypted to the paired Gateway by
+     * Codever. Sending it as an application control event avoids coupling
+     * command and recovery traffic to Matrix Megolm device-key distribution.
+     */
+    private suspend fun sendTrustedControlMessage(contentJson: String, transactionId: String) {
+        matrix.sendApplicationControlEvent(contentJson, transactionId)
+        diagnostics.record("matrix.application_control.sent")
     }
 
     private suspend fun processMatrixEvent(event: MatrixDecryptedEvent) {
@@ -907,6 +929,7 @@ class NativeClientRuntime(
         val next = activeTrust.copy(transportTrust = nextTransport)
         trustStore.save(next)
         trust = next
+        diagnostics.record("gateway.transport.recovery.accepted")
         eventHub.publish(
             ClientEventType.TRUST_CHANGED,
             PublicClientJson.encodeTrust(publicTrust()),
@@ -1014,6 +1037,7 @@ class NativeClientRuntime(
     }
 
     private suspend fun acceptHistoryPage(extension: JsonObject) {
+        diagnostics.record("history.response.received")
         val page = extension["history_page"] as? JsonObject ?: return
         val requestId = page.string("requestId") ?: return
         val pending = pendingHistory[requestId] ?: return
@@ -1081,6 +1105,7 @@ class NativeClientRuntime(
         val next = GatewayHistoryCursor(nextBefore, complete = !hasMore)
         synchronized(gatewayHistory) { gatewayHistory[pending.sessionId] = next }
         pending.response.complete(next)
+        diagnostics.record("history.response.accepted")
     }
 
     private suspend fun downloadHistoryBatch(batch: JsonObject, replayed: Int): JsonArray {

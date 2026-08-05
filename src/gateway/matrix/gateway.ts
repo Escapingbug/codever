@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 import {
+    CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     gatewayStateRequestSchema,
     historyRequestSchema,
     type CodeverCommand,
@@ -338,10 +339,19 @@ export class MatrixGatewayRunner {
     }
 
     private async handleEvent(event: MatrixIncomingEvent): Promise<void> {
-        if (event.eventType !== 'm.room.message') return
-        if (isMatrixGatewayControlEvent(event.content)) return
-        if (!event.encrypted) throw new Error('Clear-text Matrix events cannot execute gateway commands')
-        if (!event.senderDeviceId) throw new Error('Encrypted Matrix event has no cryptographic sender device key')
+        const applicationControl =
+            event.eventType === CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE
+        if (!applicationControl && event.eventType !== 'm.room.message') return
+        if (!applicationControl && isMatrixGatewayControlEvent(event.content)) return
+        if (!applicationControl && !event.encrypted) {
+            throw new Error('Clear-text Matrix events cannot execute gateway commands')
+        }
+        if (!applicationControl && !event.senderDeviceId) {
+            throw new Error('Encrypted Matrix event has no cryptographic sender device key')
+        }
+        if (applicationControl && !this.secureContent) {
+            throw new Error('Application control events require Codever application security')
+        }
         const runtime = this.rooms.get(event.roomId)
         if (!runtime) return
 
@@ -456,7 +466,7 @@ export class MatrixGatewayRunner {
                 conversationId: runtime.config.conversationId,
                 revisionEpoch: runtime.revisionEpoch,
                 matrixSender: event.sender,
-                matrixDeviceKey: event.senderDeviceId,
+                matrixDeviceKey: event.senderDeviceId ?? '',
                 ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
             }, this.now())
         } catch (error) {

@@ -80,8 +80,14 @@ class MatrixTokenLoginClientTest {
         runBlocking {
             lateinit var endpoint: URI
             var receivedToken: String? = null
-            val responseBody = """{"version":1,"signed_snapshot":{"snapshot":{},"signature":{}}}"""
-                .toByteArray()
+            val responseBody = """
+                {
+                  "io.codever.gateway_transport": {
+                    "version": 1,
+                    "signed_snapshot": {"snapshot":{},"signature":{}}
+                  }
+                }
+            """.trimIndent().toByteArray()
             val client = MatrixProfileClient(MatrixProfileTransport { target, accessToken ->
                 endpoint = target
                 receivedToken = accessToken

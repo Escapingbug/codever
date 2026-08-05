@@ -5,6 +5,7 @@ import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +31,10 @@ class MatrixConnectionRuntime(
     context: Context,
     private val loginClient: MatrixTokenLoginClient = MatrixTokenLoginClient(),
     private val profileClient: MatrixProfileClient = MatrixProfileClient(),
+    private val applicationControlClient: MatrixApplicationControlClient =
+        MatrixApplicationControlClient(),
+    private val applicationControlSyncClient: MatrixApplicationControlSyncClient =
+        MatrixApplicationControlSyncClient(),
     private val networkMonitor: NetworkMonitor = AndroidNetworkMonitor(context),
     private val accountStorage: MatrixAccountStorage = MatrixAccountStorage(
         context,
@@ -45,6 +50,12 @@ class MatrixConnectionRuntime(
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onDecryptedEvent: (MatrixDecryptedEvent) -> Unit = {},
 ) {
+    private data class ApplicationControlSendContext(
+        val session: StoredMatrixSession,
+        val generation: Long,
+        val ready: CompletableDeferred<Unit>,
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val started = AtomicBoolean(false)
@@ -54,11 +65,14 @@ class MatrixConnectionRuntime(
     @Volatile
     private var secrets: PersistedMatrixSecrets? = null
     private var driver: MatrixSdkDriver? = null
+    @Volatile
     private var driverGeneration = 0L
     @Volatile
     private var latestJournalCursor = 0L
     private var retryJob: Job? = null
     private var watchdogJob: Job? = null
+    private var applicationControlReceiverJob: Job? = null
+    private var applicationControlReady = CompletableDeferred<Unit>()
 
     val status: MatrixRuntimeStatus
         get() = stateMachine.status
@@ -110,6 +124,7 @@ class MatrixConnectionRuntime(
                         )
                         accept(MatrixRuntimeEvent.Failed(decision.detailCode, decision.blocked))
                         val staleDriver = driver
+                        stopApplicationControlReceiverLocked()
                         driver = null
                         driverGeneration += 1
                         if (staleDriver != null) stopDriver(staleDriver)
@@ -132,6 +147,34 @@ class MatrixConnectionRuntime(
         }
         withTimeout(SEND_OPERATION_TIMEOUT_MS) {
             current.sendRoomMessage(contentJson, rotateRoomKey)
+        }
+    }.await()
+
+    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): Unit = scope.async {
+        val context = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            if (driver == null) {
+                throw IllegalStateException("The native Matrix connection is not ready.")
+            }
+            ApplicationControlSendContext(
+                session = secrets?.session
+                    ?: throw IllegalStateException("The native Matrix session is unavailable."),
+                generation = driverGeneration,
+                ready = applicationControlReady,
+            )
+        }
+        withTimeout(SEND_OPERATION_TIMEOUT_MS) {
+            context.ready.await()
+            mutex.withLock {
+                check(
+                    driver != null &&
+                        driverGeneration == context.generation &&
+                        applicationControlReady === context.ready,
+                ) { "The native Matrix connection changed before the control request was sent." }
+            }
+            applicationControlClient.send(context.session, contentJson, transactionId)
+            Unit
         }
     }.await()
 
@@ -190,6 +233,7 @@ class MatrixConnectionRuntime(
             watchdogJob?.cancel()
             watchdogJob = null
             networkMonitor.stop()
+            stopApplicationControlReceiverLocked()
             stopDriver(current)
             driver = null
             driverGeneration += 1
@@ -260,6 +304,7 @@ class MatrixConnectionRuntime(
         watchdogJob?.cancel()
         watchdogJob = null
         networkMonitor.stop()
+        stopApplicationControlReceiverLocked()
         driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
@@ -328,6 +373,7 @@ class MatrixConnectionRuntime(
                             blocked = false,
                         ),
                     )
+                    stopApplicationControlReceiverLocked()
                     stopDriver(currentDriver)
                     if (driver === currentDriver) {
                         driver = null
@@ -384,6 +430,7 @@ class MatrixConnectionRuntime(
         if (!networkAvailable || !started.get()) return
         retryJob?.cancel()
         retryJob = null
+        stopApplicationControlReceiverLocked()
         driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
@@ -435,7 +482,20 @@ class MatrixConnectionRuntime(
                             }
                         }
                     },
-                    onTransportReady = onTransportReady,
+                    onTransportReady = { identity ->
+                        scope.launch {
+                            mutex.withLock {
+                                if (driver === nextDriver && driverGeneration == generation) {
+                                    startApplicationControlReceiverLocked(
+                                        currentSecrets.session,
+                                        currentFiles,
+                                        generation,
+                                        identity,
+                                    )
+                                }
+                            }
+                        }
+                    },
                     onDecryptedEvent = onDecryptedEvent,
                     onRuntimeFailure = { error ->
                         diagnostics.record("matrix.driver.runtime_failure", errorAttributes(error))
@@ -449,6 +509,7 @@ class MatrixConnectionRuntime(
                                             blocked = decision.blocked,
                                         ),
                                     )
+                                    stopApplicationControlReceiverLocked()
                                     stopDriver(nextDriver)
                                     driver = null
                                     driverGeneration += 1
@@ -462,6 +523,7 @@ class MatrixConnectionRuntime(
             accept(MatrixRuntimeEvent.SyncStarted)
         } catch (error: Exception) {
             diagnostics.record("matrix.driver.start_failure", errorAttributes(error))
+            stopApplicationControlReceiverLocked()
             stopDriver(nextDriver)
             if (driver === nextDriver && driverGeneration == generation) {
                 driver = null
@@ -478,6 +540,100 @@ class MatrixConnectionRuntime(
             if (!decision.blocked) scheduleRetryLocked()
             throw error
         }
+    }
+
+    private fun startApplicationControlReceiverLocked(
+        session: StoredMatrixSession,
+        currentFiles: MatrixAccountFiles,
+        generation: Long,
+        identity: MatrixTransportIdentity,
+    ) {
+        if (applicationControlReceiverJob?.isActive == true) return
+        val ready = applicationControlReady
+        diagnostics.record("matrix.application_control.receiver_starting")
+        applicationControlReceiverJob = scope.launch {
+            var since: String? = null
+            var consecutiveFailures = 0
+            while (isActive) {
+                val batch = try {
+                    applicationControlSyncClient.sync(session, since)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (
+                        error is MatrixApplicationControlSyncException &&
+                        error.fatal
+                    ) {
+                        diagnostics.record(
+                            "matrix.application_control.receiver_rejected",
+                            errorAttributes(error),
+                        )
+                        ready.completeExceptionally(error)
+                        scope.launch {
+                            mutex.withLock {
+                                if (driverGeneration == generation) {
+                                    accept(
+                                        MatrixRuntimeEvent.Failed(
+                                            "matrix_application_control_sync_rejected",
+                                            blocked = true,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        return@launch
+                    }
+                    consecutiveFailures += 1
+                    diagnostics.record(
+                        "matrix.application_control.receiver_retry",
+                        errorAttributes(error),
+                    )
+                    val requestedDelay =
+                        (error as? MatrixApplicationControlSyncException)?.retryAfterMs
+                    delay(
+                        requestedDelay ?: (
+                            APPLICATION_CONTROL_RETRY_BASE_MS *
+                                consecutiveFailures.coerceAtMost(
+                                    APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER,
+                                )
+                            ),
+                    )
+                    continue
+                }
+                if (!started.get() || driverGeneration != generation) return@launch
+                consecutiveFailures = 0
+                val establishingCursor = since == null
+                since = batch.nextBatch
+                if (!establishingCursor && batch.events.isNotEmpty()) {
+                    diagnostics.record("matrix.application_control.batch_received")
+                }
+                if (!establishingCursor) {
+                    batch.events.forEach { event ->
+                        currentFiles.journal.append(
+                            roomId = event.roomId,
+                            eventId = event.eventId,
+                            receivedAt = System.currentTimeMillis(),
+                            rawJson = event.rawJson,
+                        )?.let { cursor ->
+                            latestJournalCursor = cursor
+                            diagnostics.record("matrix.application_control.event_received")
+                            onDecryptedEvent(event)
+                        }
+                    }
+                }
+                if (ready.complete(Unit)) {
+                    diagnostics.record("matrix.application_control.receiver_ready")
+                    onTransportReady(identity)
+                }
+            }
+        }
+    }
+
+    private fun stopApplicationControlReceiverLocked() {
+        applicationControlReceiverJob?.cancel()
+        applicationControlReceiverJob = null
+        applicationControlReady.cancel()
+        applicationControlReady = CompletableDeferred()
     }
 
     private fun scheduleRetryLocked() {
@@ -541,5 +697,7 @@ class MatrixConnectionRuntime(
         const val PROFILE_OPERATION_TIMEOUT_MS = 45_000L
         const val MEDIA_OPERATION_TIMEOUT_MS = 120_000L
         const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
+        const val APPLICATION_CONTROL_RETRY_BASE_MS = 1_000L
+        const val APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER = 15
     }
 }

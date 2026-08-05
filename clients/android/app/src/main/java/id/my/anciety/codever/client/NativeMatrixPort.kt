@@ -22,6 +22,7 @@ interface NativeMatrixPort {
     fun publicSession(): PublicMatrixSession?
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
+    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String)
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
     suspend fun downloadMedia(url: String): ByteArray
     suspend fun profileProperty(userId: String, key: String): JsonObject?
@@ -52,6 +53,8 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
     override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = runtime.bootstrap(input)
     override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) =
         runtime.sendRoomMessage(contentJson, rotateRoomKey)
+    override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) =
+        runtime.sendApplicationControlEvent(contentJson, transactionId)
     override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String =
         runtime.uploadMedia(mimeType, bytes)
     override suspend fun downloadMedia(url: String): ByteArray = runtime.downloadMedia(url)

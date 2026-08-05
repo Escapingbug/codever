@@ -60,8 +60,10 @@ export interface MatrixRoomMessageContent extends Record<string, unknown> {
 }
 
 /**
- * Decrypted event emitted by a transport after successful Matrix E2EE
- * verification. `senderDeviceId` must come from the cryptographic sender
+ * Timeline event emitted by a transport. Normal room messages are decrypted
+ * and verified with Matrix E2EE. Application control events intentionally
+ * bypass Megolm and must contain a Codever secure envelope before use.
+ * `senderDeviceId`, when present, must come from cryptographic sender
  * information, never an untrusted clear-text content field.
  */
 export interface MatrixIncomingEvent {
