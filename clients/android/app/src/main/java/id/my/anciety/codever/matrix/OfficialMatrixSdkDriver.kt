@@ -176,11 +176,18 @@ class OfficialMatrixSdkDriver(
                 ed25519 = ownEd25519,
             )
             diagnostics.record("matrix.driver.sync_service_building")
-            val service = built.syncService()
-                .withSharePos(true)
-                .withRoomListConnectionId(ROOM_LIST_CONNECTION_ID)
-                .withRoomListTimelineLimit(1u)
-                .finish()
+            val service = try {
+                built.syncService()
+                    .withSharePos(true)
+                    .withRoomListTimelineLimit(1u)
+                    .finish()
+            } catch (error: Exception) {
+                diagnostics.record(
+                    "matrix.driver.sync_service_build_failure",
+                    errorAttributes(error),
+                )
+                throw MatrixSyncServiceBuildException(error)
+            }
             val roomList = service.roomListService()
             roomList.subscribeToRooms(listOf(activeSession.roomBinding.roomId))
             diagnostics.record("matrix.driver.room_subscription_ready")
@@ -243,7 +250,10 @@ class OfficialMatrixSdkDriver(
             closeSyncServiceResources()?.let { cleanupError ->
                 diagnostics.record("matrix.driver.stop_failure", errorAttributes(cleanupError))
             }
-            built.close()
+            runCatching { built.close() }.onFailure { cleanupError ->
+                diagnostics.record("matrix.driver.stop_failure", errorAttributes(cleanupError))
+            }
+            client = null
             throw error
         }
     }
@@ -499,7 +509,6 @@ class OfficialMatrixSdkDriver(
     )
 
     private companion object {
-        const val ROOM_LIST_CONNECTION_ID = "codever-native-v2"
         const val E2EE_INITIALIZATION_TIMEOUT_MS = 45_000L
         const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L
         const val BOUND_ROOM_POLL_INTERVAL_MS = 100L

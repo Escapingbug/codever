@@ -8,6 +8,16 @@ import org.matrix.rustcomponents.sdk.InternalException
 
 class MatrixRuntimeFailurePolicyTest {
     @Test
+    fun `sync service build failures are blocked instead of retried`() {
+        val decision = MatrixRuntimeFailurePolicy.decide(
+            MatrixSyncServiceBuildException(IllegalArgumentException("invalid connection id")),
+        )
+
+        assertTrue(decision.blocked)
+        assertEquals("matrix_sync_service_build_failed", decision.detailCode)
+    }
+
+    @Test
     fun `Rust panic is blocked instead of entering a retry storm`() {
         val decision = MatrixRuntimeFailurePolicy.decide(InternalException("redacted panic"))
 

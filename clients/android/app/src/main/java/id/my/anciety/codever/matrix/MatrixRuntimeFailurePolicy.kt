@@ -7,8 +7,15 @@ internal data class MatrixRuntimeFailureDecision(
     val blocked: Boolean,
 )
 
+internal class MatrixSyncServiceBuildException(cause: Throwable) :
+    IllegalStateException("The Matrix sync service configuration is invalid.", cause)
+
 internal object MatrixRuntimeFailurePolicy {
     fun decide(error: Throwable): MatrixRuntimeFailureDecision = when (error) {
+        is MatrixSyncServiceBuildException -> MatrixRuntimeFailureDecision(
+            detailCode = "matrix_sync_service_build_failed",
+            blocked = true,
+        )
         is InternalException -> MatrixRuntimeFailureDecision(
             detailCode = "matrix_sdk_internal_failure",
             blocked = true,
