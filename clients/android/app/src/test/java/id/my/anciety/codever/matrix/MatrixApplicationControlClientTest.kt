@@ -146,6 +146,44 @@ class MatrixApplicationControlClientTest {
         assertTrue(responseBody.all { it == 0.toByte() })
     }
 
+    @Test
+    fun `initial sync catches up control events instead of only establishing a cursor`() = runBlocking {
+        lateinit var endpoint: URI
+        val responseBody = """
+            {
+              "next_batch":"s-catchup",
+              "rooms":{"join":{"!room:example.org":{"timeline":{"events":[{
+                "type":"io.codever.secure_control.v1",
+                "event_id":"${'$'}offline-result",
+                "sender":"@gateway:example.org",
+                "origin_server_ts":1234,
+                "content":${secureContent()}
+              }]}}}}
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { target, _ ->
+                endpoint = target
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val batch = client.sync(storedSession(), since = null)
+
+        assertEquals(listOf("\$offline-result"), batch.events.map { it.eventId })
+        assertFalse(endpoint.rawQuery.contains("since="))
+        assertTrue(endpoint.rawQuery.contains("timeout=0"))
+        val encodedFilter = endpoint.rawQuery
+            .split("&")
+            .single { it.startsWith("filter=") }
+            .substringAfter("filter=")
+        val timeline = Json.parseToJsonElement(
+            URLDecoder.decode(encodedFilter, Charsets.UTF_8.name()),
+        ).jsonObject.getValue("room").jsonObject
+            .getValue("timeline").jsonObject
+        assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
+    }
+
     private fun secureContent() = """
         {
           "msgtype":"m.notice",

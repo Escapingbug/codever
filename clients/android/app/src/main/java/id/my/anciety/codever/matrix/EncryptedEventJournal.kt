@@ -25,6 +25,14 @@ data class DecryptedMatrixEvent(
     val rawJson: String,
 )
 
+data class JournalEventInput(
+    val roomId: String,
+    val eventId: String,
+    val receivedAt: Long,
+    val rawJson: String,
+    val dedupeByEventId: Boolean = false,
+)
+
 data class JournalReadResult(
     val events: List<DecryptedMatrixEvent>,
     val cursorExpired: Boolean,
@@ -34,6 +42,10 @@ data class JournalReadResult(
 
 interface DecryptedEventJournal {
     fun append(roomId: String, eventId: String, receivedAt: Long, rawJson: String): Long?
+
+    fun appendAll(events: List<JournalEventInput>): List<Long?> = events.map { event ->
+        append(event.roomId, event.eventId, event.receivedAt, event.rawJson)
+    }
 
     fun latestCursor(): Long
 
@@ -108,28 +120,46 @@ class EncryptedBoundedEventJournal(
     )
 
     @Synchronized
-    override fun append(roomId: String, eventId: String, receivedAt: Long, rawJson: String): Long? {
+    override fun append(roomId: String, eventId: String, receivedAt: Long, rawJson: String): Long? =
+        appendAll(listOf(JournalEventInput(roomId, eventId, receivedAt, rawJson))).single()
+
+    @Synchronized
+    override fun appendAll(events: List<JournalEventInput>): List<Long?> {
         ensureLoaded()
-        require(roomId.length in 1..512 && eventId.length in 1..512) { "Matrix event identity is invalid." }
-        require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_EVENT_BYTES) {
-            "Matrix event is too large for the native journal."
-        }
-        val parsed = Json.parseToJsonElement(rawJson).jsonObject
-        val rawEventId = parsed["event_id"]?.jsonPrimitive?.contentOrNull
-        require(rawEventId == null || rawEventId == eventId) { "Matrix event id does not match its JSON." }
-        val fingerprint = fingerprint(rawJson)
-        if (latestFingerprintByEventId[eventId] == fingerprint) return null
+        require(events.size <= MAX_APPEND_BATCH) { "Matrix journal append batch is too large." }
 
         val previousEntries = ArrayDeque(entries)
         val previousFingerprints = LinkedHashMap(latestFingerprintByEventId)
         val previousCursor = cursor
         return try {
-            val next = Math.addExact(cursor, 1L)
-            entries.addLast(DecryptedMatrixEvent(next, roomId, eventId, receivedAt, rawJson))
-            cursor = next
-            latestFingerprintByEventId[eventId] = fingerprint
-            trimAndPersist()
-            next
+            var changed = false
+            val cursors = events.map { event ->
+                validate(event)
+                val fingerprint = fingerprint(event.rawJson)
+                if (
+                    (event.dedupeByEventId && event.eventId in latestFingerprintByEventId) ||
+                    latestFingerprintByEventId[event.eventId] == fingerprint
+                ) {
+                    null
+                } else {
+                    val next = Math.addExact(cursor, 1L)
+                    entries.addLast(
+                        DecryptedMatrixEvent(
+                            next,
+                            event.roomId,
+                            event.eventId,
+                            event.receivedAt,
+                            event.rawJson,
+                        ),
+                    )
+                    cursor = next
+                    latestFingerprintByEventId[event.eventId] = fingerprint
+                    changed = true
+                    next
+                }
+            }
+            if (changed) trimAndPersist()
+            cursors
         } catch (error: Exception) {
             entries.clear()
             entries.addAll(previousEntries)
@@ -137,6 +167,21 @@ class EncryptedBoundedEventJournal(
             latestFingerprintByEventId.putAll(previousFingerprints)
             cursor = previousCursor
             throw error
+        }
+    }
+
+    private fun validate(event: JournalEventInput) {
+        require(event.roomId.length in 1..512 && event.eventId.length in 1..512) {
+            "Matrix event identity is invalid."
+        }
+        require(event.receivedAt >= 0) { "Matrix event timestamp is invalid." }
+        require(event.rawJson.toByteArray(Charsets.UTF_8).size <= MAX_EVENT_BYTES) {
+            "Matrix event is too large for the native journal."
+        }
+        val parsed = Json.parseToJsonElement(event.rawJson).jsonObject
+        val rawEventId = parsed["event_id"]?.jsonPrimitive?.contentOrNull
+        require(rawEventId == null || rawEventId == event.eventId) {
+            "Matrix event id does not match its JSON."
         }
     }
 
@@ -296,6 +341,7 @@ class EncryptedBoundedEventJournal(
 
     private companion object {
         const val MAX_EVENT_BYTES = 512 * 1024
+        const val MAX_APPEND_BATCH = 1_000
     }
 }
 

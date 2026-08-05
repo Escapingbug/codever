@@ -73,6 +73,8 @@ class MatrixConnectionRuntime(
     private var watchdogJob: Job? = null
     private var applicationControlReceiverJob: Job? = null
     private var applicationControlReady = CompletableDeferred<Unit>()
+    @Volatile
+    private var applicationControlSince: String? = null
 
     val status: MatrixRuntimeStatus
         get() = stateMachine.status
@@ -280,6 +282,7 @@ class MatrixConnectionRuntime(
         }
         val candidateFiles = accountStorage.forSession(session)
         accountStorage.clear(candidateFiles)
+        applicationControlSince = null
         val nextFiles = accountStorage.forSession(session)
         val nextSecrets = PersistedMatrixSecrets(
             sdkStoreKey = EncryptedMatrixSessionStore.newStoreKey(),
@@ -314,6 +317,7 @@ class MatrixConnectionRuntime(
             secrets = null
             files = null
             latestJournalCursor = 0
+            applicationControlSince = null
         }
         liveness.reset()
         accept(MatrixRuntimeEvent.Stop)
@@ -552,7 +556,7 @@ class MatrixConnectionRuntime(
         val ready = applicationControlReady
         diagnostics.record("matrix.application_control.receiver_starting")
         applicationControlReceiverJob = scope.launch {
-            var since: String? = null
+            var since = applicationControlSince
             var consecutiveFailures = 0
             while (isActive) {
                 val batch = try {
@@ -603,24 +607,36 @@ class MatrixConnectionRuntime(
                 if (!started.get() || driverGeneration != generation) return@launch
                 consecutiveFailures = 0
                 val establishingCursor = since == null
-                since = batch.nextBatch
-                if (!establishingCursor && batch.events.isNotEmpty()) {
-                    diagnostics.record("matrix.application_control.batch_received")
+                if (batch.events.isNotEmpty()) {
+                    diagnostics.record(
+                        if (establishingCursor) {
+                            "matrix.application_control.catchup_received"
+                        } else {
+                            "matrix.application_control.batch_received"
+                        },
+                    )
                 }
-                if (!establishingCursor) {
-                    batch.events.forEach { event ->
-                        currentFiles.journal.append(
+                val receivedAt = System.currentTimeMillis()
+                val cursors = currentFiles.journal.appendAll(
+                    batch.events.map { event ->
+                        JournalEventInput(
                             roomId = event.roomId,
                             eventId = event.eventId,
-                            receivedAt = System.currentTimeMillis(),
+                            receivedAt = receivedAt,
                             rawJson = event.rawJson,
-                        )?.let { cursor ->
-                            latestJournalCursor = cursor
-                            diagnostics.record("matrix.application_control.event_received")
-                            onDecryptedEvent(event)
-                        }
+                            dedupeByEventId = true,
+                        )
+                    },
+                )
+                batch.events.zip(cursors).forEach { (event, cursor) ->
+                    cursor?.let {
+                        latestJournalCursor = cursor
+                        diagnostics.record("matrix.application_control.event_received")
+                        onDecryptedEvent(event)
                     }
                 }
+                since = batch.nextBatch
+                applicationControlSince = since
                 if (ready.complete(Unit)) {
                     diagnostics.record("matrix.application_control.receiver_ready")
                     onTransportReady(identity)

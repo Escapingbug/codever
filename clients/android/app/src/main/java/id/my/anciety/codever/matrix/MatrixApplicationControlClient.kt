@@ -200,7 +200,7 @@ class MatrixApplicationControlSyncClient(
                     })
                     put(
                         "limit",
-                        if (since == null) INITIAL_TIMELINE_LIMIT else LIVE_TIMELINE_LIMIT,
+                        if (since == null) CATCHUP_TIMELINE_LIMIT else LIVE_TIMELINE_LIMIT,
                     )
                 })
             })
@@ -280,7 +280,7 @@ class MatrixApplicationControlSyncClient(
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
     private companion object {
-        const val INITIAL_TIMELINE_LIMIT = 1
+        const val CATCHUP_TIMELINE_LIMIT = 100
         const val LIVE_TIMELINE_LIMIT = 100
         const val LONG_POLL_TIMEOUT_MS = 30_000
         const val MAX_RETRY_AFTER_MS = 60_000L
