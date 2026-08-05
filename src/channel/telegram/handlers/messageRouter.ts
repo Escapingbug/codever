@@ -230,6 +230,21 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
             return
         }
 
+        const retryDeliveryAliasMatch = messageText.match(/^\/retry-delivery(?:@\w+)?(?:\s+(.+?))?\s*$/i)
+        if (retryDeliveryAliasMatch) {
+            if (!topicSession) {
+                await c.reply('No active session.')
+                return
+            }
+            await topicSession.dispatch({
+                kind: 'command',
+                name: 'retry_delivery',
+                args: retryDeliveryAliasMatch[1],
+                source: 'channel',
+            })
+            return
+        }
+
         topicSession = await getOrCreateTopicSession(c, chat.id, messageThreadId, topicKey)
         if (!topicSession) return
 

@@ -277,6 +277,34 @@ export function registerGroupHandlers(bot: any, ctx: GroupCommandContext): void 
         })
     })
 
+    bot.command('delivery', async (c: Context) => {
+        if (!c.chat || c.chat.type === 'private') return
+        const messageThreadId = c.message?.message_thread_id
+        const topicKey = makeTopicKey(c.chat.id, messageThreadId)
+        const topicSession = topicSessions.get(topicKey)
+        if (!topicSession) {
+            await c.reply('No active session.')
+            return
+        }
+
+        const deliveryId = (c as any).match?.trim()
+        await topicSession.dispatch({ kind: 'command', name: 'delivery', args: deliveryId, source: 'channel' })
+    })
+
+    bot.command('retry_delivery', async (c: Context) => {
+        if (!c.chat || c.chat.type === 'private') return
+        const messageThreadId = c.message?.message_thread_id
+        const topicKey = makeTopicKey(c.chat.id, messageThreadId)
+        const topicSession = topicSessions.get(topicKey)
+        if (!topicSession) {
+            await c.reply('No active session.')
+            return
+        }
+
+        const deliveryId = (c as any).match?.trim()
+        await topicSession.dispatch({ kind: 'command', name: 'retry_delivery', args: deliveryId, source: 'channel' })
+    })
+
     bot.command('file', async (c: Context) => {
         if (!c.chat || c.chat.type === 'private') return
         const messageThreadId = c.message?.message_thread_id

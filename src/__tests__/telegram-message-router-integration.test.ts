@@ -353,6 +353,23 @@ describe('Telegram message router integration', () => {
         expect(existing.receiveInput).not.toHaveBeenCalled()
     })
 
+    it('routes the /retry-delivery alias to retry_delivery instead of the agent prompt', async () => {
+        const bot = createBot()
+        const existing = createTopicSession()
+        const topicSessions = new Map<string, any>([['-100:10', existing]])
+        registerMessageRouter(bot, { sessionManager: createSessionManager(), topicSessions, bot: bot as any })
+
+        await bot.emitMessage(createMessageContext('/retry-delivery delivery-1'))
+
+        expect(existing.dispatch).toHaveBeenCalledWith({
+            kind: 'command',
+            name: 'retry_delivery',
+            args: 'delivery-1',
+            source: 'channel',
+        })
+        expect(existing.receiveInput).not.toHaveBeenCalled()
+    })
+
     it('keeps different Telegram topics isolated in the same group', async () => {
         const bot = createBot()
         const topicSessions = new Map<string, any>()

@@ -254,6 +254,30 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
     })
 
+    it('/delivery should dispatch a runtime delivery inspection command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCommand('delivery', createContext('delivery-1'))
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'delivery', args: 'delivery-1', source: 'channel' })
+        expect(session.receiveInput).not.toHaveBeenCalled()
+    })
+
+    it('/retry_delivery should dispatch a runtime delivery retry command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCommand('retry_delivery', createContext('delivery-1'))
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'retry_delivery', args: 'delivery-1', source: 'channel' })
+        expect(session.receiveInput).not.toHaveBeenCalled()
+    })
+
     it('/config timeout should dispatch runtime timeout config command', async () => {
         const bot = createBot()
         const session = createSession('idle')

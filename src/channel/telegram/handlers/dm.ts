@@ -99,6 +99,8 @@ export function registerDmHandlers(bot: any, sessionManager: SessionManager, res
                 '/paste_cancel - Discard collected long input\n' +
                 '/new — Start a new session\n' +
                 '/resume — List and resume past sessions\n' +
+                '/delivery [id] — Inspect retained deliveries\n' +
+                '/retry_delivery &lt;id&gt; — Resend a retained delivery\n' +
                 '/archive — Stop session, deactivate group\n' +
                 '/restart — Restart the daemon\n\n' +
                 '<b>Settings:</b>\n' +
