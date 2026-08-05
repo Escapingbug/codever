@@ -85,6 +85,10 @@ class MainActivity : ComponentActivity() {
             bindingRequested = false
             serviceBound = true
             serviceBinder = service as CodeverConnectionService.LocalBinder
+            diagnostics.record(
+                "activity.service_connected",
+                mapOf("stage" to if (webView == null) "create" else "reload"),
+            )
             if (pendingForegroundStart && notificationsAvailable()) {
                 serviceBinder?.start()
                 pendingForegroundStart = false
@@ -210,6 +214,10 @@ class MainActivity : ComponentActivity() {
             serviceConnection,
             Context.BIND_AUTO_CREATE,
         )
+        diagnostics.record(
+            "activity.service_binding_requested",
+            mapOf("available" to bindingRequested.toString()),
+        )
         if (!bindingRequested) showRecoveryPage("The native host service could not be bound.")
     }
 
@@ -265,9 +273,15 @@ class MainActivity : ComponentActivity() {
 
     private fun showWebHost() {
         val existing = webView
-        if (existing != null) {
-            setContentView(existing)
-            return
+        when (webHostActionAfterServiceConnected(existing != null)) {
+            WebHostBindingAction.RELOAD -> {
+                checkNotNull(existing)
+                setContentView(existing)
+                diagnostics.record("activity.web_host_reloading_after_bind")
+                existing.reload()
+                return
+            }
+            WebHostBindingAction.CREATE -> Unit
         }
 
         val created = WebView(this)

@@ -18,6 +18,18 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `service binding diagnostics use approved fields`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z activity.service_connected available=true stage=reload",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "activity.service_connected",
+                mapOf("stage" to "reload", "available" to "true"),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),
