@@ -131,8 +131,10 @@ test("ships a complete installable offline shell", async () => {
     source,
     /Connected directly to an encrypted Matrix room|Future Matrix device rotations/,
   );
-  assert.match(styles, /\.composer-hint-ready\s*\{\s*display: none;/);
-  assert.doesNotMatch(styles, /\.composer-hint\s*\{\s*display: none;/);
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.composer-hint\s*\{\s*display: none;/,
+  );
   assert.doesNotMatch(
     source,
     /\{isStreaming \? \([\s\S]{0,700}?key="send-message"/,
@@ -178,6 +180,7 @@ test("ships a complete installable offline shell", async () => {
   assert.match(styles, /\.composer-options-open \.agent-controls \{\s*display: grid/);
   assert.match(styles, /\.agent-controls select \{[\s\S]*?min-height: 44px/);
   assert.match(styles, /\.project-indicators i \{[\s\S]*?width: 9px;[\s\S]*?font-size: 0/);
+  assert.match(styles, /\.matrix-settings > footer \{[\s\S]*?position: sticky;[\s\S]*?bottom: 0/);
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
 });
 
