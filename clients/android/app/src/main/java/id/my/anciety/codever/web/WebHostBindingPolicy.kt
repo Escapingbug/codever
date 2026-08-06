@@ -2,6 +2,7 @@ package id.my.anciety.codever.web
 
 internal enum class WebHostBindingAction {
     CREATE,
+    KEEP,
     RELOAD,
 }
 
@@ -13,8 +14,11 @@ internal enum class WebHostBindingAction {
  */
 internal fun webHostActionAfterServiceConnected(
     hasExistingWebHost: Boolean,
-): WebHostBindingAction = if (hasExistingWebHost) {
+    recoveringFromDisconnect: Boolean = false,
+): WebHostBindingAction = if (!hasExistingWebHost) {
+    WebHostBindingAction.CREATE
+} else if (recoveringFromDisconnect) {
     WebHostBindingAction.RELOAD
 } else {
-    WebHostBindingAction.CREATE
+    WebHostBindingAction.KEEP
 }

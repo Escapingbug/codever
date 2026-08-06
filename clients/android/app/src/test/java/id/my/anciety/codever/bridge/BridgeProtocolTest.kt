@@ -368,9 +368,9 @@ class BridgeProtocolTest {
         val disconnects = mutableListOf<String>()
         private var active = true
 
-        override fun client(): NativeClientRuntime = error("Not used by this protocol fixture.")
+        override suspend fun client(): NativeClientRuntime = error("Not used by this protocol fixture.")
 
-        override fun snapshot() = ClientSnapshot(
+        override suspend fun snapshot() = ClientSnapshot(
             deviceId = nativeDeviceId,
             cursor = "cursor-1",
             generatedAt = 100,

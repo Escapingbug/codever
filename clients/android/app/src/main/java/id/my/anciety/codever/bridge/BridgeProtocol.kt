@@ -288,9 +288,9 @@ interface BridgeRuntime {
     val runtimeBuild: String
     val nativeDeviceId: String
 
-    fun client(): NativeClientRuntime
+    suspend fun client(): NativeClientRuntime
 
-    fun snapshot(): ClientSnapshot
+    suspend fun snapshot(): ClientSnapshot
 
     suspend fun start(): ClientSnapshot
 

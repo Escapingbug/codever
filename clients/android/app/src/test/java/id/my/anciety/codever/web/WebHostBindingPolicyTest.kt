@@ -5,7 +5,7 @@ import org.junit.Test
 
 class WebHostBindingPolicyTest {
     @Test
-    fun `cold service connection creates the web host`() {
+    fun `cold launch creates the web host before service connection`() {
         assertEquals(
             WebHostBindingAction.CREATE,
             webHostActionAfterServiceConnected(hasExistingWebHost = false),
@@ -13,10 +13,24 @@ class WebHostBindingPolicyTest {
     }
 
     @Test
+    fun `initial service connection keeps an already loading web host`() {
+        assertEquals(
+            WebHostBindingAction.KEEP,
+            webHostActionAfterServiceConnected(
+                hasExistingWebHost = true,
+                recoveringFromDisconnect = false,
+            ),
+        )
+    }
+
+    @Test
     fun `service reconnection reloads a retained web host`() {
         assertEquals(
             WebHostBindingAction.RELOAD,
-            webHostActionAfterServiceConnected(hasExistingWebHost = true),
+            webHostActionAfterServiceConnected(
+                hasExistingWebHost = true,
+                recoveringFromDisconnect = true,
+            ),
         )
     }
 }

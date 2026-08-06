@@ -23,13 +23,17 @@ import id.my.anciety.codever.client.events.ClientSnapshot
 import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
+import id.my.anciety.codever.matrix.MatrixSdkPlatform
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import id.my.anciety.codever.web.MainActivity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -37,7 +41,8 @@ import kotlinx.coroutines.withContext
 class CodeverConnectionService : Service() {
     private val binder = LocalBinder()
     private lateinit var preferences: ServicePreferenceStore
-    private lateinit var clientRuntime: NativeClientRuntime
+    @Volatile private var clientRuntime: NativeClientRuntime? = null
+    private val clientRuntimeReady = CompletableDeferred<NativeClientRuntime>()
     private lateinit var diagnostics: NativeDiagnosticLog
     private lateinit var taskNotifier: AgentTaskNotifier
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -50,16 +55,12 @@ class CodeverConnectionService : Service() {
         diagnostics.record("service.created")
         preferences = ServicePreferenceStore(this)
         taskNotifier = AgentTaskNotifier(this)
-        clientRuntime = NativeClientRuntime(
-            context = this,
-            foregroundState = { foregroundStarted to foregroundStarted },
-            onCommandCompletion = ::onCommandCompletion,
-        )
         createNotificationChannel()
         taskNotifier.createChannel()
+        initializeClientRuntime()
         if (preferences.restoreEnabled) {
             enterForeground()
-            clientRuntime.start()
+            startClientRuntime()
         }
     }
 
@@ -69,7 +70,7 @@ class CodeverConnectionService : Service() {
                 diagnostics.record("service.start", mapOf("source" to (intent?.action ?: "sticky")))
                 preferences.restoreEnabled = true
                 enterForeground()
-                clientRuntime.start()
+                startClientRuntime()
                 START_STICKY
             }
             ServiceStartDecision.STOP_EXPLICITLY -> {
@@ -89,9 +90,55 @@ class CodeverConnectionService : Service() {
     override fun onDestroy() {
         diagnostics.record("service.destroyed")
         foregroundStarted = false
-        runBlocking(Dispatchers.IO) { clientRuntime.close() }
+        val runtime = clientRuntime
         serviceScope.cancel()
+        if (runtime != null) {
+            runBlocking(Dispatchers.IO) { runtime.close() }
+        } else {
+            clientRuntimeReady.cancel()
+        }
         super.onDestroy()
+    }
+
+    private fun initializeClientRuntime() {
+        diagnostics.record("service.runtime_initializing")
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                MatrixSdkPlatform.initialize(this@CodeverConnectionService)
+                val created = NativeClientRuntime(
+                    context = this@CodeverConnectionService,
+                    foregroundState = { foregroundStarted to foregroundStarted },
+                    onCommandCompletion = ::onCommandCompletion,
+                )
+                if (!currentCoroutineContext().isActive) {
+                    withContext(NonCancellable) { created.close() }
+                    return@launch
+                }
+                clientRuntime = created
+                clientRuntimeReady.complete(created)
+                diagnostics.record("service.runtime_ready")
+            } catch (error: Exception) {
+                clientRuntimeReady.completeExceptionally(error)
+                diagnostics.record(
+                    "service.runtime_failed",
+                    mapOf("error" to error.javaClass.simpleName.take(160)),
+                )
+            }
+        }
+    }
+
+    private suspend fun awaitClientRuntime(): NativeClientRuntime = clientRuntimeReady.await()
+
+    private fun startClientRuntime() {
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching { awaitClientRuntime().start() }
+                .onFailure { error ->
+                    diagnostics.record(
+                        "service.runtime_start_failed",
+                        mapOf("error" to error.javaClass.simpleName.take(160)),
+                    )
+                }
+        }
     }
 
     private fun enterForeground() {
@@ -113,18 +160,19 @@ class CodeverConnectionService : Service() {
 
     private fun disconnectExplicitly() {
         serviceScope.launch {
-            withContext(Dispatchers.IO) { clientRuntime.disconnect(revoke = false) }
-            preferences.restoreEnabled = false
-            ServiceCompat.stopForeground(
-                this@CodeverConnectionService,
-                ServiceCompat.STOP_FOREGROUND_REMOVE,
-            )
-            foregroundStarted = false
-            stopSelf()
+            try {
+                withContext(Dispatchers.IO) { awaitClientRuntime().disconnect(revoke = false) }
+            } finally {
+                preferences.restoreEnabled = false
+                ServiceCompat.stopForeground(
+                    this@CodeverConnectionService,
+                    ServiceCompat.STOP_FOREGROUND_REMOVE,
+                )
+                foregroundStarted = false
+                stopSelf()
+            }
         }
     }
-
-    private fun snapshot(): ClientSnapshot = clientRuntime.snapshot()
 
     private fun onCommandCompletion(operation: CommandOperation, completion: CommandCompletion) {
         val kind = TaskNotificationPolicy.decide(uiForeground, operation, completion.outcome)
@@ -213,9 +261,11 @@ class CodeverConnectionService : Service() {
         }
 
     inner class LocalBinder : Binder() {
-        fun clientRuntime(): NativeClientRuntime = this@CodeverConnectionService.clientRuntime
+        fun readyClientRuntime(): NativeClientRuntime? = clientRuntime
 
-        fun snapshot(): ClientSnapshot = this@CodeverConnectionService.snapshot()
+        suspend fun clientRuntime(): NativeClientRuntime = awaitClientRuntime()
+
+        suspend fun snapshot(): ClientSnapshot = awaitClientRuntime().snapshot()
 
         fun setUiForeground(value: Boolean) {
             uiForeground = value
@@ -225,29 +275,37 @@ class CodeverConnectionService : Service() {
             )
         }
 
-        fun start(): ClientSnapshot {
+        fun startInBackground() {
             preferences.restoreEnabled = true
             enterForeground()
-            return clientRuntime.start()
+            startClientRuntime()
+        }
+
+        suspend fun start(): ClientSnapshot {
+            withContext(Dispatchers.Main.immediate) {
+                preferences.restoreEnabled = true
+                enterForeground()
+            }
+            return withContext(Dispatchers.IO) { awaitClientRuntime().start() }
         }
 
         suspend fun bootstrap(input: MatrixBootstrap): Pair<PublicMatrixSession, ClientSnapshot> {
             check(foregroundStarted) { "The persistent native runtime is not active." }
-            return withContext(Dispatchers.IO) { clientRuntime.bootstrap(input) }
+            return withContext(Dispatchers.IO) { awaitClientRuntime().bootstrap(input) }
         }
 
         suspend fun completePairing(
             pairingId: String,
             deviceName: String,
         ): Pair<PublicTrustState.Trusted, ClientSnapshot> = withContext(Dispatchers.IO) {
-            clientRuntime.completePairing(pairingId, deviceName)
+            awaitClientRuntime().completePairing(pairingId, deviceName)
         }
 
         suspend fun disconnect(mode: String): ClientSnapshot {
             require(mode == "stop" || mode == "revoke") { "Unsupported disconnect mode." }
             return withContext(NonCancellable) {
                 val snapshot = withContext(Dispatchers.IO) {
-                    clientRuntime.disconnect(revoke = mode == "revoke")
+                    awaitClientRuntime().disconnect(revoke = mode == "revoke")
                 }
                 withContext(Dispatchers.Main.immediate) {
                     preferences.restoreEnabled = false

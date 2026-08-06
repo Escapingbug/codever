@@ -61,15 +61,19 @@ import id.my.anciety.codever.service.ServicePreferenceStore
 import id.my.anciety.codever.service.ServiceStartPolicy
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.PublicMatrixSession
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 
 class MainActivity : ComponentActivity() {
     private var serviceBinder: CodeverConnectionService.LocalBinder? = null
     private var serviceBound = false
     private var bindingRequested = false
+    private var serviceConnectionInterrupted = false
+    private var serviceBinderReady = CompletableDeferred<CodeverConnectionService.LocalBinder>()
     private lateinit var contentHost: FrameLayout
     private var webView: WebView? = null
     private var nativeBridge: NativeWebBridge? = null
@@ -96,22 +100,33 @@ class MainActivity : ComponentActivity() {
             bindingRequested = false
             serviceBound = true
             serviceBinder = service as CodeverConnectionService.LocalBinder
+            if (!serviceBinderReady.isCompleted) serviceBinderReady.complete(serviceBinder!!)
             serviceBinder?.setUiForeground(foreground)
+            val reloadWebHost = serviceConnectionInterrupted || pendingForegroundStart
+            serviceConnectionInterrupted = false
             diagnostics.record(
                 "activity.service_connected",
-                mapOf("stage" to if (webView == null) "create" else "reload"),
+                mapOf(
+                    "stage" to when {
+                        webView == null -> "create"
+                        reloadWebHost -> "reload"
+                        else -> "keep"
+                    },
+                ),
             )
             if (pendingForegroundStart && notificationsAvailable()) {
-                serviceBinder?.start()
+                serviceBinder?.startInBackground()
                 pendingForegroundStart = false
             }
-            showWebHost()
+            showWebHost(reloadExisting = reloadWebHost)
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
             serviceBinder = null
             serviceBound = false
             bindingRequested = false
+            serviceConnectionInterrupted = true
+            serviceBinderReady = CompletableDeferred()
             if (foreground && notificationsAvailable()) {
                 showRecoveryPage("The native host stopped unexpectedly.")
             }
@@ -132,6 +147,7 @@ class MainActivity : ComponentActivity() {
             }
         })
         handleIntent(intent)
+        showWebHost()
         ensureHostBound()
     }
 
@@ -175,6 +191,7 @@ class MainActivity : ComponentActivity() {
             bindingRequested = false
             serviceBinder = null
         }
+        if (!serviceBinderReady.isCompleted) serviceBinderReady.cancel()
         nativeBackDispatchGeneration += 1
         nativeBackDispatchPending = false
         nativeBridge?.close()
@@ -279,7 +296,14 @@ class MainActivity : ComponentActivity() {
             "activity.service_binding_requested",
             mapOf("available" to bindingRequested.toString()),
         )
-        if (!bindingRequested) showRecoveryPage("The native host service could not be bound.")
+        if (!bindingRequested) {
+            if (!serviceBinderReady.isCompleted) {
+                serviceBinderReady.completeExceptionally(
+                    IllegalStateException("The native host service could not be bound."),
+                )
+            }
+            showRecoveryPage("The native host service could not be bound.")
+        }
     }
 
     private fun startForegroundAndBind() {
@@ -290,9 +314,9 @@ class MainActivity : ComponentActivity() {
         }
         CodeverConnectionService.startFromUser(this)
         serviceBinder?.let {
-            it.start()
+            it.startInBackground()
             pendingForegroundStart = false
-            showWebHost()
+            showWebHost(reloadExisting = true)
             return
         }
         bindHostOnly()
@@ -332,9 +356,15 @@ class MainActivity : ComponentActivity() {
             }
     }
 
-    private fun showWebHost() {
+    private fun showWebHost(reloadExisting: Boolean = false) {
         val existing = webView
-        when (webHostActionAfterServiceConnected(existing != null)) {
+        when (webHostActionAfterServiceConnected(existing != null, reloadExisting)) {
+            WebHostBindingAction.KEEP -> {
+                checkNotNull(existing)
+                showContent(existing)
+                diagnostics.record("activity.web_host_kept_during_bind")
+                return
+            }
             WebHostBindingAction.RELOAD -> {
                 checkNotNull(existing)
                 showContent(existing)
@@ -358,6 +388,7 @@ class MainActivity : ComponentActivity() {
         }
         nativeBridge = bridge
         showContent(created)
+        diagnostics.record("activity.web_host_created")
         created.loadUrl(pendingWebAppUrl())
     }
 
@@ -431,6 +462,14 @@ class MainActivity : ComponentActivity() {
             userAgentString = "$userAgentString CodeverNative/${BuildConfig.VERSION_NAME}"
         }
         view.webViewClient = object : WebViewClient() {
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                diagnostics.record("activity.web_page_visible")
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                diagnostics.record("activity.web_page_finished")
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (!request.isForMainFrame) return false
                 val url = request.url.toString()
@@ -600,17 +639,20 @@ class MainActivity : ComponentActivity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+    private suspend fun awaitServiceBinder(): CodeverConnectionService.LocalBinder =
+        serviceBinder ?: withTimeout(SERVICE_BIND_TIMEOUT_MS) { serviceBinderReady.await() }
+
     private inner class ActivityBridgeRuntime : BridgeRuntime {
         override val runtimeVersion: String = BuildConfig.VERSION_NAME
         override val runtimeBuild: String = BuildConfig.NATIVE_BUILD_ID
         override val nativeDeviceId: String
-            get() = serviceBinder?.clientRuntime()?.deviceId
+            get() = serviceBinder?.readyClientRuntime()?.deviceId
                 ?: ServicePreferenceStore(this@MainActivity).nativeDeviceId
 
-        override fun client(): NativeClientRuntime = serviceBinder?.clientRuntime()
-            ?: throw IllegalStateException("Native foreground service is not bound.")
+        override suspend fun client(): NativeClientRuntime =
+            awaitServiceBinder().clientRuntime()
 
-        override fun snapshot(): ClientSnapshot = client().snapshot()
+        override suspend fun snapshot(): ClientSnapshot = client().snapshot()
 
         override suspend fun start(): ClientSnapshot = withContext(Dispatchers.Main.immediate) {
             if (!notificationsAvailable()) {
@@ -625,21 +667,18 @@ class MainActivity : ComponentActivity() {
                 )
             }
             CodeverConnectionService.startFromUser(this@MainActivity)
-            serviceBinder?.start()
-                ?: throw IllegalStateException("Native host service is not bound.")
+            awaitServiceBinder().start()
         }
 
         override suspend fun bootstrap(
             input: MatrixBootstrap,
-        ): Pair<PublicMatrixSession, ClientSnapshot> = serviceBinder?.bootstrap(input)
-            ?: throw IllegalStateException("Native foreground service is not bound.")
+        ): Pair<PublicMatrixSession, ClientSnapshot> = awaitServiceBinder().bootstrap(input)
 
         override suspend fun completePairing(
             pairingId: String,
             deviceName: String,
         ): Pair<PublicTrustState.Trusted, ClientSnapshot> {
-            val binder = serviceBinder
-                ?: throw IllegalStateException("Native foreground service is not bound.")
+            val binder = awaitServiceBinder()
             val preview = binder.clientRuntime().pairingPreview(pairingId)
                 ?: throw IllegalStateException("The pairing preview is no longer available.")
             val confirmed = withContext(Dispatchers.Main.immediate) {
@@ -653,8 +692,7 @@ class MainActivity : ComponentActivity() {
         }
 
         override suspend fun disconnect(mode: String): ClientSnapshot {
-            val snapshot = serviceBinder?.disconnect(mode)
-                ?: throw IllegalStateException("Native foreground service is not bound.")
+            val snapshot = awaitServiceBinder().disconnect(mode)
             withContext(Dispatchers.Main.immediate) {
                 if (serviceBound || bindingRequested) {
                     runCatching { unbindService(serviceConnection) }
@@ -695,6 +733,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val KEY_NOTIFICATION_REQUESTED = "notification-permission-requested"
+        private const val SERVICE_BIND_TIMEOUT_MS = 10_000L
         const val ACTION_EXPORT_DIAGNOSTICS =
             "id.my.anciety.codever.action.EXPORT_DIAGNOSTICS"
         const val ACTION_OPEN_SESSION =
