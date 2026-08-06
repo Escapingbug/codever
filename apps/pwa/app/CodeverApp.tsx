@@ -7,6 +7,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -47,6 +48,7 @@ import {
   type NewSessionInput,
 } from "./NewSessionDialog";
 import { SessionDeleteDialog } from "./SessionDeleteDialog";
+import { GatewayForgetDialog } from "./GatewayForgetDialog";
 import {
   gatewayProjectKey,
   type GatewaySessionSummary,
@@ -77,6 +79,34 @@ import {
 } from "./chatMessages";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
+import { deriveConnectionPresentation } from "./connectionPresentation";
+import {
+  isProjectExpanded,
+  readProjectDisclosureState,
+  setProjectCollapsed,
+  toggleProjectCollapsed,
+  writeProjectDisclosureState,
+} from "./projectDisclosureState";
+import {
+  EMPTY_SESSION_READ_STATE,
+  countSessionIndicators,
+  initializeSessionReadState,
+  markSessionRead,
+  pruneSessionReadState,
+  readSessionReadState,
+  reconcileSelectedSessionReadState,
+  sessionIndicator,
+  writeSessionReadState,
+  type SessionReadState,
+} from "./sessionIndicators";
+import {
+  EMPTY_UI_NOTICE_STATE,
+  noticesForScope,
+  reduceUiNotices,
+  type UiNotice,
+  type UiNoticeScope,
+  type UiNoticeSeverity,
+} from "./uiNotices";
 import {
   NATIVE_BACK_PRIORITY,
   resolveCodeverBackAction,
@@ -150,6 +180,8 @@ type RevisionConflictNotice = {
   optimisticMessageId?: string;
   busy: boolean;
 };
+
+type SessionListFilter = "all" | "working" | "attention";
 
 const emptyMatrixConfig: MatrixConnectionConfig = {
   homeserver: "",
@@ -310,9 +342,50 @@ function AttachmentCard({
   );
 }
 
+function UiNoticeList({
+  notices,
+  className,
+  onDismiss,
+}: {
+  notices: UiNotice[];
+  className?: string;
+  onDismiss(key: string): void;
+}) {
+  if (notices.length === 0) return null;
+  return (
+    <div className={`ui-notice-list ${className ?? ""}`}>
+      {notices.map((notice) => (
+        <div
+          key={notice.key}
+          className={`ui-notice ui-notice-${notice.severity}`}
+          role={notice.severity === "error" ? "alert" : "status"}
+        >
+          <span aria-hidden="true">
+            {notice.severity === "error"
+              ? "!"
+              : notice.severity === "success"
+                ? "✓"
+                : "i"}
+          </span>
+          <p>{notice.message}</p>
+          <button
+            type="button"
+            aria-label="Dismiss message"
+            onClick={() => onDismiss(notice.key)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function CodeverApp() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [sessionListFilter, setSessionListFilter] =
+    useState<SessionListFilter>("all");
   const [draft, setDraft] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -374,10 +447,25 @@ export function CodeverApp() {
   const [invitationReauthRequired, setInvitationReauthRequired] =
     useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [forgetDialogOpen, setForgetDialogOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [pendingSessionCreate, setPendingSessionCreate] =
     useState<NewSessionInput | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
+    readProjectDisclosureState(
+      typeof window === "undefined" ? null : window.localStorage,
+    ),
+  );
+  const [sessionReadState, setSessionReadState] = useState<SessionReadState>(() =>
+    typeof window === "undefined"
+      ? EMPTY_SESSION_READ_STATE
+      : readSessionReadState(window.localStorage),
+  );
+  const [uiNotices, dispatchUiNotice] = useReducer(
+    reduceUiNotices,
+    EMPTY_UI_NOTICE_STATE,
+  );
   const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<{
     sessionId: string;
     action: "archive" | "restore" | "delete";
@@ -388,6 +476,9 @@ export function CodeverApp() {
     Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
+  const sessionSearchRef = useRef<HTMLInputElement>(null);
+  const detailsButtonRef = useRef<HTMLButtonElement>(null);
+  const detailsPopoverRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const codeverClientRef = useRef<CodeverClient | null>(null);
   const matrixStartupGenerationRef = useRef(0);
@@ -502,8 +593,19 @@ export function CodeverApp() {
     [gatewayState, search],
   );
   const activeFilteredSessions = useMemo(
-    () => filteredSessions.filter((session) => session.status !== "archived"),
-    [filteredSessions],
+    () =>
+      filteredSessions.filter((session) => {
+        if (session.status === "archived") return false;
+        const indicator = sessionIndicator(session, sessionReadState);
+        if (sessionListFilter === "working") {
+          return indicator.activity === "running" || indicator.activity === "stopping";
+        }
+        if (sessionListFilter === "attention") {
+          return indicator.activity === "failed" || indicator.unread;
+        }
+        return true;
+      }),
+    [filteredSessions, sessionListFilter, sessionReadState],
   );
   const archivedFilteredSessions = useMemo(
     () => filteredSessions.filter((session) => session.status === "archived"),
@@ -512,8 +614,25 @@ export function CodeverApp() {
   const activeSessionCount =
     gatewayState?.sessions.filter((session) => session.status !== "archived")
       .length ?? 0;
-  const visibleActiveSessionCount =
-    activeSessionCount + (pendingSessionCreate ? 1 : 0);
+  const activeIndicatorCounts = useMemo(
+    () =>
+      countSessionIndicators(
+        (gatewayState?.sessions ?? []).filter(
+          (session) => session.status !== "archived",
+        ),
+        sessionReadState,
+      ),
+    [gatewayState, sessionReadState],
+  );
+  const attentionSessionCount = useMemo(
+    () =>
+      (gatewayState?.sessions ?? []).filter((session) => {
+        if (session.status === "archived") return false;
+        const indicator = sessionIndicator(session, sessionReadState);
+        return indicator.activity === "failed" || indicator.unread;
+      }).length,
+    [gatewayState, sessionReadState],
+  );
   const archivedSessionCount =
     gatewayState?.sessions.filter((session) => session.status === "archived")
       .length ?? 0;
@@ -542,6 +661,16 @@ export function CodeverApp() {
     }
     return [...groups.values()];
   }, [activeFilteredSessions, matrixConfig.gatewayId]);
+  const connectionPresentation = useMemo(
+    () => deriveConnectionPresentation(connectionStatus, connectionDetail),
+    [connectionDetail, connectionStatus],
+  );
+  const composerNotices = [
+    ...noticesForScope(uiNotices, "composer"),
+    ...noticesForScope(uiNotices, "attachment"),
+  ];
+  const sessionNotices = noticesForScope(uiNotices, "session");
+  const historyNotices = noticesForScope(uiNotices, "history");
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
   const matrixTransportOnline =
@@ -598,6 +727,32 @@ export function CodeverApp() {
   const activeModelCapability = gatewayState?.capabilities.models.find(
     (model) => model.id === activeWorkspace?.model,
   );
+
+  function showUiNotice(
+    key: string,
+    scope: UiNoticeScope,
+    severity: UiNoticeSeverity,
+    message: string,
+    autoDismissMs?: number | null,
+  ) {
+    dispatchUiNotice({
+      type: "show",
+      key,
+      scope,
+      severity,
+      message,
+      now: Date.now(),
+      ...(autoDismissMs === undefined ? {} : { autoDismissMs }),
+    });
+  }
+
+  function dismissUiNotice(key: string) {
+    dispatchUiNotice({ type: "dismiss", key });
+  }
+
+  function recoverUiNotice(key: string) {
+    dispatchUiNotice({ type: "operation-recovered", key });
+  }
 
   function setSessionRunning(sessionId: string, running: boolean) {
     setRunningSessionIds((current) => {
@@ -694,6 +849,24 @@ export function CodeverApp() {
   }
 
   useEffect(() => {
+    writeProjectDisclosureState(window.localStorage, collapsedProjects);
+  }, [collapsedProjects]);
+
+  useEffect(() => {
+    writeSessionReadState(window.localStorage, sessionReadState);
+  }, [sessionReadState]);
+
+  useEffect(() => {
+    if (!Object.values(uiNotices).some((notice) => notice.expiresAt !== null)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      dispatchUiNotice({ type: "tick", now: Date.now() });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [uiNotices]);
+
+  useEffect(() => {
     const updater = registerPwaUpdates(setPwaUpdateState);
     pwaUpdateRef.current = updater;
     return () => {
@@ -701,6 +874,46 @@ export function CodeverApp() {
       updater.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    const focusSessionSearch = (event: globalThis.KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey)) {
+        return;
+      }
+      event.preventDefault();
+      setMobileChatOpen(false);
+      sessionSearchRef.current?.focus();
+    };
+    window.addEventListener("keydown", focusSessionSearch);
+    return () => window.removeEventListener("keydown", focusSessionSearch);
+  }, []);
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    const closeDetails = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setDetailsOpen(false);
+      detailsButtonRef.current?.focus();
+    };
+    const closeDetailsFromOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        detailsPopoverRef.current?.contains(target) ||
+        detailsButtonRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setDetailsOpen(false);
+    };
+    window.addEventListener("keydown", closeDetails);
+    window.addEventListener("pointerdown", closeDetailsFromOutside);
+    return () => {
+      window.removeEventListener("keydown", closeDetails);
+      window.removeEventListener("pointerdown", closeDetailsFromOutside);
+    };
+  }, [detailsOpen]);
 
   useEffect(() => {
     const recoverInterruptedStartup = () => {
@@ -993,7 +1206,10 @@ export function CodeverApp() {
             historyScopeRef.current,
             replacementTarget,
           ).catch((error) => {
-            setConnectionError(
+            showUiNotice(
+              "history:legacy-cleanup",
+              "history",
+              "warning",
               `Legacy Agent startup history could not be removed: ${formatUiError(error)}`,
             );
           });
@@ -1017,6 +1233,7 @@ export function CodeverApp() {
     if (optimisticMessageId) {
       reconciledOptimisticMessageIdsRef.current.add(optimisticMessageId);
       optimisticMessagesRef.current.delete(optimisticMessageId);
+      recoverUiNotice("composer:send");
     }
     if (sessionId && !incoming.historical) {
       rememberLiveMessage(sessionId, message, {
@@ -1034,7 +1251,10 @@ export function CodeverApp() {
             )
           : saveMessageHistory(historyScopeRef.current, sessionId, [message]);
       void persist.catch((error) => {
-        setConnectionError(
+        showUiNotice(
+          "history:save",
+          "history",
+          "warning",
           `Conversation history could not be saved: ${formatUiError(error)}`,
         );
       });
@@ -1356,6 +1576,21 @@ export function CodeverApp() {
     const sessionChanged = selectedSessionIdRef.current !== sessionId;
     selectedSessionIdRef.current = sessionId;
     setSelectedSessionId(sessionId);
+    const openedSession = gatewayState?.sessions.find(
+      (session) => session.id === sessionId,
+    );
+    if (openedSession) {
+      setSessionReadState((current) => markSessionRead(current, openedSession));
+      if (sessionChanged) {
+        const projectKey = gatewayProjectKey(
+          matrixConfig.gatewayId,
+          openedSession.projectId,
+        );
+        setCollapsedProjects((current) =>
+          setProjectCollapsed(current, projectKey, false),
+        );
+      }
+    }
     if (!sessionChanged) return;
     historyGenerationRef.current += 1;
     historySessionIdRef.current = sessionId;
@@ -1450,7 +1685,12 @@ export function CodeverApp() {
           }
           setConnectionStatus(status);
           setConnectionDetail(detail ?? null);
-          if (status === "error" && detail) setConnectionError(detail);
+          if (status === "error") {
+            const presentation = deriveConnectionPresentation(status, detail);
+            setConnectionError(presentation.detail);
+          } else if (status === "reconnecting" || status === "offline") {
+            setConnectionError(null);
+          }
           if (
             status === "connected" ||
             status === "offline" ||
@@ -1460,6 +1700,8 @@ export function CodeverApp() {
           }
           if (status === "connected") {
             sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+            setConnectionError(null);
+            dispatchUiNotice({ type: "scope-recovered", scope: "connection" });
           }
         },
         onNativeRuntime(runtime) {
@@ -1494,7 +1736,10 @@ export function CodeverApp() {
                   historyScopeRef.current,
                   previousSessionId,
                 ).catch((error) => {
-                  setConnectionError(
+                  showUiNotice(
+                    "history:deleted-session-cleanup",
+                    "history",
+                    "warning",
                     `Deleted session history could not be cleared locally: ${formatUiError(error)}`,
                   );
                 });
@@ -1581,6 +1826,35 @@ export function CodeverApp() {
               setPendingSessionCreate(null);
               setMobileChatOpen(true);
             }
+            if (
+              nextSessionId &&
+              nextSessionId !== selectedSessionIdRef.current
+            ) {
+              const newlySelectedSession = state.gatewayState.sessions.find(
+                (session) => session.id === nextSessionId,
+              );
+              if (newlySelectedSession) {
+                const projectKey = gatewayProjectKey(
+                  normalized.gatewayId,
+                  newlySelectedSession.projectId,
+                );
+                setCollapsedProjects((current) =>
+                  setProjectCollapsed(current, projectKey, false),
+                );
+              }
+            }
+            setSessionReadState((current) => {
+              const initialized = initializeSessionReadState(
+                current,
+                state.gatewayState!.sessions,
+              );
+              const pruned = pruneSessionReadState(initialized, availableIds);
+              return reconcileSelectedSessionReadState(
+                pruned,
+                state.gatewayState!.sessions,
+                nextSessionId,
+              );
+            });
             activateLocalSession(nextSessionId);
           }
         },
@@ -1592,6 +1866,7 @@ export function CodeverApp() {
             activePromptCommandsRef.current.delete(result.commandId);
             completedCommandResultsRef.current.delete(result.commandId);
             finishLocalPromptCommand(promptSessionId);
+            recoverUiNotice("composer:send");
           } else {
             completedCommandResultsRef.current.add(result.commandId);
           }
@@ -1668,6 +1943,7 @@ export function CodeverApp() {
     sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
     setConnectionStatus("offline");
     setConnectionDetail(null);
+    setConnectionError(null);
     setRunningSessionIds(new Set());
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
@@ -1735,7 +2011,10 @@ export function CodeverApp() {
     historyScopeRef.current = "";
     if (historyScope) {
       void clearMessageHistoryScope(historyScope).catch((error) => {
-        setConnectionError(
+        showUiNotice(
+          "history:clear-all",
+          "history",
+          "warning",
           `Conversation history could not be cleared: ${formatUiError(error)}`,
         );
       });
@@ -2123,17 +2402,23 @@ export function CodeverApp() {
   async function sendRealCommand(
     payload: CommandPayload,
   ): Promise<CodeverCommandSendResult | null> {
+    const notice = commandNoticeFor(payload);
     const connection = codeverClientRef.current;
     if (!connection || connectionStatus !== "connected") {
-      setConnectionError(
-        "The Gateway is not connected. Open Gateway settings and reconnect.",
+      showUiNotice(
+        notice.key,
+        notice.scope,
+        "warning",
+        connectionStatus === "reconnecting" || connectionStatus === "connecting"
+          ? "The secure connection is still resuming. Try again when the Gateway is connected."
+          : "The Gateway is not connected. Open Gateway settings to reconnect.",
       );
-      setSettingsOpen(true);
       return null;
     }
     try {
       const result = await connection.send(payload);
       revisionConflictRef.current = null;
+      recoverUiNotice(notice.key);
       return result;
     } catch (error) {
       if (error instanceof CommandAcknowledgementTimeoutError) throw error;
@@ -2146,10 +2431,15 @@ export function CodeverApp() {
         };
         revisionConflictRef.current = notice;
         setRevisionConflict(notice);
-        setConnectionError(null);
+        recoverUiNotice(commandNoticeFor(payload).key);
         return null;
       }
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        notice.key,
+        notice.scope,
+        "error",
+        formatUiError(error),
+      );
       return null;
     }
   }
@@ -2256,7 +2546,10 @@ export function CodeverApp() {
             conflictSessionId,
             [sentMessage],
           ).catch((error) => {
-            setConnectionError(
+            showUiNotice(
+              "history:save",
+              "history",
+              "warning",
               `Conversation history could not be saved: ${formatUiError(error)}`,
             );
           });
@@ -2343,7 +2636,12 @@ export function CodeverApp() {
       }
       revisionConflictRef.current = { ...conflict, busy: false };
       setRevisionConflict({ ...conflict, busy: false });
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        "composer:revision-retry",
+        "composer",
+        "error",
+        formatUiError(error),
+      );
     }
   }
 
@@ -2387,7 +2685,12 @@ export function CodeverApp() {
     } catch (error) {
       revisionConflictRef.current = { ...conflict, busy: false };
       setRevisionConflict({ ...conflict, busy: false });
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        "composer:revision-discard",
+        "composer",
+        "error",
+        formatUiError(error),
+      );
     }
   }
 
@@ -2398,7 +2701,10 @@ export function CodeverApp() {
 
   async function createSession(input: NewSessionInput) {
     if (!gatewayState?.capabilities.canCreateSession) {
-      setConnectionError(
+      showUiNotice(
+        "session:create",
+        "session",
+        "warning",
         gatewayState
           ? "This Gateway does not support creating sessions."
           : "Waiting for the current Gateway session state.",
@@ -2409,7 +2715,7 @@ export function CodeverApp() {
     setPendingSessionCreate(input);
     setNewSessionOpen(false);
     setMobileChatOpen(false);
-    setConnectionError(null);
+    recoverUiNotice("session:create");
     let acknowledged = false;
     try {
       // Let React commit the pending row before Matrix encryption, IndexedDB,
@@ -2430,7 +2736,12 @@ export function CodeverApp() {
       setNewSessionBusy(false);
       void settleSessionCreate(connection, sent);
     } catch (error) {
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        "session:create",
+        "session",
+        "error",
+        formatUiError(error),
+      );
     } finally {
       if (!acknowledged) {
         setNewSessionBusy(false);
@@ -2450,7 +2761,12 @@ export function CodeverApp() {
         sent,
       );
       if (completion.outcome !== "succeeded") {
-        setConnectionError("The Gateway could not create the session.");
+        showUiNotice(
+          "session:create",
+          "session",
+          "error",
+          "The Gateway could not create the session.",
+        );
       }
       await consumeSessionCreateCompletion(
         connection,
@@ -2459,8 +2775,14 @@ export function CodeverApp() {
       );
       waitingForGatewayState =
         completion.outcome === "succeeded" && Boolean(completion.sessionId);
+      if (waitingForGatewayState) recoverUiNotice("session:create");
     } catch (error) {
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        "session:create",
+        "session",
+        "error",
+        formatUiError(error),
+      );
     } finally {
       if (!waitingForGatewayState) setPendingSessionCreate(null);
     }
@@ -2477,7 +2799,10 @@ export function CodeverApp() {
         ? capabilities?.canDeleteSession
         : capabilities?.canArchiveSession;
     if (!supported) {
-      setConnectionError(
+      showUiNotice(
+        `session:${action}`,
+        "session",
+        "warning",
         `This Gateway does not support session ${action}. Update and reconnect the Gateway first.`,
       );
       return false;
@@ -2502,7 +2827,12 @@ export function CodeverApp() {
       );
       return true;
     } catch (error) {
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        `session:${action}`,
+        "session",
+        "error",
+        formatUiError(error),
+      );
       setSessionLifecycleBusy(null);
       return false;
     }
@@ -2518,19 +2848,31 @@ export function CodeverApp() {
     try {
       const completion = await waitForCommandCompletion(sent.completion);
       if (completion.outcome !== "succeeded") {
-        setConnectionError(
+        showUiNotice(
+          `session:${action}`,
+          "session",
+          "error",
           `The session could not be ${lifecyclePastTense(action)}.`,
         );
         return;
       }
       await onSucceeded?.();
+      recoverUiNotice(`session:${action}`);
     } catch (error) {
-      setConnectionError(formatUiError(error));
+      showUiNotice(
+        `session:${action}`,
+        "session",
+        "error",
+        formatUiError(error),
+      );
     } finally {
       try {
         await connection.releaseCommand(sent.commandId);
       } catch (error) {
-        setConnectionError(
+        showUiNotice(
+          `session:${action}:release`,
+          "session",
+          "warning",
           `The completed session command could not be released locally: ${formatUiError(error)}`,
         );
       }
@@ -2566,7 +2908,10 @@ export function CodeverApp() {
           try {
             await clearSessionMessageHistory(historyScopeRef.current, target.id);
           } catch (error) {
-            setConnectionError(
+            showUiNotice(
+              "history:deleted-session-cleanup",
+              "history",
+              "warning",
               `The session was deleted, but its local history could not be cleared: ${formatUiError(error)}`,
             );
           }
@@ -2586,7 +2931,10 @@ export function CodeverApp() {
     if (selectedFiles.length === 0) return;
     const availableSlots = MAX_CODEVER_ATTACHMENTS - pendingFiles.length;
     if (availableSlots <= 0) {
-      setConnectionError(
+      showUiNotice(
+        "attachment:limits",
+        "attachment",
+        "warning",
         `A message can include up to ${MAX_CODEVER_ATTACHMENTS} attachments.`,
       );
       return;
@@ -2595,13 +2943,19 @@ export function CodeverApp() {
     let totalBytes = pendingFiles.reduce((total, file) => total + file.size, 0);
     for (const file of selectedFiles.slice(0, availableSlots)) {
       if (file.size > MAX_CODEVER_ATTACHMENT_BYTES) {
-        setConnectionError(
+        showUiNotice(
+          "attachment:limits",
+          "attachment",
+          "warning",
           `${file.name} exceeds the ${formatFileSize(MAX_CODEVER_ATTACHMENT_BYTES)} attachment limit.`,
         );
         continue;
       }
       if (totalBytes + file.size > MAX_CODEVER_PROMPT_ATTACHMENT_BYTES) {
-        setConnectionError(
+        showUiNotice(
+          "attachment:limits",
+          "attachment",
+          "warning",
           `Attachments in one message cannot exceed ${formatFileSize(MAX_CODEVER_PROMPT_ATTACHMENT_BYTES)}.`,
         );
         continue;
@@ -2610,10 +2964,14 @@ export function CodeverApp() {
       totalBytes += file.size;
     }
     if (selectedFiles.length > availableSlots) {
-      setConnectionError(
+      showUiNotice(
+        "attachment:limits",
+        "attachment",
+        "warning",
         `Only the first ${availableSlots} selected attachment(s) were added.`,
       );
     }
+    if (accepted.length > 0) recoverUiNotice("attachment:upload");
     setPendingFiles((current) => [...current, ...accepted]);
   }
 
@@ -2623,18 +2981,34 @@ export function CodeverApp() {
     if (!value && pendingFiles.length === 0) return;
     const sessionId = selectedSessionIdRef.current;
     if (!composerState.canSend || !sessionId) {
-      setConnectionError(composerState.reason);
+      showUiNotice(
+        "composer:availability",
+        "composer",
+        "warning",
+        composerState.reason,
+      );
       return;
     }
     if (pendingPromptSessionIdsRef.current.has(sessionId)) {
-      setConnectionError("Securing the previous message…");
+      showUiNotice(
+        "composer:availability",
+        "composer",
+        "info",
+        "Securing the previous message…",
+      );
       return;
     }
     const connection = codeverClientRef.current;
     if (!connection) {
-      setConnectionError("The Matrix connection is not ready for attachment upload.");
+      showUiNotice(
+        "composer:availability",
+        "composer",
+        "warning",
+        "The secure connection is not ready yet. Your draft is still here.",
+      );
       return;
     }
+    recoverUiNotice("composer:availability");
     const queueBehindActiveTurn = isStreaming;
     const activityBeforeSubmission = agentActivity;
     const submittedFiles = [...pendingFiles];
@@ -2650,8 +3024,14 @@ export function CodeverApp() {
         attachments = await Promise.all(
           submittedFiles.map((file) => connection.uploadAttachment(file)),
         );
+        recoverUiNotice("attachment:upload");
       } catch (error) {
-        setConnectionError(`Attachment upload failed: ${formatUiError(error)}`);
+        showUiNotice(
+          "attachment:upload",
+          "attachment",
+          "error",
+          `Attachment upload failed: ${formatUiError(error)}`,
+        );
         setSessionAgentActivity(sessionId, activityBeforeSubmission);
         return;
       } finally {
@@ -2690,7 +3070,10 @@ export function CodeverApp() {
         sessionId,
         [optimisticMessage],
       ).catch((error) => {
-        setConnectionError(
+        showUiNotice(
+          "history:save",
+          "history",
+          "warning",
           `Conversation history could not be saved: ${formatUiError(error)}`,
         );
       });
@@ -2743,7 +3126,12 @@ export function CodeverApp() {
         );
       }
       setPendingFiles([]);
-      setConnectionError(acknowledgementTimeout.message);
+      showUiNotice(
+        "composer:send",
+        "composer",
+        "warning",
+        "The message is still queued securely. Codever will reconcile it without sending a duplicate.",
+      );
       return;
     }
     if (!result) {
@@ -2772,7 +3160,10 @@ export function CodeverApp() {
               submissionHistoryScope,
               optimisticId,
             ).catch((error) => {
-              setConnectionError(
+              showUiNotice(
+                "history:update",
+                "history",
+                "warning",
                 `Conversation history could not be updated: ${formatUiError(error)}`,
               );
             });
@@ -2804,7 +3195,10 @@ export function CodeverApp() {
             sessionId,
             [failedMessage],
           ).catch((error) => {
-            setConnectionError(
+            showUiNotice(
+              "history:save",
+              "history",
+              "warning",
               `Conversation history could not be saved: ${formatUiError(error)}`,
             );
           });
@@ -2872,11 +3266,15 @@ export function CodeverApp() {
           sessionId,
           [sentMessage],
         ).catch((error) => {
-          setConnectionError(
+          showUiNotice(
+            "history:save",
+            "history",
+            "warning",
             `Conversation history could not be saved: ${formatUiError(error)}`,
           );
         });
       }
+      recoverUiNotice("composer:send");
     }
   }
 
@@ -2908,12 +3306,22 @@ export function CodeverApp() {
     decision: "allow_once" | "deny",
   ) {
     if (!message.requestId) {
-      setConnectionError("This permission request has no signed request ID.");
+      showUiNotice(
+        "composer:permission",
+        "composer",
+        "error",
+        "This permission request has no signed request ID.",
+      );
       return;
     }
     const sessionId = message.sessionId ?? selectedSessionIdRef.current;
     if (!sessionId) {
-      setConnectionError("This permission request has no session identity.");
+      showUiNotice(
+        "composer:permission",
+        "composer",
+        "error",
+        "This permission request has no session identity.",
+      );
       return;
     }
     setDecisionStates((current) => ({
@@ -2983,18 +3391,10 @@ export function CodeverApp() {
           <span>⌁</span>
         </div>
         <nav className="rail-nav">
-          <button className="rail-button active" aria-label="Chats">
+          <div className="rail-button active" aria-current="page">
             <Icon>◫</Icon>
             <span>Chats</span>
-          </button>
-          <button className="rail-button" aria-label="Tasks">
-            <Icon>✓</Icon>
-            <span>Tasks</span>
-          </button>
-          <button className="rail-button" aria-label="Files">
-            <Icon>▱</Icon>
-            <span>Files</span>
-          </button>
+          </div>
         </nav>
         <div className="rail-spacer" />
         <button
@@ -3006,10 +3406,6 @@ export function CodeverApp() {
           <Icon>⚙</Icon>
           <span>Settings</span>
         </button>
-        <div className="profile-avatar" title="Alex · verified device">
-          AK
-          <span className="presence-dot" />
-        </div>
       </aside>
 
       <section className="session-panel" aria-label="Conversations">
@@ -3035,6 +3431,7 @@ export function CodeverApp() {
         <label className="search-box">
           <span aria-hidden="true">⌕</span>
           <input
+            ref={sessionSearchRef}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search conversations"
@@ -3060,27 +3457,49 @@ export function CodeverApp() {
               <i
                 className={`connection-dot connection-state-${connectionStatus}`}
               />{" "}
-              {connectionStatus === "connected"
-                ? "Securely connected"
-                : connectionStatus === "securing"
-                  ? "Matrix connected · verifying Gateway"
-                : connectionStatus === "reconnecting"
-                  ? "Reconnecting securely"
-                  : trustedGateway
-                    ? "Gateway offline · open to reconnect"
-                    : "Scan QR or paste a one-time pairing link"}
+              {trustedGateway
+                ? connectionPresentation.title
+                : "Scan QR or paste a one-time pairing link"}
             </span>
           </div>
           <span className="gateway-more" aria-hidden="true">•••</span>
         </button>
 
-        <div className="session-section-label">
-          <span>Recent</span>
-          <span>{visibleActiveSessionCount}</span>
+        <div className="session-filters" aria-label="Filter conversations">
+          <button
+            type="button"
+            className={sessionListFilter === "all" ? "active" : ""}
+            aria-pressed={sessionListFilter === "all"}
+            onClick={() => setSessionListFilter("all")}
+          >
+            All <b>{activeSessionCount + (pendingSessionCreate ? 1 : 0)}</b>
+          </button>
+          <button
+            type="button"
+            className={sessionListFilter === "working" ? "active" : ""}
+            aria-pressed={sessionListFilter === "working"}
+            onClick={() => setSessionListFilter("working")}
+          >
+            Working <b>{activeIndicatorCounts.running + activeIndicatorCounts.stopping}</b>
+          </button>
+          <button
+            type="button"
+            className={sessionListFilter === "attention" ? "active" : ""}
+            aria-pressed={sessionListFilter === "attention"}
+            onClick={() => setSessionListFilter("attention")}
+          >
+            Attention <b>{attentionSessionCount}</b>
+          </button>
         </div>
 
+        <UiNoticeList
+          notices={sessionNotices}
+          className="session-notices"
+          onDismiss={dismissUiNotice}
+        />
+
         <div className="session-list">
-          {pendingSessionCreate && (
+          {pendingSessionCreate && sessionListFilter === "all" && (
             <div
               className="session-row session-create-pending"
               role="status"
@@ -3105,34 +3524,82 @@ export function CodeverApp() {
               </span>
             </div>
           )}
-          {projectGroups.length > 0 && (
-            <div className="gateway-group-heading">
-              <span className="gateway-group-mark">G</span>
-              <span>
-                <strong>{trustedGateway?.gatewayName || "Gateway"}</strong>
-                <small>{matrixConfig.gatewayId}</small>
-              </span>
-            </div>
-          )}
-          {projectGroups.map((project) => (
+          {projectGroups.map((project) => {
+            const expanded = isProjectExpanded({
+              state: collapsedProjects,
+              projectKey: project.key,
+              searchQuery: search,
+            });
+            const indicators = countSessionIndicators(
+              project.sessions,
+              sessionReadState,
+            );
+            const contentId = `project-sessions-${encodeURIComponent(project.key)}`;
+            return (
             <section className="project-session-group" key={project.key}>
-              <header>
-                <span className="project-folder">⌘</span>
-                <span>
+              <button
+                type="button"
+                className="project-session-toggle"
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                onClick={() =>
+                  setCollapsedProjects((current) =>
+                    toggleProjectCollapsed(current, project.key),
+                  )
+                }
+              >
+                <span className="project-chevron" aria-hidden="true">
+                  {expanded ? "⌄" : "›"}
+                </span>
+                <span className="project-folder" aria-hidden="true">▱</span>
+                <span className="project-copy">
                   <strong>{project.projectName}</strong>
                   <small>{project.cwd}</small>
                 </span>
+                <span className="project-indicators" aria-label="Project status">
+                  {indicators.running + indicators.stopping > 0 && (
+                    <i className="project-working">
+                      {indicators.running + indicators.stopping} working
+                    </i>
+                  )}
+                  {indicators.failed > 0 && (
+                    <i className="project-attention">{indicators.failed} failed</i>
+                  )}
+                  {indicators.unread > 0 && (
+                    <i className="project-unread">{indicators.unread} new</i>
+                  )}
+                </span>
                 <b>{project.sessions.length}</b>
-              </header>
-              {project.sessions.map((session) => (
+              </button>
+              {expanded && (
+                <div id={contentId} className="project-session-list">
+              {project.sessions.map((session) => {
+                const indicator = sessionIndicator(session, sessionReadState);
+                const lifecycleAction =
+                  sessionLifecycleBusy?.sessionId === session.id
+                    ? sessionLifecycleBusy.action
+                    : null;
+                const stateLabel = lifecycleAction
+                  ? `${lifecycleAction === "delete" ? "Deleting" : lifecycleAction === "archive" ? "Archiving" : "Restoring"}…`
+                  : indicator.activity === "running"
+                    ? "Working"
+                    : indicator.activity === "stopping"
+                      ? "Stopping"
+                      : indicator.activity === "failed"
+                        ? "Failed"
+                        : indicator.unread
+                          ? "New activity"
+                          : null;
+                return (
                 <button
                   key={session.id}
                   className={`session-row ${
                     selectedSessionId === session.id
                       ? "selected"
                       : ""
-                  }`}
+                  } session-state-${indicator.activity} ${indicator.unread ? "unread" : ""} ${lifecycleAction ? "is-busy" : ""}`}
                   onClick={() => void chooseSession(session.id)}
+                  disabled={lifecycleAction === "delete"}
                 >
                   <span className="session-avatar violet">
                     {sessionInitials(session.title)}
@@ -3140,6 +3607,9 @@ export function CodeverApp() {
                       runningSessionIds.has(session.id) && (
                         <i className="agent-active" />
                       )}
+                    {indicator.activity === "failed" && (
+                      <i className="agent-failed" aria-hidden="true">!</i>
+                    )}
                   </span>
                   <span className="session-copy">
                     <span className="session-title-line">
@@ -3154,13 +3624,22 @@ export function CodeverApp() {
                           ? ` · ${session.reasoningEffort}`
                           : ""}
                       </span>
+                      {stateLabel && (
+                        <b className={`session-state-label state-${indicator.activity}`}>
+                          {stateLabel}
+                        </b>
+                      )}
                     </span>
                   </span>
                 </button>
-              ))}
+                );
+              })}
+                </div>
+              )}
             </section>
-          ))}
-          {archivedSessionCount > 0 && (
+            );
+          })}
+          {sessionListFilter === "all" && archivedSessionCount > 0 && (
             <section className="archived-session-section">
               <button
                 type="button"
@@ -3210,17 +3689,43 @@ export function CodeverApp() {
             </div>
           )}
           {trustedGateway && !gatewayState && (
-            <div className="empty-search">
-              <span>↻</span>
-              Syncing current Gateway state…
+            <div
+              className={`empty-search connection-progress connection-progress-${connectionPresentation.state}`}
+              role="status"
+            >
+              {connectionPresentation.state === "progress" ||
+              connectionPresentation.state === "ready" ? (
+                <span
+                  className="connection-progress-spinner"
+                  aria-hidden="true"
+                />
+              ) : (
+                <span className="connection-progress-symbol" aria-hidden="true">
+                  {connectionPresentation.state === "offline" ? "⌁" : "!"}
+                </span>
+              )}
+              <strong>
+                {connectionStatus === "connected"
+                  ? "Syncing current Gateway state"
+                  : connectionPresentation.title}
+              </strong>
+              <small>{connectionPresentation.detail}</small>
+              <button type="button" onClick={() => setSettingsOpen(true)}>
+                View connection details
+              </button>
             </div>
           )}
           {gatewayState &&
-            gatewayState.sessions.length > 0 &&
-            filteredSessions.length === 0 && (
+            activeSessionCount > 0 &&
+            projectGroups.length === 0 &&
+            (Boolean(search.trim()) || sessionListFilter !== "all") && (
             <div className="empty-search">
               <span>⌕</span>
-              No matching conversations
+              {search.trim()
+                ? "No matching active conversations"
+                : sessionListFilter === "working"
+                  ? "No agents are working right now"
+                  : "No conversations need attention"}
             </div>
           )}
           {gatewayState &&
@@ -3299,18 +3804,16 @@ export function CodeverApp() {
                     ? `${activeProvider} · archived`
                     : `${activeProvider} · encrypted sync active`
                   : "Syncing Gateway state…"
-                : connectionStatus === "securing"
-                  ? "Matrix connected · securing Gateway"
-                : connectionStatus}
+                : connectionPresentation.title}
             </span>
           </div>
           <div className="header-actions">
-            <button className="header-button" aria-label="Search in conversation">
-              ⌕
-            </button>
             <button
+              ref={detailsButtonRef}
               className={`header-button ${detailsOpen ? "pressed" : ""}`}
               aria-label="Conversation details"
+              aria-controls="conversation-details-popover"
+              aria-expanded={detailsOpen}
               onClick={() => setDetailsOpen((value) => !value)}
             >
               ⋯
@@ -3318,8 +3821,20 @@ export function CodeverApp() {
           </div>
         </header>
 
+        <UiNoticeList
+          notices={sessionNotices}
+          className="session-notices-conversation"
+          onDismiss={dismissUiNotice}
+        />
+
         {detailsOpen && (
-          <div className="details-popover">
+          <div
+            ref={detailsPopoverRef}
+            id="conversation-details-popover"
+            className="details-popover"
+            role="dialog"
+            aria-label="Conversation details"
+          >
             <span className="mini-label">Project</span>
             <strong>
               {activeWorkspace?.projectName || "Syncing…"}
@@ -3417,6 +3932,11 @@ export function CodeverApp() {
           ref={feedRef}
           onScroll={handleFeedScroll}
         >
+          <UiNoticeList
+            notices={historyNotices}
+            className="history-notices"
+            onDismiss={dismissUiNotice}
+          />
           <div
             className={`history-loader ${historyLoading ? "is-loading" : ""} ${historyError ? "has-error" : ""}`}
             aria-live="polite"
@@ -3476,7 +3996,7 @@ export function CodeverApp() {
                 >
                   <div className="agent-mark error-mark">!</div>
                   <div className="bubble agent-bubble error-bubble">
-                    <span className="agent-label">CONNECTION ERROR</span>
+                    <span className="agent-label">TASK NEEDS ATTENTION</span>
                     <p>{message.text}</p>
                     <time>{message.time}</time>
                   </div>
@@ -3674,7 +4194,7 @@ export function CodeverApp() {
         <div className="composer-area">
           <div className="context-strip">
             <div className="context-item">
-              <span className="context-icon">⌘</span>
+              <span className="context-icon">▱</span>
               <span>
                 <small>Project · Gateway</small>
                 <b title={activeWorkspace?.cwd}>
@@ -3720,6 +4240,12 @@ export function CodeverApp() {
               </div>
             </section>
           )}
+
+          <UiNoticeList
+            notices={composerNotices}
+            className="composer-notices"
+            onDismiss={dismissUiNotice}
+          />
 
           {pendingFiles.length > 0 && (
             <div className="pending-attachments" aria-label="Pending attachments">
@@ -3987,7 +4513,7 @@ export function CodeverApp() {
         open={settingsOpen}
         config={matrixConfig}
         status={connectionStatus}
-        progressDetail={connectionDetail}
+        progressDetail={connectionPresentation.detail}
         error={connectionError}
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
@@ -4009,7 +4535,7 @@ export function CodeverApp() {
         onClose={() => setSettingsOpen(false)}
         onConnect={() => void connectCodeverClient()}
         onDisconnect={() => disconnectClient()}
-        onForget={forgetMatrixConfig}
+        onForget={() => setForgetDialogOpen(true)}
         onPasswordLogin={(userId, password) =>
           void signInForPairing(userId, password)
         }
@@ -4036,8 +4562,38 @@ export function CodeverApp() {
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
       />
+
+      <GatewayForgetDialog
+        open={forgetDialogOpen}
+        gatewayName={trustedGateway?.gatewayName ?? null}
+        busy={false}
+        onClose={() => setForgetDialogOpen(false)}
+        onConfirm={() => {
+          setForgetDialogOpen(false);
+          forgetMatrixConfig();
+        }}
+      />
     </main>
   );
+}
+
+function commandNoticeFor(payload: CommandPayload): {
+  key: string;
+  scope: "session" | "composer" | "pairing";
+} {
+  if (payload.operation === "device.invite") {
+    return { key: "pairing:device-invite", scope: "pairing" };
+  }
+  if (payload.operation === "prompt") {
+    return { key: "composer:send", scope: "composer" };
+  }
+  if (payload.operation.startsWith("session.")) {
+    return {
+      key: `session:${payload.operation.slice("session.".length)}`,
+      scope: "session",
+    };
+  }
+  return { key: `composer:${payload.operation}`, scope: "composer" };
 }
 
 function waitForNextPaint(): Promise<void> {

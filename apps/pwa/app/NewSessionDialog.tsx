@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useRef, useState } from "react";
+import { useDialogFocus } from "./dialogFocus";
 import {
   gatewayProjectKey,
   type GatewayModelCapability,
@@ -29,7 +30,12 @@ type Props = {
 
 const NEW_PROJECT = "__new_project__";
 
-export function NewSessionDialog({
+export function NewSessionDialog(props: Props) {
+  if (!props.open) return null;
+  return <NewSessionDialogContent {...props} />;
+}
+
+function NewSessionDialogContent({
   open,
   busy,
   gatewayId,
@@ -74,33 +80,22 @@ export function NewSessionDialog({
         ?.defaultReasoningLevel ??
       "",
   );
+  const dialogRef = useRef<HTMLElement>(null);
+  const projectSelectRef = useRef<HTMLSelectElement>(null);
+
+  const requestClose = () => {
+    if (!busy) onClose();
+  };
+  useDialogFocus({
+    open,
+    containerRef: dialogRef,
+    initialFocusRef: projectSelectRef,
+    escapeDisabled: busy,
+    onEscape: requestClose,
+  });
 
   const selectedModel = models.find((entry) => entry.id === model);
   const reasoningLevels = selectedModel?.supportedReasoningLevels ?? [];
-
-  useEffect(() => {
-    if (!open) return;
-    setProjectSelection(currentProjectKey);
-    setProjectName(workspace.projectName);
-    setCwd(workspace.cwd);
-    setModel(workspace.model ?? "");
-    setReasoningEffort(
-      workspace.reasoningEffort ??
-        models.find((entry) => entry.id === workspace.model)
-          ?.defaultReasoningLevel ??
-        "",
-    );
-  }, [
-    currentProjectKey,
-    open,
-    workspace.cwd,
-    workspace.model,
-    workspace.projectName,
-    workspace.reasoningEffort,
-    models,
-  ]);
-
-  if (!open) return null;
 
   const chooseProject = (next: string) => {
     setProjectSelection(next);
@@ -138,12 +133,19 @@ export function NewSessionDialog({
   };
 
   return (
-    <div className="new-session-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      className="new-session-backdrop"
+      role="presentation"
+      onMouseDown={requestClose}
+    >
       <section
+        ref={dialogRef}
         className="new-session-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-session-title"
+        aria-busy={busy}
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
@@ -152,7 +154,12 @@ export function NewSessionDialog({
             <h2 id="new-session-title">Create a session</h2>
             <p>{gatewayName}</p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close new session">
+          <button
+            type="button"
+            onClick={requestClose}
+            aria-label="Close new session"
+            disabled={busy}
+          >
             ×
           </button>
         </header>
@@ -161,6 +168,7 @@ export function NewSessionDialog({
           <label>
             <span>Project</span>
             <select
+              ref={projectSelectRef}
               value={projectSelection}
               onChange={(event) => chooseProject(event.target.value)}
               disabled={busy}
@@ -186,7 +194,7 @@ export function NewSessionDialog({
               />
             </label>
             <label>
-              <span>Working directory (Mac)</span>
+              <span>Working directory</span>
               <input
                 value={cwd}
                 onChange={(event) => setCwd(event.target.value)}
@@ -241,7 +249,12 @@ export function NewSessionDialog({
           </div>
 
           <footer>
-            <button type="button" className="secondary-button" onClick={onClose}>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={requestClose}
+              disabled={busy}
+            >
               Cancel
             </button>
             <button

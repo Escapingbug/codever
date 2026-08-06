@@ -17,6 +17,7 @@ import {
   NATIVE_BACK_PRIORITY,
   useNativeBackHandler,
 } from "./nativeBackNavigation";
+import { useDialogFocus } from "./dialogFocus";
 
 type Props = {
   preview: PairingPreview | null;
@@ -447,7 +448,16 @@ function QrScanner({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const onResultRef = useRef(onResult);
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useDialogFocus({
+    open: true,
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onEscape: onClose,
+  });
 
   useEffect(() => {
     onResultRef.current = onResult;
@@ -519,14 +529,21 @@ function QrScanner({
   return (
     <div className="scanner-backdrop" role="presentation">
       <section
+        ref={dialogRef}
         className="scanner-dialog"
         role="dialog"
         aria-modal="true"
         aria-label="Scan Gateway QR code"
+        tabIndex={-1}
       >
         <header>
           <strong>Scan Gateway QR code</strong>
-          <button onClick={onClose} aria-label="Close QR scanner">
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close QR scanner"
+          >
             ×
           </button>
         </header>

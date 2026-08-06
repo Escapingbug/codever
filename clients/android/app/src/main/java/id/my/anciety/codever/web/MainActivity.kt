@@ -18,6 +18,8 @@ import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -28,6 +30,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -36,6 +39,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.R
 import id.my.anciety.codever.bridge.BridgeRuntime
@@ -63,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private var serviceBinder: CodeverConnectionService.LocalBinder? = null
     private var serviceBound = false
     private var bindingRequested = false
+    private lateinit var contentHost: FrameLayout
     private var webView: WebView? = null
     private var nativeBridge: NativeWebBridge? = null
     private var foreground = false
@@ -116,6 +124,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureEdgeToEdgeContent()
         diagnostics.record("activity.created")
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -293,7 +302,7 @@ class MainActivity : ComponentActivity() {
         val requested = preferences.getBoolean(KEY_NOTIFICATION_REQUESTED, false)
         val canRequest = Build.VERSION.SDK_INT >= 33 &&
             (!requested || shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))
-        setContentView(messageView(
+        showContent(messageView(
             title = "Persistent notification required",
             detail = "Codever needs a visible notification before its persistent native connection can start. Denying this permission leaves the native connection stopped.",
             action = if (canRequest) "Allow notification" else "Open notification settings",
@@ -328,7 +337,7 @@ class MainActivity : ComponentActivity() {
         when (webHostActionAfterServiceConnected(existing != null)) {
             WebHostBindingAction.RELOAD -> {
                 checkNotNull(existing)
-                setContentView(existing)
+                showContent(existing)
                 diagnostics.record("activity.web_host_reloading_after_bind")
                 val target = pendingWebAppUrl()
                 if (target == TrustedWebOrigin.APP_URL) existing.reload() else existing.loadUrl(target)
@@ -348,8 +357,62 @@ class MainActivity : ComponentActivity() {
             return
         }
         nativeBridge = bridge
-        setContentView(created)
+        showContent(created)
         created.loadUrl(pendingWebAppUrl())
+    }
+
+    private fun configureEdgeToEdgeContent() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Insets below are the single source of truth for keyboard avoidance.
+        // Prevent the platform from also panning or resizing the same content.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+
+        contentHost = FrameLayout(this).apply {
+            setBackgroundColor(0xFFF4F6FA.toInt())
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(contentHost) { host, windowInsets ->
+            val resolved = resolveNativeWebInsets(
+                systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars()).toEdges(),
+                displayCutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout()).toEdges(),
+                mandatoryGestures = windowInsets
+                    .getInsets(WindowInsetsCompat.Type.mandatorySystemGestures())
+                    .toEdges(),
+                ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime()).toEdges(),
+                imeVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime()),
+            )
+            if (
+                host.paddingLeft != resolved.left ||
+                host.paddingTop != resolved.top ||
+                host.paddingRight != resolved.right ||
+                host.paddingBottom != resolved.bottom
+            ) {
+                host.setPadding(resolved.left, resolved.top, resolved.right, resolved.bottom)
+            }
+
+            // The WebView is already laid out inside the native safe region.
+            // Consuming here prevents a WebView implementation from applying
+            // the same values again through CSS safe-area environment values.
+            WindowInsetsCompat.CONSUMED
+        }
+        setContentView(contentHost)
+        ViewCompat.requestApplyInsets(contentHost)
+    }
+
+    private fun Insets.toEdges(): InsetEdges = InsetEdges(left, top, right, bottom)
+
+    private fun showContent(content: View) {
+        if (content.parent !== contentHost) {
+            (content.parent as? ViewGroup)?.removeView(content)
+            contentHost.removeAllViews()
+            contentHost.addView(
+                content,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        }
+        ViewCompat.requestApplyInsets(contentHost)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -470,7 +533,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showRecoveryPage(detail: String) {
-        setContentView(messageView(
+        showContent(messageView(
             title = "Codever is temporarily unavailable",
             detail = detail,
             action = "Retry",
@@ -484,7 +547,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showDisconnectedPage() {
-        setContentView(messageView(
+        showContent(messageView(
             title = "Codever is disconnected",
             detail = "The persistent native host has stopped and will not restart after reboot.",
             action = "Reconnect",

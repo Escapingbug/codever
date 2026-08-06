@@ -591,6 +591,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     matrix,
     /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshGatewayStateAfterReconnect = true/,
   );
+  assert.match(
+    matrix,
+    /state === "ERROR"[\s\S]*refreshGatewayStateAfterReconnect = true[\s\S]*handlers\.onStatus\([\s\S]*"reconnecting"/,
+  );
   assert.match(matrix, /createGatewayStateCacheRecord\(/);
   assert.match(matrix, /parseGatewayStateCacheRecord\(/);
   assert.match(
