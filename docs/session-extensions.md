@@ -187,3 +187,17 @@ until an installed artifact adapter explicitly handles that kind. Metapp's
 file privacy and document-management app remains separate; no file API has been
 moved into Codever or this first session-extension slice. This is a deliberate
 fail-closed boundary, not a silent fallback.
+
+## Pre-merge verification
+
+`e2e/session-extension-has.test.ts` starts the HaS extension as a real child
+process, connects it over the authenticated loopback HTTP protocol to the
+session runtime, uses a local simulated HaS endpoint and ACP Agent, and verifies
+the complete sanitize/review/Agent/restore path. It also asserts that denial or
+an offline bound extension results in zero Agent invocations.
+
+`apps/pwa/e2e/session-extension-dialog.html` is a test-only browser harness for
+the real new-session component. It is used at phone dimensions to verify that
+HaS is off by default, required configuration is enforced, and the submitted
+`session.create` binding contains only declarative configuration. Neither file
+is part of a production application route.

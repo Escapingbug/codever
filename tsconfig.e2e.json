@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@/*": ["./src/*"],
+      "@codever/native-bridge": ["./packages/native-bridge/src/index.ts"]
+    }
+  },
+  "include": ["e2e/**/*.ts"]
+}

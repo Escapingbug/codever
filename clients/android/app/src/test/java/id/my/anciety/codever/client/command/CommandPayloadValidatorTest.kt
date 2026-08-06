@@ -158,6 +158,55 @@ class CommandPayloadValidatorTest {
     }
 
     @Test
+    fun `session create accepts bounded declarative extension bindings`() {
+        val payload = buildJsonObject {
+            put("operation", "session.create")
+            put("extensions", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", "has-privacy")
+                    put("config", buildJsonObject {
+                        put("contextId", "metapp-payroll")
+                        put("reviewRequired", true)
+                    })
+                })
+            })
+        }
+        val parsed = CommandPayloadValidator.validate(payload) as SessionCreateCommandPayload
+
+        assertEquals(1, parsed.extensions.size)
+        assertEquals("has-privacy", parsed.extensions.single().id)
+        assertEquals("metapp-payroll", parsed.extensions.single().config?.get("contextId")?.let {
+            (it as JsonPrimitive).content
+        })
+        assertFalse(parsed.toString().contains("metapp-payroll"))
+
+        assertInvalid(buildJsonObject {
+            put("operation", "session.create")
+            put("extensions", buildJsonArray {
+                repeat(9) { index -> add(extension("extension-$index")) }
+            })
+        })
+        assertInvalid(buildJsonObject {
+            put("operation", "session.create")
+            put("extensions", buildJsonArray {
+                add(extension("duplicate"))
+                add(extension("duplicate"))
+            })
+        })
+        assertInvalid(buildJsonObject {
+            put("operation", "session.create")
+            put("extensions", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", "too-many-settings")
+                    put("config", buildJsonObject {
+                        repeat(33) { index -> put("setting-$index", true) }
+                    })
+                })
+            })
+        })
+    }
+
+    @Test
     fun `device invitation accepts only bounded integer lifetime`() {
         for (lifetime in listOf(30_000L, 600_000L)) {
             val parsed = CommandPayloadValidator.validate(
@@ -241,6 +290,11 @@ class CommandPayloadValidatorTest {
     private fun lifecycle(operation: String) = buildJsonObject {
         put("operation", operation)
         put("sessionId", "session-1")
+    }
+
+    private fun extension(id: String) = buildJsonObject {
+        put("id", id)
+        put("config", buildJsonObject { put("enabled", true) })
     }
 
     private fun promptWith(

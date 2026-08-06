@@ -129,13 +129,23 @@ data class SessionCreateCommandPayload(
     val model: String?,
     val reasoningEffort: String?,
     val permissionMode: CommandPermissionMode?,
+    val extensions: List<SessionExtensionBindingPayload>,
 ) : ValidatedCommandPayload {
     override val operation = CommandOperation.SESSION_CREATE
     override val sessionId: String? = null
 
     override fun toString(): String =
         "SessionCreateCommandPayload(cwd=<redacted>, projectName=<redacted>, provider=$provider, " +
-            "model=$model, reasoningEffort=$reasoningEffort, permissionMode=$permissionMode)"
+            "model=$model, reasoningEffort=$reasoningEffort, permissionMode=$permissionMode, " +
+            "extensions=${extensions.map { it.id }})"
+}
+
+data class SessionExtensionBindingPayload(
+    val id: String,
+    val config: JsonObject?,
+) {
+    override fun toString(): String =
+        "SessionExtensionBindingPayload(id=$id, config=<redacted>)"
 }
 
 data class SessionLifecycleCommandPayload(
@@ -242,8 +252,22 @@ object CommandPayloadValidator {
     private fun validateSessionCreate(value: JsonObject): SessionCreateCommandPayload {
         value.requireExactKeys(
             required = setOf("operation"),
-            optional = setOf("cwd", "projectName", "provider", "model", "reasoningEffort", "permissionMode"),
+            optional = setOf(
+                "cwd",
+                "projectName",
+                "provider",
+                "model",
+                "reasoningEffort",
+                "permissionMode",
+                "extensions",
+            ),
         )
+        val extensions = value.optionalArray("extensions")?.also {
+            require(it.size <= 8) { "Session contains too many extensions." }
+        }?.map(::validateSessionExtension) ?: emptyList()
+        require(extensions.map { it.id }.toSet().size == extensions.size) {
+            "Session extension IDs must be unique."
+        }
         return SessionCreateCommandPayload(
             cwd = value.optionalBoundedString("cwd", 4_096),
             projectName = value.optionalBoundedString("projectName", 256),
@@ -251,6 +275,31 @@ object CommandPayloadValidator {
             model = value.optionalBoundedString("model", 256),
             reasoningEffort = value.optionalBoundedString("reasoningEffort", 64),
             permissionMode = value.optionalString("permissionMode")?.let(CommandPermissionMode::fromWireName),
+            extensions = extensions,
+        )
+    }
+
+    private fun validateSessionExtension(element: JsonElement): SessionExtensionBindingPayload {
+        val value = element.asObject("Session extension binding")
+        value.requireExactKeys(required = setOf("id"), optional = setOf("config"))
+        val config = if ("config" in value) {
+            value.getValue("config") as? JsonObject
+                ?: throw IllegalArgumentException("Session extension config must be an object.")
+        } else {
+            null
+        }
+        if (config != null) {
+            require(config.size <= 32) { "Session extension config has too many settings." }
+            require(config.keys.all { it.isNotEmpty() && it.length <= 128 }) {
+                "Session extension config setting ID is invalid."
+            }
+            require(config.toString().length <= 32 * 1024) {
+                "Session extension config is too large."
+            }
+        }
+        return SessionExtensionBindingPayload(
+            id = value.requiredOpaqueId("id"),
+            config = config,
         )
     }
 
