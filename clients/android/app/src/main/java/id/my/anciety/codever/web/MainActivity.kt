@@ -164,17 +164,17 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         foreground = false
         serviceBinder?.setUiForeground(false)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        diagnostics.record("activity.destroyed")
         if (serviceBound || bindingRequested) {
             runCatching { unbindService(serviceConnection) }
             serviceBound = false
             bindingRequested = false
             serviceBinder = null
         }
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        diagnostics.record("activity.destroyed")
         nativeBackDispatchGeneration += 1
         nativeBackDispatchPending = false
         nativeBridge?.close()
@@ -490,9 +490,16 @@ class MainActivity : ComponentActivity() {
             ?.takeIf { it.isNotBlank() && it.length <= 512 && !it.any(Char::isISOControl) }
             ?: return
         intent.removeExtra(EXTRA_SESSION_ID)
-        diagnostics.record("notification.task_opened")
         pendingSessionId = sessionId
-        webView?.loadUrl(pendingWebAppUrl())
+        diagnostics.record(
+            "notification.task_opened",
+            mapOf("stage" to if (serviceBound) "bound" else "deferred"),
+        )
+        // If Android recreated this Activity or disconnected the service while
+        // it was backgrounded, retain the target until onServiceConnected
+        // reloads the Web host; navigating now would be overwritten by that
+        // reload.
+        if (serviceBound) webView?.loadUrl(pendingWebAppUrl())
     }
 
     private fun pendingWebAppUrl(): String {

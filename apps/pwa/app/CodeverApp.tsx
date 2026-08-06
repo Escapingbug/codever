@@ -1572,6 +1572,7 @@ export function CodeverApp() {
   function activateLocalSession(
     sessionId: string | null,
     connection: CodeverClient | null = codeverClientRef.current,
+    revealProject = true,
   ) {
     const sessionChanged = selectedSessionIdRef.current !== sessionId;
     selectedSessionIdRef.current = sessionId;
@@ -1581,7 +1582,7 @@ export function CodeverApp() {
     );
     if (openedSession) {
       setSessionReadState((current) => markSessionRead(current, openedSession));
-      if (sessionChanged) {
+      if (sessionChanged && revealProject) {
         const projectKey = gatewayProjectKey(
           matrixConfig.gatewayId,
           openedSession.projectId,
@@ -1826,23 +1827,6 @@ export function CodeverApp() {
               setPendingSessionCreate(null);
               setMobileChatOpen(true);
             }
-            if (
-              nextSessionId &&
-              nextSessionId !== selectedSessionIdRef.current
-            ) {
-              const newlySelectedSession = state.gatewayState.sessions.find(
-                (session) => session.id === nextSessionId,
-              );
-              if (newlySelectedSession) {
-                const projectKey = gatewayProjectKey(
-                  normalized.gatewayId,
-                  newlySelectedSession.projectId,
-                );
-                setCollapsedProjects((current) =>
-                  setProjectCollapsed(current, projectKey, false),
-                );
-              }
-            }
             setSessionReadState((current) => {
               const initialized = initializeSessionReadState(
                 current,
@@ -1855,7 +1839,15 @@ export function CodeverApp() {
                 nextSessionId,
               );
             });
-            activateLocalSession(nextSessionId);
+            const shouldRevealNextSession =
+              (openedSession === nextSessionId ||
+                pendingCreated === nextSessionId) &&
+              nextSessionId !== selectedSessionIdRef.current;
+            activateLocalSession(
+              nextSessionId,
+              codeverClientRef.current,
+              shouldRevealNextSession,
+            );
           }
         },
         onCommandResult(result) {

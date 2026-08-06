@@ -4,7 +4,7 @@
     <string name="notification_channel_name">Codever connection</string>
     <string name="notification_channel_description">Persistent native Matrix connection</string>
     <string name="notification_title">Codever native is running</string>
-    <string name="notification_runtime_version">%1$s · Matrix connection active</string>
+    <string name="notification_runtime_version">%1$s · Background connection service active</string>
     <string name="notification_export_logs">Export logs</string>
     <string name="notification_disconnect">Disconnect</string>
     <string name="task_notification_channel_name">Agent task updates</string>

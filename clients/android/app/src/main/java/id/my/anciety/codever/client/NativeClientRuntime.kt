@@ -1031,12 +1031,25 @@ class NativeClientRuntime(
                 DurableError("gateway_failed", it.take(4_096), retryable = false)
             },
         )
-        if (outbox.recordCompletion(completion)) {
+        // Capture the operation before publishing the terminal command event.
+        // A Web client may synchronously consume that event and release the
+        // durable command before the completion callback runs.
+        val operation = outbox.operation(commandId)
+        val recorded = outbox.recordCompletion(completion)
+        diagnostics.record(
+            "command.completion.received",
+            mapOf(
+                "available" to recorded.toString(),
+                "action" to (operation?.wireName ?: "unavailable"),
+                "stage" to completion.outcome.wireName,
+            ),
+        )
+        if (recorded) {
             ackTimeouts.remove(commandId)?.cancel()
             outbox.get(commandId)?.let(::publishCommand)
             runCatching {
-                outbox.operation(commandId)?.let { operation ->
-                    onCommandCompletion(operation, completion)
+                operation?.let { completedOperation ->
+                    onCommandCompletion(completedOperation, completion)
                 }
             }.onFailure { error ->
                 diagnostics.record(

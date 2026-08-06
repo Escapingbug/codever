@@ -6,10 +6,10 @@ internal enum class WebHostBindingAction {
 }
 
 /**
- * A retained WebView can resume before the asynchronous Android service bind
- * completes. Its first native RPC then observes an empty binder and enters a
- * persistent recovery state. Reloading only after onServiceConnected makes
- * the WebView bootstrap against an already available native host.
+ * Normal background transitions retain the Activity-to-service binding so a
+ * visible WebView never races a new native handshake against an asynchronous
+ * rebind. If Android disconnects the service or recreates the Activity, reload
+ * only after onServiceConnected so bootstrap sees an available native host.
  */
 internal fun webHostActionAfterServiceConnected(
     hasExistingWebHost: Boolean,
