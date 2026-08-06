@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   MatrixConnectionConfig,
   MatrixConnectionStatus,
@@ -16,6 +16,7 @@ import type {
 } from "./pairing";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
+import { useDialogFocus } from "./dialogFocus";
 
 type Props = {
   open: boolean;
@@ -46,7 +47,12 @@ type Props = {
   onCheckForUpdates(): void;
 };
 
-export function MatrixSettings({
+export function MatrixSettings(props: Props) {
+  if (!props.open) return null;
+  return <MatrixSettingsDialog {...props} />;
+}
+
+function MatrixSettingsDialog({
   open,
   config,
   status,
@@ -75,8 +81,6 @@ export function MatrixSettings({
   onCheckForUpdates,
 }: Props) {
   const [loginPassword, setLoginPassword] = useState("");
-
-  if (!open) return null;
   const connected =
     status === "connected" ||
     status === "securing" ||
@@ -87,21 +91,34 @@ export function MatrixSettings({
     pairingBusy ||
     invitationBusy;
   const needsAccount = Boolean(pairingPreview) && !trustedGateway;
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const requestClose = () => {
+    setLoginPassword("");
+    onClose();
+  };
+
+  useDialogFocus({
+    open,
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onEscape: requestClose,
+  });
 
   return (
     <div
       className="settings-backdrop"
       role="presentation"
-      onMouseDown={() => {
-        setLoginPassword("");
-        onClose();
-      }}
+      onMouseDown={requestClose}
     >
       <section
+        ref={dialogRef}
         className="matrix-settings pairing-settings"
         role="dialog"
         aria-modal="true"
         aria-labelledby="matrix-settings-title"
+        aria-busy={busy}
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
@@ -112,10 +129,9 @@ export function MatrixSettings({
             </h2>
           </div>
           <button
-            onClick={() => {
-              setLoginPassword("");
-              onClose();
-            }}
+            ref={closeButtonRef}
+            type="button"
+            onClick={requestClose}
             aria-label="Close Gateway settings"
           >
             ×
@@ -281,20 +297,23 @@ export function MatrixSettings({
         )}
 
         <div className="settings-build-version">
-          <span>
-            PWA build <code>{CODEVER_BUILD_VERSION}</code>
-            {nativeRuntime && (
-              <>
-                <small>
-                  Native APK <code>{nativeRuntime.runtimeVersion}</code>
-                </small>
-                <small>
-                  Native build <code>{nativeRuntime.runtimeBuild}</code>
-                </small>
-              </>
-            )}
-            <small>{updateStatusText(updateState)}</small>
-          </span>
+          <details className="settings-build-details">
+            <summary>Advanced diagnostics</summary>
+            <span>
+              PWA build <code>{CODEVER_BUILD_VERSION}</code>
+              {nativeRuntime && (
+                <>
+                  <small>
+                    Native APK <code>{nativeRuntime.runtimeVersion}</code>
+                  </small>
+                  <small>
+                    Native build <code>{nativeRuntime.runtimeBuild}</code>
+                  </small>
+                </>
+              )}
+              <small>{updateStatusText(updateState)}</small>
+            </span>
+          </details>
           <button
             type="button"
             onClick={onCheckForUpdates}
@@ -308,7 +327,12 @@ export function MatrixSettings({
         </div>
 
         <footer>
-          <button className="forget-button" onClick={onForget}>
+          <button
+            type="button"
+            className="forget-button"
+            onClick={onForget}
+            disabled={busy}
+          >
             {trustedGateway ? "Remove trusted Gateway" : "Clear local setup"}
           </button>
           <span className="settings-spacer" />

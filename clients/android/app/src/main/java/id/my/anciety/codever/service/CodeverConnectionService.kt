@@ -128,12 +128,21 @@ class CodeverConnectionService : Service() {
 
     private fun onCommandCompletion(operation: CommandOperation, completion: CommandCompletion) {
         val kind = TaskNotificationPolicy.decide(uiForeground, operation, completion.outcome)
-            ?: return
+        diagnostics.record(
+            "notification.task_evaluated",
+            mapOf(
+                "running" to uiForeground.toString(),
+                "action" to operation.wireName,
+                "stage" to completion.outcome.wireName,
+                "reason" to (kind?.name?.lowercase() ?: "none"),
+            ),
+        )
+        if (kind == null) return
         runCatching { taskNotifier.show(kind, completion) }
             .onSuccess {
                 diagnostics.record(
                     "notification.task_posted",
-                    mapOf("outcome" to completion.outcome.wireName),
+                    mapOf("stage" to completion.outcome.wireName),
                 )
             }
             .onFailure { error ->
@@ -210,6 +219,10 @@ class CodeverConnectionService : Service() {
 
         fun setUiForeground(value: Boolean) {
             uiForeground = value
+            diagnostics.record(
+                "service.ui_foreground",
+                mapOf("running" to value.toString()),
+            )
         }
 
         fun start(): ClientSnapshot {

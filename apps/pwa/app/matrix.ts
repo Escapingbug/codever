@@ -977,7 +977,15 @@ export async function connectMatrix(
       refreshGatewayStateAfterReconnect = true;
       handlers.onStatus("reconnecting");
     } else if (state === "ERROR") {
-      handlers.onStatus("error", "Matrix sync failed. Check the token and server.");
+      // The Matrix SDK can emit ERROR between successful sync attempts. Treat
+      // this as recoverable here; startup/authentication failures are surfaced
+      // by the bounded connection path instead of flashing a fatal UI while
+      // the SDK is already retrying.
+      refreshGatewayStateAfterReconnect = true;
+      handlers.onStatus(
+        "reconnecting",
+        "Encrypted sync was interrupted. Retrying automatically…",
+      );
     } else if (state === "STOPPED") {
       handlers.onStatus("offline");
     }

@@ -30,6 +30,23 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `task notification diagnostics use approved privacy safe fields`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z notification.task_evaluated action=prompt reason=succeeded running=false stage=succeeded",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "notification.task_evaluated",
+                mapOf(
+                    "running" to "false",
+                    "action" to "prompt",
+                    "stage" to "succeeded",
+                    "reason" to "succeeded",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),
