@@ -63,6 +63,13 @@ import {
   type PwaUpdateState,
 } from "./pwaUpdate";
 import {
+  clearPendingSessionCreateRecovery,
+  readPendingSessionCreateRecovery,
+  sessionCreateRecoveryMatches,
+  writePendingSessionCreateRecovery,
+  type PendingSessionCreateRecovery,
+} from "./sessionCreateRecovery";
+import {
   hasShortDeviceInvitation,
   resolveShortDeviceInvitation,
   shortenDeviceInvitation,
@@ -489,6 +496,15 @@ export function CodeverApp() {
     hiddenAt: number | null;
   } | null>(null);
   const pwaUpdateRef = useRef<PwaUpdateHandle | null>(null);
+  const pwaReloadBlockedRef = useRef(false);
+  const connectionStatusRef = useRef<MatrixConnectionStatus>("offline");
+  const pendingSessionCreateRecoveryRef =
+    useRef<PendingSessionCreateRecovery | null>(null);
+  const sessionCreateRecoveryInFlightRef = useRef<{
+    commandId: string;
+    connection: CodeverClient;
+  } | null>(null);
+  const sessionCreateRecoveryTimerRef = useRef<number | null>(null);
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
     (
@@ -870,13 +886,44 @@ export function CodeverApp() {
   }, [uiNotices]);
 
   useEffect(() => {
-    const updater = registerPwaUpdates(setPwaUpdateState);
+    const recovery = readPendingSessionCreateRecovery(window.localStorage);
+    if (!recovery) return;
+    pendingSessionCreateRecoveryRef.current = recovery;
+    pwaReloadBlockedRef.current = true;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setPendingSessionCreate(recovery.input);
+      setNewSessionBusy(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const updater = registerPwaUpdates(setPwaUpdateState, {
+      canReload: () => !pwaReloadBlockedRef.current,
+    });
     pwaUpdateRef.current = updater;
     return () => {
       pwaUpdateRef.current = null;
       updater.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    connectionStatusRef.current = connectionStatus;
+  }, [connectionStatus]);
+
+  useEffect(
+    () => () => {
+      if (sessionCreateRecoveryTimerRef.current !== null) {
+        window.clearTimeout(sessionCreateRecoveryTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const focusSessionSearch = (event: globalThis.KeyboardEvent) => {
@@ -1075,13 +1122,12 @@ export function CodeverApp() {
           Number.isFinite(recoveryRequestedAt) &&
           recoveryRequestedAt > 0 &&
           Date.now() - recoveryRequestedAt < 5 * 60_000;
-        if (resumeInterruptedStartup) {
-          setSettingsOpen(false);
-          await connectCodeverClient(trustedConfig, true, true);
-        } else {
-          sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
-          setSettingsOpen(true);
-        }
+        setSettingsOpen(false);
+        await connectCodeverClient(
+          trustedConfig,
+          true,
+          resumeInterruptedStartup,
+        );
         return;
       }
       if (isNativeManagedMatrixConfig(stored)) {
@@ -1614,11 +1660,166 @@ export function CodeverApp() {
   }
   activateLocalSessionRef.current = (sessionId) => activateLocalSession(sessionId);
 
+  function setSessionCreateReloadBlocked(blocked: boolean): void {
+    pwaReloadBlockedRef.current = blocked;
+    if (!blocked) pwaUpdateRef.current?.resumeDeferredUpdate();
+  }
+
+  function clearPendingSessionCreateUi(): void {
+    setPendingSessionCreate(null);
+    setNewSessionBusy(false);
+    setSessionCreateReloadBlocked(false);
+  }
+
+  function rememberPendingSessionCreate(
+    input: NewSessionInput,
+    commandId: string,
+  ): PendingSessionCreateRecovery {
+    const recovery: PendingSessionCreateRecovery = {
+      version: 1,
+      commandId,
+      gatewayId: matrixConfig.gatewayId,
+      conversationId: matrixConfig.conversationId,
+      createdAt: Date.now(),
+      input,
+    };
+    pendingSessionCreateRecoveryRef.current = recovery;
+    setPendingSessionCreate(input);
+    setNewSessionBusy(true);
+    setSessionCreateReloadBlocked(true);
+    try {
+      writePendingSessionCreateRecovery(window.localStorage, recovery);
+    } catch (error) {
+      showUiNotice(
+        "session:create-recovery-storage",
+        "session",
+        "warning",
+        `This session will keep retrying while this page remains open, but its recovery state could not be saved: ${formatUiError(error)}`,
+      );
+    }
+    return recovery;
+  }
+
+  function forgetPendingSessionCreate(commandId?: string): void {
+    const recovery = pendingSessionCreateRecoveryRef.current;
+    if (commandId && recovery?.commandId !== commandId) return;
+    pendingSessionCreateRecoveryRef.current = null;
+    if (sessionCreateRecoveryTimerRef.current !== null) {
+      window.clearTimeout(sessionCreateRecoveryTimerRef.current);
+      sessionCreateRecoveryTimerRef.current = null;
+    }
+    try {
+      clearPendingSessionCreateRecovery(window.localStorage, commandId);
+    } catch (error) {
+      showUiNotice(
+        "session:create-recovery-storage",
+        "session",
+        "warning",
+        `The completed session recovery marker could not be cleared: ${formatUiError(error)}`,
+      );
+    }
+  }
+
+  function schedulePendingSessionCreateRecovery(
+    connection: CodeverClient,
+  ): void {
+    if (sessionCreateRecoveryTimerRef.current !== null) {
+      window.clearTimeout(sessionCreateRecoveryTimerRef.current);
+    }
+    sessionCreateRecoveryTimerRef.current = window.setTimeout(() => {
+      sessionCreateRecoveryTimerRef.current = null;
+      if (
+        codeverClientRef.current === connection &&
+        connectionStatusRef.current === "connected"
+      ) {
+        continuePendingSessionCreate(connection);
+      }
+    }, 5_000);
+  }
+
+  function continuePendingSessionCreate(
+    connection: CodeverClient,
+    acknowledgedCommand?: CodeverCommandSendResult,
+  ): void {
+    const recovery = pendingSessionCreateRecoveryRef.current;
+    if (!recovery) return;
+    if (
+      acknowledgedCommand &&
+      acknowledgedCommand.commandId !== recovery.commandId
+    ) {
+      return;
+    }
+    if (
+      sessionCreateRecoveryInFlightRef.current?.commandId ===
+      recovery.commandId
+    ) {
+      return;
+    }
+    sessionCreateRecoveryInFlightRef.current = {
+      commandId: recovery.commandId,
+      connection,
+    };
+    void (async () => {
+      try {
+        const sent =
+          acknowledgedCommand ??
+          (await connection.recoverCommand(recovery.commandId));
+        recoverUiNotice("session:create");
+        await settleSessionCreate(connection, sent);
+      } catch {
+        if (
+          pendingSessionCreateRecoveryRef.current?.commandId !==
+          recovery.commandId
+        ) {
+          return;
+        }
+        showUiNotice(
+          "session:create",
+          "session",
+          "warning",
+          "Session creation is still queued securely. Codever will resume the same command when your computer reconnects.",
+        );
+        if (
+          codeverClientRef.current === connection &&
+          connectionStatusRef.current === "connected"
+        ) {
+          schedulePendingSessionCreateRecovery(connection);
+        }
+      } finally {
+        if (
+          sessionCreateRecoveryInFlightRef.current?.commandId ===
+          recovery.commandId
+        ) {
+          sessionCreateRecoveryInFlightRef.current = null;
+        }
+        const currentConnection = codeverClientRef.current;
+        if (
+          pendingSessionCreateRecoveryRef.current?.commandId ===
+            recovery.commandId &&
+          currentConnection &&
+          currentConnection !== connection &&
+          connectionStatusRef.current === "connected"
+        ) {
+          continuePendingSessionCreate(currentConnection);
+        }
+      }
+    })();
+  }
+
   async function connectCodeverClient(
     configInput = matrixConfig,
     closeSettings = true,
     recoveringInterruptedStartup = false,
   ): Promise<CodeverClient | null> {
+    const storedSessionCreateRecovery = pendingSessionCreateRecoveryRef.current;
+    const sessionCreateRecovery =
+      storedSessionCreateRecovery &&
+      sessionCreateRecoveryMatches(storedSessionCreateRecovery, configInput)
+        ? storedSessionCreateRecovery
+        : null;
+    if (storedSessionCreateRecovery && !sessionCreateRecovery) {
+      forgetPendingSessionCreate(storedSessionCreateRecovery.commandId);
+    }
     const startupGeneration = matrixStartupGenerationRef.current + 1;
     matrixStartupGenerationRef.current = startupGeneration;
     const isCurrentStartup = () =>
@@ -1643,6 +1844,7 @@ export function CodeverApp() {
     setRevisionConflict(null);
     setConnectionError(null);
     setConnectionDetail("Preparing your connection…");
+    connectionStatusRef.current = "connecting";
     setConnectionStatus("connecting");
     setMessages([]);
     setSelectedSessionId(null);
@@ -1650,8 +1852,9 @@ export function CodeverApp() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
-    setPendingSessionCreate(null);
-    setNewSessionBusy(false);
+    setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
+    setNewSessionBusy(Boolean(sessionCreateRecovery));
+    setSessionCreateReloadBlocked(Boolean(sessionCreateRecovery));
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
@@ -1688,6 +1891,7 @@ export function CodeverApp() {
           ) {
             matrixStartupRef.current.phase = status;
           }
+          connectionStatusRef.current = status;
           setConnectionStatus(status);
           setConnectionDetail(detail ?? null);
           if (status === "error") {
@@ -1707,6 +1911,12 @@ export function CodeverApp() {
             sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
             setConnectionError(null);
             dispatchUiNotice({ type: "scope-recovered", scope: "connection" });
+            window.setTimeout(() => {
+              const activeConnection = codeverClientRef.current;
+              if (activeConnection) {
+                continuePendingSessionCreate(activeConnection);
+              }
+            }, 0);
           }
         },
         onNativeRuntime(runtime) {
@@ -1828,7 +2038,7 @@ export function CodeverApp() {
             }
             if (pendingCreated === nextSessionId) {
               pendingCreatedSessionIdRef.current = null;
-              setPendingSessionCreate(null);
+              clearPendingSessionCreateUi();
               setMobileChatOpen(true);
             }
             setSessionReadState((current) => {
@@ -1878,19 +2088,19 @@ export function CodeverApp() {
       codeverClientRef.current = connection;
       setDeviceKeyId(connection.deviceId);
       if (closeSettings) setSettingsOpen(false);
-      if (selectedSessionIdRef.current) {
-        void connection.ready
-          .then(() => {
-            if (codeverClientRef.current !== connection) return;
-            const sessionId = selectedSessionIdRef.current;
-            if (sessionId) void restoreSessionHistory(sessionId, connection);
-          })
-          .catch(() => undefined);
-      }
+      void connection.ready
+        .then(() => {
+          if (codeverClientRef.current !== connection) return;
+          continuePendingSessionCreate(connection);
+          const sessionId = selectedSessionIdRef.current;
+          if (sessionId) void restoreSessionHistory(sessionId, connection);
+        })
+        .catch(() => undefined);
       return connection;
     } catch (error) {
       if (!isCurrentStartup()) return null;
       matrixStartupRef.current = null;
+      connectionStatusRef.current = "error";
       setConnectionStatus("error");
       setConnectionDetail(null);
       setConnectionError(formatUiError(error));
@@ -1899,10 +2109,12 @@ export function CodeverApp() {
   }
 
   function disconnectClient() {
+    const queuedSessionCreate = pendingSessionCreateRecoveryRef.current;
     matrixStartupGenerationRef.current += 1;
     const disconnectingClient = codeverClientRef.current;
     codeverClientRef.current = null;
     void disconnectingClient?.disconnect().catch((error) => {
+      connectionStatusRef.current = "error";
       setConnectionStatus("error");
       setConnectionError(
         `The client could not disconnect cleanly: ${formatUiError(error)}`,
@@ -1916,13 +2128,19 @@ export function CodeverApp() {
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     pendingCreatedSessionIdRef.current = null;
-    setPendingSessionCreate(null);
-    setNewSessionBusy(false);
+    setPendingSessionCreate(queuedSessionCreate?.input ?? null);
+    setNewSessionBusy(Boolean(queuedSessionCreate));
+    setSessionCreateReloadBlocked(Boolean(queuedSessionCreate));
+    if (sessionCreateRecoveryTimerRef.current !== null) {
+      window.clearTimeout(sessionCreateRecoveryTimerRef.current);
+      sessionCreateRecoveryTimerRef.current = null;
+    }
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     matrixStartupRef.current = null;
     sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+    connectionStatusRef.current = "offline";
     setConnectionStatus("offline");
     setConnectionDetail(null);
     setConnectionError(null);
@@ -1963,11 +2181,13 @@ export function CodeverApp() {
     attachedClient?.dispose();
     matrixStartupRef.current = null;
     sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
+    connectionStatusRef.current = "connecting";
     setConnectionStatus("connecting");
     setConnectionDetail("Transferring the native connection to this invitation…");
   }
 
   function settleNativeBootstrapTransfer(status: "offline" | "error") {
+    connectionStatusRef.current = status;
     setConnectionStatus(status);
     setConnectionDetail(null);
   }
@@ -1976,6 +2196,11 @@ export function CodeverApp() {
     const historyScope = historyScopeRef.current;
     pairingAbortRef.current?.abort();
     disconnectClient();
+    const queuedSessionCreate = pendingSessionCreateRecoveryRef.current;
+    if (queuedSessionCreate) {
+      forgetPendingSessionCreate(queuedSessionCreate.commandId);
+      clearPendingSessionCreateUi();
+    }
     clearMatrixConfig();
     clearPendingPairing();
     clearTrustedGateway();
@@ -2429,15 +2654,14 @@ export function CodeverApp() {
     commandId: string,
     completion: CommandCompletion,
   ): Promise<void> {
+    let sessionToReveal: string | null = null;
     try {
       completedCommandResultsRef.current.delete(commandId);
       if (completion.outcome !== "succeeded") return;
       if (completion.sessionId) {
         pendingCreatedSessionIdRef.current = completion.sessionId;
         if (knownGatewaySessionIdsRef.current.has(completion.sessionId)) {
-          setPendingSessionCreate(null);
-          activateLocalSession(completion.sessionId, connection);
-          setMobileChatOpen(true);
+          sessionToReveal = completion.sessionId;
         }
       }
       setNewSessionOpen(false);
@@ -2445,6 +2669,12 @@ export function CodeverApp() {
       // Receiving an acknowledgement is not enough for session.create: the
       // terminal sessionId must survive reloads until this UI has consumed it.
       await connection.releaseCommand(commandId);
+      forgetPendingSessionCreate(commandId);
+    }
+    if (sessionToReveal) {
+      clearPendingSessionCreateUi();
+      activateLocalSession(sessionToReveal, connection);
+      setMobileChatOpen(true);
     }
   }
 
@@ -2691,17 +2921,19 @@ export function CodeverApp() {
       );
       return;
     }
+    setSessionCreateReloadBlocked(true);
     setNewSessionBusy(true);
     setPendingSessionCreate(input);
     setNewSessionOpen(false);
     setMobileChatOpen(false);
     recoverUiNotice("session:create");
-    let acknowledged = false;
+    let durableCommandRecorded = false;
+    let connection: CodeverClient | null = null;
     try {
       // Let React commit the pending row before Matrix encryption, IndexedDB,
       // acknowledgement, and command-result work begins.
       await waitForNextPaint();
-      const connection = codeverClientRef.current;
+      connection = codeverClientRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
         cwd: input.cwd,
@@ -2713,21 +2945,30 @@ export function CodeverApp() {
         ...(input.extensions?.length ? { extensions: input.extensions } : {}),
       });
       if (!sent || !connection) return;
-      acknowledged = true;
-      setNewSessionBusy(false);
-      void settleSessionCreate(connection, sent);
+      rememberPendingSessionCreate(input, sent.commandId);
+      durableCommandRecorded = true;
+      continuePendingSessionCreate(connection, sent);
     } catch (error) {
-      showUiNotice(
-        "session:create",
-        "session",
-        "error",
-        formatUiError(error),
-      );
-    } finally {
-      if (!acknowledged) {
-        setNewSessionBusy(false);
-        setPendingSessionCreate(null);
+      if (error instanceof CommandAcknowledgementTimeoutError && connection) {
+        rememberPendingSessionCreate(input, error.commandId);
+        durableCommandRecorded = true;
+        showUiNotice(
+          "session:create",
+          "session",
+          "warning",
+          "Session creation is queued securely. Codever will resume this same command without creating a duplicate.",
+        );
+        continuePendingSessionCreate(connection);
+      } else {
+        showUiNotice(
+          "session:create",
+          "session",
+          "error",
+          formatUiError(error),
+        );
       }
+    } finally {
+      if (!durableCommandRecorded) clearPendingSessionCreateUi();
     }
   }
 
@@ -2758,6 +2999,11 @@ export function CodeverApp() {
         completion.outcome === "succeeded" && Boolean(completion.sessionId);
       if (waitingForGatewayState) recoverUiNotice("session:create");
     } catch (error) {
+      if (
+        pendingSessionCreateRecoveryRef.current?.commandId === sent.commandId
+      ) {
+        throw error;
+      }
       showUiNotice(
         "session:create",
         "session",
@@ -2765,7 +3011,12 @@ export function CodeverApp() {
         formatUiError(error),
       );
     } finally {
-      if (!waitingForGatewayState) setPendingSessionCreate(null);
+      if (
+        !waitingForGatewayState &&
+        pendingSessionCreateRecoveryRef.current?.commandId !== sent.commandId
+      ) {
+        clearPendingSessionCreateUi();
+      }
     }
   }
 
@@ -3496,8 +3747,14 @@ export function CodeverApp() {
               </span>
               <span className="session-copy">
                 <span className="session-title-line">
-                  <strong>Creating session…</strong>
-                  <time>now</time>
+                  <strong>
+                    {connectionStatus === "connected"
+                      ? "Creating session…"
+                      : "Session queued…"}
+                  </strong>
+                  <time>
+                    {connectionStatus === "connected" ? "now" : "waiting"}
+                  </time>
                 </span>
                 <span className="session-preview-line">
                   <span>
@@ -4470,6 +4727,18 @@ export function CodeverApp() {
             Loading build {pwaUpdateState.latestVersion}. This page will reopen
             automatically.
           </small>
+        </div>
+      )}
+
+      {pwaUpdateState.phase === "waiting" && (
+        <div className="pwa-update-toast" role="status" aria-live="polite">
+          <span aria-hidden="true">↻</span>
+          <span>
+            <strong>Update ready</strong>
+            <small>
+              Finishing the queued session command before Codever reloads.
+            </small>
+          </span>
         </div>
       )}
 

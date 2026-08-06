@@ -86,7 +86,10 @@ test("ships a complete installable offline shell", async () => {
     /pathname\.startsWith\("\/_matrix\/"\)[\s\S]*?return;/,
   );
   assert.match(serviceWorker, /pathname === "\/api\/version"/);
-  assert.match(source, /registerPwaUpdates\(setPwaUpdateState\)/);
+  assert.match(
+    source,
+    /registerPwaUpdates\(setPwaUpdateState, \{[\s\S]*canReload:/,
+  );
   assert.match(
     source,
     /if \(isNativeManagedMatrixConfig\(stored\)\)[\s\S]*connectCodeverClient\(stored, true, true\)/,
@@ -103,12 +106,20 @@ test("ships a complete installable offline shell", async () => {
   assert.doesNotMatch(newSession, /endpoint|bearerToken/);
   assert.match(styles, /\.session-extensions\s*\{/);
   assert.match(source, /className="session-row session-create-pending"/);
-  assert.match(source, /<strong>Creating session…<\/strong>/);
+  assert.match(source, /"Creating session…"/);
+  assert.match(source, /"Session queued…"/);
   assert.match(
     source,
     /setPendingSessionCreate\(input\);[\s\S]*?setNewSessionOpen\(false\);[\s\S]*?await waitForNextPaint\(\);[\s\S]*?operation: "session\.create"/,
   );
   assert.match(styles, /\.session-create-spinner\s*\{/);
+  assert.match(source, /rememberPendingSessionCreate\(input, sent\.commandId\)/);
+  assert.match(
+    source,
+    /error instanceof CommandAcknowledgementTimeoutError[\s\S]*rememberPendingSessionCreate\(input, error\.commandId\)/,
+  );
+  assert.match(source, /continuePendingSessionCreate\(connection/);
+  assert.match(source, /resumeDeferredUpdate/);
   assert.match(
     source,
     /<button[\s\S]{0,160}?aria-label="Settings"[\s\S]{0,160}?onClick=\{\(\) => setSettingsOpen\(true\)\}/,
@@ -653,6 +664,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(pairing, /url\.searchParams\.has\("pair"\)/);
   assert.match(app, /window\.history\.replaceState/);
   assert.match(app, /await loadTrustedGateway\(identity\)/);
+  assert.match(
+    app,
+    /if \(trust\) \{[\s\S]*setSettingsOpen\(false\);[\s\S]*await connectCodeverClient\([\s\S]*trustedConfig/,
+  );
   assert.match(app, /await loadPendingPairingRecovery\(identity\)/);
   assert.match(
     app,

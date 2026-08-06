@@ -315,7 +315,8 @@ function MatrixSettingsDialog({
             onClick={onCheckForUpdates}
             disabled={
               updateState.phase === "checking" ||
-              updateState.phase === "updating"
+              updateState.phase === "updating" ||
+              updateState.phase === "waiting"
             }
           >
             {updateState.phase === "checking" ? "Checking…" : "Check for updates"}
@@ -361,6 +362,8 @@ function updateStatusText(state: PwaUpdateState): string {
       return "Checking the deployed version…";
     case "updating":
       return `Updating to ${state.latestVersion}…`;
+    case "waiting":
+      return `Update ${state.latestVersion} is waiting for the queued command`;
     case "updated":
       return `Updated from ${state.previousVersion}`;
     case "unavailable":

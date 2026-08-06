@@ -39,6 +39,11 @@ export type PwaUpdateState =
       latestVersion: string;
     }
   | {
+      phase: "waiting";
+      currentVersion: string;
+      latestVersion: string;
+    }
+  | {
       phase: "updated";
       currentVersion: string;
       previousVersion: string;
@@ -50,6 +55,7 @@ export type PwaUpdateState =
 
 export type PwaUpdateHandle = {
   checkNow(): Promise<void>;
+  resumeDeferredUpdate(): void;
   dismissUpdatedNotice(): void;
   dispose(): void;
 };
@@ -66,6 +72,7 @@ export type PwaUpdateEnvironment = {
   writeUpdateMarker(version: string): void;
   clearUpdateMarker(): void;
   clearUpdateQuery(): void;
+  canReload(): boolean;
   reloadToBuild(version: string): void;
   startPeriodicCheck(listener: () => void, intervalMs: number): number;
   stopPeriodicCheck(timer: number): void;
@@ -109,8 +116,16 @@ export function installPwaUpdateFlow(
   };
   const reload = (version: string) => {
     if (disposed || reloading) return;
-    reloading = true;
     targetVersion = version;
+    if (!environment.canReload()) {
+      publish({
+        phase: "waiting",
+        currentVersion: buildVersion,
+        latestVersion: version,
+      });
+      return;
+    }
+    reloading = true;
     environment.writeUpdateMarker(buildVersion);
     environment.reloadToBuild(version);
   };
@@ -194,6 +209,9 @@ export function installPwaUpdateFlow(
 
   return {
     checkNow: () => checkLatest(true),
+    resumeDeferredUpdate: () => {
+      if (state.phase === "waiting") reload(targetVersion);
+    },
     dismissUpdatedNotice: () => {
       if (state.phase === "updated") {
         publish({ phase: "current", currentVersion: buildVersion });
@@ -214,6 +232,7 @@ export function installPwaUpdateFlow(
 
 export function registerPwaUpdates(
   onStateChange?: (state: PwaUpdateState) => void,
+  options?: { canReload?: () => boolean },
 ): PwaUpdateHandle {
   if (typeof navigator === "undefined") {
     return inertUpdateHandle();
@@ -247,6 +266,7 @@ export function registerPwaUpdates(
       writeUpdateMarker: writeUpdateMarker,
       clearUpdateMarker: clearUpdateMarker,
       clearUpdateQuery: clearUpdateQuery,
+      canReload: options?.canReload ?? (() => true),
       reloadToBuild: reloadToBuild,
       startPeriodicCheck: (listener, intervalMs) =>
         window.setInterval(listener, intervalMs),
@@ -334,6 +354,7 @@ function clearUpdateMarker(): void {
 function inertUpdateHandle(): PwaUpdateHandle {
   return {
     checkNow: async () => {},
+    resumeDeferredUpdate: () => {},
     dismissUpdatedNotice: () => {},
     dispose: () => {},
   };

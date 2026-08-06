@@ -13,6 +13,7 @@ function updateHarness(
     latestBuild?: string;
     marker?: string | null;
     updateCheckFails?: boolean;
+    reloadAllowed?: boolean;
   } = {},
 ) {
   const listeners = {
@@ -37,6 +38,7 @@ function updateHarness(
   let periodicStopped = false;
   let clearedQuery = false;
   let reloadTarget: string | null = null;
+  let reloadAllowed = input.reloadAllowed ?? true;
   const updateRegistration = {
     waiting: {
       postMessage(message: unknown) {
@@ -83,6 +85,7 @@ function updateHarness(
     clearUpdateQuery: () => {
       clearedQuery = true;
     },
+    canReload: () => reloadAllowed,
     reloadToBuild: (version) => {
       reloadTarget = version;
     },
@@ -113,6 +116,9 @@ function updateHarness(
     clearedQuery: () => clearedQuery,
     setVisible: (next: boolean) => {
       visible = next;
+    },
+    setReloadAllowed: (next: boolean) => {
+      reloadAllowed = next;
     },
     runPeriodicCheck: () => periodicListener?.(),
   };
@@ -176,6 +182,60 @@ test("forces a versioned network navigation when deployment is newer", async () 
     latestVersion: "build-next",
   });
   assert.deepEqual(harness.workerMessages.at(-1), { type: "SKIP_WAITING" });
+});
+
+test("defers a newer deployment until an in-flight command is safe", async () => {
+  const harness = updateHarness({
+    controller: {},
+    latestBuild: "build-next",
+    reloadAllowed: false,
+  });
+  const handle = installPwaUpdateFlow(
+    harness.environment,
+    "build-current",
+    (state) => harness.states.push(state),
+  );
+  await settleRegistration();
+
+  assert.equal(harness.reloadTarget(), null);
+  assert.equal(harness.marker(), null);
+  assert.deepEqual(harness.states.at(-1), {
+    phase: "waiting",
+    currentVersion: "build-current",
+    latestVersion: "build-next",
+  });
+
+  harness.setReloadAllowed(true);
+  handle.resumeDeferredUpdate();
+
+  assert.equal(harness.reloadTarget(), "build-next");
+  assert.equal(harness.marker(), "build-current");
+});
+
+test("a worker takeover also waits for an in-flight command", async () => {
+  const harness = updateHarness({
+    controller: {},
+    visible: false,
+    reloadAllowed: false,
+  });
+  const handle = installPwaUpdateFlow(
+    harness.environment,
+    "build-current",
+    (state) => harness.states.push(state),
+  );
+  await settleRegistration();
+
+  for (const listener of harness.listeners.controllerchange) listener();
+  assert.equal(harness.reloadTarget(), null);
+  assert.deepEqual(harness.states.at(-1), {
+    phase: "waiting",
+    currentVersion: "build-current",
+    latestVersion: "build-current",
+  });
+
+  harness.setReloadAllowed(true);
+  handle.resumeDeferredUpdate();
+  assert.equal(harness.reloadTarget(), "build-current");
 });
 
 test("reports the completed update after the new build reloads", async () => {
