@@ -28,6 +28,7 @@ import {
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
+import { createSessionExtensionRegistryFromEnvironment } from '../src/runtime/sessionExtensionConfig.js'
 
 interface LocalMatrixFixture {
     homeserver: string
@@ -66,6 +67,7 @@ const providerName = process.env.CODEVER_PROVIDER
     ?? registered.defaultProvider
     ?? 'codex'
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
+const sessionExtensionRegistry = createSessionExtensionRegistryFromEnvironment()
 const runId = Date.now().toString(36).toUpperCase()
 const login = await loginGateway(fixture.homeserver, `CODEVER_GATEWAY_${runId}`)
 const sdkClient = createClient({
@@ -259,6 +261,7 @@ const config: MatrixGatewayConfig = {
 }
 runner = new MatrixGatewayRunner(config, {
     client,
+    sessionExtensionRegistry,
     listTrustedDevices: async () =>
         (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
@@ -304,6 +307,11 @@ const adminServer = await startGatewayAdminServer({
 })
 process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)
 process.stdout.write(`Provider: ${providerName}\nWorking directory: ${cwd}\n`)
+if (sessionExtensionRegistry.descriptors().length > 0) {
+    process.stdout.write(
+        `Session extensions: ${sessionExtensionRegistry.descriptors().map(item => item.name).join(', ')}\n`,
+    )
+}
 process.stdout.write(`Gateway admin socket: ${adminServer.socketPath}\n`)
 process.stdout.write('Press Ctrl+C to stop the Gateway.\n')
 

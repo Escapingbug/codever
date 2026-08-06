@@ -27,6 +27,11 @@ import type { AgentProvider, AgentQueryHandle } from '@/providers/provider'
 import type { TopicSession } from '@/bridge/channelPort'
 import type { SessionInput } from '@/runtime/semantic'
 import {
+    normalizeDeclarativeExtensionConfig,
+    SessionExtensionRegistry,
+    type SessionExtensionProvider,
+} from '@/runtime/sessionExtensions'
+import {
     CODEVER_MATRIX_EXTENSION,
     type MatrixIncomingEvent,
     type MatrixSendEventRequest,
@@ -569,8 +574,29 @@ describe('MatrixGatewayRunner', () => {
         }
         let createdRoom: MatrixGatewayConfig['rooms'][number] | undefined
         let createdSessionId: string | undefined
+        const extensionProvider: SessionExtensionProvider = {
+            descriptor: {
+                id: 'has-privacy',
+                name: 'HaS privacy',
+                description: 'Local prompt privacy',
+                version: '1',
+                settings: [{
+                    id: 'contextId',
+                    type: 'text',
+                    label: 'Privacy context',
+                    required: true,
+                }],
+            },
+            normalizeConfig(config) {
+                return normalizeDeclarativeExtensionConfig(this.descriptor, config)
+            },
+            create() {
+                throw new Error('sessionFactory owns this test runtime')
+            },
+        }
         const runner = new MatrixGatewayRunner(fixture.config, {
             client: new FakeMatrixGatewayClient(),
+            sessionExtensionRegistry: new SessionExtensionRegistry([extensionProvider]),
             sessionFactory: (room, _port, appSession) => {
                 createdRoom = room
                 createdSessionId = appSession?.id
@@ -599,6 +625,10 @@ describe('MatrixGatewayRunner', () => {
                 projectName: 'Same name is allowed',
                 model: 'gpt-project',
                 reasoningEffort: 'high',
+                extensions: [{
+                    id: 'has-privacy',
+                    config: { contextId: ' metapp-system-1 ' },
+                }],
             },
         }
 
@@ -625,8 +655,47 @@ describe('MatrixGatewayRunner', () => {
                 cwd: projectDirectory,
                 model: 'gpt-project',
                 reasoningEffort: 'high',
+                extensions: [{
+                    id: 'has-privacy',
+                    config: { contextId: 'metapp-system-1' },
+                }],
             }),
         ])
+        const advertisedState = await (runner as unknown as {
+            gatewayStateSnapshot(roomRuntime: typeof runtime): Promise<{
+                sessions: Array<{ extensions: Array<{ id: string }> }>
+                capabilities: { sessionExtensions: Array<{ id: string }> }
+            }>
+        }).gatewayStateSnapshot(runtime)
+        expect(advertisedState.sessions[0]?.extensions).toEqual([
+            expect.objectContaining({ id: 'has-privacy' }),
+        ])
+        expect(advertisedState.capabilities.sessionExtensions).toEqual([
+            expect.objectContaining({ id: 'has-privacy' }),
+        ])
+        const persistedExtensions = (Reflect.get(runner, 'runtimeStateStore') as {
+            getRoom(roomId: string): { appSessions: Array<{ extensions: unknown[] }> }
+        }).getRoom(fixture.config.rooms[0]!.roomId).appSessions[0]?.extensions
+        expect(persistedExtensions).toEqual([{
+            id: 'has-privacy',
+            config: { contextId: 'metapp-system-1' },
+        }])
+
+        await expect((runner as unknown as {
+            execute(
+                roomRuntime: typeof runtime,
+                command: CodeverCommand,
+            ): Promise<{ sessionId: string | null }>
+        }).execute(runtime, {
+            ...command,
+            commandId: 'create-missing-extension',
+            sequence: 2,
+            nonce: '0123456789abcdef-missing-extension',
+            payload: {
+                operation: 'session.create',
+                extensions: [{ id: 'not-installed' }],
+            },
+        })).rejects.toThrow('not installed')
     })
 
     it('archives, restores, and permanently removes an app session', async () => {

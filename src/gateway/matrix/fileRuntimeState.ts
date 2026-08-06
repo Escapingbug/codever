@@ -1,6 +1,10 @@
 import { mkdir, open, readFile, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import {
+    sessionExtensionBindingSchema,
+    type SessionExtensionBinding,
+} from '@codever/protocol'
 import type { MatrixGatewayRoomConfig } from './config'
 import { gatewayProjectIdentity } from './project'
 
@@ -17,6 +21,7 @@ export interface PersistedAppSession {
     permissionMode: string
     providerSessionId: string | null
     archivedAt: number | null
+    extensions: SessionExtensionBinding[]
 }
 
 export interface PersistedRoomRuntimeState {
@@ -334,7 +339,30 @@ function validateAppSession(
         archivedAt: typeof session.archivedAt === 'number'
             ? session.archivedAt
             : null,
+        extensions: parseExtensionBindings(session.extensions, roomId, index),
     }
+}
+
+function parseExtensionBindings(
+    value: unknown,
+    roomId: string,
+    sessionIndex: number,
+): SessionExtensionBinding[] {
+    if (value === undefined) return []
+    if (!Array.isArray(value)) {
+        throw new Error(`Invalid Gateway app session extensions ${sessionIndex} for room ${roomId}`)
+    }
+    const seen = new Set<string>()
+    return value.map((entry, extensionIndex) => {
+        const parsed = sessionExtensionBindingSchema.safeParse(entry)
+        if (!parsed.success || seen.has(parsed.data.id)) {
+            throw new Error(
+                `Invalid Gateway app session extension ${extensionIndex} in session ${sessionIndex} for room ${roomId}`,
+            )
+        }
+        seen.add(parsed.data.id)
+        return structuredClone(parsed.data)
+    })
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -365,6 +393,7 @@ function requiresEpochGenerationMigration(value: unknown): boolean {
                             || appSession?.cwd === undefined
                             || appSession?.reasoningEffort === undefined
                             || appSession?.permissionMode === undefined
+                            || appSession?.extensions === undefined
                         )
                     })
                 )

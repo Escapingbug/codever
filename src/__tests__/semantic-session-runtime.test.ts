@@ -3,6 +3,7 @@ import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
+import type { SessionExtensionInstance } from '@/runtime/sessionExtensions'
 import type {
     ChannelMessage,
     ChannelPort,
@@ -168,6 +169,141 @@ describe('SemanticSessionRuntime', () => {
         ])
         expect(sent.map(m => m.text)).toEqual(['Hello world'])
         expect(statuses.map(s => s.state)).toEqual(['querying', 'idle'])
+    })
+
+    it('sends only prepared input to the provider and journals canonical sanitized events', async () => {
+        const sent: ChannelMessage[] = []
+        const provider = createProvider([
+            { kind: 'text', text: 'Hello Alias' },
+            { kind: 'result', status: 'success' },
+        ])
+        const extension: SessionExtensionInstance = {
+            id: 'privacy',
+            summary: { id: 'privacy', name: 'Privacy', version: '1' },
+            prepareTurn: async () => ({
+                kind: 'ready',
+                input: 'Ask about Alias',
+                stateRef: 'mapping-v1',
+            }),
+            presentEvent: async value => value.kind === 'assistant_text_delta'
+                ? [{ ...value, text: value.text.replace('Alias', 'Original Name') }]
+                : [value],
+            lifecycle: async () => undefined,
+        }
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel(sent, []),
+            extensions: [extension],
+        })
+
+        await runtime.dispatch({
+            kind: 'user_message',
+            text: 'Ask about Original Name',
+            source: 'channel',
+        })
+
+        expect(provider.startQuery).toHaveBeenCalledWith(
+            'Ask about Alias',
+            expect.objectContaining({ cwd: '/repo' }),
+        )
+        expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'assistant_text_delta', text: 'Hello Alias' }),
+        ]))
+        expect(sent.map(message => message.text)).toEqual(['Hello Original Name'])
+    })
+
+    it('does not start the provider when an extension preview is denied', async () => {
+        const sent: ChannelMessage[] = []
+        const channel = createChannel(sent, [])
+        vi.mocked(channel.requestDecision).mockResolvedValue({ value: 'deny' })
+        const approve = vi.fn(async () => ({ kind: 'ready' as const, input: 'sanitized' }))
+        const reject = vi.fn(async () => undefined)
+        const extension: SessionExtensionInstance = {
+            id: 'privacy',
+            summary: { id: 'privacy', name: 'Privacy', version: '1' },
+            prepareTurn: async () => ({
+                kind: 'approval_required',
+                approval: { title: 'Review outbound prompt' },
+                approve,
+                reject,
+            }),
+            presentEvent: async value => [value],
+            lifecycle: async () => undefined,
+        }
+        const provider = createProvider([])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+            extensions: [extension],
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'private', source: 'channel' })
+
+        expect(provider.startQuery).not.toHaveBeenCalled()
+        expect(approve).not.toHaveBeenCalled()
+        expect(reject).toHaveBeenCalledOnce()
+        expect(sent.at(-1)?.text).toContain('cancelled before it reached the Agent')
+        expect(runtime.journal.list().at(-1)).toMatchObject({
+            kind: 'turn_finished',
+            status: 'cancelled',
+        })
+    })
+
+    it('lets an extension flush retained display text when the provider stream fails', async () => {
+        let pending = ''
+        const extension: SessionExtensionInstance = {
+            id: 'privacy',
+            summary: { id: 'privacy', name: 'Privacy', version: '1' },
+            prepareTurn: async input => ({ kind: 'ready', input, stateRef: 'mapping-v1' }),
+            presentEvent: async value => {
+                if (value.kind === 'assistant_text_delta') {
+                    pending += value.text
+                    return []
+                }
+                if (value.kind === 'turn_finished' && pending) {
+                    const text = pending.replace('Alias', 'Original')
+                    pending = ''
+                    return [{ ...value, kind: 'assistant_text_delta', text }, value]
+                }
+                return [value]
+            },
+            lifecycle: async () => undefined,
+        }
+        const provider: AgentProvider = {
+            ...createProvider([]),
+            startQuery: vi.fn(() => ({
+                events: (async function* () {
+                    yield { kind: 'text', text: 'Alias tail' } as AgentEvent
+                    throw new Error('provider stream failed')
+                })(),
+                interrupt: vi.fn(),
+            })),
+        }
+        const sent: ChannelMessage[] = []
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: createChannel(sent, []),
+            extensions: [extension],
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'prompt', source: 'channel' })
+
+        expect(sent.map(message => message.text).join('\n')).toContain('Original tail')
+        expect(sent.map(message => message.text).join('\n')).toContain('Agent error')
+        expect(runtime.journal.list().at(-1)).toMatchObject({
+            kind: 'turn_finished',
+            status: 'error',
+            summary: 'provider stream failed',
+        })
     })
 
     it('does not pass a stale model when the active provider has no model catalog', async () => {

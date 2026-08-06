@@ -164,6 +164,7 @@ describe('Gateway application-layer Matrix content', () => {
                 canSelectSession: true,
                 canArchiveSession: true,
                 canDeleteSession: true,
+                sessionExtensions: [],
             },
         }, matrix)
         const stateExtension = sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
@@ -233,6 +234,7 @@ describe('Gateway application-layer Matrix content', () => {
                 permissionModes: [{ id: 'default', name: 'Default' }],
                 canCreateSession: true,
                 canSelectSession: true,
+                sessionExtensions: [],
             },
         }, matrix)
         expect(sent[2]!.transactionId).not.toBe(firstStateTransaction)

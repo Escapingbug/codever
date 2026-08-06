@@ -7,6 +7,8 @@ export default defineConfig({
             ...configDefaults.exclude,
             '.worktrees/**',
             'apps/pwa/tests/**',
+            // Optional extensions have independent packages and test commands.
+            'extensions/**',
             'e2e/**',
         ],
         globals: true,

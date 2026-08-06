@@ -67,6 +67,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                     permissionMode: 'default',
                     providerSessionId: 'provider-session-1',
                     archivedAt: null,
+                    extensions: [],
                 }],
                 currentSessionId: 'app-session-1',
             }),
@@ -84,6 +85,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 id: 'app-session-1',
                 providerSessionId: 'provider-session-1',
                 archivedAt: null,
+                extensions: [],
             }],
         })
     })
@@ -122,6 +124,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 permissionMode: 'default',
                 providerSessionId: 'provider-session-1',
                 archivedAt: null,
+                extensions: [],
             }],
         })
 
@@ -212,12 +215,14 @@ describe('FileGatewayRuntimeStateStore', () => {
                 reasoningEffort: null,
                 permissionMode: 'default',
                 archivedAt: null,
+                extensions: [],
             }],
         })
         expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
             rooms: {
                 [room.roomId]: {
                     revisionEpochGeneration: 1,
+                    appSessions: [{ extensions: [] }],
                 },
             },
         })

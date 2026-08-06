@@ -2424,6 +2424,7 @@ export function CodeverApp() {
         ...(input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
           : {}),
+        ...(input.extensions?.length ? { extensions: input.extensions } : {}),
       });
       if (!sent || !connection) return;
       acknowledged = true;
@@ -3154,6 +3155,17 @@ export function CodeverApp() {
                           ? ` · ${session.reasoningEffort}`
                           : ""}
                       </span>
+                      {session.extensions.length > 0 && (
+                        <b
+                          className="session-extension-badge"
+                          title={session.extensions.map((item) => item.name).join(", ")}
+                        >
+                          ◇ {session.extensions[0]?.name}
+                          {session.extensions.length > 1
+                            ? ` +${session.extensions.length - 1}`
+                            : ""}
+                        </b>
+                      )}
                     </span>
                   </span>
                 </button>
@@ -3191,7 +3203,12 @@ export function CodeverApp() {
                       </span>
                       <span>
                         <strong>{session.title}</strong>
-                        <small>{session.projectName} · {session.provider}</small>
+                        <small>
+                          {session.projectName} · {session.provider}
+                          {session.extensions.length > 0
+                            ? ` · ${session.extensions.map((item) => item.name).join(", ")}`
+                            : ""}
+                        </small>
                       </span>
                       <time>{formatSessionTime(session.updatedAt)}</time>
                     </button>
@@ -3297,7 +3314,11 @@ export function CodeverApp() {
                 ? gatewayState
                   ? selectedArchived
                     ? `${activeProvider} · archived`
-                    : `${activeProvider} · encrypted sync active`
+                    : `${activeProvider} · encrypted sync active${
+                        selected?.extensions.length
+                          ? ` · ${selected.extensions.map((item) => item.name).join(", ")}`
+                          : ""
+                      }`
                   : "Syncing Gateway state…"
                 : connectionStatus === "securing"
                   ? "Matrix connected · securing Gateway"
@@ -3329,6 +3350,16 @@ export function CodeverApp() {
             <code>{matrixConfig.gatewayId || "Not connected"}</code>
             <span className="mini-label">Device</span>
             <code>{matrixConfig.matrixDeviceId || "Not connected"}</code>
+            {selected?.extensions.length ? (
+              <>
+                <span className="mini-label">Session extensions</span>
+                <div className="details-extension-list">
+                  {selected.extensions.map((extension) => (
+                    <span key={extension.id}>◇ {extension.name} · v{extension.version}</span>
+                  ))}
+                </div>
+              </>
+            ) : null}
             <span className="verified-line">
               <b>✓</b> Commands signed locally
             </span>
@@ -3967,6 +3998,7 @@ export function CodeverApp() {
           workspace={gatewayState.workspace}
           sessions={gatewayState.sessions}
           models={gatewayState.capabilities.models}
+          extensions={gatewayState.capabilities.sessionExtensions}
           onClose={() => {
             if (!newSessionBusy) setNewSessionOpen(false);
           }}

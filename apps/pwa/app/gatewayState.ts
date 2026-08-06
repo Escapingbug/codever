@@ -1,3 +1,8 @@
+import type {
+  SessionExtensionDescriptor,
+  SessionExtensionSummary,
+} from "@codever/protocol";
+
 export type GatewayCapabilityOption = {
   id: string;
   name: string;
@@ -30,6 +35,7 @@ export type GatewaySessionSummary = {
   provider: string;
   model?: string;
   reasoningEffort?: string;
+  extensions: SessionExtensionSummary[];
 };
 
 export type GatewayWorkspaceState = {
@@ -49,6 +55,7 @@ export type GatewayCapabilities = {
   canSelectSession: boolean;
   canArchiveSession?: boolean;
   canDeleteSession?: boolean;
+  sessionExtensions: SessionExtensionDescriptor[];
 };
 
 export type GatewayStateSnapshot = {
@@ -165,6 +172,7 @@ export function parseGatewayStateExtension(
           session.reasoning_effort.length > 0)
       ) ||
       !(session.cwd === undefined || typeof session.cwd === "string") ||
+      !(session.extensions === undefined || Array.isArray(session.extensions)) ||
       !(
         session.project_id === undefined ||
         (typeof session.project_id === "string" && session.project_id.length > 0)
@@ -207,6 +215,7 @@ export function parseGatewayStateExtension(
           ? session.project_name
           : undefined,
       rawCwd: typeof session.cwd === "string" ? session.cwd : undefined,
+      extensions: parseSessionExtensionSummaries(session.extensions),
     };
   });
 
@@ -266,6 +275,7 @@ export function parseGatewayStateExtension(
       ...(session.reasoningEffort
         ? { reasoningEffort: session.reasoningEffort }
         : {}),
+      extensions: session.extensions,
     };
   });
 
@@ -353,6 +363,9 @@ export function parseGatewayStateExtension(
         supportedReasoningLevels: levels,
       };
     });
+  const sessionExtensions = parseSessionExtensionDescriptors(
+    capabilities.session_extensions,
+  );
 
   const currentSessionId = extension.current_session_id;
   if (
@@ -399,6 +412,7 @@ export function parseGatewayStateExtension(
       ...(typeof capabilities.can_delete_session === "boolean"
         ? { canDeleteSession: capabilities.can_delete_session }
         : {}),
+      sessionExtensions,
     },
   };
 }
@@ -486,6 +500,11 @@ function gatewayStateExtension(
       ...(session.reasoningEffort
         ? { reasoning_effort: session.reasoningEffort }
         : {}),
+      extensions: session.extensions.map((extension) => ({
+        id: extension.id,
+        name: extension.name,
+        version: extension.version,
+      })),
     })),
     workspace: {
       project_id: state.workspace.projectId,
@@ -524,6 +543,31 @@ function gatewayStateExtension(
       ...(state.capabilities.canDeleteSession === undefined
         ? {}
         : { can_delete_session: state.capabilities.canDeleteSession }),
+      session_extensions: state.capabilities.sessionExtensions.map(
+        (extension) => ({
+          id: extension.id,
+          name: extension.name,
+          description: extension.description,
+          version: extension.version,
+          settings: extension.settings.map((setting) => ({
+            id: setting.id,
+            type: setting.type,
+            label: setting.label,
+            ...(setting.description
+              ? { description: setting.description }
+              : {}),
+            ...(setting.type === "text" && setting.required
+              ? { required: true }
+              : {}),
+            ...(setting.type === "text" && setting.placeholder
+              ? { placeholder: setting.placeholder }
+              : {}),
+            ...(setting.defaultValue === undefined
+              ? {}
+              : { default_value: setting.defaultValue }),
+          })),
+        }),
+      ),
     },
   };
 }
@@ -538,6 +582,125 @@ function legacyProjectIdentity(cwd: string): { id: string; name: string } {
     id: `legacy-project:${encodeURIComponent(normalized)}`,
     name,
   };
+}
+
+function parseSessionExtensionSummaries(value: unknown): SessionExtensionSummary[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("The authenticated Gateway session extensions are malformed.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const extension = asRecord(entry);
+    if (
+      !extension ||
+      typeof extension.id !== "string" ||
+      !extension.id ||
+      typeof extension.name !== "string" ||
+      !extension.name ||
+      typeof extension.version !== "string" ||
+      !extension.version ||
+      seen.has(extension.id)
+    ) {
+      throw new Error("The authenticated Gateway session extension is malformed.");
+    }
+    seen.add(extension.id);
+    return {
+      id: extension.id,
+      name: extension.name,
+      version: extension.version,
+    };
+  });
+}
+
+function parseSessionExtensionDescriptors(value: unknown): SessionExtensionDescriptor[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("The authenticated Gateway extension capabilities are malformed.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const extension = asRecord(entry);
+    if (
+      !extension ||
+      typeof extension.id !== "string" ||
+      !extension.id ||
+      typeof extension.name !== "string" ||
+      !extension.name ||
+      typeof extension.description !== "string" ||
+      typeof extension.version !== "string" ||
+      !extension.version ||
+      !Array.isArray(extension.settings) ||
+      seen.has(extension.id)
+    ) {
+      throw new Error("The authenticated Gateway extension capability is malformed.");
+    }
+    seen.add(extension.id);
+    const settingIds = new Set<string>();
+    const settings = extension.settings.map((entry) => {
+      const setting = asRecord(entry);
+      if (
+        !setting ||
+        typeof setting.id !== "string" ||
+        !setting.id ||
+        (setting.type !== "text" && setting.type !== "boolean") ||
+        typeof setting.label !== "string" ||
+        !setting.label ||
+        !(setting.description === undefined || typeof setting.description === "string") ||
+        settingIds.has(setting.id)
+      ) {
+        throw new Error("The authenticated Gateway extension setting is malformed.");
+      }
+      settingIds.add(setting.id);
+      if (setting.type === "boolean") {
+        if (!(setting.default_value === undefined || typeof setting.default_value === "boolean")) {
+          throw new Error("The authenticated Gateway boolean extension setting is malformed.");
+        }
+        return {
+          id: setting.id,
+          type: "boolean" as const,
+          label: setting.label,
+          ...(typeof setting.description === "string"
+            ? { description: setting.description }
+            : {}),
+          ...(typeof setting.default_value === "boolean"
+            ? { defaultValue: setting.default_value }
+            : {}),
+        };
+      }
+      if (
+        !(setting.required === undefined || typeof setting.required === "boolean") ||
+        !(setting.placeholder === undefined || typeof setting.placeholder === "string") ||
+        !(setting.default_value === undefined || typeof setting.default_value === "string")
+      ) {
+        throw new Error("The authenticated Gateway text extension setting is malformed.");
+      }
+      return {
+        id: setting.id,
+        type: "text" as const,
+        label: setting.label,
+        ...(typeof setting.description === "string"
+          ? { description: setting.description }
+          : {}),
+        ...(typeof setting.required === "boolean"
+          ? { required: setting.required }
+          : {}),
+        ...(typeof setting.placeholder === "string"
+          ? { placeholder: setting.placeholder }
+          : {}),
+        ...(typeof setting.default_value === "string"
+          ? { defaultValue: setting.default_value }
+          : {}),
+      };
+    });
+    return {
+      id: extension.id,
+      name: extension.name,
+      description: extension.description,
+      version: extension.version,
+      settings,
+    };
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

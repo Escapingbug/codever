@@ -1,6 +1,11 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type {
+  JsonValue,
+  SessionExtensionBinding,
+  SessionExtensionDescriptor,
+} from "@codever/protocol";
 import {
   gatewayProjectKey,
   type GatewayModelCapability,
@@ -13,6 +18,7 @@ type NewSessionInput = {
   projectName: string;
   model?: string;
   reasoningEffort?: string;
+  extensions?: SessionExtensionBinding[];
 };
 
 type Props = {
@@ -23,6 +29,7 @@ type Props = {
   workspace: GatewayWorkspaceState;
   sessions: GatewaySessionSummary[];
   models: GatewayModelCapability[];
+  extensions: SessionExtensionDescriptor[];
   onClose(): void;
   onCreate(input: NewSessionInput): void;
 };
@@ -37,6 +44,7 @@ export function NewSessionDialog({
   workspace,
   sessions,
   models,
+  extensions,
   onClose,
   onCreate,
 }: Props) {
@@ -74,6 +82,10 @@ export function NewSessionDialog({
         ?.defaultReasoningLevel ??
       "",
   );
+  const [enabledExtensions, setEnabledExtensions] = useState<Record<string, boolean>>({});
+  const [extensionConfig, setExtensionConfig] = useState<
+    Record<string, Record<string, JsonValue>>
+  >({});
 
   const selectedModel = models.find((entry) => entry.id === model);
   const reasoningLevels = selectedModel?.supportedReasoningLevels ?? [];
@@ -90,6 +102,21 @@ export function NewSessionDialog({
           ?.defaultReasoningLevel ??
         "",
     );
+    setEnabledExtensions({});
+    setExtensionConfig(
+      Object.fromEntries(
+        extensions.map((extension) => [
+          extension.id,
+          Object.fromEntries(
+            extension.settings.flatMap((setting) =>
+              setting.defaultValue === undefined
+                ? []
+                : [[setting.id, setting.defaultValue]],
+            ),
+          ),
+        ]),
+      ),
+    );
   }, [
     currentProjectKey,
     open,
@@ -98,7 +125,17 @@ export function NewSessionDialog({
     workspace.projectName,
     workspace.reasoningEffort,
     models,
+    extensions,
   ]);
+
+  const extensionConfigValid = extensions.every((extension) => {
+    if (!enabledExtensions[extension.id]) return true;
+    return extension.settings.every((setting) => {
+      const value = extensionConfig[extension.id]?.[setting.id];
+      return setting.type !== "text" || !setting.required ||
+        (typeof value === "string" && value.trim().length > 0);
+    });
+  });
 
   if (!open) return null;
 
@@ -134,6 +171,16 @@ export function NewSessionDialog({
       projectName: normalizedName,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(extensions.some((extension) => enabledExtensions[extension.id])
+        ? {
+            extensions: extensions
+              .filter((extension) => enabledExtensions[extension.id])
+              .map((extension) => ({
+                id: extension.id,
+                config: extensionConfig[extension.id] ?? {},
+              })),
+          }
+        : {}),
     });
   };
 
@@ -240,6 +287,90 @@ export function NewSessionDialog({
             </label>
           </div>
 
+          {extensions.length > 0 && (
+            <fieldset className="session-extensions">
+              <legend>Optional session extensions</legend>
+              <p className="session-extensions-note">
+                Off by default. Enabled extensions are fixed for the lifetime of
+                this session so they cannot be bypassed later.
+              </p>
+              {extensions.map((extension) => {
+                const enabled = Boolean(enabledExtensions[extension.id]);
+                return (
+                  <section className="session-extension-option" key={extension.id}>
+                    <label className="session-extension-toggle">
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setEnabledExtensions((current) => ({
+                            ...current,
+                            [extension.id]: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>
+                        <strong>{extension.name}</strong>
+                        <small>{extension.description}</small>
+                      </span>
+                    </label>
+                    {enabled && extension.settings.length > 0 && (
+                      <div className="session-extension-settings">
+                        {extension.settings.map((setting) =>
+                          setting.type === "boolean" ? (
+                            <label className="session-extension-boolean" key={setting.id}>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(
+                                  extensionConfig[extension.id]?.[setting.id],
+                                )}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  setExtensionConfig((current) => ({
+                                    ...current,
+                                    [extension.id]: {
+                                      ...current[extension.id],
+                                      [setting.id]: event.target.checked,
+                                    },
+                                  }))
+                                }
+                              />
+                              <span>{setting.label}</span>
+                            </label>
+                          ) : (
+                            <label key={setting.id}>
+                              <span>{setting.label}</span>
+                              <input
+                                value={String(
+                                  extensionConfig[extension.id]?.[setting.id] ?? "",
+                                )}
+                                placeholder={setting.placeholder}
+                                disabled={busy}
+                                required={setting.required}
+                                autoComplete="off"
+                                onChange={(event) =>
+                                  setExtensionConfig((current) => ({
+                                    ...current,
+                                    [extension.id]: {
+                                      ...current[extension.id],
+                                      [setting.id]: event.target.value,
+                                    },
+                                  }))
+                                }
+                              />
+                              {setting.description && <small>{setting.description}</small>}
+                            </label>
+                          ),
+                        )}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </fieldset>
+          )}
+
           <footer>
             <button type="button" className="secondary-button" onClick={onClose}>
               Cancel
@@ -247,7 +378,12 @@ export function NewSessionDialog({
             <button
               type="submit"
               className="primary-button"
-              disabled={busy || !projectName.trim() || !cwd.trim()}
+              disabled={
+                busy ||
+                !projectName.trim() ||
+                !cwd.trim() ||
+                !extensionConfigValid
+              }
             >
               {busy ? "Creating…" : "Create session"}
             </button>

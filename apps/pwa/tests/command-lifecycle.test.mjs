@@ -103,6 +103,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           provider: "codex",
           model: "gpt-5",
           reasoningEffort: "high",
+          extensions: [],
         },
         {
           id: "session-archived",
@@ -113,6 +114,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           projectName: "workspace",
           cwd: "C:/workspace",
           provider: "codex",
+          extensions: [],
         },
       ],
       workspace: {
@@ -139,9 +141,70 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
         canSelectSession: true,
         canArchiveSession: true,
         canDeleteSession: true,
+        sessionExtensions: [],
       },
     },
   );
+});
+
+test("authenticated Gateway state exposes only declarative session extension metadata", () => {
+  const state = parseGatewayStateExtension({
+    version: 1,
+    kind: "gateway_state",
+    state_version: 2,
+    revision: 0,
+    revision_epoch: "epoch-extensions",
+    revision_epoch_generation: 1,
+    active_device_count: 1,
+    current_session_id: "session-private",
+    sessions: [{
+      id: "session-private",
+      title: "Private session",
+      updated_at: 1,
+      project_id: "project-1",
+      project_name: "workspace",
+      cwd: "/workspace",
+      provider: "codex",
+      extensions: [{ id: "has-privacy", name: "HaS privacy", version: "1" }],
+    }],
+    workspace: {
+      project_id: "project-1",
+      project_name: "workspace",
+      cwd: "/workspace",
+      provider: "codex",
+      permission_mode: "default",
+    },
+    capabilities: {
+      models: [],
+      permission_modes: [{ id: "default", name: "Default" }],
+      can_create_session: true,
+      can_select_session: false,
+      session_extensions: [{
+        id: "has-privacy",
+        name: "HaS privacy",
+        description: "Local prompt privacy",
+        version: "1",
+        settings: [
+          {
+            id: "contextId",
+            type: "text",
+            label: "Privacy context",
+            required: true,
+          },
+          {
+            id: "reviewRequired",
+            type: "boolean",
+            label: "Review",
+            default_value: true,
+          },
+        ],
+      }],
+    },
+  });
+
+  assert.equal(state.sessions[0].extensions[0].id, "has-privacy");
+  assert.equal(state.capabilities.sessionExtensions[0].settings[1].defaultValue, true);
+  assert.equal("endpoint" in state.capabilities.sessionExtensions[0], false);
 });
 
 test("project identity is scoped by Gateway, not by display name", () => {

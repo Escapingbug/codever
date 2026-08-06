@@ -18,6 +18,8 @@ import {
     type HistoryRequest,
     type CodeverAttachment,
     type JsonValue,
+    type SessionExtensionDescriptor,
+    type SessionExtensionSummary,
     type SignedSecureEnvelope,
     type SignedSecureEnvelopeBundle,
 } from '@codever/protocol'
@@ -78,6 +80,7 @@ export interface GatewayStateSnapshot {
         provider: string
         model?: string
         reasoningEffort?: string
+        extensions: SessionExtensionSummary[]
     }>
     workspace: {
         projectId: string
@@ -103,6 +106,7 @@ export interface GatewayStateSnapshot {
         canSelectSession: boolean
         canArchiveSession?: boolean
         canDeleteSession?: boolean
+        sessionExtensions: SessionExtensionDescriptor[]
     }
 }
 
@@ -1180,6 +1184,11 @@ function gatewayStateExtension(state: GatewayStateSnapshot): Record<string, unkn
             ...(session.reasoningEffort
                 ? { reasoning_effort: session.reasoningEffort }
                 : {}),
+            extensions: session.extensions.map(extension => ({
+                id: extension.id,
+                name: extension.name,
+                version: extension.version,
+            })),
         })),
         workspace: {
             project_id: state.workspace.projectId,
@@ -1219,6 +1228,25 @@ function gatewayStateExtension(state: GatewayStateSnapshot): Record<string, unkn
             can_select_session: state.capabilities.canSelectSession,
             can_archive_session: state.capabilities.canArchiveSession ?? false,
             can_delete_session: state.capabilities.canDeleteSession ?? false,
+            session_extensions: state.capabilities.sessionExtensions.map(extension => ({
+                id: extension.id,
+                name: extension.name,
+                description: extension.description,
+                version: extension.version,
+                settings: extension.settings.map(setting => ({
+                    id: setting.id,
+                    type: setting.type,
+                    label: setting.label,
+                    ...(setting.description ? { description: setting.description } : {}),
+                    ...('required' in setting && setting.required ? { required: true } : {}),
+                    ...('placeholder' in setting && setting.placeholder
+                        ? { placeholder: setting.placeholder }
+                        : {}),
+                    ...('defaultValue' in setting && setting.defaultValue !== undefined
+                        ? { default_value: setting.defaultValue }
+                        : {}),
+                })),
+            })),
         },
     }
 }

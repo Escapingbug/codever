@@ -9,6 +9,7 @@ import type { RichUserInput, SessionInput } from '@/runtime/semantic'
 import type { SessionRecord } from './sessionRecord'
 import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
 import type { RetryDeliveryCommandResult } from '@/runtime/semanticSessionRuntime'
+import type { SessionExtensionLifecycleReason } from '@/runtime/sessionExtensions'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -142,7 +143,7 @@ export interface TopicSession {
     dispatch(input: SessionInput): Promise<unknown>
 
     /** Destroy the session and clean up resources */
-    destroy(): Promise<void>
+    destroy(reason?: SessionExtensionLifecycleReason): Promise<void>
 
     /** Current session state */
     readonly state: SessionState

@@ -7,6 +7,8 @@ import {
     historyRequestSchema,
     type CodeverCommand,
     type JsonValue,
+    type SessionExtensionBinding,
+    type SessionExtensionSummary,
 } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
 import { createProviderInstance, getProvider } from '@/providers/registry'
@@ -43,6 +45,7 @@ import {
 } from './secureContent'
 import { gatewayProjectIdentity } from './project'
 import { materializePromptInput } from './media'
+import { SessionExtensionRegistry } from '@/runtime/sessionExtensions'
 
 type WorkspaceState = PersistedRoomRuntimeState['workspace']
 
@@ -76,6 +79,7 @@ interface WorkspaceSettingsInput {
     model?: string | null
     reasoningEffort?: string | null
     permissionMode?: string
+    extensions?: SessionExtensionBinding[]
 }
 
 interface CommandExecutionResult {
@@ -101,6 +105,8 @@ export interface MatrixGatewayDependencies {
     isTrustedDeviceActive?: (deviceId: string) => Promise<boolean>
     /** Supplies newly paired and currently active devices without a restart. */
     listTrustedDevices?: () => Promise<readonly import('./config').MatrixGatewayTrustedDevice[]>
+    /** Locally installed, administrator-controlled session extensions. */
+    sessionExtensionRegistry?: SessionExtensionRegistry
     /** Creates a short-lived pairing offer authorized by an active PWA. */
     createDeviceInvitation?: (input: {
         requestedByDeviceId: string
@@ -120,6 +126,7 @@ export class MatrixGatewayRunner {
     private readonly runtimeStateStore: FileGatewayRuntimeStateStore
     private readonly authorizer: StrictMatrixCommandAuthorizer
     private readonly secureContent: GatewaySecureContentLayer | null
+    private readonly sessionExtensionRegistry: SessionExtensionRegistry
     private readonly rooms = new Map<string, RoomRuntime>()
     private state: MatrixGatewayState = 'stopped'
     private unsubscribe: (() => void) | null = null
@@ -146,6 +153,8 @@ export class MatrixGatewayRunner {
             config.trustedDevices,
             this.replayStore,
         )
+        this.sessionExtensionRegistry = dependencies.sessionExtensionRegistry
+            ?? new SessionExtensionRegistry()
         this.secureContent = config.applicationSecurity
             ? new GatewaySecureContentLayer(
                 config.gatewayId,
@@ -227,9 +236,16 @@ export class MatrixGatewayRunner {
                         gatewaySessionStatus(session.state, activity.phase),
                         false,
                         activity.phase,
+                        this.sessionExtensionRegistry.summaries(record.extensions),
                     )),
                 ...[...runtime.archivedSessions.values()].map(record =>
-                    gatewaySessionSummary(record, 'idle', true)),
+                    gatewaySessionSummary(
+                        record,
+                        'idle',
+                        true,
+                        undefined,
+                        this.sessionExtensionRegistry.summaries(record.extensions),
+                    )),
             ].sort((left, right) => right.updatedAt - left.updatedAt),
             workspace: {
                 projectId: runtime.workspace.projectId,
@@ -251,6 +267,7 @@ export class MatrixGatewayRunner {
                 canSelectSession: false,
                 canArchiveSession: true,
                 canDeleteSession: true,
+                sessionExtensions: this.sessionExtensionRegistry.descriptors(),
             },
         }
     }
@@ -756,7 +773,7 @@ export class MatrixGatewayRunner {
                 } catch (error) {
                     runtime.appSessions.delete(record.id)
                     appSession.port.close()
-                    await appSession.session.destroy().catch(destroyError => {
+                    await appSession.session.destroy('delete').catch(destroyError => {
                         this.log(
                             `[matrix-gateway] rolled-back app session ${record.id} destroy failed: `
                             + formatError(destroyError),
@@ -966,7 +983,7 @@ export class MatrixGatewayRunner {
         const appSession = this.requireAppSession(runtime, sessionId)
         this.updateAppSessionRecord(appSession)
         try {
-            await this.destroyAppSessionRuntime(appSession)
+            await this.destroyAppSessionRuntime(appSession, 'archive')
         } catch (error) {
             runtime.appSessions.set(
                 appSession.record.id,
@@ -1011,7 +1028,7 @@ export class MatrixGatewayRunner {
             record.archivedAt = archivedAt
             record.updatedAt = updatedAt
             runtime.archivedSessions.set(record.id, record)
-            await this.destroyAppSessionRuntime(appSession).catch(destroyError => {
+            await this.destroyAppSessionRuntime(appSession, 'replace').catch(destroyError => {
                 this.log(
                     `[matrix-gateway] rolled-back restored session ${record.id} destroy failed: `
                     + formatError(destroyError),
@@ -1033,7 +1050,7 @@ export class MatrixGatewayRunner {
         if (active) {
             this.updateAppSessionRecord(active)
             try {
-                await this.destroyAppSessionRuntime(active)
+                await this.destroyAppSessionRuntime(active, 'delete')
             } catch (error) {
                 runtime.appSessions.set(
                     record.id,
@@ -1083,6 +1100,7 @@ export class MatrixGatewayRunner {
             permissionMode: workspace.permissionMode,
             providerSessionId: null,
             archivedAt: null,
+            extensions: this.sessionExtensionRegistry.normalizeBindings(settings.extensions),
         }
     }
 
@@ -1193,12 +1211,24 @@ export class MatrixGatewayRunner {
             providerSettings: room.providerSettings,
             conversationId: appSession.providerSessionId,
         })
-        return createTopicSession({ sessionRecord, provider, channelPort: port })
+        const extensions = this.sessionExtensionRegistry.createInstances(
+            appSession.extensions,
+            {
+                sessionId: appSession.id,
+                cwd: appSession.cwd,
+                providerName: appSession.provider,
+                onLog: message => this.log(`[session-extension] ${message}`),
+            },
+        )
+        return createTopicSession({ sessionRecord, provider, channelPort: port, extensions })
     }
 
-    private async destroyAppSessionRuntime(appSession: AppSessionRuntime): Promise<void> {
+    private async destroyAppSessionRuntime(
+        appSession: AppSessionRuntime,
+        reason: 'archive' | 'delete' | 'replace' | 'shutdown',
+    ): Promise<void> {
         try {
-            await appSession.session.destroy()
+            await appSession.session.destroy(reason)
         } finally {
             appSession.port.close()
         }
@@ -1215,7 +1245,7 @@ export class MatrixGatewayRunner {
         for (const runtime of runtimes) {
             for (const appSession of runtime.appSessions.values()) {
                 appSession.port.close()
-                await appSession.session.destroy().catch(error => {
+                await appSession.session.destroy('shutdown').catch(error => {
                     this.log(
                         `[matrix-gateway] app session ${appSession.record.id} destroy failed: `
                         + formatError(error),
@@ -1300,6 +1330,7 @@ function gatewaySessionSummary(
     status: 'idle' | 'running' | 'stopping' | 'failed',
     archived = false,
     activityPhase?: AgentActivityPhase,
+    extensions: SessionExtensionSummary[] = [],
 ) {
     return {
         id: record.id,
@@ -1316,6 +1347,7 @@ function gatewaySessionSummary(
         ...(record.reasoningEffort
             ? { reasoningEffort: record.reasoningEffort }
             : {}),
+        extensions,
     }
 }
 

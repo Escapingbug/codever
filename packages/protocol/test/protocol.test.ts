@@ -265,6 +265,53 @@ describe('protocol schemas', () => {
       model: 'gpt-5',
       reasoningEffort: 'high',
     })
+
+    const withExtension = {
+      ...base,
+      commandId: 'create-extension-1',
+      sequence: 2,
+      operation: 'session.create',
+      nonce: '0123456789abcdef-create-extension',
+      payload: {
+        operation: 'session.create',
+        extensions: [{
+          id: 'has-privacy',
+          config: { contextId: 'payroll-1', reviewRequired: true },
+        }],
+      },
+    }
+    expect(commandSchema.parse(withExtension).payload).toMatchObject({
+      extensions: [{ id: 'has-privacy' }],
+    })
+    expect(commandSchema.safeParse({
+      ...withExtension,
+      payload: {
+        ...withExtension.payload,
+        extensions: [
+          { id: 'has-privacy' },
+          { id: 'has-privacy' },
+        ],
+      },
+    }).success).toBe(false)
+    expect(commandSchema.safeParse({
+      ...withExtension,
+      payload: {
+        ...withExtension.payload,
+        extensions: [{ id: 'has-privacy', endpoint: 'https://attacker.example' }],
+      },
+    }).success).toBe(false)
+    expect(commandSchema.safeParse({
+      ...withExtension,
+      payload: {
+        ...withExtension.payload,
+        extensions: [{
+          id: 'has-privacy',
+          config: Object.fromEntries(
+            Array.from({ length: 33 }, (_, index) => [`setting-${index}`, true]),
+          ),
+        }],
+      },
+    }).success).toBe(false)
   })
 
   it('accepts strict session lifecycle commands', () => {

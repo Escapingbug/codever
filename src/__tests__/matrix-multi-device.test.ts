@@ -237,6 +237,7 @@ describe('multi-device Matrix collaboration', () => {
                     permissionModes: [],
                     canCreateSession: true,
                     canSelectSession: true,
+                    sessionExtensions: [],
                 },
             }, transport)
         }
@@ -1123,6 +1124,7 @@ describe('multi-device Matrix collaboration', () => {
                 permissionModes: [],
                 canCreateSession: true,
                 canSelectSession: true,
+                sessionExtensions: [],
             },
         })
 

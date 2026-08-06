@@ -2,3 +2,4 @@ packages:
   - apps/*
   - packages/*
 
+# Optional session extensions under extensions/ are intentionally not product workspaces.

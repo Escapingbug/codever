@@ -16,6 +16,14 @@ import { createProviderSemanticAdapter, type ProviderSemanticAdapter } from './p
 import { createProviderInstance, getProvider, getProviderType } from '@/providers/registry'
 import type { ProviderCommand } from '@/providers/types'
 import { escapeHtml } from '@/utils/formatting'
+import {
+    SessionExtensionHost,
+    SessionExtensionRejectedError,
+    type PreparedExtensionTurn,
+    type SessionExtensionInstance,
+    type SessionExtensionLifecycleReason,
+    type SessionExtensionTurnContext,
+} from './sessionExtensions'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
 
@@ -119,6 +127,7 @@ export interface SemanticSessionRuntimeConfig {
     onReasoningEffortChanged?: (reasoningEffort: string | null) => void
     onAvailableCommands?: (commands: ProviderCommand[]) => void
     destroyTimeoutMs?: number
+    extensions?: readonly SessionExtensionInstance[]
 }
 
 export class SemanticSessionRuntime {
@@ -146,6 +155,7 @@ export class SemanticSessionRuntime {
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
+    private readonly extensionHost: SessionExtensionHost
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(getProviderType(config.providerName) ?? config.providerName)
@@ -158,6 +168,7 @@ export class SemanticSessionRuntime {
                 this.recordDeliveryFailure(record)
             },
         })
+        this.extensionHost = new SessionExtensionHost(config.extensions)
     }
 
     dispatch(input: SessionInput): Promise<unknown> {
@@ -203,7 +214,7 @@ export class SemanticSessionRuntime {
         return run
     }
 
-    async destroy(): Promise<void> {
+    async destroy(reason: SessionExtensionLifecycleReason = 'shutdown'): Promise<void> {
         this.state = 'dead'
         this.abortController?.abort()
         if (this.currentHandle) {
@@ -227,6 +238,11 @@ export class SemanticSessionRuntime {
             this.outbox.drain(),
             DESTROY_OUTBOX_DRAIN_TIMEOUT_MS,
             (message) => this.log(`[destroy] outbox drain timeout/error: ${message}`),
+        )
+        await waitForShutdownStep(
+            this.extensionHost.lifecycle(reason),
+            this.config.destroyTimeoutMs ?? DEFAULT_DESTROY_TIMEOUT_MS,
+            (message) => this.log(`[destroy] session extension lifecycle timeout/error: ${message}`),
         )
     }
 
@@ -305,7 +321,56 @@ export class SemanticSessionRuntime {
 
         this.abortController = new AbortController()
         const activeModel = this.getActiveModel()
-        const handle = this.config.provider.startQuery(this.prepareProviderInput(prompt), {
+        const extensionContext: SessionExtensionTurnContext = {
+            sessionId: this.config.sessionId,
+            turnId,
+            providerName: this.config.providerName,
+        }
+        let extensionTurn: PreparedExtensionTurn
+        try {
+            extensionTurn = await this.extensionHost.prepareTurn(
+                prompt,
+                extensionContext,
+                async approval => {
+                    const response = await this.config.channelPort.requestDecision({
+                        type: 'question',
+                        title: approval.title,
+                        details: approval.details,
+                        options: [
+                            { label: approval.approveLabel ?? 'Continue', value: 'allow' },
+                            { label: approval.denyLabel ?? 'Cancel', value: 'deny' },
+                        ],
+                    })
+                    return response.value === 'allow'
+                },
+            )
+        } catch (error) {
+            if (error instanceof SessionExtensionRejectedError) {
+                this.record({
+                    kind: 'turn_finished',
+                    meta: this.syntheticMeta(turnId, 'extension-rejected', Number.MAX_SAFE_INTEGER),
+                    status: 'cancelled',
+                    summary: 'Cancelled before the request reached the agent',
+                })
+                await this.send({ text: 'Request cancelled before it reached the Agent.', format: 'plain' })
+                await this.finalize()
+                this.abortController = null
+                return
+            }
+            const message = error instanceof Error ? error.message : String(error)
+            this.record({
+                kind: 'turn_finished',
+                meta: this.syntheticMeta(turnId, 'extension-error', Number.MAX_SAFE_INTEGER),
+                status: 'error',
+                summary: message,
+            })
+            await this.send({ text: `Error: ${message}`, format: 'plain' })
+            await this.finalize()
+            this.abortController = null
+            return
+        }
+
+        const handle = this.config.provider.startQuery(this.prepareProviderInput(extensionTurn.input), {
             cwd: this.config.cwd,
             sessionId: this.config.providerSessionId ?? undefined,
             signal: this.abortController.signal,
@@ -345,7 +410,14 @@ export class SemanticSessionRuntime {
                 })
                 for (const event of semanticEvents) {
                     this.record(event)
-                    await this.projectAndDeliver(event)
+                    const presentedEvents = await this.extensionHost.presentEvent(
+                        event,
+                        extensionContext,
+                        extensionTurn.stateRefs,
+                    )
+                    for (const presented of presentedEvents) {
+                        await this.projectAndDeliver(presented)
+                    }
                     if (event.kind === 'turn_finished') {
                         seenResult = true
                     }
@@ -353,14 +425,71 @@ export class SemanticSessionRuntime {
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
-            this.record({
+            const terminalEvent: ConversationEvent = {
                 kind: 'turn_finished',
                 meta: this.syntheticMeta(turnId, 'error', Number.MAX_SAFE_INTEGER),
                 status: 'error',
                 summary: message,
-            })
-            await this.send({ text: `❌ Error: ${message}`, format: 'html' })
+            }
+            this.record(terminalEvent)
+            if (!this.extensionHost.active) {
+                await this.send({ text: `❌ Error: ${message}`, format: 'html' })
+            } else {
+                try {
+                    const presentedEvents = await this.extensionHost.presentEvent(
+                        terminalEvent,
+                        extensionContext,
+                        extensionTurn.stateRefs,
+                    )
+                    for (const presented of presentedEvents) {
+                        await this.projectAndDeliver(presented)
+                    }
+                } catch (presentationError) {
+                    const detail = presentationError instanceof Error
+                        ? presentationError.message
+                        : String(presentationError)
+                    await this.send({
+                        text: `Agent output was blocked because a session extension failed: ${detail}`,
+                        format: 'plain',
+                    })
+                }
+            }
+            seenResult = true
         } finally {
+            if (!seenResult && this.extensionHost.active) {
+                const cancelled = this.isStopping()
+                const terminalEvent: ConversationEvent = {
+                    kind: 'turn_finished',
+                    meta: this.syntheticMeta(
+                        turnId,
+                        'extension-terminal-flush',
+                        Number.MAX_SAFE_INTEGER,
+                    ),
+                    status: cancelled ? 'cancelled' : 'error',
+                    summary: cancelled
+                        ? 'Task stopped before the provider emitted a terminal result'
+                        : 'Provider stream ended without a terminal result',
+                }
+                this.record(terminalEvent)
+                try {
+                    const presentedEvents = await this.extensionHost.presentEvent(
+                        terminalEvent,
+                        extensionContext,
+                        extensionTurn.stateRefs,
+                    )
+                    for (const presented of presentedEvents) {
+                        await this.projectAndDeliver(presented)
+                    }
+                } catch (presentationError) {
+                    const detail = presentationError instanceof Error
+                        ? presentationError.message
+                        : String(presentationError)
+                    await this.send({
+                        text: `Agent output was blocked because a session extension failed: ${detail}`,
+                        format: 'plain',
+                    })
+                }
+            }
             await this.finalize()
             this.currentHandle = null
             this.abortController = null

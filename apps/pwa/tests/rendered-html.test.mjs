@@ -94,6 +94,13 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /onCheckForUpdates/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
+  assert.match(source, /extensions: input\.extensions/);
+  assert.match(source, /session-extension-badge/);
+  assert.match(newSession, /Optional session extensions/);
+  assert.match(newSession, /Off by default/);
+  assert.match(newSession, /enabledExtensions/);
+  assert.doesNotMatch(newSession, /endpoint|bearerToken/);
+  assert.match(styles, /\.session-extensions\s*\{/);
   assert.match(source, /className="session-row session-create-pending"/);
   assert.match(source, /<strong>Creating session…<\/strong>/);
   assert.match(

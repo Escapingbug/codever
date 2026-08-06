@@ -30,6 +30,10 @@ This is the active architecture.
 4. **Channel delivery is isolated**: `ChannelProjector` decides what should be shown, while `DeliveryOutbox` serializes send/edit operations.
 5. **Telegram details stay behind ChannelPort**: message sending, editing, table rendering, topic routing, and inline keyboards are channel responsibilities.
 6. **MCP is an extension boundary**: agents interact with Codever through MCP tools and resources, not hidden provider-specific protocols.
+7. **Session wrappers are optional and local**: administrator-installed session
+   extensions may wrap provider input and presented semantic events. With no
+   binding the runtime is a pass-through; extension-specific models, secrets,
+   mappings, and storage stay outside the core.
 
 ## 3. Runtime Flow
 
@@ -41,9 +45,12 @@ Telegram message
   -> find or create TopicSession for chat/topic
   -> TopicSession.receiveInput()
   -> SemanticSessionRuntime.dispatch({ kind: "user_message" })
+  -> optional SessionExtensionHost.prepareTurn()
   -> AgentProvider.startQuery()
   -> ACP events stream back
   -> ProviderSemanticAdapter.toConversationEvents()
+  -> canonical ConversationEvent journal
+  -> optional SessionExtensionHost.presentEvent()
   -> ChannelProjector.project()
   -> DeliveryOutbox.send/edit()
   -> TelegramPort.send/edit()
@@ -193,6 +200,14 @@ Responsibilities:
 - handle runtime commands such as model/provider/session changes.
 
 This is the main runtime. New lifecycle behavior should usually be implemented here, not in metadata records.
+
+An optional `SessionExtensionHost` belongs to the runtime boundary. It composes
+immutable, session-bound extensions around a turn, uses the normal
+`ChannelPort.requestDecision()` surface for preview approval, journals provider
+events before display transformation, and fails closed if a bound extension is
+unavailable. The Matrix Gateway registry is administrator-owned; remote PWA
+commands can select an advertised descriptor but cannot register code, an
+endpoint, or a secret. See `docs/session-extensions.md`.
 
 ### 4.6 `SessionRecord`
 

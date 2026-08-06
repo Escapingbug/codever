@@ -9,6 +9,7 @@ import type { RichUserInput } from '@/runtime/semantic'
 import { config } from '@/config'
 import { makeTopicKey } from '@/bridge/sessionManager'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
+import type { SessionExtensionInstance, SessionExtensionLifecycleReason } from '@/runtime/sessionExtensions'
 import { createSessionRecord, type SessionRecord, type SessionRecordOptions } from './sessionRecord'
 
 // --- Session metadata factory ---
@@ -49,12 +50,13 @@ export interface TopicSessionConfig {
     sessionRecord: SessionRecord
     provider: AgentProvider
     channelPort: ChannelPort
+    extensions?: readonly SessionExtensionInstance[]
     /** Optional group logger */
     logger?: { group(chatId: number, line: string): void }
 }
 
 export function createTopicSession(options: TopicSessionConfig): TopicSession {
-    const { sessionRecord, provider, channelPort, logger } = options
+    const { sessionRecord, provider, channelPort, logger, extensions } = options
     const chatId = sessionRecord.groupChatId!
 
     function glog(line: string): void {
@@ -70,6 +72,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         model: sessionRecord.model,
         providerSessionId: sessionRecord.conversationId,
         providerSettings: sessionRecord.providerSettings,
+        extensions,
         onLog: glog,
         onModelChanged: (model) => {
             sessionRecord.setModel(model)
@@ -111,8 +114,8 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         })
     }
 
-    async function destroy(): Promise<void> {
-        await runtime.destroy()
+    async function destroy(reason: SessionExtensionLifecycleReason = 'shutdown'): Promise<void> {
+        await runtime.destroy(reason)
         if (provider.destroy) {
             await waitForShutdownStep(
                 provider.destroy(),

@@ -27,6 +27,79 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([jsonPrimitive, z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)]),
 )
 
+const sessionExtensionSettingSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      type: z.literal('text'),
+      label: z.string().min(1).max(256),
+      description: z.string().max(2_048).optional(),
+      required: z.boolean().optional(),
+      placeholder: z.string().max(512).optional(),
+      defaultValue: z.string().max(4_096).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      type: z.literal('boolean'),
+      label: z.string().min(1).max(256),
+      description: z.string().max(2_048).optional(),
+      defaultValue: z.boolean().optional(),
+    })
+    .strict(),
+])
+
+export type SessionExtensionSetting = z.infer<typeof sessionExtensionSettingSchema>
+
+export const sessionExtensionDescriptorSchema = z
+  .object({
+    id: opaqueId,
+    name: z.string().min(1).max(256),
+    description: z.string().min(1).max(4_096),
+    version: z.string().min(1).max(128),
+    settings: z.array(sessionExtensionSettingSchema).max(32),
+  })
+  .strict()
+  .superRefine((descriptor, context) => {
+    const ids = new Set<string>()
+    descriptor.settings.forEach((setting, index) => {
+      if (ids.has(setting.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['settings', index, 'id'],
+          message: 'Session extension setting IDs must be unique',
+        })
+      }
+      ids.add(setting.id)
+    })
+  })
+
+export type SessionExtensionDescriptor = z.infer<typeof sessionExtensionDescriptorSchema>
+
+export interface SessionExtensionSummary {
+  id: string
+  name: string
+  version: string
+}
+
+const sessionExtensionConfigSchema = z
+  .record(z.string().min(1).max(128), jsonValueSchema)
+  .refine((config) => Object.keys(config).length <= 32, 'Session extension config has too many settings')
+  .refine(
+    (config) => JSON.stringify(config).length <= 32 * 1024,
+    'Session extension config is too large',
+  )
+
+export const sessionExtensionBindingSchema = z
+  .object({
+    id: opaqueId,
+    config: sessionExtensionConfigSchema.optional(),
+  })
+  .strict()
+
+export type SessionExtensionBinding = z.infer<typeof sessionExtensionBindingSchema>
+
 /**
  * Read-only transcript recovery travels inside an authenticated secure
  * envelope. It is intentionally separate from CodeverCommand so browsing
@@ -272,8 +345,22 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       model: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
+      extensions: z.array(sessionExtensionBindingSchema).max(8).optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, context) => {
+      const ids = new Set<string>()
+      for (const [index, extension] of (value.extensions ?? []).entries()) {
+        if (ids.has(extension.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['extensions', index, 'id'],
+            message: 'Session extension IDs must be unique',
+          })
+        }
+        ids.add(extension.id)
+      }
+    }),
   z
     .object({
       operation: z.literal('session.archive'),

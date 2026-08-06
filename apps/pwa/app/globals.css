@@ -743,6 +743,39 @@ select:focus-visible {
   font-size: 9px;
 }
 
+.session-preview-line .session-extension-badge {
+  display: block;
+  overflow: hidden;
+  width: auto;
+  max-width: 104px;
+  height: auto;
+  flex: 0 1 auto;
+  padding: 2px 6px;
+  border: 1px solid #c9c4ef;
+  border-radius: 999px;
+  background: #f1efff;
+  color: #6256b7;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-extension-list {
+  display: grid;
+  gap: 5px;
+}
+
+.details-extension-list span {
+  padding: 7px 9px;
+  border: 1px solid #d9d5f1;
+  border-radius: 8px;
+  background: #f5f3ff;
+  color: #5f55a4;
+  font-size: 11px;
+}
+
 .empty-search {
   display: grid;
   justify-items: center;
@@ -3417,7 +3450,9 @@ select:focus-visible {
 
 .new-session-dialog {
   width: min(570px, 100%);
-  overflow: hidden;
+  max-height: min(860px, calc(100dvh - 40px));
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid #e1e3eb;
   border-radius: 18px;
   background: white;
@@ -3501,6 +3536,85 @@ select:focus-visible {
   color: #8d95a6;
   font-size: 9px;
   line-height: 1.45;
+}
+
+.session-extensions {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #e5e7ef;
+  border-radius: 12px;
+  background: #fafafe;
+}
+
+.session-extensions-note {
+  margin: -2px 0 10px;
+  color: #7a8192;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.session-extensions legend {
+  padding: 0 5px;
+  color: #7d8598;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.session-extension-option {
+  display: grid;
+  gap: 10px;
+}
+
+.new-session-dialog .session-extension-toggle {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+}
+
+.new-session-dialog .session-extension-toggle > input,
+.new-session-dialog .session-extension-boolean > input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--violet);
+}
+
+.session-extension-toggle > span {
+  display: grid;
+  gap: 3px;
+}
+
+.session-extension-toggle strong {
+  color: #343a4c;
+  font-size: 11px;
+}
+
+.session-extension-toggle small,
+.session-extension-settings label > small {
+  color: #8a92a3;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.session-extension-settings {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border-radius: 10px;
+  background: white;
+}
+
+.new-session-dialog .session-extension-boolean {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
 }
 
 .new-session-dialog footer {
