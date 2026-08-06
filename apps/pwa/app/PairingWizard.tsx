@@ -13,6 +13,10 @@ import {
   decodeQrImageFile,
   drawVideoFrame,
 } from "./qrScanning";
+import {
+  NATIVE_BACK_PRIORITY,
+  useNativeBackHandler,
+} from "./nativeBackNavigation";
 
 type Props = {
   preview: PairingPreview | null;
@@ -57,6 +61,15 @@ export function PairingWizard({
   const [imageScanError, setImageScanError] = useState<string | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+
+  useNativeBackHandler(
+    scannerOpen,
+    () => {
+      setScannerOpen(false);
+      return true;
+    },
+    NATIVE_BACK_PRIORITY.nestedModal,
+  );
 
   useEffect(() => {
     let cancelled = false;

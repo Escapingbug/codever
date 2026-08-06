@@ -77,6 +77,11 @@ import {
 } from "./chatMessages";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
+import {
+  NATIVE_BACK_PRIORITY,
+  resolveCodeverBackAction,
+  useNativeBackHandler,
+} from "./nativeBackNavigation";
 import type {
   CodeverClient,
   CodeverCommandSendResult,
@@ -443,6 +448,49 @@ export function CodeverApp() {
   const selectedArchived = selected?.status === "archived";
   const selectedLifecycleBusy = Boolean(
     selected && sessionLifecycleBusy?.sessionId === selected.id,
+  );
+  const deleteDialogBusy = Boolean(
+    deleteTarget !== null &&
+      sessionLifecycleBusy?.sessionId === deleteTarget.id &&
+      sessionLifecycleBusy.action === "delete",
+  );
+  const nativeBackAction = resolveCodeverBackAction({
+    deleteDialogOpen: deleteTarget !== null,
+    deleteDialogBusy,
+    newSessionOpen,
+    newSessionBusy,
+    settingsOpen,
+    detailsOpen,
+    mobileChatOpen,
+  });
+  useNativeBackHandler(
+    nativeBackAction !== null,
+    () => {
+      switch (nativeBackAction) {
+        case "close-delete-dialog":
+          setDeleteTarget(null);
+          break;
+        case "close-new-session":
+          setNewSessionOpen(false);
+          break;
+        case "close-settings":
+          setSettingsOpen(false);
+          break;
+        case "close-details":
+          setDetailsOpen(false);
+          break;
+        case "show-conversations":
+          setMobileChatOpen(false);
+          break;
+        case "block-delete-dialog":
+        case "block-new-session":
+          break;
+        case null:
+          return false;
+      }
+      return true;
+    },
+    NATIVE_BACK_PRIORITY.app,
   );
   const filteredSessions = useMemo(
     () =>
@@ -3928,11 +3976,7 @@ export function CodeverApp() {
 
       <SessionDeleteDialog
         session={deleteTarget}
-        busy={
-          deleteTarget !== null &&
-          sessionLifecycleBusy?.sessionId === deleteTarget.id &&
-          sessionLifecycleBusy.action === "delete"
-        }
+        busy={deleteDialogBusy}
         onClose={() => {
           if (sessionLifecycleBusy?.action !== "delete") setDeleteTarget(null);
         }}

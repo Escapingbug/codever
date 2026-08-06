@@ -68,6 +68,8 @@ class MainActivity : ComponentActivity() {
     private var foreground = false
     private var pendingForegroundStart = false
     private var pendingSessionId: String? = null
+    private var nativeBackDispatchPending = false
+    private var nativeBackDispatchGeneration = 0L
     private val diagnostics by lazy { NativeDiagnosticLog.get(this) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -117,8 +119,7 @@ class MainActivity : ComponentActivity() {
         diagnostics.record("activity.created")
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                val current = webView
-                if (current?.canGoBack() == true) current.goBack() else finish()
+                dispatchNativeBack()
             }
         })
         handleIntent(intent)
@@ -165,6 +166,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         diagnostics.record("activity.destroyed")
+        nativeBackDispatchGeneration += 1
+        nativeBackDispatchPending = false
         nativeBridge?.close()
         nativeBridge = null
         webView?.apply {
@@ -176,6 +179,51 @@ class MainActivity : ComponentActivity() {
         }
         webView = null
         super.onDestroy()
+    }
+
+    private fun dispatchNativeBack() {
+        val current = webView
+        if (current == null) {
+            performNativeBackFallback(null)
+            return
+        }
+        if (nativeBackDispatchPending) return
+
+        nativeBackDispatchPending = true
+        val generation = ++nativeBackDispatchGeneration
+        current.postDelayed({
+            if (!nativeBackDispatchPending || nativeBackDispatchGeneration != generation) return@postDelayed
+            nativeBackDispatchPending = false
+            if (current !== webView || isFinishing || isDestroyed) return@postDelayed
+            performNativeBackFallback(current)
+        }, NATIVE_BACK_RESPONSE_TIMEOUT_MS)
+
+        runCatching {
+            current.evaluateJavascript(NATIVE_BACK_DISPATCH_SCRIPT) { result ->
+                if (!nativeBackDispatchPending || nativeBackDispatchGeneration != generation) {
+                    return@evaluateJavascript
+                }
+                nativeBackDispatchPending = false
+                if (current !== webView || isFinishing || isDestroyed) return@evaluateJavascript
+                if (!nativeBackWasHandled(result)) performNativeBackFallback(current)
+            }
+        }.onFailure {
+            if (nativeBackDispatchGeneration == generation) {
+                nativeBackDispatchPending = false
+                if (current === webView && !isFinishing && !isDestroyed) {
+                    performNativeBackFallback(current)
+                }
+            }
+        }
+    }
+
+    private fun performNativeBackFallback(current: WebView?) {
+        when (nativeBackFallbackAction(current?.canGoBack() == true)) {
+            NativeBackFallbackAction.WEB_HISTORY -> current?.goBack()
+            NativeBackFallbackAction.BACKGROUND_TASK -> {
+                if (!moveTaskToBack(true)) finish()
+            }
+        }
     }
 
     private fun notificationsAvailable(): Boolean {
