@@ -33,7 +33,7 @@ test("blocks submission while the previous command is waiting for acknowledgemen
       canType: true,
       canSend: false,
       mode: "blocked",
-      reason: "Securing the previous message…",
+      reason: "Sending the previous message…",
     },
   );
 });
@@ -41,11 +41,11 @@ test("blocks submission while the previous command is waiting for acknowledgemen
 test("distinguishes reconnecting, stopping, syncing, archived, and empty states", () => {
   assert.equal(
     deriveComposerState({ ...ready, connectionStatus: "securing" }).reason,
-    "Matrix connected · verifying the trusted Gateway…",
+    "Checking your approved computer…",
   );
   assert.equal(
     deriveComposerState({ ...ready, connectionStatus: "reconnecting" }).reason,
-    "Reconnecting to Matrix… Your draft will be kept.",
+    "Reconnecting… Your draft will be kept.",
   );
   assert.equal(
     deriveComposerState({ ...ready, isStopping: true }).reason,
@@ -53,7 +53,7 @@ test("distinguishes reconnecting, stopping, syncing, archived, and empty states"
   );
   assert.equal(
     deriveComposerState({ ...ready, hasGatewayState: false }).reason,
-    "Waiting for the current Gateway session state…",
+    "Syncing your conversations…",
   );
   assert.equal(
     deriveComposerState({ ...ready, selectedArchived: true }).reason,

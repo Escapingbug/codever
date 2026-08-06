@@ -22,7 +22,7 @@ export class CommandAcknowledgementTimeoutError extends Error {
 
   constructor(commandId: string, sequence: number) {
     super(
-      "The Gateway did not confirm this command. It remains queued for a safe retry.",
+      "Your computer did not confirm this command. It remains queued for a safe retry.",
     );
     this.name = "CommandAcknowledgementTimeoutError";
     this.commandId = commandId;
@@ -35,7 +35,7 @@ export class CommandCompletionExpiredError extends Error {
 
   constructor(commandId: string) {
     super(
-      "The pending Gateway command expired before its final result arrived.",
+      "The pending command expired before its final result arrived.",
     );
     this.name = "CommandCompletionExpiredError";
     this.commandId = commandId;
@@ -45,7 +45,7 @@ export class CommandCompletionExpiredError extends Error {
 export class CommandCompletionTimeoutError extends Error {
   constructor() {
     super(
-      "The Gateway accepted this command but did not confirm its final result. Reconnect to recover the command before retrying.",
+      "Your computer accepted this command but did not confirm its final result. Reconnect before retrying.",
     );
     this.name = "CommandCompletionTimeoutError";
   }

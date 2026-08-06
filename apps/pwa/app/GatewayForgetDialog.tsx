@@ -74,13 +74,11 @@ export function GatewayForgetDialog({
             : "Clear this device’s local setup?"}
         </h2>
         <p id="gateway-forget-description">
-          This disconnects Codever and removes the saved Matrix connection,
-          trusted Gateway identity, and locally cached conversation history
-          from this device.
+          This disconnects Codever and removes the saved connection, approved
+          computer, and locally cached conversation history from this device.
         </p>
         <div id="gateway-forget-boundary" className="delete-boundary-note">
-          Gateway sessions, agent-provider data, and encrypted Matrix events
-          are not deleted.
+          Your sessions and data on the computer or server are not deleted.
         </div>
         <footer>
           <button
@@ -90,7 +88,7 @@ export function GatewayForgetDialog({
             disabled={busy}
             onClick={requestClose}
           >
-            {trustedGateway ? "Keep Gateway" : "Keep local setup"}
+            {trustedGateway ? "Keep computer" : "Keep local setup"}
           </button>
           <button
             type="button"
@@ -101,7 +99,7 @@ export function GatewayForgetDialog({
             {busy
               ? "Removing…"
               : trustedGateway
-                ? "Remove Gateway"
+                ? "Remove computer"
                 : "Clear local setup"}
           </button>
         </footer>

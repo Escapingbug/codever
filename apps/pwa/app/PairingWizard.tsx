@@ -23,7 +23,6 @@ type Props = {
   preview: PairingPreview | null;
   trustedGateway: CodeverPublicTrust | null;
   busy: boolean;
-  progressDetail: string | null;
   canConfirm: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
   invitationBusy: boolean;
@@ -40,7 +39,6 @@ export function PairingWizard({
   preview,
   trustedGateway,
   busy,
-  progressDetail,
   canConfirm,
   deviceInvitation,
   invitationBusy,
@@ -94,15 +92,15 @@ export function PairingWizard({
   if (trustedGateway && !preview) {
     return (
       <div className="device-invitation-flow">
-        <section className="paired-gateway-card" aria-label="Trusted Gateway">
+        <section className="paired-gateway-card" aria-label="Connected computer">
           <span className="gateway-device-mark" aria-hidden="true">
             G
           </span>
           <div>
-            <span className="paired-label">Trusted Gateway</span>
+            <span className="paired-label">Connected computer</span>
             <strong>{trustedGateway.gatewayName}</strong>
             <small>
-              Paired {formatDate(trustedGateway.pairedAt)} · identity verified
+              Added {formatDate(trustedGateway.pairedAt)} · identity verified
             </small>
           </div>
           <span className="verified-badge">Verified</span>
@@ -130,11 +128,11 @@ export function PairingWizard({
           <section className="invitation-reauth" aria-live="polite">
             <strong>Confirm it’s you</strong>
             <p>
-              Matrix requires your password before issuing a one-time login
-              token. The password is sent only to your homeserver.
+              Your sync provider requires your password before adding another
+              device. It is sent only to your account provider.
             </p>
             <label>
-              <span>Matrix password</span>
+              <span>Account password</span>
               <input
                 type="password"
                 value={reauthPassword}
@@ -167,8 +165,8 @@ export function PairingWizard({
                 This invitation works once and expires{" "}
                 {formatExpiry(deviceInvitation.expiresAt)}.
                 {deviceInvitation.includesMatrixLogin
-                  ? " It signs the new device into Matrix without exposing your access token."
-                  : " The new device will sign in to Matrix separately."}
+                  ? " It automatically signs in the new device."
+                  : " The new device will ask you to sign in."}
               </p>
             </div>
             {qrDataUrl ? (
@@ -251,9 +249,9 @@ export function PairingWizard({
             G
           </span>
           <div>
-            <span className="paired-label">Gateway found</span>
+            <span className="paired-label">Computer found</span>
             <strong>{preview.gatewayName}</strong>
-            <small>{friendlyHomeserver(preview.transport.homeserver)}</small>
+            <small>Secure connection ready</small>
           </div>
           <button className="text-button" onClick={onClear} disabled={busy}>
             Change
@@ -264,8 +262,8 @@ export function PairingWizard({
           <span>Invitation code</span>
           <strong>{preview.verificationCode}</strong>
           <small>
-            Expires {formatExpiry(preview.expiresAt)}. Use this code to identify
-            the one-time request in Gateway logs; it is not a password.
+            Expires {formatExpiry(preview.expiresAt)}. Confirm that it matches
+            the request shown on your computer.
           </small>
         </div>
 
@@ -275,14 +273,14 @@ export function PairingWizard({
           disabled={busy || !canConfirm}
         >
           {busy
-            ? "Completing secure pairing…"
+            ? "Connecting this device…"
             : !canConfirm
-              ? "Sign in to Matrix to continue"
-            : `Trust ${preview.gatewayName} and pair`}
+              ? "Sign in below to continue"
+            : `Connect to ${preview.gatewayName}`}
         </button>
-        {busy && progressDetail && (
+        {busy && (
           <p className="pairing-scan-status" role="status">
-            {progressDetail}
+            Finishing the connection…
           </p>
         )}
       </section>
@@ -296,10 +294,10 @@ export function PairingWizard({
           ↗
         </span>
         <div>
-          <h3>Add your Gateway</h3>
+          <h3>Connect to your computer</h3>
           <p>
-            Open Codever Gateway on your computer and choose Add device. Then
-            scan its QR code or paste the one-time pairing link shown there.
+            Open Codever on your computer and choose Add device. Then scan its
+            QR code or paste the one-time invitation shown there.
           </p>
         </div>
       </div>
@@ -533,11 +531,11 @@ function QrScanner({
         className="scanner-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Scan Gateway QR code"
+        aria-label="Scan computer QR code"
         tabIndex={-1}
       >
         <header>
-          <strong>Scan Gateway QR code</strong>
+          <strong>Scan computer QR code</strong>
           <button
             ref={closeButtonRef}
             type="button"
@@ -646,12 +644,4 @@ function formatDate(timestamp: number): string {
     month: "short",
     day: "numeric",
   }).format(new Date(timestamp));
-}
-
-function friendlyHomeserver(value: string): string {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
 }

@@ -195,7 +195,7 @@ function NewSessionDialogContent({
       >
         <header>
           <div>
-            <span className="eyebrow">Gateway × Project</span>
+            <span className="eyebrow">Computer · Project</span>
             <h2 id="new-session-title">Create a session</h2>
             <p>{gatewayName}</p>
           </div>
@@ -251,8 +251,8 @@ function NewSessionDialogContent({
             </label>
           </div>
           <small className="project-identity-note">
-            Project names may repeat. Identity is scoped by this Gateway and
-            the project working directory.
+            Project names may repeat. Codever distinguishes them by computer
+            and working directory.
           </small>
 
           <div className="new-session-grid two-columns">
@@ -263,7 +263,7 @@ function NewSessionDialogContent({
                 onChange={(event) => chooseModel(event.target.value)}
                 disabled={busy || models.length === 0}
               >
-                {!model && <option value="">Gateway default</option>}
+                {!model && <option value="">Computer default</option>}
                 {models.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.name}

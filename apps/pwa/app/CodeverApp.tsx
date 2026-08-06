@@ -412,6 +412,7 @@ export function CodeverApp() {
     Map<string, AgentActivity>
   >(() => new Map());
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
     () => loadMatrixConfig() ?? emptyMatrixConfig,
@@ -432,7 +433,7 @@ export function CodeverApp() {
   );
   const [gatewayState, setGatewayState] =
     useState<GatewayStateSnapshot | null>(null);
-  const [gatewayRevision, setGatewayRevision] = useState<number | null>(null);
+  const [, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
   const [pairingPreview, setPairingPreview] =
@@ -552,6 +553,7 @@ export function CodeverApp() {
     newSessionBusy,
     settingsOpen,
     detailsOpen,
+    composerOptionsOpen,
     mobileChatOpen,
   });
   useNativeBackHandler(
@@ -569,6 +571,9 @@ export function CodeverApp() {
           break;
         case "close-details":
           setDetailsOpen(false);
+          break;
+        case "close-composer-options":
+          setComposerOptionsOpen(false);
           break;
         case "show-conversations":
           setMobileChatOpen(false);
@@ -673,8 +678,6 @@ export function CodeverApp() {
   const historyNotices = noticesForScope(uiNotices, "history");
   const matrixConnected =
     connectionStatus === "connected" || connectionStatus === "reconnecting";
-  const matrixTransportOnline =
-    matrixConnected || connectionStatus === "securing";
   const isStreaming = Boolean(
     selectedSessionId && runningSessionIds.has(selectedSessionId),
   );
@@ -709,10 +712,10 @@ export function CodeverApp() {
     (trustedGateway
       ? gatewayState
         ? "No active session"
-        : "Syncing Gateway state…"
-      : "Add a Gateway");
+        : "Syncing conversations…"
+      : "Connect a computer");
   const activeProvider =
-    selected?.provider ?? gatewayState?.workspace.provider ?? "Gateway agent";
+    selected?.provider ?? gatewayState?.workspace.provider ?? "Agent";
   const activeWorkspace = selected
     ? {
         projectId: selected.projectId,
@@ -1095,7 +1098,7 @@ export function CodeverApp() {
       }
       if (pending.status === "expired") {
         setConnectionError(
-          "The previous pairing request expired. Scan a new Gateway QR code.",
+          "The previous invitation expired. Scan a new QR code from your computer.",
         );
         setSettingsOpen(true);
         return;
@@ -1593,6 +1596,7 @@ export function CodeverApp() {
       }
     }
     if (!sessionChanged) return;
+    setComposerOptionsOpen(false);
     historyGenerationRef.current += 1;
     historySessionIdRef.current = sessionId;
     historyCursorRef.current = null;
@@ -1638,7 +1642,7 @@ export function CodeverApp() {
     completedCommandResultsRef.current.clear();
     setRevisionConflict(null);
     setConnectionError(null);
-    setConnectionDetail("Preparing the encrypted Matrix connection…");
+    setConnectionDetail("Preparing your connection…");
     setConnectionStatus("connecting");
     setMessages([]);
     setSelectedSessionId(null);
@@ -1883,20 +1887,6 @@ export function CodeverApp() {
           })
           .catch(() => undefined);
       }
-      void connection.ready
-        .then(() => {
-          if (codeverClientRef.current !== connection) return;
-          setMessages((current) => [
-            {
-              id: `matrix-connected-${Date.now()}`,
-              kind: "notice",
-              text: "Connected directly to an encrypted Matrix room. Commands are signed by this device’s P-256 key.",
-              time: "now",
-            },
-            ...current,
-          ]);
-        })
-        .catch(() => undefined);
       return connection;
     } catch (error) {
       if (!isCurrentStartup()) return null;
@@ -2082,7 +2072,7 @@ export function CodeverApp() {
       if (!matrixLogin) return;
       if (matrixLogin.expiresAt <= Date.now()) {
         setConnectionError(
-          "The one-time Matrix login expired. Sign in with your Matrix ID and password below; the Gateway invitation may still be valid.",
+          "The one-time sign-in expired. Sign in below; the invitation may still be valid.",
         );
         return;
       }
@@ -2125,7 +2115,7 @@ export function CodeverApp() {
       } catch (error) {
         settleNativeBootstrapTransfer("error");
         setConnectionError(
-          `The one-time Matrix sign-in could not be used: ${formatUiError(error)} Sign in below to continue.`,
+          `The one-time sign-in could not be used: ${formatUiError(error)} Sign in below to continue.`,
         );
       }
     } catch (error) {
@@ -2158,7 +2148,7 @@ export function CodeverApp() {
   async function createDeviceInvitation(password?: string) {
     if (!trustedGateway || !codeverClientRef.current) {
       setConnectionError(
-        "Connect to the trusted Gateway before authorizing another device.",
+        "Connect to your approved computer before adding another device.",
       );
       return;
     }
@@ -2173,7 +2163,7 @@ export function CodeverApp() {
       const generated = await deviceInvitationLifecycleRef.current.request(
         async () => {
           const connection = codeverClientRef.current;
-          if (!connection) throw new Error("The Matrix connection was closed.");
+          if (!connection) throw new Error("The connection was closed.");
           let gatewayInvitation = pendingGatewayInvitationRef.current;
           if (
             !gatewayInvitation ||
@@ -2205,7 +2195,7 @@ export function CodeverApp() {
                 }
                 commandId = error.commandId;
                 setInvitationError(
-                  "The request is still queued on the Gateway. Codever will keep waiting for this same invitation instead of creating another one.",
+                  "Your computer is still preparing this invitation. Codever will keep waiting instead of creating another one.",
                 );
                 completion = await connection.observeCommandCompletion(
                   error.commandId,
@@ -2220,7 +2210,7 @@ export function CodeverApp() {
             if (completion.outcome !== "succeeded") {
               if (commandId) await connection.releaseCommand(commandId);
               throw new Error(
-                "The Gateway could not create the device invitation.",
+                "Your computer could not create the device invitation.",
               );
             }
             if (!commandId) {
@@ -2253,12 +2243,12 @@ export function CodeverApp() {
               onRateLimit: (remainingMs) => {
                 if (remainingMs === 0) {
                   setInvitationError(
-                    "Matrix is accepting another sign-in attempt. Finishing this invitation…",
+                    "The account provider is accepting another sign-in attempt. Finishing this invitation…",
                   );
                   return;
                 }
                 setInvitationError(
-                  `Matrix temporarily limited new-device sign-ins. Codever is keeping this invitation and will retry it in ${Math.ceil(remainingMs / 1_000)} seconds.`,
+                  `The account provider temporarily limited new-device sign-ins. Codever will keep this invitation and retry in ${Math.ceil(remainingMs / 1_000)} seconds.`,
                 );
               },
             });
@@ -2371,15 +2361,13 @@ export function CodeverApp() {
       setMatrixConfig(configForPairing);
       setPairingPreview(null);
       setSettingsOpen(false);
-      setMessages((current) => [
-        {
-          id: `gateway-paired-${Date.now()}`,
-          kind: "notice",
-          text: `${trust.gatewayName} is now trusted. Future Matrix device rotations must be signed by its persistent Gateway key.`,
-          time: "now",
-        },
-        ...current,
-      ]);
+      showUiNotice(
+        "connection:paired",
+        "session",
+        "success",
+        `${trust.gatewayName} connected.`,
+        5_000,
+      );
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setConnectionError(formatUiError(error));
@@ -2402,8 +2390,8 @@ export function CodeverApp() {
         notice.scope,
         "warning",
         connectionStatus === "reconnecting" || connectionStatus === "connecting"
-          ? "The secure connection is still resuming. Try again when the Gateway is connected."
-          : "The Gateway is not connected. Open Gateway settings to reconnect.",
+          ? "The connection is still resuming. Try again when your computer is connected."
+          : "Your computer is not connected. Open connection settings.",
       );
       return null;
     }
@@ -2698,8 +2686,8 @@ export function CodeverApp() {
         "session",
         "warning",
         gatewayState
-          ? "This Gateway does not support creating sessions."
-          : "Waiting for the current Gateway session state.",
+          ? "This computer does not support creating sessions."
+          : "Waiting for your conversations to sync.",
       );
       return;
     }
@@ -2758,7 +2746,7 @@ export function CodeverApp() {
           "session:create",
           "session",
           "error",
-          "The Gateway could not create the session.",
+          "Your computer could not create the session.",
         );
       }
       await consumeSessionCreateCompletion(
@@ -2796,7 +2784,7 @@ export function CodeverApp() {
         `session:${action}`,
         "session",
         "warning",
-        `This Gateway does not support session ${action}. Update and reconnect the Gateway first.`,
+        `This computer does not support session ${action}. Update Codever on the computer and reconnect first.`,
       );
       return false;
     }
@@ -3199,7 +3187,7 @@ export function CodeverApp() {
         const errorMessage: ChatMessage = {
           id: `matrix-error-${Date.now()}`,
           kind: "error",
-          text: "The signed command was not sent. Check Matrix connection settings.",
+          text: "The command was not sent. Open connection settings.",
           time: "now",
           timestamp: Date.now(),
           sessionId,
@@ -3272,6 +3260,11 @@ export function CodeverApp() {
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Escape" && composerOptionsOpen) {
+      event.preventDefault();
+      setComposerOptionsOpen(false);
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendMessage();
@@ -3303,7 +3296,7 @@ export function CodeverApp() {
         "composer:permission",
         "composer",
         "error",
-        "This permission request has no signed request ID.",
+        "This permission request is missing its secure request ID.",
       );
       return;
     }
@@ -3444,7 +3437,7 @@ export function CodeverApp() {
           <span className="gateway-icon">G</span>
           <div>
             <strong>
-              {trustedGateway?.gatewayName || "Add a Gateway"}
+              {trustedGateway?.gatewayName || "Connect a computer"}
             </strong>
             <span>
               <i
@@ -3452,7 +3445,7 @@ export function CodeverApp() {
               />{" "}
               {trustedGateway
                 ? connectionPresentation.title
-                : "Scan QR or paste a one-time pairing link"}
+                : "Scan or paste a one-time code"}
             </span>
           </div>
           <span className="gateway-more" aria-hidden="true">•••</span>
@@ -3694,7 +3687,7 @@ export function CodeverApp() {
           {!trustedGateway && (
             <div className="empty-search">
               <span>G</span>
-              Add a Gateway to start your first secure conversation
+              Connect a computer to start your first conversation
             </div>
           )}
           {trustedGateway && !gatewayState && (
@@ -3715,12 +3708,12 @@ export function CodeverApp() {
               )}
               <strong>
                 {connectionStatus === "connected"
-                  ? "Syncing current Gateway state"
+                  ? "Syncing your conversations"
                   : connectionPresentation.title}
               </strong>
               <small>{connectionPresentation.detail}</small>
               <button type="button" onClick={() => setSettingsOpen(true)}>
-                View connection details
+                Open connection settings
               </button>
             </div>
           )}
@@ -3742,7 +3735,7 @@ export function CodeverApp() {
             !pendingSessionCreate && (
               <div className="empty-search">
                 <span>+</span>
-                Create your first secure conversation
+                Create your first conversation
               </div>
             )}
           {gatewayState &&
@@ -3759,25 +3752,21 @@ export function CodeverApp() {
         <footer className="trust-footer">
           <span className="shield">✓</span>
           <span>
-            <strong>Matrix E2EE + P-256</strong>
+            <strong>Protected connection</strong>
             <small>
               {deviceKeyId
-                ? `${matrixTransportOnline ? "This device online" : "This device offline"} · ${
+                ? `${connectionPresentation.title} · ${
                     activeDeviceCount === null
-                      ? "device count pending"
-                      : `${activeDeviceCount} trusted ${
+                      ? "checking approved devices"
+                      : `${activeDeviceCount} approved ${
                           activeDeviceCount === 1 ? "device" : "devices"
                         }`
-                  } · ${
-                    gatewayRevision === null
-                      ? "syncing state"
-                      : `r${gatewayRevision}`
                   }`
-                : "Local device key not loaded"}
+                : "Preparing this device"}
             </small>
           </span>
           <button
-            aria-label="View trusted devices"
+            aria-label="Open connection settings"
             onClick={() => setSettingsOpen(true)}
           >
             ›
@@ -3811,12 +3800,12 @@ export function CodeverApp() {
                 ? gatewayState
                   ? selectedArchived
                     ? `${activeProvider} · archived`
-                    : `${activeProvider} · encrypted sync active${
+                    : `${activeProvider} · up to date${
                         selected?.extensions.length
                           ? ` · ${selected.extensions.map((item) => item.name).join(", ")}`
                           : ""
                       }`
-                  : "Syncing Gateway state…"
+                  : "Syncing conversations…"
                 : connectionPresentation.title}
             </span>
           </div>
@@ -3853,10 +3842,9 @@ export function CodeverApp() {
               {activeWorkspace?.projectName || "Syncing…"}
             </strong>
             <code>{activeWorkspace?.cwd || "Syncing…"}</code>
-            <span className="mini-label">Gateway</span>
-            <code>{matrixConfig.gatewayId || "Not connected"}</code>
-            <span className="mini-label">Device</span>
-            <code>{matrixConfig.matrixDeviceId || "Not connected"}</code>
+            <span className="mini-label">Agent</span>
+            <strong>{activeProvider}</strong>
+            {activeWorkspace?.model && <code>{activeWorkspace.model}</code>}
             {selected?.extensions.length ? (
               <>
                 <span className="mini-label">Session extensions</span>
@@ -3868,7 +3856,7 @@ export function CodeverApp() {
               </>
             ) : null}
             <span className="verified-line">
-              <b>✓</b> Commands signed locally
+              <b>✓</b> This device is approved
             </span>
             {selected && (
               <div className="session-menu-actions">
@@ -4111,12 +4099,12 @@ export function CodeverApp() {
                       <span>!</span>
                       <div>
                         <strong>{message.text || "Permission required"}</strong>
-                        <small>Signed response required</small>
+                        <small>Your approval is required</small>
                       </div>
                     </div>
                     <p>
-                      This decision will be signed by your local Codever key and
-                      sent through the encrypted room.
+                      Your choice is protected and sent only to your connected
+                      computer.
                     </p>
                     {message.historical ? (
                       <div className="decision-state historical">
@@ -4219,16 +4207,16 @@ export function CodeverApp() {
             <div className="context-item">
               <span className="context-icon">▱</span>
               <span>
-                <small>Project · Gateway</small>
+                <small>Project · Computer</small>
                 <b title={activeWorkspace?.cwd}>
-                  {activeWorkspace?.projectName || "Syncing Gateway state…"}
+                  {activeWorkspace?.projectName || "Syncing conversations…"}
                   {trustedGateway ? ` · ${trustedGateway.gatewayName}` : ""}
                 </b>
               </span>
             </div>
             <div className="context-item branch-item">
               <span className="branch-mark">⑂</span>
-              <code>{activeWorkspace?.provider || "Gateway"}</code>
+              <code>{activeWorkspace?.provider || "Agent"}</code>
             </div>
             <span className="context-spacer" />
           </div>
@@ -4299,7 +4287,7 @@ export function CodeverApp() {
           )}
 
           <form
-            className="composer"
+            className={`composer ${composerOptionsOpen ? "composer-options-open" : ""}`}
             onSubmit={(event) => void sendMessage(event)}
           >
             <textarea
@@ -4312,8 +4300,8 @@ export function CodeverApp() {
                   : matrixConnected
                   ? `Message ${activeProvider}…`
                   : trustedGateway
-                    ? "Reconnect your Gateway to send messages"
-                    : "Add a Gateway to start"
+                    ? "Connect your computer to send messages"
+                    : "Connect a computer to start"
               }
               aria-label={`Message ${activeProvider}`}
               rows={1}
@@ -4337,7 +4325,17 @@ export function CodeverApp() {
               >
                 {attachmentBusy ? "…" : "+"}
               </button>
-              <div className="agent-controls">
+              <button
+                type="button"
+                className="composer-options-button"
+                aria-label="Agent options"
+                aria-expanded={composerOptionsOpen}
+                aria-controls="composer-agent-options"
+                onClick={() => setComposerOptionsOpen((open) => !open)}
+              >
+                <span aria-hidden="true">•••</span>
+              </button>
+              <div id="composer-agent-options" className="agent-controls">
                 <label>
                   <span className="status-spark" />
                   <select
@@ -4350,7 +4348,7 @@ export function CodeverApp() {
                     }
                   >
                     {!activeWorkspace?.model && (
-                      <option value="">Gateway default</option>
+                      <option value="">Computer default</option>
                     )}
                     {(gatewayState?.capabilities.models ?? []).map((model) => (
                       <option key={model.id} value={model.id}>
@@ -4500,7 +4498,7 @@ export function CodeverApp() {
         >
           <span>!</span>
           <span>
-            <strong>Matrix needs attention</strong>
+            <strong>Connection needs attention</strong>
             <small>{connectionError}</small>
           </span>
           <b>Open settings</b>
@@ -4882,7 +4880,7 @@ function parseGatewayInvitationResult(input: unknown): {
   expiresAt: number;
 } {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("The Gateway returned an invalid device invitation.");
+    throw new Error("Your computer returned an invalid device invitation.");
   }
   const result = input as Record<string, unknown>;
   if (
@@ -4892,7 +4890,7 @@ function parseGatewayInvitationResult(input: unknown): {
     !Number.isSafeInteger(result.expiresAt) ||
     result.expiresAt <= Date.now()
   ) {
-    throw new Error("The Gateway returned an invalid device invitation.");
+    throw new Error("Your computer returned an invalid device invitation.");
   }
   return {
     pairingLink: result.pairingLink,

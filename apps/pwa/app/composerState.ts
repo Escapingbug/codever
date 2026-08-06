@@ -42,31 +42,31 @@ export function deriveComposerState(input: ComposerStateInput): ComposerState {
     return blocked("Restore this session to continue.");
   }
   if (input.connectionStatus === "offline" || input.connectionStatus === "error") {
-    return blocked("The Gateway is offline. Reconnect before sending.");
+    return blocked("Your computer is offline. Reconnect before sending.");
   }
   if (input.connectionStatus === "connecting") {
-    return blocked("Connecting to Matrix… Your draft will be kept.");
+    return blocked("Connecting… Your draft will be kept.");
   }
   if (input.connectionStatus === "securing") {
-    return blocked("Matrix connected · verifying the trusted Gateway…");
+    return blocked("Checking your approved computer…");
   }
   if (input.connectionStatus === "reconnecting") {
-    return blocked("Reconnecting to Matrix… Your draft will be kept.");
+    return blocked("Reconnecting… Your draft will be kept.");
   }
   if (!input.hasGatewayState) {
-    return blocked("Waiting for the current Gateway session state…");
+    return blocked("Syncing your conversations…");
   }
   if (!input.hasSelectedSession) {
     return blocked("Create or select a session before sending.");
   }
   if (input.attachmentBusy) {
-    return blocked("Encrypting and uploading attachments…");
+    return blocked("Preparing attachments…");
   }
   if (input.isStopping) {
     return blocked("Waiting for the agent to stop…");
   }
   if (input.promptSubmitting) {
-    return blocked("Securing the previous message…");
+    return blocked("Sending the previous message…");
   }
   if (!input.hasContent) {
     return blocked("Write a message or attach a file.");
@@ -83,6 +83,6 @@ export function deriveComposerState(input: ComposerStateInput): ComposerState {
     canType,
     canSend: true,
     mode: "ready",
-    reason: "Signed locally · Matrix E2EE transport · Enter to send",
+    reason: "Protected connection · Enter to send",
   };
 }

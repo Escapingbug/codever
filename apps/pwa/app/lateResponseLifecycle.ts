@@ -58,7 +58,7 @@ export class LateResponseLifecycle<T> {
         this.onExpired(id);
         this.reject(
           id,
-          new Error("The Gateway request expired before its response arrived."),
+          new Error("The request expired before its response arrived."),
         );
       }, Math.max(0, expiresAt - Date.now())),
       waiters: new Set(),
@@ -79,7 +79,7 @@ export class LateResponseLifecycle<T> {
   ): Promise<T> {
     const entry = this.#byId.get(id);
     if (!entry) {
-      return Promise.reject(new Error("The Gateway request is no longer pending."));
+      return Promise.reject(new Error("The request is no longer pending."));
     }
     return new Promise((resolve, reject) => {
       const waiter: ResponseWaiter<T> = {
@@ -105,7 +105,7 @@ export class LateResponseLifecycle<T> {
       this.onExpired(id);
       this.reject(
         id,
-        new Error("The Gateway response could not be completed before expiry."),
+        new Error("The response could not be completed before expiry."),
       );
     }, Math.max(0, expiresAt - Date.now()));
   }

@@ -58,8 +58,8 @@ export function SessionDeleteDialog({
             : " and stops its agent if it is still running."}
         </p>
         <div className="delete-boundary-note">
-          Existing encrypted Matrix events and data retained by the agent
-          provider are not erased.
+          Copies already stored by your account provider or coding agent are
+          not erased.
         </div>
         <footer>
           <button

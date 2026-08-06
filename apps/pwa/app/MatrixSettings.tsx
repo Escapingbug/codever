@@ -56,7 +56,6 @@ function MatrixSettingsDialog({
   open,
   config,
   status,
-  progressDetail,
   error,
   pairingPreview,
   trustedGateway,
@@ -123,16 +122,16 @@ function MatrixSettingsDialog({
       >
         <header>
           <div>
-            <span className="eyebrow">Secure devices</span>
+            <span className="eyebrow">Devices</span>
             <h2 id="matrix-settings-title">
-              {trustedGateway ? "Gateway connection" : "Add a Gateway"}
+              {trustedGateway ? "Connection" : "Connect a computer"}
             </h2>
           </div>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={requestClose}
-            aria-label="Close Gateway settings"
+            aria-label="Close connection settings"
           >
             ×
           </button>
@@ -141,9 +140,8 @@ function MatrixSettingsDialog({
         <div className="settings-security-note">
           <span>✓</span>
           <p>
-            Your Gateway provides one QR code or pairing link. The six-digit
-            code confirms it directly; Matrix transports encrypted messages
-            but never decides which device Codever trusts.
+            Scan a one-time code from Codever on your computer. Only devices
+            you approve can see or send messages.
           </p>
         </div>
 
@@ -151,7 +149,6 @@ function MatrixSettingsDialog({
           preview={pairingPreview}
           trustedGateway={trustedGateway}
           busy={busy}
-          progressDetail={progressDetail}
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}
           invitationBusy={invitationBusy}
@@ -168,35 +165,35 @@ function MatrixSettingsDialog({
           <details className="connection-details" open={needsAccount}>
             <summary>
               <span>
-                <strong>Matrix connection</strong>
+                <strong>Connection details</strong>
                 <small>
                   {needsAccount
-                    ? "Sign in once to complete encrypted pairing"
+                    ? "Sign in once to finish adding this device"
                     : status === "securing"
-                      ? "Matrix connected; verifying the trusted Gateway"
+                      ? "Checking your approved computer"
                     : connected
-                      ? "Connected and end-to-end encrypted"
+                      ? "Protected and up to date"
                       : "Saved on this device"}
                 </small>
               </span>
               <b>
                 {status === "securing"
-                  ? "Securing"
+                  ? "Checking"
                   : connected
                     ? "Online"
                     : needsAccount
-                      ? "Required"
+                    ? "Sign in"
                       : "Details"}
               </b>
             </summary>
 
             <div className="matrix-form-grid compact-matrix-form">
               <label className="wide-field">
-                <span>Homeserver</span>
+                <span>Account provider</span>
                 <input
                   value={config.homeserver}
                   readOnly={Boolean(pairingPreview || trustedGateway)}
-                  placeholder="Provided by the Gateway"
+                  placeholder="Provided by your computer"
                   autoComplete="off"
                   spellCheck={false}
                   onChange={(event) =>
@@ -207,7 +204,7 @@ function MatrixSettingsDialog({
               {needsAccount && !config.accessToken && (
                 <>
                   <label className="wide-field">
-                    <span>Matrix ID</span>
+                    <span>Account ID</span>
                     <input
                       value={config.userId}
                       placeholder="@you:example.org"
@@ -219,11 +216,11 @@ function MatrixSettingsDialog({
                     />
                   </label>
                   <label className="wide-field">
-                    <span>Password</span>
+                    <span>Account password</span>
                     <input
                       type="password"
                       value={loginPassword}
-                      placeholder="Your Matrix password"
+                      placeholder="Your account password"
                       autoComplete="current-password"
                       onChange={(event) => setLoginPassword(event.target.value)}
                     />
@@ -239,18 +236,17 @@ function MatrixSettingsDialog({
                       setLoginPassword("");
                     }}
                   >
-                    {pairingBusy ? "Signing in…" : "Sign in to Matrix"}
+                    {pairingBusy ? "Signing in…" : "Sign in"}
                   </button>
                   <p className="matrix-session-hint wide-field">
-                    This creates a separate Matrix device session. Codever
-                    never asks you to copy an access token.
+                    This signs in only this Codever device. You will never be
+                    asked to copy a private access token.
                   </p>
                 </>
               )}
               {config.accessToken && (
                 <p className="matrix-session-hint wide-field">
-                  Signed in as {config.userId || "your Matrix account"} on this
-                  device.
+                  Signed in as {config.userId || "your account"} on this device.
                 </p>
               )}
               <details className="advanced-token-field wide-field">
@@ -273,7 +269,7 @@ function MatrixSettingsDialog({
                 </label>
               </details>
               <label>
-                <span>Encrypted room</span>
+                <span>Conversation channel</span>
                 <input value={config.roomId} readOnly placeholder="From QR code" />
               </label>
             </div>
@@ -284,7 +280,7 @@ function MatrixSettingsDialog({
           <div className="connection-error" role="alert">
             <strong>
               {pairingPreview && !trustedGateway
-                ? "Pairing needs attention"
+                ? "Setup needs attention"
                 : "Connection needs attention"}
             </strong>
             <span>{error}</span>
@@ -333,27 +329,26 @@ function MatrixSettingsDialog({
             onClick={onForget}
             disabled={busy}
           >
-            {trustedGateway ? "Remove trusted Gateway" : "Clear local setup"}
+            {trustedGateway ? "Remove computer" : "Clear local setup"}
           </button>
           <span className="settings-spacer" />
-          {connected && (
-            <button className="disconnect-button" onClick={onDisconnect}>
+          {connected ? (
+            <button
+              className="disconnect-button"
+              onClick={onDisconnect}
+              disabled={pairingBusy || invitationBusy}
+            >
               Disconnect
             </button>
-          )}
-          {trustedGateway && (
+          ) : trustedGateway ? (
             <button
               className="connect-button"
               onClick={onConnect}
               disabled={busy}
             >
-              {busy
-                ? "Connecting…"
-                : connected
-                  ? "Reconnect"
-                  : "Connect securely"}
+              {busy ? "Connecting…" : "Try again"}
             </button>
-          )}
+          ) : null}
         </footer>
       </section>
     </div>

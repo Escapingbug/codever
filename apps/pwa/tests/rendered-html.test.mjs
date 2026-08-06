@@ -50,10 +50,11 @@ test("server-renders the Codever agent workspace", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Your agents, anywhere · Codever<\/title>/i);
-  assert.match(html, /Add a Gateway/);
-  assert.match(html, /Scan QR or paste a one-time pairing link/);
-  assert.match(html, /Matrix E2EE \+ P-256/);
-  assert.match(html, /Add a Gateway to start/);
+  assert.match(html, /Connect a computer/);
+  assert.match(html, /Scan or paste a one-time code/);
+  assert.match(html, /Protected connection/);
+  assert.match(html, /Connect a computer to start/);
+  assert.doesNotMatch(html, /Matrix|P-256|Gateway/);
   assert.doesNotMatch(html, />Demo</);
   assert.doesNotMatch(html, /Connection mode/);
   assert.doesNotMatch(html, /Permission required/);
@@ -124,6 +125,12 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /composerState\.mode === "queue"/);
   assert.match(source, /aria-label="Stop agent"|"Stop agent"/);
   assert.match(source, /disabled=\{!composerState\.canSend\}/);
+  assert.match(source, /aria-label="Agent options"/);
+  assert.match(source, /aria-controls="composer-agent-options"/);
+  assert.doesNotMatch(
+    source,
+    /Connected directly to an encrypted Matrix room|Future Matrix device rotations/,
+  );
   assert.match(styles, /\.composer-hint-ready\s*\{\s*display: none;/);
   assert.doesNotMatch(styles, /\.composer-hint\s*\{\s*display: none;/);
   assert.doesNotMatch(
@@ -133,7 +140,7 @@ test("ships a complete installable offline shell", async () => {
   assert.doesNotMatch(source, /const \[isStreaming, setIsStreaming\]/);
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
-  assert.match(newSession, /Gateway × Project/);
+  assert.match(newSession, /Computer · Project/);
   assert.match(newSession, /Project names may repeat/);
   assert.match(newSession, /Reasoning effort/);
   assert.match(source, /stopStreaming/);
@@ -166,6 +173,11 @@ test("ships a complete installable offline shell", async () => {
     styles,
     /@media \(max-width: 900px\)[\s\S]*?\.composer textarea,[\s\S]*?font-size: 16px/,
   );
+  assert.match(styles, /\.composer textarea \{[\s\S]*?field-sizing: content/);
+  assert.match(styles, /\.mobile-back \{[\s\S]*?width: 44px;[\s\S]*?min-width: 44px/);
+  assert.match(styles, /\.composer-options-open \.agent-controls \{\s*display: grid/);
+  assert.match(styles, /\.agent-controls select \{[\s\S]*?min-height: 44px/);
+  assert.match(styles, /\.project-indicators i \{[\s\S]*?width: 9px;[\s\S]*?font-size: 0/);
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
 });
 
@@ -452,7 +464,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(relayStore, /new Map<string, EncryptedInvitationRelayEntry>/);
   assert.match(relayStore, /INVITATION_RELAY_MAX_ENTRIES = 256/);
   assert.doesNotMatch(invitationRoute, /loginToken|accessToken|pairingLink/);
-  assert.match(settings, /Sign in to Matrix/);
+  assert.match(settings, /"Sign in"/);
   assert.match(settings, /Advanced: use an access token/);
   assert.match(app, /operation: "device\.invite"/);
   assert.match(app, /error instanceof CommandAcknowledgementTimeoutError/);
@@ -565,17 +577,16 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(wizard, /Take photo/);
   assert.match(wizard, /Choose photo/);
   assert.match(wizard, /Invitation code/);
-  assert.match(wizard, /Trust \$\{preview\.gatewayName\} and pair/);
-  assert.match(wizard, /busy && progressDetail/);
-  assert.match(settings, /progressDetail=\{progressDetail\}/);
+  assert.match(wizard, /Connect to \$\{preview\.gatewayName\}/);
+  assert.match(wizard, /Finishing the connection/);
   assert.match(app, /setConnectionDetail\(detail \?\? null\)/);
   assert.match(qrScanning, /BarcodeDetector/);
   assert.match(wizard, /decodeQrImageFile/);
   assert.match(qrScanning, /import\("\.\/qrDecodeFallback"\)/);
   assert.match(qrDecodeFallback, /jsQR/);
-  assert.match(settings, /Matrix transports/);
-  assert.match(settings, /creates a separate Matrix device session/);
-  assert.match(settings, /never asks you to copy an access token/);
+  assert.match(settings, /Only devices/);
+  assert.match(settings, /signs in only this Codever device/);
+  assert.match(settings, /never be[\s\S]*asked to copy a private access token/);
   assert.match(settings, /Advanced: use an access token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
@@ -684,7 +695,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /Delete session/);
   assert.match(app, /clearSessionMessageHistory/);
   assert.match(sessionDeleteDialog, /role="alertdialog"/);
-  assert.match(sessionDeleteDialog, /Existing encrypted Matrix events/);
+  assert.match(sessionDeleteDialog, /Copies already stored/);
   assert.match(chatMessages, /entry\.commandId === message\.commandId/);
   assert.match(app, /message\.originDeviceName/);
   assert.match(app, /Another device updated this session/);

@@ -12,6 +12,7 @@ const emptyState = {
   newSessionBusy: false,
   settingsOpen: false,
   detailsOpen: false,
+  composerOptionsOpen: false,
   mobileChatOpen: false,
 };
 
@@ -50,6 +51,14 @@ test("selects the topmost visible Codever UI layer", () => {
       mobileChatOpen: true,
     }),
     "close-details",
+  );
+  assert.equal(
+    resolveCodeverBackAction({
+      ...emptyState,
+      composerOptionsOpen: true,
+      mobileChatOpen: true,
+    }),
+    "close-composer-options",
   );
   assert.equal(
     resolveCodeverBackAction({ ...emptyState, mobileChatOpen: true }),

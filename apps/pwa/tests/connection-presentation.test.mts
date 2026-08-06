@@ -9,8 +9,8 @@ test("maps native progress codes to calm user-facing copy while retaining diagno
   );
   assert.deepEqual(presentation, {
     state: "progress",
-    title: "Connecting for the first time",
-    detail: "Waiting for the first encrypted Matrix sync…",
+    title: "Finishing setup",
+    detail: "Downloading your latest conversations…",
     rawDetailCode: "matrix_first_sync_waiting",
   });
   assert.equal(presentation.detail.includes("matrix_"), false);
@@ -21,8 +21,8 @@ test("maps legacy native sync progress without exposing the machine code", () =>
     "connecting",
     "matrix_sync_connecting",
   );
-  assert.equal(presentation.title, "Connecting securely");
-  assert.equal(presentation.detail, "Starting the encrypted Matrix sync…");
+  assert.equal(presentation.title, "Connecting");
+  assert.equal(presentation.detail, "Reaching your computer…");
   assert.equal(presentation.rawDetailCode, "matrix_sync_connecting");
 });
 
@@ -32,7 +32,7 @@ test("blocked native codes provide actionable copy instead of leaking raw codes"
     "matrix_sdk_internal_failure",
   );
   assert.equal(presentation.state, "blocked");
-  assert.equal(presentation.title, "Native Matrix service needs attention");
+  assert.equal(presentation.title, "Background connection needs attention");
   assert.equal(presentation.rawDetailCode, "matrix_sdk_internal_failure");
   assert.equal(presentation.detail.includes("matrix_sdk_internal_failure"), false);
 });
@@ -44,19 +44,20 @@ test("unknown machine codes remain diagnostic-only and use status fallback copy"
   );
   assert.deepEqual(presentation, {
     state: "progress",
-    title: "Reconnecting securely",
-    detail: "Codever will resume automatically when Matrix is reachable.",
+    title: "Reconnecting",
+    detail: "Codever will resume automatically when the connection returns.",
     rawDetailCode: "matrix_future_retry_reason",
   });
 });
 
-test("human web-runtime details remain visible and statuses have stable severity", () => {
+test("runtime details remain diagnostic-only and statuses have stable severity", () => {
   assert.deepEqual(
     deriveConnectionPresentation("securing", "Verifying the trusted Gateway device…"),
     {
       state: "progress",
-      title: "Verifying Gateway",
-      detail: "Verifying the trusted Gateway device…",
+      title: "Checking connection",
+      detail: "Confirming your approved computer…",
+      diagnosticDetail: "Verifying the trusted Gateway device…",
     },
   );
   assert.equal(deriveConnectionPresentation("connected").state, "ready");
