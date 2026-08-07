@@ -211,6 +211,16 @@ select:focus-visible {
   letter-spacing: -0.04em;
 }
 
+.session-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-search-button {
+  display: none;
+}
+
 .round-button {
   display: grid;
   width: 44px;
@@ -574,27 +584,39 @@ select:focus-visible {
 }
 
 .project-indicators i {
-  padding: 3px 5px;
-  border-radius: 8px;
-  font-size: 8px;
+  display: flex;
+  height: 18px;
+  align-items: center;
+  gap: 3px;
+  color: #6f7789;
+  font-size: 9px;
   font-style: normal;
   font-weight: 700;
   white-space: nowrap;
 }
 
-.project-working {
-  background: #e8f7f0;
-  color: #267859;
+.project-indicators i > span {
+  display: block;
 }
 
-.project-attention {
-  background: #fff0f1;
-  color: #a64751;
+.project-indicators i > b {
+  font-size: 9px;
+  font-weight: 750;
 }
 
-.project-unread {
-  background: var(--violet-soft);
+.project-needs-user > span {
   color: #5b49ca;
+  font-size: 8px;
+  line-height: 1;
+}
+
+.project-working > span {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid #b9ded0;
+  border-top-color: #2a9d73;
+  border-radius: 50%;
+  animation: session-status-spin 1.2s linear infinite;
 }
 
 .project-session-group > header {
@@ -648,7 +670,7 @@ select:focus-visible {
   background: var(--violet-soft);
 }
 
-.session-row.unread:not(.selected) {
+.session-row.session-signal-ready:not(.selected) {
   box-shadow: inset 3px 0 0 var(--violet);
 }
 
@@ -851,13 +873,29 @@ select:focus-visible {
 
 .agent-active {
   position: absolute;
+  inset: -3px;
+  border: 2px solid rgb(63 199 137 / 32%);
+  border-top-color: #32b47c;
+  border-radius: 16px;
+  animation: session-status-spin 1.35s linear infinite;
+}
+
+.agent-active.is-paused {
+  border-color: #aeb4c0;
+  border-style: dashed;
+  animation: none;
+}
+
+.agent-ready {
+  position: absolute;
   right: -2px;
   bottom: -2px;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border: 2px solid white;
   border-radius: 50%;
-  background: #3fc789;
+  background: var(--violet);
+  box-shadow: 0 0 0 3px rgb(105 87 229 / 11%);
 }
 
 .agent-failed {
@@ -874,6 +912,12 @@ select:focus-visible {
   color: white;
   font-size: 8px;
   font-style: normal;
+}
+
+@keyframes session-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .session-copy {
@@ -919,6 +963,18 @@ select:focus-visible {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-preview-line .session-status-summary {
+  color: #747d90;
+}
+
+.session-signal-ready .session-status-summary {
+  color: #6256bd;
+}
+
+.session-signal-failed .session-status-summary {
+  color: #a64751;
 }
 
 .session-preview-line b {
@@ -4845,17 +4901,41 @@ body {
     font-size: 20px;
   }
 
+  .session-header-actions {
+    gap: 6px;
+  }
+
+  .mobile-search-button {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 11px;
+    background: transparent;
+    color: #626b7e;
+    font-size: 22px;
+  }
+
+  .mobile-search-button[aria-expanded="true"] {
+    background: #eeecfb;
+    color: #5d4bca;
+  }
+
   .search-box {
     margin: 0 12px 6px;
+  }
+
+  .search-box:not(.search-box-open) {
+    display: none;
   }
 
   .gateway-card {
     position: absolute;
     z-index: 4;
     top: calc(4px + env(safe-area-inset-top));
-    right: 62px;
+    right: 112px;
     width: auto;
-    max-width: 112px;
+    max-width: 90px;
     min-height: 44px;
     gap: 0;
     margin: 0;
@@ -4886,7 +4966,7 @@ body {
 
   .gateway-card div .gateway-mobile-status {
     display: flex !important;
-    max-width: 98px;
+    max-width: 76px;
     margin: 0;
     overflow: hidden;
     color: #5f687b;
@@ -4900,19 +4980,12 @@ body {
     display: none;
   }
 
-  .session-filters {
-    gap: 2px;
-    margin: 0 12px 6px;
-    padding: 2px;
-  }
-
   .session-row {
     min-height: 68px;
     gap: 9px;
     padding: 7px 10px;
   }
 
-  .session-filters button,
   .ui-notice button,
   .settings-build-version button,
   .settings-build-details summary {
@@ -4990,6 +5063,11 @@ body {
 
   .session-preview-line > span {
     font-size: 11px;
+  }
+
+  .session-technical-summary,
+  .session-extension-badge {
+    display: none !important;
   }
 
   .trust-footer {
@@ -5272,29 +5350,8 @@ body {
     max-width: none;
   }
 
-  .session-filters {
-    overflow-x: auto;
-  }
-
-  .session-filters button {
-    min-width: max-content;
-  }
-
   .project-session-toggle {
     grid-template-columns: 15px 22px minmax(0, 1fr) auto 22px;
-  }
-
-  .project-indicators {
-    display: flex;
-    gap: 4px;
-  }
-
-  .project-indicators i {
-    width: 9px;
-    height: 9px;
-    padding: 0;
-    border-radius: 50%;
-    font-size: 0;
   }
 
   .context-item b {

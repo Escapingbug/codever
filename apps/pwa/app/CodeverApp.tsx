@@ -97,7 +97,6 @@ import {
 } from "./projectDisclosureState";
 import {
   EMPTY_SESSION_READ_STATE,
-  countSessionIndicators,
   initializeSessionReadState,
   markSessionRead,
   pruneSessionReadState,
@@ -107,6 +106,14 @@ import {
   writeSessionReadState,
   type SessionReadState,
 } from "./sessionIndicators";
+import {
+  compareProjectSessionsForAction,
+  compareSessionsForAction,
+  projectSessionSummaryLabel,
+  sessionListSignal,
+  sessionSignalLabel,
+  summarizeProjectSessions,
+} from "./sessionListOrder";
 import {
   EMPTY_UI_NOTICE_STATE,
   noticesForScope,
@@ -188,8 +195,6 @@ type RevisionConflictNotice = {
   optimisticMessageId?: string;
   busy: boolean;
 };
-
-type SessionListFilter = "all" | "working" | "attention";
 
 const emptyMatrixConfig: MatrixConnectionConfig = {
   homeserver: "",
@@ -392,8 +397,7 @@ function UiNoticeList({
 export function CodeverApp() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [sessionListFilter, setSessionListFilter] =
-    useState<SessionListFilter>("all");
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -571,6 +575,7 @@ export function CodeverApp() {
     settingsOpen,
     detailsOpen,
     composerOptionsOpen,
+    sessionSearchOpen,
     mobileChatOpen,
   });
   useNativeBackHandler(
@@ -591,6 +596,10 @@ export function CodeverApp() {
           break;
         case "close-composer-options":
           setComposerOptionsOpen(false);
+          break;
+        case "close-session-search":
+          setSearch("");
+          setSessionSearchOpen(false);
           break;
         case "show-conversations":
           setMobileChatOpen(false);
@@ -615,19 +624,8 @@ export function CodeverApp() {
     [gatewayState, search],
   );
   const activeFilteredSessions = useMemo(
-    () =>
-      filteredSessions.filter((session) => {
-        if (session.status === "archived") return false;
-        const indicator = sessionIndicator(session, sessionReadState);
-        if (sessionListFilter === "working") {
-          return indicator.activity === "running" || indicator.activity === "stopping";
-        }
-        if (sessionListFilter === "attention") {
-          return indicator.activity === "failed" || indicator.unread;
-        }
-        return true;
-      }),
-    [filteredSessions, sessionListFilter, sessionReadState],
+    () => filteredSessions.filter((session) => session.status !== "archived"),
+    [filteredSessions],
   );
   const archivedFilteredSessions = useMemo(
     () => filteredSessions.filter((session) => session.status === "archived"),
@@ -636,25 +634,6 @@ export function CodeverApp() {
   const activeSessionCount =
     gatewayState?.sessions.filter((session) => session.status !== "archived")
       .length ?? 0;
-  const activeIndicatorCounts = useMemo(
-    () =>
-      countSessionIndicators(
-        (gatewayState?.sessions ?? []).filter(
-          (session) => session.status !== "archived",
-        ),
-        sessionReadState,
-      ),
-    [gatewayState, sessionReadState],
-  );
-  const attentionSessionCount = useMemo(
-    () =>
-      (gatewayState?.sessions ?? []).filter((session) => {
-        if (session.status === "archived") return false;
-        const indicator = sessionIndicator(session, sessionReadState);
-        return indicator.activity === "failed" || indicator.unread;
-      }).length,
-    [gatewayState, sessionReadState],
-  );
   const archivedSessionCount =
     gatewayState?.sessions.filter((session) => session.status === "archived")
       .length ?? 0;
@@ -681,8 +660,21 @@ export function CodeverApp() {
       group.sessions.push(session);
       groups.set(key, group);
     }
-    return [...groups.values()];
-  }, [activeFilteredSessions, matrixConfig.gatewayId]);
+    const projects = [...groups.values()];
+    for (const project of projects) {
+      project.sessions.sort((left, right) =>
+        compareSessionsForAction(left, right, sessionReadState),
+      );
+    }
+    projects.sort((left, right) =>
+      compareProjectSessionsForAction(
+        left.sessions,
+        right.sessions,
+        sessionReadState,
+      ) || left.projectName.localeCompare(right.projectName),
+    );
+    return projects;
+  }, [activeFilteredSessions, matrixConfig.gatewayId, sessionReadState]);
   const connectionPresentation = useMemo(
     () => deriveConnectionPresentation(connectionStatus, connectionDetail),
     [connectionDetail, connectionStatus],
@@ -933,7 +925,8 @@ export function CodeverApp() {
       }
       event.preventDefault();
       setMobileChatOpen(false);
-      sessionSearchRef.current?.focus();
+      setSessionSearchOpen(true);
+      window.requestAnimationFrame(() => sessionSearchRef.current?.focus());
     };
     window.addEventListener("keydown", focusSessionSearch);
     return () => window.removeEventListener("keydown", focusSessionSearch);
@@ -3652,23 +3645,48 @@ export function CodeverApp() {
             <span className="eyebrow">Workspace</span>
             <h1>Codever</h1>
           </div>
-          <button
-            className="round-button"
-            aria-label="New conversation"
-            onClick={() => setNewSessionOpen(true)}
-            disabled={
-              newSessionBusy ||
-              !matrixConnected ||
-              !gatewayState?.capabilities.canCreateSession
-            }
-          >
-            +
-          </button>
+          <div className="session-header-actions">
+            <button
+              type="button"
+              className="mobile-search-button"
+              aria-label={sessionSearchOpen ? "Close conversation search" : "Search conversations"}
+              aria-expanded={sessionSearchOpen}
+              aria-controls="session-search"
+              onClick={() => {
+                if (sessionSearchOpen) {
+                  setSearch("");
+                  setSessionSearchOpen(false);
+                  return;
+                }
+                setSessionSearchOpen(true);
+                window.requestAnimationFrame(() =>
+                  sessionSearchRef.current?.focus(),
+                );
+              }}
+            >
+              {sessionSearchOpen ? "×" : "⌕"}
+            </button>
+            <button
+              className="round-button"
+              aria-label="New conversation"
+              onClick={() => setNewSessionOpen(true)}
+              disabled={
+                newSessionBusy ||
+                !matrixConnected ||
+                !gatewayState?.capabilities.canCreateSession
+              }
+            >
+              +
+            </button>
+          </div>
         </header>
 
-        <label className="search-box">
+        <label
+          className={`search-box ${sessionSearchOpen || search ? "search-box-open" : ""}`}
+        >
           <span aria-hidden="true">⌕</span>
           <input
+            id="session-search"
             ref={sessionSearchRef}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -3712,33 +3730,6 @@ export function CodeverApp() {
           <span className="gateway-more" aria-hidden="true">•••</span>
         </button>
 
-        <div className="session-filters" aria-label="Filter conversations">
-          <button
-            type="button"
-            className={sessionListFilter === "all" ? "active" : ""}
-            aria-pressed={sessionListFilter === "all"}
-            onClick={() => setSessionListFilter("all")}
-          >
-            All <b>{activeSessionCount + (pendingSessionCreate ? 1 : 0)}</b>
-          </button>
-          <button
-            type="button"
-            className={sessionListFilter === "working" ? "active" : ""}
-            aria-pressed={sessionListFilter === "working"}
-            onClick={() => setSessionListFilter("working")}
-          >
-            Working <b>{activeIndicatorCounts.running + activeIndicatorCounts.stopping}</b>
-          </button>
-          <button
-            type="button"
-            className={sessionListFilter === "attention" ? "active" : ""}
-            aria-pressed={sessionListFilter === "attention"}
-            onClick={() => setSessionListFilter("attention")}
-          >
-            Attention <b>{attentionSessionCount}</b>
-          </button>
-        </div>
-
         <UiNoticeList
           notices={sessionNotices}
           className="session-notices"
@@ -3746,7 +3737,7 @@ export function CodeverApp() {
         />
 
         <div className="session-list">
-          {pendingSessionCreate && sessionListFilter === "all" && (
+          {pendingSessionCreate && (
             <div
               className="session-row session-create-pending"
               role="status"
@@ -3783,7 +3774,7 @@ export function CodeverApp() {
               projectKey: project.key,
               searchQuery: search,
             });
-            const indicators = countSessionIndicators(
+            const projectSummary = summarizeProjectSessions(
               project.sessions,
               sessionReadState,
             );
@@ -3795,6 +3786,10 @@ export function CodeverApp() {
                 className="project-session-toggle"
                 aria-expanded={expanded}
                 aria-controls={contentId}
+                aria-label={`${projectSessionSummaryLabel(
+                  project.projectName,
+                  projectSummary,
+                )}. ${expanded ? "Collapse project" : "Expand project"}`}
                 onClick={() =>
                   setCollapsedProjects((current) =>
                     toggleProjectCollapsed(current, project.key),
@@ -3809,40 +3804,37 @@ export function CodeverApp() {
                   <strong>{project.projectName}</strong>
                   <small>{project.cwd}</small>
                 </span>
-                <span className="project-indicators" aria-label="Project status">
-                  {indicators.running + indicators.stopping > 0 && (
-                    <i className="project-working">
-                      {indicators.running + indicators.stopping} working
+                <span className="project-indicators" aria-hidden="true">
+                  {projectSummary.needsUser > 0 && (
+                    <i className="project-needs-user">
+                      <span>●</span>
+                      <b>{projectSummary.needsUser}</b>
                     </i>
                   )}
-                  {indicators.failed > 0 && (
-                    <i className="project-attention">{indicators.failed} failed</i>
-                  )}
-                  {indicators.unread > 0 && (
-                    <i className="project-unread">{indicators.unread} new</i>
+                  {projectSummary.working > 0 && (
+                    <i className="project-working">
+                      <span />
+                      <b>{projectSummary.working}</b>
+                    </i>
                   )}
                 </span>
-                <b>{project.sessions.length}</b>
+                <b aria-hidden="true">{project.sessions.length}</b>
               </button>
               {expanded && (
                 <div id={contentId} className="project-session-list">
               {project.sessions.map((session) => {
                 const indicator = sessionIndicator(session, sessionReadState);
+                const signal = sessionListSignal(session, sessionReadState);
+                const activity = agentActivitiesBySession.get(session.id);
                 const lifecycleAction =
                   sessionLifecycleBusy?.sessionId === session.id
                     ? sessionLifecycleBusy.action
                     : null;
-                const stateLabel = lifecycleAction
+                const statusSummary = lifecycleAction
                   ? `${lifecycleAction === "delete" ? "Deleting" : lifecycleAction === "archive" ? "Archiving" : "Restoring"}…`
-                  : indicator.activity === "running"
-                    ? "Working"
-                    : indicator.activity === "stopping"
-                      ? "Stopping"
-                      : indicator.activity === "failed"
-                        ? "Failed"
-                        : indicator.unread
-                          ? "New activity"
-                          : null;
+                  : activity?.detail ||
+                    activity?.label ||
+                    sessionSignalLabel(signal);
                 return (
                 <button
                   key={session.id}
@@ -3850,17 +3842,22 @@ export function CodeverApp() {
                     selectedSessionId === session.id
                       ? "selected"
                       : ""
-                  } session-state-${indicator.activity} ${indicator.unread ? "unread" : ""} ${lifecycleAction ? "is-busy" : ""}`}
+                  } session-state-${indicator.activity} session-signal-${signal} ${indicator.unread ? "unread" : ""} ${lifecycleAction ? "is-busy" : ""}`}
                   onClick={() => void chooseSession(session.id)}
                   disabled={lifecycleAction === "delete"}
                 >
                   <span className="session-avatar violet">
                     {sessionInitials(session.title)}
-                    {matrixConnected &&
-                      runningSessionIds.has(session.id) && (
-                        <i className="agent-active" />
-                      )}
-                    {indicator.activity === "failed" && (
+                    {signal === "working" && (
+                      <i
+                        className={`agent-active ${matrixConnected ? "" : "is-paused"}`}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {signal === "ready" && (
+                      <i className="agent-ready" aria-hidden="true" />
+                    )}
+                    {signal === "failed" && (
                       <i className="agent-failed" aria-hidden="true">!</i>
                     )}
                   </span>
@@ -3870,13 +3867,19 @@ export function CodeverApp() {
                       <time>{formatSessionTime(session.updatedAt)}</time>
                     </span>
                     <span className="session-preview-line">
-                      <span>
-                        {session.provider}
-                        {session.model ? ` · ${session.model}` : ""}
-                        {session.reasoningEffort
-                          ? ` · ${session.reasoningEffort}`
-                          : ""}
-                      </span>
+                      {statusSummary ? (
+                        <span className="session-status-summary">
+                          {statusSummary}
+                        </span>
+                      ) : (
+                        <span className="session-technical-summary">
+                          {session.provider}
+                          {session.model ? ` · ${session.model}` : ""}
+                          {session.reasoningEffort
+                            ? ` · ${session.reasoningEffort}`
+                            : ""}
+                        </span>
+                      )}
                       {session.extensions.length > 0 && (
                         <b
                           className="session-extension-badge"
@@ -3886,11 +3889,6 @@ export function CodeverApp() {
                           {session.extensions.length > 1
                             ? ` +${session.extensions.length - 1}`
                             : ""}
-                        </b>
-                      )}
-                      {stateLabel && (
-                        <b className={`session-state-label state-${indicator.activity}`}>
-                          {stateLabel}
                         </b>
                       )}
                     </span>
@@ -3903,7 +3901,7 @@ export function CodeverApp() {
             </section>
             );
           })}
-          {sessionListFilter === "all" && archivedSessionCount > 0 && (
+          {archivedSessionCount > 0 && (
             <section className="archived-session-section">
               <button
                 type="button"
@@ -3987,14 +3985,10 @@ export function CodeverApp() {
           {gatewayState &&
             activeSessionCount > 0 &&
             projectGroups.length === 0 &&
-            (Boolean(search.trim()) || sessionListFilter !== "all") && (
+            Boolean(search.trim()) && (
             <div className="empty-search">
               <span>⌕</span>
-              {search.trim()
-                ? "No matching active conversations"
-                : sessionListFilter === "working"
-                  ? "No agents are working right now"
-                  : "No conversations need attention"}
+              No matching active conversations
             </div>
           )}
           {gatewayState &&

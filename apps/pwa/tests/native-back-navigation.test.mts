@@ -13,6 +13,7 @@ const emptyState = {
   settingsOpen: false,
   detailsOpen: false,
   composerOptionsOpen: false,
+  sessionSearchOpen: false,
   mobileChatOpen: false,
 };
 
@@ -63,6 +64,10 @@ test("selects the topmost visible Codever UI layer", () => {
   assert.equal(
     resolveCodeverBackAction({ ...emptyState, mobileChatOpen: true }),
     "show-conversations",
+  );
+  assert.equal(
+    resolveCodeverBackAction({ ...emptyState, sessionSearchOpen: true }),
+    "close-session-search",
   );
   assert.equal(resolveCodeverBackAction(emptyState), null);
 });

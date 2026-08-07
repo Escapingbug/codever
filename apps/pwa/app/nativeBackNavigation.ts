@@ -54,6 +54,7 @@ export type CodeverBackState = {
   settingsOpen: boolean;
   detailsOpen: boolean;
   composerOptionsOpen: boolean;
+  sessionSearchOpen: boolean;
   mobileChatOpen: boolean;
 };
 
@@ -65,6 +66,7 @@ export type CodeverBackAction =
   | "close-settings"
   | "close-details"
   | "close-composer-options"
+  | "close-session-search"
   | "show-conversations";
 
 export function resolveCodeverBackAction(
@@ -84,6 +86,7 @@ export function resolveCodeverBackAction(
   if (state.detailsOpen) return "close-details";
   if (state.composerOptionsOpen) return "close-composer-options";
   if (state.mobileChatOpen) return "show-conversations";
+  if (state.sessionSearchOpen) return "close-session-search";
   return null;
 }
 

@@ -202,7 +202,7 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(
     styles,
-    /@media \(max-width: 900px\)[\s\S]*?\.gateway-card\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*62px/,
+    /@media \(max-width: 900px\)[\s\S]*?\.gateway-card\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*112px/,
   );
   assert.match(
     styles,
@@ -221,9 +221,16 @@ test("ships a complete installable offline shell", async () => {
     /@media \(max-width: 900px\)[\s\S]*?\.new-session-dialog footer\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?bottom:\s*0/,
   );
   assert.match(source, /<kbd aria-label="Control or Command K">Ctrl\/⌘ K<\/kbd>/);
+  assert.match(source, /className="mobile-search-button"/);
+  assert.doesNotMatch(source, /aria-label="Filter conversations"/);
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.search-box:not\(\.search-box-open\)\s*\{\s*display:\s*none/,
+  );
   assert.match(styles, /\.composer-options-open \.agent-controls \{\s*display: grid/);
   assert.match(styles, /\.agent-controls select \{[\s\S]*?min-height: 44px/);
-  assert.match(styles, /\.project-indicators i \{[\s\S]*?width: 9px;[\s\S]*?font-size: 0/);
+  assert.match(styles, /\.project-needs-user > span \{[\s\S]*?color: #5b49ca/);
+  assert.match(styles, /\.agent-active \{[\s\S]*?animation: session-status-spin/);
   assert.match(styles, /\.matrix-settings > footer \{[\s\S]*?position: sticky;[\s\S]*?bottom: 0/);
   await assert.rejects(access(new URL("app/_sites-preview", appRoot)));
 });
