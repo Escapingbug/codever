@@ -198,7 +198,15 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(
     styles,
-    /@media \(max-width: 900px\)[\s\S]*?\.session-header\s*\{[\s\S]*?height:\s*calc\(64px \+ env\(safe-area-inset-top\)\)/,
+    /@media \(max-width: 900px\)[\s\S]*?\.session-header\s*\{[\s\S]*?height:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.gateway-card\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*62px/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.session-row\s*\{[\s\S]*?min-height:\s*68px/,
   );
   assert.match(
     styles,

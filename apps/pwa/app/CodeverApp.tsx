@@ -3684,6 +3684,9 @@ export function CodeverApp() {
               ? "offline"
               : ""
           }`}
+          aria-label={`Open connection settings, ${
+            trustedGateway ? connectionPresentation.title : "not connected"
+          }`}
           onClick={() => setSettingsOpen(true)}
         >
           <span className="gateway-icon">G</span>
@@ -3691,13 +3694,19 @@ export function CodeverApp() {
             <strong>
               {trustedGateway?.gatewayName || "Connect a computer"}
             </strong>
-            <span>
+            <span className="gateway-status-copy">
               <i
                 className={`connection-dot connection-state-${connectionStatus}`}
               />{" "}
               {trustedGateway
                 ? connectionPresentation.title
                 : "Scan or paste a one-time code"}
+            </span>
+            <span className="gateway-mobile-status" aria-hidden="true">
+              <i
+                className={`connection-dot connection-state-${connectionStatus}`}
+              />{" "}
+              {trustedGateway ? connectionPresentation.title : "Connect"}
             </span>
           </div>
           <span className="gateway-more" aria-hidden="true">•••</span>

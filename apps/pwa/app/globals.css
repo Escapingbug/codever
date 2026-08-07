@@ -351,6 +351,10 @@ select:focus-visible {
   font-size: 10px;
 }
 
+.gateway-mobile-status {
+  display: none !important;
+}
+
 .gateway-card i,
 .conversation-heading i {
   width: 6px;
@@ -4828,9 +4832,9 @@ body {
   }
 
   .session-header {
-    height: calc(64px + env(safe-area-inset-top));
+    height: calc(52px + env(safe-area-inset-top));
     align-items: center;
-    padding: calc(8px + env(safe-area-inset-top)) 12px 8px 14px;
+    padding: calc(4px + env(safe-area-inset-top)) 12px 4px 14px;
   }
 
   .session-header .eyebrow {
@@ -4838,49 +4842,74 @@ body {
   }
 
   .session-header h1 {
-    font-size: 22px;
+    font-size: 20px;
   }
 
   .search-box {
-    margin: 0 12px 8px;
+    margin: 0 12px 6px;
   }
 
   .gateway-card {
-    min-height: 50px;
-    gap: 8px;
-    margin: 0 12px 8px;
-    padding: 6px 9px;
-    border-radius: 11px;
+    position: absolute;
+    z-index: 4;
+    top: calc(4px + env(safe-area-inset-top));
+    right: 62px;
+    width: auto;
+    max-width: 112px;
+    min-height: 44px;
+    gap: 0;
+    margin: 0;
+    padding: 0 7px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: none;
   }
 
   .gateway-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
-    font-size: 13px;
+    display: none;
   }
 
   .gateway-card strong {
-    font-size: 14px;
+    display: none;
   }
 
-  .gateway-card div span {
-    margin-top: 1px;
+  .gateway-card > div {
+    flex: 0 1 auto;
+    overflow: hidden;
+  }
+
+  .gateway-card div .gateway-status-copy {
+    display: none;
+  }
+
+  .gateway-card div .gateway-mobile-status {
+    display: flex !important;
+    max-width: 98px;
+    margin: 0;
+    overflow: hidden;
+    color: #5f687b;
     font-size: 11px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .gateway-more {
-    align-self: center;
+    display: none;
   }
 
   .session-filters {
     gap: 2px;
-    margin: 0 12px 8px;
+    margin: 0 12px 6px;
     padding: 2px;
   }
 
   .session-row {
-    min-height: 78px;
+    min-height: 68px;
+    gap: 9px;
+    padding: 7px 10px;
   }
 
   .session-filters button,
@@ -4905,15 +4934,27 @@ body {
   }
 
   .project-session-toggle {
-    min-height: 50px;
+    min-height: 44px;
+    margin-bottom: 0;
   }
 
   .project-copy strong {
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .project-copy small {
+    display: none;
+  }
+
+  .session-avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
     font-size: 11px;
+  }
+
+  .session-copy {
+    gap: 3px;
   }
 
   .mobile-chat-open .session-panel .session-notices {
@@ -4926,7 +4967,7 @@ body {
   }
 
   .session-title-line strong {
-    font-size: 16px;
+    font-size: 14px;
   }
 
   .session-title-line {
@@ -4948,7 +4989,7 @@ body {
   }
 
   .session-preview-line > span {
-    font-size: 14px;
+    font-size: 11px;
   }
 
   .trust-footer {
