@@ -4828,12 +4828,59 @@ body {
   }
 
   .session-header {
-    height: calc(83px + env(safe-area-inset-top));
-    padding-top: calc(14px + env(safe-area-inset-top));
+    height: calc(64px + env(safe-area-inset-top));
+    align-items: center;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px 14px;
+  }
+
+  .session-header .eyebrow {
+    display: none;
+  }
+
+  .session-header h1 {
+    font-size: 22px;
+  }
+
+  .search-box {
+    margin: 0 12px 8px;
+  }
+
+  .gateway-card {
+    min-height: 50px;
+    gap: 8px;
+    margin: 0 12px 8px;
+    padding: 6px 9px;
+    border-radius: 11px;
+  }
+
+  .gateway-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    font-size: 13px;
+  }
+
+  .gateway-card strong {
+    font-size: 14px;
+  }
+
+  .gateway-card div span {
+    margin-top: 1px;
+    font-size: 11px;
+  }
+
+  .gateway-more {
+    align-self: center;
+  }
+
+  .session-filters {
+    gap: 2px;
+    margin: 0 12px 8px;
+    padding: 2px;
   }
 
   .session-row {
-    min-height: 84px;
+    min-height: 78px;
   }
 
   .session-filters button,
@@ -4858,7 +4905,7 @@ body {
   }
 
   .project-session-toggle {
-    min-height: 54px;
+    min-height: 50px;
   }
 
   .project-copy strong {
@@ -4905,7 +4952,7 @@ body {
   }
 
   .trust-footer {
-    padding-bottom: max(11px, env(safe-area-inset-bottom));
+    display: none;
   }
 
   .conversation-panel {
@@ -4924,6 +4971,7 @@ body {
 
   .conversation-header {
     height: calc(65px + env(safe-area-inset-top));
+    gap: 8px;
     padding: env(safe-area-inset-top) 11px 0 8px;
   }
 
@@ -4943,12 +4991,12 @@ body {
   }
 
   .conversation-avatar {
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
   }
 
-  .header-actions .header-button:first-child {
-    display: none;
+  .conversation-header .header-actions .header-button {
+    display: grid;
   }
 
   .chat-feed {
@@ -5125,6 +5173,34 @@ body {
     border-radius: 20px 20px 0 0;
     transform-origin: bottom center;
     animation-name: mobile-sheet-enter;
+  }
+
+  .new-session-dialog > header {
+    position: sticky;
+    z-index: 5;
+    top: 0;
+    background: white;
+  }
+
+  .new-session-dialog form {
+    padding-bottom: 0;
+  }
+
+  .new-session-dialog footer {
+    position: sticky;
+    z-index: 5;
+    bottom: 0;
+    margin: 0 -22px;
+    padding: 11px 22px max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid #eceef3;
+    background: white;
+    box-shadow: 0 -10px 24px rgb(39 47 74 / 8%);
+  }
+
+  .new-session-dialog footer button {
+    min-width: 0;
+    height: 44px;
+    flex: 1;
   }
 
   .session-delete-dialog {

@@ -188,6 +188,31 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(styles, /\.composer textarea \{[\s\S]*?field-sizing: content/);
   assert.match(styles, /\.mobile-back \{[\s\S]*?width: 44px;[\s\S]*?min-width: 44px/);
+  assert.doesNotMatch(
+    styles,
+    /\.header-actions \.header-button:first-child\s*\{\s*display:\s*none/,
+  );
+  assert.match(
+    styles,
+    /\.conversation-header \.header-actions \.header-button\s*\{\s*display:\s*grid/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.session-header\s*\{[\s\S]*?height:\s*calc\(64px \+ env\(safe-area-inset-top\)\)/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.trust-footer\s*\{\s*display:\s*none/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.new-session-dialog > header\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?top:\s*0/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.new-session-dialog footer\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?bottom:\s*0/,
+  );
+  assert.match(source, /<kbd aria-label="Control or Command K">Ctrl\/⌘ K<\/kbd>/);
   assert.match(styles, /\.composer-options-open \.agent-controls \{\s*display: grid/);
   assert.match(styles, /\.agent-controls select \{[\s\S]*?min-height: 44px/);
   assert.match(styles, /\.project-indicators i \{[\s\S]*?width: 9px;[\s\S]*?font-size: 0/);

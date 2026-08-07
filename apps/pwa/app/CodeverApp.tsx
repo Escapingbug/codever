@@ -87,6 +87,7 @@ import {
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import { deriveConnectionPresentation } from "./connectionPresentation";
+import { formatUserFacingError } from "./userFacingError";
 import {
   isProjectExpanded,
   readProjectDisclosureState,
@@ -3674,7 +3675,7 @@ export function CodeverApp() {
             placeholder="Search conversations"
             aria-label="Search conversations"
           />
-          <kbd>⌘ K</kbd>
+          <kbd aria-label="Control or Command K">Ctrl/⌘ K</kbd>
         </label>
 
         <button
@@ -5131,7 +5132,7 @@ function sessionLifecyclePayload(
 }
 
 function formatUiError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return formatUserFacingError(error);
 }
 
 function deviceInvitationFromLink(link: string): boolean {
