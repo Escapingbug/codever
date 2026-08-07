@@ -8,7 +8,7 @@ import {
     type MatrixClient,
     type MatrixEvent,
 } from 'matrix-js-sdk'
-import { AllDevicesIsolationMode } from 'matrix-js-sdk/lib/crypto-api'
+import { AllDevicesIsolationMode } from 'matrix-js-sdk/lib/crypto-api/index.js'
 import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
