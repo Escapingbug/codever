@@ -86,9 +86,7 @@ class DurableCommandOutbox internal constructor(
             it.sequence > snapshot.lastAcknowledgedSequence && !it.state.isTerminal
         }
         if (blocking != null) {
-            throw CommandBusyException(
-                "Command ${blocking.commandId} must be acknowledged, recovered, or discarded first.",
-            )
+            throw CommandBusyException(blocking.commandId)
         }
         require(snapshot.commands.size < MAX_ACTIVE_COMMANDS) {
             "Release completed commands before adding another command."

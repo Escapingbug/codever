@@ -89,7 +89,10 @@ import {
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import { deriveConnectionPresentation } from "./connectionPresentation";
-import { formatUserFacingError } from "./userFacingError";
+import {
+  formatUserFacingError,
+  isCommandRecoveryPendingError,
+} from "./userFacingError";
 import {
   isProjectExpanded,
   readProjectDisclosureState,
@@ -2636,6 +2639,15 @@ export function CodeverApp() {
       return result;
     } catch (error) {
       if (error instanceof CommandAcknowledgementTimeoutError) throw error;
+      if (isCommandRecoveryPendingError(error)) {
+        showUiNotice(
+          notice.key,
+          notice.scope,
+          "warning",
+          formatUiError(error),
+        );
+        return null;
+      }
       if (error instanceof CommandRevisionConflictError) {
         const notice: RevisionConflictNotice = {
           commandId: error.commandId,

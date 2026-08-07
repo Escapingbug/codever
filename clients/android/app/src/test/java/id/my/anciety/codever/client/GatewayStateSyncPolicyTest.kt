@@ -1,5 +1,10 @@
 package id.my.anciety.codever.client
 
+import id.my.anciety.codever.client.command.CommandCompletion
+import id.my.anciety.codever.client.command.CommandOutcome
+import id.my.anciety.codever.client.command.CommandState
+import id.my.anciety.codever.client.command.CommandView
+import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -19,5 +24,48 @@ class GatewayStateSyncPolicyTest {
         assertThrows(IllegalArgumentException::class.java) {
             gatewayStateRetryDelayMs(-1)
         }
+    }
+
+    @Test
+    fun `command recovery retries use bounded backoff`() {
+        assertEquals(5_000L, commandRecoveryDelayMs(0))
+        assertEquals(15_000L, commandRecoveryDelayMs(1))
+        assertEquals(30_000L, commandRecoveryDelayMs(2))
+        assertEquals(60_000L, commandRecoveryDelayMs(3))
+        assertEquals(60_000L, commandRecoveryDelayMs(100))
+        assertThrows(IllegalArgumentException::class.java) {
+            commandRecoveryDelayMs(-1)
+        }
+    }
+
+    @Test
+    fun `only recovery-required commands are resumed in sequence order`() {
+        val commands = listOf(
+            command("accepted", 2, CommandState.ACCEPTED),
+            command("later", 3, CommandState.RECOVERY_REQUIRED),
+            command("earlier", 1, CommandState.RECOVERY_REQUIRED),
+            command("done", 4, CommandState.SUCCEEDED),
+        )
+
+        assertEquals(listOf("earlier", "later"), recoverableCommandIds(commands))
+    }
+
+    private fun command(id: String, sequence: Long, state: CommandState): CommandView {
+        val completion = if (state.isTerminal) {
+            CommandCompletion(id, sequence, 4, CommandOutcome.SUCCEEDED)
+        } else {
+            null
+        }
+        return CommandView(
+            operationId = "operation-$id",
+            commandId = id,
+            idempotencyKey = UUID.randomUUID().toString(),
+            state = state,
+            submittedAt = 1,
+            updatedAt = 1,
+            sequence = sequence,
+            revision = if (state == CommandState.ACCEPTED || state.isTerminal) 4 else null,
+            completion = completion,
+        )
     }
 }

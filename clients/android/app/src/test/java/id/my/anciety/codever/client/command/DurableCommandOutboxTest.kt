@@ -64,9 +64,14 @@ class DurableCommandOutboxTest {
 
         val timedOut = fixture.outbox.markAcknowledgementTimedOut(receipt.commandId)!!
         assertEquals(CommandState.RECOVERY_REQUIRED, timedOut.state)
-        assertThrows(CommandBusyException::class.java) {
+        val busy = assertThrows(CommandBusyException::class.java) {
             fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "two"))
         }
+        assertEquals(receipt.commandId, busy.blockingCommandId)
+        assertEquals(
+            "Codever is restoring the previous queued action. Try again in a moment.",
+            busy.message,
+        )
 
         val recovered = fixture.outbox.claimRecovery(receipt.commandId)!!
         assertEquals(transmission.commandId, recovered.commandId)

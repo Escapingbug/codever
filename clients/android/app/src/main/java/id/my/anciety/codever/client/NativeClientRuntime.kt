@@ -164,6 +164,8 @@ class NativeClientRuntime(
     private val outbox = DurableCommandOutbox.encrypted(files.commands, cipher, deviceId)
     private val transfers = AttachmentTransferManager(files.transfers, matrix, cipher, now)
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
+    private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
+    private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val pendingHistory = linkedMapOf<String, PendingHistoryRequest>()
     private val gatewayHistory = linkedMapOf<String, GatewayHistoryCursor>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
@@ -423,7 +425,10 @@ class NativeClientRuntime(
 
     suspend fun recoverCommand(commandId: String): DurableReceipt = mutex.withLock {
         val current = outbox.get(commandId) ?: throw IllegalArgumentException("Command was not found.")
-        if (current.state == DurableState.RECOVERY_REQUIRED) transmit(commandId, recovery = true)
+        if (current.state == DurableState.RECOVERY_REQUIRED) {
+            cancelScheduledCommandRecovery(commandId, resetAttempts = false)
+            transmit(commandId, recovery = true)
+        }
         publicReceipt(outbox.get(commandId) ?: current)
     }
 
@@ -450,6 +455,7 @@ class NativeClientRuntime(
 
     fun releaseCommand(commandId: String): Boolean {
         ackTimeouts.remove(commandId)?.cancel()
+        cancelScheduledCommandRecovery(commandId)
         val released = outbox.release(commandId)
         if (released) refreshSnapshot(publishLifecycle = false)
         return released
@@ -486,8 +492,11 @@ class NativeClientRuntime(
         } else {
             matrix.stop(clearSession = false)
         }
-        ackTimeouts.values.forEach(Job::cancel)
-        ackTimeouts.clear()
+        ackTimeouts.keys.toList().forEach { commandId ->
+            ackTimeouts.remove(commandId)?.cancel()
+            outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
+        }
+        cancelAllCommandRecoveries()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         gatewayStateSynchronized = false
@@ -515,6 +524,8 @@ class NativeClientRuntime(
     suspend fun close() {
         matrix.setObserver(null)
         ackTimeouts.values.forEach(Job::cancel)
+        ackTimeouts.clear()
+        cancelAllCommandRecoveries()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         transfers.clear()
@@ -560,15 +571,99 @@ class NativeClientRuntime(
             )
         } catch (error: Exception) {
             outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
+            scheduleCommandRecovery(commandId)
             throw error
         }
         ackTimeouts.remove(commandId)?.cancel()
         ackTimeouts[commandId] = scope.launch {
             delay(COMMAND_ACK_TIMEOUT_MS)
             mutex.withLock {
-                outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
+                ackTimeouts.remove(commandId)
+                val timedOut = outbox.markAcknowledgementTimedOut(commandId)
+                timedOut?.let(::publishCommand)
+                if (timedOut?.state == DurableState.RECOVERY_REQUIRED) {
+                    diagnostics.record(
+                        "command.recovery.required",
+                        mapOf("action" to (outbox.operation(commandId)?.wireName ?: "unknown")),
+                    )
+                    scheduleCommandRecovery(commandId)
+                }
             }
         }
+    }
+
+    private fun schedulePendingCommandRecoveries(immediate: Boolean) {
+        recoverableCommandIds(outbox.list()).forEach { commandId ->
+            scheduleCommandRecovery(commandId, immediate)
+        }
+    }
+
+    private fun scheduleCommandRecovery(commandId: String, immediate: Boolean = false) {
+        synchronized(commandRecoveryJobs) {
+            if (commandRecoveryJobs[commandId]?.isActive == true) return
+            val completedAttempts = commandRecoveryAttempts[commandId] ?: 0
+            val retryDelayMs = if (immediate) 0L else commandRecoveryDelayMs(completedAttempts)
+            val job = scope.launch {
+                var retryAfterFailure = false
+                try {
+                    if (retryDelayMs > 0) delay(retryDelayMs)
+                    mutex.withLock {
+                        val command = outbox.get(commandId)
+                        if (command?.state != DurableState.RECOVERY_REQUIRED) return@withLock
+                        if (
+                            trust == null ||
+                            transportIdentity == null ||
+                            gatewayState == null ||
+                            !gatewayStateSynchronized
+                        ) {
+                            diagnostics.record(
+                                "command.recovery.waiting_for_connection",
+                                mapOf("action" to (outbox.operation(commandId)?.wireName ?: "unknown")),
+                            )
+                            return@withLock
+                        }
+                        commandRecoveryAttempts[commandId] = completedAttempts + 1
+                        diagnostics.record(
+                            "command.recovery.attempted",
+                            mapOf(
+                                "action" to (outbox.operation(commandId)?.wireName ?: "unknown"),
+                                "stage" to if (completedAttempts == 0) "initial" else "retry",
+                            ),
+                        )
+                        try {
+                            transmit(commandId, recovery = true)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            retryAfterFailure = true
+                            diagnostics.record(
+                                "command.recovery.failure",
+                                mapOf("error" to diagnosticErrorName(error)),
+                            )
+                        }
+                    }
+                } finally {
+                    val currentJob = coroutineContext[Job]
+                    if (currentJob != null) commandRecoveryJobs.remove(commandId, currentJob)
+                }
+                if (retryAfterFailure) scheduleCommandRecovery(commandId)
+            }
+            commandRecoveryJobs[commandId] = job
+        }
+    }
+
+    private fun cancelScheduledCommandRecovery(
+        commandId: String,
+        resetAttempts: Boolean = true,
+    ) {
+        commandRecoveryJobs.remove(commandId)?.cancel()
+        if (resetAttempts) commandRecoveryAttempts.remove(commandId)
+    }
+
+    private fun cancelAllCommandRecoveries() {
+        commandRecoveryJobs.values.forEach(Job::cancel)
+        commandRecoveryJobs.clear()
+        commandRecoveryAttempts.clear()
     }
 
     private fun signedCommandContent(transmission: CommandTransmission): JsonObject {
@@ -989,6 +1084,7 @@ class NativeClientRuntime(
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         diagnostics.record("gateway.state.response.accepted")
+        schedulePendingCommandRecoveries(immediate = true)
     }
 
     private fun acceptCommandAck(extension: JsonObject) {
@@ -997,6 +1093,7 @@ class NativeClientRuntime(
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
         if (outbox.recordAcknowledgement(commandId, sequence, revision)) {
             ackTimeouts.remove(commandId)?.cancel()
+            cancelScheduledCommandRecovery(commandId)
             outbox.get(commandId)?.let(::publishCommand)
         }
     }
@@ -1006,6 +1103,7 @@ class NativeClientRuntime(
         val expected = extension.long("expected_revision")?.takeIf { it >= 0 } ?: return
         val sequence = outbox.get(commandId)?.sequence ?: return
         ackTimeouts.remove(commandId)?.cancel()
+        cancelScheduledCommandRecovery(commandId)
         outbox.recordRevisionConflict(commandId, sequence, expected)?.let(::publishCommand)
     }
 
@@ -1046,6 +1144,7 @@ class NativeClientRuntime(
         )
         if (recorded) {
             ackTimeouts.remove(commandId)?.cancel()
+            cancelScheduledCommandRecovery(commandId)
             outbox.get(commandId)?.let(::publishCommand)
             runCatching {
                 operation?.let { completedOperation ->
@@ -1560,3 +1659,21 @@ internal fun gatewayStateRetryDelayMs(completedAttempts: Int): Long {
         else -> 60_000L
     }
 }
+
+internal fun commandRecoveryDelayMs(completedAttempts: Int): Long {
+    require(completedAttempts >= 0)
+    return when (completedAttempts) {
+        0 -> 5_000L
+        1 -> 15_000L
+        2 -> 30_000L
+        else -> 60_000L
+    }
+}
+
+internal fun recoverableCommandIds(commands: List<DurableView>): List<String> =
+    commands
+        .asSequence()
+        .filter { it.state == DurableState.RECOVERY_REQUIRED }
+        .sortedBy(DurableView::sequence)
+        .map(DurableView::commandId)
+        .toList()

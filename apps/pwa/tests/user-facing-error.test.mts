@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   GENERIC_ERROR_DETAIL,
   formatUserFacingError,
+  isCommandRecoveryPendingError,
 } from "../app/userFacingError.ts";
 
 test("turns native RPC and network failures into calm product copy", () => {
@@ -26,6 +27,23 @@ test("turns native RPC and network failures into calm product copy", () => {
     formatUserFacingError(new Error("HTTP 429: Too Many Requests")),
     "Too many requests. Wait a moment and try again.",
   );
+  assert.equal(
+    formatUserFacingError(
+      new Error(
+        "Command 8b9f21b8-760d-46af-bccc-414972433d38 must be acknowledged, recovered, or discarded first.",
+      ),
+    ),
+    "Codever is restoring your previous action. Try again in a moment.",
+  );
+  assert.equal(
+    isCommandRecoveryPendingError(
+      new Error(
+        "Command 8b9f21b8-760d-46af-bccc-414972433d38 must be acknowledged, recovered, or discarded first.",
+      ),
+    ),
+    true,
+  );
+  assert.equal(isCommandRecoveryPendingError(new Error("Gateway offline.")), false);
 });
 
 test("hides machine details while preserving short actionable copy", () => {

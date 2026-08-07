@@ -11,6 +11,7 @@ import id.my.anciety.codever.client.AttachmentHashMismatchException
 import id.my.anciety.codever.client.AttachmentTooLargeException
 import id.my.anciety.codever.client.AttachmentTransferNotFoundException
 import id.my.anciety.codever.client.command.CommandIdempotencyConflictException
+import id.my.anciety.codever.client.command.CommandBusyException
 import id.my.anciety.codever.client.command.CommandReceipt
 import id.my.anciety.codever.client.command.RevisionConflictAction
 import id.my.anciety.codever.client.events.ClientEvent
@@ -769,6 +770,15 @@ class BridgeDispatcher(
             request.id,
             BridgeError.IDEMPOTENCY_CONFLICT,
             error.message ?: "Command idempotency conflict.",
+        )
+    } catch (_: CommandBusyException) {
+        BridgeProtocol.failure(
+            request.id,
+            BridgeError.INVALID_STATE,
+            "Codever is restoring the previous queued action. Try again in a moment.",
+            retryable = true,
+            userAction = "retry",
+            retryAfterMs = 5_000,
         )
     } catch (error: UnknownSubscriptionException) {
         BridgeProtocol.failure(request.id, BridgeError.OPERATION_NOT_FOUND, error.message.orEmpty())

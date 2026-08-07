@@ -164,7 +164,11 @@ enum class RevisionConflictAction {
     DISCARD,
 }
 
-class CommandBusyException(message: String) : IllegalStateException(message)
+class CommandBusyException(
+    val blockingCommandId: String,
+) : IllegalStateException(
+    "Codever is restoring the previous queued action. Try again in a moment.",
+)
 
 class CommandIdempotencyConflictException(message: String) : IllegalArgumentException(message)
 
