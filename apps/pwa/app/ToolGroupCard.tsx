@@ -16,6 +16,9 @@ export function ToolGroupCard({
   time?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const detailsId = useMemo(
     () => `tool-group-${safeDomId(group.groupId)}`,
     [group.groupId],
@@ -23,9 +26,32 @@ export function ToolGroupCard({
   const summary = toolGroupSummary(group.tools);
   const latest = group.tools.at(-1);
 
+  async function copyDetails() {
+    const value =
+      group.tools.length === 1
+        ? [latest?.detail || latest?.title || latest?.name, latest?.result]
+            .filter(Boolean)
+            .join("\n")
+        : group.tools
+            .map((tool) =>
+              [tool.name, tool.detail || tool.title, tool.result]
+                .filter(Boolean)
+                .join("\n"),
+            )
+            .join("\n\n");
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1_600);
+  }
+
   return (
     <article
-      className={`tool-group-card ${summary.failed > 0 ? "has-error" : ""}`}
+      className={`tool-group-card category-${latest?.category ?? "unknown"} ${summary.failed > 0 ? "has-error" : ""}`}
     >
       <button
         type="button"
@@ -65,31 +91,42 @@ export function ToolGroupCard({
           role="region"
           aria-label="Tool call details"
         >
-          <ol>
-            {group.tools.map((tool) => (
-              <li key={tool.id} className={tool.isError ? "has-error" : ""}>
-                <span
-                  className={`tool-item-icon category-${tool.category}`}
-                  aria-hidden="true"
-                >
-                  {toolIcon(tool.category)}
-                </span>
-                <span className="tool-item-copy">
-                  <strong>{tool.name}</strong>
-                  {(tool.detail || tool.title !== tool.name) && (
-                    <code>{tool.detail || tool.title}</code>
-                  )}
-                  {tool.result && <small>{tool.result}</small>}
-                </span>
-                <ToolState
-                  phase={tool.phase}
-                  label={toolPhaseLabel(tool.phase)}
-                  compact
-                />
-              </li>
-            ))}
-          </ol>
-          {time && <time>{time}</time>}
+          {(group.tools.length > 1 || latest?.result) && (
+            <ol>
+              {group.tools.map((tool) => (
+                <li key={tool.id} className={tool.isError ? "has-error" : ""}>
+                  <span
+                    className={`tool-item-icon category-${tool.category}`}
+                    aria-hidden="true"
+                  >
+                    {toolIcon(tool.category)}
+                  </span>
+                  <span className="tool-item-copy">
+                    <strong>{tool.name}</strong>
+                    {(tool.detail || tool.title !== tool.name) && (
+                      <code>{tool.detail || tool.title}</code>
+                    )}
+                    {tool.result && <small>{tool.result}</small>}
+                  </span>
+                  <ToolState
+                    phase={tool.phase}
+                    label={toolPhaseLabel(tool.phase)}
+                    compact
+                  />
+                </li>
+              ))}
+            </ol>
+          )}
+          <footer className="tool-group-footer">
+            {time && <time>{time}</time>}
+            <button type="button" onClick={() => void copyDetails()}>
+              {copyState === "copied"
+                ? "Copied"
+                : copyState === "failed"
+                  ? "Copy failed"
+                  : "Copy details"}
+            </button>
+          </footer>
         </div>
       )}
     </article>

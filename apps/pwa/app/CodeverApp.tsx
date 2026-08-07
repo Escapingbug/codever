@@ -77,8 +77,10 @@ import {
 import {
   compareChatMessages,
   findOptimisticMessageId,
+  isAgentWorkMessage,
   isLegacyAgentStartupMessage,
   isTransientAgentLifecycleEvent,
+  legacyCommandText,
   mergeChatMessage,
   mergeChatMessages,
   type ChatMessage,
@@ -402,6 +404,7 @@ export function CodeverApp() {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [feedAwayFromLatest, setFeedAwayFromLatest] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -489,6 +492,7 @@ export function CodeverApp() {
     Record<string, "pending" | "submitting" | "approved" | "denied">
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const sessionSearchRef = useRef<HTMLInputElement>(null);
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
   const detailsPopoverRef = useRef<HTMLDivElement>(null);
@@ -1173,6 +1177,7 @@ export function CodeverApp() {
       prependScrollRef.current = null;
       feed.scrollTop =
         prepend.scrollTop + (feed.scrollHeight - prepend.scrollHeight);
+      setFeedAwayFromLatest(!isNearFeedBottom(feed));
       return;
     }
     if (followLatestRef.current) {
@@ -1180,12 +1185,11 @@ export function CodeverApp() {
         top: feed.scrollHeight,
         behavior: "auto",
       });
+      setFeedAwayFromLatest(false);
+    } else {
+      setFeedAwayFromLatest(!isNearFeedBottom(feed));
     }
   }, [messages, isStreaming]);
-
-  useEffect(() => {
-    followLatestRef.current = true;
-  }, [selected?.id]);
 
   useEffect(
     () => () => {
@@ -1603,6 +1607,7 @@ export function CodeverApp() {
     const feed = feedRef.current;
     if (!feed) return;
     followLatestRef.current = isNearFeedBottom(feed);
+    setFeedAwayFromLatest(!followLatestRef.current);
     if (
       feed.scrollTop <= 80 &&
       historyHasMore &&
@@ -1610,6 +1615,14 @@ export function CodeverApp() {
     ) {
       void loadOlderHistory();
     }
+  }
+
+  function scrollFeedToLatest() {
+    const feed = feedRef.current;
+    if (!feed) return;
+    followLatestRef.current = true;
+    feed.scrollTo({ top: feed.scrollHeight, behavior: "auto" });
+    setFeedAwayFromLatest(false);
   }
 
   function activateLocalSession(
@@ -1636,6 +1649,8 @@ export function CodeverApp() {
       }
     }
     if (!sessionChanged) return;
+    followLatestRef.current = true;
+    setFeedAwayFromLatest(false);
     setComposerOptionsOpen(false);
     historyGenerationRef.current += 1;
     historySessionIdRef.current = sessionId;
@@ -3516,6 +3531,50 @@ export function CodeverApp() {
     }
   }
 
+  function restoreFailedMessage(message: ChatMessage) {
+    const sessionId = message.sessionId ?? selectedSessionIdRef.current;
+    if (!sessionId || !message.text) return;
+    if (draft.trim()) {
+      showUiNotice(
+        "composer:retry",
+        "composer",
+        "warning",
+        "Your current draft is still here. Send or clear it before restoring the failed message.",
+      );
+      composerTextareaRef.current?.focus();
+      return;
+    }
+    setDraft(message.text);
+    optimisticMessagesRef.current.delete(message.id);
+    removeLiveMessage(sessionId, message.id);
+    setMessages((current) =>
+      current.filter((entry) => entry.id !== message.id),
+    );
+    if (historyScopeRef.current) {
+      void deleteMessageHistory(historyScopeRef.current, message.id).catch(
+        (error) => {
+          showUiNotice(
+            "history:update",
+            "history",
+            "warning",
+            `Conversation history could not be updated: ${formatUiError(error)}`,
+          );
+        },
+      );
+    }
+    if (message.attachments?.length) {
+      showUiNotice(
+        "composer:retry-attachments",
+        "attachment",
+        "warning",
+        "The message text was restored. Attach its files again before sending.",
+      );
+    } else {
+      recoverUiNotice("composer:retry");
+    }
+    window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+  }
+
   async function stopStreaming() {
     if (isStopping) return;
     const sessionId = selectedSessionIdRef.current;
@@ -4060,11 +4119,11 @@ export function CodeverApp() {
               {connectionStatus === "connected"
                 ? gatewayState
                   ? selectedArchived
-                    ? `${activeProvider} · archived`
-                    : `${activeProvider} · up to date${
-                        selected?.extensions.length
-                          ? ` · ${selected.extensions.map((item) => item.name).join(", ")}`
-                          : ""
+                    ? `${activeWorkspace?.projectName || "Project"} · archived`
+                    : `${activeWorkspace?.projectName || "Project"} · ${
+                        isStreaming
+                          ? agentActivity?.label || "working"
+                          : activeProvider
                       }`
                   : "Syncing conversations…"
                 : connectionPresentation.title}
@@ -4244,7 +4303,18 @@ export function CodeverApp() {
           {historyLoading && messages.length === 0 && (
             <div className="history-skeleton" aria-hidden="true" />
           )}
-          {messages.map((message) => {
+          {messages.map((message, messageIndex) => {
+            const agentWork = isAgentWorkMessage(message);
+            const previousIsAgentWork = isAgentWorkMessage(
+              messages[messageIndex - 1],
+            );
+            const nextIsAgentWork = isAgentWorkMessage(
+              messages[messageIndex + 1],
+            );
+            const agentTurnClass = agentWork
+              ? `${previousIsAgentWork ? "agent-turn-continuation" : "agent-turn-start"} ${nextIsAgentWork ? "" : "agent-turn-end"}`
+              : "";
+            const legacyCommand = legacyCommandText(message);
             if (message.kind === "notice") {
               return (
                 <div
@@ -4298,10 +4368,14 @@ export function CodeverApp() {
                       attachments={message.attachments}
                       connection={codeverClientRef.current}
                     />
-                    <time>
-                      {message.revision !== undefined
-                        ? `r${message.revision} · ${message.time ?? ""}`
-                        : message.time}{" "}
+                    <time
+                      title={
+                        message.revision !== undefined
+                          ? `Gateway revision ${message.revision}`
+                          : undefined
+                      }
+                    >
+                      {message.time}{" "}
                       {deliveryState && (
                         <span
                           className={`delivery-indicator ${deliveryState}`}
@@ -4321,7 +4395,37 @@ export function CodeverApp() {
                         </span>
                       )}
                     </time>
+                    {deliveryState === "failed" && (
+                      <button
+                        type="button"
+                        className="failed-message-retry"
+                        onClick={() => restoreFailedMessage(message)}
+                      >
+                        Edit and retry
+                      </button>
+                    )}
                   </div>
+                </div>
+              );
+            }
+            if (legacyCommand) {
+              const toolGroup = legacyToolGroupPresentation({
+                groupId: message.eventId ?? message.id,
+                name: "Command",
+                detail: legacyCommand,
+                category: "execute",
+                phase:
+                  !nextIsAgentWork && isStreaming ? "updated" : "completed",
+                timestamp: message.timestamp ?? Date.now(),
+              });
+              return (
+                <div
+                  className={`message-row tool-group-row legacy-command-row ${agentTurnClass} ${
+                    message.historical ? "" : "message-enter"
+                  }`}
+                  key={message.id}
+                >
+                  <ToolGroupCard group={toolGroup} time={message.time} />
                 </div>
               );
             }
@@ -4335,7 +4439,7 @@ export function CodeverApp() {
                 });
               return (
                 <div
-                  className={`message-row tool-group-row ${
+                  className={`message-row tool-group-row ${agentTurnClass} ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
@@ -4404,7 +4508,7 @@ export function CodeverApp() {
             }
             return (
               <div
-                className={`message-row agent-row ${
+                className={`message-row agent-row ${agentTurnClass} ${
                   message.historical ? "" : "message-enter"
                 }`}
                 key={message.id}
@@ -4464,6 +4568,15 @@ export function CodeverApp() {
         </div>
 
         <div className="composer-area">
+          {feedAwayFromLatest && (
+            <button
+              type="button"
+              className="jump-to-latest"
+              onClick={scrollFeedToLatest}
+            >
+              ↓ Latest messages
+            </button>
+          )}
           <div className="context-strip">
             <div className="context-item">
               <span className="context-icon">▱</span>
@@ -4552,6 +4665,7 @@ export function CodeverApp() {
             onSubmit={(event) => void sendMessage(event)}
           >
             <textarea
+              ref={composerTextareaRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}

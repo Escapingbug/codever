@@ -59,6 +59,20 @@ export type OptimisticMessageReference = {
   commandId?: string;
 };
 
+export function isAgentWorkMessage(
+  message: Pick<ChatMessage, "kind"> | undefined,
+): boolean {
+  return message?.kind === "agent" || message?.kind === "tool";
+}
+
+export function legacyCommandText(
+  message: Pick<ChatMessage, "kind" | "text">,
+): string | undefined {
+  if (message.kind !== "agent" || !message.text) return undefined;
+  const match = message.text.trim().match(/^(?:💻|🖥️?|🖥)\s*\$\s+([\s\S]+)$/u);
+  return match?.[1]?.trim() || undefined;
+}
+
 export function findOptimisticMessageId(
   references: Iterable<OptimisticMessageReference>,
   incoming: Pick<ChatMessage, "text" | "sessionId" | "commandId">,

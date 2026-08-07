@@ -77,6 +77,9 @@ export function legacyToolGroupPresentation(input: {
   timestamp: number;
   phase?: ToolPhase;
   isError?: boolean;
+  detail?: string;
+  result?: string;
+  category?: ToolCategory;
 }): ToolGroupPresentation {
   const name = boundedText(input.name) || "Agent tool";
   const phase = input.phase ?? "completed";
@@ -89,7 +92,9 @@ export function legacyToolGroupPresentation(input: {
         id: boundedText(input.groupId),
         name,
         title: name,
-        category: "unknown",
+        ...(input.detail ? { detail: boundedText(input.detail) } : {}),
+        ...(input.result ? { result: boundedText(input.result) } : {}),
+        category: input.category ?? "unknown",
         phase,
         isError: input.isError ?? phase === "failed",
         startedAt: input.timestamp,

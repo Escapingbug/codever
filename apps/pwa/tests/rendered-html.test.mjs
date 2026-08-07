@@ -290,17 +290,25 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
 
   assert.match(app, /<MarkdownContent content=\{message\.text \?\? ""\}/);
   assert.match(app, /<ToolGroupCard group=\{toolGroup\}/);
+  assert.match(app, /legacyCommandText\(message\)/);
+  assert.match(app, /className="failed-message-retry"/);
+  assert.match(app, /className="jump-to-latest"/);
   assert.doesNotMatch(app, /JSON\.stringify\(message\.raw/);
   assert.match(markdown, /remarkPlugins=\{\[remarkGfm\]\}/);
   assert.match(markdown, /skipHtml/);
   assert.match(markdown, /rel="noopener noreferrer"/);
+  assert.match(markdown, /MarkdownCodeBlock/);
+  assert.match(markdown, /navigator\.clipboard\.writeText/);
   assert.match(toolGroup, /aria-expanded=\{expanded\}/);
   assert.match(toolGroup, /group\.tools\.map/);
+  assert.match(toolGroup, /copyDetails/);
   assert.match(presentation, /const TOOL_LIMIT = 200/);
   assert.match(packageJson, /"react-markdown"/);
   assert.match(packageJson, /"remark-gfm"/);
   assert.match(styles, /\.markdown-content pre/);
   assert.match(styles, /\.tool-group-details/);
+  assert.match(styles, /\.agent-turn-continuation/);
+  assert.match(styles, /overflow-wrap: anywhere/);
 });
 
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {

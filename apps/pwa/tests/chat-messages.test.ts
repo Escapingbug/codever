@@ -2,9 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 const {
   findOptimisticMessageId,
+  isAgentWorkMessage,
+  legacyCommandText,
   mergeChatMessage,
   mergeChatMessages,
 } = await import(new URL("../app/chatMessages.ts", import.meta.url).href);
+
+test("recognizes legacy shell messages for the modern command presentation", () => {
+  assert.equal(
+    legacyCommandText({ kind: "agent", text: "💻 $ pnpm test\n--runInBand" }),
+    "pnpm test\n--runInBand",
+  );
+  assert.equal(legacyCommandText({ kind: "agent", text: "Final answer" }), undefined);
+  assert.equal(legacyCommandText({ kind: "user", text: "💻 $ pnpm test" }), undefined);
+  assert.equal(isAgentWorkMessage({ kind: "agent" }), true);
+  assert.equal(isAgentWorkMessage({ kind: "tool" }), true);
+  assert.equal(isAgentWorkMessage({ kind: "user" }), false);
+});
 
 test("authoritative user echo repairs clock-skewed optimistic ordering", () => {
   const optimistic = {
