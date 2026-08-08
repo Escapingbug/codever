@@ -2,6 +2,7 @@ package id.my.anciety.codever.client
 
 import id.my.anciety.codever.client.command.CommandCompletion
 import id.my.anciety.codever.client.command.CommandOutcome
+import id.my.anciety.codever.client.command.CommandOperation
 import id.my.anciety.codever.client.command.CommandState
 import id.my.anciety.codever.client.command.CommandView
 import java.util.UUID
@@ -48,6 +49,14 @@ class GatewayStateSyncPolicyTest {
         )
 
         assertEquals(listOf("earlier", "later"), recoverableCommandIds(commands))
+    }
+
+    @Test
+    fun `only session creation revision conflicts retry without review`() {
+        assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_CREATE))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.PROMPT))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_DELETE))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(null))
     }
 
     private fun command(id: String, sequence: Long, state: CommandState): CommandView {

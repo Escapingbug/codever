@@ -68,8 +68,11 @@ class DurableCommandOutboxTest {
             fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "two"))
         }
         assertEquals(receipt.commandId, busy.blockingCommandId)
+        assertEquals(CommandState.RECOVERY_REQUIRED, busy.blockingState)
+        assertEquals(CommandOperation.PROMPT, busy.blockingOperation)
+        assertNull(busy.expectedRevision)
         assertEquals(
-            "Codever is restoring the previous queued action. Try again in a moment.",
+            "Codever is restoring the previous queued action.",
             busy.message,
         )
 
@@ -170,6 +173,27 @@ class DurableCommandOutboxTest {
             ),
         )
         assertTrue(fixture.outbox.recordAcknowledgement(retried.commandId, retried.sequence, 10))
+    }
+
+    @Test
+    fun `revision conflict reports review metadata instead of temporary recovery`() {
+        val fixture = fixture()
+        val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.delete"))
+        fixture.outbox.claimForTransmission(receipt.commandId)
+        fixture.outbox.recordRevisionConflict(receipt.commandId, receipt.sequence, 9)
+
+        val busy = assertThrows(CommandBusyException::class.java) {
+            fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.create"))
+        }
+
+        assertEquals(receipt.commandId, busy.blockingCommandId)
+        assertEquals(CommandState.NEEDS_REVIEW, busy.blockingState)
+        assertEquals(CommandOperation.SESSION_DELETE, busy.blockingOperation)
+        assertEquals(9L, busy.expectedRevision)
+        assertEquals(
+            "The previous Codever action needs review before another action can start.",
+            busy.message,
+        )
     }
 
     @Test

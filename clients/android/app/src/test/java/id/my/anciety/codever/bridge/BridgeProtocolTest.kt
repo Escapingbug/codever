@@ -1,9 +1,11 @@
 package id.my.anciety.codever.bridge
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.runBlocking
 import id.my.anciety.codever.client.NativeClientRuntime
 import id.my.anciety.codever.client.events.ClientLifecycle
@@ -271,6 +273,31 @@ class BridgeProtocolTest {
         assertEquals("RATE_LIMITED", data.getValue("errorCode").jsonPrimitive.content)
         assertEquals(12_000, data.getValue("retryAfterMs").jsonPrimitive.int)
         assertFalse(response.toString().contains("single-use-secret"))
+    }
+
+    @Test
+    fun `command blocking details remain structured and bounded`() {
+        val response = json.parseToJsonElement(
+            BridgeProtocol.failure(
+                "command",
+                BridgeError.INVALID_STATE,
+                "The previous Codever action needs review before another action can start.",
+                details = buildJsonObject {
+                    put("kind", "command_blocked")
+                    put("commandId", "command-1")
+                    put("state", "needs_review")
+                    put("operation", "session.delete")
+                    put("expectedRevision", 9)
+                },
+            ),
+        ).jsonObject.getValue("error").jsonObject
+
+        val details = response.getValue("data").jsonObject.getValue("details").jsonObject
+        assertEquals("command_blocked", details.getValue("kind").jsonPrimitive.content)
+        assertEquals("command-1", details.getValue("commandId").jsonPrimitive.content)
+        assertEquals("needs_review", details.getValue("state").jsonPrimitive.content)
+        assertEquals("session.delete", details.getValue("operation").jsonPrimitive.content)
+        assertEquals(9, details.getValue("expectedRevision").jsonPrimitive.int)
     }
 
     private fun helloRequest(

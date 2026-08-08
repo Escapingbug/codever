@@ -134,12 +134,14 @@ import {
 } from "./nativeBackNavigation";
 import type {
   CodeverClient,
+  CodeverCommandReview,
   CodeverCommandSendResult,
   CodeverHistoryRecovery,
   CodeverMessage,
   CodeverNativeRuntimeInfo,
   CodeverPublicTrust,
 } from "./client/CodeverClient";
+import { CommandReviewRequiredError } from "./client/CodeverClient";
 import {
   NATIVE_MANAGED_ACCESS_TOKEN,
   bootstrapNativeMatrixSessionIfAvailable,
@@ -198,6 +200,10 @@ type RevisionConflictNotice = {
   expectedRevision: number;
   payload: CommandPayload;
   optimisticMessageId?: string;
+  busy: boolean;
+};
+
+type NativeCommandReviewNotice = CodeverCommandReview & {
   busy: boolean;
 };
 
@@ -454,6 +460,8 @@ export function CodeverApp() {
   const [, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
+  const [nativeCommandReview, setNativeCommandReview] =
+    useState<NativeCommandReviewNotice | null>(null);
   const [pairingPreview, setPairingPreview] =
     useState<PairingPreview | null>(null);
   const [trustedGateway, setTrustedGateway] =
@@ -525,6 +533,7 @@ export function CodeverApp() {
     ) => Promise<void>
   >(async () => {});
   const revisionConflictRef = useRef<RevisionConflictNotice | null>(null);
+  const nativeCommandReviewRef = useRef<NativeCommandReviewNotice | null>(null);
   const activePromptCommandsRef = useRef(new Map<string, string>());
   const completedCommandResultsRef = useRef(new Set<string>());
   const optimisticMessagesRef = useRef(
@@ -1851,9 +1860,11 @@ export function CodeverApp() {
     pendingPromptSessionIdsRef.current.clear();
     setSubmittingPromptSessionIds(new Set());
     revisionConflictRef.current = null;
+    nativeCommandReviewRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     setRevisionConflict(null);
+    setNativeCommandReview(null);
     setConnectionError(null);
     setConnectionDetail("Preparing your connection…");
     connectionStatusRef.current = "connecting";
@@ -2076,6 +2087,20 @@ export function CodeverApp() {
             );
           }
         },
+        onCommandReviewRequired(review) {
+          if (!isCurrentStartup()) return;
+          if (!review) {
+            nativeCommandReviewRef.current = null;
+            setNativeCommandReview(null);
+            return;
+          }
+          const notice: NativeCommandReviewNotice = {
+            ...review,
+            busy: false,
+          };
+          nativeCommandReviewRef.current = notice;
+          setNativeCommandReview(notice);
+        },
         onCommandResult(result) {
           if (!isCurrentStartup()) return;
           const promptSessionId =
@@ -2137,6 +2162,7 @@ export function CodeverApp() {
     pendingPromptSessionIdsRef.current.clear();
     setSubmittingPromptSessionIds(new Set());
     revisionConflictRef.current = null;
+    nativeCommandReviewRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     pendingCreatedSessionIdRef.current = null;
@@ -2150,6 +2176,7 @@ export function CodeverApp() {
     knownGatewaySessionIdsRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
+    setNativeCommandReview(null);
     matrixStartupRef.current = null;
     sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
     connectionStatusRef.current = "offline";
@@ -2639,6 +2666,16 @@ export function CodeverApp() {
       return result;
     } catch (error) {
       if (error instanceof CommandAcknowledgementTimeoutError) throw error;
+      if (error instanceof CommandReviewRequiredError) {
+        const review: NativeCommandReviewNotice = {
+          ...error.review,
+          busy: false,
+        };
+        nativeCommandReviewRef.current = review;
+        setNativeCommandReview(review);
+        recoverUiNotice(notice.key);
+        return null;
+      }
       if (isCommandRecoveryPendingError(error)) {
         showUiNotice(
           notice.key,
@@ -2918,6 +2955,77 @@ export function CodeverApp() {
       setRevisionConflict({ ...conflict, busy: false });
       showUiNotice(
         "composer:revision-discard",
+        "composer",
+        "error",
+        formatUiError(error),
+      );
+    }
+  }
+
+  async function retryNativeCommandReview() {
+    const review = nativeCommandReviewRef.current;
+    const connection = codeverClientRef.current;
+    if (!review || !connection || review.busy) return;
+    const busyReview = { ...review, busy: true };
+    nativeCommandReviewRef.current = busyReview;
+    setNativeCommandReview(busyReview);
+    try {
+      const sent = await connection.confirmRevisionRetry(review.commandId);
+      if (nativeCommandReviewRef.current?.commandId === review.commandId) {
+        nativeCommandReviewRef.current = null;
+        setNativeCommandReview(null);
+      }
+      void sent.completion
+        .then(() => connection.releaseCommand(sent.commandId))
+        .catch((error) => {
+          showUiNotice(
+            "command:review-retry",
+            "composer",
+            "warning",
+            `The retried action is still being reconciled: ${formatUiError(error)}`,
+          );
+        });
+    } catch (error) {
+      if (error instanceof CommandReviewRequiredError) {
+        const next: NativeCommandReviewNotice = {
+          ...error.review,
+          busy: false,
+        };
+        nativeCommandReviewRef.current = next;
+        setNativeCommandReview(next);
+        return;
+      }
+      const next = { ...review, busy: false };
+      nativeCommandReviewRef.current = next;
+      setNativeCommandReview(next);
+      showUiNotice(
+        "command:review-retry",
+        "composer",
+        "error",
+        formatUiError(error),
+      );
+    }
+  }
+
+  async function discardNativeCommandReview() {
+    const review = nativeCommandReviewRef.current;
+    const connection = codeverClientRef.current;
+    if (!review || !connection || review.busy) return;
+    const busyReview = { ...review, busy: true };
+    nativeCommandReviewRef.current = busyReview;
+    setNativeCommandReview(busyReview);
+    try {
+      await connection.discardRevisionConflict(review.commandId);
+      if (nativeCommandReviewRef.current?.commandId === review.commandId) {
+        nativeCommandReviewRef.current = null;
+        setNativeCommandReview(null);
+      }
+    } catch (error) {
+      const next = { ...review, busy: false };
+      nativeCommandReviewRef.current = next;
+      setNativeCommandReview(next);
+      showUiNotice(
+        "command:review-discard",
         "composer",
         "error",
         formatUiError(error),
@@ -4633,6 +4741,35 @@ export function CodeverApp() {
                   onClick={() => void confirmRevisionRetry()}
                 >
                   {revisionConflict.busy ? "Checking…" : "Review complete · send"}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {nativeCommandReview && (
+            <section className="revision-conflict-card" role="alert">
+              <div>
+                <strong>A previous action needs review</strong>
+                <p>
+                  Another device changed the Gateway before this action was
+                  accepted. Retry it against the latest state, or discard it
+                  before starting new work.
+                </p>
+              </div>
+              <div className="revision-conflict-actions">
+                <button
+                  type="button"
+                  disabled={nativeCommandReview.busy}
+                  onClick={() => void discardNativeCommandReview()}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  disabled={nativeCommandReview.busy}
+                  onClick={() => void retryNativeCommandReview()}
+                >
+                  {nativeCommandReview.busy ? "Retrying…" : "Retry previous action"}
                 </button>
               </div>
             </section>

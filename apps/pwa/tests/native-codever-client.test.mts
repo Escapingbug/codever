@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BridgeProtocolError,
   NATIVE_BRIDGE_LIMITS,
   type BridgeMethodParams,
   type CapabilityName,
@@ -17,6 +18,7 @@ import {
   acquireNativeRpcBridge,
   type NativeBridgePort,
 } from "../app/client/native/NativeRpcBridge.ts";
+import { CommandReviewRequiredError } from "../app/client/CodeverClient.ts";
 
 type Request = {
   jsonrpc: "2.0";
@@ -29,6 +31,10 @@ class RuntimePort implements NativeBridgePort {
   onmessage: NativeBridgePort["onmessage"] = null;
   readonly requests: Request[] = [];
 
+  constructor(
+    private readonly responder: (request: Request) => unknown = responseFor,
+  ) {}
+
   postMessage(message: string): void {
     const request = JSON.parse(message) as Request;
     this.requests.push(request);
@@ -40,10 +46,21 @@ class RuntimePort implements NativeBridgePort {
   }
 
   #respond(request: Request): void {
-    const result = responseFor(request);
-    this.onmessage?.({
-      data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }),
-    });
+    try {
+      const result = this.responder(request);
+      this.onmessage?.({
+        data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }),
+      });
+    } catch (error) {
+      if (!(error instanceof BridgeProtocolError)) throw error;
+      this.onmessage?.({
+        data: JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: error.toRpcError(),
+        }),
+      });
+    }
   }
 }
 
@@ -190,6 +207,231 @@ test("replays native state, sends a durable command, and acknowledges events", a
   const replacement = await acquireNativeRpcBridge(port);
   replacement.close();
 });
+
+test("follows an automatically rebased command by operation identity", async () => {
+  const port = new RuntimePort((request) => {
+    if (request.method !== "codever.command.send") return responseFor(request);
+    const params = request.params as BridgeMethodParams["codever.command.send"];
+    return {
+      operationId: "operation-rebased-1",
+      commandId: "command-original-1",
+      idempotencyKey: params.idempotencyKey,
+      state: "transmitting",
+      submittedAt: 1,
+      updatedAt: 1,
+      sequence: 2,
+    };
+  });
+  const client = await createTestClient(port);
+  const pending = client.send({ operation: "session.create" });
+  await nextTurn();
+  deliverCommand(port, {
+    operationId: "operation-rebased-1",
+    commandId: "command-rebased-1",
+    idempotencyKey: "00000000-0000-4000-8000-000000000002",
+    state: "accepted",
+    submittedAt: 1,
+    updatedAt: 3,
+    sequence: 2,
+    revision: 8,
+  }, "cursor-rebased-ack");
+
+  const sent = await pending;
+  assert.equal(sent.commandId, "command-rebased-1");
+  assert.equal(sent.revision, 8);
+  deliverCommand(port, {
+    operationId: "operation-rebased-1",
+    commandId: "command-rebased-1",
+    idempotencyKey: "00000000-0000-4000-8000-000000000002",
+    state: "succeeded",
+    submittedAt: 1,
+    updatedAt: 4,
+    sequence: 2,
+    revision: 8,
+    completion: {
+      commandId: "command-rebased-1",
+      sequence: 2,
+      revision: 8,
+      outcome: "succeeded",
+      sessionId: "session-created-1",
+    },
+  }, "cursor-rebased-result");
+  assert.equal((await sent.completion).sessionId, "session-created-1");
+  client.dispose();
+});
+
+test("waits for transient outbox recovery with one idempotency key", async () => {
+  let attempts = 0;
+  const port = new RuntimePort((request) => {
+    if (request.method !== "codever.command.send") return responseFor(request);
+    attempts += 1;
+    if (attempts === 1) {
+      throw new BridgeProtocolError(
+        "INVALID_STATE",
+        "Codever is restoring the previous queued action.",
+        {
+          retryable: true,
+          retryAfterMs: 1,
+          userAction: "retry",
+          details: {
+            kind: "command_blocked",
+            commandId: "command-blocking-1",
+            state: "recovery_required",
+            operation: "prompt",
+          },
+        },
+      );
+    }
+    const params = request.params as BridgeMethodParams["codever.command.send"];
+    return {
+      operationId: "operation-after-recovery-1",
+      commandId: "command-after-recovery-1",
+      idempotencyKey: params.idempotencyKey,
+      state: "accepted",
+      submittedAt: 2,
+      updatedAt: 2,
+      sequence: 3,
+      revision: 9,
+    };
+  });
+  const client = await createTestClient(port);
+  const sent = await client.send({ operation: "session.create" });
+  const sends = port.requests.filter((request) => request.method === "codever.command.send");
+  assert.equal(sends.length, 2);
+  assert.equal(
+    (sends[0]!.params as BridgeMethodParams["codever.command.send"]).idempotencyKey,
+    (sends[1]!.params as BridgeMethodParams["codever.command.send"]).idempotencyKey,
+  );
+  deliverCommand(port, {
+    operationId: sent.operationId,
+    commandId: sent.commandId,
+    idempotencyKey:
+      (sends[1]!.params as BridgeMethodParams["codever.command.send"]).idempotencyKey,
+    state: "succeeded",
+    submittedAt: 2,
+    updatedAt: 3,
+    sequence: sent.sequence,
+    revision: sent.revision,
+    completion: {
+      commandId: sent.commandId,
+      sequence: sent.sequence,
+      revision: sent.revision,
+      outcome: "succeeded",
+    },
+  }, "cursor-recovered-result");
+  await sent.completion;
+  client.dispose();
+});
+
+test("surfaces a review-required blocker immediately", async () => {
+  const reviews: string[] = [];
+  const port = new RuntimePort((request) => {
+    if (request.method !== "codever.command.send") return responseFor(request);
+    throw new BridgeProtocolError(
+      "INVALID_STATE",
+      "The previous Codever action needs review before another action can start.",
+      {
+        details: {
+          kind: "command_blocked",
+          commandId: "command-review-1",
+          state: "needs_review",
+          operation: "session.delete",
+          expectedRevision: 12,
+        },
+      },
+    );
+  });
+  const client = await createTestClient(port, (review) => {
+    if (review) reviews.push(`${review.commandId}:${review.expectedRevision}`);
+  });
+  await assert.rejects(
+    client.send({ operation: "session.create" }),
+    (error) => error instanceof CommandReviewRequiredError &&
+      error.review.commandId === "command-review-1" &&
+      error.review.expectedRevision === 12,
+  );
+  assert.deepEqual(reviews, ["command-review-1:12"]);
+  client.dispose();
+});
+
+test("clears a startup review after native safely resumes the operation", async () => {
+  const changes: Array<string | null> = [];
+  const port = new RuntimePort();
+  const client = await createTestClient(port, (review) => {
+    changes.push(review?.commandId ?? null);
+  });
+  const common = {
+    operationId: "operation-startup-review-1",
+    idempotencyKey: "00000000-0000-4000-8000-000000000004",
+    submittedAt: 1,
+    sequence: 4,
+  };
+  deliverCommand(port, {
+    ...common,
+    commandId: "command-startup-review-1",
+    state: "needs_review",
+    updatedAt: 2,
+  }, "cursor-startup-review");
+  deliverCommand(port, {
+    ...common,
+    commandId: "command-startup-rebased-1",
+    state: "queued",
+    updatedAt: 3,
+  }, "cursor-startup-rebased");
+  await nextTurn();
+  assert.deepEqual(changes, ["command-startup-review-1", null]);
+  client.dispose();
+});
+
+async function createTestClient(
+  port: RuntimePort,
+  onReview: (
+    review: { commandId: string; expectedRevision?: number } | null,
+  ) => void = () => {},
+): Promise<NativeBridgeClient> {
+  const bridge = await acquireNativeRpcBridge(port);
+  const hello = await bridge.hello({
+    webBuild: "test-build",
+    requiredCapabilities: [],
+    optionalCapabilities: [
+      ...REQUIRED_NATIVE_CAPABILITIES,
+      ...OPTIONAL_NATIVE_CAPABILITIES,
+    ].map((name) => ({ name, versions: [1] })),
+  });
+  const client = new NativeBridgeClient(bridge, hello, {
+    onMessage() {},
+    onStatus() {},
+    onCommandReviewRequired: onReview,
+  });
+  await client.ready;
+  return client;
+}
+
+function deliverCommand(
+  port: RuntimePort,
+  payload: Record<string, unknown>,
+  cursor: string,
+): void {
+  port.deliver({
+    jsonrpc: "2.0",
+    method: "codever.events.deliver",
+    params: {
+      subscriptionId: "subscription-1",
+      events: [{
+        schemaVersion: 1,
+        eventId: `event-${cursor}`,
+        cursor,
+        occurredAt: Date.now(),
+        type: "command.changed",
+        payload,
+      }],
+    },
+  });
+}
+
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function responseFor(request: Request): unknown {
   switch (request.method) {

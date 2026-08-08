@@ -166,6 +166,7 @@ class NativeClientRuntime(
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
+    private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
     private val pendingHistory = linkedMapOf<String, PendingHistoryRequest>()
     private val gatewayHistory = linkedMapOf<String, GatewayHistoryCursor>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
@@ -456,6 +457,7 @@ class NativeClientRuntime(
     fun releaseCommand(commandId: String): Boolean {
         ackTimeouts.remove(commandId)?.cancel()
         cancelScheduledCommandRecovery(commandId)
+        outbox.get(commandId)?.operationId?.let(automaticRevisionRetryAttempts::remove)
         val released = outbox.release(commandId)
         if (released) refreshSnapshot(publishLifecycle = false)
         return released
@@ -464,6 +466,7 @@ class NativeClientRuntime(
     suspend fun resolveConflict(commandId: String, action: RevisionConflictAction): DurableReceipt =
         mutex.withLock {
             val receipt = outbox.resolveRevisionConflict(commandId, action)
+            automaticRevisionRetryAttempts.remove(receipt.operationId)
             publishCommand(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
             if (action == RevisionConflictAction.RETRY) transmit(receipt.commandId, recovery = false)
             publicReceipt(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
@@ -497,6 +500,7 @@ class NativeClientRuntime(
             outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
         }
         cancelAllCommandRecoveries()
+        automaticRevisionRetryAttempts.clear()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         gatewayStateSynchronized = false
@@ -526,6 +530,7 @@ class NativeClientRuntime(
         ackTimeouts.values.forEach(Job::cancel)
         ackTimeouts.clear()
         cancelAllCommandRecoveries()
+        automaticRevisionRetryAttempts.clear()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         transfers.clear()
@@ -1068,7 +1073,7 @@ class NativeClientRuntime(
         }
     }
 
-    private fun acceptGatewayState(extension: JsonObject) {
+    private suspend fun acceptGatewayState(extension: JsonObject) {
         if (extension.toString().toByteArray(Charsets.UTF_8).size > MAX_BRIDGE_EVENT_PAYLOAD_BYTES) return
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
         val revisionEpoch = extension.string("revision_epoch") ?: return
@@ -1084,6 +1089,7 @@ class NativeClientRuntime(
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         diagnostics.record("gateway.state.response.accepted")
+        resumePendingSafeRevisionConflict()
         schedulePendingCommandRecoveries(immediate = true)
     }
 
@@ -1091,20 +1097,25 @@ class NativeClientRuntime(
         val commandId = extension.string("command_id") ?: return
         val sequence = extension.long("sequence")?.takeIf { it > 0 } ?: return
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
+        val operationId = outbox.get(commandId)?.operationId
         if (outbox.recordAcknowledgement(commandId, sequence, revision)) {
             ackTimeouts.remove(commandId)?.cancel()
             cancelScheduledCommandRecovery(commandId)
+            operationId?.let(automaticRevisionRetryAttempts::remove)
             outbox.get(commandId)?.let(::publishCommand)
         }
     }
 
-    private fun acceptRevisionConflict(extension: JsonObject) {
+    private suspend fun acceptRevisionConflict(extension: JsonObject) {
         val commandId = extension.string("command_id") ?: return
         val expected = extension.long("expected_revision")?.takeIf { it >= 0 } ?: return
         val sequence = outbox.get(commandId)?.sequence ?: return
         ackTimeouts.remove(commandId)?.cancel()
         cancelScheduledCommandRecovery(commandId)
-        outbox.recordRevisionConflict(commandId, sequence, expected)?.let(::publishCommand)
+        val conflicted = outbox.recordRevisionConflict(commandId, sequence, expected) ?: return
+        if (!retrySafeRevisionConflict(conflicted.commandId, "gateway")) {
+            publishCommand(conflicted)
+        }
     }
 
     private fun acceptCommandResult(event: MatrixDecryptedEvent, extension: JsonObject) {
@@ -1133,6 +1144,7 @@ class NativeClientRuntime(
         // A Web client may synchronously consume that event and release the
         // durable command before the completion callback runs.
         val operation = outbox.operation(commandId)
+        val operationId = outbox.get(commandId)?.operationId
         val recorded = outbox.recordCompletion(completion)
         diagnostics.record(
             "command.completion.received",
@@ -1145,9 +1157,20 @@ class NativeClientRuntime(
         if (recorded) {
             ackTimeouts.remove(commandId)?.cancel()
             cancelScheduledCommandRecovery(commandId)
+            operationId?.let(automaticRevisionRetryAttempts::remove)
             outbox.get(commandId)?.let(::publishCommand)
             runCatching {
                 operation?.let { completedOperation ->
+                    diagnostics.record(
+                        "gateway.state.refresh.scheduled",
+                        mapOf("action" to completedOperation.wireName),
+                    )
+                    // Command acknowledgements advance the durable revision,
+                    // but session summaries live in Gateway state. Refresh it
+                    // after every terminal command so the UI can consume a
+                    // newly-created session and the next device sees current
+                    // lifecycle state without waiting for reconnect.
+                    startGatewayStateSync(recoverTransport = false)
                     onCommandCompletion(completedOperation, completion)
                 }
             }.onFailure { error ->
@@ -1177,6 +1200,53 @@ class NativeClientRuntime(
                 refreshedSnapshot(),
             )
         }
+    }
+
+    private suspend fun resumePendingSafeRevisionConflict() {
+        val pending = outbox.list()
+            .asSequence()
+            .filter { it.state == DurableState.NEEDS_REVIEW }
+            .sortedBy { it.sequence }
+            .firstOrNull { shouldAutomaticallyRetryRevisionConflict(outbox.operation(it.commandId)) }
+            ?: return
+        retrySafeRevisionConflict(pending.commandId, "startup")
+    }
+
+    private suspend fun retrySafeRevisionConflict(commandId: String, stage: String): Boolean {
+        val current = outbox.get(commandId) ?: return false
+        val operation = outbox.operation(commandId)
+        if (!shouldAutomaticallyRetryRevisionConflict(operation)) return false
+        val completedAttempts = automaticRevisionRetryAttempts[current.operationId] ?: 0
+        if (completedAttempts >= MAX_AUTOMATIC_REVISION_RETRIES) {
+            diagnostics.record(
+                "command.revision_retry.exhausted",
+                mapOf("action" to (operation?.wireName ?: "unknown")),
+            )
+            return false
+        }
+        automaticRevisionRetryAttempts[current.operationId] = completedAttempts + 1
+        val receipt = outbox.resolveRevisionConflict(commandId, RevisionConflictAction.RETRY)
+        val rebased = outbox.get(receipt.commandId) ?: error("Rebased command disappeared.")
+        diagnostics.record(
+            "command.revision_retry.automatic",
+            mapOf(
+                "action" to (operation?.wireName ?: "unknown"),
+                "stage" to stage,
+                "attempt" to (completedAttempts + 1).toString(),
+            ),
+        )
+        publishCommand(rebased)
+        try {
+            transmit(rebased.commandId, recovery = false)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            diagnostics.record(
+                "command.revision_retry.failure",
+                mapOf("error" to diagnosticErrorName(error)),
+            )
+        }
+        return true
     }
 
     private suspend fun acceptHistoryPage(extension: JsonObject) {
@@ -1647,8 +1717,12 @@ class NativeClientRuntime(
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
         const val COMMAND_LIFETIME_MS = 5 * 60_000L
         const val COMMAND_ACK_TIMEOUT_MS = 30_000L
+        const val MAX_AUTOMATIC_REVISION_RETRIES = 3
     }
 }
+
+internal fun shouldAutomaticallyRetryRevisionConflict(operation: CommandOperation?): Boolean =
+    operation == CommandOperation.SESSION_CREATE
 
 internal fun gatewayStateRetryDelayMs(completedAttempts: Int): Long {
     require(completedAttempts >= 0)

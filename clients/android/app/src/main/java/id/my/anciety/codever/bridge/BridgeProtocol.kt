@@ -13,6 +13,7 @@ import id.my.anciety.codever.client.AttachmentTransferNotFoundException
 import id.my.anciety.codever.client.command.CommandIdempotencyConflictException
 import id.my.anciety.codever.client.command.CommandBusyException
 import id.my.anciety.codever.client.command.CommandReceipt
+import id.my.anciety.codever.client.command.CommandState
 import id.my.anciety.codever.client.command.RevisionConflictAction
 import id.my.anciety.codever.client.events.ClientEvent
 import id.my.anciety.codever.client.events.ClientEventListener
@@ -250,6 +251,7 @@ object BridgeProtocol {
         retryable: Boolean = false,
         userAction: String? = null,
         retryAfterMs: Long? = null,
+        details: JsonElement? = null,
     ): String = buildJsonObject {
         put("jsonrpc", "2.0")
         put("id", id?.let(::JsonPrimitive) ?: JsonNull)
@@ -261,6 +263,7 @@ object BridgeProtocol {
                 put("retryable", retryable)
                 userAction?.let { put("userAction", it) }
                 retryAfterMs?.let { put("retryAfterMs", it) }
+                details?.let { put("details", it) }
             })
         })
     }.toString()
@@ -771,14 +774,22 @@ class BridgeDispatcher(
             BridgeError.IDEMPOTENCY_CONFLICT,
             error.message ?: "Command idempotency conflict.",
         )
-    } catch (_: CommandBusyException) {
+    } catch (error: CommandBusyException) {
+        val needsReview = error.blockingState == CommandState.NEEDS_REVIEW
         BridgeProtocol.failure(
             request.id,
             BridgeError.INVALID_STATE,
-            "Codever is restoring the previous queued action. Try again in a moment.",
-            retryable = true,
-            userAction = "retry",
-            retryAfterMs = 5_000,
+            error.message.orEmpty(),
+            retryable = !needsReview,
+            userAction = if (needsReview) null else "retry",
+            retryAfterMs = if (needsReview) null else 5_000,
+            details = buildJsonObject {
+                put("kind", "command_blocked")
+                put("commandId", error.blockingCommandId)
+                put("state", error.blockingState.wireName)
+                put("operation", error.blockingOperation.wireName)
+                error.expectedRevision?.let { put("expectedRevision", it) }
+            },
         )
     } catch (error: UnknownSubscriptionException) {
         BridgeProtocol.failure(request.id, BridgeError.OPERATION_NOT_FOUND, error.message.orEmpty())

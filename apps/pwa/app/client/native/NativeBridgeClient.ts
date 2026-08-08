@@ -28,10 +28,12 @@ import {
 import type {
   CodeverClient,
   CodeverClientHandlers,
+  CodeverCommandReview,
   CodeverCommandSendResult,
   CodeverHistoryPage,
   CodeverPublicTrust,
 } from "../CodeverClient";
+import { CommandReviewRequiredError } from "../CodeverClient";
 import { NativeRpcBridge } from "./NativeRpcBridge";
 
 export const REQUIRED_NATIVE_CAPABILITIES = [
@@ -51,22 +53,29 @@ export const OPTIONAL_NATIVE_CAPABILITIES = ["matrix.login-token"] as const;
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
+const DEFAULT_BLOCKED_COMMAND_RETRY_WINDOW_MS = 2 * 60_000;
 const NATIVE_CURSOR_PREFIX = "codever.native.cursor.v1";
 
 type Acknowledgement = {
+  commandId: string;
   sequence: number;
   revision: number;
 };
 
 type AcknowledgementWaiter = {
+  commandId: string;
   sequence: number;
-  resolve(revision: number): void;
+  resolve(acknowledgement: Acknowledgement): void;
   reject(error: Error): void;
 };
 
 type CompletionWaiter = {
   resolve(value: CommandCompletion): void;
   reject(error: Error): void;
+};
+
+type BlockingCommand = CodeverCommandReview & {
+  state: "queued" | "transmitting" | "recovery_required" | "needs_review";
 };
 
 export type NativeBootstrapInput = Omit<
@@ -100,6 +109,8 @@ export class NativeBridgeClient implements CodeverClient {
   #detachEventListener: (() => void) | null = null;
   #eventChain: Promise<void> = Promise.resolve();
   readonly #historyBefore = new Map<string, string>();
+  readonly #commandOperations = new Map<string, string>();
+  readonly #reviewCommands = new Map<string, string>();
   readonly #acknowledgements = new Map<string, Acknowledgement>();
   readonly #acknowledgementWaiters = new Map<string, AcknowledgementWaiter>();
   readonly #completions = new Map<string, CommandCompletion>();
@@ -162,11 +173,8 @@ export class NativeBridgeClient implements CodeverClient {
 
   async send(payload: CommandPayload): Promise<CodeverCommandSendResult> {
     await this.ready;
-    const receipt = await this.bridge.request("codever.command.send", {
-      context: this.bridge.context(),
-      idempotencyKey: crypto.randomUUID(),
-      payload: { ...jsonObject(payload), operation: payload.operation },
-    });
+    const idempotencyKey = crypto.randomUUID();
+    const receipt = await this.#sendWhenOutboxAvailable(payload, idempotencyKey);
     return this.#sendResult(receipt);
   }
 
@@ -224,12 +232,13 @@ export class NativeBridgeClient implements CodeverClient {
 
   async discardRevisionConflict(commandId: string): Promise<void> {
     await this.ready;
-    await this.bridge.request("codever.command.resolveConflict", {
+    const receipt = await this.bridge.request("codever.command.resolveConflict", {
       context: this.bridge.context(),
       idempotencyKey: crypto.randomUUID(),
       commandId,
       action: "discard",
     });
+    await this.releaseCommand(receipt.commandId ?? commandId);
   }
 
   async uploadAttachment(file: File): Promise<CodeverAttachment> {
@@ -390,7 +399,17 @@ export class NativeBridgeClient implements CodeverClient {
       commandId,
     });
     this.#completions.delete(commandId);
-    this.#acknowledgements.delete(commandId);
+    const operationId = this.#commandOperations.get(commandId);
+    if (operationId) {
+      this.#acknowledgements.delete(operationId);
+      for (const [knownCommandId, knownOperationId] of this.#commandOperations) {
+        if (knownOperationId === operationId) {
+          this.#commandOperations.delete(knownCommandId);
+        }
+      }
+    } else {
+      this.#commandOperations.delete(commandId);
+    }
     this.#rejectCompletion(commandId, new CommandCompletionExpiredError(commandId));
   }
 
@@ -537,12 +556,28 @@ export class NativeBridgeClient implements CodeverClient {
   }
 
   #recordCommand(command: CommandView): void {
+    if (command.commandId) {
+      this.#commandOperations.set(command.commandId, command.operationId);
+    }
+    if (command.commandId && command.state === "needs_review") {
+      const review: CodeverCommandReview = { commandId: command.commandId };
+      this.#reviewCommands.set(command.operationId, command.commandId);
+      const waiter = this.#acknowledgementWaiters.get(command.operationId);
+      if (waiter) {
+        this.#acknowledgementWaiters.delete(command.operationId);
+        waiter.reject(new CommandReviewRequiredError(review));
+      }
+      this.handlers.onCommandReviewRequired?.(review);
+    } else if (this.#reviewCommands.delete(command.operationId)) {
+      this.handlers.onCommandReviewRequired?.(null);
+    }
     if (
       command.commandId &&
       command.sequence !== undefined &&
       command.revision !== undefined
     ) {
       this.#recordAcknowledgement(
+        command.operationId,
         command.commandId,
         command.sequence,
         command.revision,
@@ -569,6 +604,41 @@ export class NativeBridgeClient implements CodeverClient {
     waiters.forEach((waiter) => waiter.resolve(normalized));
   }
 
+  async #sendWhenOutboxAvailable(
+    payload: CommandPayload,
+    idempotencyKey: string,
+  ): Promise<CommandReceipt> {
+    const deadline = Date.now() + DEFAULT_BLOCKED_COMMAND_RETRY_WINDOW_MS;
+    while (true) {
+      try {
+        return await this.bridge.request("codever.command.send", {
+          context: this.bridge.context(),
+          idempotencyKey,
+          payload: { ...jsonObject(payload), operation: payload.operation },
+        });
+      } catch (error) {
+        const blocking = parseBlockingCommand(error);
+        if (!blocking) throw error;
+        if (blocking.state === "needs_review") {
+          this.handlers.onCommandReviewRequired?.(blocking);
+          throw new CommandReviewRequiredError(blocking);
+        }
+        if (
+          !(error instanceof BridgeProtocolError) ||
+          !error.data.retryable ||
+          Date.now() >= deadline
+        ) {
+          throw error;
+        }
+        const retryAfterMs = Math.max(
+          250,
+          Math.min(error.data.retryAfterMs ?? 1_000, 5_000),
+        );
+        await delay(retryAfterMs);
+      }
+    }
+  }
+
   async #sendResult(receipt: CommandReceipt): Promise<CodeverCommandSendResult> {
     if (!receipt.commandId || receipt.sequence === undefined) {
       throw new BridgeProtocolError(
@@ -578,63 +648,81 @@ export class NativeBridgeClient implements CodeverClient {
     }
     const commandId = receipt.commandId;
     const sequence = receipt.sequence;
-    const revision = receipt.revision ?? await this.#waitForAcknowledgement(
-      commandId,
-      sequence,
-    );
+    this.#commandOperations.set(commandId, receipt.operationId);
+    if (receipt.state === "needs_review") {
+      const review: CodeverCommandReview = { commandId };
+      this.#reviewCommands.set(receipt.operationId, commandId);
+      this.handlers.onCommandReviewRequired?.(review);
+      throw new CommandReviewRequiredError(review);
+    }
+    const acknowledgement = receipt.revision === undefined
+      ? await this.#waitForAcknowledgement(
+          receipt.operationId,
+          commandId,
+          sequence,
+        )
+      : { commandId, sequence, revision: receipt.revision };
     const completion = this.#waitForCompletion(
-      commandId,
+      acknowledgement.commandId,
       DEFAULT_COMMAND_TIMEOUT_MS,
-      () => new CommandCompletionExpiredError(commandId),
+      () => new CommandCompletionExpiredError(acknowledgement.commandId),
     );
     return {
       operationId: receipt.operationId,
-      commandId,
-      sequence,
-      revision,
+      commandId: acknowledgement.commandId,
+      sequence: acknowledgement.sequence,
+      revision: acknowledgement.revision,
       completion,
     };
   }
 
   #recordAcknowledgement(
+    operationId: string,
     commandId: string,
     sequence: number,
     revision: number,
   ): void {
-    const current = this.#acknowledgements.get(commandId);
+    this.#commandOperations.set(commandId, operationId);
+    const current = this.#acknowledgements.get(operationId);
     if (
       !current ||
       sequence > current.sequence ||
       (sequence === current.sequence && revision > current.revision)
     ) {
-      this.#acknowledgements.set(commandId, { sequence, revision });
+      this.#acknowledgements.set(operationId, { commandId, sequence, revision });
     }
-    const waiter = this.#acknowledgementWaiters.get(commandId);
+    const waiter = this.#acknowledgementWaiters.get(operationId);
     if (waiter?.sequence !== sequence) return;
-    this.#acknowledgementWaiters.delete(commandId);
-    waiter.resolve(revision);
+    this.#acknowledgementWaiters.delete(operationId);
+    waiter.resolve({ commandId, sequence, revision });
   }
 
   #waitForAcknowledgement(
+    operationId: string,
     commandId: string,
     sequence: number,
-  ): Promise<number> {
-    const acknowledged = this.#acknowledgements.get(commandId);
+  ): Promise<Acknowledgement> {
+    const acknowledged = this.#acknowledgements.get(operationId);
     if (acknowledged?.sequence === sequence) {
-      return Promise.resolve(acknowledged.revision);
+      return Promise.resolve(acknowledged);
     }
     return new Promise((resolve, reject) => {
-      const accept = (revision: number) => {
+      const accept = (acknowledgement: Acknowledgement) => {
         globalThis.clearTimeout(timeout);
-        resolve(revision);
+        resolve(acknowledgement);
       };
       const timeout = globalThis.setTimeout(() => {
-        if (this.#acknowledgementWaiters.get(commandId)?.resolve === accept) {
-          this.#acknowledgementWaiters.delete(commandId);
+        const current = this.#acknowledgementWaiters.get(operationId);
+        if (current?.resolve === accept) {
+          this.#acknowledgementWaiters.delete(operationId);
         }
-        reject(new CommandAcknowledgementTimeoutError(commandId, sequence));
+        reject(new CommandAcknowledgementTimeoutError(
+          current?.commandId ?? commandId,
+          sequence,
+        ));
       }, DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS);
-      this.#acknowledgementWaiters.set(commandId, {
+      this.#acknowledgementWaiters.set(operationId, {
+        commandId,
         sequence,
         resolve: accept,
         reject: (error) => {
@@ -870,4 +958,53 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parseBlockingCommand(error: unknown): BlockingCommand | null {
+  if (!(error instanceof BridgeProtocolError)) return null;
+  const details = error.data.details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null;
+  if (details.kind !== "command_blocked" || typeof details.commandId !== "string") {
+    return null;
+  }
+  if (
+    details.state !== "queued" &&
+    details.state !== "transmitting" &&
+    details.state !== "recovery_required" &&
+    details.state !== "needs_review"
+  ) {
+    return null;
+  }
+  const operation = parseCommandOperation(details.operation);
+  const expectedRevision = typeof details.expectedRevision === "number" &&
+      Number.isSafeInteger(details.expectedRevision) && details.expectedRevision >= 0
+    ? details.expectedRevision
+    : undefined;
+  return {
+    commandId: details.commandId,
+    state: details.state,
+    ...(operation === undefined ? {} : { operation }),
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+  };
+}
+
+function parseCommandOperation(input: unknown): CommandPayload["operation"] | undefined {
+  switch (input) {
+    case "session.create":
+    case "session.settings":
+    case "session.archive":
+    case "session.restore":
+    case "session.delete":
+    case "prompt":
+    case "cancel":
+    case "decision":
+    case "device.invite":
+      return input;
+    default:
+      return undefined;
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
 }

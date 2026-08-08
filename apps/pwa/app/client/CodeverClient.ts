@@ -41,6 +41,21 @@ export type CodeverHistoryRecovery = CodeverHistoryPage & {
   sessionId: string;
 };
 
+export type CodeverCommandReview = {
+  commandId: string;
+  operation?: CommandPayload["operation"];
+  expectedRevision?: number;
+};
+
+export class CommandReviewRequiredError extends Error {
+  constructor(readonly review: CodeverCommandReview) {
+    super(
+      "A previous action conflicts with newer Gateway state. Review or discard it before starting another action.",
+    );
+    this.name = "CommandReviewRequiredError";
+  }
+}
+
 export type CodeverClientHandlers = {
   onMessage(message: CodeverMessage): void;
   onStatus(status: MatrixConnectionStatus, detail?: string): void;
@@ -48,6 +63,7 @@ export type CodeverClientHandlers = {
   onTrustUpdated?(trust: CodeverPublicTrust | null): void;
   onCollaborationState?(state: CollaborationState): void;
   onCommandResult?(result: CommandCompletion): void;
+  onCommandReviewRequired?(review: CodeverCommandReview | null): void;
   onHistoryRecovered?(page: CodeverHistoryRecovery): void;
 };
 

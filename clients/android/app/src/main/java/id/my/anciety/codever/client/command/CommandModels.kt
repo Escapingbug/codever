@@ -166,8 +166,15 @@ enum class RevisionConflictAction {
 
 class CommandBusyException(
     val blockingCommandId: String,
+    val blockingState: CommandState,
+    val blockingOperation: CommandOperation,
+    val expectedRevision: Long?,
 ) : IllegalStateException(
-    "Codever is restoring the previous queued action. Try again in a moment.",
+    if (blockingState == CommandState.NEEDS_REVIEW) {
+        "The previous Codever action needs review before another action can start."
+    } else {
+        "Codever is restoring the previous queued action."
+    },
 )
 
 class CommandIdempotencyConflictException(message: String) : IllegalArgumentException(message)

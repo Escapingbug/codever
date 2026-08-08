@@ -86,7 +86,12 @@ class DurableCommandOutbox internal constructor(
             it.sequence > snapshot.lastAcknowledgedSequence && !it.state.isTerminal
         }
         if (blocking != null) {
-            throw CommandBusyException(blocking.commandId)
+            throw CommandBusyException(
+                blockingCommandId = blocking.commandId,
+                blockingState = blocking.state,
+                blockingOperation = CommandPayloadValidator.validate(blocking.payload).operation,
+                expectedRevision = blocking.expectedRevision,
+            )
         }
         require(snapshot.commands.size < MAX_ACTIVE_COMMANDS) {
             "Release completed commands before adding another command."
