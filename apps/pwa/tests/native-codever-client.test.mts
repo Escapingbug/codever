@@ -18,7 +18,10 @@ import {
   acquireNativeRpcBridge,
   type NativeBridgePort,
 } from "../app/client/native/NativeRpcBridge.ts";
-import { CommandReviewRequiredError } from "../app/client/CodeverClient.ts";
+import {
+  CommandReviewRequiredError,
+  type CodeverCommandReview,
+} from "../app/client/CodeverClient.ts";
 
 type Request = {
   jsonrpc: "2.0";
@@ -208,7 +211,7 @@ test("replays native state, sends a durable command, and acknowledges events", a
   replacement.close();
 });
 
-test("follows an automatically rebased command by operation identity", async () => {
+test("follows an automatically rebased session deletion by operation identity", async () => {
   const port = new RuntimePort((request) => {
     if (request.method !== "codever.command.send") return responseFor(request);
     const params = request.params as BridgeMethodParams["codever.command.send"];
@@ -223,7 +226,10 @@ test("follows an automatically rebased command by operation identity", async () 
     };
   });
   const client = await createTestClient(port);
-  const pending = client.send({ operation: "session.create" });
+  const pending = client.send({
+    operation: "session.delete",
+    sessionId: "session-delete-1",
+  });
   await nextTurn();
   deliverCommand(port, {
     operationId: "operation-rebased-1",
@@ -253,10 +259,10 @@ test("follows an automatically rebased command by operation identity", async () 
       sequence: 2,
       revision: 8,
       outcome: "succeeded",
-      sessionId: "session-created-1",
+      sessionId: "session-delete-1",
     },
   }, "cursor-rebased-result");
-  assert.equal((await sent.completion).sessionId, "session-created-1");
+  assert.equal((await sent.completion).sessionId, "session-delete-1");
   client.dispose();
 });
 
@@ -323,7 +329,7 @@ test("waits for transient outbox recovery with one idempotency key", async () =>
   client.dispose();
 });
 
-test("surfaces a review-required blocker immediately", async () => {
+test("surfaces a review-required blocker with its operation immediately", async () => {
   const reviews: string[] = [];
   const port = new RuntimePort((request) => {
     if (request.method !== "codever.command.send") return responseFor(request);
@@ -342,15 +348,20 @@ test("surfaces a review-required blocker immediately", async () => {
     );
   });
   const client = await createTestClient(port, (review) => {
-    if (review) reviews.push(`${review.commandId}:${review.expectedRevision}`);
+    if (review) {
+      reviews.push(
+        `${review.commandId}:${review.operation}:${review.expectedRevision}`,
+      );
+    }
   });
   await assert.rejects(
     client.send({ operation: "session.create" }),
     (error) => error instanceof CommandReviewRequiredError &&
       error.review.commandId === "command-review-1" &&
+      error.review.operation === "session.delete" &&
       error.review.expectedRevision === 12,
   );
-  assert.deepEqual(reviews, ["command-review-1:12"]);
+  assert.deepEqual(reviews, ["command-review-1:session.delete:12"]);
   client.dispose();
 });
 
@@ -385,9 +396,7 @@ test("clears a startup review after native safely resumes the operation", async 
 
 async function createTestClient(
   port: RuntimePort,
-  onReview: (
-    review: { commandId: string; expectedRevision?: number } | null,
-  ) => void = () => {},
+  onReview: (review: CodeverCommandReview | null) => void = () => {},
 ): Promise<NativeBridgeClient> {
   const bridge = await acquireNativeRpcBridge(port);
   const hello = await bridge.hello({

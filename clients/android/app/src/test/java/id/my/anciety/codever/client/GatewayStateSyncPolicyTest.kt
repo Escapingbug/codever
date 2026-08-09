@@ -52,10 +52,15 @@ class GatewayStateSyncPolicyTest {
     }
 
     @Test
-    fun `only session creation revision conflicts retry without review`() {
+    fun `desired-state session operations retry revision conflicts without review`() {
         assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_CREATE))
+        assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_ARCHIVE))
+        assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_RESTORE))
+        assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_DELETE))
         assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.PROMPT))
-        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_DELETE))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_SETTINGS))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.DECISION))
+        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.DEVICE_INVITE))
         assertEquals(false, shouldAutomaticallyRetryRevisionConflict(null))
     }
 

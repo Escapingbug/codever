@@ -980,6 +980,9 @@ export class MatrixGatewayRunner {
         runtime: RoomRuntime,
         sessionId: string,
     ): Promise<CommandExecutionResult> {
+        if (runtime.archivedSessions.has(sessionId)) {
+            return { sessionId }
+        }
         const appSession = this.requireAppSession(runtime, sessionId)
         this.updateAppSessionRecord(appSession)
         try {
@@ -1013,6 +1016,9 @@ export class MatrixGatewayRunner {
         runtime: RoomRuntime,
         sessionId: string,
     ): Promise<CommandExecutionResult> {
+        if (runtime.appSessions.has(sessionId)) {
+            return { sessionId }
+        }
         const record = this.requireArchivedSession(runtime, sessionId)
         const archivedAt = record.archivedAt
         const updatedAt = record.updatedAt
@@ -1045,7 +1051,10 @@ export class MatrixGatewayRunner {
     ): Promise<CommandExecutionResult> {
         const active = runtime.appSessions.get(sessionId)
         const archived = runtime.archivedSessions.get(sessionId)
-        if (!active && !archived) throw new Error(`Unknown app session ${sessionId}`)
+        // Deletion is a desired-state operation. A concurrent device may have
+        // removed the same immutable session id after this client captured its
+        // Gateway revision; replaying that intent must converge as success.
+        if (!active && !archived) return { sessionId }
         const record = active?.record ?? archived!
         if (active) {
             this.updateAppSessionRecord(active)

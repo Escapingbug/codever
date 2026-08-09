@@ -747,14 +747,23 @@ describe('MatrixGatewayRunner', () => {
             providerSessionId: 'provider-session-1',
         })
         expect(session.destroy).toHaveBeenCalledTimes(1)
+        await expect(execute(command('session.archive', 2))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
+        expect(session.destroy).toHaveBeenCalledTimes(1)
 
-        await expect(execute(command('session.restore', 2))).resolves.toEqual({
+        await expect(execute(command('session.restore', 3))).resolves.toEqual({
             sessionId: 'app-session-1',
         })
         expect(runtime.archivedSessions.size).toBe(0)
         expect(runtime.appSessions.get('app-session-1')?.record.archivedAt).toBeNull()
+        const restoredRuntime = runtime.appSessions.get('app-session-1')
+        await expect(execute(command('session.restore', 4))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
+        expect(runtime.appSessions.get('app-session-1')).toBe(restoredRuntime)
 
-        await expect(execute(command('session.delete', 3))).resolves.toEqual({
+        await expect(execute(command('session.delete', 5))).resolves.toEqual({
             sessionId: 'app-session-1',
         })
         expect(runtime.appSessions.size).toBe(0)
@@ -762,6 +771,11 @@ describe('MatrixGatewayRunner', () => {
         const runtimeStateStore = Reflect.get(runner, 'runtimeStateStore') as {
             getRoom(roomId: string): { appSessions: unknown[] }
         }
+        expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
+            .toEqual([])
+        await expect(execute(command('session.delete', 6))).resolves.toEqual({
+            sessionId: 'app-session-1',
+        })
         expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
             .toEqual([])
     })

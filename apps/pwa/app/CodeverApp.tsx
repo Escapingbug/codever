@@ -4749,11 +4749,9 @@ export function CodeverApp() {
           {nativeCommandReview && (
             <section className="revision-conflict-card" role="alert">
               <div>
-                <strong>A previous action needs review</strong>
+                <strong>{nativeCommandReviewTitle(nativeCommandReview.operation)}</strong>
                 <p>
-                  Another device changed the Gateway before this action was
-                  accepted. Retry it against the latest state, or discard it
-                  before starting new work.
+                  {nativeCommandReviewDescription(nativeCommandReview.operation)}
                 </p>
               </div>
               <div className="revision-conflict-actions">
@@ -5360,6 +5358,63 @@ function describeConflictedAction(payload: CommandPayload): string {
     case "device.invite":
       return "The device invitation request";
   }
+}
+
+function nativeCommandReviewTitle(
+  operation: CommandPayload["operation"] | undefined,
+): string {
+  switch (operation) {
+    case "session.delete":
+      return "Session deletion needs review";
+    case "session.archive":
+      return "Session archive needs review";
+    case "session.restore":
+      return "Session restore needs review";
+    case "session.create":
+      return "Session creation needs review";
+    case "prompt":
+      return "A previous prompt needs review";
+    case "decision":
+      return "A permission decision needs review";
+    case "session.settings":
+      return "A settings change needs review";
+    case "cancel":
+      return "A cancel action needs review";
+    case "device.invite":
+      return "A device invitation needs review";
+    default:
+      return "A previous action needs review";
+  }
+}
+
+function nativeCommandReviewDescription(
+  operation: CommandPayload["operation"] | undefined,
+): string {
+  const action = (() => {
+    switch (operation) {
+      case "session.delete":
+        return "session deletion";
+      case "session.archive":
+        return "session archive";
+      case "session.restore":
+        return "session restore";
+      case "session.create":
+        return "session creation";
+      case "prompt":
+        return "prompt";
+      case "decision":
+        return "permission decision";
+      case "session.settings":
+        return "settings change";
+      case "cancel":
+        return "cancel action";
+      case "device.invite":
+        return "device invitation";
+      default:
+        return "action";
+    }
+  })();
+  return `Another device changed the Gateway before this ${action} was accepted. Review the latest state, then retry it or discard it before starting new work.`;
 }
 
 function lifecyclePastTense(

@@ -1722,7 +1722,14 @@ class NativeClientRuntime(
 }
 
 internal fun shouldAutomaticallyRetryRevisionConflict(operation: CommandOperation?): Boolean =
-    operation == CommandOperation.SESSION_CREATE
+    when (operation) {
+        CommandOperation.SESSION_CREATE,
+        CommandOperation.SESSION_ARCHIVE,
+        CommandOperation.SESSION_RESTORE,
+        CommandOperation.SESSION_DELETE,
+        -> true
+        else -> false
+    }
 
 internal fun gatewayStateRetryDelayMs(completedAttempts: Int): Long {
     require(completedAttempts >= 0)

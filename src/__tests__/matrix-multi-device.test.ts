@@ -1844,9 +1844,18 @@ describe('multi-device Matrix collaboration', () => {
         const directory = await temporaryDirectory()
         const first = await generateDeviceKeyPair()
         const second = await generateDeviceKeyPair()
-        const policies = [
+        const policies: MatrixGatewayTrustedDevice[] = [
             trusted('device-a', 'Alice phone', first.publicJwk, 'MATRIX_A', 'certificate-a'),
-            trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B', 'certificate-b'),
+            {
+                ...trusted(
+                    'device-b',
+                    'Bob laptop',
+                    second.publicJwk,
+                    'MATRIX_B',
+                    'certificate-b',
+                ),
+                allowedOperations: ['prompt', 'session.delete'],
+            },
         ]
         const replayStore = new FileCommandReplayStore(join(directory, 'commands.jsonl'))
         const authorizer = new StrictMatrixCommandAuthorizer(
@@ -1871,7 +1880,14 @@ describe('multi-device Matrix collaboration', () => {
         expect(acceptedA).toMatchObject({ duplicate: false, revision: 1 })
 
         await expect(authorizer.authorizeDelivery(
-            await signedPrompt(second, 'device-b', 1, 0, 'runtime-epoch-1', 'certificate-b'),
+            await signedSessionDelete(
+                second,
+                'device-b',
+                1,
+                0,
+                'runtime-epoch-1',
+                'certificate-b',
+            ),
             context('device-b'),
             now,
         )).rejects.toMatchObject({
@@ -1881,7 +1897,14 @@ describe('multi-device Matrix collaboration', () => {
         })
 
         const acceptedB = await authorizer.authorizeDelivery(
-            await signedPrompt(second, 'device-b', 1, 1, 'runtime-epoch-1', 'certificate-b'),
+            await signedSessionDelete(
+                second,
+                'device-b',
+                1,
+                1,
+                'runtime-epoch-1',
+                'certificate-b',
+            ),
             context('device-b'),
             now,
         )
@@ -2071,6 +2094,37 @@ async function signedPrompt(
             operation: 'prompt',
             sessionId: 'app-session-1',
             text: `hello from ${deviceId}`,
+        },
+    }
+    return signCommand(command, keys.privateKey, keys.keyId)
+}
+
+async function signedSessionDelete(
+    keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    deviceId: string,
+    sequence: number,
+    baseRevision: number,
+    revisionEpoch = 'runtime-epoch-1',
+    sequenceEpoch = `certificate-${deviceId}`,
+) {
+    const command: CodeverCommand = {
+        kind: 'codever.command',
+        version: 1,
+        commandId: `${deviceId}-delete-${sequence}-${baseRevision}`,
+        gatewayId: 'gateway-1',
+        deviceId,
+        sequenceEpoch,
+        conversationId: 'conversation-1',
+        revisionEpoch,
+        sequence,
+        baseRevision,
+        operation: 'session.delete',
+        issuedAt: now,
+        expiresAt: now + 60_000,
+        nonce: `0123456789abcdef-${deviceId}-delete-${baseRevision}`,
+        payload: {
+            operation: 'session.delete',
+            sessionId: 'app-session-1',
         },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
