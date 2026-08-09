@@ -167,6 +167,89 @@ describe('native session lifecycle revision recovery', () => {
 
         client.dispose()
     })
+
+    it('recovers a command whose acknowledgement and result were both missed exactly once', async () => {
+        const directory = await temporaryDirectory()
+        const native = await generateDeviceKeyPair()
+        const policy = trustedDevice(
+            'native-device-1',
+            native.publicJwk,
+            ['prompt'],
+        )
+        const ledgerPath = join(directory, 'restart-commands.jsonl')
+        const firstStore = new FileCommandReplayStore(ledgerPath)
+        const firstGateway = new StrictMatrixCommandAuthorizer(
+            'gateway-1',
+            [policy],
+            firstStore,
+        )
+        await firstGateway.initialize(now)
+        const original = await signedCommand(native, {
+            deviceId: 'native-device-1',
+            commandId: 'native-exactly-once-1',
+            sequence: 1,
+            baseRevision: 0,
+            payload: {
+                operation: 'prompt',
+                sessionId: 'existing-session',
+                text: 'execute only once',
+            },
+        })
+        const accepted = await firstGateway.authorizeDelivery(
+            original,
+            commandContext('native-device-1'),
+            now,
+        )
+        expect(accepted).toMatchObject({ duplicate: false, revision: 1 })
+        await firstStore.recordCommandResult(accepted.command, {
+            revision: 1,
+            outcome: 'succeeded',
+            sessionId: 'existing-session',
+            result: { text: 'terminal result persisted before transport loss' },
+        }, 'certificate-native-device-1')
+
+        // Both the APK and Gateway may restart before the acknowledgement or
+        // result reaches the WebView. Resending the exact signed command must
+        // replay its stored terminal result instead of invoking the agent.
+        const restartedStore = new FileCommandReplayStore(ledgerPath)
+        const restartedGateway = new StrictMatrixCommandAuthorizer(
+            'gateway-1',
+            [policy],
+            restartedStore,
+        )
+        await restartedGateway.initialize(now + 1)
+        await expect(restartedGateway.authorizeDelivery(
+            original,
+            commandContext('native-device-1'),
+            now + 1,
+        )).resolves.toMatchObject({ duplicate: true, revision: 1 })
+        await expect(restartedStore.getCommandResult(
+            original.command,
+            'certificate-native-device-1',
+        )).resolves.toEqual({
+            revision: 1,
+            outcome: 'succeeded',
+            sessionId: 'existing-session',
+            result: { text: 'terminal result persisted before transport loss' },
+        })
+
+        const next = await signedCommand(native, {
+            deviceId: 'native-device-1',
+            commandId: 'native-exactly-once-2',
+            sequence: 2,
+            baseRevision: 1,
+            payload: {
+                operation: 'prompt',
+                sessionId: 'existing-session',
+                text: 'next command remains available',
+            },
+        })
+        await expect(restartedGateway.authorizeDelivery(
+            next,
+            commandContext('native-device-1'),
+            now + 1,
+        )).resolves.toMatchObject({ duplicate: false, revision: 2 })
+    })
 })
 
 type RpcRequest = {
