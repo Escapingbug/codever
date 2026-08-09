@@ -132,11 +132,29 @@ event persistence/replay, encrypted transfers, Matrix login/runtime recovery,
 and lifecycle policy. The PWA has separate bridge selection, conformance, and
 online-update tests.
 
+For a paired debug APK on an emulator, the live device E2E drives the real
+WebView through its debug protocol and the Android lifecycle through ADB. It
+cold-starts online and offline, verifies cached conversations and history,
+restores the native Matrix connection, and runs two complete
+create/archive/restore/delete cycles. It creates uniquely named disposable
+projects and only deletes sessions created by that run. Lifecycle operations
+remain correctness failures after 90 seconds and are also reported as latency
+warnings when they exceed 20 seconds. The opt-in guard keeps it out of normal
+test runs:
+
+```sh
+CODEVER_ANDROID_LIVE_E2E=1 pnpm test:e2e:android-live
+```
+
+The command requires exactly one connected emulator by default. Set
+`CODEVER_ANDROID_SERIAL` when several devices are attached. Physical-device
+mutation is rejected unless `CODEVER_ANDROID_ALLOW_PHYSICAL=1` is also set
+after explicit approval.
+
 ## Remaining release work
 
-- Run a live Matrix/E2EE smoke test on an arm64 Android 12+ device, including
-  screen lock, Activity removal, network switching, process death, reboot,
-  remote command completion, and device revocation.
+- Complete the remaining physical-device Matrix/E2EE release checks: screen
+  lock, reboot, device revocation, and prolonged OEM background restrictions.
 - Make attachment transfer metadata process-durable. Current temporary chunks
   are encrypted, but an interrupted process discards orphan transfer state and
   the UI must restart that transfer.

@@ -18,6 +18,7 @@
     "test:rewrite": "pnpm --recursive --if-present test",
     "test:unit": "vitest run",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:e2e:android-live": "tsx scripts/android-live-e2e.ts",
     "test:matrix-live": "tsx scripts/matrix-live-smoke.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.gateway-scripts.json",
     "typecheck:rewrite": "pnpm --recursive --if-present typecheck"
