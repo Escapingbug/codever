@@ -142,11 +142,6 @@ class NativeClientRuntime(
     private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
     private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId)
-    private val historyCheckpoints = AtomicEncryptedGatewayHistoryCheckpointStore(
-        files.historyCheckpoints,
-        cipher,
-        deviceId,
-    )
     private val timelineKeys = AtomicEncryptedTimelineKeyStore(
         files.timelineKeys,
         cipher,
@@ -491,7 +486,6 @@ class NativeClientRuntime(
         if (revoke) {
             trustStore.clear()
             replayStore.clear()
-            historyCheckpoints.clear()
             timelineKeys.clear()
             outbox.clear()
             transfers.clear()
@@ -1040,7 +1034,6 @@ class NativeClientRuntime(
             "timeline_key_ring_grant" -> acceptTimelineKeyRing(extension)
             "session_root", "session_update", "session_lifecycle", "gateway_checkpoint" ->
                 nativeProjection.apply(extension)?.let { acceptGatewayState(it) }
-            "gateway_state" -> acceptGatewayState(extension)
             "command_ack" -> acceptCommandAck(extension)
             "revision_conflict" -> acceptRevisionConflict(extension)
             "command_result" -> acceptCommandResult(event, extension)

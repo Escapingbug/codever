@@ -15,7 +15,6 @@ import {
   waitForMatrixSyncStoreClose,
 } from "../app/matrixSyncStore.ts";
 import {
-  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
   createGatewayStateCacheRecord,
   gatewayProjectKey,
@@ -373,25 +372,6 @@ test("offline E3 before delayed E2 rejects the lower generation", () => {
   assert.equal(
     classifyGatewayStateEpoch("epoch-3", 3, [], "forged-epoch", 3),
     "conflict",
-  );
-});
-
-test("legacy cert-scoped state can migrate to a rotated epoch only with a newer state version", () => {
-  assert.equal(
-    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-1", 7),
-    true,
-  );
-  assert.equal(
-    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 8),
-    true,
-  );
-  assert.equal(
-    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 7),
-    false,
-  );
-  assert.equal(
-    canMigrateLegacyGatewayState("epoch-1", 7, "epoch-2", 6),
-    false,
   );
 });
 

@@ -81,9 +81,8 @@ that is installed into one room-level runtime when selected:
 - selecting a conversation is PWA-local view state. It changes which history
   is displayed and never sends a Gateway mutation or suspends another session.
 
-The Gateway intentionally has no mutable “current app session”. Legacy
-authoritative-state fields are emitted only as `current_session_id: null` and
-`can_select_session: false` during protocol migration.
+The Gateway intentionally has no mutable “current app session”. Session
+selection is client-local and is projected from Matrix thread identity.
 
 Sensitive business data must not be written to unencrypted Matrix state:
 
@@ -125,8 +124,8 @@ display data from encrypted Codever events.
    serial and lower priority. A recipient
    watchdog bounds only the caller's wait: the raw transport promise remains
    in-flight until it really settles, so a timeout cannot submit the same stable
-   Matrix transaction twice. Queued replacements and Gateway/status snapshots
-   use last-write-wins coalescing and leave a durable `superseded` tombstone.
+   Matrix transaction twice. Queued replacements and status updates use
+   last-write-wins coalescing and leave a durable `superseded` tombstone.
 9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
    device-list changes can therefore be caught up before a Gateway-signed
    transport rotation is pinned; the sync checkpoint itself grants no trust.
@@ -136,8 +135,8 @@ display data from encrypted Codever events.
 10. Late-joining devices receive retained room-key epochs in the next event
     addressed to them, then restore roots and transcripts with Matrix
     `/threads`, `/sync`, and backward timeline pagination. History reads create
-    no Gateway event and consume no command sequence or revision. Version-1
-    state/history handlers remain only as rolling-upgrade compatibility.
+    no Gateway event and consume no command sequence or revision. The
+    pre-release state/history RPC handlers have been removed.
 
 The normative details are in
 [`matrix-native-conversation-protocol.md`](matrix-native-conversation-protocol.md).

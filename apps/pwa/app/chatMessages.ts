@@ -275,7 +275,7 @@ function mergeLogicalCopies(
     mergedOperationIds: mergeOperationIds(existing, message),
     timestamp: timelineCopy.timestamp ?? existing.timestamp ?? message.timestamp,
     time: timelineCopy.time ?? existing.time ?? message.time,
-    raw: preferredTimelineRaw(timelineCopy, preferred),
+    raw: preferred.raw,
     historical: Boolean(existing.historical && message.historical),
   };
   return next;
@@ -294,30 +294,8 @@ function preferredTimelineCopy(
 }
 
 function timelineAuthorityRank(message: ChatMessage): number {
-  if (isGatewayHistoryCopy(message)) return 2;
   if (message.eventId) return 1;
   return 0;
-}
-
-function isGatewayHistoryCopy(message: ChatMessage): boolean {
-  const marker = message.raw?.history_replay;
-  return Boolean(
-    marker &&
-      typeof marker === "object" &&
-      !Array.isArray(marker) &&
-      (marker as Record<string, unknown>).display_only === true,
-  );
-}
-
-function preferredTimelineRaw(
-  timelineCopy: ChatMessage,
-  contentCopy: ChatMessage,
-): Record<string, unknown> | undefined {
-  if (!isGatewayHistoryCopy(timelineCopy)) return contentCopy.raw;
-  return {
-    ...(contentCopy.raw ?? {}),
-    ...(timelineCopy.raw ?? {}),
-  };
 }
 
 function preferredLogicalCopy(

@@ -3,8 +3,6 @@ import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
-    gatewayStateRequestSchema,
-    historyRequestSchema,
     type CodeverCommand,
     type JsonValue,
     type SessionExtensionBinding,
@@ -412,88 +410,6 @@ export class MatrixGatewayRunner {
         const extension = asRecord(
             (opened?.content ?? event.content)[CODEVER_MATRIX_EXTENSION],
         )
-        if (extension?.version === 1 && extension.kind === 'gateway_state_request') {
-            if (!opened || !this.secureContent) {
-                throw new Error('Gateway state recovery requires an authenticated application envelope')
-            }
-            const request = gatewayStateRequestSchema.parse(extension.gateway_state_request)
-            const now = this.now()
-            if (request.expiresAt <= now || request.issuedAt > now + 30_000) {
-                throw new Error('Gateway state request is outside its validity window')
-            }
-            if (
-                request.gatewayId !== this.config.gatewayId
-                || request.conversationId !== runtime.config.conversationId
-                || request.deviceId !== opened.authenticatedDeviceId
-            ) {
-                throw new Error('Gateway state request route does not match its secure envelope')
-            }
-            if (
-                this.dependencies.isTrustedDeviceActive
-                && !(await this.dependencies.isTrustedDeviceActive(request.deviceId))
-            ) {
-                throw new Error(`Codever device ${request.deviceId} has been revoked`)
-            }
-            const task = this.gatewayStateSnapshot(runtime)
-                .then(state => this.secureContent!.sendGatewayStateToDevice(
-                    runtime.config,
-                    opened.authenticatedDeviceId,
-                    state,
-                    request.requestId,
-                    this.client,
-                ))
-                .then(() => undefined)
-                .catch(error => {
-                    this.dependencies.onRejected?.(event, error)
-                    this.log(
-                        `[matrix-gateway] state recovery ${request.requestId} failed: `
-                        + formatError(error),
-                    )
-                })
-                .finally(() => this.executionTasks.delete(task))
-            this.executionTasks.add(task)
-            return
-        }
-        if (extension?.version === 1 && extension.kind === 'history_request') {
-            if (!opened || !this.secureContent) {
-                throw new Error('History recovery requires an authenticated application envelope')
-            }
-            const request = historyRequestSchema.parse(extension.history_request)
-            const now = this.now()
-            if (request.expiresAt <= now || request.issuedAt > now + 30_000) {
-                throw new Error('History recovery request is outside its validity window')
-            }
-            if (
-                request.gatewayId !== this.config.gatewayId
-                || request.conversationId !== runtime.config.conversationId
-                || request.deviceId !== opened.authenticatedDeviceId
-            ) {
-                throw new Error('History recovery request route does not match its secure envelope')
-            }
-            if (
-                this.dependencies.isTrustedDeviceActive
-                && !(await this.dependencies.isTrustedDeviceActive(request.deviceId))
-            ) {
-                throw new Error(`Codever device ${request.deviceId} has been revoked`)
-            }
-            const task = this.secureContent.sendHistoryPage(
-                runtime.config,
-                opened.authenticatedDeviceId,
-                request,
-                this.client,
-            )
-                .then(() => undefined)
-                .catch(error => {
-                    this.dependencies.onRejected?.(event, error)
-                    this.log(
-                        `[matrix-gateway] history recovery ${request.requestId} failed: `
-                        + formatError(error),
-                    )
-                })
-                .finally(() => this.executionTasks.delete(task))
-            this.executionTasks.add(task)
-            return
-        }
         if (!extension || extension.version !== 1 || extension.kind !== 'signed_command') return
         if (opened) this.authorizer.trustDevice(opened.trustedDevice)
         const signedCommand = asRecord(extension.signed_command)

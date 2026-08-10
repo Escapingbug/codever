@@ -1,5 +1,4 @@
 import {
-    encryptMedia,
     base64UrlEncode,
     importDeviceKeyPair,
     openSecureEnvelope,
@@ -7,28 +6,22 @@ import {
     sealSecureEnvelopeBundle,
     sealSecureEnvelope,
     sealMatrixTimelineEnvelope,
-    sha256,
     type DeviceKeyPair,
 } from '@codever/security'
 import { createHash, randomUUID } from 'node:crypto'
 import { FileReplayStore } from '@codever/security/node'
 import {
-    MAX_HISTORY_PAGE_BYTES,
-    MAX_INLINE_HISTORY_PAGE_BYTES,
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     MATRIX_NATIVE_PROTOCOL_VERSION,
     canonicalJsonBytes,
     matrixNativeContentSchema,
     type MatrixNativeContent,
     type MatrixTimelineKeyRingGrant,
-    type HistoryPage,
-    type HistoryRequest,
     type CodeverAttachment,
     type JsonValue,
     type SessionExtensionDescriptor,
     type SessionExtensionSummary,
     type SignedSecureEnvelope,
-    type SignedSecureEnvelopeBundle,
 } from '@codever/protocol'
 import {
     CODEVER_MATRIX_EXTENSION,
@@ -52,7 +45,6 @@ import {
     type DurableMatrixBundleDelivery,
     type DurableMatrixBundleRecipient,
     type DurableMatrixDelivery,
-    type MatrixHistoryDeliveryPage,
 } from './fileDeliveryOutbox'
 import { FileTimelineKeyStore, type TimelineKeyRing } from './fileTimelineKeyStore'
 
@@ -68,7 +60,7 @@ const DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS = 25_000
 const MAX_MATRIX_NORMAL_IN_FLIGHT = 2
 const MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES = 40 * 1024
 
-type MatrixDeliveryPriority = 'control' | 'history' | 'normal' | 'recovery'
+type MatrixDeliveryPriority = 'control' | 'normal' | 'recovery'
 
 export interface GatewayStateSnapshot {
     revision: number
@@ -388,230 +380,8 @@ export class GatewaySecureContentLayer {
         }, commandDeliveryTransactionId('result', commandId, outcome), transport)
     }
 
-    async sendGatewayState(
-        room: MatrixGatewayRoomConfig,
-        state: GatewayStateSnapshot,
-        transport: MatrixTransport,
-    ): Promise<MatrixSendEventResult> {
-        const extension = gatewayStateExtension(state)
-        return this.sealOutgoingToAll({
-            roomId: room.roomId,
-            eventType: 'm.room.message',
-            // A state sync is an explicit new snapshot even when the command
-            // revision is unchanged (for example, after device pairing).
-            transactionId: `codever.gateway.state.${state.revision}.${randomUUID()}`,
-            content: {
-                msgtype: 'm.notice',
-                body: 'Encrypted Codever gateway state',
-                [CODEVER_MATRIX_EXTENSION]: extension,
-            },
-        }, room, transport)
-    }
-
-    async sendGatewayStateToDevice(
-        room: MatrixGatewayRoomConfig,
-        deviceId: string,
-        state: GatewayStateSnapshot,
-        requestId: string,
-        transport: MatrixTransport,
-    ): Promise<MatrixSendEventResult> {
-        return this.sendToDevice(
-            room,
-            deviceId,
-            gatewayStateExtension(state),
-            `codever.gateway.state.request.${requestId}`,
-            transport,
-            'Encrypted Codever gateway state',
-        )
-    }
-
-    /** Sends one bounded transcript page instead of replaying every item as a
-     * separate Matrix event. Stable logical item IDs keep later edits working
-     * without manufacturing recipient-specific timeline history.
-     */
-    async sendHistoryPage(
-        room: MatrixGatewayRoomConfig,
-        deviceId: string,
-        request: HistoryRequest,
-        transport: MatrixTransport,
-    ): Promise<MatrixSendEventResult> {
-        const now = Date.now()
-        const active = (await this.currentTrustedDevices(now)).filter(device =>
-            device.allowedRoomIds.includes(room.roomId),
-        )
-        const recipient = active.find(device => device.deviceId === deviceId)
-        if (!recipient) throw new Error(`History recipient ${deviceId} is not active for this room`)
-        const page = this.deliveryOutbox.historyPage(
-            room.roomId,
-            request.sessionId,
-            request.before,
-            request.limit,
-            request.maxBytes ?? MAX_HISTORY_PAGE_BYTES,
-        )
-        if (request.maxBytes === undefined) {
-            return this.sendLegacyHistoryPage(
-                room,
-                recipient,
-                request,
-                page,
-                active.length,
-                now,
-                transport,
-            )
-        }
-        const encodedItems = new TextEncoder().encode(JSON.stringify(page.items))
-        if (encodedItems.byteLength !== page.byteLength) {
-            throw new Error('Matrix history page byte accounting mismatch')
-        }
-        const baseResponse = {
-            kind: 'codever.history.page',
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
-            requestId: request.requestId,
-            sessionId: request.sessionId,
-            ...(page.headEventId ? { headEventId: page.headEventId } : {}),
-            ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
-            hasMore: page.hasMore,
-            replayed: page.items.length,
-        } as const
-        let response: HistoryPage
-        if (encodedItems.byteLength <= MAX_INLINE_HISTORY_PAGE_BYTES) {
-            response = { ...baseResponse, items: page.items }
-        } else {
-            const upload = transport.uploadEncryptedMedia
-            if (!upload) {
-                throw new Error('Matrix transport does not support encrypted history batch upload')
-            }
-            const encrypted = await encryptMedia(encodedItems)
-            const uploaded = await upload.call(transport, {
-                ciphertext: encrypted.ciphertext,
-            })
-            response = {
-                ...baseResponse,
-                batch: {
-                    encoding: 'json',
-                    itemCount: page.items.length,
-                    plaintextSize: encodedItems.byteLength,
-                    plaintextSha256: await sha256(encodedItems),
-                    media: {
-                        url: uploaded.url,
-                        ...encrypted.descriptor,
-                    },
-                },
-            }
-        }
-        return this.sendToDevice(room, deviceId, {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
-            kind: 'history_page',
-            history_page: response,
-        }, `codever.history.page.${request.requestId}`, transport,
-        'Encrypted Codever history page', 'history')
-    }
-
-    private async sendLegacyHistoryPage(
-        room: MatrixGatewayRoomConfig,
-        recipient: MatrixGatewayTrustedDevice,
-        request: HistoryRequest,
-        page: MatrixHistoryDeliveryPage,
-        activeDeviceCount: number,
-        now: number,
-        transport: MatrixTransport,
-    ): Promise<MatrixSendEventResult> {
-        const identity = await recipientIdentity(recipient)
-        let replayed = 0
-        for (const entry of page.deliveries) {
-            const prior = this.deliveryOutbox.recipientDelivery(
-                entry.logicalKey,
-                recipient.deviceId,
-            )
-            if (prior && !sameRecipientIdentity(prior, identity)) {
-                await this.deliveryOutbox.markAbandoned(
-                    prior.deliveryId,
-                    'recipient_identity_changed',
-                    now,
-                )
-            } else if (prior) {
-                continue
-            }
-
-            const logicalTargetId = entry.replacementLogicalKey
-                ? this.deliveryOutbox.logicalEventId(entry.replacementLogicalKey)
-                : undefined
-            const physicalTargetId = logicalTargetId
-                ? this.deliveryIds.get(logicalTargetId)?.get(recipient.deviceId)
-                : undefined
-            const originalTargetId = replacementTargetId(entry.content)
-            const addressed = originalTargetId
-                ? contentForRecipient(entry.content, originalTargetId, physicalTargetId)
-                : structuredClone(entry.content)
-            const content = withHistoryReplay(
-                withActiveDeviceCount(addressed, activeDeviceCount),
-                request.requestId,
-                entry.createdAt,
-            )
-            const recipientRequest: MatrixSendEventRequest = {
-                roomId: room.roomId,
-                eventType: 'm.room.message',
-                transactionId: recipientTransactionId(
-                    `codever.history.replay.${request.requestId}.${entry.cursor}`,
-                    recipient.deviceId,
-                ),
-                content,
-            }
-            const delivery = durableDelivery(
-                entry.logicalKey,
-                recipient.deviceId,
-                identity,
-                recipientRequest,
-                entry.createdAt,
-            )
-            await this.deliveryOutbox.stage(delivery)
-            let result: MatrixSendEventResult
-            try {
-                result = await this.deliverDurable(
-                    delivery,
-                    room,
-                    recipient,
-                    transport,
-                    'history',
-                )
-            } catch (error) {
-                this.schedulePendingRetry(room, transport)
-                throw error
-            }
-            const logicalEventId = this.deliveryOutbox.logicalEventId(entry.logicalKey)
-                ?? result.eventId
-            await this.deliveryOutbox.recordLogicalEvent(
-                entry.logicalKey,
-                logicalEventId,
-                entry.createdAt,
-            )
-            this.deliveryIds.set(
-                logicalEventId,
-                this.deliveryOutbox.recipientEvents(entry.logicalKey),
-            )
-            replayed += 1
-        }
-
-        const response: HistoryPage = {
-            kind: 'codever.history.page',
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
-            requestId: request.requestId,
-            sessionId: request.sessionId,
-            ...(page.headEventId ? { headEventId: page.headEventId } : {}),
-            ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
-            hasMore: page.hasMore,
-            replayed,
-        }
-        return this.sendToDevice(room, recipient.deviceId, {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
-            kind: 'history_page',
-            history_page: response,
-        }, `codever.history.page.${request.requestId}`, transport,
-        'Encrypted Codever history page', 'history')
-    }
-
     /**
-     * Retries durable bundles and legacy recipient copies that are still
+     * Retries durable bundles and targeted recipient copies that are still
      * missing. Calls for the same room are coalesced so duplicate commands and
      * startup recovery cannot race each other.
      */
@@ -657,7 +427,7 @@ export class GatewaySecureContentLayer {
             ? this.deliveryIds.get(replacementTarget)
             : undefined
         const stableTarget = replacementTarget
-            ? this.deliveryOutbox.historyEventIdForEvent(replacementTarget)
+            ? this.deliveryOutbox.stableLogicalEventIdForEvent(replacementTarget)
             : undefined
         const physicalTargets = targetDeliveries
             ? recipients.map(recipient => targetDeliveries.get(recipient.deviceId) ?? stableTarget)
@@ -928,22 +698,7 @@ export class GatewaySecureContentLayer {
         if (inFlight) return this.observeDeliveryAttempt(inFlight)
 
         const lateCompletion = (async () => {
-            const result = isLegacyApplicationSnapshot(delivery.request)
-                ? await this.sealOutgoingBundle(
-                    delivery.request,
-                    room,
-                    recipients,
-                    transport,
-                    priority,
-                    bundleDeliveryCoalesceKey(delivery),
-                    async () => {
-                        await this.deliveryOutbox.markAbandoned(
-                            delivery.deliveryId,
-                            'superseded',
-                        )
-                    },
-                )
-                : await this.sealOutgoingTimeline(
+            const result = await this.sealOutgoingTimeline(
                 delivery.request,
                 room,
                 recipients,
@@ -1076,91 +831,6 @@ export class GatewaySecureContentLayer {
     private clearConfirmationCandidate(logicalKey: string): void {
         this.confirmationCandidates.delete(logicalKey)
         this.confirmedDeliveries.delete(logicalKey)
-    }
-
-    private async sealOutgoingBundle(
-        request: MatrixSendEventRequest,
-        room: MatrixGatewayRoomConfig,
-        recipients: readonly MatrixGatewayTrustedDevice[],
-        transport: MatrixTransport,
-        priority: MatrixDeliveryPriority = 'normal',
-        coalesceKey?: string,
-        onSuperseded?: () => Promise<void>,
-    ): Promise<MatrixSendEventResult> {
-        return this.sendScheduler.schedule(priority, async () => {
-            let secureEnvelopeBundle: SignedSecureEnvelopeBundle
-            try {
-                const now = Date.now()
-                const keys = this.requireGatewayKeys()
-                const addressedRecipients = await Promise.all(recipients.map(async recipient => {
-                    this.assertCertificateActive(recipient, now)
-                    if (recipient.certificateExpiresAt === undefined) {
-                        throw new Error(
-                            `Trusted device ${recipient.deviceId} has no certificate expiry`,
-                        )
-                    }
-                    return {
-                        recipientDeviceId: recipient.deviceId,
-                        recipientKeyId: await publicKeyId(recipient.publicKey),
-                        recipientPublicKey: recipient.publicKey,
-                        certificateExpiresAt: recipient.certificateExpiresAt,
-                    }
-                }))
-                const expiresAt = Math.min(...addressedRecipients.map(
-                    recipient => recipient.certificateExpiresAt,
-                ))
-                secureEnvelopeBundle = await sealSecureEnvelopeBundle({
-                    plaintext: toJsonValue(request.content),
-                    gatewayId: this.gatewayId,
-                    conversationId: room.conversationId,
-                    direction: 'gateway_to_device',
-                    senderDeviceId: this.config.gatewayDeviceId,
-                    senderKeyId: keys.keyId,
-                    senderPrivateKey: keys.privateKey,
-                    recipients: addressedRecipients.map(({ certificateExpiresAt: _, ...recipient }) =>
-                        recipient,
-                    ),
-                    envelopeId: request.transactionId,
-                    now,
-                    lifetimeMs: Math.min(
-                        expiresAt - now,
-                        366 * 24 * 60 * 60_000,
-                    ),
-                })
-            } catch (error) {
-                throw new PermanentMatrixDeliveryError(error)
-            }
-            const content: MatrixRoomMessageContent = {
-                msgtype: 'm.notice',
-                body: 'Encrypted Codever message',
-                [CODEVER_MATRIX_EXTENSION]: {
-                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
-                    kind: 'secure_envelope_bundle',
-                    secure_envelope_bundle: secureEnvelopeBundle,
-                },
-            }
-            // Gateway state is an authoritative, coalescible snapshot. Keep it
-            // off the Megolm room timeline so a limited/background sync cannot
-            // drop the only snapshot that tells another device about new or
-            // completed sessions. The bundle remains application encrypted and
-            // authenticated for every active Codever device.
-            if (isApplicationControlRequest(request) && transport.sendApplicationControlEvent) {
-                return transport.sendApplicationControlEvent({
-                    roomId: request.roomId,
-                    eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
-                    transactionId: request.transactionId,
-                    content,
-                })
-            }
-            return transport.sendEncryptedRoomEvent({
-                ...request,
-                content,
-            })
-        }, {
-            coalesceKey,
-            onSuperseded,
-            serializationKey: JSON.stringify([room.roomId, 'secure-envelope-bundle']),
-        })
     }
 
     private async sealOutgoingTimeline(
@@ -1375,109 +1045,6 @@ export class GatewaySecureContentLayer {
     }
 }
 
-function gatewayStateExtension(state: GatewayStateSnapshot): Record<string, unknown> {
-    if (!Number.isSafeInteger(state.revision) || state.revision < 0) {
-        throw new Error('Gateway state revision must be a non-negative integer')
-    }
-    if (
-        !Number.isSafeInteger(state.revisionEpochGeneration)
-        || state.revisionEpochGeneration < 1
-    ) {
-        throw new Error('Gateway revision epoch generation must be a positive integer')
-    }
-    if (!Number.isSafeInteger(state.stateVersion) || state.stateVersion < 1) {
-        throw new Error('Gateway state version must be a positive integer')
-    }
-    return {
-        version: CODEVER_MATRIX_PROTOCOL_VERSION,
-        kind: 'gateway_state',
-        revision: state.revision,
-        revision_epoch: state.revisionEpoch,
-        revision_epoch_generation: state.revisionEpochGeneration,
-        state_version: state.stateVersion,
-        current_session_id: state.currentSessionId,
-        sessions: state.sessions.map(session => ({
-            id: session.id,
-            title: session.title,
-            updated_at: session.updatedAt,
-            status: session.status,
-            ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
-            ...(session.archived ? { archived: true } : {}),
-            project_id: session.projectId,
-            project_name: session.projectName,
-            cwd: session.cwd,
-            provider: session.provider,
-            ...(session.model ? { model: session.model } : {}),
-            ...(session.reasoningEffort
-                ? { reasoning_effort: session.reasoningEffort }
-                : {}),
-            extensions: session.extensions.map(extension => ({
-                id: extension.id,
-                name: extension.name,
-                version: extension.version,
-            })),
-        })),
-        workspace: {
-            project_id: state.workspace.projectId,
-            project_name: state.workspace.projectName,
-            cwd: state.workspace.cwd,
-            provider: state.workspace.provider,
-            ...(state.workspace.model ? { model: state.workspace.model } : {}),
-            ...(state.workspace.reasoningEffort
-                ? { reasoning_effort: state.workspace.reasoningEffort }
-                : {}),
-            permission_mode: state.workspace.permissionMode,
-        },
-        capabilities: {
-            models: state.capabilities.models.map(model => ({
-                id: model.id,
-                name: model.name,
-                ...(model.defaultReasoningLevel
-                    ? { default_reasoning_level: model.defaultReasoningLevel }
-                    : {}),
-                ...(model.supportedReasoningLevels
-                    ? {
-                        supported_reasoning_levels:
-                            model.supportedReasoningLevels.map(level => ({
-                                effort: level.effort,
-                                ...(level.description
-                                    ? { description: level.description }
-                                    : {}),
-                            })),
-                    }
-                    : {}),
-            })),
-            permission_modes: state.capabilities.permissionModes.map(mode => ({
-                id: mode.id,
-                name: mode.name,
-            })),
-            can_create_session: state.capabilities.canCreateSession,
-            can_select_session: state.capabilities.canSelectSession,
-            can_archive_session: state.capabilities.canArchiveSession ?? false,
-            can_delete_session: state.capabilities.canDeleteSession ?? false,
-            session_extensions: state.capabilities.sessionExtensions.map(extension => ({
-                id: extension.id,
-                name: extension.name,
-                description: extension.description,
-                version: extension.version,
-                settings: extension.settings.map(setting => ({
-                    id: setting.id,
-                    type: setting.type,
-                    label: setting.label,
-                    ...(setting.description ? { description: setting.description } : {}),
-                    ...('required' in setting && setting.required ? { required: true } : {}),
-                    ...('placeholder' in setting && setting.placeholder
-                        ? { placeholder: setting.placeholder }
-                        : {}),
-                    ...('defaultValue' in setting && setting.defaultValue !== undefined
-                        ? { default_value: setting.defaultValue }
-                        : {}),
-                })),
-            })),
-        },
-    }
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
@@ -1657,12 +1224,6 @@ function bundleDeliveryCoalesceKey(
         ])
     }
     const extension = matrixContentExtension(delivery.request.content)
-    if (extension?.kind === 'gateway_state') {
-        return JSON.stringify([
-            'gateway_state_bundle',
-            delivery.request.roomId,
-        ])
-    }
     if (extension?.kind === 'status') {
         return JSON.stringify([
             'status_bundle',
@@ -1693,13 +1254,6 @@ function replacementDeliveryCoalesceKey(
         ])
     }
     const extension = matrixContentExtension(delivery.request.content)
-    if (extension?.kind === 'gateway_state') {
-        return JSON.stringify([
-            'gateway_state',
-            delivery.request.roomId,
-            delivery.recipientDeviceId,
-        ])
-    }
     if (extension?.kind === 'status') {
         return JSON.stringify([
             'status',
@@ -1729,18 +1283,11 @@ function isApplicationControlRequest(request: MatrixSendEventRequest): boolean {
     return kind === 'command_ack'
         || kind === 'command_result'
         || kind === 'revision_conflict'
-        || kind === 'gateway_state'
-        || kind === 'history_page'
-}
-
-function isLegacyApplicationSnapshot(request: MatrixSendEventRequest): boolean {
-    const kind = matrixContentExtension(request.content)?.kind
-    return kind === 'gateway_state' || kind === 'history_page'
 }
 
 function isCoalescibleSnapshot(request: MatrixSendEventRequest): boolean {
     const kind = matrixContentExtension(request.content)?.kind
-    return kind === 'gateway_state' || kind === 'status'
+    return kind === 'status'
 }
 
 function supersededEventId(logicalKey: string): string {
@@ -1816,24 +1363,9 @@ function withLogicalDeliveryIdentity(
 
 function stableLogicalEventId(logicalKey: string): string {
     return createHash('sha256')
-        .update('codever-matrix-history:v1\0')
+        .update('codever-matrix-timeline:v2\0')
         .update(logicalKey)
         .digest('base64url')
-}
-
-function withHistoryReplay(
-    content: MatrixRoomMessageContent,
-    requestId: string,
-    timestamp: number,
-): MatrixRoomMessageContent {
-    const copy = structuredClone(content)
-    const marker = { request_id: requestId, display_only: true, timestamp }
-    const extension = asRecord(copy[CODEVER_MATRIX_EXTENSION])
-    if (extension) extension.history_replay = marker
-    const newContent = asRecord(copy['m.new_content'])
-    const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
-    if (newExtension) newExtension.history_replay = marker
-    return copy
 }
 
 class PermanentMatrixDeliveryError extends Error {
@@ -1869,17 +1401,14 @@ interface MatrixSendTask {
 
 /**
  * Bounds the number of requests admitted to matrix-js-sdk. Control traffic has
- * reserved command and history lanes, while normal broadcasts and startup
- * recovery share a bounded pool. Command confirmation cannot be trapped by a
- * history upload, and history cannot be trapped by startup recovery.
+ * a reserved lane, while normal broadcasts and startup recovery share a
+ * bounded pool.
  */
 class MatrixSendScheduler {
     private readonly control: MatrixSendTask[] = []
-    private readonly history: MatrixSendTask[] = []
     private readonly normal: MatrixSendTask[] = []
     private readonly recovery: MatrixSendTask[] = []
     private activeControl = 0
-    private activeHistory = 0
     private activeBulk = 0
     private activeRecovery = 0
     private readonly activeBulkKeys = new Set<string>()
@@ -1919,7 +1448,6 @@ class MatrixSendScheduler {
 
     private queue(priority: MatrixDeliveryPriority): MatrixSendTask[] {
         if (priority === 'control') return this.control
-        if (priority === 'history') return this.history
         if (priority === 'recovery') return this.recovery
         return this.normal
     }
@@ -1957,10 +1485,6 @@ class MatrixSendScheduler {
             const task = this.control.shift()
             if (task) this.start(task, 'control')
         }
-        if (this.activeHistory === 0) {
-            const task = this.history.shift()
-            if (task) this.start(task, 'history')
-        }
         while (this.activeBulk < MAX_MATRIX_NORMAL_IN_FLIGHT) {
             const task = this.takeRunnableBulkTask()
             if (!task) break
@@ -1981,9 +1505,8 @@ class MatrixSendScheduler {
         return undefined
     }
 
-    private start(task: MatrixSendTask, lane: 'control' | 'history' | 'bulk'): void {
+    private start(task: MatrixSendTask, lane: 'control' | 'bulk'): void {
         if (lane === 'control') this.activeControl += 1
-        else if (lane === 'history') this.activeHistory += 1
         else {
             this.activeBulk += 1
             if (task.priority === 'recovery') this.activeRecovery += 1
@@ -1994,7 +1517,6 @@ class MatrixSendScheduler {
             .then(task.resolve, task.reject)
             .finally(() => {
                 if (lane === 'control') this.activeControl -= 1
-                else if (lane === 'history') this.activeHistory -= 1
                 else {
                     this.activeBulk -= 1
                     if (task.priority === 'recovery') this.activeRecovery -= 1

@@ -98,18 +98,6 @@ export function classifyGatewayStateEpoch(
   return incomingEpoch === currentEpoch ? "current" : "conflict";
 }
 
-export function canMigrateLegacyGatewayState(
-  currentEpoch: string,
-  currentStateVersion: number,
-  incomingEpoch: string,
-  incomingStateVersion: number,
-): boolean {
-  return (
-    incomingEpoch === currentEpoch ||
-    incomingStateVersion > currentStateVersion
-  );
-}
-
 export function parseGatewayStateExtension(
   value: unknown,
 ): GatewayStateSnapshot | null {

@@ -54,9 +54,9 @@ Clients restore data through native Matrix APIs:
 - `/messages`/SDK backward pagination for older timeline data;
 - the SDK's local encrypted store for offline display.
 
-Version-2 clients do not send `gateway_state_request` or `history_request`.
-The Gateway can temporarily read/respond to those version-1 events during a
-rolling APK/PWA upgrade, but they are not part of the version-2 data path.
+The removed pre-release `gateway_state_request` and `history_request` RPCs have
+no compatibility path. The Gateway neither accepts those requests nor emits
+their response events, and clients do not parse them.
 
 ## Application encryption
 
@@ -130,14 +130,14 @@ limits is not a correctness requirement.
 8. Offline, display the locally persisted projection and transcript. Queue no
    read RPC and execute no command until connectivity/trust are current.
 
-## Migration invariants
+## Cutover invariants
 
-- A version-1 event is never silently interpreted as version 2.
+- There is no negotiated downgrade for the conversation data plane. Removed
+  Gateway state/history RPC event kinds are ignored rather than interpreted as
+  native timeline events.
 - Existing Gateway delivery WAL entries retain stable transaction IDs.
 - Existing sessions receive one idempotent `session_root` during startup and
   persist its Matrix event ID before their ports emit threaded output.
-- Old pairwise history remains readable by the devices originally addressed.
-  Once version 2 is active, all new durable history comes from the Matrix
-  timeline and is readable by later authorized devices through retained epochs.
-- Legacy state/history handlers may be removed only after the minimum supported
-  APK version understands timeline envelopes and native projection.
+- All supported APK and PWA builds restore state and history from version-2
+  timeline envelopes. Pre-release clients that only understand the removed RPC
+  flow must be replaced and paired again.

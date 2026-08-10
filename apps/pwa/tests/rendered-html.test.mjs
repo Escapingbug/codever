@@ -659,7 +659,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.doesNotMatch(app, /setActiveDeviceCount\(incoming\.activeDeviceCount\)/);
   assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
-  assert.match(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
+  assert.doesNotMatch(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
   assert.match(matrix, /loadCachedGatewayState\(/);
   assert.doesNotMatch(matrix, /gatewayStateRequestSchema/);
   assert.doesNotMatch(matrix, /kind: "gateway_state_request"/);
@@ -738,7 +738,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /loadRecentHistory\(sessionId/);
   assert.doesNotMatch(matrix, /kind: "codever\.history\.request"/);
   assert.doesNotMatch(matrix, /kind: "history_request"/);
-  assert.match(matrix, /historyPageSchema\.parse/);
+  assert.doesNotMatch(matrix, /historyPageSchema\.parse|parseHistoryReplayEvent/);
   assert.doesNotMatch(matrix, /createDetachedSerialDispatcher/);
   assert.doesNotMatch(matrix, /historyRequestLifecycle/);
   assert.match(

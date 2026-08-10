@@ -35,7 +35,7 @@ class MatrixApplicationControlClientTest {
             val eventId = client.send(
                 storedSession(),
                 secureContent(),
-                "codever.history.request/request-1",
+                "codever.command.ack/command-1",
             )
 
             assertEquals("\$control-event", eventId)
@@ -43,7 +43,7 @@ class MatrixApplicationControlClientTest {
             assertEquals(
                 "https://matrix.example.org/_matrix/client/v3/rooms/" +
                     "%21room%3Aexample.org/send/io.codever.secure_control.v1/" +
-                    "codever.history.request%2Frequest-1",
+                    "codever.command.ack%2Fcommand-1",
                 endpoint.toASCIIString(),
             )
             assertEquals(

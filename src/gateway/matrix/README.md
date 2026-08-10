@@ -38,16 +38,16 @@ carry `replaces_logical_event_id`. These IDs, not recipient-specific Matrix
 event IDs, join live delivery to late-join history and are the PWA's message and
 replacement identities. Matrix event IDs remain transport receipts only.
 
-Targeted acknowledgements, command results, state snapshots, and history pages
-remain single-recipient envelopes. Their outer Matrix event type is
+Targeted acknowledgements, command results, and revision conflicts remain
+single-recipient envelopes. Their outer Matrix event type is
 `io.codever.secure_control.v1`: the homeserver can see only envelope routing
 metadata and ciphertext, while the persistent Gateway application key signs
 the envelope and the recipient's application key encrypts its contents. This
 keeps the control path independent from delayed or missing Megolm room keys.
-PWA clients accept both this event type and legacy Megolm-wrapped
-`m.room.message` envelopes during migration.
-Deploy the dual-read PWA before enabling the bundle-sending Gateway; rolling
-the Gateway back is safe because the upgraded PWA retains the legacy read path.
+Session state and conversation history are not control responses: they are
+signed version-2 timeline envelopes restored with Matrix sync, threads, and
+backward pagination. The pre-release state/history RPC event kinds are not
+accepted or emitted.
 
 ## Command event shape
 

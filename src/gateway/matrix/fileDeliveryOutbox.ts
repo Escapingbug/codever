@@ -1,14 +1,7 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
-import {
-    DEFAULT_HISTORY_PAGE_BYTES,
-    MAX_HISTORY_PAGE_BYTES,
-    historyItemSchema,
-    type HistoryItem,
-    type JsonValue,
-} from '@codever/protocol'
-import type { MatrixRoomMessageContent, MatrixSendEventRequest } from '@/channel/matrix'
+import type { MatrixSendEventRequest } from '@/channel/matrix'
 
 interface PendingEntry {
     version: 1
@@ -96,35 +89,13 @@ export interface DurableMatrixBundleDelivery {
     createdAt: number
 }
 
-export interface MatrixHistoryDelivery {
-    logicalKey: string
-    cursor: string
-    createdAt: number
-    content: MatrixRoomMessageContent
-    replacementLogicalKey?: string
-}
-
-export interface MatrixHistoryDeliveryPage {
-    deliveries: MatrixHistoryDelivery[]
-    items: HistoryItem[]
-    byteLength: number
-    headEventId?: string
-    nextBefore?: string
-    hasMore: boolean
-}
-
-type MatrixHistoryDeliverySource = Pick<
-    DurableMatrixDelivery,
-    'deliveryId' | 'logicalKey' | 'request' | 'createdAt'
->
-
 /**
- * Append-only Matrix delivery ledger for legacy recipient copies and shared
+ * Append-only Matrix delivery ledger for targeted recipient copies and shared
  * multi-recipient bundles.
  *
  * A pending record is fsynced through the filesystem API before the network
  * attempt starts. Completion records retain the physical Matrix event ID, so
- * stable transaction retries and logical edit/history mappings survive a
+ * stable transaction retries and logical edit mappings survive a
  * restart.
  */
 export class FileMatrixDeliveryOutbox {
@@ -389,9 +360,9 @@ export class FileMatrixDeliveryOutbox {
         return this.logicalEvents.get(logicalKey)
     }
 
-    historyEventIdForEvent(eventId: string): string | undefined {
+    stableLogicalEventIdForEvent(eventId: string): string | undefined {
         const logicalKey = this.eventLogicalKeys.get(eventId)
-        return logicalKey ? historyCursor(logicalKey) : undefined
+        return logicalKey ? stableLogicalEventId(logicalKey) : undefined
     }
 
     logicalEventMappings(): Array<{
@@ -424,110 +395,6 @@ export class FileMatrixDeliveryOutbox {
         return result
     }
 
-    /**
-     * Returns one canonical copy per logical Codever event. Recipient-specific
-     * ciphertext and Matrix event IDs are deliberately not part of this view;
-     * callers re-address every entry to the requesting application device.
-     */
-    historyPage(
-        roomId: string,
-        sessionId: string,
-        before: string | undefined,
-        limit: number,
-        maxBytes = DEFAULT_HISTORY_PAGE_BYTES,
-    ): MatrixHistoryDeliveryPage {
-        const eventToLogicalKey = new Map<string, string>()
-        for (const [logicalKey, eventId] of this.logicalEvents) {
-            eventToLogicalKey.set(eventId, logicalKey)
-            eventToLogicalKey.set(historyCursor(logicalKey), logicalKey)
-        }
-        const allDeliveries = [
-            ...this.deliveries.values(),
-            ...this.bundleDeliveries.values(),
-        ]
-        for (const delivery of allDeliveries) {
-            const eventId = this.delivered.get(delivery.deliveryId)
-            if (eventId) eventToLogicalKey.set(eventId, delivery.logicalKey)
-        }
-
-        const canonical = new Map<string, MatrixHistoryDeliverySource>()
-        for (const delivery of allDeliveries) {
-            if (delivery.request.roomId !== roomId) continue
-            const current = canonical.get(delivery.logicalKey)
-            if (
-                !current
-                || delivery.createdAt < current.createdAt
-                || (
-                    delivery.createdAt === current.createdAt
-                    && delivery.deliveryId.localeCompare(current.deliveryId) < 0
-                )
-            ) {
-                canonical.set(delivery.logicalKey, delivery)
-            }
-        }
-
-        const entries = [...canonical.values()]
-            .filter(delivery => isDisplayHistoryContent(delivery.request.content, sessionId))
-            .map((delivery): MatrixHistoryDelivery => {
-                const target = replacementTargetId(delivery.request.content)
-                const replacementLogicalKey = target
-                    ? eventToLogicalKey.get(target)
-                    : undefined
-                return {
-                    logicalKey: delivery.logicalKey,
-                    cursor: historyCursor(delivery.logicalKey),
-                    createdAt: delivery.createdAt,
-                    content: structuredClone(delivery.request.content),
-                    ...(replacementLogicalKey ? { replacementLogicalKey } : {}),
-                }
-            })
-            .sort((left, right) =>
-                left.createdAt - right.createdAt
-                || left.logicalKey.localeCompare(right.logicalKey),
-            )
-
-        let eligible = entries
-        if (before !== undefined) {
-            const index = entries.findIndex(entry => entry.cursor === before)
-            if (index < 0) throw new Error('Matrix history cursor is no longer available')
-            eligible = entries.slice(0, index)
-        }
-        const pageLimit = Math.max(1, Math.min(limit, 100))
-        const pageByteTarget = Math.max(
-            4 * 1024,
-            Math.min(maxBytes, MAX_HISTORY_PAGE_BYTES),
-        )
-        const byLogicalKey = new Map(entries.map(entry => [entry.logicalKey, entry]))
-        const selected: MatrixHistoryDelivery[] = []
-        let deliveries: MatrixHistoryDelivery[] = []
-        let items: HistoryItem[] = []
-        let byteLength = 2
-        for (let index = eligible.length - 1; index >= 0 && selected.length < pageLimit; index -= 1) {
-            const candidateSelected = [eligible[index]!, ...selected]
-            const candidateDeliveries = expandHistoryDeliveries(candidateSelected, byLogicalKey)
-            const candidateItems = candidateDeliveries.map(entry => historyItem(entry))
-            const candidateBytes = Buffer.byteLength(JSON.stringify(candidateItems), 'utf8')
-            if (candidateBytes > pageByteTarget && selected.length > 0) break
-            if (candidateBytes > MAX_HISTORY_PAGE_BYTES) {
-                throw new Error(
-                    `Matrix history item exceeds the ${MAX_HISTORY_PAGE_BYTES} byte page limit`,
-                )
-            }
-            selected.unshift(eligible[index]!)
-            deliveries = candidateDeliveries
-            items = candidateItems
-            byteLength = candidateBytes
-        }
-        return {
-            deliveries,
-            items,
-            byteLength,
-            ...(entries.at(-1) ? { headEventId: entries.at(-1)!.cursor } : {}),
-            ...(items[0] ? { nextBefore: items[0].eventId } : {}),
-            hasMore: eligible.length > items.length,
-        }
-    }
-
     private async append(entry: DeliveryEntry): Promise<void> {
         const line = `${JSON.stringify(entry)}\n`
         this.writeChain = this.writeChain.then(async () => {
@@ -557,108 +424,15 @@ export class FileMatrixDeliveryOutbox {
     }
 }
 
-function expandHistoryDeliveries(
-    selected: readonly MatrixHistoryDelivery[],
-    byLogicalKey: ReadonlyMap<string, MatrixHistoryDelivery>,
-): MatrixHistoryDelivery[] {
-    const expanded = new Map<string, MatrixHistoryDelivery>()
-    const visiting = new Set<string>()
-    const includeWithDependencies = (entry: MatrixHistoryDelivery): void => {
-        if (expanded.has(entry.logicalKey)) return
-        if (expanded.size + visiting.size >= 100) {
-            throw new Error('Matrix history edit dependency limit exceeded')
-        }
-        if (visiting.has(entry.logicalKey)) {
-            throw new Error('Matrix history contains a cyclic edit relationship')
-        }
-        visiting.add(entry.logicalKey)
-        const target = entry.replacementLogicalKey
-            ? byLogicalKey.get(entry.replacementLogicalKey)
-            : undefined
-        if (target) includeWithDependencies(target)
-        visiting.delete(entry.logicalKey)
-        expanded.set(entry.logicalKey, entry)
-    }
-    for (const entry of selected) includeWithDependencies(entry)
-    return [...expanded.values()]
-        .sort((left, right) =>
-            left.createdAt - right.createdAt
-            || left.logicalKey.localeCompare(right.logicalKey),
-        )
-}
-
-function historyItem(entry: MatrixHistoryDelivery): HistoryItem {
-    const originalTargetId = replacementTargetId(entry.content)
-    const replacementEventId = entry.replacementLogicalKey
-        ? historyCursor(entry.replacementLogicalKey)
-        : undefined
-    const content = originalTargetId
-        ? contentForHistory(entry.content, originalTargetId, replacementEventId)
-        : structuredClone(entry.content)
-    return historyItemSchema.parse({
-        eventId: entry.cursor,
-        timestamp: entry.createdAt,
-        content: content as Record<string, JsonValue>,
-    })
-}
-
-function contentForHistory(
-    content: MatrixRoomMessageContent,
-    originalTargetId: string,
-    replacementEventId: string | undefined,
-): MatrixRoomMessageContent {
-    const copy = structuredClone(content)
-    const relation = asRecord(copy['m.relates_to'])
-    if (relation?.event_id === originalTargetId) {
-        if (replacementEventId) relation.event_id = replacementEventId
-        else delete copy['m.relates_to']
-    }
-    const extension = asRecord(copy['io.codever'])
-    if (extension?.replaces_event_id === originalTargetId) {
-        if (replacementEventId) extension.replaces_event_id = replacementEventId
-        else delete extension.replaces_event_id
-    }
-    const newContent = asRecord(copy['m.new_content'])
-    const newExtension = asRecord(newContent?.['io.codever'])
-    if (newExtension?.replaces_event_id === originalTargetId) {
-        if (replacementEventId) newExtension.replaces_event_id = replacementEventId
-        else delete newExtension.replaces_event_id
-    }
-    return copy
-}
-
-function historyCursor(logicalKey: string): string {
+function stableLogicalEventId(logicalKey: string): string {
     return createHash('sha256')
-        .update('codever-matrix-history:v1\0')
+        .update('codever-matrix-timeline:v2\0')
         .update(logicalKey)
         .digest('base64url')
 }
 
-function replacementTargetId(content: MatrixRoomMessageContent): string | undefined {
-    const relation = asRecord(content['m.relates_to'])
-    return relation?.rel_type === 'm.replace' && typeof relation.event_id === 'string'
-        ? relation.event_id
-        : undefined
-}
-
 function recipientDeliveryKey(logicalKey: string, recipientDeviceId: string): string {
     return JSON.stringify([logicalKey, recipientDeviceId])
-}
-
-function isDisplayHistoryContent(
-    content: MatrixRoomMessageContent,
-    sessionId: string,
-): boolean {
-    const replacement = asRecord(content['m.new_content'])
-    const extension = asRecord(
-        replacement?.['io.codever'] ?? content['io.codever'],
-    )
-    return extension?.session_id === sessionId && (
-        extension.kind === 'collaboration_command'
-        || extension.kind === 'message'
-        || extension.kind === 'decision_request'
-        || (extension.kind === 'command_result' && extension.outcome === 'failed')
-    )
 }
 
 function validateEntry(value: unknown): DeliveryEntry {

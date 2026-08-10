@@ -132,8 +132,8 @@ snapshot before the transport attempt. Retry and restart recovery preserve the
 same Matrix transaction ID. Targeted command acknowledgements/results continue
 to use single-recipient envelopes because they are executable, device-bound
 control traffic. Conversation history and session state do not: version-2
-clients recover both from the signed room timeline. The legacy history/state
-request handlers remain receive-only during the rolling-upgrade window.
+clients recover both from the signed room timeline. The pre-release
+Gateway state/history RPC handlers and schemas have been removed.
 
 Sessions are Matrix threads. Stable application `logical_event_id` values
 decouple message/edit identity from Matrix event IDs, while retained timeline

@@ -3,17 +3,12 @@ import {
   canonicalJson,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
-  historyItemsSchema,
-  historyPageSchema,
   matrixNativeContentSchema,
   matrixTimelineKeyRingGrantSchema,
   signedMatrixTimelineEnvelopeSchema,
   type CodeverAttachment,
   type CodeverCommand,
   type CommandPayload,
-  type HistoryBatch,
-  type HistoryPage,
-  type HistoryItem,
   type JsonValue,
   type MatrixNativeContent,
   type SignedCommand,
@@ -84,11 +79,9 @@ import {
   waitForMatrixSyncStoreClose,
 } from "./matrixSyncStore";
 import {
-  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
   createGatewayStateCacheRecord,
   parseGatewayStateCacheRecord,
-  parseGatewayStateExtension,
   type GatewayStateCacheBinding,
   type GatewayStateSnapshot,
 } from "./gatewayState";
@@ -117,7 +110,6 @@ export {
   type GatewaySessionSummary,
   type GatewayStateSnapshot,
   type GatewayWorkspaceState,
-  canMigrateLegacyGatewayState,
   classifyGatewayStateEpoch,
 } from "./gatewayState";
 
@@ -572,7 +564,7 @@ export async function connectMatrix(
   const historySeen = new Set<string>();
   const historyBySession = new Map<string, IncomingCodeverMessage[]>();
   const deliveredHistory = new Map<string, Set<string>>();
-  let legacyHistorySessionHint: string | null = null;
+  let historySessionHint: string | null = null;
   let historyInitialized = false;
   let historyChain: Promise<unknown> = Promise.resolve();
   const inFlightHistoryLoads = new Map<string, Promise<MatrixHistoryPage>>();
@@ -767,9 +759,6 @@ export async function connectMatrix(
           onRevisionConflict,
           onKnownRevision,
           onAuthenticatedCommandResult,
-          onGatewayState,
-          undefined,
-          undefined,
           onNativeContent,
           onNativeSessionStatus,
           historical,
@@ -1464,7 +1453,7 @@ export async function connectMatrix(
     initialSessionId: string,
   ): Promise<void> => {
     if (!historyInitialized) {
-      legacyHistorySessionHint = initialSessionId;
+      historySessionHint = initialSessionId;
       historyInitialized = true;
     }
     const events = room
@@ -1489,11 +1478,11 @@ export async function connectMatrix(
       if (!decoded) continue;
       historySeen.add(eventId);
       if (decoded?.gatewaySessionId !== undefined) {
-        legacyHistorySessionHint = decoded.gatewaySessionId;
+        historySessionHint = decoded.gatewaySessionId;
       }
       if (!decoded.message) continue;
       const sessionId =
-        decoded.message.sessionId ?? legacyHistorySessionHint;
+        decoded.message.sessionId ?? historySessionHint;
       if (!sessionId) continue;
       const message = {
         ...decoded.message,
@@ -2429,98 +2418,10 @@ export function parseCodeverEvent(
   }
 }
 
-export function parseHistoryReplayEvent(
-  eventId: string,
-  sender: string,
-  timestamp: number,
-  content: Record<string, unknown>,
-): { requestId: string; message: IncomingCodeverMessage } | null {
-  const extension = asRecord(content["io.codever"]);
-  const marker = asRecord(extension?.history_replay);
-  if (
-    marker?.display_only !== true ||
-    typeof marker.request_id !== "string" ||
-    !marker.request_id
-  ) {
-    return null;
-  }
-  const replayTimestamp = isNonnegativeInteger(marker.timestamp)
-    ? marker.timestamp
-    : timestamp;
-  if (
-    extension?.kind === "command_result" &&
-    extension.outcome === "failed" &&
-    typeof extension.command_id === "string"
-  ) {
-    return {
-      requestId: marker.request_id,
-      message: {
-        eventId,
-        sender,
-        timestamp: replayTimestamp,
-        encrypted: true,
-        kind: "error",
-        text:
-          typeof extension.error === "string"
-            ? extension.error
-            : "The Gateway accepted the command but could not complete it.",
-        format: "plain",
-        commandId: extension.command_id,
-        ...(isPositiveInteger(extension.revision)
-          ? { revision: extension.revision }
-          : {}),
-        ...(typeof extension.session_id === "string" && extension.session_id
-          ? { sessionId: extension.session_id }
-          : {}),
-        historical: true,
-        raw: extension,
-      },
-    };
-  }
-  const parsed = parseCodeverEvent(
-    eventId,
-    sender,
-    replayTimestamp,
-    true,
-    content,
-  );
-  return parsed
-    ? {
-        requestId: marker.request_id,
-        message: { ...parsed, historical: true },
-      }
-    : null;
-}
-
 type DecodedHistoricalEvent = {
   gatewaySessionId?: string | null;
   message?: IncomingCodeverMessage;
 };
-
-export async function decodeHistoryBatchPayload(
-  plaintext: Uint8Array,
-  batch: HistoryBatch,
-): Promise<HistoryItem[]> {
-  if (
-    plaintext.byteLength !== batch.plaintextSize ||
-    (await sha256(plaintext)) !== batch.plaintextSha256
-  ) {
-    throw new Error("History page content does not match its signed metadata.");
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(plaintext),
-    ) as unknown;
-  } catch (error) {
-    throw new Error("Encrypted history page is not valid JSON.", { cause: error });
-  }
-  const items = historyItemsSchema.parse(decoded);
-  if (items.length !== batch.itemCount) {
-    throw new Error("Encrypted history page item count does not match.");
-  }
-  return items;
-}
 
 function isGatewaySecureEnvelopeExtension(
   extension: Record<string, unknown> | null,
@@ -2773,10 +2674,6 @@ async function decodeHistoricalEvent(
       ? { gatewaySessionId: native.data.session_id }
       : null;
   }
-  const gatewayState = parseGatewayStateExtension(decryptedExtension);
-  if (gatewayState) {
-    return { gatewaySessionId: gatewayState.currentSessionId };
-  }
   if (decryptedExtension?.kind === "command_result") {
     if (
       decryptedExtension.outcome !== "failed" ||
@@ -2887,12 +2784,6 @@ export async function processGatewayTimelineEvent(
     revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
-  onGatewayState?: (state: GatewayStateSnapshot) => Promise<void>,
-  onHistoryReplay?: (
-    requestId: string,
-    message: IncomingCodeverMessage,
-  ) => boolean,
-  onHistoryPage?: (page: HistoryPage) => void,
   onNativeContent?: (content: MatrixNativeContent) => Promise<void>,
   onNativeSessionStatus?: (extension: Record<string, unknown>) => Promise<void>,
   historical = false,
@@ -3020,35 +2911,6 @@ export async function processGatewayTimelineEvent(
   const nativeContent = matrixNativeContentSchema.safeParse(decryptedExtension);
   if (nativeContent.success) {
     await onNativeContent?.(nativeContent.data);
-    seen.add(eventId);
-    return;
-  }
-  const historyReplay = parseHistoryReplayEvent(
-    eventId,
-    trust.gatewayId,
-    event.getTs(),
-    decryptedContent,
-  );
-  if (historyReplay) {
-    seen.add(eventId);
-    const consumed = onHistoryReplay?.(
-      historyReplay.requestId,
-      historyReplay.message,
-    ) ?? false;
-    if (!consumed) onMessage(historyReplay.message);
-    return;
-  }
-  if (decryptedExtension?.kind === "history_page") {
-    const page = historyPageSchema.parse(decryptedExtension.history_page);
-    seen.add(eventId);
-    // Media download and parsing run on their own serial lane. Awaiting them
-    // here would head-of-line block command acknowledgements/results.
-    onHistoryPage?.(page);
-    return;
-  }
-  const gatewayState = parseGatewayStateExtension(decryptedExtension);
-  if (gatewayState) {
-    await onGatewayState?.(gatewayState);
     seen.add(eventId);
     return;
   }
@@ -3794,28 +3656,10 @@ async function initializeKnownRevision(
         try {
           const state = parseCommandSequenceState(commandRead.result);
           const epochState = parseDurableGatewayEpochState(epochRead.result);
-          const migratingLegacyState =
-            !epochState &&
-            state.revisionInitialized &&
-            Boolean(state.revisionEpoch);
-          if (
-            migratingLegacyState &&
-            !canMigrateLegacyGatewayState(
-              state.revisionEpoch!,
-              state.stateVersion,
-              revisionEpoch,
-              stateVersion,
-            )
-          ) {
-            throw new Error(
-              "Refusing to migrate to a new revision epoch without a newer Gateway state version.",
-            );
-          }
           const epochStatus = classifyGatewayStateEpoch(
             epochState?.revisionEpoch,
             epochState?.revisionEpochGeneration,
-            epochState?.retiredRevisionEpochs ??
-              state.retiredRevisionEpochs,
+            epochState?.retiredRevisionEpochs ?? [],
             revisionEpoch,
             revisionEpochGeneration,
           );
@@ -3829,11 +3673,8 @@ async function initializeKnownRevision(
               "Rejected a Gateway state snapshot that changed epoch without advancing its generation.",
             );
           }
-          const migrationKeepsEpoch =
-            migratingLegacyState && state.revisionEpoch === revisionEpoch;
           const sameEpoch =
-            (epochState !== null && epochStatus === "current") ||
-            migrationKeepsEpoch;
+            epochState !== null && epochStatus === "current";
           const baselineStateVersion =
             epochState?.stateVersion ?? state.stateVersion;
           const baselineRevision =
@@ -3854,18 +3695,17 @@ async function initializeKnownRevision(
             );
           }
           const retiredRevisionEpochs = sameEpoch
-            ? epochState?.retiredRevisionEpochs ??
-              state.retiredRevisionEpochs
+            ? epochState.retiredRevisionEpochs
             : [
                 ...new Set([
-                  ...(epochState?.retiredRevisionEpochs ??
-                    state.retiredRevisionEpochs),
-                  ...(epochState?.revisionEpoch || state.revisionEpoch
-                    ? [epochState?.revisionEpoch ?? state.revisionEpoch!]
+                  ...(epochState?.retiredRevisionEpochs ?? []),
+                  ...(epochState?.revisionEpoch
+                    ? [epochState.revisionEpoch]
                     : []),
                 ]),
               ];
           const commandAlreadyCurrent =
+            epochState !== null &&
             state.revisionInitialized &&
             state.revisionEpoch === revisionEpoch &&
             (state.revisionEpochGeneration === undefined ||
