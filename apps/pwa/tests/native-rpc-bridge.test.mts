@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { NATIVE_BRIDGE_LIMITS } from "@codever/native-bridge";
 import {
   NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
+  NATIVE_COMMAND_CONFLICT_TIMEOUT_MS,
   NATIVE_HISTORY_PAGE_TIMEOUT_MS,
   NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
   NativeRpcBridge,
@@ -146,10 +148,15 @@ test("does not poison future handoffs when an unmanaged owner is attached", asyn
   replacement.close();
 });
 
-test("allows native Matrix response time for history and pairing", () => {
+test("allows native Matrix response time for history, pairing, and conflict recovery", () => {
   assert.equal(NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS, 15_000);
+  assert.equal(NATIVE_COMMAND_CONFLICT_TIMEOUT_MS, 60_000);
   assert.equal(NATIVE_HISTORY_PAGE_TIMEOUT_MS, 45_000);
   assert.equal(NATIVE_PAIRING_COMPLETE_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(
+    nativeBridgeRequestTimeoutMs("codever.command.resolveConflict"),
+    NATIVE_COMMAND_CONFLICT_TIMEOUT_MS,
+  );
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.history.page"),
     NATIVE_HISTORY_PAGE_TIMEOUT_MS,
@@ -161,5 +168,31 @@ test("allows native Matrix response time for history and pairing", () => {
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.client.snapshot"),
     NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
+  );
+});
+
+test("keeps native conflict decisions independent from slow Matrix command delivery", async () => {
+  const runtime = await readFile(
+    new URL(
+      "../../../clients/android/app/src/main/java/id/my/anciety/codever/client/NativeClientRuntime.kt",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const conflictHandler = runtime.match(
+    /suspend fun resolveConflict[\s\S]*?\n    fun openUpload/,
+  )?.[0];
+  assert.ok(conflictHandler, "Native conflict handler must remain inspectable");
+  assert.doesNotMatch(conflictHandler, /mutex\.withLock/);
+  assert.match(conflictHandler, /launchCommandTransmission/);
+
+  const transmission = runtime.match(
+    /private suspend fun transmit[\s\S]*?\n    private fun schedulePendingCommandRecoveries/,
+  )?.[0];
+  assert.ok(transmission, "Native command transmission must remain inspectable");
+  assert.match(transmission, /val transmission = mutex\.withLock/);
+  assert.match(
+    transmission,
+    /}\s*\?: return\s*\n\s*try \{\s*\n\s*sendTrustedControlMessage/,
   );
 });

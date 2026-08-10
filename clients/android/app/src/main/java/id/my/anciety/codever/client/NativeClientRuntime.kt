@@ -407,7 +407,9 @@ class NativeClientRuntime(
                 payload.string("sessionId"),
             )
             val current = outbox.get(receipt.commandId) ?: error("Durable command disappeared.")
-            if (current.state == DurableState.QUEUED) transmit(current.commandId, recovery = false)
+            if (current.state == DurableState.QUEUED) {
+                launchCommandTransmission(current.commandId, recovery = false)
+            }
             publicReceipt(outbox.get(receipt.commandId) ?: current)
         }
 
@@ -424,13 +426,13 @@ class NativeClientRuntime(
         },
     )
 
-    suspend fun recoverCommand(commandId: String): DurableReceipt = mutex.withLock {
+    suspend fun recoverCommand(commandId: String): DurableReceipt {
         val current = outbox.get(commandId) ?: throw IllegalArgumentException("Command was not found.")
         if (current.state == DurableState.RECOVERY_REQUIRED) {
             cancelScheduledCommandRecovery(commandId, resetAttempts = false)
-            transmit(commandId, recovery = true)
+            launchCommandTransmission(commandId, recovery = true)
         }
-        publicReceipt(outbox.get(commandId) ?: current)
+        return publicReceipt(outbox.get(commandId) ?: current)
     }
 
     fun command(commandId: String): CommandView = outbox.get(commandId)?.let(::publicCommand)
@@ -463,14 +465,18 @@ class NativeClientRuntime(
         return released
     }
 
-    suspend fun resolveConflict(commandId: String, action: RevisionConflictAction): DurableReceipt =
-        mutex.withLock {
-            val receipt = outbox.resolveRevisionConflict(commandId, action)
-            automaticRevisionRetryAttempts.remove(receipt.operationId)
-            publishCommand(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
-            if (action == RevisionConflictAction.RETRY) transmit(receipt.commandId, recovery = false)
-            publicReceipt(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
+    suspend fun resolveConflict(commandId: String, action: RevisionConflictAction): DurableReceipt {
+        // DurableCommandOutbox serializes its own state. Conflict decisions
+        // intentionally bypass the broader runtime mutex so discard remains a
+        // local escape hatch even while unrelated Matrix recovery is slow.
+        val receipt = outbox.resolveRevisionConflict(commandId, action)
+        automaticRevisionRetryAttempts.remove(receipt.operationId)
+        publishCommand(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
+        if (action == RevisionConflictAction.RETRY) {
+            launchCommandTransmission(receipt.commandId, recovery = false)
         }
+        return publicReceipt(outbox.get(receipt.commandId) ?: error("Resolved command disappeared."))
+    }
 
     fun openUpload(name: String, mimeType: String, size: Long, sha256: String): UploadTransfer =
         transfers.openUpload(name, mimeType, size, sha256)
@@ -562,36 +568,69 @@ class NativeClientRuntime(
         }
     }
 
+    private fun launchCommandTransmission(commandId: String, recovery: Boolean) {
+        scope.launch {
+            try {
+                transmit(commandId, recovery)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                diagnostics.record(
+                    "command.transmission.failure",
+                    mapOf(
+                        "action" to (outbox.operation(commandId)?.wireName ?: "unknown"),
+                        "stage" to if (recovery) "recovery" else "initial",
+                        "error" to diagnosticErrorName(error),
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Command Matrix I/O must never run while [mutex] is held. Bridge mutations
+     * only commit durable command state synchronously; delivery continues in a
+     * background task so a slow Matrix send cannot starve local recovery RPCs.
+     */
     private suspend fun transmit(commandId: String, recovery: Boolean) {
-        val transmission = if (recovery) {
-            outbox.claimRecovery(commandId)
-        } else {
-            outbox.claimForTransmission(commandId)
+        val transmission = mutex.withLock {
+            val claimed = if (recovery) {
+                outbox.claimRecovery(commandId)
+            } else {
+                outbox.claimForTransmission(commandId)
+            } ?: return@withLock null
+            publishCommand(outbox.get(commandId) ?: return@withLock null)
+            claimed
         } ?: return
-        publishCommand(outbox.get(commandId) ?: return)
         try {
             sendTrustedControlMessage(
                 signedCommandContent(transmission).toString(),
                 "codever.command.${transmission.commandId}",
             )
         } catch (error: Exception) {
-            outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
-            scheduleCommandRecovery(commandId)
+            mutex.withLock {
+                outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
+                scheduleCommandRecovery(commandId)
+            }
             throw error
         }
-        ackTimeouts.remove(commandId)?.cancel()
-        ackTimeouts[commandId] = scope.launch {
-            delay(COMMAND_ACK_TIMEOUT_MS)
-            mutex.withLock {
-                ackTimeouts.remove(commandId)
-                val timedOut = outbox.markAcknowledgementTimedOut(commandId)
-                timedOut?.let(::publishCommand)
-                if (timedOut?.state == DurableState.RECOVERY_REQUIRED) {
-                    diagnostics.record(
-                        "command.recovery.required",
-                        mapOf("action" to (outbox.operation(commandId)?.wireName ?: "unknown")),
-                    )
-                    scheduleCommandRecovery(commandId)
+        mutex.withLock {
+            if (outbox.get(commandId)?.state == DurableState.TRANSMITTING) {
+                ackTimeouts.remove(commandId)?.cancel()
+                ackTimeouts[commandId] = scope.launch {
+                    delay(COMMAND_ACK_TIMEOUT_MS)
+                    mutex.withLock {
+                        ackTimeouts.remove(commandId)
+                        val timedOut = outbox.markAcknowledgementTimedOut(commandId)
+                        timedOut?.let(::publishCommand)
+                        if (timedOut?.state == DurableState.RECOVERY_REQUIRED) {
+                            diagnostics.record(
+                                "command.recovery.required",
+                                mapOf("action" to (outbox.operation(commandId)?.wireName ?: "unknown")),
+                            )
+                            scheduleCommandRecovery(commandId)
+                        }
+                    }
                 }
             }
         }
@@ -612,9 +651,9 @@ class NativeClientRuntime(
                 var retryAfterFailure = false
                 try {
                     if (retryDelayMs > 0) delay(retryDelayMs)
-                    mutex.withLock {
+                    val readyToTransmit = mutex.withLock {
                         val command = outbox.get(commandId)
-                        if (command?.state != DurableState.RECOVERY_REQUIRED) return@withLock
+                        if (command?.state != DurableState.RECOVERY_REQUIRED) return@withLock false
                         if (
                             trust == null ||
                             transportIdentity == null ||
@@ -625,7 +664,7 @@ class NativeClientRuntime(
                                 "command.recovery.waiting_for_connection",
                                 mapOf("action" to (outbox.operation(commandId)?.wireName ?: "unknown")),
                             )
-                            return@withLock
+                            return@withLock false
                         }
                         commandRecoveryAttempts[commandId] = completedAttempts + 1
                         diagnostics.record(
@@ -635,6 +674,9 @@ class NativeClientRuntime(
                                 "stage" to if (completedAttempts == 0) "initial" else "retry",
                             ),
                         )
+                        true
+                    }
+                    if (readyToTransmit) {
                         try {
                             transmit(commandId, recovery = true)
                         } catch (error: CancellationException) {
@@ -1236,16 +1278,7 @@ class NativeClientRuntime(
             ),
         )
         publishCommand(rebased)
-        try {
-            transmit(rebased.commandId, recovery = false)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            diagnostics.record(
-                "command.revision_retry.failure",
-                mapOf("error" to diagnosticErrorName(error)),
-            )
-        }
+        launchCommandTransmission(rebased.commandId, recovery = false)
         return true
     }
 
