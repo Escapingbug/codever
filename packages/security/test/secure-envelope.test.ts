@@ -242,7 +242,7 @@ describe('application-layer secure envelopes', () => {
 
     const tampered = structuredClone(sealed)
     tampered.bundle.recipients[0]!.wrappedKey =
-      `${tampered.bundle.recipients[0]!.wrappedKey.slice(0, -1)}A`
+      `${tampered.bundle.recipients[0]!.wrappedKey.slice(0, -1)}${tampered.bundle.recipients[0]!.wrappedKey.endsWith('A') ? 'B' : 'A'}`
     await expect(openSecureEnvelopeBundle(tampered, {
       recipientPrivateKey: phone.privateKey,
       senderPublicKey: gateway.publicKey,

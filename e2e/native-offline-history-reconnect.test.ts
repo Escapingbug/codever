@@ -15,10 +15,12 @@ import {
     REQUIRED_NATIVE_CAPABILITIES,
     type NativeCursorStore,
 } from '../apps/pwa/app/client/native/NativeBridgeClient'
+import type { CollaborationState } from '../apps/pwa/app/client/CodeverClient'
 import {
     acquireNativeRpcBridge,
     type NativeBridgePort,
 } from '../apps/pwa/app/client/native/NativeRpcBridge'
+import { shouldReconcileRecentHistory } from '../apps/pwa/app/crossDeviceSync'
 
 describe('native offline history and reconnect', () => {
     it('opens cached history offline and replays missed events once after WebView restart', async () => {
@@ -83,11 +85,66 @@ describe('native offline history and reconnect', () => {
         expect(port.failures).toEqual([])
         second.dispose()
     })
+
+    it('repairs output missed by the phone timeline when another device completes the session', async () => {
+        const port = new PersistentHistoryPort([
+            message('cross-device-user', 1, 'first message from the phone', false),
+            message('cross-device-command', 2, 'running command', false),
+        ])
+        let client: NativeBridgeClient
+        let previousUpdatedAt: number | undefined
+        let resolveRecovery!: (messages: ClientMessage[]) => void
+        const recovered = new Promise<ClientMessage[]>(resolve => {
+            resolveRecovery = resolve
+        })
+        client = await createClient(port, { load: () => undefined, save() {} }, {
+            onCollaborationState(state) {
+                const session = state.gatewayState?.sessions.find(
+                    candidate => candidate.id === 'session-history',
+                )
+                const nextUpdatedAt = session?.updatedAt
+                if (shouldReconcileRecentHistory({
+                    selectedSessionId: 'session-history',
+                    previousUpdatedAt,
+                    nextUpdatedAt,
+                })) {
+                    void client.loadRecentHistory('session-history', 30)
+                        .then(page => resolveRecovery(page.messages))
+                }
+                previousUpdatedAt = nextUpdatedAt
+            },
+        })
+        await expect(client.loadRecentHistory('session-history', 30)).resolves.toMatchObject({
+            messages: [
+                { eventId: 'cross-device-user' },
+                { eventId: 'cross-device-command' },
+            ],
+        })
+        port.deliverGatewayState(1)
+        await nextTurn()
+
+        // The ordinary Matrix timeline event is deliberately absent. Only the
+        // authoritative Gateway state advances, exactly like a limited native
+        // sync that retained the running command but dropped the final answer.
+        port.appendWithoutTimeline(
+            message('cross-device-final', 3, 'final answer from the browser task', true),
+        )
+        port.deliverGatewayState(2)
+
+        await expect(within(recovered, 5_000)).resolves.toEqual([
+            expect.objectContaining({ eventId: 'cross-device-user' }),
+            expect.objectContaining({ eventId: 'cross-device-command' }),
+            expect.objectContaining({ eventId: 'cross-device-final' }),
+        ])
+        expect(port.failures).toEqual([])
+        client.dispose()
+    })
 })
 
 type Handlers = {
     onStatus?(status: string): void
     onMessage?(message: ClientMessage): void
+    onCollaborationState?(state: CollaborationState): void
 }
 
 type RpcRequest = {
@@ -122,6 +179,21 @@ class PersistentHistoryPort implements NativeBridgePort {
     appendWhileDetached(incoming: ClientMessage): void {
         this.history.push(incoming)
         this.replay.push(messageEvent(incoming, 'cursor-detached-3'))
+    }
+
+    appendWithoutTimeline(incoming: ClientMessage): void {
+        this.history.push(incoming)
+    }
+
+    deliverGatewayState(updatedAt: number): void {
+        this.deliver([{
+            schemaVersion: 1,
+            eventId: `bridge-gateway-state-${updatedAt}`,
+            cursor: `cursor-gateway-state-${updatedAt}`,
+            occurredAt: updatedAt,
+            type: 'gateway.state.changed',
+            payload: gatewayState(updatedAt),
+        }])
     }
 
     deliverLive(incoming: ClientMessage): void {
@@ -213,6 +285,7 @@ async function createClient(
     const client = new NativeBridgeClient(bridge, hello, {
         onMessage: incoming => handlers.onMessage?.(incoming),
         onStatus: status => handlers.onStatus?.(status),
+        onCollaborationState: state => handlers.onCollaborationState?.(state),
     }, cursorStore)
     await client.ready
     return client
@@ -281,6 +354,54 @@ function snapshot(phase: ClientSnapshot['lifecycle']['phase']): ClientSnapshot {
         trust: { state: 'unpaired' },
         commands: [],
     }
+}
+
+function gatewayState(updatedAt: number): Record<string, unknown> {
+    return {
+        kind: 'gateway_state',
+        version: 1,
+        state_version: updatedAt,
+        revision: updatedAt,
+        revision_epoch: 'runtime-epoch-1',
+        revision_epoch_generation: 1,
+        active_device_count: 2,
+        current_session_id: 'session-history',
+        sessions: [{
+            id: 'session-history',
+            title: 'Cross-device session',
+            updated_at: updatedAt,
+            status: 'idle',
+            project_id: 'project-codever',
+            project_name: 'codever',
+            cwd: '/workspace/codever',
+            provider: 'codex',
+            extensions: [],
+        }],
+        workspace: {
+            project_id: 'project-codever',
+            project_name: 'codever',
+            cwd: '/workspace/codever',
+            provider: 'codex',
+            permission_mode: 'default',
+        },
+        capabilities: {
+            models: [],
+            permission_modes: [],
+            can_create_session: true,
+            can_select_session: true,
+            session_extensions: [],
+        },
+    }
+}
+
+function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(
+            () => reject(new Error(`Timed out after ${timeoutMs} ms.`)),
+            timeoutMs,
+        )),
+    ])
 }
 
 function nextTurn(): Promise<void> {

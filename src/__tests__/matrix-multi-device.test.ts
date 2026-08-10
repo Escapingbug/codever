@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+    CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     DEFAULT_HISTORY_PAGE_BYTES,
     historyItemsSchema,
     type CodeverCommand,
@@ -155,6 +156,86 @@ describe('multi-device Matrix collaboration', () => {
         const afterRevoke = await openFor(sent[2]!, first, gateway, 'device-a')
         expect(afterRevoke[CODEVER_MATRIX_EXTENSION]).toMatchObject({
             active_device_count: 1,
+        })
+    })
+
+    it('broadcasts authoritative Gateway state as one application-control bundle', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const phone = await generateDeviceKeyPair()
+        const browser = await generateDeviceKeyPair()
+        const policies = [
+            trusted('phone', 'Phone', phone.publicJwk, 'MATRIX_PHONE'),
+            trusted('browser', 'Browser', browser.publicJwk, 'MATRIX_BROWSER'),
+        ]
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'state-envelopes.json'),
+            },
+            policies,
+            async () => policies,
+        )
+        await layer.initialize(now)
+        const encrypted: MatrixSendEventRequest[] = []
+        const controls: MatrixSendEventRequest[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                encrypted.push(request)
+                return { eventId: `$encrypted-${encrypted.length}` }
+            },
+            async sendApplicationControlEvent(request) {
+                controls.push(request as unknown as MatrixSendEventRequest)
+                return { eventId: `$control-${controls.length}` }
+            },
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: '/repo',
+            providerName: 'test',
+        }
+
+        await layer.sendGatewayState(room, {
+            revision: 4,
+            revisionEpoch: 'runtime-epoch-1',
+            revisionEpochGeneration: 1,
+            stateVersion: 9,
+            currentSessionId: null,
+            sessions: [],
+            workspace: {
+                projectId: 'project-1',
+                projectName: 'Project',
+                cwd: '/repo',
+                provider: 'test',
+                permissionMode: 'default',
+            },
+            capabilities: {
+                models: [],
+                permissionModes: [],
+                canCreateSession: true,
+                canSelectSession: true,
+                sessionExtensions: [],
+            },
+        }, transport)
+
+        expect(encrypted).toEqual([])
+        expect(controls).toHaveLength(1)
+        expect(controls[0]!.eventType).toBe(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE)
+        expect(bundleRecipients(controls[0]!)).toEqual(['browser', 'phone'])
+        await expect(openFor(controls[0]!, phone, gateway, 'phone')).resolves.toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_state',
+                state_version: 9,
+            },
+        })
+        await expect(openFor(controls[0]!, browser, gateway, 'browser')).resolves.toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_state',
+                state_version: 9,
+            },
         })
     })
 

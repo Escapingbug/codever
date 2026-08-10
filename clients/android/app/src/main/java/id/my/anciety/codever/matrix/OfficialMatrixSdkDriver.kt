@@ -179,7 +179,7 @@ class OfficialMatrixSdkDriver(
             val service = try {
                 built.syncService()
                     .withSharePos(true)
-                    .withRoomListTimelineLimit(1u)
+                    .withRoomListTimelineLimit(ROOM_LIST_TIMELINE_LIMIT)
                     .finish()
             } catch (error: Exception) {
                 diagnostics.record(
@@ -364,9 +364,17 @@ class OfficialMatrixSdkDriver(
     }
 
     private fun processTimelineDiffs(diffs: List<TimelineDiff>) {
-        diffs.forEach { diff ->
-            timelineItems(diff).forEach(::captureDecryptedEvent)
+        val items = diffs.flatMap(::timelineItems)
+        if (items.isNotEmpty()) {
+            diagnostics.record(
+                "matrix.timeline.batch_received",
+                mapOf(
+                    "diffs" to diffs.size.toString(),
+                    "items" to items.size.toString(),
+                ),
+            )
         }
+        items.forEach(::captureDecryptedEvent)
     }
 
     private fun timelineItems(diff: TimelineDiff): List<TimelineItem> = when (diff) {
@@ -509,6 +517,7 @@ class OfficialMatrixSdkDriver(
     )
 
     private companion object {
+        const val ROOM_LIST_TIMELINE_LIMIT = 100u
         const val E2EE_INITIALIZATION_TIMEOUT_MS = 45_000L
         const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L
         const val BOUND_ROOM_POLL_INTERVAL_MS = 100L

@@ -768,6 +768,43 @@ export async function connectMatrix(
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
   };
+  let gatewayStateRecovery: Promise<void> | null = null;
+  let lastGatewayStateRecoveryAt = 0;
+  const recoverGatewayStateSnapshot = (): void => {
+    if (
+      stopped ||
+      !connectionReady ||
+      !activeTrust ||
+      document.visibilityState !== "visible" ||
+      gatewayStateRecovery ||
+      Date.now() - lastGatewayStateRecoveryAt < 2_000
+    ) {
+      return;
+    }
+    lastGatewayStateRecoveryAt = Date.now();
+    gatewayStateRecovery = requestGatewayStateSnapshot()
+      .catch(reportInboundError)
+      .finally(() => {
+        gatewayStateRecovery = null;
+      });
+  };
+  const onTimelineReset = (room: Room | undefined): void => {
+    if (!room || room.roomId !== config.roomId) return;
+    // A limited Matrix sync explicitly means events may have been skipped.
+    // The current Gateway snapshot is authoritative and travels back on the
+    // application-control lane, so recover it instead of assuming the newest
+    // session state happened to remain inside the limited timeline window.
+    recoverGatewayStateSnapshot();
+  };
+  const onVisibilityRecovery = (): void => {
+    if (document.visibilityState === "visible") recoverGatewayStateSnapshot();
+  };
+  const onFocusRecovery = (): void => recoverGatewayStateSnapshot();
+  const removeBrowserRecoveryListeners = (): void => {
+    document.removeEventListener("visibilitychange", onVisibilityRecovery);
+    window.removeEventListener("focus", onFocusRecovery);
+    window.removeEventListener("online", onFocusRecovery);
+  };
   const resolveHistoryRequest = (
     requestId: string,
     page: MatrixHistoryPage,
@@ -1071,7 +1108,9 @@ export async function connectMatrix(
   } catch (error) {
     stopped = true;
     client.off(sdk.RoomEvent.Timeline, onTimeline);
+    client.off(sdk.RoomEvent.TimelineReset, onTimelineReset);
     client.off(sdk.ClientEvent.Sync, onSync);
+    removeBrowserRecoveryListeners();
     client.stopClient();
     let detail = formatError(error);
     try {
@@ -1194,6 +1233,7 @@ export async function connectMatrix(
       enqueueInboundEvent(event, true),
     );
     client.on(sdk.RoomEvent.Timeline, onTimeline);
+    client.on(sdk.RoomEvent.TimelineReset, onTimelineReset);
     await Promise.all(initialTimelineOperations);
     assertStartupActive();
 
@@ -1221,6 +1261,9 @@ export async function connectMatrix(
 
     assertPersistenceHealthy();
     connectionReady = true;
+    document.addEventListener("visibilitychange", onVisibilityRecovery);
+    window.addEventListener("focus", onFocusRecovery);
+    window.addEventListener("online", onFocusRecovery);
     handlers.onStatus("connected");
   };
   const startupReady = finishMatrixStartup();
@@ -1232,7 +1275,9 @@ export async function connectMatrix(
     );
     pendingHistoryRequests.clear();
     client.off(sdk.RoomEvent.Timeline, onTimeline);
+    client.off(sdk.RoomEvent.TimelineReset, onTimelineReset);
     client.off(sdk.ClientEvent.Sync, onSync);
+    removeBrowserRecoveryListeners();
     client.stopClient();
     let detail = formatError(error);
     try {
@@ -2090,7 +2135,9 @@ export async function connectMatrix(
       );
       pendingHistoryRequests.clear();
       client.off(sdk.RoomEvent.Timeline, onTimeline);
+      client.off(sdk.RoomEvent.TimelineReset, onTimelineReset);
       client.off(sdk.ClientEvent.Sync, onSync);
+      removeBrowserRecoveryListeners();
       client.stopClient();
       handlers.onStatus("offline");
       void checkpointAndReleaseMatrixSyncStore(

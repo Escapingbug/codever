@@ -145,12 +145,50 @@ class DevtoolsPage {
         })()`)
     }
 
-    async clickButtonStrong(label: string): Promise<void> {
-        await this.click(`(() => {
-            const target = Array.from(document.querySelectorAll('button'))
-                .find(button => normalized(button.querySelector('strong')?.textContent || '') === ${json(label)} && visible(button));
-            return clickResult(target);
-        })()`)
+    async waitForButtonTextEnabled(
+        label: string,
+        containerSelector?: string,
+        timeoutMs = DEFAULT_TIMEOUT_MS,
+    ): Promise<void> {
+        const deadline = Date.now() + timeoutMs
+        while (Date.now() < deadline) {
+            const ready = await this.evaluate<boolean>(`(() => {
+                const normalized = value => String(value || '').replace(/\\s+/gu, ' ').trim();
+                const root = ${containerSelector ? `document.querySelector(${json(containerSelector)})` : 'document'};
+                const target = root && Array.from(root.querySelectorAll('button'))
+                    .find(button => normalized(button.innerText) === ${json(label)} && button.getClientRects().length > 0);
+                return Boolean(target && !target.disabled);
+            })()`)
+            if (ready) return
+            await delay(250)
+        }
+        throw new Error(`Timed out waiting for the enabled ${label} button.`)
+    }
+
+    async clickConversationActionStrong(
+        label: string,
+        timeoutMs = DEFAULT_TIMEOUT_MS,
+    ): Promise<void> {
+        const deadline = Date.now() + timeoutMs
+        while (Date.now() < deadline) {
+            const result = await this.evaluate<'clicked' | 'waiting' | 'missing'>(`(() => {
+                const normalized = value => String(value || '').replace(/\\s+/gu, ' ').trim();
+                const target = Array.from(document.querySelectorAll('button'))
+                    .find(button => normalized(button.querySelector('strong')?.textContent || '') === ${json(label)} && button.getClientRects().length > 0);
+                if (target) {
+                    if (target.disabled) return 'waiting';
+                    target.click();
+                    return 'clicked';
+                }
+                const details = Array.from(document.querySelectorAll('button'))
+                    .find(button => button.getAttribute('aria-label') === 'Conversation details' && button.getClientRects().length > 0);
+                if (details && details.getAttribute('aria-expanded') !== 'true') details.click();
+                return details ? 'waiting' : 'missing';
+            })()`)
+            if (result === 'clicked') return
+            await delay(250)
+        }
+        throw new Error(`Timed out opening the enabled ${label} conversation action.`)
     }
 
     async createSession(projectName: string): Promise<void> {
@@ -421,8 +459,7 @@ async function exerciseSessionLifecycle(
     recordLatency(projectName, 'create', startedAt, latencyWarnings)
 
     startedAt = Date.now()
-    await page.clickAria('Conversation details')
-    await page.clickButtonStrong('Archive session')
+    await page.clickConversationActionStrong('Archive session')
     const archived = await page.waitFor(
         `archived session in ${projectName}`,
         state => state.archivedBanner && state.archivedSessionCount > 0,
@@ -432,6 +469,7 @@ async function exerciseSessionLifecycle(
     recordLatency(projectName, 'archive', startedAt, latencyWarnings)
 
     startedAt = Date.now()
+    await page.waitForButtonTextEnabled('Restore')
     await page.clickButtonText('Restore')
     const restored = await page.waitFor(
         `restored session in ${projectName}`,
@@ -455,8 +493,7 @@ async function exerciseSessionLifecycle(
 }
 
 async function deleteSelectedSession(page: DevtoolsPage): Promise<void> {
-    await page.clickAria('Conversation details')
-    await page.clickButtonStrong('Delete session')
+    await page.clickConversationActionStrong('Delete session')
     await page.waitFor(
         'the delete confirmation',
         state => state.dialogs.some(dialog => dialog.startsWith('Delete “')),

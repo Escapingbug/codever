@@ -167,7 +167,9 @@ describe('Gateway application-layer Matrix content', () => {
                 sessionExtensions: [],
             },
         }, matrix)
-        const stateExtension = sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        expect(sent).toHaveLength(1)
+        expect(controlSent[1]?.eventType).toBe('io.codever.secure_control.v1')
+        const stateExtension = controlSent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
         const openedState = await openSecureEnvelopeBundle(
             stateExtension.secure_envelope_bundle,
             {
@@ -214,7 +216,7 @@ describe('Gateway application-layer Matrix content', () => {
                 },
             },
         })
-        const firstStateTransaction = sent[1]!.transactionId
+        const firstStateTransaction = controlSent[1]!.transactionId
         await layer.sendGatewayState(room, {
             revision: 0,
             revisionEpoch: 'gateway-key-epoch',
@@ -237,7 +239,8 @@ describe('Gateway application-layer Matrix content', () => {
                 sessionExtensions: [],
             },
         }, matrix)
-        expect(sent[2]!.transactionId).not.toBe(firstStateTransaction)
+        expect(sent).toHaveLength(1)
+        expect(controlSent[2]!.transactionId).not.toBe(firstStateTransaction)
 
         const incoming = await sealSecureEnvelope({
             plaintext: {

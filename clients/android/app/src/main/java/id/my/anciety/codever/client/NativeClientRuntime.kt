@@ -231,7 +231,29 @@ class NativeClientRuntime(
 
     suspend fun historyPage(sessionId: String, before: String?, limit: Int): HistoryPage {
         diagnostics.record("history.page.requested")
-        val gatewayCursor = synchronized(gatewayHistory) { gatewayHistory[sessionId] }
+        if (matrix.status.phase != MatrixRuntimePhase.SYNCING) {
+            diagnostics.record("history.page.local_offline")
+            return eventHub.historyPage(
+                sessionId,
+                before,
+                limit,
+                externalHasMore = false,
+            )
+        }
+        var gatewayCursor = synchronized(gatewayHistory) { gatewayHistory[sessionId] }
+        if (before == null) {
+            // A completed cursor only describes the Gateway history that
+            // existed when it was fetched. Another device can append new
+            // messages afterwards, and those live timeline events may have
+            // crossed a limited/background sync gap. Always reconcile the
+            // newest authoritative page when the WebView asks for recent
+            // history instead of treating an old `complete` bit as permanent.
+            gatewayCursor = requestAndAwaitGatewayHistory(
+                sessionId = sessionId,
+                requestedBefore = null,
+                limit = limit,
+            )
+        }
         var local = eventHub.historyPage(
             sessionId,
             before,
@@ -243,9 +265,28 @@ class NativeClientRuntime(
             return local
         }
 
+        val resolvedGatewayCursor = requestAndAwaitGatewayHistory(
+            sessionId = sessionId,
+            requestedBefore = gatewayCursor?.before,
+            limit = limit,
+        )
+        local = eventHub.historyPage(
+            sessionId,
+            before,
+            limit,
+            externalHasMore = !resolvedGatewayCursor.complete,
+        )
+        diagnostics.record("history.page.completed")
+        return local
+    }
+
+    private suspend fun requestAndAwaitGatewayHistory(
+        sessionId: String,
+        requestedBefore: String?,
+        limit: Int,
+    ): GatewayHistoryCursor {
         val pending = mutex.withLock {
-            pendingHistory.values.firstOrNull { it.sessionId == sessionId }
-                ?: requestGatewayHistoryLocked(sessionId, gatewayCursor?.before, limit)
+            requestGatewayHistoryLocked(sessionId, requestedBefore, limit)
         }
         val resolvedGatewayCursor = try {
             try {
@@ -259,14 +300,7 @@ class NativeClientRuntime(
         } finally {
             mutex.withLock { pendingHistory.remove(pending.requestId) }
         }
-        local = eventHub.historyPage(
-            sessionId,
-            before,
-            limit,
-            externalHasMore = !resolvedGatewayCursor.complete,
-        )
-        diagnostics.record("history.page.completed")
-        return local
+        return resolvedGatewayCursor
     }
 
     fun inspectPairing(link: String): NativePairingPreview {

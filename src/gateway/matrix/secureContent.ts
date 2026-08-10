@@ -1040,17 +1040,31 @@ export class GatewaySecureContentLayer {
             } catch (error) {
                 throw new PermanentMatrixDeliveryError(error)
             }
+            const content: MatrixRoomMessageContent = {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever message',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
+                    kind: 'secure_envelope_bundle',
+                    secure_envelope_bundle: secureEnvelopeBundle,
+                },
+            }
+            // Gateway state is an authoritative, coalescible snapshot. Keep it
+            // off the Megolm room timeline so a limited/background sync cannot
+            // drop the only snapshot that tells another device about new or
+            // completed sessions. The bundle remains application encrypted and
+            // authenticated for every active Codever device.
+            if (isApplicationControlRequest(request) && transport.sendApplicationControlEvent) {
+                return transport.sendApplicationControlEvent({
+                    roomId: request.roomId,
+                    eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+                    transactionId: request.transactionId,
+                    content,
+                })
+            }
             return transport.sendEncryptedRoomEvent({
                 ...request,
-                content: {
-                    msgtype: 'm.notice',
-                    body: 'Encrypted Codever message',
-                    [CODEVER_MATRIX_EXTENSION]: {
-                        version: CODEVER_MATRIX_PROTOCOL_VERSION,
-                        kind: 'secure_envelope_bundle',
-                        secure_envelope_bundle: secureEnvelopeBundle,
-                    },
-                },
+                content,
             })
         }, {
             coalesceKey,

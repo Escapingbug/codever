@@ -86,6 +86,7 @@ import {
   type ChatMessage,
   type OptimisticMessageReference,
 } from "./chatMessages";
+import { shouldReconcileRecentHistory } from "./crossDeviceSync";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import { deriveConnectionPresentation } from "./connectionPresentation";
@@ -546,7 +547,11 @@ export function CodeverApp() {
   const pendingOpenedSessionIdRef = useRef<string | null>(null);
   const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
   const knownGatewaySessionIdsRef = useRef(new Set<string>());
+  const knownGatewaySessionUpdatedAtRef = useRef(new Map<string, number>());
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
+  const recentHistoryReconciliationRef = useRef(
+    new Map<string, Promise<void>>(),
+  );
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
@@ -1372,6 +1377,71 @@ export function CodeverApp() {
       });
   }
 
+  function reconcileRecentSessionHistory(
+    sessionId: string,
+    connection: CodeverClient,
+  ): void {
+    if (
+      historySessionIdRef.current !== sessionId ||
+      historyLoadingRef.current ||
+      recentHistoryReconciliationRef.current.has(sessionId)
+    ) {
+      return;
+    }
+    const scope = historyScopeRef.current;
+    if (!scope) return;
+    const generation = historyGenerationRef.current;
+    const operation = (async () => {
+      const remote = await connection.loadRecentHistory(sessionId);
+      const recovered = remote.messages.map((message) =>
+        chatMessageFromIncoming(
+          { ...incomingMessageFromClient(message), historical: true },
+          message.sessionId ?? sessionId,
+        ),
+      );
+      if (recovered.length > 0) {
+        await persistMessageHistoryPage(scope, sessionId, recovered);
+      }
+      if (
+        codeverClientRef.current !== connection ||
+        generation !== historyGenerationRef.current ||
+        historySessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      if (recovered.length > 0) {
+        historyCursorRef.current = olderHistoryCursor(
+          historyCursorRef.current,
+          recovered,
+        );
+        setMessages((current) => mergeChatMessages(current, recovered));
+      }
+      setHistoryHasMore((current) => current || remote.hasMore);
+      setHistoryError(null);
+      setHistoryRetryMode(null);
+      recoverUiNotice("history:cross-device-sync");
+    })()
+      .catch((error) => {
+        if (
+          codeverClientRef.current === connection &&
+          historySessionIdRef.current === sessionId
+        ) {
+          showUiNotice(
+            "history:cross-device-sync",
+            "history",
+            "warning",
+            `Recent messages from another device could not be synchronized: ${formatUiError(error)}`,
+          );
+        }
+      })
+      .finally(() => {
+        if (recentHistoryReconciliationRef.current.get(sessionId) === operation) {
+          recentHistoryReconciliationRef.current.delete(sessionId);
+        }
+      });
+    recentHistoryReconciliationRef.current.set(sessionId, operation);
+  }
+
   async function restoreSessionHistory(
     sessionId: string,
     connection: CodeverClient | null = codeverClientRef.current,
@@ -1879,6 +1949,8 @@ export function CodeverApp() {
     setNewSessionBusy(Boolean(sessionCreateRecovery));
     setSessionCreateReloadBlocked(Boolean(sessionCreateRecovery));
     knownGatewaySessionIdsRef.current.clear();
+    knownGatewaySessionUpdatedAtRef.current.clear();
+    recentHistoryReconciliationRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
     setGatewayRevision(null);
@@ -1963,6 +2035,13 @@ export function CodeverApp() {
             );
           }
           if (state.gatewayState) {
+            const previousUpdatedAt = knownGatewaySessionUpdatedAtRef.current;
+            const nextUpdatedAt = new Map(
+              state.gatewayState.sessions.map((session) => [
+                session.id,
+                session.updatedAt,
+              ]),
+            );
             const nextSessionIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
@@ -1984,6 +2063,7 @@ export function CodeverApp() {
               }
             }
             knownGatewaySessionIdsRef.current = nextSessionIds;
+            knownGatewaySessionUpdatedAtRef.current = nextUpdatedAt;
             setDeleteTarget((current) =>
               current
                 ? state.gatewayState!.sessions.find(
@@ -2085,6 +2165,24 @@ export function CodeverApp() {
               codeverClientRef.current,
               shouldRevealNextSession,
             );
+            const previousSelectedUpdatedAt = nextSessionId
+              ? previousUpdatedAt.get(nextSessionId)
+              : undefined;
+            const nextSelectedUpdatedAt = nextSessionId
+              ? nextUpdatedAt.get(nextSessionId)
+              : undefined;
+            const activeConnection = codeverClientRef.current;
+            if (
+              nextSessionId &&
+              activeConnection &&
+              shouldReconcileRecentHistory({
+                selectedSessionId: nextSessionId,
+                previousUpdatedAt: previousSelectedUpdatedAt,
+                nextUpdatedAt: nextSelectedUpdatedAt,
+              })
+            ) {
+              reconcileRecentSessionHistory(nextSessionId, activeConnection);
+            }
           }
         },
         onCommandReviewRequired(review) {
@@ -2174,6 +2272,8 @@ export function CodeverApp() {
       sessionCreateRecoveryTimerRef.current = null;
     }
     knownGatewaySessionIdsRef.current.clear();
+    knownGatewaySessionUpdatedAtRef.current.clear();
+    recentHistoryReconciliationRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     setNativeCommandReview(null);
