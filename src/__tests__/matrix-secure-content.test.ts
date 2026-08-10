@@ -6,6 +6,8 @@ import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
+    base64UrlDecode,
+    openMatrixTimelineEnvelope,
     openSecureEnvelopeBundle,
     openSecureEnvelope,
     sealSecureEnvelope,
@@ -30,6 +32,55 @@ afterEach(async () => {
 })
 
 describe('Gateway application-layer Matrix content', () => {
+    it('rejects oversized timeline content before Matrix encryption', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-secure-matrix-'))
+        temporaryDirectories.push(directory)
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            [{
+                deviceId: 'phone-1',
+                publicKey: device.publicJwk,
+                allowedRoomIds: ['!room:localhost'],
+                allowedOperations: ['prompt'],
+                matrixUserId: '@phone:localhost',
+                matrixDeviceId: 'PHONE_MATRIX',
+                matrixDeviceKeys: ['phone-matrix-ed25519'],
+                certificateExpiresAt: now + 60_000,
+                sequenceEpoch: 'certificate-phone-1',
+            }],
+        )
+        await layer.initialize(now)
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent() {
+                throw new Error('oversized content must not reach Matrix')
+            },
+        }
+        const secureTransport = layer.transportForRoom({
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: '/repo',
+            providerName: 'test',
+        }, transport)
+
+        await expect(secureTransport.sendEncryptedRoomEvent({
+            roomId: '!room:localhost',
+            eventType: 'm.room.message',
+            transactionId: 'oversized-event',
+            content: {
+                msgtype: 'm.text',
+                body: 'x'.repeat(30 * 1024),
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })).rejects.toThrow(/Matrix timeline event|too_big|32/i)
+    })
+
     it('seals outgoing content and opens authenticated incoming content', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-secure-matrix-'))
         temporaryDirectories.push(directory)
@@ -81,14 +132,30 @@ describe('Gateway application-layer Matrix content', () => {
             content: {
                 msgtype: 'm.text',
                 body: 'agent secret reply',
-                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+                'm.relates_to': {
+                    rel_type: 'm.thread',
+                    event_id: '$session-root',
+                    is_falling_back: true,
+                    'm.in_reply_to': { event_id: '$session-root' },
+                },
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    session_id: 'session-1',
+                    thread_root_event_id: '$session-root',
+                },
             },
             transactionId: 'transaction-1',
         })
-        expect(JSON.stringify(sent[0]?.content)).not.toContain('agent secret reply')
+        expect(sent).toHaveLength(1)
+        expect(JSON.stringify(sent)).not.toContain('agent secret reply')
+        expect(sent[0]?.content['m.relates_to']).toMatchObject({
+            rel_type: 'm.thread',
+            event_id: '$session-root',
+        })
         const outgoingExtension = sent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const openedOutgoing = await openSecureEnvelopeBundle(
-            outgoingExtension.secure_envelope_bundle,
+        const openedGrant = await openSecureEnvelopeBundle(
+            outgoingExtension.timeline_key_ring_bundle,
             {
             recipientPrivateKey: device.privateKey,
             senderPublicKey: gateway.publicKey,
@@ -103,6 +170,26 @@ describe('Gateway application-layer Matrix content', () => {
             },
             replayStore: new InMemoryReplayStore(),
             now: Date.now(),
+            },
+        )
+        const grant = openedGrant.plaintext as {
+                active_epoch_id: string
+                epochs: Array<{ epoch_id: string; key: string }>
+            }
+        const activeKey = grant.epochs.find(epoch => epoch.epoch_id === grant.active_epoch_id)!
+        const openedOutgoing = await openMatrixTimelineEnvelope(
+            outgoingExtension.timeline_envelope,
+            {
+                timelineKey: base64UrlDecode(activeKey.key),
+                gatewayPublicKey: gateway.publicKey,
+                expected: {
+                    gatewayId: 'gateway-1',
+                    conversationId: 'conversation-1',
+                    roomId: '!room:localhost',
+                    epochId: activeKey.epoch_id,
+                    sessionId: 'session-1',
+                    threadRootEventId: '$session-root',
+                },
             },
         )
         expect(openedOutgoing.plaintext).toMatchObject({ body: 'agent secret reply' })
@@ -142,105 +229,6 @@ describe('Gateway application-layer Matrix content', () => {
                 sequence: 1,
             },
         })
-
-        await layer.sendGatewayState(room, {
-            revision: 0,
-            revisionEpoch: 'gateway-key-epoch',
-            revisionEpochGeneration: 1,
-            stateVersion: 1,
-            currentSessionId: null,
-            sessions: [],
-            workspace: {
-                projectId: 'project-repo',
-                projectName: 'repo',
-                cwd: 'C:\\repo',
-                provider: 'codex',
-                permissionMode: 'default',
-            },
-            capabilities: {
-                models: [{ id: 'gpt-test', name: 'GPT Test' }],
-                permissionModes: [{ id: 'default', name: 'Default' }],
-                canCreateSession: true,
-                canSelectSession: true,
-                canArchiveSession: true,
-                canDeleteSession: true,
-                sessionExtensions: [],
-            },
-        }, matrix)
-        expect(sent).toHaveLength(1)
-        expect(controlSent[1]?.eventType).toBe('io.codever.secure_control.v1')
-        const stateExtension = controlSent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const openedState = await openSecureEnvelopeBundle(
-            stateExtension.secure_envelope_bundle,
-            {
-            recipientPrivateKey: device.privateKey,
-            senderPublicKey: gateway.publicKey,
-            expected: {
-                gatewayId: 'gateway-1',
-                conversationId: 'conversation-1',
-                direction: 'gateway_to_device',
-                senderDeviceId: 'gateway-1',
-                recipientDeviceId: 'phone-1',
-                senderKeyId: gateway.keyId,
-                recipientKeyId: device.keyId,
-            },
-            replayStore: new InMemoryReplayStore(),
-            now: Date.now(),
-            },
-        )
-        expect(openedState.plaintext).toMatchObject({
-            [CODEVER_MATRIX_EXTENSION]: {
-                version: 1,
-                kind: 'gateway_state',
-                revision: 0,
-                revision_epoch: 'gateway-key-epoch',
-                revision_epoch_generation: 1,
-                state_version: 1,
-                active_device_count: 1,
-                current_session_id: null,
-                sessions: [],
-                workspace: {
-                    project_id: 'project-repo',
-                    project_name: 'repo',
-                    cwd: 'C:\\repo',
-                    provider: 'codex',
-                    permission_mode: 'default',
-                },
-                capabilities: {
-                    models: [{ id: 'gpt-test', name: 'GPT Test' }],
-                    permission_modes: [{ id: 'default', name: 'Default' }],
-                    can_create_session: true,
-                    can_select_session: true,
-                    can_archive_session: true,
-                    can_delete_session: true,
-                },
-            },
-        })
-        const firstStateTransaction = controlSent[1]!.transactionId
-        await layer.sendGatewayState(room, {
-            revision: 0,
-            revisionEpoch: 'gateway-key-epoch',
-            revisionEpochGeneration: 1,
-            stateVersion: 2,
-            currentSessionId: null,
-            sessions: [],
-            workspace: {
-                projectId: 'project-repo',
-                projectName: 'repo',
-                cwd: 'C:\\repo',
-                provider: 'codex',
-                permissionMode: 'default',
-            },
-            capabilities: {
-                models: [{ id: 'gpt-test', name: 'GPT Test' }],
-                permissionModes: [{ id: 'default', name: 'Default' }],
-                canCreateSession: true,
-                canSelectSession: true,
-                sessionExtensions: [],
-            },
-        }, matrix)
-        expect(sent).toHaveLength(1)
-        expect(controlSent[2]!.transactionId).not.toBe(firstStateTransaction)
 
         const incoming = await sealSecureEnvelope({
             plaintext: {

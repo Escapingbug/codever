@@ -15,6 +15,8 @@ import {
     InMemoryReplayStore,
     openSecureEnvelopeBundle,
     openSecureEnvelope,
+    openMatrixTimelineEnvelope,
+    base64UrlDecode,
     sha256,
     signCommand,
 } from '@codever/security'
@@ -34,8 +36,10 @@ import {
 
 const temporaryDirectories: string[] = []
 const now = Date.now()
+const TEST_CREDENTIAL_LIFETIME_MS = 15 * 60_000
 
 afterEach(async () => {
+    vi.restoreAllMocks()
     await Promise.all(
         temporaryDirectories.splice(0).map(directory =>
             rm(directory, { recursive: true, force: true }),
@@ -753,6 +757,10 @@ describe('multi-device Matrix collaboration', () => {
         const markDeliveredGate = new Promise<void>(resolve => {
             releaseMarkDelivered = resolve
         })
+        let markDeliveredPersisted!: () => void
+        const persisted = new Promise<void>(resolve => {
+            markDeliveredPersisted = resolve
+        })
         const originalMarkDelivered = FileMatrixDeliveryOutbox.prototype.markDelivered
         const markDelivered = vi.spyOn(
             FileMatrixDeliveryOutbox.prototype,
@@ -764,6 +772,7 @@ describe('multi-device Matrix collaboration', () => {
             deliveredAt,
         ) {
             await originalMarkDelivered.call(this, deliveryId, eventId, deliveredAt)
+            markDeliveredPersisted()
             await markDeliveredGate
         })
         try {
@@ -789,6 +798,11 @@ describe('multi-device Matrix collaboration', () => {
             }
             layer.stopRetries()
 
+            // Explicitly establish the race this test names. Timeline group
+            // encryption can legitimately take longer than the 20 ms caller
+            // watchdog under a parallel test load; persistence, rather than
+            // cryptographic scheduling latency, is the required precondition.
+            await persisted
             await expect(queued.confirmation).resolves.toEqual({
                 messageId: '$persisted-before-waiter',
             })
@@ -1674,6 +1688,8 @@ describe('multi-device Matrix collaboration', () => {
         await firstLayer.sendCollaborationPrompt(room, {
             commandId: 'command-durable',
             revision: 7,
+            revisionEpoch: 'runtime-epoch-1',
+            revisionEpochGeneration: 1,
             sessionId: 'session-durable',
             originDeviceId: 'device-a',
             originDeviceName: 'Alice phone',
@@ -1790,6 +1806,8 @@ describe('multi-device Matrix collaboration', () => {
         await expect(original.sendCollaborationPrompt(room, {
             commandId: 'rotated-command',
             revision: 8,
+            revisionEpoch: 'runtime-epoch-1',
+            revisionEpochGeneration: 1,
             originDeviceId: 'device-a',
             originDeviceName: 'Alice phone',
             text: 'must remain bound to the old certificate',
@@ -2170,8 +2188,46 @@ async function openFor(
     }
     const opened = extension.kind === 'secure_envelope_bundle'
         ? await openSecureEnvelopeBundle(extension.secure_envelope_bundle, options)
-        : await openSecureEnvelope(extension.secure_envelope, options)
+        : extension.kind === 'timeline_envelope'
+            ? await openTimelineFor(extension, options, gateway)
+            : await openSecureEnvelope(extension.secure_envelope, options)
     return opened.plaintext as Record<string, unknown>
+}
+
+async function openTimelineFor(
+    extension: Record<string, unknown>,
+    options: Parameters<typeof openSecureEnvelopeBundle>[1],
+    gateway: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+) {
+    const openedGrant = await openSecureEnvelopeBundle(
+        extension.timeline_key_ring_bundle,
+        options,
+    )
+    const grant = openedGrant.plaintext as {
+        active_epoch_id: string
+        epochs: Array<{ epoch_id: string; key: string }>
+    }
+    const active = grant.epochs.find(epoch => epoch.epoch_id === grant.active_epoch_id)!
+    const signed = extension.timeline_envelope as {
+        envelope: {
+            sessionId?: string
+            threadRootEventId?: string
+        }
+    }
+    return openMatrixTimelineEnvelope(extension.timeline_envelope, {
+        timelineKey: base64UrlDecode(active.key),
+        gatewayPublicKey: gateway.publicKey,
+        expected: {
+            gatewayId: options.expected.gatewayId,
+            conversationId: options.expected.conversationId,
+            roomId: '!room:localhost',
+            epochId: active.epoch_id,
+            ...(signed.envelope.sessionId ? { sessionId: signed.envelope.sessionId } : {}),
+            ...(signed.envelope.threadRootEventId
+                ? { threadRootEventId: signed.envelope.threadRootEventId }
+                : {}),
+        },
+    })
 }
 
 function envelopeRecipient(request: MatrixSendEventRequest): string | undefined {
@@ -2180,7 +2236,8 @@ function envelopeRecipient(request: MatrixSendEventRequest): string | undefined 
         envelope?: { recipientDeviceId?: string }
     } | undefined
     if (!signed) {
-        const bundle = extension.secure_envelope_bundle as {
+        const bundle = (extension.secure_envelope_bundle
+            ?? extension.timeline_key_ring_bundle) as {
             bundle?: { recipients?: Array<{ recipientDeviceId?: string }> }
         } | undefined
         return bundle?.bundle?.recipients?.length === 1
@@ -2192,7 +2249,8 @@ function envelopeRecipient(request: MatrixSendEventRequest): string | undefined 
 
 function bundleRecipients(request: MatrixSendEventRequest): string[] {
     const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-    const signed = extension.secure_envelope_bundle as {
+    const signed = (extension.secure_envelope_bundle
+        ?? extension.timeline_key_ring_bundle) as {
         bundle?: { recipients?: Array<{ recipientDeviceId?: string }> }
     } | undefined
     return (signed?.bundle?.recipients ?? [])
@@ -2216,7 +2274,7 @@ function trusted(
         matrixUserId: `@${deviceId}:localhost`,
         matrixDeviceId,
         matrixDeviceKeys: [`${matrixDeviceId}-ed25519`],
-        certificateExpiresAt: now + 60_000,
+        certificateExpiresAt: now + TEST_CREDENTIAL_LIFETIME_MS,
         sequenceEpoch,
     }
 }

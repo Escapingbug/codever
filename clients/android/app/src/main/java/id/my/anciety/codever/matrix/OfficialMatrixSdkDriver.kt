@@ -53,6 +53,8 @@ interface MatrixSdkDriver {
 
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
 
+    suspend fun paginateRoomHistory(limit: Int): Boolean
+
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
 
     suspend fun downloadMedia(url: String): ByteArray
@@ -275,6 +277,12 @@ class OfficialMatrixSdkDriver(
         check(room.isEncrypted()) { "Refusing to send Codever data to an unencrypted Matrix room." }
         if (rotateRoomKey) room.discardRoomKey()
         room.sendRaw("m.room.message", contentJson)
+    }
+
+    override suspend fun paginateRoomHistory(limit: Int): Boolean {
+        require(limit in 1..100)
+        ensureTimeline()
+        return timeline?.paginateBackwards(limit.toUShort()) ?: false
     }
 
     override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {

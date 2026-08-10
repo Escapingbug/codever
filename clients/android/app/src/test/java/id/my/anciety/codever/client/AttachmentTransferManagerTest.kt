@@ -106,6 +106,7 @@ class AttachmentTransferManagerTest {
         override suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult =
             error("unused")
         override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) = Unit
+        override suspend fun paginateRoomHistory(limit: Int): Boolean = false
         override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) = Unit
         override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
             if (failUpload) throw IllegalStateException("upload unavailable")

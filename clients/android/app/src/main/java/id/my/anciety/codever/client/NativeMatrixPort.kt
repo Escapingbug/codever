@@ -25,6 +25,8 @@ interface NativeMatrixPort {
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession
     suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult
     suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
+    /** Returns true only when Matrix reports that the room timeline start was reached. */
+    suspend fun paginateRoomHistory(limit: Int): Boolean
     suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String)
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
     suspend fun downloadMedia(url: String): ByteArray
@@ -59,6 +61,8 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         runtime.issueLoginToken(password)
     override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) =
         runtime.sendRoomMessage(contentJson, rotateRoomKey)
+    override suspend fun paginateRoomHistory(limit: Int): Boolean =
+        runtime.paginateRoomHistory(limit)
     override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) =
         runtime.sendApplicationControlEvent(contentJson, transactionId)
     override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String =

@@ -20,6 +20,8 @@ import {
     InMemoryReplayStore,
     openSecureEnvelopeBundle,
     openSecureEnvelope,
+    openMatrixTimelineEnvelope,
+    base64UrlDecode,
     sealSecureEnvelope,
     signCommand,
 } from '@codever/security'
@@ -330,8 +332,13 @@ describe('MatrixGatewayRunner', () => {
             },
         })
 
-        await vi.waitFor(() => expect(client.sent).toHaveLength(2))
-        const responseOuter = client.sent[1]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        await vi.waitFor(() => expect(client.sent.some(request =>
+            request.transactionId.includes(historyRequest.requestId),
+        )).toBe(true))
+        const responseRequest = client.sent.find(request =>
+            request.transactionId.includes(historyRequest.requestId)
+        )!
+        const responseOuter = responseRequest.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
         const response = await openSecureEnvelope(responseOuter.secure_envelope, {
             recipientPrivateKey: fixture.keys.privateKey,
             senderPublicKey: gatewayKeys.publicKey,
@@ -449,8 +456,13 @@ describe('MatrixGatewayRunner', () => {
             },
         })
 
-        await vi.waitFor(() => expect(client.sent).toHaveLength(2))
-        const responseOuter = client.sent[1]!.content[CODEVER_MATRIX_EXTENSION] as {
+        await vi.waitFor(() => expect(client.sent.some(request =>
+            request.transactionId.includes(stateRequest.requestId),
+        )).toBe(true))
+        const responseRequest = client.sent.find(candidate =>
+            candidate.transactionId.includes(stateRequest.requestId)
+        )!
+        const responseOuter = responseRequest.content[CODEVER_MATRIX_EXTENSION] as {
             kind?: string
             secure_envelope?: {
                 envelope?: { recipientDeviceId?: string }
@@ -765,6 +777,7 @@ describe('MatrixGatewayRunner', () => {
 
         await expect(execute(command('session.delete', 5))).resolves.toEqual({
             sessionId: 'app-session-1',
+            nativeRevisionPublished: true,
         })
         expect(runtime.appSessions.size).toBe(0)
         expect(runtime.archivedSessions.size).toBe(0)
@@ -775,6 +788,7 @@ describe('MatrixGatewayRunner', () => {
             .toEqual([])
         await expect(execute(command('session.delete', 6))).resolves.toEqual({
             sessionId: 'app-session-1',
+            nativeRevisionPublished: false,
         })
         expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
             .toEqual([])
@@ -911,36 +925,25 @@ describe('MatrixGatewayRunner', () => {
         })
 
         await runner.start()
-        expect(client.sent).toHaveLength(1)
-        await runner.syncState()
         expect(client.sent).toHaveLength(2)
-        expect(client.sent[0]!.transactionId).not.toBe(client.sent[1]!.transactionId)
-
-        const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const opened = await openSecureEnvelopeBundle(outer.secure_envelope_bundle, {
-            recipientPrivateKey: fixture.keys.privateKey,
-            senderPublicKey: gatewayKeys.publicKey,
-            expected: {
-                gatewayId: 'gateway-1',
-                conversationId: 'conversation-1',
-                direction: 'gateway_to_device',
-                senderDeviceId: 'gateway-1',
-                recipientDeviceId: 'pwa-device-1',
-                senderKeyId: gatewayKeys.keyId,
-                recipientKeyId: fixture.keys.keyId,
-            },
-            replayStore: new InMemoryReplayStore(),
-        })
+        await runner.syncState()
+        expect(client.sent).toHaveLength(3)
+        const checkpoints = client.sent.filter(request =>
+            request.transactionId.startsWith('codever.gateway.checkpoint.'),
+        )
+        expect(checkpoints).toHaveLength(2)
+        expect(checkpoints[0]!.transactionId).not.toBe(checkpoints[1]!.transactionId)
+        const opened = await openNativeTimeline(
+            checkpoints[0]!, fixture.keys, gatewayKeys,
+        )
         expect(opened.plaintext).toMatchObject({
             [CODEVER_MATRIX_EXTENSION]: {
-                kind: 'gateway_state',
+                kind: 'gateway_checkpoint',
                 revision: 0,
                 revision_epoch: REVISION_EPOCH,
                 revision_epoch_generation: 1,
                 state_version: 1,
-                current_session_id: null,
                 workspace: {
-                    cwd: 'C:\\repo',
                     provider: 'mock-provider',
                     permission_mode: 'default',
                 },
@@ -1012,34 +1015,28 @@ describe('MatrixGatewayRunner', () => {
         await runner.start()
         expect(restoredRoom?.cwd).toBe('D:\\restored')
         expect(session.sessionRecord.conversationId).toBe('provider-session-1')
-        const outer = client.sent[0]!.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const opened = await openSecureEnvelopeBundle(outer.secure_envelope_bundle, {
-            recipientPrivateKey: fixture.keys.privateKey,
-            senderPublicKey: gatewayKeys.publicKey,
-            expected: {
-                gatewayId: 'gateway-1',
-                conversationId: 'conversation-1',
-                direction: 'gateway_to_device',
-                senderDeviceId: 'gateway-1',
-                recipientDeviceId: 'pwa-device-1',
-                senderKeyId: gatewayKeys.keyId,
-                recipientKeyId: fixture.keys.keyId,
+        const rootRequest = client.sent.find(request =>
+            request.transactionId === 'codever.session.root.app-session-1'
+        )!
+        const openedRoot = await openNativeTimeline(rootRequest, fixture.keys, gatewayKeys)
+        expect(openedRoot.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'session_root',
+                session_id: 'app-session-1',
+                title: 'Restored work',
             },
-            replayStore: new InMemoryReplayStore(),
         })
+        const checkpointRequest = client.sent.find(request =>
+            request.transactionId.startsWith('codever.gateway.checkpoint.')
+        )!
+        const opened = await openNativeTimeline(checkpointRequest, fixture.keys, gatewayKeys)
         expect(opened.plaintext).toMatchObject({
             [CODEVER_MATRIX_EXTENSION]: {
-                kind: 'gateway_state',
+                kind: 'gateway_checkpoint',
                 revision_epoch: REVISION_EPOCH,
                 revision_epoch_generation: 1,
                 state_version: 5,
-                current_session_id: null,
-                sessions: [{
-                    id: 'app-session-1',
-                    title: 'Restored work',
-                    status: 'idle',
-                }],
-                workspace: { cwd: 'D:\\restored' },
+                workspace: { project: { cwd: 'D:\\restored' } },
             },
         })
         const persisted = JSON.parse(
@@ -1074,6 +1071,18 @@ describe('MatrixGatewayRunner', () => {
 
     it('keeps cancel responsive while a previously accepted prompt is still running', async () => {
         const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'cancel-envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = Date.now() + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
         const client = new FakeMatrixGatewayClient()
         const dispatched: SessionInput[] = []
         let finishPrompt!: () => void
@@ -1092,12 +1101,54 @@ describe('MatrixGatewayRunner', () => {
         })
         await runner.start()
 
-        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now, 1), 'prompt'))
+        client.emit(await incomingSecureSigned(
+            await signedPrompt(
+                fixture.keys,
+                fixture.now,
+                1,
+                0,
+                'certificate-pwa-1',
+            ),
+            fixture.keys,
+            gatewayKeys,
+            fixture.now,
+            'prompt',
+        ))
         await vi.waitFor(() => expect(dispatched).toHaveLength(1))
-        client.emit(incomingSigned(await signedCancel(fixture.keys, fixture.now, 2), 'cancel'))
+        client.emit(await incomingSecureSigned(
+            await signedCancel(
+                fixture.keys,
+                fixture.now,
+                2,
+                'certificate-pwa-1',
+            ),
+            fixture.keys,
+            gatewayKeys,
+            fixture.now,
+            'cancel',
+        ))
 
         await vi.waitFor(() => expect(dispatched).toHaveLength(2))
         expect(dispatched[1]).toMatchObject({ kind: 'cancel', reason: 'user' })
+        await vi.waitFor(() => expect(client.sent.some(request =>
+            request.transactionId === `codever.gateway.revision.${REVISION_EPOCH}.2`
+        )).toBe(true))
+        const revisionRequest = client.sent.find(request =>
+            request.transactionId === `codever.gateway.revision.${REVISION_EPOCH}.2`
+        )!
+        const openedRevision = await openNativeTimeline(
+            revisionRequest,
+            fixture.keys,
+            gatewayKeys,
+        )
+        expect(openedRevision.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'gateway_revision',
+                revision: 2,
+                revision_epoch: REVISION_EPOCH,
+                source_command_id: expect.stringContaining('cancel-2-'),
+            },
+        })
         finishPrompt()
         await runner.stop()
     })
@@ -1698,6 +1749,7 @@ async function signedCancel(
     keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     now: number,
     sequence: number,
+    sequenceEpoch = 'legacy-v1',
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -1705,7 +1757,7 @@ async function signedCancel(
         commandId: `cancel-${sequence}-${Math.random()}`,
         gatewayId: 'gateway-1',
         deviceId: 'pwa-device-1',
-        sequenceEpoch: 'legacy-v1',
+        sequenceEpoch,
         conversationId: 'conversation-1',
         revisionEpoch: REVISION_EPOCH,
         sequence,
@@ -1735,6 +1787,52 @@ function incomingSigned(signedCommand: SignedCommand, suffix = 'event'): MatrixI
                 version: 1,
                 kind: 'signed_command',
                 signed_command: signedCommand,
+            },
+        },
+    }
+}
+
+async function incomingSecureSigned(
+    signedCommand: SignedCommand,
+    deviceKeys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    gatewayKeys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    now: number,
+    suffix: string,
+): Promise<MatrixIncomingEvent> {
+    const envelope = await sealSecureEnvelope({
+        plaintext: {
+            msgtype: 'm.notice',
+            body: 'Encrypted Codever command',
+            [CODEVER_MATRIX_EXTENSION]: {
+                version: 1,
+                kind: 'signed_command',
+                signed_command: signedCommand,
+            },
+        },
+        senderPrivateKey: deviceKeys.privateKey,
+        recipientPublicKey: gatewayKeys.publicKey,
+        gatewayId: 'gateway-1',
+        conversationId: 'conversation-1',
+        direction: 'device_to_gateway',
+        senderDeviceId: 'pwa-device-1',
+        recipientDeviceId: 'gateway-1',
+        senderKeyId: deviceKeys.keyId,
+        recipientKeyId: gatewayKeys.keyId,
+        now,
+    })
+    return {
+        roomId: '!room:example.org',
+        eventId: `$secure-${suffix}`,
+        eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+        sender: '@alice:example.org',
+        encrypted: false,
+        content: {
+            msgtype: 'm.notice',
+            body: 'Encrypted Codever command',
+            [CODEVER_MATRIX_EXTENSION]: {
+                version: 1,
+                kind: 'secure_envelope',
+                secure_envelope: envelope,
             },
         },
     }
@@ -1812,6 +1910,53 @@ function directRoomRuntime(
         replayGeneration: REPLAY_GENERATION,
         stateVersion: 0,
     }
+}
+
+async function openNativeTimeline(
+    request: MatrixSendEventRequest,
+    recipient: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    gateway: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+) {
+    const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const openedGrant = await openSecureEnvelopeBundle(
+        extension.timeline_key_ring_bundle,
+        {
+            recipientPrivateKey: recipient.privateKey,
+            senderPublicKey: gateway.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gateway.keyId,
+                recipientKeyId: recipient.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+        },
+    )
+    const grant = openedGrant.plaintext as {
+        active_epoch_id: string
+        epochs: Array<{ epoch_id: string; key: string }>
+    }
+    const active = grant.epochs.find(epoch => epoch.epoch_id === grant.active_epoch_id)!
+    const signed = extension.timeline_envelope as {
+        envelope: { sessionId?: string; threadRootEventId?: string }
+    }
+    return openMatrixTimelineEnvelope(extension.timeline_envelope, {
+        timelineKey: base64UrlDecode(active.key),
+        gatewayPublicKey: gateway.publicKey,
+        expected: {
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            roomId: '!room:example.org',
+            epochId: active.epoch_id,
+            ...(signed.envelope.sessionId ? { sessionId: signed.envelope.sessionId } : {}),
+            ...(signed.envelope.threadRootEventId
+                ? { threadRootEventId: signed.envelope.threadRootEventId }
+                : {}),
+        },
+    })
 }
 
 async function initializeDirectRuntime(

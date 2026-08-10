@@ -1,8 +1,6 @@
 package id.my.anciety.codever.client
 
 import android.content.Context
-import java.nio.ByteBuffer
-import java.nio.charset.CodingErrorAction
 import id.my.anciety.codever.client.command.CommandCompletion as DurableCompletion
 import id.my.anciety.codever.client.command.CommandAuthorizationPolicy
 import id.my.anciety.codever.client.command.CommandPayloadValidator
@@ -58,6 +56,9 @@ import id.my.anciety.codever.security.codever.EncryptedGatewayTrustStore
 import id.my.anciety.codever.security.codever.GatewayTrust
 import id.my.anciety.codever.security.codever.GatewayTransportCodec
 import id.my.anciety.codever.security.codever.MatrixTransportBinding
+import id.my.anciety.codever.security.codever.MatrixTimelineBindings
+import id.my.anciety.codever.security.codever.MatrixTimelineEnvelopeCodec
+import id.my.anciety.codever.security.codever.MatrixTimelineEnvelopes
 import id.my.anciety.codever.security.codever.PairingCodec
 import id.my.anciety.codever.security.codever.PairingRequest
 import id.my.anciety.codever.security.codever.PairingSecurity
@@ -74,9 +75,6 @@ import id.my.anciety.codever.security.codever.SignedPairingResponse
 import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -95,13 +93,12 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -138,28 +135,20 @@ class NativeClientRuntime(
         var response: CompletableDeferred<SignedPairingResponse>? = null,
     )
 
-    private data class PendingHistoryRequest(
-        val requestId: String,
-        val sessionId: String,
-        val requestedBefore: String?,
-        val response: CompletableDeferred<GatewayHistoryCursor>,
-    )
-
-    private data class GatewayHistoryCursor(
-        val before: String?,
-        val complete: Boolean,
-        val headEventId: String?,
-        val eventIds: Set<String>,
-    )
-
     val deviceId: String = identity.publicIdentity.keyId
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val timelinePaginationMutex = Mutex()
     private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
     private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId)
     private val historyCheckpoints = AtomicEncryptedGatewayHistoryCheckpointStore(
         files.historyCheckpoints,
+        cipher,
+        deviceId,
+    )
+    private val timelineKeys = AtomicEncryptedTimelineKeyStore(
+        files.timelineKeys,
         cipher,
         deviceId,
     )
@@ -174,11 +163,8 @@ class NativeClientRuntime(
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
-    private val recentHistoryConvergences =
-        ConcurrentHashMap<String, CompletableDeferred<GatewayHistoryCursor>>()
-    private val pendingHistory = linkedMapOf<String, PendingHistoryRequest>()
-    private val gatewayHistory = linkedMapOf<String, GatewayHistoryCursor>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
+    private val nativeProjection = MatrixNativeProjection()
     private val restoredTrust = runCatching { trustStore.load() }
     @Volatile private var transportIdentity: MatrixTransportIdentity? = null
     @Volatile private var trust: GatewayTrust? = restoredTrust.getOrNull()
@@ -240,142 +226,25 @@ class NativeClientRuntime(
 
     suspend fun historyPage(sessionId: String, before: String?, limit: Int): HistoryPage {
         diagnostics.record("history.page.requested")
-        if (matrix.status.phase != MatrixRuntimePhase.SYNCING) {
-            diagnostics.record("history.page.local_offline")
-            return eventHub.historyPage(
-                sessionId,
-                before,
-                limit,
-                externalHasMore = false,
-            )
-        }
-        var gatewayCursor = synchronized(gatewayHistory) { gatewayHistory[sessionId] }
-        if (before == null) {
-            // A completed cursor only describes the Gateway history that
-            // existed when it was fetched. Another device can append new
-            // messages afterwards, and those live timeline events may have
-            // crossed a limited/background sync gap. Always reconcile the
-            // newest authoritative page when the WebView asks for recent
-            // history instead of treating an old `complete` bit as permanent.
-            gatewayCursor = reconcileRecentGatewayHistory(sessionId, limit)
-        }
         var local = eventHub.historyPage(
             sessionId,
             before,
             limit,
-            externalHasMore = gatewayCursor?.complete == false,
+            externalHasMore = matrix.status.phase == MatrixRuntimePhase.SYNCING,
         )
-        if (local.hasMore || gatewayCursor?.complete == true) {
+        if (local.hasMore || matrix.status.phase != MatrixRuntimePhase.SYNCING) {
             diagnostics.record("history.page.local")
             return local
         }
-
-        val resolvedGatewayCursor = requestAndAwaitGatewayHistory(
-            sessionId = sessionId,
-            requestedBefore = gatewayCursor?.before,
-            limit = limit,
-        )
+        val reachedStart = matrix.paginateRoomHistory(maxOf(30, limit))
         local = eventHub.historyPage(
             sessionId,
             before,
             limit,
-            externalHasMore = !resolvedGatewayCursor.complete,
+            externalHasMore = matrixRoomHistoryHasMore(reachedStart),
         )
         diagnostics.record("history.page.completed")
         return local
-    }
-
-    private suspend fun reconcileRecentGatewayHistory(
-        sessionId: String,
-        limit: Int,
-    ): GatewayHistoryCursor {
-        val convergence = CompletableDeferred<GatewayHistoryCursor>()
-        val existing = recentHistoryConvergences.putIfAbsent(sessionId, convergence)
-        if (existing != null) {
-            diagnostics.record("history.convergence.coalesced")
-            return existing.await()
-        }
-        try {
-            val resolved = performRecentGatewayHistoryConvergence(sessionId, limit)
-            convergence.complete(resolved)
-            return resolved
-        } catch (error: Throwable) {
-            convergence.completeExceptionally(error)
-            throw error
-        } finally {
-            recentHistoryConvergences.remove(sessionId, convergence)
-        }
-    }
-
-    private suspend fun performRecentGatewayHistoryConvergence(
-        sessionId: String,
-        limit: Int,
-    ): GatewayHistoryCursor {
-        val previousHeadEventId = historyCheckpoints.head(sessionId)
-        val hasLocalHistory = eventHub.historyPage(
-            sessionId,
-            before = null,
-            limit = 1,
-            externalHasMore = false,
-        ).messages.isNotEmpty()
-        val convergence = GatewayHistoryConvergence(
-            previousHeadEventId = previousHeadEventId,
-            // Before this mechanism existed, an upgraded APK could already
-            // contain a gapped local cache. Without a persisted Gateway head,
-            // only a complete scan can establish a trustworthy baseline.
-            requireCompleteWithoutCheckpoint = previousHeadEventId == null && hasLocalHistory,
-        )
-        var requestedBefore: String? = null
-        var pages = 0
-        while (true) {
-            val page = requestAndAwaitGatewayHistory(
-                sessionId = sessionId,
-                requestedBefore = requestedBefore,
-                limit = maxOf(limit, HISTORY_CONVERGENCE_PAGE_SIZE),
-            )
-            pages += 1
-            when (val decision = convergence.accept(GatewayHistoryPagePosition(
-                headEventId = page.headEventId,
-                eventIds = page.eventIds,
-                nextBefore = page.before,
-                complete = page.complete,
-            ))) {
-                is GatewayHistoryConvergenceDecision.Continue -> {
-                    requestedBefore = decision.before
-                }
-                is GatewayHistoryConvergenceDecision.Complete -> {
-                    decision.headEventId?.let { historyCheckpoints.update(sessionId, it) }
-                    diagnostics.record(
-                        "history.convergence.completed",
-                        mapOf("pages" to pages.toString()),
-                    )
-                    return page
-                }
-            }
-        }
-    }
-
-    private suspend fun requestAndAwaitGatewayHistory(
-        sessionId: String,
-        requestedBefore: String?,
-        limit: Int,
-    ): GatewayHistoryCursor {
-        val pending = mutex.withLock {
-            requestGatewayHistoryLocked(sessionId, requestedBefore, limit)
-        }
-        val resolvedGatewayCursor = try {
-            try {
-                withTimeout(HISTORY_RESPONSE_TIMEOUT_MS) { pending.response.await() }
-            } catch (_: TimeoutCancellationException) {
-                diagnostics.record("history.response.timeout")
-                throw IllegalStateException(
-                    "The Gateway is still preparing history. Retry to continue recovery.",
-                )
-            }
-        } finally {
-            mutex.withLock { pendingHistory.remove(pending.requestId) }
-        }
-        return resolvedGatewayCursor
     }
 
     fun inspectPairing(link: String): NativePairingPreview {
@@ -619,17 +488,11 @@ class NativeClientRuntime(
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
         gatewayStateSynchronized = false
-        pendingHistory.values.forEach { request ->
-            request.response.completeExceptionally(
-                IllegalStateException("The native client disconnected during history recovery."),
-            )
-        }
-        pendingHistory.clear()
-        synchronized(gatewayHistory) { gatewayHistory.clear() }
         if (revoke) {
             trustStore.clear()
             replayStore.clear()
             historyCheckpoints.clear()
+            timelineKeys.clear()
             outbox.clear()
             transfers.clear()
             trust = null
@@ -915,33 +778,6 @@ class NativeClientRuntime(
         }
     }
 
-    private suspend fun requestGatewayStateSnapshotLocked() {
-        val activeTrust = trust ?: return
-        val timestamp = now()
-        val requestId = UUID.randomUUID().toString()
-        val request = buildJsonObject {
-            put("kind", "codever.gateway.state.request")
-            put("version", 1)
-            put("requestId", requestId)
-            put("gatewayId", activeTrust.gatewayId)
-            put("conversationId", conversationId())
-            put("deviceId", activeTrust.certificate.deviceId)
-            put("issuedAt", timestamp)
-            put("expiresAt", timestamp + CONTROL_REQUEST_LIFETIME_MS)
-        }
-        sendTrustedControlMessage(
-            secureControlContent(
-                activeTrust,
-                "gateway_state_request",
-                "gateway_state_request",
-                request,
-                "codever.gateway.state.request.$requestId",
-                timestamp,
-            ).toString(),
-            "codever.gateway.state.request.$requestId",
-        )
-    }
-
     private fun startGatewayStateSync(recoverTransport: Boolean) {
         gatewayStateSynchronized = false
         gatewayStateSyncJob?.cancel()
@@ -957,132 +793,36 @@ class NativeClientRuntime(
                         }
                 }
             }
-            var completedAttempts = 0
-            while (isActive && trust != null && !gatewayStateSynchronized) {
-                mutex.withLock {
-                    if (trust == null || gatewayStateSynchronized) return@withLock
-                    runCatching { requestGatewayStateSnapshotLocked() }
-                        .onSuccess {
-                            diagnostics.record(
-                                "gateway.state.request.sent",
-                                mapOf("stage" to if (completedAttempts == 0) "initial" else "retry"),
-                            )
-                        }
-                        .onFailure { error ->
-                            diagnostics.record(
-                                "gateway.state.request.failure",
-                                mapOf("error" to diagnosticErrorName(error)),
-                            )
-                        }
-                }
-                if (gatewayStateSynchronized || trust == null) break
-                delay(gatewayStateRetryDelayMs(completedAttempts))
-                completedAttempts += 1
+            if (trust != null && matrix.status.phase == MatrixRuntimePhase.SYNCING) {
+                runCatching { backfillNativeTimeline() }
+                    .onSuccess { result ->
+                        diagnostics.record(
+                            "matrix.native_timeline.paginated",
+                            mapOf(
+                                "pages" to result.pages.toString(),
+                                "reached_start" to result.reachedStart.toString(),
+                            ),
+                        )
+                    }
+                    .onFailure { error ->
+                        diagnostics.record(
+                            "matrix.native_timeline.pagination_failure",
+                            mapOf("error" to diagnosticErrorName(error)),
+                        )
+                    }
             }
         }
     }
 
+    private suspend fun backfillNativeTimeline(): MatrixTimelineBackfillResult =
+        timelinePaginationMutex.withLock {
+            paginateMatrixTimelineToStart(MAX_NATIVE_TIMELINE_BACKFILL_PAGES) {
+                matrix.paginateRoomHistory(100)
+            }
+        }
+
     private fun diagnosticErrorName(error: Throwable): String =
         error::class.simpleName?.take(160)?.takeIf { it.isNotBlank() } ?: "Exception"
-
-    private suspend fun requestGatewayHistoryLocked(
-        sessionId: String,
-        before: String?,
-        limit: Int,
-    ): PendingHistoryRequest {
-        val activeTrust = trust
-            ?: throw NativeTrustRequiredException("Pair the Gateway before restoring history.")
-        require(sessionId.isNotBlank() && sessionId.length <= 512 && sessionId.none(Char::isISOControl))
-        require(before == null || (before.length in 1..256 && before.none(Char::isISOControl)))
-        require(limit in 1..100)
-        val timestamp = now()
-        val requestId = UUID.randomUUID().toString()
-        val request = buildJsonObject {
-            put("kind", "codever.history.request")
-            put("version", 1)
-            put("requestId", requestId)
-            put("gatewayId", activeTrust.gatewayId)
-            put("conversationId", conversationId())
-            put("deviceId", activeTrust.certificate.deviceId)
-            put("sessionId", sessionId)
-            before?.let { put("before", it) }
-            put("limit", limit)
-            put("maxBytes", DEFAULT_HISTORY_PAGE_BYTES)
-            put("issuedAt", timestamp)
-            put("expiresAt", timestamp + CONTROL_REQUEST_LIFETIME_MS)
-        }
-        val pending = PendingHistoryRequest(
-            requestId,
-            sessionId,
-            before,
-            CompletableDeferred(),
-        )
-        pendingHistory[requestId] = pending
-        try {
-            sendTrustedControlMessage(
-                secureControlContent(
-                    activeTrust,
-                    "history_request",
-                    "history_request",
-                    request,
-                    "codever.history.request.$requestId",
-                    timestamp,
-                ).toString(),
-                "codever.history.request.$requestId",
-            )
-            diagnostics.record("history.request.sent")
-        } catch (error: Exception) {
-            pendingHistory.remove(requestId)
-            throw error
-        }
-        return pending
-    }
-
-    private fun secureControlContent(
-        activeTrust: GatewayTrust,
-        kind: String,
-        payloadName: String,
-        payload: JsonObject,
-        envelopeId: String,
-        timestamp: Long,
-    ): JsonObject {
-        val plaintext = buildJsonObject {
-            put("msgtype", "m.notice")
-            put("body", "Encrypted Codever control request")
-            put("io.codever", buildJsonObject {
-                put("version", 1)
-                put("kind", kind)
-                put(payloadName, payload)
-            })
-        }
-        val certificate = activeTrust.certificate
-        val envelope = SecureEnvelopes.sealSecureEnvelope(
-            bindings = SecureEnvelopeBindings(
-                gatewayId = activeTrust.gatewayId,
-                conversationId = conversationId(),
-                direction = SecureEnvelopeDirection.DEVICE_TO_GATEWAY,
-                senderDeviceId = certificate.deviceId,
-                recipientDeviceId = certificate.gatewayId,
-                senderKeyId = deviceId,
-                recipientKeyId = activeTrust.gatewayKey.keyId,
-            ),
-            plaintext = plaintext,
-            senderIdentity = identity,
-            recipientPublicKey = activeTrust.gatewayKey,
-            envelopeId = envelopeId,
-            now = timestamp,
-            lifetimeMs = CONTROL_REQUEST_LIFETIME_MS,
-        )
-        return buildJsonObject {
-            put("msgtype", "m.notice")
-            put("body", "Encrypted Codever message")
-            put("io.codever", buildJsonObject {
-                put("version", 1)
-                put("kind", "secure_envelope")
-                put("secure_envelope", envelope.toJson())
-            })
-        }
-    }
 
     /**
      * The content is already signed and encrypted to the paired Gateway by
@@ -1167,9 +907,76 @@ class NativeClientRuntime(
                     now(),
                 ).plaintext
             }
+            "timeline_envelope" -> {
+                val signed = MatrixTimelineEnvelopeCodec.parse(
+                    extension.objectValue("timeline_envelope").toString(),
+                )
+                var key = timelineKeys.key(signed.envelope.epochId)
+                if (key == null) {
+                    val keyBundleValue = extension["timeline_key_ring_bundle"] as? JsonObject
+                        ?: return
+                    val keyBundle = SecureEnvelopeBundleCodec.parse(keyBundleValue.toString())
+                    if (keyBundle.bundle.recipients.none {
+                            it.recipientDeviceId == deviceId && it.recipientKeyId == deviceId
+                        }
+                    ) return
+                    val grant = SecureEnvelopeBundles.open(
+                        keyBundle,
+                        identity,
+                        activeTrust.gatewayKey,
+                        SecureEnvelopeBundleBindings(
+                            gatewayId = activeTrust.gatewayId,
+                            conversationId = conversationId(),
+                            direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
+                            senderDeviceId = activeTrust.certificate.gatewayId,
+                            senderKeyId = activeTrust.gatewayKey.keyId,
+                        ),
+                        deviceId,
+                        replayStore,
+                        keyBundle.bundle.issuedAt,
+                    ).plaintext as? JsonObject ?: return
+                    acceptTimelineKeyRingValue(grant)
+                    key = timelineKeys.key(signed.envelope.epochId) ?: return
+                }
+                try {
+                    MatrixTimelineEnvelopes.open(
+                        signed,
+                        key,
+                        activeTrust.gatewayKey,
+                        MatrixTimelineBindings(
+                            gatewayId = activeTrust.gatewayId,
+                            conversationId = conversationId(),
+                            roomId = event.roomId,
+                            epochId = signed.envelope.epochId,
+                            sessionId = signed.envelope.sessionId,
+                            threadRootEventId = signed.envelope.threadRootEventId,
+                        ),
+                    )
+                } finally {
+                    key.fill(0)
+                }
+            }
             else -> return
         }
         val decryptedContent = plaintext as? JsonObject ?: return
+        if (kind == "timeline_envelope") {
+            val signed = MatrixTimelineEnvelopeCodec.parse(
+                extension.objectValue("timeline_envelope").toString(),
+            )
+            require(
+                CanonicalJson.encode(content["m.relates_to"] ?: JsonNull) ==
+                    CanonicalJson.encode(decryptedContent["m.relates_to"] ?: JsonNull),
+            ) { "The Matrix homeserver changed a signed timeline relation." }
+            val decryptedExtension = decryptedContent["io.codever"] as? JsonObject ?: return
+            require(decryptedExtension.string("session_id") == signed.envelope.sessionId)
+            val relation = decryptedContent["m.relates_to"] as? JsonObject
+            val contentRoot = if (relation?.string("rel_type") == "m.thread") {
+                relation.string("event_id")
+            } else {
+                decryptedExtension.string("thread_root_event_id")
+            }
+            require(contentRoot == signed.envelope.threadRootEventId)
+        }
         processAuthenticatedContent(event, decryptedContent)
     }
 
@@ -1230,15 +1037,70 @@ class NativeClientRuntime(
     private suspend fun processAuthenticatedContent(event: MatrixDecryptedEvent, content: JsonObject) {
         val extension = content["io.codever"] as? JsonObject ?: return
         when (extension.string("kind")) {
+            "timeline_key_ring_grant" -> acceptTimelineKeyRing(extension)
+            "session_root", "session_update", "session_lifecycle", "gateway_checkpoint" ->
+                nativeProjection.apply(extension)?.let { acceptGatewayState(it) }
             "gateway_state" -> acceptGatewayState(extension)
             "command_ack" -> acceptCommandAck(extension)
             "revision_conflict" -> acceptRevisionConflict(extension)
             "command_result" -> acceptCommandResult(event, extension)
-            "history_page" -> acceptHistoryPage(extension)
-            else -> parseMessage(event, content)?.let { message ->
-                val sessionId = message.sessionId ?: currentSessionId() ?: conversationId()
-                eventHub.upsertMessage(sessionId, message.copy(sessionId = sessionId), refreshedSnapshot())
+            else -> {
+                if (extension.string("kind") == "status") {
+                    nativeProjection.applyStatus(extension)?.let { acceptGatewayState(it) }
+                }
+                if (extension.string("kind") == "collaboration_command") {
+                    acceptTimelineRevision(extension)
+                }
+                parseMessage(event, content)?.let { message ->
+                    val sessionId = message.sessionId ?: currentSessionId() ?: conversationId()
+                    eventHub.upsertMessage(sessionId, message.copy(sessionId = sessionId), refreshedSnapshot())
+                }
             }
+        }
+    }
+
+    private suspend fun acceptTimelineRevision(extension: JsonObject) {
+        val state = gatewayState ?: return
+        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
+        val epoch = extension.string("revision_epoch") ?: return
+        val generation = extension.long("revision_epoch_generation")?.takeIf { it > 0 } ?: return
+        val currentEpoch = state.string("revision_epoch") ?: return
+        val currentGeneration = state.long("revision_epoch_generation") ?: return
+        if (generation < currentGeneration) return
+        if (generation > currentGeneration) {
+            diagnostics.record("gateway.revision.checkpoint_required")
+            return
+        }
+        require(epoch == currentEpoch) {
+            "Matrix timeline revision epoch does not match Gateway state."
+        }
+        if (revision < (state.long("revision") ?: 0)) return
+        acceptGatewayState(JsonObject(state + ("revision" to JsonPrimitive(revision))))
+    }
+
+    private fun acceptTimelineKeyRing(extension: JsonObject) {
+        val grant = extension["timeline_key_ring_grant"] as? JsonObject ?: return
+        acceptTimelineKeyRingValue(grant)
+    }
+
+    private fun acceptTimelineKeyRingValue(grant: JsonObject) {
+        val activeTrust = trust ?: return
+        require(grant.long("version") == 2L)
+        require(grant.string("kind") == "timeline_key_ring_grant")
+        require(grant.string("gateway_id") == activeTrust.gatewayId)
+        require(grant.string("conversation_id") == conversationId())
+        require(grant.string("room_id") == matrix.publicSession()?.roomBinding?.roomId)
+        val changed = timelineKeys.save(grant)
+        diagnostics.record("matrix.timeline_keys.accepted")
+        if (!changed) return
+        scope.launch {
+            runCatching { backfillNativeTimeline() }
+                .onFailure { error ->
+                    diagnostics.record(
+                        "matrix.timeline_keys.replay_failure",
+                        mapOf("error" to diagnosticErrorName(error)),
+                    )
+                }
         }
     }
 
@@ -1249,11 +1111,6 @@ class NativeClientRuntime(
         if (revisionEpoch.isBlank()) return
         gatewayState = extension
         outbox.updateKnownRevision(revision)
-        (extension["sessions"] as? JsonArray)?.let { sessions ->
-            historyCheckpoints.retainSessionIds(
-                sessions.mapNotNull { (it as? JsonObject)?.string("id") }.toSet(),
-            )
-        }
         eventHub.publish(
             ClientEventType.GATEWAY_STATE_CHANGED,
             extension,
@@ -1413,158 +1270,6 @@ class NativeClientRuntime(
         launchCommandTransmission(rebased.commandId, recovery = false)
         return true
     }
-
-    private suspend fun acceptHistoryPage(extension: JsonObject) {
-        diagnostics.record("history.response.received")
-        val page = extension["history_page"] as? JsonObject ?: return
-        val requestId = page.string("requestId") ?: return
-        val pending = pendingHistory[requestId] ?: return
-        if (page.string("sessionId") != pending.sessionId) {
-            pending.response.completeExceptionally(
-                IllegalArgumentException("Gateway history response targeted a different session."),
-            )
-            return
-        }
-        val hasMore = page["hasMore"]?.jsonPrimitive?.booleanOrNull ?: return
-        val replayed = page.int("replayed")?.takeIf { it in 0..100 } ?: return
-        val nextBefore = page.string("nextBefore")
-        if (hasMore && nextBefore == null) {
-            pending.response.completeExceptionally(
-                IllegalArgumentException("Gateway history response omitted its continuation cursor."),
-            )
-            return
-        }
-        val inline = page["items"] as? JsonArray
-        val batch = page["batch"] as? JsonObject
-        if (inline != null && batch != null) return
-        val items = when {
-            inline != null -> inline.also {
-                require(it.size == replayed && it.size <= 100) {
-                    "Gateway inline history count is invalid."
-                }
-                require(it.toString().toByteArray(Charsets.UTF_8).size <= MAX_INLINE_HISTORY_BYTES) {
-                    "Gateway inline history page is too large."
-                }
-            }
-            batch != null -> downloadHistoryBatch(batch, replayed)
-            replayed == 0 -> JsonArray(emptyList())
-            else -> return
-        }
-        val roomId = matrix.publicSession()?.roomBinding?.roomId
-        val historyMessages = items.mapNotNull { item ->
-            val entry = item as? JsonObject ?: return@mapNotNull null
-            require(entry.keys == setOf("eventId", "timestamp", "content")) {
-                "Gateway history item has an invalid shape."
-            }
-            val content = entry["content"] as? JsonObject ?: return@mapNotNull null
-            val timestamp = entry.long("timestamp")?.takeIf { it >= 0 } ?: return@mapNotNull null
-            val historyEventId = entry.string("eventId")
-                ?.takeIf { it.length == 43 && runCatching { Base64Url.decode(it).size == 32 }.getOrDefault(false) }
-                ?: return@mapNotNull null
-            parseMessage(
-                MatrixDecryptedEvent(
-                    roomId ?: return@mapNotNull null,
-                    historyEventId,
-                    trust?.gatewayId ?: "gateway",
-                    timestamp,
-                    "{}",
-                ),
-                content,
-                historical = true,
-            )?.copy(sessionId = pending.sessionId)
-        }
-        if (historyMessages.isNotEmpty()) {
-            eventHub.upsertMessages(
-                pending.sessionId,
-                historyMessages,
-                refreshedSnapshot(),
-            )
-        }
-        val headEventId = page.string("headEventId")
-        if ("headEventId" in page && (headEventId == null || !isSha256Base64Url(headEventId))) {
-            pending.response.completeExceptionally(
-                IllegalArgumentException("Gateway history response contained an invalid head event id."),
-            )
-            return
-        }
-        val next = GatewayHistoryCursor(
-            before = nextBefore,
-            complete = !hasMore,
-            headEventId = headEventId,
-            eventIds = historyMessages.mapTo(mutableSetOf(), ClientMessage::eventId),
-        )
-        synchronized(gatewayHistory) { gatewayHistory[pending.sessionId] = next }
-        pending.response.complete(next)
-        diagnostics.record("history.response.accepted")
-    }
-
-    private suspend fun downloadHistoryBatch(batch: JsonObject, replayed: Int): JsonArray {
-        require(batch.keys == setOf(
-            "encoding", "itemCount", "plaintextSize", "plaintextSha256", "media",
-        )) { "Gateway history batch has an invalid shape." }
-        require(batch.string("encoding") == "json")
-        val itemCount = batch.int("itemCount")?.takeIf { it in 1..100 }
-            ?: throw IllegalArgumentException("Gateway history batch item count is invalid.")
-        require(itemCount == replayed)
-        val plaintextSize = batch.int("plaintextSize")
-            ?.takeIf { it in 1..MAX_HISTORY_PAGE_BYTES }
-            ?: throw IllegalArgumentException("Gateway history plaintext size is invalid.")
-        val plaintextSha256 = batch.string("plaintextSha256")
-            ?.takeIf(::isSha256Base64Url)
-            ?: throw IllegalArgumentException("Gateway history plaintext hash is invalid.")
-        val media = batch["media"] as? JsonObject
-            ?: throw IllegalArgumentException("Gateway history media descriptor is missing.")
-        require(media.keys == setOf("url", "key", "iv", "sha256", "size")) {
-            "Gateway history media descriptor has an invalid shape."
-        }
-        val url = media.string("url")?.takeIf { it.startsWith("mxc://") }
-            ?: throw IllegalArgumentException("Gateway history media URL is invalid.")
-        val key = media.string("key")?.let(Base64Url::decode)
-            ?.takeIf { it.size == 32 }
-            ?: throw IllegalArgumentException("Gateway history media key is invalid.")
-        val iv = media.string("iv")?.let(Base64Url::decode)
-            ?.takeIf { it.size == 12 }
-            ?: throw IllegalArgumentException("Gateway history media IV is invalid.")
-        val ciphertextSha256 = media.string("sha256")
-            ?.takeIf(::isSha256Base64Url)
-            ?: throw IllegalArgumentException("Gateway history media hash is invalid.")
-        val ciphertextSize = media.long("size")
-            ?.takeIf { it == plaintextSize.toLong() + 16 }
-            ?: throw IllegalArgumentException("Gateway history media size is invalid.")
-        val ciphertext = matrix.downloadMedia(url)
-        try {
-            require(ciphertext.size.toLong() == ciphertextSize)
-            require(CodeverCrypto.sha256Base64Url(ciphertext) == ciphertextSha256)
-            val plaintext = try {
-                Cipher.getInstance("AES/GCM/NoPadding").run {
-                    init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
-                    doFinal(ciphertext)
-                }
-            } finally {
-                key.fill(0)
-                iv.fill(0)
-            }
-            try {
-                require(plaintext.size == plaintextSize)
-                require(CodeverCrypto.sha256Base64Url(plaintext) == plaintextSha256)
-                val decoded = Charsets.UTF_8.newDecoder()
-                    .onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .decode(ByteBuffer.wrap(plaintext))
-                    .toString()
-                return json.parseToJsonElement(decoded).jsonArray.also {
-                    require(it.size == itemCount)
-                }
-            } finally {
-                plaintext.fill(0)
-            }
-        } finally {
-            ciphertext.fill(0)
-        }
-    }
-
-    private fun isSha256Base64Url(value: String): Boolean =
-        value.length == 43 && runCatching { Base64Url.decode(value).size == 32 }.getOrDefault(false)
 
     private fun parseMessage(
         event: MatrixDecryptedEvent,
@@ -1886,16 +1591,11 @@ class NativeClientRuntime(
     private companion object {
         const val PAIRING_REQUEST_MS = 2 * 60_000L
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L
-        const val CONTROL_REQUEST_LIFETIME_MS = 60_000L
-        const val HISTORY_RESPONSE_TIMEOUT_MS = 30_000L
-        const val HISTORY_CONVERGENCE_PAGE_SIZE = 100
-        const val DEFAULT_HISTORY_PAGE_BYTES = 48 * 1024
-        const val MAX_INLINE_HISTORY_BYTES = 20 * 1024
-        const val MAX_HISTORY_PAGE_BYTES = 256 * 1024
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
         const val COMMAND_LIFETIME_MS = 5 * 60_000L
         const val COMMAND_ACK_TIMEOUT_MS = 30_000L
         const val MAX_AUTOMATIC_REVISION_RETRIES = 3
+        const val MAX_NATIVE_TIMELINE_BACKFILL_PAGES = 100
     }
 }
 
@@ -1936,3 +1636,23 @@ internal fun recoverableCommandIds(commands: List<DurableView>): List<String> =
         .sortedBy(DurableView::sequence)
         .map(DurableView::commandId)
         .toList()
+
+internal data class MatrixTimelineBackfillResult(
+    val pages: Int,
+    val reachedStart: Boolean,
+)
+
+internal fun matrixRoomHistoryHasMore(reachedStart: Boolean): Boolean = !reachedStart
+
+internal suspend fun paginateMatrixTimelineToStart(
+    maxPages: Int,
+    paginate: suspend () -> Boolean,
+): MatrixTimelineBackfillResult {
+    require(maxPages > 0)
+    repeat(maxPages) { index ->
+        if (paginate()) {
+            return MatrixTimelineBackfillResult(pages = index + 1, reachedStart = true)
+        }
+    }
+    return MatrixTimelineBackfillResult(pages = maxPages, reachedStart = false)
+}

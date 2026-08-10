@@ -166,6 +166,17 @@ class MatrixConnectionRuntime(
         }
     }.await()
 
+    suspend fun paginateRoomHistory(limit: Int): Boolean = scope.async {
+        val current = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
+        }
+        withTimeout(SEND_OPERATION_TIMEOUT_MS) {
+            current.paginateRoomHistory(limit)
+        }
+    }.await()
+
     suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): Unit = scope.async {
         val context = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }

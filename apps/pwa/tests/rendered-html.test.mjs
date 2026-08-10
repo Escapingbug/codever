@@ -661,19 +661,23 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
   assert.match(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
   assert.match(matrix, /loadCachedGatewayState\(/);
-  assert.match(matrix, /gatewayStateRequestSchema\.parse\(\{/);
-  assert.match(matrix, /kind: "gateway_state_request"/);
+  assert.doesNotMatch(matrix, /gatewayStateRequestSchema/);
+  assert.doesNotMatch(matrix, /kind: "gateway_state_request"/);
   assert.match(
     matrix,
-    /client\.on\(sdk\.RoomEvent\.Timeline, onTimeline\);[\s\S]*await Promise\.all\(initialTimelineOperations\);[\s\S]*await requestGatewayStateSnapshot\(\)/,
+    /client\.on\(sdk\.RoomEvent\.Timeline, onTimeline\);[\s\S]*await Promise\.all\(initialTimelineOperations\);[\s\S]*await recoverNativeTimeline\?\.\(\)/,
+  );
+  assert.doesNotMatch(
+    matrix,
+    /await requestGatewayStateSnapshot\(\)/,
   );
   assert.match(
     matrix,
-    /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshGatewayStateAfterReconnect = true/,
+    /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshNativeTimelineAfterReconnect = true/,
   );
   assert.match(
     matrix,
-    /state === "ERROR"[\s\S]*refreshGatewayStateAfterReconnect = true[\s\S]*handlers\.onStatus\([\s\S]*"reconnecting"/,
+    /state === "ERROR"[\s\S]*refreshNativeTimelineAfterReconnect = true[\s\S]*handlers\.onStatus\([\s\S]*"reconnecting"/,
   );
   assert.match(matrix, /createGatewayStateCacheRecord\(/);
   assert.match(matrix, /parseGatewayStateCacheRecord\(/);
@@ -732,18 +736,22 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
   assert.match(matrix, /loadRecentHistory\(sessionId/);
-  assert.match(matrix, /kind: "codever\.history\.request"/);
-  assert.match(matrix, /kind: "history_request"/);
+  assert.doesNotMatch(matrix, /kind: "codever\.history\.request"/);
+  assert.doesNotMatch(matrix, /kind: "history_request"/);
   assert.match(matrix, /historyPageSchema\.parse/);
-  assert.match(matrix, /createDetachedSerialDispatcher/);
-  assert.doesNotMatch(matrix, /await onHistoryPage\?\.\(page\)/);
-  assert.match(matrix, /historyRequestLifecycle\.idForKey\(key\)/);
+  assert.doesNotMatch(matrix, /createDetachedSerialDispatcher/);
+  assert.doesNotMatch(matrix, /historyRequestLifecycle/);
   assert.match(
     app,
     /onHistoryRecovered\(page\)[\s\S]*if \(isCurrentStartup\(\)\) recoverLateHistory\(page\)/,
   );
   assert.match(app, /setHistoryError/);
-  assert.doesNotMatch(matrix, /client\.scrollback\(room/);
+  assert.match(matrix, /await room\.fetchRoomThreads\(\)/);
+  assert.match(
+    matrix,
+    /const loadHistoryPage = async[\s\S]*await client\.scrollback\(room/,
+  );
+  assert.doesNotMatch(matrix, /return requestGatewayHistoryPage\(/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);
   assert.match(matrix, /now: routed\.data\.envelope\.issuedAt/);
   assert.match(matrix, /sessionId: effectiveExtension\.session_id/);

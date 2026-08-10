@@ -11,9 +11,10 @@ authority and it is not the source of truth for local agent state.
 - Mobile installs the Codever PWA and never runs a Gateway.
 - Desktop installs the same web UI together with a local Gateway service.
 - A Gateway can also be installed independently on a headless machine.
-- One private encrypted Matrix room maps to one Gateway collaboration
-  namespace. The Gateway may expose multiple project-scoped agent sessions
-  inside that encrypted namespace.
+- Each agent session maps to an `m.thread` rooted by a signed `session_root`
+  event in its configured encrypted room. The target multi-room topology maps
+  a Gateway workspace to a Matrix Space and a project to a child room;
+  existing mixed-project rooms remain readable during that later migration.
 - Existing Matrix clients can transport the room events, but only Codever
   clients can decrypt application content.
 - Codever-specific fields add tool cards, decisions, streaming state and
@@ -43,19 +44,18 @@ local execution state.
 
 ## Room model
 
-Each Gateway collaboration namespace owns one private encrypted room. The
-Matrix room ID is a transport locator, not a Codever project or session
-identity. A local binding record maps:
+The version-2 session mapping and target room topology are:
 
 ```text
-conversationId <-> roomId <-> gatewayId
-                              └─ app session A
-                              │    ├─ projectId <-> cwd
-                              │    └─ TopicSession <-> provider session
-                              └─ app session B
-                                   ├─ projectId <-> cwd
-                                   └─ TopicSession <-> provider session
+Gateway <-> Space
+             └─ project room <-> projectId <-> cwd
+                  └─ session_root <-> m.thread <-> TopicSession
 ```
+
+Version 2 implements the `session_root`/thread event model inside the currently
+configured encrypted room. Automatic Space discovery and cross-room UI
+aggregation are a separate topology migration; state and history do not depend
+on that migration and already use Matrix timelines directly.
 
 Project identity is the pair `(gatewayId, projectId)`. Project display names
 are intentionally non-unique; the Gateway derives a stable `projectId` from
@@ -106,9 +106,10 @@ display data from encrypted Codever events.
    enrolled device, Gateway and conversation.
 5. Stable envelope/command IDs and persistent replay ledgers make redelivery
    idempotent.
-6. A room may contain multiple independently enrolled PWA devices. Gateway
-   output is fanned out as one P-256 envelope per recipient; there is no shared
-   application decryption key.
+6. A room may contain multiple independently enrolled clients. Gateway output
+   is encrypted once with the room timeline epoch. The same Matrix event
+   carries a pairwise key-ring bundle for authorized devices, so device count
+   changes bytes but never the number of Matrix sends.
 7. Each device owns an independent command sequence, while a durable
    conversation revision provides cross-device compare-and-swap ordering.
    Stale concurrent mutations are rejected and shown for user review; only an
@@ -132,26 +133,14 @@ display data from encrypted Codever events.
    If incremental rotations fell outside the local timeline, the PWA fetches
    the Gateway's root-signed current transport from its fixed extended Matrix
    profile field before it verifies the Matrix device and sends a command.
-10. Late-joining devices recover transcripts through a read-only, expiring
-   request inside the authenticated application envelope. The Gateway pages
-   canonical logical events from its durable delivery outbox into one
-   byte-bounded history page (48 KiB target, 256 KiB hard maximum). Pages up to
-   20 KiB travel inline in one application-encrypted Matrix event; larger pages
-   use one AES-GCM-encrypted Matrix media object whose size and hashes are bound
-   by that event. Stable logical event IDs preserve edit relationships without
-   manufacturing a Matrix timeline event for every recovered item. The PWA
-   verifies the whole batch before parsing, caches pages locally, coalesces
-   concurrent reads of the same cursor, and loads older pages lazily. A UI
-   timeout does not discard the protocol request: retries attach to the same
-   request until its signed expiry, and a late page is persisted even when the
-   user has switched sessions. History media verification runs on a separate
-   serial lane after envelope authentication so a slow download cannot block
-   command acknowledgements or invitation results. Cursor advancement uses the
-   request's original `before` value as a compare-and-swap guard. Replayed
-   decisions are display-only and history reads never consume a command
-   sequence or advance the conversation revision. During rolling upgrades, a
-   request without the byte-limit capability retains the legacy per-event
-   response so an already-installed PWA is not broken before its worker updates.
+10. Late-joining devices receive retained room-key epochs in the next event
+    addressed to them, then restore roots and transcripts with Matrix
+    `/threads`, `/sync`, and backward timeline pagination. History reads create
+    no Gateway event and consume no command sequence or revision. Version-1
+    state/history handlers remain only as rolling-upgrade compatibility.
+
+The normative details are in
+[`matrix-native-conversation-protocol.md`](matrix-native-conversation-protocol.md).
 
 Device invitation UI observes the terminal result independently from the
 command acknowledgement. If the acknowledgement wait times out, the PWA keeps

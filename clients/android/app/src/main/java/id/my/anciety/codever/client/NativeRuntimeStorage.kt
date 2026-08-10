@@ -5,11 +5,13 @@ import android.util.AtomicFile
 import id.my.anciety.codever.security.SecretCipher
 import id.my.anciety.codever.security.SecretEnvelope
 import id.my.anciety.codever.security.codever.EncryptedTrustBlobStore
+import id.my.anciety.codever.security.codever.Base64Url
 import id.my.anciety.codever.security.codever.ReplayClaim
 import id.my.anciety.codever.security.codever.ReplayStore
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,22 +28,118 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
     val trust = File(root, "gateway-trust.enc")
     val replay = File(root, "replay.enc")
     val historyCheckpoints = File(root, "history-checkpoints.enc")
+    val timelineKeys = File(root, "matrix-timeline-keys.enc")
     val transfers = File(root, "transfers").apply {
         check(isDirectory || mkdirs()) { "Native transfer storage could not be created." }
     }
 
     fun clearAccountState() {
-        listOf(events, commands, trust, replay, historyCheckpoints).forEach { file ->
+        listOf(events, commands, trust, replay, historyCheckpoints, timelineKeys).forEach { file ->
             AtomicFile(file).delete()
         }
         transfers.listFiles().orEmpty().forEach(File::delete)
     }
 }
 
+class AtomicEncryptedTimelineKeyStore(
+    file: File,
+    private val cipher: SecretCipher,
+    scope: String,
+) {
+    private val atomic = AtomicFile(file)
+    private val associatedData =
+        "codever.matrix-timeline-keys.v2\u0000$scope".toByteArray(Charsets.UTF_8)
+    private var grant: JsonObject? = load()
+
+    @Synchronized
+    fun save(value: JsonObject): Boolean {
+        validate(value)
+        if (grant == value) return false
+        grant = value
+        val plaintext = value.toString().toByteArray(Charsets.UTF_8)
+        require(plaintext.size <= MAX_BYTES)
+        val encrypted = try {
+            val envelope = cipher.encrypt(plaintext, associatedData)
+            try {
+                SecretEnvelope.encode(envelope)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            plaintext.fill(0)
+        }
+        try {
+            atomic.writeExactly(encrypted)
+        } finally {
+            encrypted.fill(0)
+        }
+        return true
+    }
+
+    @Synchronized
+    fun key(epochId: String): ByteArray? {
+        val epochs = grant?.get("epochs") as? JsonArray ?: return null
+        val encoded = epochs.asSequence()
+            .mapNotNull { it as? JsonObject }
+            .firstOrNull { it["epoch_id"]?.jsonPrimitive?.contentOrNull == epochId }
+            ?.get("key")?.jsonPrimitive?.contentOrNull
+            ?: return null
+        return Base64Url.decode(encoded).also { require(it.size == 32) }
+    }
+
+    @Synchronized
+    fun clear() {
+        grant = null
+        atomic.delete()
+    }
+
+    private fun load(): JsonObject? {
+        if (!atomic.baseFile.exists()) return null
+        val encrypted = atomic.readFully()
+        val plaintext = try {
+            val envelope = SecretEnvelope.decode(encrypted)
+            try {
+                cipher.decrypt(envelope, associatedData)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            encrypted.fill(0)
+        }
+        return try {
+            require(plaintext.size <= MAX_BYTES)
+            Json.parseToJsonElement(plaintext.toString(Charsets.UTF_8)).jsonObject.also(::validate)
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    private fun validate(value: JsonObject) {
+        require(value["version"]?.jsonPrimitive?.longOrNull == 2L)
+        require(value["kind"]?.jsonPrimitive?.contentOrNull == "timeline_key_ring_grant")
+        val epochs = value["epochs"] as? JsonArray
+            ?: throw IllegalArgumentException("Matrix timeline key ring has no epochs.")
+        require(epochs.size in 1..64)
+        epochs.forEach { item ->
+            val epoch = item as? JsonObject
+                ?: throw IllegalArgumentException("Matrix timeline key epoch is invalid.")
+            val key = epoch["key"]?.jsonPrimitive?.contentOrNull
+                ?: throw IllegalArgumentException("Matrix timeline key is missing.")
+            require(Base64Url.decode(key).size == 32)
+        }
+    }
+
+    private companion object {
+        const val MAX_BYTES = 1024 * 1024
+    }
+}
+
 /**
- * Persists the last Gateway history head that was fully reconciled for each
- * session. A live Matrix event is never allowed to advance this checkpoint;
- * only a paginated Gateway history response can do so.
+ * Legacy version-1 Gateway history checkpoint store. Version-2 history uses
+ * the Matrix SDK timeline and local event journal directly; this file remains
+ * readable only for rolling-upgrade compatibility.
  */
 class AtomicEncryptedGatewayHistoryCheckpointStore(
     file: File,

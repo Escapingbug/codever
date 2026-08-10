@@ -6,11 +6,41 @@ import id.my.anciety.codever.client.command.CommandOperation
 import id.my.anciety.codever.client.command.CommandState
 import id.my.anciety.codever.client.command.CommandView
 import java.util.UUID
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class GatewayStateSyncPolicyTest {
+    @Test
+    fun `Matrix pagination reports reached start rather than has more`() {
+        assertEquals(true, matrixRoomHistoryHasMore(reachedStart = false))
+        assertEquals(false, matrixRoomHistoryHasMore(reachedStart = true))
+    }
+
+    @Test
+    fun `native timeline backfill continues until Matrix reaches the start`() = runBlocking {
+        val results = ArrayDeque(listOf(false, false, true))
+        val backfill = paginateMatrixTimelineToStart(maxPages = 10) {
+            results.removeFirst()
+        }
+
+        assertEquals(MatrixTimelineBackfillResult(pages = 3, reachedStart = true), backfill)
+        assertEquals(0, results.size)
+    }
+
+    @Test
+    fun `native timeline backfill is bounded when Matrix never reaches the start`() = runBlocking {
+        var calls = 0
+        val backfill = paginateMatrixTimelineToStart(maxPages = 4) {
+            calls += 1
+            false
+        }
+
+        assertEquals(MatrixTimelineBackfillResult(pages = 4, reachedStart = false), backfill)
+        assertEquals(4, calls)
+    }
+
     @Test
     fun `gateway state retries back off to one request per minute`() {
         assertEquals(5_000L, gatewayStateRetryDelayMs(0))

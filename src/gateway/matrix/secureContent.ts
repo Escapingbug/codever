@@ -1,10 +1,12 @@
 import {
     encryptMedia,
+    base64UrlEncode,
     importDeviceKeyPair,
     openSecureEnvelope,
     publicKeyId,
     sealSecureEnvelopeBundle,
     sealSecureEnvelope,
+    sealMatrixTimelineEnvelope,
     sha256,
     type DeviceKeyPair,
 } from '@codever/security'
@@ -14,6 +16,11 @@ import {
     MAX_HISTORY_PAGE_BYTES,
     MAX_INLINE_HISTORY_PAGE_BYTES,
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    MATRIX_NATIVE_PROTOCOL_VERSION,
+    canonicalJsonBytes,
+    matrixNativeContentSchema,
+    type MatrixNativeContent,
+    type MatrixTimelineKeyRingGrant,
     type HistoryPage,
     type HistoryRequest,
     type CodeverAttachment,
@@ -47,6 +54,7 @@ import {
     type DurableMatrixDelivery,
     type MatrixHistoryDeliveryPage,
 } from './fileDeliveryOutbox'
+import { FileTimelineKeyStore, type TimelineKeyRing } from './fileTimelineKeyStore'
 
 export interface OpenedGatewayMatrixContent {
     content: Record<string, unknown>
@@ -58,6 +66,7 @@ export type TrustedDeviceProvider = () => Promise<readonly MatrixGatewayTrustedD
 
 const DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS = 25_000
 const MAX_MATRIX_NORMAL_IN_FLIGHT = 2
+const MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES = 40 * 1024
 
 type MatrixDeliveryPriority = 'control' | 'history' | 'normal' | 'recovery'
 
@@ -114,6 +123,7 @@ export class GatewaySecureContentLayer {
     private gatewayKeys: DeviceKeyPair | null = null
     private readonly replayStore: FileReplayStore
     private readonly deliveryOutbox: FileMatrixDeliveryOutbox
+    private readonly timelineKeyStore: FileTimelineKeyStore
     /** Logical Matrix event ID -> per-recipient physical event ID. */
     private readonly deliveryIds = new Map<string, Map<string, string>>()
     private readonly retryingRooms = new Map<string, Promise<void>>()
@@ -138,12 +148,16 @@ export class GatewaySecureContentLayer {
         this.deliveryOutbox = new FileMatrixDeliveryOutbox(
             `${config.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
         )
+        this.timelineKeyStore = new FileTimelineKeyStore(
+            `${config.envelopeReplayLedgerPath}.timeline-keys.json`,
+        )
     }
 
     async initialize(now = Date.now()): Promise<void> {
         this.gatewayKeys = await importDeviceKeyPair(this.config.gatewayKeyPair)
         await this.replayStore.prune(now)
         await this.deliveryOutbox.initialize()
+        await this.timelineKeyStore.initialize()
         for (const mapping of this.deliveryOutbox.logicalEventMappings()) {
             this.deliveryIds.set(mapping.eventId, mapping.recipientEvents)
         }
@@ -172,6 +186,44 @@ export class GatewaySecureContentLayer {
                 ? { downloadEncryptedMedia: transport.downloadEncryptedMedia.bind(transport) }
                 : {}),
         }
+    }
+
+    async sendNativeContent(
+        room: MatrixGatewayRoomConfig,
+        content: MatrixNativeContent,
+        transactionId: string,
+        transport: MatrixTransport,
+        threadRootEventId?: string,
+    ): Promise<MatrixSendEventResult> {
+        const native = matrixNativeContentSchema.parse(content)
+        return this.sealOutgoingToAll({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId,
+            content: {
+                msgtype: 'm.notice',
+                body: native.kind === 'session_root'
+                    ? native.title
+                    : `Codever ${native.kind.replaceAll('_', ' ')}`,
+                ...(threadRootEventId
+                    ? {
+                        'm.relates_to': {
+                            rel_type: 'm.thread',
+                            event_id: threadRootEventId,
+                            is_falling_back: true,
+                            'm.in_reply_to': { event_id: threadRootEventId },
+                        },
+                    }
+                    : {}),
+                [CODEVER_MATRIX_EXTENSION]: native,
+            },
+        }, room, transport)
+    }
+
+    async activeDeviceCountForRoom(room: MatrixGatewayRoomConfig): Promise<number> {
+        return (await this.currentTrustedDevices()).filter(device =>
+            device.allowedRoomIds.includes(room.roomId)
+        ).length
     }
 
     async openIncoming(
@@ -260,7 +312,10 @@ export class GatewaySecureContentLayer {
         input: {
             commandId: string
             revision: number
+            revisionEpoch: string
+            revisionEpochGeneration: number
             sessionId?: string
+            threadRootEventId?: string
             originDeviceId: string
             originDeviceName: string
             text: string
@@ -275,12 +330,27 @@ export class GatewaySecureContentLayer {
             content: {
                 msgtype: 'm.text',
                 body: 'Encrypted Codever collaboration event',
+                ...(input.threadRootEventId
+                    ? {
+                        'm.relates_to': {
+                            rel_type: 'm.thread',
+                            event_id: input.threadRootEventId,
+                            is_falling_back: true,
+                            'm.in_reply_to': { event_id: input.threadRootEventId },
+                        },
+                    }
+                    : {}),
                 [CODEVER_MATRIX_EXTENSION]: {
                     version: CODEVER_MATRIX_PROTOCOL_VERSION,
                     kind: 'collaboration_command',
                     command_id: input.commandId,
                     revision: input.revision,
+                    revision_epoch: input.revisionEpoch,
+                    revision_epoch_generation: input.revisionEpochGeneration,
                     ...(input.sessionId ? { session_id: input.sessionId } : {}),
+                    ...(input.threadRootEventId
+                        ? { thread_root_event_id: input.threadRootEventId }
+                        : {}),
                     origin_device_id: input.originDeviceId,
                     origin_device_name: input.originDeviceName,
                     operation: 'prompt',
@@ -858,7 +928,22 @@ export class GatewaySecureContentLayer {
         if (inFlight) return this.observeDeliveryAttempt(inFlight)
 
         const lateCompletion = (async () => {
-            const result = await this.sealOutgoingBundle(
+            const result = isLegacyApplicationSnapshot(delivery.request)
+                ? await this.sealOutgoingBundle(
+                    delivery.request,
+                    room,
+                    recipients,
+                    transport,
+                    priority,
+                    bundleDeliveryCoalesceKey(delivery),
+                    async () => {
+                        await this.deliveryOutbox.markAbandoned(
+                            delivery.deliveryId,
+                            'superseded',
+                        )
+                    },
+                )
+                : await this.sealOutgoingTimeline(
                 delivery.request,
                 room,
                 recipients,
@@ -871,7 +956,7 @@ export class GatewaySecureContentLayer {
                         'superseded',
                     )
                 },
-            )
+                )
             await this.deliveryOutbox.markDelivered(delivery.deliveryId, result.eventId)
             this.confirmDelivery(delivery.logicalKey, result.eventId)
             return result
@@ -1078,6 +1163,129 @@ export class GatewaySecureContentLayer {
         })
     }
 
+    private async sealOutgoingTimeline(
+        request: MatrixSendEventRequest,
+        room: MatrixGatewayRoomConfig,
+        recipients: readonly MatrixGatewayTrustedDevice[],
+        transport: MatrixTransport,
+        priority: MatrixDeliveryPriority = 'normal',
+        coalesceKey?: string,
+        onSuperseded?: () => Promise<void>,
+    ): Promise<MatrixSendEventResult> {
+        let content: MatrixRoomMessageContent
+        try {
+            const now = Date.now()
+            const keyRing = await this.timelineKeyStore.ensureRoom(
+                room.roomId,
+                recipients.map(recipient => recipient.deviceId),
+                now,
+            )
+            const active = keyRing.epochs.find(
+                epoch => epoch.epochId === keyRing.activeEpochId,
+            )
+            if (!active) throw new Error(`Timeline key ring for ${room.roomId} has no active epoch`)
+            const keys = this.requireGatewayKeys()
+            const addressedRecipients = await Promise.all(recipients.map(async recipient => {
+                this.assertCertificateActive(recipient, now)
+                if (recipient.certificateExpiresAt === undefined) {
+                    throw new Error(
+                        `Trusted device ${recipient.deviceId} has no certificate expiry`,
+                    )
+                }
+                return {
+                    recipientDeviceId: recipient.deviceId,
+                    recipientKeyId: await publicKeyId(recipient.publicKey),
+                    recipientPublicKey: recipient.publicKey,
+                    certificateExpiresAt: recipient.certificateExpiresAt,
+                }
+            }))
+            const grant: MatrixTimelineKeyRingGrant = {
+                kind: 'timeline_key_ring_grant',
+                version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                gateway_id: this.gatewayId,
+                conversation_id: room.conversationId,
+                room_id: room.roomId,
+                active_epoch_id: keyRing.activeEpochId,
+                epochs: keyRing.epochs.map(epoch => ({
+                    epoch_id: epoch.epochId,
+                    key: base64UrlEncode(epoch.key),
+                    created_at: epoch.createdAt,
+                })),
+            }
+            const expiresAt = Math.min(...addressedRecipients.map(
+                recipient => recipient.certificateExpiresAt,
+            ))
+            const timelineKeyRingBundle = await sealSecureEnvelopeBundle({
+                plaintext: grant,
+                gatewayId: this.gatewayId,
+                conversationId: room.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: this.config.gatewayDeviceId,
+                senderKeyId: keys.keyId,
+                senderPrivateKey: keys.privateKey,
+                recipients: addressedRecipients.map(({ certificateExpiresAt: _, ...recipient }) =>
+                    recipient,
+                ),
+                envelopeId: `${request.transactionId}.keys`,
+                now,
+                lifetimeMs: Math.min(expiresAt - now, 366 * 24 * 60 * 60_000),
+            })
+            const extension = asRecord(request.content[CODEVER_MATRIX_EXTENSION])
+            const sessionId = typeof extension?.session_id === 'string'
+                ? extension.session_id
+                : undefined
+            const threadRootEventId = typeof extension?.thread_root_event_id === 'string'
+                ? extension.thread_root_event_id
+                : threadRootFromRelation(request.content['m.relates_to'])
+            const timelineEnvelope = await sealMatrixTimelineEnvelope({
+                plaintext: toJsonValue(request.content),
+                timelineKey: active.key,
+                gatewayPrivateKey: keys.privateKey,
+                gatewayKeyId: keys.keyId,
+                gatewayId: this.gatewayId,
+                conversationId: room.conversationId,
+                roomId: room.roomId,
+                epochId: active.epochId,
+                ...(sessionId ? { sessionId } : {}),
+                ...(threadRootEventId ? { threadRootEventId } : {}),
+                envelopeId: request.transactionId,
+                logicalEventId: stableLogicalEventId(logicalDeliveryKey(request)),
+                now,
+            })
+            content = {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever timeline event',
+                ...(request.content['m.relates_to'] === undefined
+                    ? {}
+                    : { 'm.relates_to': request.content['m.relates_to'] }),
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                    kind: 'timeline_envelope',
+                    timeline_envelope: timelineEnvelope,
+                    timeline_key_ring_bundle: timelineKeyRingBundle,
+                },
+            }
+            const encodedContentBytes = canonicalJsonBytes(
+                content as unknown as JsonValue,
+            ).byteLength
+            if (encodedContentBytes > MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES) {
+                throw new Error(
+                    `Matrix timeline event content is ${encodedContentBytes} bytes; `
+                    + `the safe pre-encryption budget is ${MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES} bytes`,
+                )
+            }
+        } catch (error) {
+            throw new PermanentMatrixDeliveryError(error)
+        }
+        return this.sendScheduler.schedule(priority, async () => {
+            return transport.sendEncryptedRoomEvent({ ...request, content })
+        }, {
+            coalesceKey,
+            onSuperseded,
+            serializationKey: JSON.stringify([room.roomId, 'timeline-envelope-v2']),
+        })
+    }
+
     private async sealOutgoing(
         request: MatrixSendEventRequest,
         room: MatrixGatewayRoomConfig,
@@ -1274,6 +1482,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null
+}
+
+function threadRootFromRelation(value: unknown): string | undefined {
+    const relation = asRecord(value)
+    return relation?.rel_type === 'm.thread' && typeof relation.event_id === 'string'
+        ? relation.event_id
+        : undefined
 }
 
 function requireRecord(value: JsonValue, label: string): Record<string, unknown> {
@@ -1518,6 +1733,11 @@ function isApplicationControlRequest(request: MatrixSendEventRequest): boolean {
         || kind === 'history_page'
 }
 
+function isLegacyApplicationSnapshot(request: MatrixSendEventRequest): boolean {
+    const kind = matrixContentExtension(request.content)?.kind
+    return kind === 'gateway_state' || kind === 'history_page'
+}
+
 function isCoalescibleSnapshot(request: MatrixSendEventRequest): boolean {
     const kind = matrixContentExtension(request.content)?.kind
     return kind === 'gateway_state' || kind === 'status'
@@ -1564,10 +1784,14 @@ function withActiveDeviceCount(
 ): MatrixRoomMessageContent {
     const copy = structuredClone(content)
     const extension = asRecord(copy[CODEVER_MATRIX_EXTENSION])
-    if (extension) extension.active_device_count = activeDeviceCount
+    if (extension?.version === CODEVER_MATRIX_PROTOCOL_VERSION) {
+        extension.active_device_count = activeDeviceCount
+    }
     const newContent = asRecord(copy['m.new_content'])
     const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
-    if (newExtension) newExtension.active_device_count = activeDeviceCount
+    if (newExtension?.version === CODEVER_MATRIX_PROTOCOL_VERSION) {
+        newExtension.active_device_count = activeDeviceCount
+    }
     return copy
 }
 
@@ -1581,7 +1805,7 @@ function withLogicalDeliveryIdentity(
         asRecord(copy[CODEVER_MATRIX_EXTENSION]),
         asRecord(asRecord(copy['m.new_content'])?.[CODEVER_MATRIX_EXTENSION]),
     ]) {
-        if (!extension) continue
+        if (!extension || extension.version !== CODEVER_MATRIX_PROTOCOL_VERSION) continue
         extension.logical_event_id = logicalEventId
         if (replacesLogicalEventId) {
             extension.replaces_logical_event_id = replacesLogicalEventId

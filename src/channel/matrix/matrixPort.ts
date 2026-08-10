@@ -32,6 +32,8 @@ export interface MatrixPortOptions {
      * client happens to be viewing.
      */
     sessionId?: string
+    /** Matrix event ID of the immutable session_root that owns this thread. */
+    threadRootEventId?: string
     onLog?: (message: string) => void
     /** Observe every runtime status transition, including non-visible ones. */
     onStatusChange?: (status: SessionStatus) => void
@@ -60,19 +62,30 @@ export class MatrixPort implements ChannelPort {
 
     constructor(private readonly options: MatrixPortOptions) {}
 
+    setThreadRootEventId(eventId: string): void {
+        if (!eventId) throw new Error('Matrix thread root event ID is required')
+        if (
+            this.options.threadRootEventId !== undefined
+            && this.options.threadRootEventId !== eventId
+        ) {
+            throw new Error('Matrix thread root event ID is immutable')
+        }
+        this.options.threadRootEventId = eventId
+    }
+
     async send(message: ChannelMessage): Promise<ChannelSendResult> {
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
         const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const attachments = await this.uploadAttachments(operationId, message.attachments)
-        const content = buildMessageContent(message, {
+        const content = this.withThreadRelation(buildMessageContent(message, {
             kind: 'message',
             operation_id: operationId,
             ...this.sessionMetadata(),
             format: message.format,
             ...(attachments.length ? { attachments } : {}),
             ...(presentation === undefined ? {} : { ui: presentation }),
-        })
+        }))
         const transactionId = this.transactionId('send', operationId)
         const result = await this.options.transport.sendEncryptedRoomEvent({
             roomId: this.options.roomId,
@@ -133,7 +146,7 @@ export class MatrixPort implements ChannelPort {
         void this.options.transport.sendEncryptedRoomEvent({
             roomId: this.options.roomId,
             eventType: 'm.room.message',
-            content: {
+            content: this.withThreadRelation({
                 msgtype: 'm.text',
                 body,
                 [CODEVER_MATRIX_EXTENSION]: {
@@ -146,7 +159,7 @@ export class MatrixPort implements ChannelPort {
                     details: request.details,
                     options: request.options.map(option => ({ label: option.label, value: option.value })),
                 },
-            },
+            }),
             transactionId: this.transactionId('decision', decisionId),
         }).catch((error) => {
             this.options.onLog?.(`[matrix] decision delivery failed: ${formatError(error)}`)
@@ -193,11 +206,11 @@ export class MatrixPort implements ChannelPort {
             cwd: status.cwd,
             model: status.model,
         }
-        const content: MatrixRoomMessageContent = {
+        const content: MatrixRoomMessageContent = this.withThreadRelation({
             msgtype: 'm.notice',
             body,
             [CODEVER_MATRIX_EXTENSION]: extension,
-        }
+        })
         if (status.editMessageId != null) {
             const targetEventId = String(status.editMessageId)
             content.body = `* ${body}`
@@ -248,9 +261,28 @@ export class MatrixPort implements ChannelPort {
         return `codever.${digest}`
     }
 
-    private sessionMetadata(): { session_id?: string } {
+    private sessionMetadata(): { session_id?: string; thread_root_event_id?: string } {
         const sessionId = this.options.sessionId
-        return sessionId ? { session_id: sessionId } : {}
+        return sessionId ? {
+            session_id: sessionId,
+            ...(this.options.threadRootEventId
+                ? { thread_root_event_id: this.options.threadRootEventId }
+                : {}),
+        } : {}
+    }
+
+    private withThreadRelation(content: MatrixRoomMessageContent): MatrixRoomMessageContent {
+        const rootEventId = this.options.threadRootEventId
+        if (!rootEventId || content['m.relates_to'] !== undefined) return content
+        return {
+            ...content,
+            'm.relates_to': {
+                rel_type: 'm.thread',
+                event_id: rootEventId,
+                is_falling_back: true,
+                'm.in_reply_to': { event_id: rootEventId },
+            },
+        }
     }
 
     private operationIdFor(message: ChannelMessage): string {

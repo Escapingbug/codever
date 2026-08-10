@@ -57,7 +57,9 @@ describe('FileGatewayRuntimeStateStore', () => {
                 appSessions: [{
                     id: 'app-session-1',
                     title: 'Persisted session',
+                    createdAt: 1,
                     updatedAt: 1,
+                    matrixThreadRootEventId: '$root:example.org',
                     projectId: initial.workspace.projectId,
                     projectName: initial.workspace.projectName,
                     cwd: initial.workspace.cwd,
@@ -114,7 +116,9 @@ describe('FileGatewayRuntimeStateStore', () => {
             appSessions: [{
                 id: 'app-session-1',
                 title: 'Survives ledger recovery',
+                createdAt: 1,
                 updatedAt: 1,
+                matrixThreadRootEventId: null,
                 projectId: firstState.workspace.projectId,
                 projectName: firstState.workspace.projectName,
                 cwd: firstState.workspace.cwd,

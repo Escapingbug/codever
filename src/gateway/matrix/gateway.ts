@@ -12,7 +12,12 @@ import {
 } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
 import { createProviderInstance, getProvider } from '@/providers/registry'
-import type { AgentActivityPhase, SessionStatus, TopicSession } from '@/bridge/channelPort'
+import {
+    ChannelDeliveryQueuedError,
+    type AgentActivityPhase,
+    type SessionStatus,
+    type TopicSession,
+} from '@/bridge/channelPort'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import {
     CODEVER_MATRIX_EXTENSION,
@@ -85,6 +90,7 @@ interface WorkspaceSettingsInput {
 interface CommandExecutionResult {
     sessionId: string | null
     result?: JsonValue
+    nativeRevisionPublished?: boolean
 }
 
 export interface MatrixGatewayDependencies {
@@ -180,11 +186,34 @@ export class MatrixGatewayRunner {
                 runtimeStateWithoutVersion(runtime),
             )
             runtime.stateVersion = stateVersion
-            await this.secureContent!.sendGatewayState(
-                runtime.config,
-                await this.gatewayStateSnapshot(runtime),
-                this.client,
-            )
+            const snapshot = await this.gatewayStateSnapshot(runtime)
+            await this.secureContent!.sendNativeContent(runtime.config, {
+                version: 2,
+                kind: 'gateway_checkpoint',
+                gateway_id: this.config.gatewayId,
+                conversation_id: runtime.config.conversationId,
+                revision: snapshot.revision,
+                revision_epoch: snapshot.revisionEpoch,
+                revision_epoch_generation: snapshot.revisionEpochGeneration,
+                state_version: stateVersion,
+                active_device_count:
+                    await this.secureContent!.activeDeviceCountForRoom(runtime.config),
+                workspace: {
+                    project: {
+                        id: runtime.workspace.projectId,
+                        name: runtime.workspace.projectName,
+                        cwd: runtime.workspace.cwd,
+                    },
+                    provider: runtime.workspace.provider,
+                    ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
+                    ...(runtime.workspace.reasoningEffort
+                        ? { reasoning_effort: runtime.workspace.reasoningEffort }
+                        : {}),
+                    permission_mode: runtime.workspace.permissionMode,
+                },
+                capabilities: nativeCheckpointCapabilities(snapshot.capabilities),
+                updated_at: this.now(),
+            }, `codever.gateway.checkpoint.${runtime.revisionEpoch}.${stateVersion}`, this.client)
         }))
     }
 
@@ -303,8 +332,9 @@ export class MatrixGatewayRunner {
             }
             if (this.startupFailure) throw this.startupFailure
             this.state = 'running'
+            await this.ensureSessionRoots()
             await this.syncState().catch(error => {
-                this.log(`[matrix-gateway] initial state sync failed: ${formatError(error)}`)
+                this.log(`[matrix-gateway] initial checkpoint sync failed: ${formatError(error)}`)
             })
             const queued = this.startupEvents
             this.startupEvents = []
@@ -527,7 +557,15 @@ export class MatrixGatewayRunner {
                 collaborationDelivery = this.secureContent.sendCollaborationPrompt(runtime.config, {
                     commandId: authorized.command.commandId,
                     revision: authorized.revision,
+                    revisionEpoch: runtime.revisionEpoch,
+                    revisionEpochGeneration: runtime.revisionEpochGeneration,
                     sessionId: appSession.record.id,
+                    threadRootEventId: appSession.record.matrixThreadRootEventId
+                        ?? await this.ensureSessionRoot(
+                            runtime,
+                            appSession.record,
+                            appSession.port,
+                        ),
                     originDeviceId: authorized.command.deviceId,
                     originDeviceName: opened?.trustedDevice.deviceName
                         ?? opened?.trustedDevice.deviceId
@@ -629,6 +667,14 @@ export class MatrixGatewayRunner {
                 this.log(`[matrix-gateway] command ${command.commandId} failed: ${formatError(error)}`)
             }
 
+            if (needsStandaloneRevisionEvent(
+                command.payload.operation,
+                outcome,
+                executionResult.nativeRevisionPublished === true,
+            )) {
+                this.scheduleGatewayRevision(runtime, command.commandId)
+            }
+
             const terminal: DurableCommandResult = {
                 revision,
                 outcome,
@@ -662,12 +708,6 @@ export class MatrixGatewayRunner {
                     `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
                 )
             }
-            await this.syncState(runtime.config.roomId).catch(error => {
-                this.log(
-                    `[matrix-gateway] post-command state sync failed for ${command.commandId}: `
-                    + formatError(error),
-                )
-            })
         })()
             .finally(() => {
                 this.executionTasks.delete(task)
@@ -726,6 +766,11 @@ export class MatrixGatewayRunner {
                 })
                 this.updateAppSessionRecord(appSession)
                 await this.persistRuntime(runtime)
+                await this.sendSessionUpdate(runtime, appSession.record, command.commandId)
+                    .catch(error => this.log(
+                        `[matrix-gateway] session update delivery failed for ${appSession.record.id}: `
+                        + formatError(error),
+                    ))
                 return { sessionId: appSession.record.id }
             }
             case 'cancel': {
@@ -759,6 +804,11 @@ export class MatrixGatewayRunner {
                 )
                 await this.applySessionSettings(appSession, command, command.payload)
                 await this.persistRuntime(runtime)
+                await this.sendSessionUpdate(runtime, appSession.record, command.commandId)
+                    .catch(error => this.log(
+                        `[matrix-gateway] session update delivery failed for ${appSession.record.id}: `
+                        + formatError(error),
+                    ))
                 return { sessionId: appSession.record.id }
             }
             case 'session.create': {
@@ -770,8 +820,22 @@ export class MatrixGatewayRunner {
                 runtime.appSessions.set(record.id, appSession)
                 try {
                     await this.persistRuntime(runtime)
+                    if (this.secureContent) {
+                        await this.ensureSessionRoot(
+                            runtime,
+                            record,
+                            appSession.port,
+                            command.commandId,
+                        )
+                    }
                 } catch (error) {
                     runtime.appSessions.delete(record.id)
+                    await this.persistRuntime(runtime).catch(rollbackError => {
+                        this.log(
+                            `[matrix-gateway] rolled-back app session ${record.id} persistence failed: `
+                            + formatError(rollbackError),
+                        )
+                    })
                     appSession.port.close()
                     await appSession.session.destroy('delete').catch(destroyError => {
                         this.log(
@@ -1009,6 +1073,9 @@ export class MatrixGatewayRunner {
             )
             throw error
         }
+        await this.sendSessionLifecycle(runtime, appSession.record, 'archived').catch(error =>
+            this.log(`[matrix-gateway] archive lifecycle delivery failed: ${formatError(error)}`),
+        )
         return { sessionId: appSession.record.id }
     }
 
@@ -1042,6 +1109,9 @@ export class MatrixGatewayRunner {
             })
             throw error
         }
+        await this.sendSessionLifecycle(runtime, record, 'idle').catch(error =>
+            this.log(`[matrix-gateway] restore lifecycle delivery failed: ${formatError(error)}`),
+        )
         return { sessionId: record.id }
     }
 
@@ -1054,7 +1124,7 @@ export class MatrixGatewayRunner {
         // Deletion is a desired-state operation. A concurrent device may have
         // removed the same immutable session id after this client captured its
         // Gateway revision; replaying that intent must converge as success.
-        if (!active && !archived) return { sessionId }
+        if (!active && !archived) return { sessionId, nativeRevisionPublished: false }
         const record = active?.record ?? archived!
         if (active) {
             this.updateAppSessionRecord(active)
@@ -1084,7 +1154,10 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
-        return { sessionId: record.id }
+        await this.sendSessionLifecycle(runtime, record, 'deleted').catch(error =>
+            this.log(`[matrix-gateway] delete lifecycle delivery failed: ${formatError(error)}`),
+        )
+        return { sessionId: record.id, nativeRevisionPublished: true }
     }
 
     private async createAppSessionRecord(
@@ -1096,10 +1169,13 @@ export class MatrixGatewayRunner {
             settings,
             runtime.capabilityProvider,
         )
+        const createdAt = this.now()
         return {
             id: randomUUID(),
             title: 'New session',
-            updatedAt: this.now(),
+            createdAt,
+            updatedAt: createdAt,
+            matrixThreadRootEventId: null,
             projectId: workspace.projectId,
             projectName: workspace.projectName,
             cwd: workspace.cwd,
@@ -1117,6 +1193,173 @@ export class MatrixGatewayRunner {
         appSession.record.providerSessionId =
             appSession.session.sessionRecord.conversationId
         appSession.record.updatedAt = this.now()
+    }
+
+    private async ensureSessionRoots(): Promise<void> {
+        if (!this.secureContent) return
+        for (const runtime of this.rooms.values()) {
+            for (const appSession of runtime.appSessions.values()) {
+                await this.ensureSessionRoot(runtime, appSession.record, appSession.port)
+            }
+            for (const record of runtime.archivedSessions.values()) {
+                await this.ensureSessionRoot(runtime, record)
+            }
+        }
+    }
+
+    private async ensureSessionRoot(
+        runtime: RoomRuntime,
+        record: AppSessionRecord,
+        port?: MatrixPort,
+        sourceCommandId?: string,
+    ): Promise<string> {
+        if (record.matrixThreadRootEventId) {
+            port?.setThreadRootEventId(record.matrixThreadRootEventId)
+            return record.matrixThreadRootEventId
+        }
+        if (!this.secureContent) {
+            throw new Error('Matrix native session roots require application security')
+        }
+        const status = record.archivedAt !== null
+            ? 'idle'
+            : gatewaySessionStatus(
+                runtime.appSessions.get(record.id)?.session.state ?? 'idle',
+                runtime.appSessions.get(record.id)?.activity.phase,
+            )
+        const revision = await this.nativeRevision(runtime)
+        const send = this.secureContent.sendNativeContent(runtime.config, {
+            version: 2,
+            kind: 'session_root',
+            ...revision,
+            session_id: record.id,
+            title: record.title,
+            project: { id: record.projectId, name: record.projectName, cwd: record.cwd },
+            created_at: record.createdAt,
+            updated_at: record.updatedAt,
+            archived: record.archivedAt !== null,
+            status,
+            provider: record.provider,
+            ...(record.model ? { model: record.model } : {}),
+            ...(record.reasoningEffort
+                ? { reasoning_effort: record.reasoningEffort }
+                : {}),
+            permission_mode: record.permissionMode,
+            extensions: this.sessionExtensionRegistry.summaries(record.extensions),
+            ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
+        }, `codever.session.root.${record.id}`, this.client)
+        let eventId: string
+        try {
+            eventId = (await send).eventId
+        } catch (error) {
+            if (!(error instanceof ChannelDeliveryQueuedError) || !error.confirmation) throw error
+            const confirmation = await error.confirmation
+            if (confirmation.messageId === undefined) {
+                throw new Error(`Matrix did not confirm session root ${record.id}`)
+            }
+            eventId = String(confirmation.messageId)
+        }
+        record.matrixThreadRootEventId = eventId
+        port?.setThreadRootEventId(eventId)
+        await this.persistRuntime(runtime).catch(error => {
+            // The root transaction is idempotent and the pre-root record is
+            // already durable. Keep serving the live session; startup will
+            // recover the same Matrix event ID and retry this metadata write.
+            this.log(
+                `[matrix-gateway] session root mapping persistence failed for ${record.id}: `
+                + formatError(error),
+            )
+        })
+        return eventId
+    }
+
+    private async sendSessionUpdate(
+        runtime: RoomRuntime,
+        record: AppSessionRecord,
+        sourceCommandId?: string,
+    ): Promise<void> {
+        if (!this.secureContent) return
+        const threadRootEventId = await this.ensureSessionRoot(
+            runtime,
+            record,
+            runtime.appSessions.get(record.id)?.port,
+            sourceCommandId,
+        )
+        const revision = await this.nativeRevision(runtime)
+        await this.secureContent.sendNativeContent(runtime.config, {
+            version: 2,
+            kind: 'session_update',
+            ...revision,
+            session_id: record.id,
+            updated_at: record.updatedAt,
+            title: record.title,
+            project: { id: record.projectId, name: record.projectName, cwd: record.cwd },
+            provider: record.provider,
+            model: record.model,
+            reasoning_effort: record.reasoningEffort,
+            permission_mode: record.permissionMode,
+            extensions: this.sessionExtensionRegistry.summaries(record.extensions),
+            ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
+        }, `codever.session.update.${record.id}.${record.updatedAt}`, this.client, threadRootEventId)
+    }
+
+    private async sendSessionLifecycle(
+        runtime: RoomRuntime,
+        record: AppSessionRecord,
+        state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
+    ): Promise<void> {
+        if (!this.secureContent) return
+        const threadRootEventId = await this.ensureSessionRoot(
+            runtime,
+            record,
+            runtime.appSessions.get(record.id)?.port,
+        )
+        const revision = await this.nativeRevision(runtime)
+        await this.secureContent.sendNativeContent(runtime.config, {
+            version: 2,
+            kind: 'session_lifecycle',
+            ...revision,
+            session_id: record.id,
+            state,
+            updated_at: record.updatedAt,
+        }, `codever.session.lifecycle.${record.id}.${state}.${record.updatedAt}`,
+        this.client, threadRootEventId)
+    }
+
+    private async nativeRevision(runtime: RoomRuntime): Promise<{
+        revision: number
+        revision_epoch: string
+        revision_epoch_generation: number
+    }> {
+        return {
+            revision: await this.replayStore.getConversationRevision(
+                this.config.gatewayId,
+                runtime.config.conversationId,
+                runtime.revisionEpoch,
+            ),
+            revision_epoch: runtime.revisionEpoch,
+            revision_epoch_generation: runtime.revisionEpochGeneration,
+        }
+    }
+
+    private scheduleGatewayRevision(runtime: RoomRuntime, sourceCommandId: string): void {
+        if (!this.secureContent) return
+        const task = (async () => {
+            const revision = await this.nativeRevision(runtime)
+            await this.secureContent!.sendNativeContent(runtime.config, {
+                version: 2,
+                kind: 'gateway_revision',
+                ...revision,
+                gateway_id: this.config.gatewayId,
+                conversation_id: runtime.config.conversationId,
+                updated_at: this.now(),
+                source_command_id: sourceCommandId,
+            }, `codever.gateway.revision.${runtime.revisionEpoch}.${revision.revision}`, this.client)
+        })()
+            .catch(error => this.log(
+                `[matrix-gateway] revision ${sourceCommandId} delivery failed: ${formatError(error)}`,
+            ))
+            .finally(() => this.executionTasks.delete(task))
+        this.executionTasks.add(task)
     }
 
     private async persistRuntime(runtime: RoomRuntime): Promise<void> {
@@ -1170,15 +1413,12 @@ export class MatrixGatewayRunner {
             roomId: runtime.config.roomId,
             gatewayId: this.config.gatewayId,
             sessionId: record.id,
+            ...(record.matrixThreadRootEventId
+                ? { threadRootEventId: record.matrixThreadRootEventId }
+                : {}),
             onLog: this.dependencies.onLog,
             onStatusChange: status => {
                 activity.phase = status.activity ?? activityForSessionStatus(status)
-                void this.syncState(runtime.config.roomId).catch(error => {
-                    this.log(
-                        `[matrix-gateway] session status sync failed for ${record.id}: `
-                        + formatError(error),
-                    )
-                })
             },
         })
         let capabilityProvider: AgentProvider | null
@@ -1360,6 +1600,43 @@ function gatewaySessionSummary(
     }
 }
 
+function nativeCheckpointCapabilities(
+    capabilities: GatewayStateSnapshot['capabilities'],
+): JsonValue {
+    return JSON.parse(JSON.stringify({
+        models: capabilities.models.map(model => ({
+            id: model.id,
+            name: model.name,
+            ...(model.defaultReasoningLevel
+                ? { default_reasoning_level: model.defaultReasoningLevel }
+                : {}),
+            ...(model.supportedReasoningLevels
+                ? {
+                    supported_reasoning_levels: model.supportedReasoningLevels.map(level => ({
+                        effort: level.effort,
+                        ...(level.description ? { description: level.description } : {}),
+                    })),
+                }
+                : {}),
+        })),
+        permission_modes: capabilities.permissionModes.map(mode => ({
+            id: mode.id,
+            name: mode.name,
+        })),
+        can_create_session: capabilities.canCreateSession,
+        can_select_session: capabilities.canSelectSession,
+        can_archive_session: capabilities.canArchiveSession ?? false,
+        can_delete_session: capabilities.canDeleteSession ?? false,
+        session_extensions: capabilities.sessionExtensions.map(extension => ({
+            id: extension.id,
+            name: extension.name,
+            description: extension.description,
+            version: extension.version,
+            settings: extension.settings,
+        })),
+    })) as JsonValue
+}
+
 function workspaceFromRecord(record: AppSessionRecord): WorkspaceState {
     return {
         projectId: record.projectId,
@@ -1402,6 +1679,19 @@ function activityForSessionStatus(status: SessionStatus): AgentActivityPhase {
         case 'idle':
             return 'idle'
     }
+}
+
+function needsStandaloneRevisionEvent(
+    operation: CodeverCommand['payload']['operation'],
+    outcome: 'succeeded' | 'failed',
+    nativeRevisionPublished: boolean,
+): boolean {
+    if (operation === 'prompt') return false
+    if (outcome === 'failed') return true
+    if (operation === 'session.delete') return !nativeRevisionPublished
+    return operation === 'cancel'
+        || operation === 'decision'
+        || operation === 'device.invite'
 }
 
 function roomConfigForSession(

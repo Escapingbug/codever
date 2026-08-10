@@ -11,7 +11,9 @@ import { gatewayProjectIdentity } from './project'
 export interface PersistedAppSession {
     id: string
     title: string
+    createdAt: number
     updatedAt: number
+    matrixThreadRootEventId: string | null
     projectId: string
     projectName: string
     cwd: string
@@ -287,10 +289,19 @@ function validateAppSession(
         || typeof session.id !== 'string'
         || !session.id
         || typeof session.title !== 'string'
+        || !(
+            session.createdAt === undefined
+            || (Number.isSafeInteger(session.createdAt) && (session.createdAt as number) >= 0)
+        )
         || !Number.isSafeInteger(session.updatedAt)
         || typeof session.provider !== 'string'
         || !(session.model === null || typeof session.model === 'string')
         || !(session.providerSessionId === null || typeof session.providerSessionId === 'string')
+        || !(
+            session.matrixThreadRootEventId === undefined
+            || session.matrixThreadRootEventId === null
+            || typeof session.matrixThreadRootEventId === 'string'
+        )
     ) {
         throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
     }
@@ -321,7 +332,13 @@ function validateAppSession(
     return {
         id: session.id,
         title: session.title,
+        createdAt: typeof session.createdAt === 'number'
+            ? session.createdAt
+            : session.updatedAt as number,
         updatedAt: session.updatedAt as number,
+        matrixThreadRootEventId: typeof session.matrixThreadRootEventId === 'string'
+            ? session.matrixThreadRootEventId
+            : null,
         projectId: typeof session.projectId === 'string' && session.projectId
             ? session.projectId
             : generatedProject?.id ?? fallback.projectId,
@@ -389,6 +406,8 @@ function requiresEpochGenerationMigration(value: unknown): boolean {
                         const appSession = asRecord(session)
                         return (
                             appSession?.projectId === undefined
+                            || appSession?.createdAt === undefined
+                            || appSession?.matrixThreadRootEventId === undefined
                             || appSession?.projectName === undefined
                             || appSession?.cwd === undefined
                             || appSession?.reasoningEffort === undefined
