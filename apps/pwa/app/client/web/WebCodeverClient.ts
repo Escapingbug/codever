@@ -188,6 +188,7 @@ export async function createWebCodeverClient(
         hasMore: page.hasMore,
       });
     },
+    onConvergenceRequired: handlers.onConvergenceRequired,
   });
   client = new WebCodeverClient(transport, config);
   return client;

@@ -34,6 +34,7 @@ describe('protocol schemas', () => {
       version: 1,
       requestId: 'history-1',
       sessionId: 'session-1',
+      headEventId: 'H'.repeat(43),
       hasMore: false,
       replayed: 1,
       items: [item],
@@ -55,6 +56,9 @@ describe('protocol schemas', () => {
     expect(historyPageSchema.parse(inline).items).toEqual([item])
     expect(historyPageSchema.safeParse({ ...inline, batch }).success).toBe(false)
     expect(historyPageSchema.safeParse({ ...inline, replayed: 2 }).success).toBe(false)
+    expect(historyPageSchema.safeParse({ ...inline, headEventId: 'not-a-history-head' }).success)
+      .toBe(false)
+    expect(historyPageSchema.safeParse({ ...inline, hasMore: true }).success).toBe(false)
     expect(historyPageSchema.safeParse({
       ...inline,
       items: [{ ...item, content: { body: 'x'.repeat(21 * 1024) } }],

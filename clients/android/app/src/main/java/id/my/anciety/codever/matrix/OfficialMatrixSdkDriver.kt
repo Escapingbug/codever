@@ -40,6 +40,7 @@ interface MatrixSdkDriver {
         onSessionUpdated: (StoredMatrixSession) -> Unit,
         onJournalAdvanced: (Long) -> Unit,
         onTransportReady: (MatrixTransportIdentity) -> Unit,
+        onTimelineGap: () -> Unit,
         onDecryptedEvent: (MatrixDecryptedEvent) -> Unit,
         onRuntimeFailure: (Throwable) -> Unit,
     )
@@ -99,6 +100,7 @@ class OfficialMatrixSdkDriver(
     private lateinit var activeFiles: MatrixAccountFiles
     private var runtimeFailure: (Throwable) -> Unit = {}
     private var journalAdvanced: (Long) -> Unit = {}
+    private var timelineGap: () -> Unit = {}
     private var decryptedEvent: (MatrixDecryptedEvent) -> Unit = {}
 
     override suspend fun start(
@@ -108,6 +110,7 @@ class OfficialMatrixSdkDriver(
         onSessionUpdated: (StoredMatrixSession) -> Unit,
         onJournalAdvanced: (Long) -> Unit,
         onTransportReady: (MatrixTransportIdentity) -> Unit,
+        onTimelineGap: () -> Unit,
         onDecryptedEvent: (MatrixDecryptedEvent) -> Unit,
         onRuntimeFailure: (Throwable) -> Unit,
     ) {
@@ -122,6 +125,7 @@ class OfficialMatrixSdkDriver(
         activeFiles = files
         runtimeFailure = onRuntimeFailure
         journalAdvanced = onJournalAdvanced
+        timelineGap = onTimelineGap
         decryptedEvent = onDecryptedEvent
         val delegate = object : ClientSessionDelegate {
             override fun retrieveSessionFromKeychain(userId: String) = files.sessionStore.load()
@@ -364,6 +368,10 @@ class OfficialMatrixSdkDriver(
     }
 
     private fun processTimelineDiffs(diffs: List<TimelineDiff>) {
+        if (diffs.any { it is TimelineDiff.Reset }) {
+            diagnostics.record("matrix.timeline.gap_detected")
+            timelineGap()
+        }
         val items = diffs.flatMap(::timelineItems)
         if (items.isNotEmpty()) {
             diagnostics.record(

@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
@@ -24,15 +25,131 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
     val commands = File(root, "commands.enc")
     val trust = File(root, "gateway-trust.enc")
     val replay = File(root, "replay.enc")
+    val historyCheckpoints = File(root, "history-checkpoints.enc")
     val transfers = File(root, "transfers").apply {
         check(isDirectory || mkdirs()) { "Native transfer storage could not be created." }
     }
 
     fun clearAccountState() {
-        listOf(events, commands, trust, replay).forEach { file ->
+        listOf(events, commands, trust, replay, historyCheckpoints).forEach { file ->
             AtomicFile(file).delete()
         }
         transfers.listFiles().orEmpty().forEach(File::delete)
+    }
+}
+
+/**
+ * Persists the last Gateway history head that was fully reconciled for each
+ * session. A live Matrix event is never allowed to advance this checkpoint;
+ * only a paginated Gateway history response can do so.
+ */
+class AtomicEncryptedGatewayHistoryCheckpointStore(
+    file: File,
+    private val cipher: SecretCipher,
+    scope: String,
+) {
+    private val atomic = AtomicFile(file)
+    private val associatedData =
+        "codever.gateway.history-checkpoints.v1\u0000$scope".toByteArray(Charsets.UTF_8)
+    // A corrupt checkpoint cannot safely be treated as a first synchronization:
+    // doing so could bless an existing, gapped local cache as complete.
+    private var heads = load()
+
+    @Synchronized
+    fun head(sessionId: String): String? = heads[sessionId]
+
+    @Synchronized
+    fun update(sessionId: String, headEventId: String) {
+        requireCheckpoint(sessionId, headEventId)
+        if (heads[sessionId] == headEventId) return
+        require(heads.size < MAX_SESSIONS || sessionId in heads) {
+            "The Gateway history checkpoint store is full."
+        }
+        heads = heads + (sessionId to headEventId)
+        save()
+    }
+
+    @Synchronized
+    fun retainSessionIds(sessionIds: Set<String>) {
+        val retained = heads.filterKeys(sessionIds::contains)
+        if (retained == heads) return
+        heads = retained
+        if (heads.isEmpty()) atomic.delete() else save()
+    }
+
+    @Synchronized
+    fun clear() {
+        heads = emptyMap()
+        atomic.delete()
+    }
+
+    private fun load(): Map<String, String> {
+        if (!atomic.baseFile.exists()) return emptyMap()
+        val encrypted = atomic.readFully()
+        val plaintext = try {
+            val envelope = SecretEnvelope.decode(encrypted)
+            try {
+                cipher.decrypt(envelope, associatedData)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            encrypted.fill(0)
+        }
+        return try {
+            require(plaintext.size <= MAX_BYTES)
+            val root = Json.parseToJsonElement(plaintext.toString(Charsets.UTF_8)).jsonObject
+            require(root.keys == setOf("schemaVersion", "heads"))
+            require(root.getValue("schemaVersion").jsonPrimitive.longOrNull == 1L)
+            val values = root.getValue("heads").jsonObject
+            require(values.size <= MAX_SESSIONS)
+            values.mapValues { (sessionId, value) ->
+                val headEventId = value.jsonPrimitive.contentOrNull
+                    ?: throw IllegalArgumentException("Gateway history checkpoint is invalid.")
+                requireCheckpoint(sessionId, headEventId)
+                headEventId
+            }
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    private fun save() {
+        val plaintext = buildJsonObject {
+            put("schemaVersion", 1)
+            put("heads", JsonObject(heads.toSortedMap().mapValues { (_, value) ->
+                kotlinx.serialization.json.JsonPrimitive(value)
+            }))
+        }.toString().toByteArray(Charsets.UTF_8)
+        require(plaintext.size <= MAX_BYTES)
+        val encrypted = try {
+            val envelope = cipher.encrypt(plaintext, associatedData)
+            try {
+                SecretEnvelope.encode(envelope)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            plaintext.fill(0)
+        }
+        try {
+            atomic.writeExactly(encrypted)
+        } finally {
+            encrypted.fill(0)
+        }
+    }
+
+    private fun requireCheckpoint(sessionId: String, headEventId: String) {
+        require(sessionId.isNotBlank() && sessionId.length <= 512 && sessionId.none(Char::isISOControl))
+        require(HISTORY_EVENT_ID.matches(headEventId))
+    }
+
+    private companion object {
+        val HISTORY_EVENT_ID = Regex("^[A-Za-z0-9_-]{43}$")
+        const val MAX_SESSIONS = 5_000
+        const val MAX_BYTES = 1024 * 1024
     }
 }
 

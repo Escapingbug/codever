@@ -148,6 +148,8 @@ class NativeClientRuntime(
     private data class GatewayHistoryCursor(
         val before: String?,
         val complete: Boolean,
+        val headEventId: String?,
+        val eventIds: Set<String>,
     )
 
     val deviceId: String = identity.publicIdentity.keyId
@@ -156,6 +158,11 @@ class NativeClientRuntime(
     private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
     private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId)
+    private val historyCheckpoints = AtomicEncryptedGatewayHistoryCheckpointStore(
+        files.historyCheckpoints,
+        cipher,
+        deviceId,
+    )
     private val trustStore = EncryptedGatewayTrustStore(
         AtomicEncryptedTrustBlobStore(files.trust),
         cipher,
@@ -167,6 +174,8 @@ class NativeClientRuntime(
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
+    private val recentHistoryConvergences =
+        ConcurrentHashMap<String, CompletableDeferred<GatewayHistoryCursor>>()
     private val pendingHistory = linkedMapOf<String, PendingHistoryRequest>()
     private val gatewayHistory = linkedMapOf<String, GatewayHistoryCursor>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
@@ -248,11 +257,7 @@ class NativeClientRuntime(
             // crossed a limited/background sync gap. Always reconcile the
             // newest authoritative page when the WebView asks for recent
             // history instead of treating an old `complete` bit as permanent.
-            gatewayCursor = requestAndAwaitGatewayHistory(
-                sessionId = sessionId,
-                requestedBefore = null,
-                limit = limit,
-            )
+            gatewayCursor = reconcileRecentGatewayHistory(sessionId, limit)
         }
         var local = eventHub.historyPage(
             sessionId,
@@ -278,6 +283,76 @@ class NativeClientRuntime(
         )
         diagnostics.record("history.page.completed")
         return local
+    }
+
+    private suspend fun reconcileRecentGatewayHistory(
+        sessionId: String,
+        limit: Int,
+    ): GatewayHistoryCursor {
+        val convergence = CompletableDeferred<GatewayHistoryCursor>()
+        val existing = recentHistoryConvergences.putIfAbsent(sessionId, convergence)
+        if (existing != null) {
+            diagnostics.record("history.convergence.coalesced")
+            return existing.await()
+        }
+        try {
+            val resolved = performRecentGatewayHistoryConvergence(sessionId, limit)
+            convergence.complete(resolved)
+            return resolved
+        } catch (error: Throwable) {
+            convergence.completeExceptionally(error)
+            throw error
+        } finally {
+            recentHistoryConvergences.remove(sessionId, convergence)
+        }
+    }
+
+    private suspend fun performRecentGatewayHistoryConvergence(
+        sessionId: String,
+        limit: Int,
+    ): GatewayHistoryCursor {
+        val previousHeadEventId = historyCheckpoints.head(sessionId)
+        val hasLocalHistory = eventHub.historyPage(
+            sessionId,
+            before = null,
+            limit = 1,
+            externalHasMore = false,
+        ).messages.isNotEmpty()
+        val convergence = GatewayHistoryConvergence(
+            previousHeadEventId = previousHeadEventId,
+            // Before this mechanism existed, an upgraded APK could already
+            // contain a gapped local cache. Without a persisted Gateway head,
+            // only a complete scan can establish a trustworthy baseline.
+            requireCompleteWithoutCheckpoint = previousHeadEventId == null && hasLocalHistory,
+        )
+        var requestedBefore: String? = null
+        var pages = 0
+        while (true) {
+            val page = requestAndAwaitGatewayHistory(
+                sessionId = sessionId,
+                requestedBefore = requestedBefore,
+                limit = maxOf(limit, HISTORY_CONVERGENCE_PAGE_SIZE),
+            )
+            pages += 1
+            when (val decision = convergence.accept(GatewayHistoryPagePosition(
+                headEventId = page.headEventId,
+                eventIds = page.eventIds,
+                nextBefore = page.before,
+                complete = page.complete,
+            ))) {
+                is GatewayHistoryConvergenceDecision.Continue -> {
+                    requestedBefore = decision.before
+                }
+                is GatewayHistoryConvergenceDecision.Complete -> {
+                    decision.headEventId?.let { historyCheckpoints.update(sessionId, it) }
+                    diagnostics.record(
+                        "history.convergence.completed",
+                        mapOf("pages" to pages.toString()),
+                    )
+                    return page
+                }
+            }
+        }
     }
 
     private suspend fun requestAndAwaitGatewayHistory(
@@ -554,6 +629,7 @@ class NativeClientRuntime(
         if (revoke) {
             trustStore.clear()
             replayStore.clear()
+            historyCheckpoints.clear()
             outbox.clear()
             transfers.clear()
             trust = null
@@ -584,6 +660,23 @@ class NativeClientRuntime(
         if (trust != null) {
             startGatewayStateSync(recoverTransport = true)
         }
+    }
+
+    override fun onConvergenceRequired(reason: String) {
+        requestAuthoritativeConvergence(reason)
+    }
+
+    fun requestAuthoritativeConvergence(reason: String) {
+        val diagnosticReason = reason
+            .replace(Regex("[^A-Za-z0-9._:+/-]"), "_")
+            .take(160)
+            .ifBlank { "unspecified" }
+        diagnostics.record(
+            "gateway.convergence.requested",
+            mapOf("reason" to diagnosticReason),
+        )
+        if (trust == null || gatewayStateSyncJob?.isActive == true) return
+        startGatewayStateSync(recoverTransport = false)
     }
 
     override fun onDecryptedEvent(event: MatrixDecryptedEvent) {
@@ -1156,6 +1249,11 @@ class NativeClientRuntime(
         if (revisionEpoch.isBlank()) return
         gatewayState = extension
         outbox.updateKnownRevision(revision)
+        (extension["sessions"] as? JsonArray)?.let { sessions ->
+            historyCheckpoints.retainSessionIds(
+                sessions.mapNotNull { (it as? JsonObject)?.string("id") }.toSet(),
+            )
+        }
         eventHub.publish(
             ClientEventType.GATEWAY_STATE_CHANGED,
             extension,
@@ -1382,7 +1480,19 @@ class NativeClientRuntime(
                 refreshedSnapshot(),
             )
         }
-        val next = GatewayHistoryCursor(nextBefore, complete = !hasMore)
+        val headEventId = page.string("headEventId")
+        if ("headEventId" in page && (headEventId == null || !isSha256Base64Url(headEventId))) {
+            pending.response.completeExceptionally(
+                IllegalArgumentException("Gateway history response contained an invalid head event id."),
+            )
+            return
+        }
+        val next = GatewayHistoryCursor(
+            before = nextBefore,
+            complete = !hasMore,
+            headEventId = headEventId,
+            eventIds = historyMessages.mapTo(mutableSetOf(), ClientMessage::eventId),
+        )
         synchronized(gatewayHistory) { gatewayHistory[pending.sessionId] = next }
         pending.response.complete(next)
         diagnostics.record("history.response.accepted")
@@ -1778,6 +1888,7 @@ class NativeClientRuntime(
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L
         const val CONTROL_REQUEST_LIFETIME_MS = 60_000L
         const val HISTORY_RESPONSE_TIMEOUT_MS = 30_000L
+        const val HISTORY_CONVERGENCE_PAGE_SIZE = 100
         const val DEFAULT_HISTORY_PAGE_BYTES = 48 * 1024
         const val MAX_INLINE_HISTORY_BYTES = 20 * 1024
         const val MAX_HISTORY_PAGE_BYTES = 256 * 1024

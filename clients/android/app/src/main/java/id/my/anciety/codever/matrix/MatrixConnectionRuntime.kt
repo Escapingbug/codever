@@ -49,6 +49,7 @@ class MatrixConnectionRuntime(
     private val liveness: MatrixSyncLiveness = MatrixSyncLiveness(),
     private val retryDelayMs: Long = 5_000,
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
+    private val onConvergenceRequired: (String) -> Unit = {},
     private val onDecryptedEvent: (MatrixDecryptedEvent) -> Unit = {},
 ) {
     private data class ApplicationControlSendContext(
@@ -405,6 +406,9 @@ class MatrixConnectionRuntime(
                     runCatching { connectLocked() }
                 }
             }
+            if (resumeError == null && currentDriver != null) {
+                onConvergenceRequired("network_recovered")
+            }
         }
     }
 
@@ -512,6 +516,9 @@ class MatrixConnectionRuntime(
                                 }
                             }
                         }
+                    },
+                    onTimelineGap = {
+                        onConvergenceRequired("room_timeline_reset")
                     },
                     onDecryptedEvent = onDecryptedEvent,
                     onRuntimeFailure = { error ->
@@ -650,6 +657,10 @@ class MatrixConnectionRuntime(
                 }
                 since = batch.nextBatch
                 applicationControlSince = since
+                if (batch.limited) {
+                    diagnostics.record("matrix.application_control.gap_detected")
+                    onConvergenceRequired("application_control_limited")
+                }
                 if (ready.complete(Unit)) {
                     diagnostics.record("matrix.application_control.receiver_ready")
                     onTransportReady(identity)

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldReconcileRecentHistory } from "../app/crossDeviceSync.ts";
+import {
+  shouldReconcileRecentHistory,
+  shouldRecoverVisibleHistory,
+} from "../app/crossDeviceSync.ts";
 
 test("a newer selected-session snapshot invalidates recent history", () => {
   assert.equal(
@@ -10,6 +13,39 @@ test("a newer selected-session snapshot invalidates recent history", () => {
       nextUpdatedAt: 11,
     }),
     true,
+  );
+});
+
+test("foreground, focus, and online recovery is bounded but does not need a newer snapshot", () => {
+  assert.equal(
+    shouldRecoverVisibleHistory({
+      visible: true,
+      connected: true,
+      selectedSessionId: "session-1",
+      lastRecoveryAt: 1_000,
+      now: 3_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRecoverVisibleHistory({
+      visible: true,
+      connected: true,
+      selectedSessionId: "session-1",
+      lastRecoveryAt: 2_500,
+      now: 3_000,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRecoverVisibleHistory({
+      visible: false,
+      connected: true,
+      selectedSessionId: "session-1",
+      lastRecoveryAt: 0,
+      now: 3_000,
+    }),
+    false,
   );
 });
 

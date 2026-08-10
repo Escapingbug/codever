@@ -711,8 +711,7 @@ describe('multi-device Matrix collaboration', () => {
                 return { eventId: '$must-not-duplicate' }
             },
         })
-        await new Promise(resolve => setTimeout(resolve, 5))
-        expect(attemptedTransactions).toHaveLength(1)
+        await vi.waitFor(() => expect(attemptedTransactions).toHaveLength(1))
         expect(recoveryTransportCalls).toBe(0)
 
         releaseHung()
@@ -920,6 +919,78 @@ describe('multi-device Matrix collaboration', () => {
             transactionId.startsWith('old-bulk-transaction-'),
         )).toHaveLength(4)
         layer.stopRetries()
+    })
+
+    it('lets command confirmation bypass a hung history response for the same device', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        let releaseHistory!: () => void
+        const historyGate = new Promise<void>(resolve => {
+            releaseHistory = resolve
+        })
+        const attempted: string[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                attempted.push(request.transactionId)
+                if (request.transactionId.startsWith('codever.history.page.')) {
+                    await historyGate
+                }
+                return { eventId: `$history-priority-${attempted.length}` }
+            },
+        }
+        const history = layer.sendHistoryPage(room, policy.deviceId, {
+            kind: 'codever.history.request',
+            version: 1,
+            requestId: 'hung-history',
+            gatewayId: 'gateway-1',
+            conversationId: room.conversationId,
+            deviceId: policy.deviceId,
+            sessionId: 'history-session',
+            limit: 20,
+            maxBytes: DEFAULT_HISTORY_PAGE_BYTES,
+            issuedAt: now,
+            expiresAt: now + 60_000,
+        }, transport)
+        try {
+            await vi.waitFor(() => expect(attempted).toHaveLength(1))
+            const accepted = layer.sendCommandAccepted(
+                room,
+                policy.deviceId,
+                'command-during-history',
+                1,
+                1,
+                'runtime-epoch-1',
+                transport,
+            )
+            await vi.waitFor(() => expect(attempted).toHaveLength(2))
+            expect(attempted[1]).toMatch(
+                /^codever\.command\.ack\.command-during-history\.[^.]+\./u,
+            )
+            await accepted
+        } finally {
+            releaseHistory()
+            await history
+            layer.stopRetries()
+        }
     })
 
     it('uses a fresh Matrix transaction and envelope for each command-status redelivery', async () => {
@@ -1525,6 +1596,7 @@ describe('multi-device Matrix collaboration', () => {
         expect(firstItems).toHaveLength(batch.itemCount)
         expect(firstItems.length).toBeLessThan(36)
         expect(page).toMatchObject({ hasMore: true, replayed: firstItems.length })
+        expect(page.headEventId).toBe(firstItems.at(-1)?.eventId)
         expect(typeof page.nextBefore).toBe('string')
 
         await layer.sendHistoryPage(room, 'device-c', {
@@ -1555,6 +1627,7 @@ describe('multi-device Matrix collaboration', () => {
             JSON.parse(new TextDecoder().decode(secondPlaintext)),
         )
         expect(secondPage).toMatchObject({ hasMore: false, replayed: secondItems.length })
+        expect(secondPage.headEventId).toBe(page.headEventId)
         expect(new Set([
             ...firstItems.map(item => item.eventId),
             ...secondItems.map(item => item.eventId),

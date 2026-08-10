@@ -86,7 +86,7 @@ describe('native offline history and reconnect', () => {
         second.dispose()
     })
 
-    it('repairs output missed by the phone timeline when another device completes the session', async () => {
+    it('repairs more than one hundred outputs when every phone timeline event is lost', async () => {
         const port = new PersistentHistoryPort([
             message('cross-device-user', 1, 'first message from the phone', false),
             message('cross-device-command', 2, 'running command', false),
@@ -94,10 +94,14 @@ describe('native offline history and reconnect', () => {
         let client: NativeBridgeClient
         let previousUpdatedAt: number | undefined
         let resolveRecovery!: (messages: ClientMessage[]) => void
+        const deliveredTimelineEvents: string[] = []
         const recovered = new Promise<ClientMessage[]>(resolve => {
             resolveRecovery = resolve
         })
         client = await createClient(port, { load: () => undefined, save() {} }, {
+            onMessage(message) {
+                deliveredTimelineEvents.push(message.eventId)
+            },
             onCollaborationState(state) {
                 const session = state.gatewayState?.sessions.find(
                     candidate => candidate.id === 'session-history',
@@ -123,19 +127,25 @@ describe('native offline history and reconnect', () => {
         port.deliverGatewayState(1)
         await nextTurn()
 
-        // The ordinary Matrix timeline event is deliberately absent. Only the
-        // authoritative Gateway state advances, exactly like a limited native
-        // sync that retained the running command but dropped the final answer.
-        port.appendWithoutTimeline(
-            message('cross-device-final', 3, 'final answer from the browser task', true),
-        )
+        // Every ordinary Matrix timeline event is deliberately absent. Only
+        // the authoritative Gateway state advances, so correctness cannot
+        // depend on the native sync retaining its latest 100 timeline events.
+        for (let index = 1; index <= 150; index += 1) {
+            port.appendWithoutTimeline(message(
+                `cross-device-missed-${index}`,
+                index + 2,
+                `missed browser output ${index}`,
+                true,
+            ))
+        }
         port.deliverGatewayState(2)
 
-        await expect(within(recovered, 5_000)).resolves.toEqual([
-            expect.objectContaining({ eventId: 'cross-device-user' }),
-            expect.objectContaining({ eventId: 'cross-device-command' }),
-            expect.objectContaining({ eventId: 'cross-device-final' }),
-        ])
+        await expect(within(recovered, 5_000)).resolves.toEqual(
+            Array.from({ length: 30 }, (_, offset) => expect.objectContaining({
+                eventId: `cross-device-missed-${offset + 121}`,
+            })),
+        )
+        expect(deliveredTimelineEvents).toEqual([])
         expect(port.failures).toEqual([])
         client.dispose()
     })
@@ -242,7 +252,7 @@ class PersistentHistoryPort implements NativeBridgePort {
                 this.result(request, {
                     sessionId: request.params.sessionId,
                     messages: this.history.slice(-request.params.limit),
-                    hasMore: false,
+                    hasMore: this.history.length > request.params.limit,
                     asOfCursor: this.history.at(-1)?.eventId ?? 'history-empty',
                 })
                 return

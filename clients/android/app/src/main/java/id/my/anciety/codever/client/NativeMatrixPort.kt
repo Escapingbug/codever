@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 
 interface NativeMatrixObserver {
     fun onTransportReady(identity: MatrixTransportIdentity)
+    fun onConvergenceRequired(reason: String)
     fun onDecryptedEvent(event: MatrixDecryptedEvent)
 }
 
@@ -41,6 +42,7 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         context = context,
         diagnostics = diagnostics,
         onTransportReady = { identity -> observer?.onTransportReady(identity) },
+        onConvergenceRequired = { reason -> observer?.onConvergenceRequired(reason) },
         onDecryptedEvent = { event -> observer?.onDecryptedEvent(event) },
     )
 

@@ -86,7 +86,10 @@ import {
   type ChatMessage,
   type OptimisticMessageReference,
 } from "./chatMessages";
-import { shouldReconcileRecentHistory } from "./crossDeviceSync";
+import {
+  shouldReconcileRecentHistory,
+  shouldRecoverVisibleHistory,
+} from "./crossDeviceSync";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import { deriveConnectionPresentation } from "./connectionPresentation";
@@ -552,6 +555,9 @@ export function CodeverApp() {
   const recentHistoryReconciliationRef = useRef(
     new Map<string, Promise<void>>(),
   );
+  const reconcileRecentSessionHistoryCallbackRef = useRef<
+    (sessionId: string, connection: CodeverClient) => void
+  >(() => {});
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
@@ -882,6 +888,11 @@ export function CodeverApp() {
   }
 
   useEffect(() => {
+    reconcileRecentSessionHistoryCallbackRef.current =
+      reconcileRecentSessionHistory;
+  });
+
+  useEffect(() => {
     writeProjectDisclosureState(window.localStorage, collapsedProjects);
   }, [collapsedProjects]);
 
@@ -912,6 +923,36 @@ export function CodeverApp() {
     });
     return () => {
       active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let lastRecoveryAt = 0;
+    const recoverVisibleHistory = () => {
+      if (document.visibilityState !== "visible") return;
+      const connection = codeverClientRef.current;
+      const sessionId = selectedSessionIdRef.current;
+      const now = Date.now();
+      if (!shouldRecoverVisibleHistory({
+        visible: document.visibilityState === "visible",
+        connected: connection !== null,
+        selectedSessionId: sessionId,
+        lastRecoveryAt,
+        now,
+      })) {
+        return;
+      }
+      lastRecoveryAt = now;
+      reconcileRecentSessionHistoryCallbackRef.current(sessionId!, connection!);
+    };
+    const onVisibilityChange = () => recoverVisibleHistory();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", recoverVisibleHistory);
+    window.addEventListener("online", recoverVisibleHistory);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", recoverVisibleHistory);
+      window.removeEventListener("online", recoverVisibleHistory);
     };
   }, []);
 
@@ -2183,6 +2224,14 @@ export function CodeverApp() {
             ) {
               reconcileRecentSessionHistory(nextSessionId, activeConnection);
             }
+          }
+        },
+        onConvergenceRequired() {
+          if (!isCurrentStartup()) return;
+          const activeConnection = codeverClientRef.current;
+          const sessionId = selectedSessionIdRef.current;
+          if (activeConnection && sessionId) {
+            reconcileRecentSessionHistory(sessionId, activeConnection);
           }
         },
         onCommandReviewRequired(review) {

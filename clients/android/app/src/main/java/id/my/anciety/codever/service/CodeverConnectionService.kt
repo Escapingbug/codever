@@ -268,11 +268,24 @@ class CodeverConnectionService : Service() {
         suspend fun snapshot(): ClientSnapshot = awaitClientRuntime().snapshot()
 
         fun setUiForeground(value: Boolean) {
+            val becameForeground = value && !uiForeground
             uiForeground = value
             diagnostics.record(
                 "service.ui_foreground",
                 mapOf("running" to value.toString()),
             )
+            if (becameForeground) {
+                serviceScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        awaitClientRuntime().requestAuthoritativeConvergence("ui_foreground")
+                    }.onFailure { error ->
+                        diagnostics.record(
+                            "service.ui_convergence_failed",
+                            mapOf("error" to error.javaClass.simpleName.take(160)),
+                        )
+                    }
+                }
+            }
         }
 
         fun startInBackground() {

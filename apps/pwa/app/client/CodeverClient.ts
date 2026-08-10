@@ -65,6 +65,7 @@ export type CodeverClientHandlers = {
   onCommandResult?(result: CommandCompletion): void;
   onCommandReviewRequired?(review: CodeverCommandReview | null): void;
   onHistoryRecovered?(page: CodeverHistoryRecovery): void;
+  onConvergenceRequired?(): void;
 };
 
 /**

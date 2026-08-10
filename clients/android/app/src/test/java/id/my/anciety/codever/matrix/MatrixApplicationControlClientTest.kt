@@ -88,6 +88,13 @@ class MatrixApplicationControlClientTest {
         """.trimIndent()
 
         assertTrue(isCodeverApplicationControlEvent(event))
+        assertTrue(isCodeverApplicationControlEvent(event.replace(
+            "\"kind\":\"secure_envelope\"",
+            "\"kind\":\"secure_envelope_bundle\"",
+        ).replace(
+            "\"secure_envelope\":",
+            "\"secure_envelope_bundle\":",
+        )))
         assertFalse(isCodeverApplicationControlEvent(secureContent()))
         assertFalse(isCodeverApplicationControlEvent("""
             {
@@ -103,7 +110,7 @@ class MatrixApplicationControlClientTest {
         val responseBody = """
             {
               "next_batch":"s-next",
-              "rooms":{"join":{"!room:example.org":{"timeline":{"events":[{
+              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"events":[{
                 "type":"io.codever.secure_control.v1",
                 "event_id":"${'$'}control-response",
                 "sender":"@gateway:example.org",
@@ -127,6 +134,7 @@ class MatrixApplicationControlClientTest {
         assertEquals("\$control-response", batch.events.single().eventId)
         assertEquals("@gateway:example.org", batch.events.single().sender)
         assertEquals(1234L, batch.events.single().timestamp)
+        assertTrue(batch.limited)
         assertTrue(endpoint.rawQuery.contains("since=s-current"))
         assertTrue(endpoint.rawQuery.contains("filter="))
         val encodedFilter = endpoint.rawQuery
@@ -171,6 +179,7 @@ class MatrixApplicationControlClientTest {
         val batch = client.sync(storedSession(), since = null)
 
         assertEquals(listOf("\$offline-result"), batch.events.map { it.eventId })
+        assertFalse(batch.limited)
         assertFalse(endpoint.rawQuery.contains("since="))
         assertTrue(endpoint.rawQuery.contains("timeout=0"))
         val encodedFilter = endpoint.rawQuery

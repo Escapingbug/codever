@@ -498,6 +498,7 @@ export async function connectMatrix(
     onCollaborationState?(state: CollaborationState): void;
     onCommandResult?(result: CommandResultState): void;
     onHistoryRecovered?(page: MatrixHistoryRecovery): void;
+    onConvergenceRequired?(): void;
   },
 ): Promise<MatrixConnection> {
   const config = normalizeMatrixConfig(configInput);
@@ -782,6 +783,7 @@ export async function connectMatrix(
       return;
     }
     lastGatewayStateRecoveryAt = Date.now();
+    handlers.onConvergenceRequired?.();
     gatewayStateRecovery = requestGatewayStateSnapshot()
       .catch(reportInboundError)
       .finally(() => {
@@ -1851,6 +1853,11 @@ export async function connectMatrix(
     const pageLimit = Math.max(1, Math.min(limit, 100));
     await scanHistoryTimeline(room, sessionId);
     const local = takeHistory(sessionId, pageLimit);
+    // Recent reconciliation is an authoritative refresh, not "load the next
+    // older page". Reset the Gateway cursor so focus/online/timeline-gap
+    // recovery always starts at the current head even after history was
+    // previously paginated.
+    gatewayHistoryState.delete(sessionId);
     const gateway = await requestGatewayHistoryPage(sessionId, pageLimit);
     return {
       messages: deduplicateIncomingMessages([

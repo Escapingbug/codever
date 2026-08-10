@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -34,9 +35,12 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
     }
     val content = root["content"] as? JsonObject ?: return@runCatching false
     val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
-    extension["version"]?.jsonPrimitive?.intOrNull == 1 &&
-        extension["kind"]?.jsonPrimitive?.contentOrNull == "secure_envelope" &&
-        extension["secure_envelope"] is JsonObject
+    if (extension["version"]?.jsonPrimitive?.intOrNull != 1) return@runCatching false
+    when (extension["kind"]?.jsonPrimitive?.contentOrNull) {
+        "secure_envelope" -> extension["secure_envelope"] is JsonObject
+        "secure_envelope_bundle" -> extension["secure_envelope_bundle"] is JsonObject
+        else -> false
+    }
 }.getOrDefault(false)
 
 fun interface MatrixApplicationControlTransport {
@@ -156,6 +160,7 @@ class RestrictedHttpsMatrixApplicationControlSyncTransport(
 data class MatrixApplicationControlSyncBatch(
     val nextBatch: String,
     val events: List<MatrixDecryptedEvent>,
+    val limited: Boolean,
 )
 
 class MatrixApplicationControlSyncException(
@@ -229,7 +234,7 @@ class MatrixApplicationControlSyncClient(
                 ?.contentOrNull
                 ?.takeIf { it.isNotBlank() && it.length <= 4_096 }
                 ?: throw IllegalStateException("Matrix control sync response is incomplete.")
-            val events = root["rooms"]
+            val timeline = root["rooms"]
                 ?.jsonObject
                 ?.get("join")
                 ?.jsonObject
@@ -237,6 +242,12 @@ class MatrixApplicationControlSyncClient(
                 ?.jsonObject
                 ?.get("timeline")
                 ?.jsonObject
+            val limited = timeline
+                ?.get("limited")
+                ?.jsonPrimitive
+                ?.booleanOrNull
+                ?: false
+            val events = timeline
                 ?.get("events")
                 ?.jsonArray
                 ?.mapNotNull { element ->
@@ -262,7 +273,7 @@ class MatrixApplicationControlSyncClient(
                     )
                 }
                 .orEmpty()
-            MatrixApplicationControlSyncBatch(nextBatch, events)
+            MatrixApplicationControlSyncBatch(nextBatch, events, limited)
         } finally {
             response.body.fill(0)
         }

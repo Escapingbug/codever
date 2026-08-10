@@ -233,6 +233,7 @@ export const historyPageSchema = z
     version: z.literal(PROTOCOL_VERSION),
     requestId: opaqueId,
     sessionId: opaqueId,
+    headEventId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
     nextBefore: z.string().min(1).max(256).optional(),
     hasMore: z.boolean(),
     replayed: z.number().int().nonnegative(),
@@ -241,6 +242,13 @@ export const historyPageSchema = z
   })
   .strict()
   .superRefine((page, context) => {
+    if (page.hasMore && !page.nextBefore) {
+      context.addIssue({
+        code: 'custom',
+        path: ['nextBefore'],
+        message: 'A history page with more results must include nextBefore',
+      })
+    }
     if (page.items && page.batch) {
       context.addIssue({
         code: 'custom',

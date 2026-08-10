@@ -59,7 +59,7 @@ export type TrustedDeviceProvider = () => Promise<readonly MatrixGatewayTrustedD
 const DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS = 25_000
 const MAX_MATRIX_NORMAL_IN_FLIGHT = 2
 
-type MatrixDeliveryPriority = 'control' | 'normal' | 'recovery'
+type MatrixDeliveryPriority = 'control' | 'history' | 'normal' | 'recovery'
 
 export interface GatewayStateSnapshot {
     revision: number
@@ -398,6 +398,7 @@ export class GatewaySecureContentLayer {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             requestId: request.requestId,
             sessionId: request.sessionId,
+            ...(page.headEventId ? { headEventId: page.headEventId } : {}),
             ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
             hasMore: page.hasMore,
             replayed: page.items.length,
@@ -432,7 +433,8 @@ export class GatewaySecureContentLayer {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             kind: 'history_page',
             history_page: response,
-        }, `codever.history.page.${request.requestId}`, transport)
+        }, `codever.history.page.${request.requestId}`, transport,
+        'Encrypted Codever history page', 'history')
     }
 
     private async sendLegacyHistoryPage(
@@ -500,7 +502,7 @@ export class GatewaySecureContentLayer {
                     room,
                     recipient,
                     transport,
-                    'control',
+                    'history',
                 )
             } catch (error) {
                 this.schedulePendingRetry(room, transport)
@@ -525,6 +527,7 @@ export class GatewaySecureContentLayer {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             requestId: request.requestId,
             sessionId: request.sessionId,
+            ...(page.headEventId ? { headEventId: page.headEventId } : {}),
             ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
             hasMore: page.hasMore,
             replayed,
@@ -533,7 +536,8 @@ export class GatewaySecureContentLayer {
             version: CODEVER_MATRIX_PROTOCOL_VERSION,
             kind: 'history_page',
             history_page: response,
-        }, `codever.history.page.${request.requestId}`, transport)
+        }, `codever.history.page.${request.requestId}`, transport,
+        'Encrypted Codever history page', 'history')
     }
 
     /**
@@ -668,6 +672,7 @@ export class GatewaySecureContentLayer {
         transactionId: string,
         transport: MatrixTransport,
         body = 'Encrypted Codever command status',
+        priority: MatrixDeliveryPriority = 'control',
     ): Promise<MatrixSendEventResult> {
         const active = (await this.currentTrustedDevices()).filter(device =>
             device.allowedRoomIds.includes(room.roomId),
@@ -714,7 +719,7 @@ export class GatewaySecureContentLayer {
                 room,
                 recipient,
                 transport,
-                'control',
+                priority,
             )
         } catch (error) {
             this.schedulePendingRetry(room, transport)
@@ -1640,15 +1645,17 @@ interface MatrixSendTask {
 
 /**
  * Bounds the number of requests admitted to matrix-js-sdk. Control traffic has
- * a reserved lane, while normal broadcasts and startup recovery share a bounded
- * pool. This means a hung normal send cannot trap command acknowledgements or
- * history pages behind an SDK-sized FIFO.
+ * reserved command and history lanes, while normal broadcasts and startup
+ * recovery share a bounded pool. Command confirmation cannot be trapped by a
+ * history upload, and history cannot be trapped by startup recovery.
  */
 class MatrixSendScheduler {
     private readonly control: MatrixSendTask[] = []
+    private readonly history: MatrixSendTask[] = []
     private readonly normal: MatrixSendTask[] = []
     private readonly recovery: MatrixSendTask[] = []
     private activeControl = 0
+    private activeHistory = 0
     private activeBulk = 0
     private activeRecovery = 0
     private readonly activeBulkKeys = new Set<string>()
@@ -1688,6 +1695,7 @@ class MatrixSendScheduler {
 
     private queue(priority: MatrixDeliveryPriority): MatrixSendTask[] {
         if (priority === 'control') return this.control
+        if (priority === 'history') return this.history
         if (priority === 'recovery') return this.recovery
         return this.normal
     }
@@ -1725,6 +1733,10 @@ class MatrixSendScheduler {
             const task = this.control.shift()
             if (task) this.start(task, 'control')
         }
+        if (this.activeHistory === 0) {
+            const task = this.history.shift()
+            if (task) this.start(task, 'history')
+        }
         while (this.activeBulk < MAX_MATRIX_NORMAL_IN_FLIGHT) {
             const task = this.takeRunnableBulkTask()
             if (!task) break
@@ -1745,8 +1757,9 @@ class MatrixSendScheduler {
         return undefined
     }
 
-    private start(task: MatrixSendTask, lane: 'control' | 'bulk'): void {
+    private start(task: MatrixSendTask, lane: 'control' | 'history' | 'bulk'): void {
         if (lane === 'control') this.activeControl += 1
+        else if (lane === 'history') this.activeHistory += 1
         else {
             this.activeBulk += 1
             if (task.priority === 'recovery') this.activeRecovery += 1
@@ -1757,6 +1770,7 @@ class MatrixSendScheduler {
             .then(task.resolve, task.reject)
             .finally(() => {
                 if (lane === 'control') this.activeControl -= 1
+                else if (lane === 'history') this.activeHistory -= 1
                 else {
                     this.activeBulk -= 1
                     if (task.priority === 'recovery') this.activeRecovery -= 1

@@ -108,6 +108,7 @@ export interface MatrixHistoryDeliveryPage {
     deliveries: MatrixHistoryDelivery[]
     items: HistoryItem[]
     byteLength: number
+    headEventId?: string
     nextBefore?: string
     hasMore: boolean
 }
@@ -521,6 +522,7 @@ export class FileMatrixDeliveryOutbox {
             deliveries,
             items,
             byteLength,
+            ...(entries.at(-1) ? { headEventId: entries.at(-1)!.cursor } : {}),
             ...(items[0] ? { nextBefore: items[0].eventId } : {}),
             hasMore: eligible.length > items.length,
         }
