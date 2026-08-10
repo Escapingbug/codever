@@ -87,7 +87,8 @@ binding, Gateway root trust, transport-device rotation, and durable signed
 transport snapshots are verified before changing trust. Commands are validated
 and authorized against the current Gateway certificate before entering the
 encrypted durable outbox. History first replays the encrypted local event
-store, then requests authenticated Gateway pages when needed.
+store, then paginates the signed Matrix room and thread timelines when needed;
+it never requests transcript pages from the Gateway.
 
 ## Secret handling
 
