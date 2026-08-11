@@ -198,6 +198,9 @@ export class MatrixGatewayRunner {
                     await this.secureContent!.activeDeviceCountForRoom(runtime.config),
                 sessions: snapshot.sessions.map(session => ({
                     session_id: session.id,
+                    ...(session.threadRootEventId
+                        ? { thread_root_event_id: session.threadRootEventId }
+                        : {}),
                     title: session.title,
                     updated_at: session.updatedAt,
                     archived: session.archived === true,
@@ -278,22 +281,30 @@ export class MatrixGatewayRunner {
             // deliberately absent from Gateway-authoritative state.
             currentSessionId: null,
             sessions: [
-                ...[...runtime.appSessions.values()].map(({ record, session, activity }) =>
-                    gatewaySessionSummary(
+                ...[...runtime.appSessions.values()].map(({ record, session, activity }) => ({
+                    ...gatewaySessionSummary(
                         record,
                         gatewaySessionStatus(session.state, activity.phase),
                         false,
                         activity.phase,
                         this.sessionExtensionRegistry.summaries(record.extensions),
-                    )),
-                ...[...runtime.archivedSessions.values()].map(record =>
-                    gatewaySessionSummary(
+                    ),
+                    ...(record.matrixThreadRootEventId
+                        ? { threadRootEventId: record.matrixThreadRootEventId }
+                        : {}),
+                })),
+                ...[...runtime.archivedSessions.values()].map(record => ({
+                    ...gatewaySessionSummary(
                         record,
                         'idle',
                         true,
                         undefined,
                         this.sessionExtensionRegistry.summaries(record.extensions),
-                    )),
+                    ),
+                    ...(record.matrixThreadRootEventId
+                        ? { threadRootEventId: record.matrixThreadRootEventId }
+                        : {}),
+                })),
             ].sort((left, right) => right.updatedAt - left.updatedAt),
             workspace: {
                 projectId: runtime.workspace.projectId,
@@ -1192,6 +1203,11 @@ export class MatrixGatewayRunner {
             }
             eventId = String(confirmation.messageId)
         }
+        // Application timeline envelopes intentionally bypass Matrix E2EE and
+        // the SDK send queue. Wait for the immutable root's remote echo before
+        // publishing replies, otherwise matrix-js-sdk sees thread receipts and
+        // children before it can construct the thread timeline.
+        await this.client.prepareRoomThread?.(runtime.config.roomId, eventId)
         record.matrixThreadRootEventId = eventId
         port?.setThreadRootEventId(eventId)
         await this.persistRuntime(runtime).catch(error => {

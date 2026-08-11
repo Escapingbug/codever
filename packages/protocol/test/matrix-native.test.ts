@@ -64,6 +64,7 @@ describe('Matrix native conversation protocol', () => {
       active_device_count: 2,
       sessions: [{
         session_id: 'session-1',
+        thread_root_event_id: '$session-root:example.org',
         title: 'Fix sync',
         updated_at: 19,
         archived: false,
@@ -81,6 +82,9 @@ describe('Matrix native conversation protocol', () => {
       updated_at: 20,
     })
     expect(checkpoint.sessions[0]?.session_id).toBe('session-1')
+    expect(checkpoint.sessions[0]?.thread_root_event_id).toBe(
+      '$session-root:example.org',
+    )
   })
 
   it('advances cross-device concurrency without publishing a state snapshot', () => {

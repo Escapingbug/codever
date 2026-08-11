@@ -221,6 +221,7 @@ export type MatrixSessionLifecycle = z.infer<typeof matrixSessionLifecycleSchema
 const matrixCheckpointSessionSchema = z
   .object({
     session_id: opaqueId,
+    thread_root_event_id: z.string().min(1).max(512).optional(),
     title: z.string().min(1).max(512),
     updated_at: timestamp,
     archived: z.boolean(),

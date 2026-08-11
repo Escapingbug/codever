@@ -70,6 +70,7 @@ export interface GatewayStateSnapshot {
     currentSessionId: string | null
     sessions: Array<{
         id: string
+        threadRootEventId?: string
         title: string
         updatedAt: number
         status: 'idle' | 'running' | 'stopping' | 'failed'

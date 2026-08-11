@@ -753,7 +753,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /await room\.fetchRoomThreads\(\)/);
   assert.match(
     matrix,
-    /const loadHistoryPage = async[\s\S]*await client\.scrollback\(room/,
+    /const loadHistoryPage = async[\s\S]*await fetchSessionRelations\(/,
+  );
+  assert.doesNotMatch(matrix, /client\.scrollback\(room/);
+  assert.doesNotMatch(
+    matrix,
+    /client\.paginateEventTimeline\(thread\.liveTimeline/,
   );
   assert.doesNotMatch(matrix, /return requestGatewayHistoryPage\(/);
   assert.match(matrix, /class DisplayOnlyReplayStore implements ReplayStore/);

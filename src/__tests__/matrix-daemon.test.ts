@@ -855,6 +855,10 @@ describe('MatrixGatewayRunner', () => {
                 revision_epoch: REVISION_EPOCH,
                 revision_epoch_generation: 1,
                 state_version: 5,
+                sessions: [{
+                    session_id: 'app-session-1',
+                    thread_root_event_id: expect.any(String),
+                }],
                 workspace: { project: { cwd: 'D:\\restored' } },
             },
         })

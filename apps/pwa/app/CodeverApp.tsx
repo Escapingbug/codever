@@ -508,10 +508,9 @@ export function CodeverApp() {
     reduceUiNotices,
     EMPTY_UI_NOTICE_STATE,
   );
-  const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<{
-    sessionId: string;
-    action: "archive" | "restore" | "delete";
-  } | null>(null);
+  const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<
+    Map<string, "archive" | "restore" | "delete">
+  >(() => new Map());
   const [optimisticallyDeletedSessionIds, setOptimisticallyDeletedSessionIds] =
     useState<Set<string>>(() => new Set());
   const [deleteTarget, setDeleteTarget] =
@@ -602,13 +601,13 @@ export function CodeverApp() {
         !optimisticallyDeletedSessionIds.has(session.id),
     ) ?? null;
   const selectedArchived = selected?.status === "archived";
-  const selectedLifecycleBusy = Boolean(
-    selected && sessionLifecycleBusy?.sessionId === selected.id,
-  );
+  const selectedLifecycleAction = selected
+    ? sessionLifecycleBusy.get(selected.id) ?? null
+    : null;
+  const selectedLifecycleBusy = selectedLifecycleAction !== null;
   const deleteDialogBusy = Boolean(
     deleteTarget !== null &&
-      sessionLifecycleBusy?.sessionId === deleteTarget.id &&
-      sessionLifecycleBusy.action === "delete",
+      sessionLifecycleBusy.get(deleteTarget.id) === "delete",
   );
   const nativeBackAction = resolveCodeverBackAction({
     deleteDialogOpen: deleteTarget !== null,
@@ -1788,6 +1787,7 @@ export function CodeverApp() {
     sessionId: string | null,
     connection: CodeverClient | null = codeverClientRef.current,
     revealProject = true,
+    skipHistoryRestore = false,
   ) {
     const sessionChanged = selectedSessionIdRef.current !== sessionId;
     selectedSessionIdRef.current = sessionId;
@@ -1823,10 +1823,10 @@ export function CodeverApp() {
     historyCursorRef.current = null;
     setMessages([]);
     setDecisionStates({});
-    setHistoryHasMore(Boolean(sessionId));
+    setHistoryHasMore(Boolean(sessionId) && !skipHistoryRestore);
     setHistoryError(null);
     setHistoryRetryMode(null);
-    if (!sessionId) {
+    if (!sessionId || skipHistoryRestore) {
       historyLoadingRef.current = false;
       setHistoryLoading(false);
     } else if (connection) {
@@ -2031,6 +2031,7 @@ export function CodeverApp() {
     pendingCreatedSessionIdRef.current = null;
     optimisticallyDeletedSessionIdsRef.current = new Set();
     setOptimisticallyDeletedSessionIds(new Set());
+    setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
     setNewSessionBusy(Boolean(sessionCreateRecovery));
     setSessionCreateReloadBlocked(Boolean(sessionCreateRecovery));
@@ -2278,6 +2279,7 @@ export function CodeverApp() {
               nextSessionId,
               codeverClientRef.current,
               shouldRevealNextSession,
+              pendingCreated === nextSessionId,
             );
             const previousSelectedUpdatedAt = nextSessionId
               ? previousUpdatedAt.get(nextSessionId)
@@ -2388,6 +2390,7 @@ export function CodeverApp() {
     pendingCreatedSessionIdRef.current = null;
     optimisticallyDeletedSessionIdsRef.current = new Set();
     setOptimisticallyDeletedSessionIds(new Set());
+    setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(queuedSessionCreate?.input ?? null);
     setNewSessionBusy(Boolean(queuedSessionCreate));
     setSessionCreateReloadBlocked(Boolean(queuedSessionCreate));
@@ -3428,14 +3431,23 @@ export function CodeverApp() {
       );
       return false;
     }
-    setSessionLifecycleBusy({ sessionId, action });
+    setSessionLifecycleBusy((current) => {
+      const next = new Map(current);
+      next.set(sessionId, action);
+      return next;
+    });
     try {
       const connection = codeverClientRef.current;
       const sent = await sendRealCommand(
         sessionLifecyclePayload(action, sessionId),
       );
       if (!sent || !connection) {
-        setSessionLifecycleBusy(null);
+        setSessionLifecycleBusy((current) => {
+          if (current.get(sessionId) !== action) return current;
+          const next = new Map(current);
+          next.delete(sessionId);
+          return next;
+        });
         return false;
       }
       setDetailsOpen(false);
@@ -3455,7 +3467,12 @@ export function CodeverApp() {
         "error",
         formatUiError(error),
       );
-      setSessionLifecycleBusy(null);
+      setSessionLifecycleBusy((current) => {
+        if (current.get(sessionId) !== action) return current;
+        const next = new Map(current);
+        next.delete(sessionId);
+        return next;
+      });
       return false;
     }
   }
@@ -3501,11 +3518,12 @@ export function CodeverApp() {
           `The completed session command could not be released locally: ${formatUiError(error)}`,
         );
       }
-      setSessionLifecycleBusy((current) =>
-        current?.sessionId === sessionId && current.action === action
-          ? null
-          : current,
-      );
+      setSessionLifecycleBusy((current) => {
+        if (current.get(sessionId) !== action) return current;
+        const next = new Map(current);
+        next.delete(sessionId);
+        return next;
+      });
     }
   }
 
@@ -4277,9 +4295,7 @@ export function CodeverApp() {
                 const signal = sessionListSignal(session, sessionReadState);
                 const activity = agentActivitiesBySession.get(session.id);
                 const lifecycleAction =
-                  sessionLifecycleBusy?.sessionId === session.id
-                    ? sessionLifecycleBusy.action
-                    : null;
+                  sessionLifecycleBusy.get(session.id) ?? null;
                 const statusSummary = lifecycleAction
                   ? `${lifecycleAction === "delete" ? "Deleting" : lifecycleAction === "archive" ? "Archiving" : "Restoring"}…`
                   : activity?.detail ||
@@ -5335,7 +5351,7 @@ export function CodeverApp() {
         session={deleteTarget}
         busy={deleteDialogBusy}
         onClose={() => {
-          if (sessionLifecycleBusy?.action !== "delete") setDeleteTarget(null);
+          if (!deleteDialogBusy) setDeleteTarget(null);
         }}
         onConfirm={() => void deleteSession()}
       />

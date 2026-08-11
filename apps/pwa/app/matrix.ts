@@ -567,9 +567,10 @@ export async function connectMatrix(
   const historySeen = new Set<string>();
   const historyBySession = new Map<string, IncomingCodeverMessage[]>();
   const deliveredHistory = new Map<string, Set<string>>();
-  let historySessionHint: string | null = null;
-  let historyInitialized = false;
-  let historyChain: Promise<unknown> = Promise.resolve();
+  const sessionRootEventIds = new Map<string, string>();
+  const historyRelationTokens = new Map<string, string | null>();
+  const initializedHistoryRelations = new Set<string>();
+  const historyChains = new Map<string, Promise<unknown>>();
   const inFlightHistoryLoads = new Map<string, Promise<MatrixHistoryPage>>();
   const nativeProjection = new MatrixNativeProjection();
   const outboundCommandMetadata = new Map<
@@ -730,7 +731,22 @@ export async function connectMatrix(
     const recorded = commandLifecycle.recordResult(completion);
     if (recorded) handlers.onCommandResult?.(completion);
   };
-  const onNativeContent = async (content: MatrixNativeContent): Promise<void> => {
+  const onNativeContent = async (
+    content: MatrixNativeContent,
+    eventId: string,
+  ): Promise<void> => {
+    if (content.kind === "session_root") {
+      sessionRootEventIds.set(content.session_id, eventId);
+    } else if (content.kind === "gateway_checkpoint") {
+      for (const session of content.sessions) {
+        if (session.thread_root_event_id) {
+          sessionRootEventIds.set(
+            session.session_id,
+            session.thread_root_event_id,
+          );
+        }
+      }
+    }
     const state = nativeProjection.apply(content);
     // The durable command must be terminal before its visible inventory
     // change is published. A tab can be closed immediately after rendering.
@@ -1507,23 +1523,16 @@ export async function connectMatrix(
     );
     return response.event_id;
   };
-  const scanHistoryTimeline = async (
-    room: Room,
-    initialSessionId: string,
+  const scanHistoryEvents = async (
+    events: readonly MatrixEvent[],
   ): Promise<void> => {
-    if (!historyInitialized) {
-      historySessionHint = initialSessionId;
-      historyInitialized = true;
-    }
-    const events = room
-      .getLiveTimeline()
-      .getEvents()
+    const unseenEvents = events
       .filter((event) => {
         const eventId = event.getId();
         return Boolean(eventId && !historySeen.has(eventId));
       })
       .reverse();
-    for (const event of events) {
+    for (const event of unseenEvents) {
       const eventId = event.getId();
       if (!eventId) continue;
       const decoded = await decodeHistoricalEvent(
@@ -1537,11 +1546,12 @@ export async function connectMatrix(
       if (!decoded) continue;
       historySeen.add(eventId);
       if (decoded?.gatewaySessionId !== undefined) {
-        historySessionHint = decoded.gatewaySessionId;
+        if (decoded.gatewaySessionId) {
+          sessionRootEventIds.set(decoded.gatewaySessionId, eventId);
+        }
       }
       if (!decoded.message) continue;
-      const sessionId =
-        decoded.message.sessionId ?? historySessionHint;
+      const sessionId = decoded.message.sessionId;
       if (!sessionId) continue;
       const message = {
         ...decoded.message,
@@ -1556,14 +1566,70 @@ export async function connectMatrix(
       }
     }
   };
+  const sessionRootEventId = async (
+    room: Room,
+    sessionId: string,
+  ): Promise<string | null> => {
+    if (!sessionRootEventIds.has(sessionId)) {
+      await room.fetchRoomThreads();
+      await scanHistoryEvents(
+        room.getThreads().flatMap((thread) =>
+          thread.rootEvent ? [thread.rootEvent] : [],
+        ),
+      );
+    }
+    await scanHistoryEvents(room.getLiveTimeline().getEvents());
+    return sessionRootEventIds.get(sessionId) ?? null;
+  };
+  const fetchSessionRelations = async (
+    room: Room,
+    sessionId: string,
+    limit: number,
+    from?: string,
+  ): Promise<string | null> => {
+    const rootEventId = await sessionRootEventId(room, sessionId);
+    if (!rootEventId) return null;
+    const page = await client.relations(
+      config.roomId,
+      rootEventId,
+      null,
+      null,
+      {
+        dir: sdk.Direction.Backward,
+        limit,
+        recurse: true,
+        ...(from ? { from } : {}),
+      },
+    );
+    await scanHistoryEvents([
+      ...(page.originalEvent ? [page.originalEvent] : []),
+      ...page.events,
+    ]);
+    return page.nextBatch ?? null;
+  };
+  const initializeSessionRelations = async (
+    room: Room,
+    sessionId: string,
+    limit: number,
+  ): Promise<void> => {
+    if (initializedHistoryRelations.has(sessionId)) return;
+    const nextToken = await fetchSessionRelations(room, sessionId, limit);
+    initializedHistoryRelations.add(sessionId);
+    historyRelationTokens.set(sessionId, nextToken);
+  };
   recoverNativeTimeline = async (): Promise<void> => {
     const room = client.getRoom(config.roomId);
     if (!room) throw new Error("The Matrix room is not available.");
     await room.fetchRoomThreads();
     for (const thread of room.getThreads()) {
       if (thread.rootEvent) await enqueueInboundEvent(thread.rootEvent, true);
+      for (const event of thread.liveTimeline.getEvents()) {
+        const eventId = event.getId();
+        if (eventId && !seen.has(eventId)) {
+          await enqueueInboundEvent(event, true);
+        }
+      }
     }
-    await client.scrollback(room, 100);
     for (const event of room.getLiveTimeline().getEvents()) {
       const eventId = event.getId();
       if (eventId && !seen.has(eventId)) {
@@ -1599,23 +1665,27 @@ export async function connectMatrix(
     const room = client.getRoom(config.roomId);
     if (!room) throw new Error("The Matrix room is not available.");
     const pageLimit = Math.max(1, Math.min(limit, 100));
-    await scanHistoryTimeline(room, sessionId);
+    await initializeSessionRelations(room, sessionId, Math.max(30, pageLimit));
     const messages = takeHistory(sessionId, pageLimit);
-    while (
-      messages.length < pageLimit &&
-      room.getLiveTimeline().getPaginationToken(sdk.Direction.Backward)
-    ) {
-      const before = room.getLiveTimeline().getEvents().length;
-      await client.scrollback(room, Math.max(30, pageLimit - messages.length));
-      await scanHistoryTimeline(room, sessionId);
+    while (messages.length < pageLimit) {
+      const from = historyRelationTokens.get(sessionId);
+      if (!from) break;
+      const before = historySeen.size;
+      const nextToken = await fetchSessionRelations(
+        room,
+        sessionId,
+        Math.max(30, pageLimit - messages.length),
+        from,
+      );
+      historyRelationTokens.set(sessionId, nextToken);
       messages.push(...takeHistory(sessionId, pageLimit - messages.length));
-      if (room.getLiveTimeline().getEvents().length === before) break;
+      if (historySeen.size === before && nextToken === from) break;
     }
     return {
       messages: deduplicateIncomingMessages(messages).sort(compareIncomingMessages),
       hasMore:
         hasPendingHistory(sessionId) ||
-        room.getLiveTimeline().getPaginationToken(sdk.Direction.Backward) !== null,
+        Boolean(historyRelationTokens.get(sessionId)),
     };
   };
   const loadRecentHistory = async (
@@ -1627,13 +1697,17 @@ export async function connectMatrix(
     const room = client.getRoom(config.roomId);
     if (!room) throw new Error("The Matrix room is not available.");
     const pageLimit = Math.max(1, Math.min(limit, 100));
-    await scanHistoryTimeline(room, sessionId);
+    if (initializedHistoryRelations.has(sessionId)) {
+      await fetchSessionRelations(room, sessionId, Math.max(30, pageLimit));
+    } else {
+      await initializeSessionRelations(room, sessionId, Math.max(30, pageLimit));
+    }
     const local = (historyBySession.get(sessionId) ?? []).slice(-pageLimit);
     return {
       messages: deduplicateIncomingMessages(local).sort(compareIncomingMessages),
       hasMore:
         (historyBySession.get(sessionId)?.length ?? 0) > pageLimit ||
-        room.getLiveTimeline().getPaginationToken(sdk.Direction.Backward) !== null,
+        Boolean(historyRelationTokens.get(sessionId)),
     };
   };
   const enqueueHistoryOperation = (
@@ -1644,15 +1718,20 @@ export async function connectMatrix(
     const key = `${sessionId}\u0000${limit}`;
     const existing = inFlightHistoryLoads.get(key);
     if (existing) return existing;
-    const queued = historyChain.then(operation);
-    historyChain = queued.then(
+    const previous = historyChains.get(sessionId) ?? Promise.resolve();
+    const queued = previous.then(operation);
+    const tail = queued.then(
       () => undefined,
       () => undefined,
     );
+    historyChains.set(sessionId, tail);
     inFlightHistoryLoads.set(key, queued);
     return queued.finally(() => {
       if (inFlightHistoryLoads.get(key) === queued) {
         inFlightHistoryLoads.delete(key);
+      }
+      if (historyChains.get(sessionId) === tail) {
+        historyChains.delete(sessionId);
       }
     });
   };
@@ -2851,7 +2930,10 @@ export async function processGatewayTimelineEvent(
     revisionEpoch: string,
     activeDeviceCount?: number,
   ) => Promise<void>,
-  onNativeContent?: (content: MatrixNativeContent) => Promise<void>,
+  onNativeContent?: (
+    content: MatrixNativeContent,
+    eventId: string,
+  ) => Promise<void>,
   onNativeSessionStatus?: (extension: Record<string, unknown>) => Promise<void>,
   historical = false,
 ): Promise<void> {
@@ -2986,7 +3068,7 @@ export async function processGatewayTimelineEvent(
   }
   const nativeContent = matrixNativeContentSchema.safeParse(decryptedExtension);
   if (nativeContent.success) {
-    await onNativeContent?.(nativeContent.data);
+    await onNativeContent?.(nativeContent.data, eventId);
     seen.add(eventId);
     return;
   }

@@ -25,8 +25,10 @@ describe('Matrix-native client boundary', () => {
             expect(source).not.toContain('history_page')
             expect(source).not.toContain('history_replay')
         }
-        expect(web).toContain('client.scrollback(room')
+        expect(web).not.toContain('client.scrollback(room')
         expect(web).toContain('room.fetchRoomThreads()')
+        expect(web).toContain('client.relations(')
+        expect(web).not.toContain('client.paginateEventTimeline(thread.liveTimeline')
         expect(android).toContain('matrix.paginateRoomHistory(100)')
     })
 })
