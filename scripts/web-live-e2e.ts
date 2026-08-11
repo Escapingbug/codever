@@ -5,16 +5,26 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { chromium, type Browser, type Page } from 'playwright-core'
+import {
+    chromium,
+    type Browser,
+    type Locator,
+    type Page,
+    type Route,
+} from 'playwright-core'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidAlphaJourney } from './e2e/androidAlphaJourney.js'
-import { createDisposableMatrixFixture } from './e2e/localMatrixFixture.js'
+import {
+    createDisposableMatrixFixture,
+    type DisposableMatrixFixture,
+} from './e2e/localMatrixFixture.js'
 
 const ENABLE_ENV = 'CODEVER_WEB_LIVE_E2E'
 const ALPHA_ENABLE_ENV = 'CODEVER_ALPHA_LIVE_E2E'
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const STARTUP_TIMEOUT_MS = 90_000
+const TIMELINE_NOISE_EVENT_COUNT = 240
 const PROVIDER_RESPONSE = 'Codever deterministic E2E response'
 
 type ManagedProcess = {
@@ -44,14 +54,17 @@ const pwaUrl = `http://127.0.0.1:${pwaPort}`
 const projectName = `Codever Web E2E ${runId}`
 const secondProjectName = `Codever Web E2E second ${runId}`
 const prompt = `business E2E prompt ${runId}`
+const newSessionPrompt = `new-session reload prompt ${runId}`
 
 let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
 let pwaProcess: ManagedProcess | undefined
 let firstPage: Page | undefined
 let secondPage: Page | undefined
+let thirdPage: Page | undefined
 const browserLogs = new Map<string, string[]>()
 const browserPageErrors = new WeakMap<Page, Error[]>()
+const regressionFailures: Error[] = []
 let pwaBuildOutput = ''
 
 try {
@@ -108,9 +121,7 @@ try {
                 CODEVER_GATEWAY_NAME: `Codever E2E Gateway ${runId}`,
                 CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
                 CODEVER_MATRIX_E2E_PROVIDER: '1',
-                ...(alphaEnabled
-                    ? { CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '3500' }
-                    : {}),
+                CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '3500',
                 CODEVER_CWD: repositoryRoot,
             },
         },
@@ -149,6 +160,9 @@ try {
         socketPath: gatewayAdminSocket,
         timeoutMs: 10_000,
     })
+    // Force the second browser's initial sync to be limited. A session-scoped
+    // history implementation must not depend on scanning this whole room.
+    await sendIgnoredTimelineNoise(fixture, `${runId}-before-pair`, TIMELINE_NOISE_EVENT_COUNT)
     const invitation = await admin.createInvitation({
         matrixLogin: 'disabled',
         appUrl: pwaUrl,
@@ -174,11 +188,53 @@ try {
         baselineFirst + 1,
         'The newly paired browser did not restore the existing session inventory',
     )
+    await startHistoryLoadingObservation(secondPage)
     await createSession(secondPage, secondProjectName, secondProjectDirectory)
     await waitForProject(firstPage, secondProjectName)
     assert.equal(await activeSessionCount(firstPage), baselineFirst + 2)
     assert.equal(await activeSessionCount(secondPage), baselineSecond + 1)
+    process.stdout.write('[5b/8] Verifying a brand-new empty session never enters history loading…\n')
+    await delay(250)
+    const emptySessionShowedHistoryLoading = await stopHistoryLoadingObservation(secondPage)
+    await recordRegression(
+        regressionFailures,
+        'brand-new empty session skips irrelevant earlier-message loading',
+        async () => {
+            assert.equal(
+                emptySessionShowedHistoryLoading,
+                false,
+                'A newly created empty session displayed Loading earlier messages',
+            )
+        },
+    )
+    await openProjectSession(secondPage, secondProjectName)
+    await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
+    process.stdout.write('[5c/8] Sending in the new session and reloading its originating browser…\n')
+    await recordRegression(
+        regressionFailures,
+        'new-session message survives an originating-browser reload and reaches another device',
+        async () => {
+            await sendPrompt(secondPage!, newSessionPrompt)
+            await waitForText(secondPage!, newSessionPrompt)
+            await reloadAndWaitForConnected(secondPage!)
+            await waitForProject(secondPage!, secondProjectName)
+            await openProjectSession(secondPage!, secondProjectName)
+            let immediateRestoreFailure: unknown
+            try {
+                await waitForText(secondPage!, newSessionPrompt, UI_FEEDBACK_TIMEOUT_MS)
+            } catch (error) {
+                immediateRestoreFailure = error
+            }
+            await waitForText(secondPage!, newSessionPrompt)
+            await waitForText(secondPage!, PROVIDER_RESPONSE)
+            await openProjectSession(firstPage!, secondProjectName)
+            await waitForText(firstPage!, newSessionPrompt)
+            await waitForText(firstPage!, PROVIDER_RESPONSE)
+            if (immediateRestoreFailure) throw immediateRestoreFailure
+        },
+    )
     await openProjectSession(secondPage, projectName)
+    await openProjectSession(firstPage, projectName)
 
     process.stdout.write('[6/8] Sending a prompt and restoring its Matrix-native history…\n')
     await sendPrompt(firstPage, prompt)
@@ -186,6 +242,59 @@ try {
     await waitForText(firstPage, PROVIDER_RESPONSE)
     await waitForText(secondPage, prompt)
     await waitForText(secondPage, PROVIDER_RESPONSE)
+    process.stdout.write('[6a/8] Restoring canonical history on a cache-cold third browser…\n')
+    await sendIgnoredTimelineNoise(fixture, runId, TIMELINE_NOISE_EVENT_COUNT)
+    const thirdInvitation = await admin.createInvitation({
+        matrixLogin: 'disabled',
+        appUrl: pwaUrl,
+    })
+    const thirdContext = await browser.newContext()
+    thirdPage = await thirdContext.newPage()
+    captureBrowserDiagnostics(thirdPage, 'browser-3')
+    const refreshHistoryRequest = await holdNextRoomHistoryPage(thirdPage)
+    try {
+        await recordRegression(
+            regressionFailures,
+            'cache-cold browser restores the canonical prompt without room-wide scanning',
+            async () => {
+                await pairBrowser(
+                    thirdPage!,
+                    pwaUrl,
+                    thirdInvitation.pairingLink,
+                    fixture.tester.userId,
+                    fixture.tester.password,
+                )
+                await waitFor(async () => (await admin.devices()).length === 3, {
+                    description: 'three active Gateway devices',
+                    timeoutMs: STARTUP_TIMEOUT_MS,
+                })
+                await waitForProject(thirdPage!, projectName)
+                await openProjectSession(thirdPage!, projectName)
+                await waitForText(thirdPage!, prompt)
+                await waitForText(thirdPage!, PROVIDER_RESPONSE)
+                await waitForHistoryIdle(thirdPage!, CONVERGENCE_TIMEOUT_MS)
+            },
+        )
+    } finally {
+        await refreshHistoryRequest.release()
+    }
+    if (!refreshHistoryRequest.intercepted()) {
+        process.stdout.write('[history fixture] Cache-cold restore used session/thread history.\n')
+    }
+    if (!await projectSessionExists(thirdPage, projectName)) {
+        await pairBrowser(
+            thirdPage,
+            pwaUrl,
+            thirdInvitation.pairingLink,
+            fixture.tester.userId,
+            fixture.tester.password,
+        )
+    }
+    await waitForProject(thirdPage, projectName)
+    await openProjectSession(thirdPage, projectName)
+    await waitForHistoryIdle(thirdPage, CONVERGENCE_TIMEOUT_MS)
+    await waitForText(thirdPage, prompt)
+    await waitForText(thirdPage, PROVIDER_RESPONSE)
     await reloadAndWaitForConnected(secondPage)
     await waitForProject(secondPage, projectName)
     await openProjectSession(secondPage, projectName)
@@ -211,33 +320,83 @@ try {
         await openProjectSession(firstPage, projectName)
     }
 
-    process.stdout.write('[7/8] Deleting with immediate feedback and durable multi-device absence…\n')
-    await Promise.all([
-        delayMatrixRoomSends(firstPage, 2_500),
-        delayMatrixRoomSends(secondPage, 2_500),
-    ])
-    await deleteSelectedSession(firstPage, projectName)
-    await waitForProjectAbsent(secondPage, projectName)
-    await openProjectSession(secondPage, secondProjectName)
-    await deleteSelectedSession(secondPage, secondProjectName)
-    await waitForProjectAbsent(firstPage, secondProjectName)
-    assert.equal(await activeSessionCount(firstPage), baselineFirst)
-    assert.equal(await activeSessionCount(secondPage), baselineSecond - 1)
+    process.stdout.write('[7/8] Overlapping two deletions in one browser and tracking both rows…\n')
+    await openProjectSession(firstPage, projectName)
+    await delayMatrixRoomSends(firstPage, 2_500)
+    await recordRegression(
+        regressionFailures,
+        'overlapping deletions retain independent busy state and both converge',
+        async () => {
+            await beginDeleteSelectedSession(firstPage!, projectName)
+            await openProjectSession(firstPage!, secondProjectName)
+            await beginDeleteSelectedSession(firstPage!, secondProjectName)
+            let busyStateFailure: unknown
+            try {
+                await assertProjectsDeleting(firstPage!, [projectName, secondProjectName])
+            } catch (error) {
+                busyStateFailure = error
+            }
+            await Promise.all([
+                waitForProjectAbsent(firstPage!, projectName),
+                waitForProjectAbsent(firstPage!, secondProjectName),
+                waitForProjectAbsent(secondPage!, projectName),
+                waitForProjectAbsent(secondPage!, secondProjectName),
+                waitForProjectAbsent(thirdPage!, projectName),
+                waitForProjectAbsent(thirdPage!, secondProjectName),
+            ])
+            if (busyStateFailure) throw busyStateFailure
+        },
+    )
+    await settleOrDeleteProject(firstPage, projectName)
+    await settleOrDeleteProject(firstPage, secondProjectName)
+    await recordRegression(
+        regressionFailures,
+        'overlapping deletions remain absent on both browsers after reload',
+        async () => {
+            await Promise.all([
+                waitForProjectAbsent(secondPage!, projectName),
+                waitForProjectAbsent(secondPage!, secondProjectName),
+                waitForProjectAbsent(thirdPage!, projectName),
+                waitForProjectAbsent(thirdPage!, secondProjectName),
+            ])
+            assert.equal(await activeSessionCount(firstPage!), baselineFirst)
+            assert.equal(await activeSessionCount(secondPage!), baselineSecond - 1)
 
-    await Promise.all([
-        reloadAndWaitForConnected(firstPage),
-        reloadAndWaitForConnected(secondPage),
-    ])
-    await Promise.all([
-        waitForProjectAbsent(firstPage, projectName),
-        waitForProjectAbsent(secondPage, projectName),
-        waitForProjectAbsent(firstPage, secondProjectName),
-        waitForProjectAbsent(secondPage, secondProjectName),
-    ])
-    assert.equal(await projectSessionExists(firstPage, projectName), false)
-    assert.equal(await projectSessionExists(secondPage, projectName), false)
-    assert.equal(await projectSessionExists(firstPage, secondProjectName), false)
-    assert.equal(await projectSessionExists(secondPage, secondProjectName), false)
+            await Promise.all([
+                reloadAndWaitForConnected(firstPage!),
+                reloadAndWaitForConnected(secondPage!),
+                reloadAndWaitForConnected(thirdPage!),
+            ])
+            await Promise.all([
+                waitForProjectAbsent(firstPage!, projectName),
+                waitForProjectAbsent(secondPage!, projectName),
+                waitForProjectAbsent(thirdPage!, projectName),
+                waitForProjectAbsent(firstPage!, secondProjectName),
+                waitForProjectAbsent(secondPage!, secondProjectName),
+                waitForProjectAbsent(thirdPage!, secondProjectName),
+            ])
+        },
+    )
+
+    await recordRegression(
+        regressionFailures,
+        'Matrix thread roots remain recoverable during browser history loading',
+        async () => {
+            assert.doesNotMatch(
+                gatewayProcess!.output,
+                /Couldn't find timeline for thread ID/u,
+                'Gateway/Matrix SDK could not resolve a session thread root',
+            )
+        },
+    )
+
+    if (regressionFailures.length > 0) {
+        throw new AggregateError(
+            regressionFailures,
+            `${regressionFailures.length} browser session consistency regression(s) reproduced:\n`
+            + regressionFailures.map(failure => `- ${failure.message}`).join('\n'),
+        )
+    }
 
     process.stdout.write('[8/8] PASS — real browser, Synapse, Gateway, E2EE, history, and deletion converged.\n')
 } catch (error) {
@@ -245,6 +404,7 @@ try {
     await Promise.all([
         capturePage(firstPage, join(artifactDirectory, 'browser-1.png')),
         capturePage(secondPage, join(artifactDirectory, 'browser-2.png')),
+        capturePage(thirdPage, join(artifactDirectory, 'browser-3.png')),
     ])
     await writeFile(
         join(artifactDirectory, 'gateway.log'),
@@ -400,6 +560,188 @@ async function delayMatrixRoomSends(page: Page, milliseconds: number): Promise<v
         await delay(milliseconds)
         await route.continue()
     })
+}
+
+async function holdNextRoomHistoryPage(page: Page): Promise<{
+    release(): Promise<void>
+    intercepted(): boolean
+}> {
+    const pattern = '**/_matrix/client/**/rooms/**/messages**'
+    let releaseRequest = () => {}
+    let intercepted = false
+    const held = new Promise<void>(resolve => { releaseRequest = resolve })
+    const handler = async (route: Route) => {
+        intercepted = true
+        await held
+        await route.continue()
+    }
+    await page.route(pattern, handler, { times: 1 })
+    return {
+        async release() {
+            releaseRequest()
+            await page.unroute(pattern, handler)
+        },
+        intercepted: () => intercepted,
+    }
+}
+
+async function sendIgnoredTimelineNoise(
+    fixture: DisposableMatrixFixture,
+    runId: string,
+    count: number,
+): Promise<void> {
+    await Promise.all(Array.from({ length: count }, async (_, index) => {
+        const transactionId = `codever-e2e-noise-${runId}-${index}-${randomUUID()}`
+        const response = await fetch(
+            `${fixture.homeserver}/_matrix/client/v3/rooms/`
+            + `${encodeURIComponent(fixture.roomId)}/send/m.room.message/`
+            + encodeURIComponent(transactionId),
+            {
+                method: 'PUT',
+                headers: {
+                    authorization: `Bearer ${fixture.tester.accessToken}`,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                    msgtype: 'm.notice',
+                    body: `Ignored Codever E2E timeline noise ${runId} ${index}`,
+                }),
+            },
+        )
+        if (response.ok) return
+        throw new Error(
+            `Could not seed Matrix timeline noise: HTTP ${response.status} `
+            + await response.text(),
+        )
+    }))
+}
+
+async function startHistoryLoadingObservation(page: Page): Promise<void> {
+    await page.evaluate(`(() => {
+        window.__codeverE2eHistoryObserver?.disconnect();
+        document.documentElement.dataset.codeverE2eHistoryLoadingSeen = "false";
+        const inspect = () => {
+            if (document.querySelector(".history-loader.is-loading")) {
+                document.documentElement.dataset.codeverE2eHistoryLoadingSeen = "true";
+            }
+        };
+        const observer = new MutationObserver(inspect);
+        observer.observe(document.body, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+        });
+        window.__codeverE2eHistoryObserver = observer;
+        inspect();
+    })()`)
+}
+
+async function stopHistoryLoadingObservation(page: Page): Promise<boolean> {
+    return page.evaluate(`(() => {
+        window.__codeverE2eHistoryObserver?.disconnect();
+        delete window.__codeverE2eHistoryObserver;
+        const seen = document.documentElement.dataset.codeverE2eHistoryLoadingSeen === "true";
+        delete document.documentElement.dataset.codeverE2eHistoryLoadingSeen;
+        return seen;
+    })()`)
+}
+
+async function waitForHistoryIdle(page: Page, timeoutMs: number): Promise<void> {
+    await waitFor(async () => {
+        const loader = page.locator('.history-loader')
+        if (await loader.count() === 0) return false
+        const className = await loader.getAttribute('class')
+        const textContent = await loader.textContent()
+        return !className?.includes('is-loading')
+            && !textContent?.includes('Loading earlier messages')
+    }, {
+        description: 'conversation history loader to settle',
+        timeoutMs,
+        failFast: () => assertNoPageErrors(page),
+    })
+    await assertNoBlockingAlert(page)
+}
+
+async function recordRegression(
+    failures: Error[],
+    name: string,
+    journey: () => Promise<void>,
+): Promise<void> {
+    try {
+        await journey()
+        process.stdout.write(`[regression pass] ${name}\n`)
+    } catch (error) {
+        const failure = new Error(`${name}: ${formatError(error)}`)
+        failures.push(failure)
+        process.stderr.write(`[REPRODUCED] ${failure.message}\n`)
+    }
+}
+
+async function beginDeleteSelectedSession(
+    page: Page,
+    projectName: string,
+): Promise<void> {
+    const details = page.getByRole('button', { name: 'Conversation details' })
+    if (await details.getAttribute('aria-expanded') !== 'true') await details.click()
+    await page.getByRole('button').filter({
+        has: page.locator('strong', { hasText: /^Delete session$/u }),
+    }).click()
+    const dialog = page.getByRole('alertdialog')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
+    await waitFor(async () => {
+        const feedback = await projectSessionFeedback(page, projectName)
+        return !await dialog.isVisible().catch(() => false)
+            && await page.locator('button.session-row.selected').count() === 0
+            && (feedback.deleting || !feedback.exists)
+    }, {
+        description: `immediate deletion feedback for ${projectName}`,
+        timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+        failFast: () => assertNoPageErrors(page),
+    })
+}
+
+async function assertProjectsDeleting(
+    page: Page,
+    projectNames: string[],
+): Promise<void> {
+    for (const projectName of projectNames) {
+        const group = projectGroup(page, projectName)
+        const toggle = group.locator('button.project-session-toggle')
+        if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
+    }
+    const feedback = await Promise.all(projectNames.map(async projectName => ({
+        projectName,
+        ...await projectSessionFeedback(page, projectName),
+    })))
+    assert.deepEqual(
+        feedback.filter(item => !item.exists || !item.deleting),
+        [],
+        `Every overlapping deletion must retain its own busy row: ${JSON.stringify(feedback)}`,
+    )
+}
+
+async function settleOrDeleteProject(page: Page, projectName: string): Promise<void> {
+    if (!await projectSessionExists(page, projectName)) return
+    try {
+        await waitForProjectAbsent(page, projectName)
+        return
+    } catch (error) {
+        process.stderr.write(
+            `[cleanup] ${projectName} did not converge after the overlapping delete: `
+            + `${formatError(error)}; retrying once\n`,
+        )
+    }
+    await reloadAndWaitForConnected(page)
+    if (!await projectSessionExists(page, projectName)) return
+    try {
+        await openProjectSession(page, projectName)
+        await deleteSelectedSession(page, projectName)
+    } catch (error) {
+        process.stderr.write(
+            `[cleanup] Retry for ${projectName} also failed: ${formatError(error)}\n`,
+        )
+    }
 }
 
 async function deleteSelectedSession(page: Page, projectName: string): Promise<void> {
@@ -559,9 +901,7 @@ async function openProjectSession(
     projectName: string,
     selectionTimeoutMs = UI_FEEDBACK_TIMEOUT_MS,
 ): Promise<void> {
-    const group = page.locator('.project-session-group').filter({
-        has: page.locator('.project-copy strong', { hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u') }),
-    })
+    const group = projectGroup(page, projectName)
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
     const row = group.locator('button.session-row').first()
@@ -592,12 +932,24 @@ async function openProjectSession(
     }
 }
 
-async function waitForText(page: Page, text: string): Promise<void> {
+function projectGroup(page: Page, projectName: string): Locator {
+    return page.locator('.project-session-group').filter({
+        has: page.locator('.project-copy strong', {
+            hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u'),
+        }),
+    })
+}
+
+async function waitForText(
+    page: Page,
+    text: string,
+    timeoutMs = CONVERGENCE_TIMEOUT_MS,
+): Promise<void> {
     await waitFor(async () => {
         return await page.locator('.chat-feed').getByText(text, { exact: true }).last().isVisible()
     }, {
         description: `visible text ${JSON.stringify(text)}`,
-        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        timeoutMs,
         failFast: () => assertNoPageErrors(page),
     })
     await assertNoBlockingAlert(page)
