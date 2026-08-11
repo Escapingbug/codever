@@ -19,6 +19,7 @@ internal object DiagnosticLine {
         "code",
         "detail",
         "error",
+        "kind",
         "phase",
         "reason",
         "running",

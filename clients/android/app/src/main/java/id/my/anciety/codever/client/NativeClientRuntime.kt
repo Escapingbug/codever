@@ -167,6 +167,8 @@ class NativeClientRuntime(
     @Volatile private var gatewayState: JsonObject? = null
     @Volatile private var gatewayStateSynchronized = false
     @Volatile private var gatewayStateSyncJob: Job? = null
+    @Volatile private var gatewayConvergenceFallbackJob: Job? = null
+    @Volatile private var gatewayConvergenceMinimumRevision: Long? = null
     @Volatile private var pendingPairing: PendingPairing? = null
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
 
@@ -501,6 +503,7 @@ class NativeClientRuntime(
         automaticRevisionRetryAttempts.clear()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
+        cancelGatewayConvergenceFallback()
         gatewayStateSynchronized = false
         if (revoke) {
             trustStore.clear()
@@ -525,6 +528,7 @@ class NativeClientRuntime(
         automaticRevisionRetryAttempts.clear()
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
+        cancelGatewayConvergenceFallback()
         transfers.clear()
         matrix.close()
         scope.cancel()
@@ -1094,8 +1098,14 @@ class NativeClientRuntime(
         val extension = content["io.codever"] as? JsonObject ?: return
         when (extension.string("kind")) {
             "timeline_key_ring_grant" -> acceptTimelineKeyRing(extension)
-            "session_root", "session_update", "session_lifecycle", "gateway_checkpoint" ->
-                nativeProjection.apply(extension)?.let { acceptGatewayState(it) }
+            "session_root", "session_update", "session_lifecycle", "gateway_checkpoint", "gateway_revision" -> {
+                val projectedState = nativeProjection.apply(extension)
+                // Persist the command's terminal state before publishing the
+                // corresponding inventory change. A process may be stopped as
+                // soon as the UI observes that change.
+                acceptCanonicalCommandCompletion(extension)
+                projectedState?.let { acceptGatewayState(it) }
+            }
             "command_ack" -> acceptCommandAck(extension)
             "revision_conflict" -> acceptRevisionConflict(extension)
             "command_result" -> acceptCommandResult(event, extension)
@@ -1168,6 +1178,14 @@ class NativeClientRuntime(
         gatewayState = extension
         outbox.updateKnownRevision(revision)
         gatewayStateSynchronized = true
+        val convergenceRevision = gatewayConvergenceMinimumRevision
+        if (convergenceRevision != null && revision >= convergenceRevision) {
+            cancelGatewayConvergenceFallback()
+            diagnostics.record(
+                "gateway.state.timeline_converged",
+                mapOf("stage" to "native"),
+            )
+        }
         if (changed) {
             try {
                 eventHub.publish(
@@ -1237,46 +1255,11 @@ class NativeClientRuntime(
                 DurableError("gateway_failed", it.take(4_096), retryable = false)
             },
         )
-        // Capture the operation before publishing the terminal command event.
-        // A Web client may synchronously consume that event and release the
-        // durable command before the completion callback runs.
-        val operation = outbox.operation(commandId)
-        val operationId = outbox.get(commandId)?.operationId
-        val recorded = outbox.recordCompletion(completion)
-        diagnostics.record(
-            "command.completion.received",
-            mapOf(
-                "available" to recorded.toString(),
-                "action" to (operation?.wireName ?: "unavailable"),
-                "stage" to completion.outcome.wireName,
-            ),
+        recordCommandCompletion(
+            completion,
+            diagnosticEvent = "command.completion.received",
+            scheduleConvergenceFallback = true,
         )
-        if (recorded) {
-            ackTimeouts.remove(commandId)?.cancel()
-            cancelScheduledCommandRecovery(commandId)
-            operationId?.let(automaticRevisionRetryAttempts::remove)
-            outbox.get(commandId)?.let(::publishCommand)
-            runCatching {
-                operation?.let { completedOperation ->
-                    diagnostics.record(
-                        "gateway.state.refresh.scheduled",
-                        mapOf("action" to completedOperation.wireName),
-                    )
-                    // Command acknowledgements advance the durable revision,
-                    // but session summaries live in Gateway state. Refresh it
-                    // after every terminal command so the UI can consume a
-                    // newly-created session and the next device sees current
-                    // lifecycle state without waiting for reconnect.
-                    startGatewayStateSync(recoverTransport = false)
-                    onCommandCompletion(completedOperation, completion)
-                }
-            }.onFailure { error ->
-                diagnostics.record(
-                    "command.completion.callback_failed",
-                    mapOf("error" to error.javaClass.simpleName.take(160)),
-                )
-            }
-        }
         if (outcome == DurableOutcome.FAILED) {
             val sessionId = extension.string("session_id") ?: currentSessionId() ?: conversationId()
             eventHub.upsertMessage(
@@ -1295,6 +1278,76 @@ class NativeClientRuntime(
                     semantic = extension,
                 ),
                 refreshedSnapshot(),
+            )
+        }
+    }
+
+    /**
+     * A signed Matrix-native state event is the authoritative result of a
+     * desired-state session command. Complete the matching durable command as
+     * soon as that state is visible instead of waiting for a later per-device
+     * command_result copy from the homeserver.
+     */
+    private fun acceptCanonicalCommandCompletion(extension: JsonObject) {
+        val commandId = extension.string("source_command_id") ?: return
+        val command = outbox.get(commandId) ?: return
+        val operation = outbox.operation(commandId) ?: return
+        val kind = extension.string("kind") ?: return
+        val state = extension.string("state")
+        if (!canonicalStateCompletesCommand(operation, kind, state)) return
+        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
+        val eventSessionId = extension.string("session_id") ?: return
+        if (command.sessionId != null && command.sessionId != eventSessionId) return
+        recordCommandCompletion(
+            DurableCompletion(
+                commandId = commandId,
+                sequence = command.sequence,
+                revision = revision,
+                outcome = DurableOutcome.SUCCEEDED,
+                sessionId = eventSessionId,
+            ),
+            diagnosticEvent = "command.completion.inferred",
+            scheduleConvergenceFallback = false,
+        )
+    }
+
+    private fun recordCommandCompletion(
+        completion: DurableCompletion,
+        diagnosticEvent: String,
+        scheduleConvergenceFallback: Boolean,
+    ) {
+        // Capture metadata before publishing the terminal event. A Web client
+        // may synchronously consume it and release the durable command.
+        val operation = outbox.operation(completion.commandId)
+        val operationId = outbox.get(completion.commandId)?.operationId
+        val recorded = outbox.recordCompletion(completion)
+        diagnostics.record(
+            diagnosticEvent,
+            mapOf(
+                "available" to recorded.toString(),
+                "action" to (operation?.wireName ?: "unavailable"),
+                "stage" to completion.outcome.wireName,
+            ),
+        )
+        if (!recorded) return
+        ackTimeouts.remove(completion.commandId)?.cancel()
+        cancelScheduledCommandRecovery(completion.commandId)
+        operationId?.let(automaticRevisionRetryAttempts::remove)
+        outbox.get(completion.commandId)?.let(::publishCommand)
+        runCatching {
+            operation?.let { completedOperation ->
+                if (scheduleConvergenceFallback) {
+                    scheduleGatewayConvergenceFallback(
+                        completion.revision,
+                        completedOperation,
+                    )
+                }
+                onCommandCompletion(completedOperation, completion)
+            }
+        }.onFailure { error ->
+            diagnostics.record(
+                "command.completion.callback_failed",
+                mapOf("error" to error.javaClass.simpleName.take(160)),
             )
         }
     }
@@ -1578,6 +1631,53 @@ class NativeClientRuntime(
         )
     }
 
+    private fun scheduleGatewayConvergenceFallback(
+        expectedRevision: Long,
+        operation: CommandOperation,
+    ) {
+        val currentRevision = gatewayState?.long("revision")
+        if (!requiresGatewayConvergence(currentRevision, expectedRevision)) {
+            diagnostics.record(
+                "gateway.state.timeline_converged",
+                mapOf("action" to operation.wireName, "stage" to "completion"),
+            )
+            return
+        }
+        cancelGatewayConvergenceFallback()
+        gatewayConvergenceMinimumRevision = expectedRevision
+        diagnostics.record(
+            "gateway.state.fallback_scheduled",
+            mapOf("action" to operation.wireName),
+        )
+        gatewayConvergenceFallbackJob = scope.launch {
+            delay(GATEWAY_CONVERGENCE_GRACE_MS)
+            val shouldBackfill = mutex.withLock {
+                val stillBehind = requiresGatewayConvergence(
+                    gatewayState?.long("revision"),
+                    expectedRevision,
+                )
+                if (gatewayConvergenceMinimumRevision == expectedRevision) {
+                    gatewayConvergenceMinimumRevision = null
+                    gatewayConvergenceFallbackJob = null
+                }
+                stillBehind && trust != null
+            }
+            if (shouldBackfill) {
+                diagnostics.record(
+                    "gateway.state.fallback_requested",
+                    mapOf("action" to operation.wireName),
+                )
+                startGatewayStateSync(recoverTransport = false)
+            }
+        }
+    }
+
+    private fun cancelGatewayConvergenceFallback() {
+        gatewayConvergenceFallbackJob?.cancel()
+        gatewayConvergenceFallbackJob = null
+        gatewayConvergenceMinimumRevision = null
+    }
+
     private fun publishCommand(command: DurableView) {
         val public = publicCommand(command)
         eventHub.publish(
@@ -1672,10 +1772,35 @@ class NativeClientRuntime(
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
         const val COMMAND_LIFETIME_MS = 5 * 60_000L
         const val COMMAND_ACK_TIMEOUT_MS = 30_000L
+        const val GATEWAY_CONVERGENCE_GRACE_MS = 3_000L
         const val MAX_AUTOMATIC_REVISION_RETRIES = 3
         const val MAX_NATIVE_TIMELINE_BACKFILL_PAGES = 100
         const val CACHED_STATE_CONVERGENCE_PAGES = 1
     }
+}
+
+internal fun requiresGatewayConvergence(
+    currentRevision: Long?,
+    expectedRevision: Long,
+): Boolean {
+    require(expectedRevision >= 0)
+    return currentRevision == null || currentRevision < expectedRevision
+}
+
+internal fun canonicalStateCompletesCommand(
+    operation: CommandOperation,
+    eventKind: String,
+    lifecycleState: String?,
+): Boolean = when (operation) {
+    CommandOperation.SESSION_CREATE -> eventKind == "session_root"
+    CommandOperation.SESSION_SETTINGS -> eventKind == "session_update"
+    CommandOperation.SESSION_ARCHIVE ->
+        eventKind == "session_lifecycle" && lifecycleState == "archived"
+    CommandOperation.SESSION_RESTORE ->
+        eventKind == "session_lifecycle" && lifecycleState == "idle"
+    CommandOperation.SESSION_DELETE ->
+        eventKind == "session_lifecycle" && lifecycleState == "deleted"
+    else -> false
 }
 
 internal fun shouldAutomaticallyRetryRevisionConflict(operation: CommandOperation?): Boolean =

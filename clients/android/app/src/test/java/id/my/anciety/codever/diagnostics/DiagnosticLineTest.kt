@@ -50,7 +50,7 @@ class DiagnosticLineTest {
     fun `matrix event diagnostics allow only counts and security codes`() {
         assertEquals(
             "2026-08-04T12:00:00Z matrix.native_event.rejected " +
-                "accepted=2 appended=1 candidates=3 code=BINDING_MISMATCH",
+                "accepted=2 appended=1 candidates=3 code=BINDING_MISMATCH kind=timeline_envelope",
             DiagnosticLine.encode(
                 "2026-08-04T12:00:00Z",
                 "matrix.native_event.rejected",
@@ -59,6 +59,7 @@ class DiagnosticLineTest {
                     "accepted" to "2",
                     "appended" to "1",
                     "code" to "BINDING_MISMATCH",
+                    "kind" to "timeline_envelope",
                 ),
             ),
         )

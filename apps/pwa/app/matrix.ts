@@ -105,6 +105,7 @@ import {
 } from "./matrixStartup";
 import { processMatrixEventWithDecryptionRetry } from "./matrixDecryptionRetry";
 import { MatrixNativeProjection } from "./matrixNativeProjection";
+import { canonicalSessionCommandResult } from "./canonicalCommandCompletion";
 export {
   parseGatewayStateExtension,
   type GatewayCapabilities,
@@ -571,6 +572,10 @@ export async function connectMatrix(
   let historyChain: Promise<unknown> = Promise.resolve();
   const inFlightHistoryLoads = new Map<string, Promise<MatrixHistoryPage>>();
   const nativeProjection = new MatrixNativeProjection();
+  const outboundCommandMetadata = new Map<
+    string,
+    { reservation: CommandReservation; payload: CommandPayload }
+  >();
   const onCommandAcknowledged = async (
     commandId: string,
     sequence: number,
@@ -647,8 +652,8 @@ export async function connectMatrix(
         result,
       );
     }
-    commandLifecycle.recordResult(result);
-    handlers.onCommandResult?.(result);
+    const recorded = commandLifecycle.recordResult(result);
+    if (recorded) handlers.onCommandResult?.(result);
   };
   const onKnownRevision = async (
     revision: number,
@@ -688,8 +693,48 @@ export async function connectMatrix(
       gatewayState,
     });
   };
+  const acceptCanonicalNativeCommandResult = async (
+    content: MatrixNativeContent,
+  ): Promise<void> => {
+    const sourceCommandId = "source_command_id" in content
+      ? content.source_command_id
+      : undefined;
+    if (!sourceCommandId) return;
+    const trust = activeTrust;
+    const metadata = outboundCommandMetadata.get(sourceCommandId);
+    if (!trust || !metadata) return;
+    if (metadata.reservation.revisionEpoch !== content.revision_epoch) return;
+    const sessionId = canonicalSessionCommandResult(metadata.payload, content);
+    if (!sessionId) return;
+    const completion: CommandResultState = {
+      commandId: sourceCommandId,
+      sequence: metadata.reservation.sequence,
+      revision: content.revision,
+      outcome: "succeeded",
+      sessionId,
+    };
+    await onCommandAcknowledged(
+      completion.commandId,
+      completion.sequence,
+      completion.revision,
+      content.revision_epoch,
+    );
+    if (retainsCommandUntilResultConsumed(metadata.payload)) {
+      await savePendingCommandCompletion(
+        config,
+        identity,
+        trust.certificate.certificate.certificateId,
+        completion,
+      );
+    }
+    const recorded = commandLifecycle.recordResult(completion);
+    if (recorded) handlers.onCommandResult?.(completion);
+  };
   const onNativeContent = async (content: MatrixNativeContent): Promise<void> => {
     const state = nativeProjection.apply(content);
+    // The durable command must be terminal before its visible inventory
+    // change is published. A tab can be closed immediately after rendering.
+    await acceptCanonicalNativeCommandResult(content);
     if (state) await onGatewayState(state);
   };
   const onNativeSessionStatus = async (
@@ -1197,6 +1242,10 @@ export async function connectMatrix(
       trust,
     );
     if (recovered) {
+      outboundCommandMetadata.set(recovered.reservation.commandId, {
+        reservation: recovered.reservation,
+        payload: structuredClone(recovered.payload),
+      });
       if (recovered.completion) {
         commandLifecycle.recordResult(recovered.completion);
         if (JSON.stringify(recovered.payload) === JSON.stringify(payload)) {
@@ -1280,6 +1329,10 @@ export async function connectMatrix(
     sequenceEpoch: string,
     trust: TrustedGateway,
   ): Promise<CommandSendResult> => {
+    outboundCommandMetadata.set(reservation.commandId, {
+      reservation,
+      payload: structuredClone(payload),
+    });
     try {
       const eventId = await transmitReservation(
         reservation,
@@ -1345,6 +1398,10 @@ export async function connectMatrix(
         `The durable command ${commandId} is no longer available for recovery.`,
       );
     }
+    outboundCommandMetadata.set(recovered.reservation.commandId, {
+      reservation: recovered.reservation,
+      payload: structuredClone(recovered.payload),
+    });
     if (recovered.completion) {
       commandLifecycle.recordResult(recovered.completion);
       return {
@@ -1828,6 +1885,7 @@ export async function connectMatrix(
     async releaseCommand(commandId) {
       await startupReady;
       commandLifecycle.release(commandId);
+      outboundCommandMetadata.delete(commandId);
       const trust = activeTrust;
       if (!trust) return;
       try {

@@ -691,7 +691,10 @@ class MatrixConnectionRuntime(
                 batch.events.zip(cursors).forEach { (event, cursor) ->
                     cursor?.let {
                         latestJournalCursor = cursor
-                        diagnostics.record("matrix.application_control.event_received")
+                        diagnostics.record(
+                            "matrix.application_control.event_received",
+                            mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
+                        )
                         onDecryptedEvent(event)
                     }
                 }

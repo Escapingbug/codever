@@ -789,7 +789,7 @@ export class MatrixGatewayRunner {
                 return this.serializeSessionMutation(
                     runtime,
                     sessionId,
-                    () => this.archiveAppSession(runtime, sessionId),
+                    () => this.archiveAppSession(runtime, sessionId, command.commandId),
                 )
             }
             case 'session.restore': {
@@ -797,7 +797,7 @@ export class MatrixGatewayRunner {
                 return this.serializeSessionMutation(
                     runtime,
                     sessionId,
-                    () => this.restoreAppSession(runtime, sessionId),
+                    () => this.restoreAppSession(runtime, sessionId, command.commandId),
                 )
             }
             case 'session.delete': {
@@ -805,7 +805,7 @@ export class MatrixGatewayRunner {
                 return this.serializeSessionMutation(
                     runtime,
                     sessionId,
-                    () => this.deleteAppSession(runtime, sessionId),
+                    () => this.deleteAppSession(runtime, sessionId, command.commandId),
                 )
             }
             case 'device.invite': {
@@ -980,6 +980,7 @@ export class MatrixGatewayRunner {
     private async archiveAppSession(
         runtime: RoomRuntime,
         sessionId: string,
+        sourceCommandId: string,
     ): Promise<CommandExecutionResult> {
         if (runtime.archivedSessions.has(sessionId)) {
             return { sessionId }
@@ -1010,15 +1011,14 @@ export class MatrixGatewayRunner {
             )
             throw error
         }
-        await this.sendSessionLifecycle(runtime, appSession.record, 'archived').catch(error =>
-            this.log(`[matrix-gateway] archive lifecycle delivery failed: ${formatError(error)}`),
-        )
+        this.scheduleSessionLifecycle(runtime, appSession.record, 'archived', sourceCommandId)
         return { sessionId: appSession.record.id }
     }
 
     private async restoreAppSession(
         runtime: RoomRuntime,
         sessionId: string,
+        sourceCommandId: string,
     ): Promise<CommandExecutionResult> {
         if (runtime.appSessions.has(sessionId)) {
             return { sessionId }
@@ -1046,15 +1046,14 @@ export class MatrixGatewayRunner {
             })
             throw error
         }
-        await this.sendSessionLifecycle(runtime, record, 'idle').catch(error =>
-            this.log(`[matrix-gateway] restore lifecycle delivery failed: ${formatError(error)}`),
-        )
+        this.scheduleSessionLifecycle(runtime, record, 'idle', sourceCommandId)
         return { sessionId: record.id }
     }
 
     private async deleteAppSession(
         runtime: RoomRuntime,
         sessionId: string,
+        sourceCommandId: string,
     ): Promise<CommandExecutionResult> {
         const active = runtime.appSessions.get(sessionId)
         const archived = runtime.archivedSessions.get(sessionId)
@@ -1091,9 +1090,7 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
-        await this.sendSessionLifecycle(runtime, record, 'deleted').catch(error =>
-            this.log(`[matrix-gateway] delete lifecycle delivery failed: ${formatError(error)}`),
-        )
+        this.scheduleSessionLifecycle(runtime, record, 'deleted', sourceCommandId)
         return { sessionId: record.id, nativeRevisionPublished: true }
     }
 
@@ -1236,13 +1233,15 @@ export class MatrixGatewayRunner {
             permission_mode: record.permissionMode,
             extensions: this.sessionExtensionRegistry.summaries(record.extensions),
             ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
-        }, `codever.session.update.${record.id}.${record.updatedAt}`, this.client, threadRootEventId)
+        }, `codever.session.update.${record.id}.${sourceCommandId ?? record.updatedAt}`,
+        this.client, threadRootEventId)
     }
 
     private async sendSessionLifecycle(
         runtime: RoomRuntime,
         record: AppSessionRecord,
         state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
+        sourceCommandId?: string,
     ): Promise<void> {
         if (!this.secureContent) return
         const threadRootEventId = await this.ensureSessionRoot(
@@ -1258,8 +1257,32 @@ export class MatrixGatewayRunner {
             session_id: record.id,
             state,
             updated_at: record.updatedAt,
-        }, `codever.session.lifecycle.${record.id}.${state}.${record.updatedAt}`,
+            ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
+        }, `codever.session.lifecycle.${record.id}.${state}.${sourceCommandId ?? record.updatedAt}`,
         this.client, threadRootEventId)
+    }
+
+    /**
+     * Runtime state is already durable before this is called. Keep the Matrix
+     * lifecycle publication in the runner's shutdown/retry set, but do not
+     * hold command-result delivery behind a homeserver round trip. This lets
+     * the client release its one-command durable outbox before the user starts
+     * the next desired-state action.
+     */
+    private scheduleSessionLifecycle(
+        runtime: RoomRuntime,
+        record: AppSessionRecord,
+        state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
+        sourceCommandId: string,
+    ): void {
+        const task = this.sendSessionLifecycle(runtime, record, state, sourceCommandId)
+            .catch(error => {
+                this.log(
+                    `[matrix-gateway] ${state} lifecycle delivery failed: ${formatError(error)}`,
+                )
+            })
+            .finally(() => this.executionTasks.delete(task))
+        this.executionTasks.add(task)
     }
 
     private async nativeRevision(runtime: RoomRuntime): Promise<{

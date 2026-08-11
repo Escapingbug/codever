@@ -421,6 +421,7 @@ try {
         pendingCleanup.add(projectName)
         await exerciseSessionLifecycle(
             page,
+            serial,
             projectName,
             baselineSessionCount,
         )
@@ -482,9 +483,11 @@ try {
 
 async function exerciseSessionLifecycle(
     page: DevtoolsPage,
+    serial: string,
     projectName: string,
     baselineSessionCount: number,
 ): Promise<void> {
+    let durableCount = await durableCompletionCount(serial, 'create')
     let startedAt = Date.now()
     await page.createSession(projectName)
     const creationFeedback = await page.waitFor(
@@ -506,8 +509,10 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(created)
+    await assertDurablyCompleted(serial, 'create', durableCount)
     recordLatency(projectName, 'create', startedAt)
 
+    durableCount = await durableCompletionCount(serial, 'archive')
     startedAt = Date.now()
     await page.clickConversationActionStrong('Archive session')
     const archived = await page.waitFor(
@@ -516,8 +521,10 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(archived)
+    await assertDurablyCompleted(serial, 'archive', durableCount)
     recordLatency(projectName, 'archive', startedAt)
 
+    durableCount = await durableCompletionCount(serial, 'restore')
     startedAt = Date.now()
     await page.waitForButtonTextEnabled('Restore')
     await page.clickButtonText('Restore')
@@ -527,8 +534,10 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(restored)
+    await assertDurablyCompleted(serial, 'restore', durableCount)
     recordLatency(projectName, 'restore', startedAt)
 
+    durableCount = await durableCompletionCount(serial, 'delete')
     startedAt = Date.now()
     await deleteSelectedSession(page, projectName)
     const deleted = await page.waitFor(
@@ -540,7 +549,39 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(deleted)
+    await assertDurablyCompleted(serial, 'delete', durableCount)
     recordLatency(projectName, 'delete', startedAt)
+}
+
+async function assertDurablyCompleted(
+    serial: string,
+    action: 'create' | 'archive' | 'restore' | 'delete',
+    previousCount: number,
+): Promise<void> {
+    const currentCount = await durableCompletionCount(serial, action)
+    assert.ok(
+        currentCount > previousCount,
+        `The visible session.${action} state was published before its native command completed durably`,
+    )
+}
+
+async function durableCompletionCount(
+    serial: string,
+    action: 'create' | 'archive' | 'restore' | 'delete',
+): Promise<number> {
+    const log = await adbMaybe(
+        serial,
+        'exec-out',
+        'run-as',
+        PACKAGE_NAME,
+        'sh',
+        '-c',
+        'cat files/diagnostics/native-previous.log files/diagnostics/native-current.log 2>/dev/null',
+    )
+    const expected = `action=session.${action} available=true stage=succeeded`
+    return log.split(/\r?\n/u).filter(line =>
+        line.includes('command.completion.') && line.includes(expected),
+    ).length
 }
 
 async function deleteSelectedSession(

@@ -125,19 +125,20 @@ export class CommandLifecycle {
     }
   }
 
-  recordResult(result: CommandCompletion): void {
+  recordResult(result: CommandCompletion): boolean {
     this.recordAcknowledgement(
       result.commandId,
       result.sequence,
       result.revision,
     );
-    if (this.#completions.has(result.commandId)) return;
+    if (this.#completions.has(result.commandId)) return false;
     this.#completions.set(result.commandId, result);
     const waiters = this.#completionWaiters.get(result.commandId);
     if (waiters) {
       this.#completionWaiters.delete(result.commandId);
       for (const waiter of waiters) waiter.resolve(result);
     }
+    return true;
   }
 
   waitForAcknowledgement(

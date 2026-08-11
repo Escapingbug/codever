@@ -135,6 +135,26 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
+    fun `diagnostics expose only the bounded application event kind`() {
+        assertEquals(
+            "timeline_envelope",
+            codeverApplicationEventKind("""
+                {
+                  "type":"m.room.message",
+                  "content":${timelineContent()}
+                }
+            """.trimIndent()),
+        )
+        assertEquals(
+            "unknown",
+            codeverApplicationEventKind("""
+                {"content":{"io.codever":{"kind":"Secret value must not become a diagnostic"}}}
+            """.trimIndent()),
+        )
+        assertEquals("unknown", codeverApplicationEventKind("not-json"))
+    }
+
+    @Test
     fun `sync receives raw application control events for the bound room`() = runBlocking {
         lateinit var endpoint: URI
         val responseBody = """

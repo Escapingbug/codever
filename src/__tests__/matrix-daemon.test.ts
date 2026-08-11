@@ -548,6 +548,71 @@ describe('MatrixGatewayRunner', () => {
             .toEqual([])
     })
 
+    it('does not hold a durable lifecycle command result behind Matrix publication', async () => {
+        const fixture = await securityFixture()
+        const session = fakeTopicSession([])
+        const runtime = directRoomRuntime(fixture.config.rooms[0]!, session)
+        Reflect.set(runtime.appSessions.get('app-session-1')!.record, 'matrixThreadRootEventId', '$root')
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client: new FakeMatrixGatewayClient(),
+            sessionFactory: () => session,
+            now: () => fixture.now,
+        })
+        await initializeDirectRuntime(runner, fixture.config)
+        let finishLifecycle!: (value: MatrixSendEventResult) => void
+        const lifecycleDelivery = new Promise<MatrixSendEventResult>(resolve => {
+            finishLifecycle = resolve
+        })
+        const sendNativeContent = vi.fn((..._arguments: unknown[]) => lifecycleDelivery)
+        Reflect.set(runner, 'secureContent', { sendNativeContent })
+
+        const execution = (runner as unknown as {
+            execute(
+                roomRuntime: typeof runtime,
+                command: CodeverCommand,
+            ): Promise<{ sessionId: string | null }>
+        }).execute(runtime, {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'archive-with-slow-matrix',
+            gatewayId: fixture.config.gatewayId,
+            deviceId: 'pwa-device-1',
+            sequenceEpoch: 'legacy-v1',
+            conversationId: fixture.config.rooms[0]!.conversationId,
+            revisionEpoch: REVISION_EPOCH,
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'session.archive',
+            issuedAt: fixture.now,
+            expiresAt: fixture.now + 60_000,
+            nonce: '0123456789abcdef-slow-lifecycle',
+            payload: { operation: 'session.archive', sessionId: 'app-session-1' },
+        })
+
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const result = await Promise.race([
+            execution,
+            new Promise<never>((_, reject) => {
+                timeout = setTimeout(
+                    () => reject(new Error('Lifecycle command result waited for Matrix publication.')),
+                    250,
+                )
+            }),
+        ]).finally(() => clearTimeout(timeout))
+        expect(result).toEqual({ sessionId: 'app-session-1' })
+        await vi.waitFor(() => expect(sendNativeContent).toHaveBeenCalledOnce())
+        expect(sendNativeContent.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+            kind: 'session_lifecycle',
+            state: 'archived',
+            source_command_id: 'archive-with-slow-matrix',
+        }))
+        finishLifecycle({ eventId: '$lifecycle' })
+        await vi.waitFor(() => {
+            const tasks = Reflect.get(runner, 'executionTasks') as Set<Promise<void>>
+            expect(tasks.size).toBe(0)
+        })
+    })
+
     it('routes two concurrently running prompts to independent app session runtimes', async () => {
         const fixture = await securityFixture()
         const firstDispatches: SessionInput[] = []

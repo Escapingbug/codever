@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   matrixGatewayCheckpointSchema,
   matrixGatewayRevisionSchema,
+  matrixSessionLifecycleSchema,
   matrixSessionRootSchema,
   matrixThreadRelationSchema,
   matrixTimelineKeyGrantSchema,
@@ -34,6 +35,20 @@ describe('Matrix native conversation protocol', () => {
       is_falling_back: true,
       'm.in_reply_to': { event_id: '$root:example.org' },
     }).rel_type).toBe('m.thread')
+  })
+
+  it('binds a lifecycle transition to the command whose result it proves', () => {
+    expect(matrixSessionLifecycleSchema.parse({
+      version: 2,
+      kind: 'session_lifecycle',
+      revision: 7,
+      revision_epoch: 'revision-epoch-1',
+      revision_epoch_generation: 1,
+      session_id: 'session-1',
+      state: 'deleted',
+      updated_at: 12,
+      source_command_id: 'command-delete-1',
+    }).source_command_id).toBe('command-delete-1')
   })
 
   it('carries the current session inventory for a newly paired device', () => {

@@ -389,7 +389,8 @@ test("command result before explicit ack resolves acknowledgement and completion
     },
   };
 
-  lifecycle.recordResult(result);
+  assert.equal(lifecycle.recordResult(result), true);
+  assert.equal(lifecycle.recordResult(result), false);
 
   assert.equal(
     await lifecycle.waitForAcknowledgement(result.commandId, result.sequence),

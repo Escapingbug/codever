@@ -53,6 +53,20 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
 internal fun shouldCaptureMatrixSdkTimelineEvent(rawJson: String): Boolean =
     !isCodeverApplicationControlEvent(rawJson)
 
+internal fun codeverApplicationEventKind(rawJson: String): String = runCatching {
+    val root = Json.parseToJsonElement(rawJson).jsonObject
+    val extension = root["content"]
+        ?.jsonObject
+        ?.get("io.codever")
+        ?.jsonObject
+    extension
+        ?.get("kind")
+        ?.jsonPrimitive
+        ?.contentOrNull
+        ?.takeIf { it.matches(Regex("^[a-z0-9_]{1,64}$")) }
+        ?: "unknown"
+}.getOrDefault("unknown")
+
 fun interface MatrixApplicationControlTransport {
     suspend fun putJson(
         endpoint: URI,

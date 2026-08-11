@@ -58,6 +58,61 @@ class GatewayStateSyncPolicyTest {
     }
 
     @Test
+    fun `canonical Matrix revision suppresses command completion fallback`() {
+        assertEquals(true, requiresGatewayConvergence(null, 4))
+        assertEquals(true, requiresGatewayConvergence(3, 4))
+        assertEquals(false, requiresGatewayConvergence(4, 4))
+        assertEquals(false, requiresGatewayConvergence(5, 4))
+        assertThrows(IllegalArgumentException::class.java) {
+            requiresGatewayConvergence(0, -1)
+        }
+    }
+
+    @Test
+    fun `canonical Matrix state only completes its matching session command`() {
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_CREATE,
+            "session_root",
+            null,
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_SETTINGS,
+            "session_update",
+            null,
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_ARCHIVE,
+            "session_lifecycle",
+            "archived",
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_RESTORE,
+            "session_lifecycle",
+            "idle",
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_DELETE,
+            "session_lifecycle",
+            "deleted",
+        ))
+        assertEquals(false, canonicalStateCompletesCommand(
+            CommandOperation.PROMPT,
+            "session_update",
+            null,
+        ))
+        assertEquals(false, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_DELETE,
+            "session_lifecycle",
+            "archived",
+        ))
+        assertEquals(false, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_RESTORE,
+            "gateway_revision",
+            null,
+        ))
+    }
+
+    @Test
     fun `command recovery retries use bounded backoff`() {
         assertEquals(5_000L, commandRecoveryDelayMs(0))
         assertEquals(15_000L, commandRecoveryDelayMs(1))
