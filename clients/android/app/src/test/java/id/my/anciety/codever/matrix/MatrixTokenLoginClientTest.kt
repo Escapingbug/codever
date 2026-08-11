@@ -60,6 +60,40 @@ class MatrixTokenLoginClientTest {
     }
 
     @Test
+    fun `exchanges a fallback password in native memory and wipes request bytes`() = runBlocking {
+        lateinit var requestReference: ByteArray
+        lateinit var requestCopy: ByteArray
+        val responseBody = successResponse().toByteArray()
+        val client = MatrixTokenLoginClient(MatrixLoginTransport { _, body ->
+            requestReference = body
+            requestCopy = body.copyOf()
+            MatrixHttpResponse(200, responseBody)
+        })
+
+        val tokenBootstrap = bootstrap()
+        val passwordBootstrap = MatrixBootstrap(
+            homeserver = tokenBootstrap.homeserver,
+            password = "private-password",
+            expectedUserId = tokenBootstrap.expectedUserId,
+            deviceName = tokenBootstrap.deviceName,
+            roomBinding = tokenBootstrap.roomBinding,
+        )
+        val session = client.exchange(passwordBootstrap)
+
+        val request = Json.parseToJsonElement(requestCopy.toString(Charsets.UTF_8)).jsonObject
+        assertEquals("m.login.password", request.getValue("type").jsonPrimitive.content)
+        assertEquals(
+            "@alice:example.org",
+            request.getValue("identifier").jsonObject.getValue("user").jsonPrimitive.content,
+        )
+        assertEquals("private-password", request.getValue("password").jsonPrimitive.content)
+        assertEquals("MATRIX-DEVICE", session.deviceId)
+        assertTrue(requestReference.all { it == 0.toByte() })
+        assertTrue(responseBody.all { it == 0.toByte() })
+        assertFalse(passwordBootstrap.toString().contains("private-password"))
+    }
+
+    @Test
     fun `sanitizes Matrix error bodies and marks server failures retryable`() = runBlocking {
         val client = MatrixTokenLoginClient(MatrixLoginTransport { _, _ ->
             MatrixHttpResponse(

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The .e2e application is never distributed and trusts only its compiled loopback Web origin. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

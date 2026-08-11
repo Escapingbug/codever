@@ -45,6 +45,19 @@ val buildTimestamp = DateTimeFormatter
     .format(Instant.ofEpochMilli(buildEpochMillis))
 val androidVersionName = "$androidBaseVersion-dev.$buildTimestamp+$sourceLabel"
 val androidNativeBuildId = "android-$buildTimestamp-$sourceLabel"
+val productionWebOrigin = "https://rd.anciety.my.id"
+val e2eWebOrigin = providers.environmentVariable("CODEVER_ANDROID_E2E_WEB_ORIGIN")
+    .orNull
+    ?.also { configured ->
+        require(configured.matches(Regex("http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}"))) {
+            "CODEVER_ANDROID_E2E_WEB_ORIGIN must be an explicit loopback HTTP origin with a port."
+        }
+        val port = configured.substringAfterLast(':').toInt()
+        require(port in 1..65535) {
+            "CODEVER_ANDROID_E2E_WEB_ORIGIN contains an invalid port."
+        }
+    }
+    ?: "http://127.0.0.1:4173"
 
 android {
     namespace = "id.my.anciety.codever"
@@ -64,6 +77,8 @@ android {
         versionCode = androidVersionCode.toInt()
         versionName = androidVersionName
         buildConfigField("String", "NATIVE_BUILD_ID", "\"$androidNativeBuildId\"")
+        buildConfigField("String", "APP_ORIGIN", "\"$productionWebOrigin\"")
+        buildConfigField("boolean", "ALLOW_INSECURE_E2E_LOOPBACK", "false")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -82,6 +97,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+        }
+        create("e2e") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".e2e"
+            versionNameSuffix = "-e2e"
+            buildConfigField("String", "APP_ORIGIN", "\"$e2eWebOrigin\"")
+            buildConfigField("boolean", "ALLOW_INSECURE_E2E_LOOPBACK", "true")
+            matchingFallbacks += listOf("debug")
         }
     }
 

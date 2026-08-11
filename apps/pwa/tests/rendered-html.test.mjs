@@ -641,7 +641,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(wizard, /Invitation code/);
   assert.match(wizard, /Connect to \$\{preview\.gatewayName\}/);
   assert.match(wizard, /Finishing the connection/);
-  assert.match(app, /setConnectionDetail\(detail \?\? null\)/);
+  assert.match(
+    app,
+    /setConnectionDetail\(presentedStatus === "offline" \? null : detail \?\? null\)/,
+  );
   assert.match(qrScanning, /BarcodeDetector/);
   assert.match(wizard, /decodeQrImageFile/);
   assert.match(qrScanning, /import\("\.\/qrDecodeFallback"\)/);

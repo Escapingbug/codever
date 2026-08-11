@@ -174,6 +174,14 @@ export function deriveConnectionPresentation(
   };
 }
 
+export function connectionStatusForBrowserNetwork(
+  status: MatrixConnectionStatus,
+  online: boolean,
+): MatrixConnectionStatus {
+  if (online || status === "offline" || status === "error") return status;
+  return "offline";
+}
+
 function connectionPresentationState(
   status: MatrixConnectionStatus,
 ): ConnectionPresentation["state"] {

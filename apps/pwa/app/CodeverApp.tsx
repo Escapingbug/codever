@@ -96,7 +96,10 @@ import {
 } from "./crossDeviceSync";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
-import { deriveConnectionPresentation } from "./connectionPresentation";
+import {
+  connectionStatusForBrowserNetwork,
+  deriveConnectionPresentation,
+} from "./connectionPresentation";
 import {
   formatUserFacingError,
   isCommandRecoveryPendingError,
@@ -990,6 +993,19 @@ export function CodeverApp() {
   useEffect(() => {
     connectionStatusRef.current = connectionStatus;
   }, [connectionStatus]);
+
+  useEffect(() => {
+    if (isNativeManagedMatrixConfig(matrixConfig)) return;
+    const reportBrowserOffline = () => {
+      connectionStatusRef.current = "offline";
+      setConnectionStatus("offline");
+      setConnectionDetail(null);
+      setConnectionError(null);
+    };
+    window.addEventListener("offline", reportBrowserOffline);
+    if (!navigator.onLine) reportBrowserOffline();
+    return () => window.removeEventListener("offline", reportBrowserOffline);
+  }, [matrixConfig]);
 
   useEffect(
     () => () => {
@@ -2056,29 +2072,35 @@ export function CodeverApp() {
         },
         onStatus(status, detail) {
           if (!isCurrentStartup()) return;
+          const presentedStatus = isNativeManagedMatrixConfig(normalized)
+            ? status
+            : connectionStatusForBrowserNetwork(status, navigator.onLine);
           if (
             matrixStartupRef.current &&
-            (status === "connecting" || status === "securing")
+            (presentedStatus === "connecting" || presentedStatus === "securing")
           ) {
-            matrixStartupRef.current.phase = status;
+            matrixStartupRef.current.phase = presentedStatus;
           }
-          connectionStatusRef.current = status;
-          setConnectionStatus(status);
-          setConnectionDetail(detail ?? null);
-          if (status === "error") {
-            const presentation = deriveConnectionPresentation(status, detail);
+          connectionStatusRef.current = presentedStatus;
+          setConnectionStatus(presentedStatus);
+          setConnectionDetail(presentedStatus === "offline" ? null : detail ?? null);
+          if (presentedStatus === "error") {
+            const presentation = deriveConnectionPresentation(presentedStatus, detail);
             setConnectionError(presentation.detail);
-          } else if (status === "reconnecting" || status === "offline") {
+          } else if (
+            presentedStatus === "reconnecting" ||
+            presentedStatus === "offline"
+          ) {
             setConnectionError(null);
           }
           if (
-            status === "connected" ||
-            status === "offline" ||
-            status === "error"
+            presentedStatus === "connected" ||
+            presentedStatus === "offline" ||
+            presentedStatus === "error"
           ) {
             matrixStartupRef.current = null;
           }
-          if (status === "connected") {
+          if (presentedStatus === "connected") {
             sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
             setConnectionError(null);
             dispatchUiNotice({ type: "scope-recovered", scope: "connection" });
@@ -2598,16 +2620,46 @@ export function CodeverApp() {
     setPairingBusy(true);
     setConnectionError(null);
     try {
-      const credentials = await loginWithMatrixPassword(
-        matrixConfig.homeserver,
-        userId,
-        password,
-        browserDeviceName(),
-      );
+      detachClientForNativeBootstrap();
+      const preview = pairingPreview;
+      const nativeBootstrap = preview
+        ? await bootstrapNativeMatrixSessionIfAvailable({
+            homeserver: matrixConfig.homeserver,
+            password,
+            expectedUserId: userId,
+            deviceName: browserDeviceName(),
+            roomBinding: {
+              roomId: preview.transport.roomId,
+              gatewayId: preview.gatewayId,
+              conversationId: preview.transport.roomId,
+              gatewayUserId: preview.transport.userId,
+              gatewayDeviceId: preview.transport.deviceId,
+              gatewayDeviceEd25519: preview.transport.ed25519,
+            },
+          })
+        : null;
+      const credentials = nativeBootstrap
+        ? {
+            homeserver: nativeBootstrap.session.homeserver,
+            userId: nativeBootstrap.session.userId,
+            matrixDeviceId: nativeBootstrap.session.matrixDeviceId,
+            accessToken: NATIVE_MANAGED_ACCESS_TOKEN,
+          }
+        : await loginWithMatrixPassword(
+            matrixConfig.homeserver,
+            userId,
+            password,
+            browserDeviceName(),
+          );
       const next = { ...matrixConfig, ...credentials };
       setMatrixConfig(next);
       saveMatrixConfig(next);
+      // Native bootstrap is opportunistic. A regular browser deliberately
+      // falls back to the Web Matrix client, so the temporary transfer state
+      // must be settled for both outcomes before pairing can be confirmed.
+      settleNativeBootstrapTransfer("offline");
     } catch (error) {
+      settleNativeBootstrapTransfer("error");
       setConnectionError(formatUiError(error));
     } finally {
       setPairingBusy(false);

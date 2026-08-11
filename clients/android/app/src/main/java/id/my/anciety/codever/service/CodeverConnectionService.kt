@@ -304,7 +304,14 @@ class CodeverConnectionService : Service() {
 
         suspend fun bootstrap(input: MatrixBootstrap): Pair<PublicMatrixSession, ClientSnapshot> {
             check(foregroundStarted) { "The persistent native runtime is not active." }
-            return withContext(Dispatchers.IO) { awaitClientRuntime().bootstrap(input) }
+            return withContext(Dispatchers.IO) {
+                val runtime = awaitClientRuntime()
+                // Service startup schedules runtime restoration asynchronously.
+                // A freshly opened WebView may submit bootstrap before that job
+                // runs, so make this boundary self-sufficient and idempotent.
+                runtime.start()
+                runtime.bootstrap(input)
+            }
         }
 
         suspend fun completePairing(

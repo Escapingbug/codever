@@ -89,6 +89,13 @@ CODEVER_WEB_LIVE_E2E=1 pnpm test:e2e:web-live
 CODEVER_ANDROID_LIVE_E2E=1 \
 CODEVER_ANDROID_SERIAL=emulator-5554 \
 pnpm test:e2e:android-live
+
+# Full isolated Alpha gate: fresh .e2e APK, two browsers, official Synapse,
+# current Gateway, deterministic delayed provider, background notifications,
+# cross-device lifecycle, and in-flight recovery.
+CODEVER_ALPHA_LIVE_E2E=1 \
+CODEVER_ANDROID_SERIAL=emulator-5554 \
+pnpm test:e2e:alpha-live
 ```
 
 The Web runner starts the official disposable Synapse fixture under
@@ -97,21 +104,27 @@ local Cloudflare Workers runtime, opens two isolated Chrome contexts, and
 starts the current Gateway with a loopback-only deterministic provider. It
 never falls back to a fake port or development server. The Android runner
 validates the installed APK and the actually deployed Matrix/Gateway path.
+The isolated Alpha gate also validates fresh native onboarding. It accepts a
+negotiated one-time Matrix login when the homeserver supports that capability,
+and otherwise requires the documented new-device username/password fallback
+to complete before pairing can continue.
 
 ## Automated coverage status
 
 | Journey | Web live runner | Android live runner |
 | --- | --- | --- |
-| Fresh-device pairing and inventory bootstrap | Two isolated browser devices | Uses the installed, already-paired APK |
+| Fresh-device pairing and inventory bootstrap | Two isolated browser devices | Enforced by the isolated Alpha gate |
 | Create and immediate feedback | Enforced | Enforced |
-| Cross-device prompt and agent response | Enforced | Not yet automated |
+| Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
 | History after reload/process restart | Enforced on both browser devices | Enforced for cached history |
 | Archive, restore, and delete | Delete enforced on both devices | Full lifecycle enforced twice |
-| Offline read and network recovery | Not yet automated | Enforced with airplane mode |
-| Android foreground-service and completion notifications | Not applicable | Not yet automated |
+| Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
+| Android foreground-service and completion notifications | Not applicable | Enforced by the isolated Alpha gate |
 
 An unimplemented cell is not implicitly passed. Web local business E2E may be
-green while the overall release acceptance remains incomplete. In particular,
-the Android release gate stays red until the newly built APK passes its live
-runner and the remaining cross-device and notification journeys are automated
-or executed as recorded, reproducible acceptance cases.
+green while the overall release acceptance remains incomplete. The Alpha gate
+uses an application-id-suffixed APK which can coexist with the normal APK. Its
+native bridge accepts only the compiled loopback origin and reaches disposable
+PWA and Synapse fixtures through `adb reverse`; it never reuses a person's
+paired account. A distributable APK still has to pass the installed release
+runner against the newly deployed production components.

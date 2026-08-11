@@ -209,7 +209,7 @@ export class GatewaySecureContentLayer {
                     : {}),
                 [CODEVER_MATRIX_EXTENSION]: native,
             },
-        }, room, transport)
+        }, room, transport, 'control')
     }
 
     async activeDeviceCountForRoom(room: MatrixGatewayRoomConfig): Promise<number> {

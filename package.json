@@ -21,6 +21,7 @@
     "test:e2e": "pnpm run test:e2e:web-live && pnpm run test:e2e:android-live",
     "test:e2e:web-live": "tsx scripts/web-live-e2e.ts",
     "test:e2e:android-live": "tsx scripts/android-live-e2e.ts",
+    "test:e2e:alpha-live": "tsx scripts/web-live-e2e.ts",
     "test:matrix-live": "tsx scripts/matrix-live-smoke.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.gateway-scripts.json",
     "typecheck:rewrite": "pnpm --recursive --if-present typecheck"

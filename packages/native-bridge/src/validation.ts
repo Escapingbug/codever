@@ -1277,14 +1277,19 @@ function httpsHomeserver(input: unknown, label: string): string {
   } catch {
     invalidParams(`${label} must be an absolute HTTPS URL.`);
   }
+  const loopbackFixture =
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost");
   if (
-    url.protocol !== "https:" ||
+    (url.protocol !== "https:" && !loopbackFixture) ||
     url.username !== "" ||
     url.password !== "" ||
     url.search !== "" ||
     url.hash !== ""
   ) {
-    invalidParams(`${label} must be a credential-free HTTPS homeserver URL.`);
+    invalidParams(
+      `${label} must be a credential-free HTTPS homeserver URL (or an explicit loopback test fixture).`,
+    );
   }
   return value;
 }
@@ -1336,12 +1341,23 @@ function parseMethodParams(method: RequestMethod, input: unknown): JsonObject {
       const params = mutationParams(input, [
         "homeserver",
         "oneTimeLoginToken",
+        "password",
         "expectedUserId",
         "deviceName",
         "roomBinding",
       ]);
       httpsHomeserver(params.homeserver, "homeserver");
-      requiredString(params.oneTimeLoginToken, "oneTimeLoginToken", 4_096);
+      const hasToken = params.oneTimeLoginToken !== undefined;
+      const hasPassword = params.password !== undefined;
+      if (hasToken === hasPassword) {
+        invalidParams("exactly one Matrix bootstrap credential is required");
+      }
+      if (hasToken) {
+        requiredString(params.oneTimeLoginToken, "oneTimeLoginToken", 4_096);
+      }
+      if (hasPassword) {
+        requiredString(params.password, "password", 4_096);
+      }
       matrixUserId(params.expectedUserId, "expectedUserId");
       requiredString(params.deviceName, "deviceName", 256);
       parseMatrixRoomBinding(params.roomBinding, "roomBinding");

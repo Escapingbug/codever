@@ -73,6 +73,7 @@ import id.my.anciety.codever.security.codever.SignedPairingOffer
 import id.my.anciety.codever.security.codever.SignedPairingRequest
 import id.my.anciety.codever.security.codever.SignedPairingResponse
 import java.security.SecureRandom
+import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
@@ -170,6 +171,7 @@ class NativeClientRuntime(
     @Volatile private var gatewayConvergenceFallbackJob: Job? = null
     @Volatile private var gatewayConvergenceMinimumRevision: Long? = null
     @Volatile private var pendingPairing: PendingPairing? = null
+    private val preTrustEvents = ArrayDeque<MatrixDecryptedEvent>()
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
 
     private val eventHub = ClientEventHub(
@@ -260,6 +262,7 @@ class NativeClientRuntime(
         val offer = PairingCodec.decodePairingLink(link)
         PairingSecurity.verifyOffer(offer, now = now())
         assertOfferRoute(offer)
+        clearPreTrustEvents()
         pendingPairing = PendingPairing(offer)
         val preview = NativePairingPreview(
             pairingId = offer.offer.offerId,
@@ -359,12 +362,17 @@ class NativeClientRuntime(
             trust = nextTrust
             trustStorageBlocked = false
             pendingPairing = null
+            replayPreTrustEvents()
             val public = publicTrust() as PublicTrustState.Trusted
             val nextSnapshot = refreshedSnapshot()
             eventHub.publish(ClientEventType.TRUST_CHANGED, PublicClientJson.encodeTrust(public), nextSnapshot)
+            // A checkpoint published immediately after the Gateway accepts
+            // pairing may already have been replayed from the pre-trust
+            // buffer. Preserve that verified state; when no checkpoint was
+            // replayed the synchronization flag is already false.
             startGatewayStateSync(
                 recoverTransport = false,
-                invalidateCurrentState = true,
+                invalidateCurrentState = false,
             )
             public to snapshot()
         }
@@ -374,6 +382,7 @@ class NativeClientRuntime(
         val pending = pendingPairing?.takeIf { it.offer.offer.offerId == pairingId } ?: return false
         pending.response?.completeExceptionally(NativePairingRejectedException("Pairing was cancelled."))
         pendingPairing = null
+        clearPreTrustEvents()
         eventHub.publish(
             ClientEventType.PAIRING_CHANGED,
             buildJsonObject { put("pairingId", pairingId); put("cancelled", true) },
@@ -515,6 +524,7 @@ class NativeClientRuntime(
             trustStorageBlocked = false
             gatewayState = null
             pendingPairing = null
+            clearPreTrustEvents()
         }
         refreshSnapshot(publishLifecycle = true)
         snapshot()
@@ -922,11 +932,17 @@ class NativeClientRuntime(
             )
             return
         }
+        val activeTrust = trust ?: run {
+            val pending = pendingPairing
+            if (pending != null && event.sender == pending.offer.offer.gatewayTransport.userId) {
+                bufferPreTrustEvent(event)
+            }
+            return
+        }
         if (kind == "gateway_device_rotation") {
             acceptGatewayDeviceRotation(event, extension)
             return
         }
-        val activeTrust = trust ?: return
         if (event.sender != activeTrust.transportTrust.currentTransport.userId) return
         val plaintext = when (kind) {
             "secure_envelope" -> {
@@ -1046,6 +1062,40 @@ class NativeClientRuntime(
         val signed = PairingCodec.parseResponse(extension.objectValue("pairing_response").toString())
         if (signed.response.requestId != pending.request?.request?.requestId) return
         pending.response?.complete(signed)
+    }
+
+    private fun bufferPreTrustEvent(event: MatrixDecryptedEvent) {
+        synchronized(preTrustEvents) {
+            if (preTrustEvents.size >= MAX_PRE_TRUST_EVENTS) {
+                preTrustEvents.removeFirst()
+                diagnostics.record("matrix.pretrust_event.evicted")
+            }
+            preTrustEvents.addLast(event)
+        }
+    }
+
+    private suspend fun replayPreTrustEvents() {
+        val buffered = synchronized(preTrustEvents) {
+            preTrustEvents.toList().also { preTrustEvents.clear() }
+        }
+        if (buffered.isEmpty()) return
+        diagnostics.record(
+            "matrix.pretrust_events.replaying",
+            mapOf("count" to buffered.size.toString()),
+        )
+        buffered.forEach { event ->
+            runCatching { processMatrixEvent(event) }
+                .onFailure { error ->
+                    diagnostics.record(
+                        "matrix.pretrust_event.rejected",
+                        mapOf("error" to diagnosticErrorName(error)),
+                    )
+                }
+        }
+    }
+
+    private fun clearPreTrustEvents() {
+        synchronized(preTrustEvents) { preTrustEvents.clear() }
     }
 
     private fun acceptGatewayDeviceRotation(event: MatrixDecryptedEvent, extension: JsonObject) {
@@ -1767,6 +1817,7 @@ class NativeClientRuntime(
 
     private companion object {
         const val BRIDGE_REPLAY_EVENT_LIMIT = 100
+        const val MAX_PRE_TRUST_EVENTS = 256
         const val PAIRING_REQUEST_MS = 2 * 60_000L
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"

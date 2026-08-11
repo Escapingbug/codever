@@ -1,5 +1,6 @@
 package id.my.anciety.codever.matrix
 
+import id.my.anciety.codever.BuildConfig
 import java.net.URI
 import java.security.MessageDigest
 import org.matrix.rustcomponents.sdk.Session
@@ -17,13 +18,14 @@ data class MatrixRoomBinding(
 /** The login token is intentionally memory-only and must never be logged or persisted. */
 class MatrixBootstrap(
     val homeserver: String,
-    val oneTimeLoginToken: String,
+    val oneTimeLoginToken: String? = null,
     val expectedUserId: String,
     val deviceName: String,
     val roomBinding: MatrixRoomBinding,
+    val password: String? = null,
 ) {
     override fun toString(): String =
-        "MatrixBootstrap(homeserver=$homeserver, oneTimeLoginToken=<redacted>, " +
+        "MatrixBootstrap(homeserver=$homeserver, credential=<redacted>, " +
             "expectedUserId=$expectedUserId, deviceName=$deviceName, roomBinding=$roomBinding)"
 }
 
@@ -115,15 +117,19 @@ object MatrixIdentifiers {
         val uri = runCatching { URI(input) }.getOrElse {
             throw IllegalArgumentException("homeserver must be an absolute HTTPS URL.")
         }
+        val secure = uri.scheme.equals("https", ignoreCase = true)
+        val e2eLoopback = BuildConfig.ALLOW_INSECURE_E2E_LOOPBACK &&
+            uri.scheme.equals("http", ignoreCase = true) &&
+            (uri.host == "127.0.0.1" || uri.host.equals("localhost", ignoreCase = true))
         require(
-            uri.scheme.equals("https", ignoreCase = true) &&
+            (secure || e2eLoopback) &&
                 !uri.host.isNullOrBlank() &&
                 uri.rawUserInfo == null &&
                 uri.rawQuery == null &&
                 uri.rawFragment == null,
         ) { "homeserver must be a credential-free HTTPS URL." }
         val path = uri.rawPath.orEmpty().trimEnd('/')
-        return URI("https", null, uri.host.lowercase(), uri.port, path.ifEmpty { null }, null, null)
+        return URI(uri.scheme.lowercase(), null, uri.host.lowercase(), uri.port, path.ifEmpty { null }, null, null)
             .toASCIIString()
     }
 
@@ -148,7 +154,15 @@ object MatrixIdentifiers {
 
     fun validateBootstrap(input: MatrixBootstrap): MatrixBootstrap = input.also {
         normalizeHomeserver(it.homeserver)
-        require(it.oneTimeLoginToken.length in 1..4_096) { "oneTimeLoginToken is invalid." }
+        require((it.oneTimeLoginToken == null) xor (it.password == null)) {
+            "Exactly one Matrix bootstrap credential is required."
+        }
+        require(it.oneTimeLoginToken == null || it.oneTimeLoginToken.length in 1..4_096) {
+            "oneTimeLoginToken is invalid."
+        }
+        require(it.password == null || it.password.length in 1..4_096) {
+            "password is invalid."
+        }
         requireUserId(it.expectedUserId, "expectedUserId")
         require(it.deviceName.length in 1..256) { "deviceName is invalid." }
         validateRoomBinding(it.roomBinding)
@@ -162,5 +176,12 @@ object MatrixIdentifiers {
 
     private fun requireOpaque(value: String, label: String) {
         require(value.isNotBlank() && value.length <= 512) { "$label is invalid." }
+    }
+
+    fun requireAllowedEndpoint(endpoint: URI, label: String) {
+        normalizeHomeserver(
+            URI(endpoint.scheme, null, endpoint.host, endpoint.port, null, null, null).toString(),
+        )
+        require(endpoint.rawUserInfo == null) { "$label must not contain credentials." }
     }
 }

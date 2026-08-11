@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveConnectionPresentation } from "../app/connectionPresentation.ts";
+import {
+  connectionStatusForBrowserNetwork,
+  deriveConnectionPresentation,
+} from "../app/connectionPresentation.ts";
 
 test("maps native progress codes to calm user-facing copy while retaining diagnostics", () => {
   const presentation = deriveConnectionPresentation(
@@ -74,4 +77,12 @@ test("runtime details remain diagnostic-only and statuses have stable severity",
   assert.equal(deriveConnectionPresentation("connected").state, "ready");
   assert.equal(deriveConnectionPresentation("offline").state, "offline");
   assert.equal(deriveConnectionPresentation("error").state, "blocked");
+});
+
+test("reports browser transport phases as offline when the browser knows it has no network", () => {
+  for (const status of ["connecting", "securing", "connected", "reconnecting"] as const) {
+    assert.equal(connectionStatusForBrowserNetwork(status, false), "offline");
+  }
+  assert.equal(connectionStatusForBrowserNetwork("connected", true), "connected");
+  assert.equal(connectionStatusForBrowserNetwork("error", false), "error");
 });

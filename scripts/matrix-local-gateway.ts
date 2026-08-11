@@ -487,11 +487,21 @@ function formatError(error: unknown): string {
 }
 
 function e2eProvider(name: string): AgentProvider {
+    const delayMs = Number.parseInt(
+        process.env.CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS ?? '0',
+        10,
+    )
+    if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 30_000) {
+        throw new Error('CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS must be between 0 and 30000')
+    }
     return {
         name,
         startQuery(): AgentQueryHandle {
             return {
                 events: (async function* () {
+                    if (delayMs > 0) {
+                        await new Promise(resolve => setTimeout(resolve, delayMs))
+                    }
                     yield {
                         kind: 'text' as const,
                         text: 'Codever deterministic E2E response',

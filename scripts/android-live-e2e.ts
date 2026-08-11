@@ -174,6 +174,19 @@ class DevtoolsPage {
         throw new Error(`Timed out waiting for the enabled ${label} button.`)
     }
 
+    async waitForEvaluation(
+        description: string,
+        predicate: () => Promise<boolean>,
+        timeoutMs = 5_000,
+    ): Promise<void> {
+        const deadline = Date.now() + timeoutMs
+        while (Date.now() < deadline) {
+            if (await predicate()) return
+            await delay(50)
+        }
+        throw new Error(`Timed out waiting for ${description}.`)
+    }
+
     async clickConversationActionStrong(
         label: string,
         timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -224,25 +237,27 @@ class DevtoolsPage {
             return { selected: true, cwd: originalCwd };
         })()`)
         assert.equal(projectSelected.selected, true, 'Could not select a disposable live E2E project')
-        const deadline = Date.now() + 5_000
-        let configured = false
-        while (!configured && Date.now() < deadline) {
-            configured = await this.evaluate<boolean>(`(() => {
+        await this.waitForEvaluation('enabled live E2E project name', async () => this.evaluate<boolean>(`(() => {
                 const dialog = document.querySelector('.new-session-dialog');
                 const projectNameInput = dialog?.querySelector('input[placeholder="My project"]');
-                const cwdInput = dialog?.querySelector('input[placeholder="/Users/me/Documents/project"]');
-                if (!projectNameInput || !cwdInput || projectNameInput.disabled || cwdInput.disabled) return false;
+                if (!projectNameInput || projectNameInput.disabled) return false;
                 const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
                 if (!setter) return false;
                 setter.call(projectNameInput, ${json(projectName)});
                 projectNameInput.dispatchEvent(new Event('input', { bubbles: true }));
+                return true;
+            })()`))
+        await this.waitForEvaluation('enabled live E2E working directory', async () => this.evaluate<boolean>(`(() => {
+                const dialog = document.querySelector('.new-session-dialog');
+                const cwdInput = dialog?.querySelector('input[placeholder="/Users/me/Documents/project"]');
+                if (!cwdInput || cwdInput.disabled) return false;
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                if (!setter) return false;
                 setter.call(cwdInput, ${json(projectSelected.cwd)});
                 cwdInput.dispatchEvent(new Event('input', { bubbles: true }));
                 return true;
-            })()`)
-            if (!configured) await delay(50)
-        }
-        assert.equal(configured, true, 'Could not configure the live E2E project')
+            })()`))
+        await this.waitForButtonTextEnabled('Create session', '.new-session-dialog', 5_000)
         await this.clickButtonText('Create session', '.new-session-dialog')
     }
 

@@ -5,6 +5,7 @@
   },
   "include": [
     "scripts/android-live-e2e.ts",
+    "scripts/e2e/androidAlphaJourney.ts",
     "scripts/matrix-local-gateway.ts"
   ]
 }

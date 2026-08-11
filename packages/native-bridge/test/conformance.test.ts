@@ -187,7 +187,7 @@ describe("native bridge JSON-RPC conformance", () => {
     ).toThrow(/does not match/);
   });
 
-  it("bootstraps a public Matrix session with a one-time token only", () => {
+  it("bootstraps a public Matrix session with exactly one memory-only credential", () => {
     const roomBinding = {
       roomId: "!room:matrix.example",
       gatewayId: "gateway-1",
@@ -257,6 +257,29 @@ describe("native bridge JSON-RPC conformance", () => {
         roomBinding: { ...roomBinding, roomId: "not-a-matrix-room" },
       })),
     ).toThrow(/Matrix room id/);
+
+    const passwordFallback = parseRpcRequest(request("codever.client.bootstrap", {
+      context,
+      idempotencyKey: "550e8400-e29b-41d4-a716-446655440002",
+      homeserver: "https://matrix.example",
+      password: "memory-only-password",
+      expectedUserId: "@device:matrix.example",
+      deviceName: "Pixel 10",
+      roomBinding,
+    }));
+    expect(passwordFallback.method).toBe("codever.client.bootstrap");
+    expect(() =>
+      parseRpcRequest(request("codever.client.bootstrap", {
+        context,
+        idempotencyKey: "550e8400-e29b-41d4-a716-446655440003",
+        homeserver: "https://matrix.example",
+        oneTimeLoginToken: "one-time-login-token",
+        password: "must-not-be-accepted-together",
+        expectedUserId: "@device:matrix.example",
+        deviceName: "Pixel 10",
+        roomBinding,
+      })),
+    ).toThrow(/exactly one Matrix bootstrap credential/);
   });
 
   it("issues a bounded one-time Matrix token for a completed invitation", () => {

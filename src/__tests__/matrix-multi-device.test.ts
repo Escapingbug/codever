@@ -737,6 +737,88 @@ describe('multi-device Matrix collaboration', () => {
         layer.stopRetries()
     })
 
+    it('lets canonical session state bypass a hung normal timeline send', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        let releaseNormal!: () => void
+        const normalGate = new Promise<void>(resolve => {
+            releaseNormal = resolve
+        })
+        const attempted: string[] = []
+        const transport: MatrixTransport = {
+            async sendEncryptedRoomEvent(request) {
+                attempted.push(request.transactionId)
+                if (request.transactionId === 'hung-normal') await normalGate
+                return { eventId: `$canonical-priority-${attempted.length}` }
+            },
+        }
+        const secureTransport = layer.transportForRoom(room, transport)
+        const normalContent = {
+            msgtype: 'm.text' as const,
+            body: 'normal timeline event',
+            [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+        }
+        const hungNormal = secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'hung-normal',
+            content: normalContent,
+        })
+        await vi.waitFor(() => expect(attempted).toEqual(['hung-normal']))
+        const queuedNormal = secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'queued-normal',
+            content: normalContent,
+        })
+        const canonical = layer.sendNativeContent(room, {
+            version: 2,
+            kind: 'session_lifecycle',
+            revision: 2,
+            revision_epoch: 'runtime-epoch-1',
+            revision_epoch_generation: 1,
+            session_id: 'session-to-delete',
+            state: 'deleted',
+            updated_at: now,
+            source_command_id: 'delete-command',
+        }, 'priority-session-lifecycle', transport)
+
+        try {
+            await vi.waitFor(() => expect(attempted).toEqual([
+                'hung-normal',
+                'priority-session-lifecycle',
+            ]), { timeout: 500 })
+        } finally {
+            releaseNormal()
+            await Promise.all([hungNormal, queuedNormal, canonical])
+            layer.stopRetries()
+        }
+        expect(attempted).toEqual([
+            'hung-normal',
+            'priority-session-lifecycle',
+            'queued-normal',
+        ])
+    })
+
     it('uses a fresh Matrix transaction and envelope for each command-status redelivery', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()

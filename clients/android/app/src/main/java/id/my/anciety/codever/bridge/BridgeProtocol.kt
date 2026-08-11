@@ -356,11 +356,11 @@ class BridgeDispatcher(
                     mutation = true,
                     requiredExtra = setOf(
                         "homeserver",
-                        "oneTimeLoginToken",
                         "expectedUserId",
                         "deviceName",
                         "roomBinding",
                     ),
+                    optionalExtra = setOf("oneTimeLoginToken", "password"),
                 )
                 if (MATRIX_BOOTSTRAP_CAPABILITY !in negotiatedCapabilities) {
                     throw BridgeDispatchException(
@@ -1123,15 +1123,21 @@ class BridgeDispatcher(
     }
 
     private fun parseBootstrap(params: JsonObject): MatrixBootstrap {
+        val oneTimeLoginToken = optionalString(params, "oneTimeLoginToken", 4_096)
+        val password = optionalString(params, "password", 4_096)
+        if ((oneTimeLoginToken == null) == (password == null)) {
+            invalidParams("Exactly one Matrix bootstrap credential is required.")
+        }
         val bootstrap = MatrixBootstrap(
             homeserver = requiredString(params, "homeserver", 2_048),
-            oneTimeLoginToken = requiredString(params, "oneTimeLoginToken", 4_096),
+            oneTimeLoginToken = oneTimeLoginToken,
             expectedUserId = requiredString(params, "expectedUserId", 512),
             deviceName = requiredString(params, "deviceName", 256),
             roomBinding = params["roomBinding"]
                 ?.let { runCatching { it.jsonObject }.getOrNull() }
                 ?.let(::parseRoomBinding)
                 ?: invalidParams("roomBinding must be an object."),
+            password = password,
         )
         return try {
             MatrixIdentifiers.validateBootstrap(bootstrap)

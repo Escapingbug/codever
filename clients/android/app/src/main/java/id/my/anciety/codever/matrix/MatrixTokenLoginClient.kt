@@ -1,10 +1,10 @@
 package id.my.anciety.codever.matrix
 
 import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
-import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -46,10 +46,8 @@ class RestrictedHttpsMatrixLoginTransport(
 ) : MatrixLoginTransport {
     override suspend fun postJson(endpoint: URI, body: ByteArray): MatrixHttpResponse =
         withContext(Dispatchers.IO) {
-            require(endpoint.scheme == "https" && endpoint.rawUserInfo == null) {
-                "Matrix login endpoint must use HTTPS."
-            }
-            val connection = URL(endpoint.toASCIIString()).openConnection() as HttpsURLConnection
+            MatrixIdentifiers.requireAllowedEndpoint(endpoint, "Matrix login endpoint")
+            val connection = URL(endpoint.toASCIIString()).openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
                 connection.requestMethod = "POST"
@@ -94,11 +92,9 @@ class RestrictedHttpsMatrixLoginTokenTransport(
         accessToken: String,
         body: ByteArray,
     ): MatrixHttpResponse = withContext(Dispatchers.IO) {
-        require(endpoint.scheme == "https" && endpoint.rawUserInfo == null) {
-            "Matrix login-token endpoint must use HTTPS."
-        }
+        MatrixIdentifiers.requireAllowedEndpoint(endpoint, "Matrix login-token endpoint")
         require(accessToken.isNotEmpty() && accessToken.length <= 32_768)
-        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpsURLConnection
+        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpURLConnection
         try {
             connection.instanceFollowRedirects = false
             connection.requestMethod = "POST"
@@ -143,11 +139,9 @@ class RestrictedHttpsMatrixProfileTransport(
 ) : MatrixProfileTransport {
     override suspend fun getJson(endpoint: URI, accessToken: String): MatrixHttpResponse =
         withContext(Dispatchers.IO) {
-            require(endpoint.scheme == "https" && endpoint.rawUserInfo == null) {
-                "Matrix profile endpoint must use HTTPS."
-            }
+            MatrixIdentifiers.requireAllowedEndpoint(endpoint, "Matrix profile endpoint")
             require(accessToken.isNotEmpty() && accessToken.length <= 32_768)
-            val connection = URL(endpoint.toASCIIString()).openConnection() as HttpsURLConnection
+            val connection = URL(endpoint.toASCIIString()).openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
                 connection.requestMethod = "GET"
@@ -192,7 +186,7 @@ class MatrixProfileClient(
         val response = transport.getJson(endpoint, session.accessToken)
         return try {
             when (response.status) {
-                HttpsURLConnection.HTTP_OK -> {
+                HttpURLConnection.HTTP_OK -> {
                     val root = Json.parseToJsonElement(
                         response.body.toString(Charsets.UTF_8),
                     ).jsonObject
@@ -201,7 +195,7 @@ class MatrixProfileClient(
                     // unwrapped form for compatible homeserver variants.
                     (root[key] as? JsonObject) ?: root
                 }
-                HttpsURLConnection.HTTP_NOT_FOUND -> null
+                HttpURLConnection.HTTP_NOT_FOUND -> null
                 else -> throw IllegalStateException("Matrix profile request failed (${response.status}).")
             }
         } finally {
@@ -218,8 +212,18 @@ class MatrixTokenLoginClient(
         val homeserver = MatrixIdentifiers.normalizeHomeserver(bootstrap.homeserver)
         val endpoint = URI("$homeserver/_matrix/client/v3/login")
         val requestBytes = buildJsonObject {
-            put("type", "m.login.token")
-            put("token", bootstrap.oneTimeLoginToken)
+            val token = bootstrap.oneTimeLoginToken
+            if (token != null) {
+                put("type", "m.login.token")
+                put("token", token)
+            } else {
+                put("type", "m.login.password")
+                put("identifier", buildJsonObject {
+                    put("type", "m.id.user")
+                    put("user", bootstrap.expectedUserId)
+                })
+                put("password", requireNotNull(bootstrap.password))
+            }
             put("initial_device_display_name", bootstrap.deviceName)
         }.toString().toByteArray(Charsets.UTF_8)
         val response = try {
@@ -247,7 +251,7 @@ class MatrixTokenLoginClient(
         } catch (_: Exception) {
             null
         }
-        if (response.status != HttpsURLConnection.HTTP_OK) {
+        if (response.status != HttpURLConnection.HTTP_OK) {
             val errorCode = body?.string("errcode", 128)
                 ?.takeIf { MATRIX_ERROR_CODE.matches(it) }
             throw MatrixLoginException(
@@ -322,7 +326,7 @@ class MatrixLoginTokenIssueClient(
         if (initial.status in 200..299) return ready(initial.body)
         if (unsupported(initial)) return MatrixLoginTokenIssueResult.Unsupported
         if (rateLimited(initial)) throw rateLimitException(initial.body)
-        if (initial.status != HttpsURLConnection.HTTP_UNAUTHORIZED) {
+        if (initial.status != HttpURLConnection.HTTP_UNAUTHORIZED) {
             throw MatrixLoginTokenIssueException(initial.status, retryable(initial.status))
         }
 
@@ -397,8 +401,8 @@ class MatrixLoginTokenIssueClient(
     }
 
     private fun unsupported(response: ParsedMatrixResponse): Boolean =
-        response.status == HttpsURLConnection.HTTP_NOT_FOUND ||
-            response.status == HttpsURLConnection.HTTP_BAD_METHOD ||
+        response.status == HttpURLConnection.HTTP_NOT_FOUND ||
+            response.status == HttpURLConnection.HTTP_BAD_METHOD ||
             response.body.string("errcode", 128) == "M_UNRECOGNIZED"
 
     private fun supportsPassword(body: JsonObject?): Boolean = (body?.get("flows") as? JsonArray)

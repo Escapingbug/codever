@@ -1,10 +1,14 @@
 package id.my.anciety.codever.bridge
 
+import id.my.anciety.codever.BuildConfig
 import java.net.URI
 
 object TrustedWebOrigin {
-    const val APP_ORIGIN = "https://rd.anciety.my.id"
-    const val APP_URL = "$APP_ORIGIN/"
+    val APP_ORIGIN: String = BuildConfig.APP_ORIGIN
+    val APP_URL: String = "$APP_ORIGIN/"
+    private val trustedUri = requireNotNull(parse(APP_ORIGIN)) {
+        "The configured Codever Web origin is invalid."
+    }
 
     fun isTrustedOrigin(candidate: String?): Boolean {
         val uri = parse(candidate) ?: return false
@@ -21,10 +25,17 @@ object TrustedWebOrigin {
     }
 
     private fun isTrustedUri(uri: URI): Boolean =
-        uri.scheme.equals("https", ignoreCase = true) &&
-            uri.host.equals("rd.anciety.my.id", ignoreCase = true) &&
-            (uri.port == -1 || uri.port == 443) &&
+        uri.scheme.equals(trustedUri.scheme, ignoreCase = true) &&
+            uri.host.equals(trustedUri.host, ignoreCase = true) &&
+            effectivePort(uri) == effectivePort(trustedUri) &&
             uri.rawUserInfo == null
+
+    private fun effectivePort(uri: URI): Int = when {
+        uri.port != -1 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        uri.scheme.equals("http", ignoreCase = true) -> 80
+        else -> -1
+    }
 
     private fun parse(candidate: String?): URI? {
         if (candidate.isNullOrBlank()) return null

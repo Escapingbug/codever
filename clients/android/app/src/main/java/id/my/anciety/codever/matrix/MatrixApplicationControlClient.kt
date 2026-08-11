@@ -1,10 +1,10 @@
 package id.my.anciety.codever.matrix
 
 import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
-import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -91,11 +91,9 @@ class RestrictedHttpsMatrixApplicationControlTransport(
         accessToken: String,
         body: ByteArray,
     ): MatrixHttpResponse = withContext(Dispatchers.IO) {
-        require(endpoint.scheme == "https" && endpoint.rawUserInfo == null) {
-            "Matrix control endpoint must use HTTPS."
-        }
+        MatrixIdentifiers.requireAllowedEndpoint(endpoint, "Matrix control endpoint")
         require(accessToken.isNotEmpty() && accessToken.length <= 32_768)
-        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpsURLConnection
+        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpURLConnection
         try {
             connection.instanceFollowRedirects = false
             connection.requestMethod = "PUT"
@@ -142,11 +140,9 @@ class RestrictedHttpsMatrixApplicationControlSyncTransport(
         endpoint: URI,
         accessToken: String,
     ): MatrixHttpResponse = withContext(Dispatchers.IO) {
-        require(endpoint.scheme == "https" && endpoint.rawUserInfo == null) {
-            "Matrix control sync endpoint must use HTTPS."
-        }
+        MatrixIdentifiers.requireAllowedEndpoint(endpoint, "Matrix control sync endpoint")
         require(accessToken.isNotEmpty() && accessToken.length <= 32_768)
-        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpsURLConnection
+        val connection = URL(endpoint.toASCIIString()).openConnection() as HttpURLConnection
         try {
             connection.instanceFollowRedirects = false
             connection.requestMethod = "GET"

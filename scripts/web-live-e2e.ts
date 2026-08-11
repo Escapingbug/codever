@@ -7,9 +7,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
+import { runAndroidAlphaJourney } from './e2e/androidAlphaJourney.js'
 import { createDisposableMatrixFixture } from './e2e/localMatrixFixture.js'
 
 const ENABLE_ENV = 'CODEVER_WEB_LIVE_E2E'
+const ALPHA_ENABLE_ENV = 'CODEVER_ALPHA_LIVE_E2E'
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const STARTUP_TIMEOUT_MS = 90_000
@@ -22,9 +24,10 @@ type ManagedProcess = {
     stop(): Promise<void>
 }
 
-if (process.env[ENABLE_ENV] !== '1') {
+const alphaEnabled = process.env[ALPHA_ENABLE_ENV] === '1'
+if (process.env[ENABLE_ENV] !== '1' && !alphaEnabled) {
     throw new Error(
-        `Live Web E2E starts a disposable Synapse fixture and mutates Gateway state. Set ${ENABLE_ENV}=1 to run it.`,
+        `Live Web E2E starts a disposable Synapse fixture and mutates Gateway state. Set ${ENABLE_ENV}=1 or ${ALPHA_ENABLE_ENV}=1 to run it.`,
     )
 }
 
@@ -105,6 +108,9 @@ try {
                 CODEVER_GATEWAY_NAME: `Codever E2E Gateway ${runId}`,
                 CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
                 CODEVER_MATRIX_E2E_PROVIDER: '1',
+                ...(alphaEnabled
+                    ? { CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '3500' }
+                    : {}),
                 CODEVER_CWD: repositoryRoot,
             },
         },
@@ -185,6 +191,25 @@ try {
     await openProjectSession(secondPage, projectName)
     await waitForText(secondPage, prompt)
     await waitForText(secondPage, PROVIDER_RESPONSE)
+
+    if (alphaEnabled) {
+        process.stdout.write('[6b/8] Reloading the browser offline and restoring cached state…\n')
+        await verifyBrowserOfflineHistory(secondPage, projectName, prompt, PROVIDER_RESPONSE)
+        process.stdout.write('[A/8] Running fresh APK, cross-device, notification, and recovery acceptance…\n')
+        await runAndroidAlphaJourney({
+            repositoryRoot,
+            pwaUrl,
+            pwaPort,
+            matrixPort: 8008,
+            runId,
+            browserPage: firstPage,
+            testerUserId: fixture.tester.userId,
+            testerPassword: fixture.tester.password,
+            providerResponse: PROVIDER_RESPONSE,
+            artifactDirectory,
+        })
+        await openProjectSession(firstPage, projectName)
+    }
 
     process.stdout.write('[7/8] Deleting with immediate feedback and durable multi-device absence…\n')
     await Promise.all([
@@ -272,11 +297,21 @@ async function pairBrowser(
     await dialog.getByPlaceholder('Your account password').fill(password)
     await dialog.getByRole('button', { name: 'Sign in', exact: true }).click()
     const connect = dialog.getByRole('button', { name: /^Connect to /u })
-    await waitFor(async () => await connect.isEnabled(), {
-        description: 'enabled secure pairing confirmation',
+    await waitFor(async () => {
+        const connectionLabel = await page
+            .locator('button[aria-label^="Open connection settings,"]')
+            .getAttribute('aria-label')
+        if (connectionLabel?.endsWith('Connected')) return true
+        return await connect.isVisible().catch(() => false)
+            && await connect.isEnabled({ timeout: 500 }).catch(() => false)
+    }, {
+        description: 'signed-in pairing confirmation',
         timeoutMs: STARTUP_TIMEOUT_MS,
     })
-    await connect.click()
+    const connectionLabel = await page
+        .locator('button[aria-label^="Open connection settings,"]')
+        .getAttribute('aria-label')
+    if (!connectionLabel?.endsWith('Connected')) await connect.click()
     await waitForConnected(page)
     const close = page.getByRole('button', { name: 'Close connection settings' })
     if (await close.isVisible().catch(() => false)) await close.click()
@@ -410,6 +445,72 @@ async function reloadAndWaitForConnected(page: Page): Promise<void> {
     await waitForConnected(page)
 }
 
+async function verifyBrowserOfflineHistory(
+    page: Page,
+    projectName: string,
+    prompt: string,
+    response: string,
+): Promise<void> {
+    await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) await navigator.serviceWorker.ready
+    })
+    const context = page.context()
+    await context.setOffline(true)
+    try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: STARTUP_TIMEOUT_MS })
+        // Chromium's DevTools offline emulation keeps requests disconnected but
+        // resets navigator.onLine to true during a service-worker navigation.
+        // Restore the browser-standard signal without changing the real network
+        // failure that this journey exercises.
+        const connectionButton = page.locator(
+            'button[aria-label^="Open connection settings,"]',
+        )
+        await connectionButton.waitFor({ state: 'visible', timeout: CONVERGENCE_TIMEOUT_MS })
+        await page.evaluate(() => new Promise<void>(resolve => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        }))
+        await setEmulatedNavigatorOnline(page, false)
+        try {
+            await waitFor(async () => {
+                const label = await connectionButton.getAttribute('aria-label')
+                return label?.toLocaleLowerCase().endsWith('offline') ?? false
+            }, {
+                description: 'truthful browser offline state',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+                failFast: () => assertNoPageErrors(page),
+            })
+        } catch (error) {
+            const [label, online] = await Promise.all([
+                connectionButton.getAttribute('aria-label'),
+                page.evaluate(() => navigator.onLine),
+            ])
+            throw new Error(`${formatError(error)}; label=${label}; navigator.onLine=${online}`)
+        }
+        await waitForProject(page, projectName)
+        await openProjectSession(page, projectName, CONVERGENCE_TIMEOUT_MS)
+        await waitForText(page, prompt)
+        await waitForText(page, response)
+    } finally {
+        await context.setOffline(false)
+        await setEmulatedNavigatorOnline(page, true)
+    }
+    await waitForConnected(page)
+    await waitForProject(page, projectName)
+    await openProjectSession(page, projectName)
+    await waitForText(page, prompt)
+    await waitForText(page, response)
+}
+
+async function setEmulatedNavigatorOnline(page: Page, online: boolean): Promise<void> {
+    await page.evaluate((nextOnline) => {
+        Object.defineProperty(navigator, 'onLine', {
+            configurable: true,
+            value: nextOnline,
+        })
+        window.dispatchEvent(new Event(nextOnline ? 'online' : 'offline'))
+    }, online)
+}
+
 async function waitForProject(page: Page, projectName: string): Promise<void> {
     await waitFor(
         () => projectSessionExists(page, projectName),
@@ -453,23 +554,42 @@ async function projectSessionFeedback(
     }, projectName)
 }
 
-async function openProjectSession(page: Page, projectName: string): Promise<void> {
+async function openProjectSession(
+    page: Page,
+    projectName: string,
+    selectionTimeoutMs = UI_FEEDBACK_TIMEOUT_MS,
+): Promise<void> {
     const group = page.locator('.project-session-group').filter({
         has: page.locator('.project-copy strong', { hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u') }),
     })
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
     const row = group.locator('button.session-row').first()
-    await row.click()
-    await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
-        description: `selected session in ${projectName}`,
-        timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
-        failFast: () => assertNoPageErrors(page),
-    })
-    await page.locator('.conversation-heading span', { hasText: projectName }).waitFor({
-        state: 'visible',
-        timeout: UI_FEEDBACK_TIMEOUT_MS,
-    })
+    if (!(await row.getAttribute('class'))?.includes('selected')) {
+        await row.click()
+        await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
+            description: `selected session in ${projectName}`,
+            timeoutMs: selectionTimeoutMs,
+            failFast: () => assertNoPageErrors(page),
+        })
+    }
+    try {
+        await page.locator('.conversation-heading').waitFor({
+            state: 'visible',
+            timeout: selectionTimeoutMs,
+        })
+    } catch (error) {
+        const state = await page.evaluate(() => ({
+            heading: document.querySelector('.conversation-heading')?.textContent ?? null,
+            selectedRows: Array.from(document.querySelectorAll('button.session-row.selected'))
+                .map(element => element.textContent),
+            chat: document.querySelector('.chat-feed')?.textContent ?? null,
+            connection: document
+                .querySelector('button[aria-label^="Open connection settings,"]')
+                ?.getAttribute('aria-label') ?? null,
+        }))
+        throw new Error(`${formatError(error)}; state=${JSON.stringify(state)}`)
+    }
 }
 
 async function waitForText(page: Page, text: string): Promise<void> {
