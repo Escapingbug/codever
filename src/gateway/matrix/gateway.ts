@@ -196,6 +196,27 @@ export class MatrixGatewayRunner {
                 state_version: stateVersion,
                 active_device_count:
                     await this.secureContent!.activeDeviceCountForRoom(runtime.config),
+                sessions: snapshot.sessions.map(session => ({
+                    session_id: session.id,
+                    title: session.title,
+                    updated_at: session.updatedAt,
+                    archived: session.archived === true,
+                    status: session.status,
+                    ...(session.activityPhase
+                        ? { activity_phase: session.activityPhase }
+                        : {}),
+                    project: {
+                        id: session.projectId,
+                        name: session.projectName,
+                        cwd: session.cwd,
+                    },
+                    provider: session.provider,
+                    ...(session.model ? { model: session.model } : {}),
+                    ...(session.reasoningEffort
+                        ? { reasoning_effort: session.reasoningEffort }
+                        : {}),
+                    extensions: session.extensions,
+                })),
                 workspace: {
                     project: {
                         id: runtime.workspace.projectId,

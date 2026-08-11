@@ -2,11 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   clearPendingSessionCreateRecovery,
+  completedSessionCreateTarget,
   readPendingSessionCreateRecovery,
   sessionCreateRecoveryMatches,
   writePendingSessionCreateRecovery,
   type PendingSessionCreateRecovery,
 } from "../app/sessionCreateRecovery.ts";
+
+test("does not leave a pending selection when the session root arrives first", () => {
+  assert.deepEqual(
+    completedSessionCreateTarget("session-new", new Set(["session-new"])),
+    { pendingSessionId: null, sessionToReveal: "session-new" },
+  );
+});
+
+test("waits for the session root when the command result arrives first", () => {
+  assert.deepEqual(
+    completedSessionCreateTarget("session-new", new Set()),
+    { pendingSessionId: "session-new", sessionToReveal: null },
+  );
+});
 
 class MemoryStorage {
   readonly values = new Map<string, string>();

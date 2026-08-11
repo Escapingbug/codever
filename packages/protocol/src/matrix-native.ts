@@ -218,6 +218,30 @@ export const matrixSessionLifecycleSchema = z
 
 export type MatrixSessionLifecycle = z.infer<typeof matrixSessionLifecycleSchema>
 
+const matrixCheckpointSessionSchema = z
+  .object({
+    session_id: opaqueId,
+    title: z.string().min(1).max(512),
+    updated_at: timestamp,
+    archived: z.boolean(),
+    status: z.enum(['idle', 'running', 'stopping', 'failed']),
+    activity_phase: z
+      .enum(['starting', 'working', 'stopping', 'idle', 'failed'])
+      .optional(),
+    project: projectSummarySchema,
+    provider: z.string().min(1).max(256),
+    model: z.string().min(1).max(256).optional(),
+    reasoning_effort: z.string().min(1).max(64).optional(),
+    extensions: z.array(
+      z.object({
+        id: opaqueId,
+        name: z.string().min(1).max(256),
+        version: z.string().min(1).max(64),
+      }).strict(),
+    ).max(128),
+  })
+  .strict()
+
 export const matrixGatewayCheckpointSchema = z
   .object({
     version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
@@ -229,6 +253,7 @@ export const matrixGatewayCheckpointSchema = z
     revision_epoch_generation: z.number().int().positive(),
     state_version: z.number().int().nonnegative(),
     active_device_count: z.number().int().positive(),
+    sessions: z.array(matrixCheckpointSessionSchema).max(2_048),
     workspace: z
       .object({
         project: projectSummarySchema,

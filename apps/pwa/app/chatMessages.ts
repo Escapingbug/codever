@@ -162,7 +162,7 @@ export function mergeChatMessage(
       id: existing.id,
       timestamp: timelineCopy.timestamp ?? existing.timestamp ?? message.timestamp,
       time: timelineCopy.time ?? existing.time ?? message.time,
-      raw: preferredTimelineRaw(timelineCopy, message),
+      raw: message.raw,
       optimistic: !incomingIsCanonical && message.optimistic,
     });
   }

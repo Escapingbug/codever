@@ -686,14 +686,15 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /cachedGatewayState[\s\S]*handlers\.onCollaborationState/,
   );
   assert.match(matrix, /revisionInitialized: false/);
-  assert.match(matrix, /stateVersion < baselineStateVersion/);
+  assert.match(matrix, /classifyGatewayStateProgress/);
+  assert.match(matrix, /isIgnorableGatewayStateReplay/);
   assert.match(matrix, /retiredRevisionEpochs/);
   assert.match(matrix, /gateway-epoch-v1/);
   assert.match(
     matrix,
     /function gatewayEpochScope[\s\S]*config\.gatewayId,[\s\S]*identity\.keyId,[\s\S]*config\.conversationId/,
   );
-  assert.match(matrix, /epochStatus === "retired" \|\| epochStatus === "stale"/);
+  assert.match(matrix, /isIgnorableGatewayStateReplay\(epochStatus/);
   assert.match(matrix, /revisionEpochGeneration/);
   assert.match(matrix, /changed epoch without advancing its generation/);
   assert.match(matrix, /lastAcknowledged: 0,[\s\S]*revisionEpoch,[\s\S]*stateVersion/);

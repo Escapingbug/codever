@@ -20,3 +20,4 @@ dev/matrix/data/
 dev/matrix/gateway-data/
 dev/matrix/local-test.json
 dev/matrix/pairing.json
+artifacts/e2e/

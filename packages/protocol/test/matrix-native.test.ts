@@ -36,7 +36,7 @@ describe('Matrix native conversation protocol', () => {
     }).rel_type).toBe('m.thread')
   })
 
-  it('keeps the Gateway checkpoint free of a session inventory', () => {
+  it('carries the current session inventory for a newly paired device', () => {
     const checkpoint = matrixGatewayCheckpointSchema.parse({
       version: 2,
       kind: 'gateway_checkpoint',
@@ -47,6 +47,16 @@ describe('Matrix native conversation protocol', () => {
       revision_epoch_generation: 1,
       state_version: 3,
       active_device_count: 2,
+      sessions: [{
+        session_id: 'session-1',
+        title: 'Fix sync',
+        updated_at: 19,
+        archived: false,
+        status: 'running',
+        project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
+        provider: 'codex',
+        extensions: [],
+      }],
       workspace: {
         project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
         provider: 'codex',
@@ -55,7 +65,7 @@ describe('Matrix native conversation protocol', () => {
       capabilities: { canCreateSession: true },
       updated_at: 20,
     })
-    expect(checkpoint).not.toHaveProperty('sessions')
+    expect(checkpoint.sessions[0]?.session_id).toBe('session-1')
   })
 
   it('advances cross-device concurrency without publishing a state snapshot', () => {

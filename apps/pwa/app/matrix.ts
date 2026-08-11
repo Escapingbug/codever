@@ -80,7 +80,9 @@ import {
 } from "./matrixSyncStore";
 import {
   classifyGatewayStateEpoch,
+  classifyGatewayStateProgress,
   createGatewayStateCacheRecord,
+  isIgnorableGatewayStateReplay,
   parseGatewayStateCacheRecord,
   type GatewayStateCacheBinding,
   type GatewayStateSnapshot,
@@ -3663,11 +3665,10 @@ async function initializeKnownRevision(
             revisionEpoch,
             revisionEpochGeneration,
           );
-          if (epochStatus === "retired" || epochStatus === "stale") {
-            throw new Error(
-              "Rejected a Gateway state snapshot from an older revision epoch generation.",
-            );
-          }
+          // Timeline recovery replays authenticated older checkpoints. They
+          // are history, not fatal connection errors, and must never replace
+          // a newer durable projection.
+          if (isIgnorableGatewayStateReplay(epochStatus)) return;
           if (epochStatus === "conflict") {
             throw new Error(
               "Rejected a Gateway state snapshot that changed epoch without advancing its generation.",
@@ -3679,21 +3680,16 @@ async function initializeKnownRevision(
             epochState?.stateVersion ?? state.stateVersion;
           const baselineRevision =
             epochState?.revision ?? state.lastRevision;
-          if (
-            sameEpoch &&
-            (stateVersion < baselineStateVersion ||
-              (stateVersion === baselineStateVersion &&
-                revision !== baselineRevision))
-          ) {
-            throw new Error(
-              "Rejected an inconsistent or stale Gateway state snapshot.",
-            );
-          }
-          if (sameEpoch && revision < baselineRevision) {
-            throw new Error(
-              "Rejected a Gateway state snapshot with a regressed revision.",
-            );
-          }
+          const progress = sameEpoch
+            ? classifyGatewayStateProgress(
+                {
+                  stateVersion: baselineStateVersion,
+                  revision: baselineRevision,
+                },
+                { stateVersion, revision },
+              )
+            : "advance";
+          if (isIgnorableGatewayStateReplay(epochStatus, progress)) return;
           const retiredRevisionEpochs = sameEpoch
             ? epochState.retiredRevisionEpochs
             : [
@@ -3714,7 +3710,7 @@ async function initializeKnownRevision(
             epochState === null ||
             !commandAlreadyCurrent ||
             !sameEpoch ||
-            stateVersion > state.stateVersion;
+            progress === "advance";
           accepted = true;
           store.put(
             createGatewayStateCacheRecord(cacheBinding, gatewayState),

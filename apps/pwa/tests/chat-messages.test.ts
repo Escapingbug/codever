@@ -185,6 +185,36 @@ test("canonical history wins over a persisted optimistic duplicate", () => {
   assert.equal(messages[0].eventId, "$canonical-user");
 });
 
+test("canonical Matrix echo reconciles an optimistic user message", () => {
+  const optimistic = {
+    id: "user-local",
+    kind: "user",
+    text: "Hello",
+    timestamp: 2_000,
+    commandId: "command-1",
+    optimistic: true,
+    raw: { source: "optimistic" },
+  };
+  const canonical = {
+    id: "$canonical-user",
+    eventId: "$canonical-user",
+    kind: "user",
+    text: "Hello",
+    timestamp: 1_000,
+    commandId: "command-1",
+    raw: { source: "matrix" },
+  };
+
+  const messages = mergeChatMessage([optimistic], canonical);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, optimistic.id);
+  assert.equal(messages[0].eventId, canonical.eventId);
+  assert.equal(messages[0].timestamp, canonical.timestamp);
+  assert.deepEqual(messages[0].raw, canonical.raw);
+  assert.equal(messages[0].optimistic, false);
+});
+
 test("legacy startup placeholders never enter the visible transcript", () => {
   const messages = mergeChatMessages([], [
     {

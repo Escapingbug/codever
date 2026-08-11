@@ -11,8 +11,11 @@ const ENABLE_ENV = 'CODEVER_ANDROID_LIVE_E2E'
 const PHYSICAL_ENV = 'CODEVER_ANDROID_ALLOW_PHYSICAL'
 const SERIAL_ENV = 'CODEVER_ANDROID_SERIAL'
 const DEFAULT_TIMEOUT_MS = 30_000
-const LIFECYCLE_TIMEOUT_MS = 90_000
-const LIFECYCLE_LATENCY_WARNING_MS = 20_000
+// A business E2E must assert both perceived responsiveness and eventual
+// convergence. A queued Matrix operation may finish in the background, but
+// the UI must acknowledge the user's intent immediately.
+const ACTION_FEEDBACK_TIMEOUT_MS = 1_500
+const LIFECYCLE_TIMEOUT_MS = 15_000
 
 type JsonRecord = Record<string, unknown>
 
@@ -32,6 +35,10 @@ type PageState = {
     archivedProjects: string[]
     archivedBanner: boolean
     recentMessagesVisible: boolean
+    sessionCreatePending: boolean
+    selectedSessionCount: number
+    deletingSessionCount: number
+    mobileChatOpen: boolean
     dialogs: string[]
     alerts: string[]
 }
@@ -320,6 +327,10 @@ const PAGE_STATE_EXPRESSION = `(() => {
         archivedProjects,
         archivedBanner: Boolean(document.querySelector('.archived-session-banner')),
         recentMessagesVisible: document.body?.innerText.includes('Recent messages') || false,
+        sessionCreatePending: Boolean(document.querySelector('.session-create-pending')),
+        selectedSessionCount: document.querySelectorAll('button.session-row.selected').length,
+        deletingSessionCount: document.querySelectorAll('button.session-row.is-busy').length,
+        mobileChatOpen: document.querySelector('.app-shell')?.classList.contains('mobile-chat-open') || false,
         dialogs: Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]'))
             .map(element => normalized(element.querySelector('h2')?.textContent || element.textContent || '')),
         alerts: Array.from(document.querySelectorAll('[role="alert"]'))
@@ -348,7 +359,6 @@ assert.equal(initialAirplaneMode, false, 'The device must be online before live 
 const runId = Date.now().toString(36).toUpperCase()
 const testProjects = [`Codever Android E2E ${runId} A`, `Codever Android E2E ${runId} B`]
 const pendingCleanup = new Set<string>()
-const latencyWarnings: string[] = []
 let page: DevtoolsPage | undefined
 let forwardedPort: string | undefined
 
@@ -393,33 +403,44 @@ try {
             page,
             projectName,
             baselineSessionCount,
-            latencyWarnings,
         )
         pendingCleanup.delete(projectName)
+        ;({ page, port: forwardedPort } = await restartAndAttach(serial, page, forwardedPort))
+        const restarted = await page.waitFor(
+            `Gateway recovery after deleting ${projectName}`,
+            state =>
+                state.connection.endsWith('Connected') &&
+                !state.activeProjects.includes(projectName) &&
+                !state.archivedProjects.includes(projectName),
+        )
+        assertHealthy(restarted)
+        assert.equal(
+            restarted.activeSessionCount + restarted.archivedSessionCount,
+            baselineSessionCount,
+            `Deleted session ${projectName} reappeared after process restart`,
+        )
+        assert.equal(
+            await page.openActiveProjectSession(projectName),
+            false,
+            `Deleted session ${projectName} remained actionable after restart`,
+        )
         if (index === 0) {
-            ;({ page, port: forwardedPort } = await restartAndAttach(serial, page, forwardedPort))
-            const restarted = await page.waitFor(
-                'Gateway recovery after lifecycle process restart',
-                state => state.connection.endsWith('Connected'),
-            )
-            assertHealthy(restarted)
-            assert.equal(
-                restarted.activeSessionCount + restarted.archivedSessionCount,
-                baselineSessionCount,
-            )
+            process.stdout.write('  first deletion remained absent after process restart\n')
         }
     }
 
-    if (latencyWarnings.length > 0) {
+    process.stdout.write(
+        '[5/5] PASS — immediate UI feedback, network recovery, process restart, ' +
+        'cached history, durable deletion, and lifecycle convergence passed.\n',
+    )
+} catch (error) {
+    if (page) {
+        const state = await page.state().catch(() => null)
         process.stderr.write(
-            `Lifecycle latency warnings (>${LIFECYCLE_LATENCY_WARNING_MS} ms):\n` +
-            latencyWarnings.map(warning => `  - ${warning}\n`).join(''),
+            `Live E2E failure state: ${JSON.stringify(state)}\n`,
         )
     }
-    process.stdout.write(
-        `[5/5] PASS${latencyWarnings.length > 0 ? ' with latency warnings' : ''} — ` +
-        'network, process restart, cached history, and lifecycle recovery passed.\n',
-    )
+    throw error
 } finally {
     if (await airplaneMode(serial).catch(() => initialAirplaneMode)) {
         await setAirplaneMode(serial, initialAirplaneMode).catch(error => {
@@ -443,10 +464,17 @@ async function exerciseSessionLifecycle(
     page: DevtoolsPage,
     projectName: string,
     baselineSessionCount: number,
-    latencyWarnings: string[],
 ): Promise<void> {
     let startedAt = Date.now()
     await page.createSession(projectName)
+    const creationFeedback = await page.waitFor(
+        `immediate creation feedback for ${projectName}`,
+        state =>
+            state.sessionCreatePending &&
+            !state.dialogs.some(dialog => dialog.startsWith('Create a session')),
+        ACTION_FEEDBACK_TIMEOUT_MS,
+    )
+    assertHealthy(creationFeedback)
     const created = await page.waitFor(
         `created session in ${projectName}`,
         state =>
@@ -456,7 +484,7 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(created)
-    recordLatency(projectName, 'create', startedAt, latencyWarnings)
+    recordLatency(projectName, 'create', startedAt)
 
     startedAt = Date.now()
     await page.clickConversationActionStrong('Archive session')
@@ -466,7 +494,7 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(archived)
-    recordLatency(projectName, 'archive', startedAt, latencyWarnings)
+    recordLatency(projectName, 'archive', startedAt)
 
     startedAt = Date.now()
     await page.waitForButtonTextEnabled('Restore')
@@ -477,28 +505,42 @@ async function exerciseSessionLifecycle(
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(restored)
-    recordLatency(projectName, 'restore', startedAt, latencyWarnings)
+    recordLatency(projectName, 'restore', startedAt)
 
     startedAt = Date.now()
-    await deleteSelectedSession(page)
+    await deleteSelectedSession(page, projectName)
     const deleted = await page.waitFor(
         `deleted session in ${projectName}`,
         state =>
             !state.activeProjects.includes(projectName) &&
+            !state.archivedProjects.includes(projectName) &&
             state.activeSessionCount + state.archivedSessionCount === baselineSessionCount,
         LIFECYCLE_TIMEOUT_MS,
     )
     assertHealthy(deleted)
-    recordLatency(projectName, 'delete', startedAt, latencyWarnings)
+    recordLatency(projectName, 'delete', startedAt)
 }
 
-async function deleteSelectedSession(page: DevtoolsPage): Promise<void> {
+async function deleteSelectedSession(
+    page: DevtoolsPage,
+    projectName: string,
+): Promise<void> {
     await page.clickConversationActionStrong('Delete session')
     await page.waitFor(
         'the delete confirmation',
         state => state.dialogs.some(dialog => dialog.startsWith('Delete “')),
     )
     await page.clickButtonText('Delete session', '[role="alertdialog"]')
+    const feedback = await page.waitFor(
+        `immediate deletion feedback for ${projectName}`,
+        state =>
+            !state.dialogs.some(dialog => dialog.startsWith('Delete “')) &&
+            !state.activeProjects.includes(projectName) &&
+            state.selectedSessionCount === 0 &&
+            !state.mobileChatOpen,
+        ACTION_FEEDBACK_TIMEOUT_MS,
+    )
+    assertHealthy(feedback)
 }
 
 async function cleanupProjectSession(page: DevtoolsPage, projectName: string): Promise<void> {
@@ -511,7 +553,7 @@ async function cleanupProjectSession(page: DevtoolsPage, projectName: string): P
     await page.waitFor('the disposable session to open', current => current.selectedTitle === 'New session')
     state = await page.state()
     const sessionCountBeforeDelete = state.activeSessionCount + state.archivedSessionCount
-    await deleteSelectedSession(page)
+    await deleteSelectedSession(page, projectName)
     await page.waitFor(
         `cleanup of ${projectName}`,
         current =>
@@ -528,17 +570,19 @@ function recordLatency(
     projectName: string,
     action: string,
     startedAt: number,
-    warnings: string[],
 ): void {
     const durationMs = Date.now() - startedAt
     const sample = `${projectName} ${action}: ${durationMs} ms`
     process.stdout.write(`  ${sample}\n`)
-    if (durationMs > LIFECYCLE_LATENCY_WARNING_MS) warnings.push(sample)
+    assert.ok(
+        durationMs <= LIFECYCLE_TIMEOUT_MS,
+        `${sample} exceeded the ${LIFECYCLE_TIMEOUT_MS} ms business convergence budget`,
+    )
 }
 
 function assertHealthy(state: PageState): void {
     const unexpected = state.alerts.filter(alert =>
-        /history could not be restored|native bridge did not answer|matrix runtime failed|needs review|must be acknowledged/iu.test(alert),
+        /history could not be restored|native bridge did not answer|matrix runtime failed|needs review|must be acknowledged|previous action|connected device did not respond|too many requests/iu.test(alert),
     )
     assert.deepEqual(unexpected, [], `Blocking Codever alert appeared: ${unexpected.join(' | ')}`)
 }

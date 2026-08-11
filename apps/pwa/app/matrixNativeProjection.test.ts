@@ -4,6 +4,7 @@ import { MatrixNativeProjection } from "./matrixNativeProjection";
 describe("MatrixNativeProjection", () => {
   it("rebuilds session inventory from roots and lifecycle deltas", () => {
     const projection = new MatrixNativeProjection();
+    projection.apply(checkpoint());
     projection.apply({
       version: 2,
       kind: "session_root",
@@ -19,7 +20,7 @@ describe("MatrixNativeProjection", () => {
       permission_mode: "default",
       extensions: [],
     });
-    const state = projection.apply(checkpoint());
+    const state = projection.snapshot();
     expect(state?.sessions).toMatchObject([{ id: "s1", status: "running" }]);
     expect(projection.apply({
       version: 2,
@@ -38,6 +39,69 @@ describe("MatrixNativeProjection", () => {
       updated_at: 3,
     })?.sessions).toEqual([]);
     expect(projection.snapshot()?.revision).toBe(3);
+  });
+
+  it("bootstraps sessions from the latest checkpoint without historical roots", () => {
+    const projection = new MatrixNativeProjection();
+    const state = projection.apply({
+      ...checkpoint(),
+      sessions: [{
+        session_id: "s-existing",
+        title: "Existing work",
+        updated_at: 7,
+        archived: false,
+        status: "idle" as const,
+        project: { id: "p1", name: "codever", cwd: "/repo" },
+        provider: "codex",
+        extensions: [],
+      }],
+    });
+
+    expect(state?.sessions).toMatchObject([{
+      id: "s-existing",
+      title: "Existing work",
+      projectName: "codever",
+    }]);
+  });
+
+  it("does not let a duplicate checkpoint erase newer session roots", () => {
+    const projection = new MatrixNativeProjection();
+    const initial = {
+      ...checkpoint(),
+      sessions: [{
+        session_id: "s-existing",
+        title: "Existing work",
+        updated_at: 7,
+        archived: false,
+        status: "idle" as const,
+        project: { id: "p1", name: "codever", cwd: "/repo" },
+        provider: "codex",
+        extensions: [],
+      }],
+    };
+    projection.apply(initial);
+    projection.apply({
+      version: 2,
+      kind: "session_root",
+      ...revision(2),
+      session_id: "s-new",
+      title: "New work",
+      project: { id: "p2", name: "another", cwd: "/another" },
+      created_at: 8,
+      updated_at: 8,
+      archived: false,
+      status: "idle",
+      provider: "codex",
+      permission_mode: "default",
+      extensions: [],
+    });
+
+    const replayed = projection.apply(initial);
+
+    expect(replayed?.sessions.map((session) => session.id).sort()).toEqual([
+      "s-existing",
+      "s-new",
+    ]);
   });
 
   it("replays updates that arrive before their thread root", () => {
@@ -142,6 +206,7 @@ function checkpoint() {
     revision_epoch_generation: 1,
     state_version: 1,
     active_device_count: 1,
+    sessions: [],
     workspace: {
       project: { id: "p1", name: "codever", cwd: "/repo" },
       provider: "codex",

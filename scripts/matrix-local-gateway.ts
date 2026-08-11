@@ -28,6 +28,10 @@ import {
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
+import type {
+    AgentProvider,
+    AgentQueryHandle,
+} from '../src/providers/provider.js'
 import { createSessionExtensionRegistryFromEnvironment } from '../src/runtime/sessionExtensionConfig.js'
 
 interface LocalMatrixFixture {
@@ -63,9 +67,15 @@ const fixture = await readJson<LocalMatrixFixture>(
 assertAllowedHomeserver(fixture.homeserver)
 
 const registered = registerConfiguredProviders()
-const providerName = process.env.CODEVER_PROVIDER
-    ?? registered.defaultProvider
-    ?? 'codex'
+const deterministicE2eProvider = process.env.CODEVER_MATRIX_E2E_PROVIDER === '1'
+if (deterministicE2eProvider && !isLoopbackHomeserver(fixture.homeserver)) {
+    throw new Error('CODEVER_MATRIX_E2E_PROVIDER is allowed only with a loopback homeserver')
+}
+const providerName = deterministicE2eProvider
+    ? 'codex'
+    : process.env.CODEVER_PROVIDER
+        ?? registered.defaultProvider
+        ?? 'codex'
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
 const sessionExtensionRegistry = createSessionExtensionRegistryFromEnvironment()
 const runId = Date.now().toString(36).toUpperCase()
@@ -262,6 +272,9 @@ const config: MatrixGatewayConfig = {
 runner = new MatrixGatewayRunner(config, {
     client,
     sessionExtensionRegistry,
+    ...(deterministicE2eProvider
+        ? { providerFactory: () => e2eProvider(providerName) }
+        : {}),
     listTrustedDevices: async () =>
         (await registry.listActive()).map(trustedDeviceFromRecord),
     isTrustedDeviceActive: async deviceId =>
@@ -289,6 +302,9 @@ runner = new MatrixGatewayRunner(config, {
             `[matrix-gateway] rejected ${event.eventId}: ${formatError(error)}\n`,
         )
     },
+    ...(deterministicE2eProvider
+        ? { onLog: (message: string) => process.stderr.write(`${message}\n`) }
+        : {}),
 })
 
 await runner.start()
@@ -468,4 +484,26 @@ function formatCode(code: string): string {
 
 function formatError(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
+}
+
+function e2eProvider(name: string): AgentProvider {
+    return {
+        name,
+        startQuery(): AgentQueryHandle {
+            return {
+                events: (async function* () {
+                    yield {
+                        kind: 'text' as const,
+                        text: 'Codever deterministic E2E response',
+                    }
+                    yield { kind: 'result' as const, status: 'success' as const }
+                })(),
+                async interrupt() {},
+            }
+        },
+        isReady: () => true,
+        getInitError: () => null,
+        getAvailableModels: () => [],
+        getAvailablePermissionModes: () => ['default'],
+    }
 }

@@ -98,6 +98,39 @@ export function classifyGatewayStateEpoch(
   return incomingEpoch === currentEpoch ? "current" : "conflict";
 }
 
+/**
+ * Checkpoint versions and semantic revisions advance independently. Matrix
+ * native session events deliberately reuse the latest checkpoint version
+ * while advancing the conversation revision, so equal state versions are not
+ * evidence of a conflicting snapshot.
+ */
+export function classifyGatewayStateProgress(
+  current: Pick<GatewayStateCacheEpoch, "stateVersion" | "revision">,
+  incoming: Pick<GatewayStateCacheEpoch, "stateVersion" | "revision">,
+): "current" | "advance" | "stale" {
+  if (
+    incoming.stateVersion < current.stateVersion ||
+    incoming.revision < current.revision
+  ) {
+    return "stale";
+  }
+  return incoming.stateVersion === current.stateVersion &&
+    incoming.revision === current.revision
+      ? "current"
+      : "advance";
+}
+
+export function isIgnorableGatewayStateReplay(
+  epochStatus: ReturnType<typeof classifyGatewayStateEpoch>,
+  progress?: ReturnType<typeof classifyGatewayStateProgress>,
+): boolean {
+  return (
+    epochStatus === "retired" ||
+    epochStatus === "stale" ||
+    (epochStatus === "current" && progress === "stale")
+  );
+}
+
 export function parseGatewayStateExtension(
   value: unknown,
 ): GatewayStateSnapshot | null {

@@ -31,8 +31,31 @@ export class MatrixNativeProjection {
     const event = matrixNativeContentSchema.parse(input);
     this.observeRevision(event);
     if (event.kind === "gateway_checkpoint") {
-      if (!this.checkpoint || event.state_version >= this.checkpoint.state_version) {
+      if (!this.checkpoint || event.state_version > this.checkpoint.state_version) {
         this.checkpoint = event;
+        this.sessions.clear();
+        for (const session of event.sessions) {
+          if (this.deletedAt.has(session.session_id)) continue;
+          this.sessions.set(session.session_id, {
+            id: session.session_id,
+            title: session.title,
+            updatedAt: session.updated_at,
+            status: session.archived ? "archived" : session.status,
+            ...(session.activity_phase
+              ? { activityPhase: session.activity_phase }
+              : {}),
+            projectId: session.project.id,
+            projectName: session.project.name,
+            cwd: session.project.cwd,
+            provider: session.provider,
+            ...(session.model ? { model: session.model } : {}),
+            ...(session.reasoning_effort
+              ? { reasoningEffort: session.reasoning_effort }
+              : {}),
+            extensions: session.extensions,
+          });
+          this.drainPendingDeltas(session.session_id);
+        }
       }
       return this.snapshot();
     }

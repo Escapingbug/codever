@@ -16,6 +16,25 @@ export type PendingSessionCreateRecovery = {
   input: NewSessionInput;
 };
 
+export type CompletedSessionCreateTarget = {
+  pendingSessionId: string | null;
+  sessionToReveal: string | null;
+};
+
+/**
+ * Resolves both valid Matrix event orders for a completed session creation.
+ * If the native session root is already projected, reveal it immediately and
+ * leave no pending marker that could override a later manual selection.
+ */
+export function completedSessionCreateTarget(
+  sessionId: string,
+  knownSessionIds: ReadonlySet<string>,
+): CompletedSessionCreateTarget {
+  return knownSessionIds.has(sessionId)
+    ? { pendingSessionId: null, sessionToReveal: sessionId }
+    : { pendingSessionId: sessionId, sessionToReveal: null };
+}
+
 export function readPendingSessionCreateRecovery(
   storage: SessionCreateRecoveryStorage | null,
 ): PendingSessionCreateRecovery | null {
