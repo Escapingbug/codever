@@ -79,7 +79,7 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `recognizes only raw application control events with secure envelopes`() {
+    fun `recognizes only application encrypted control and timeline events`() {
         val event = """
             {
               "type":"io.codever.secure_control.v1",
@@ -95,11 +95,41 @@ class MatrixApplicationControlClientTest {
             "\"secure_envelope\":",
             "\"secure_envelope_bundle\":",
         )))
+        assertTrue(isCodeverApplicationControlEvent("""
+            {
+              "type":"m.room.message",
+              "content":${timelineContent()}
+            }
+        """.trimIndent()))
         assertFalse(isCodeverApplicationControlEvent(secureContent()))
+        assertFalse(isCodeverApplicationControlEvent("""
+            {
+              "type":"m.room.message",
+              "content":${secureContent()}
+            }
+        """.trimIndent()))
         assertFalse(isCodeverApplicationControlEvent("""
             {
               "type":"io.codever.secure_control.v1",
               "content":{"io.codever":{"version":1,"kind":"history_page"}}
+            }
+        """.trimIndent()))
+    }
+
+    @Test
+    fun `sdk timeline defers application encrypted events to persistent sync`() {
+        val timelineEvent = """
+            {
+              "type":"m.room.message",
+              "content":${timelineContent()}
+            }
+        """.trimIndent()
+
+        assertFalse(shouldCaptureMatrixSdkTimelineEvent(timelineEvent))
+        assertTrue(shouldCaptureMatrixSdkTimelineEvent("""
+            {
+              "type":"m.room.message",
+              "content":{"msgtype":"m.text","body":"ordinary Matrix message"}
             }
         """.trimIndent()))
     }
@@ -110,13 +140,22 @@ class MatrixApplicationControlClientTest {
         val responseBody = """
             {
               "next_batch":"s-next",
-              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"events":[{
-                "type":"io.codever.secure_control.v1",
-                "event_id":"${'$'}control-response",
-                "sender":"@gateway:example.org",
-                "origin_server_ts":1234,
-                "content":${secureContent()}
-              }]}}}}
+              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"events":[
+                {
+                  "type":"io.codever.secure_control.v1",
+                  "event_id":"${'$'}control-response",
+                  "sender":"@gateway:example.org",
+                  "origin_server_ts":1234,
+                  "content":${secureContent()}
+                },
+                {
+                  "type":"m.room.message",
+                  "event_id":"${'$'}timeline-response",
+                  "sender":"@gateway:example.org",
+                  "origin_server_ts":1235,
+                  "content":${timelineContent()}
+                }
+              ]}}}}
             }
         """.trimIndent().toByteArray()
         val client = MatrixApplicationControlSyncClient(
@@ -130,10 +169,9 @@ class MatrixApplicationControlClientTest {
         val batch = client.sync(storedSession(), "s-current")
 
         assertEquals("s-next", batch.nextBatch)
-        assertEquals(1, batch.events.size)
-        assertEquals("\$control-response", batch.events.single().eventId)
-        assertEquals("@gateway:example.org", batch.events.single().sender)
-        assertEquals(1234L, batch.events.single().timestamp)
+        assertEquals(listOf("\$control-response", "\$timeline-response"), batch.events.map { it.eventId })
+        assertEquals("@gateway:example.org", batch.events.first().sender)
+        assertEquals(1234L, batch.events.first().timestamp)
         assertTrue(batch.limited)
         assertTrue(endpoint.rawQuery.contains("since=s-current"))
         assertTrue(endpoint.rawQuery.contains("filter="))
@@ -149,6 +187,10 @@ class MatrixApplicationControlClientTest {
         assertEquals(
             "@gateway:example.org",
             timeline.getValue("senders").jsonArray.single().jsonPrimitive.content,
+        )
+        assertEquals(
+            setOf("io.codever.secure_control.v1", "m.room.message"),
+            timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
         assertTrue(responseBody.all { it == 0.toByte() })
@@ -193,6 +235,25 @@ class MatrixApplicationControlClientTest {
         assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
     }
 
+    @Test
+    fun `receiver readiness check does not long poll a persisted cursor`() = runBlocking {
+        lateinit var endpoint: URI
+        val responseBody = """
+            {"next_batch":"s-ready","rooms":{"join":{}}}
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { target, _ ->
+                endpoint = target
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        client.sync(storedSession(), since = "s-current", longPoll = false)
+
+        assertTrue(endpoint.rawQuery.contains("since=s-current"))
+        assertTrue(endpoint.rawQuery.contains("timeout=0"))
+    }
+
     private fun secureContent() = """
         {
           "msgtype":"m.notice",
@@ -201,6 +262,19 @@ class MatrixApplicationControlClientTest {
             "version":1,
             "kind":"secure_envelope",
             "secure_envelope":{"envelope":{},"signature":{}}
+          }
+        }
+    """.trimIndent()
+
+    private fun timelineContent() = """
+        {
+          "msgtype":"m.notice",
+          "body":"Encrypted Codever timeline event",
+          "io.codever":{
+            "version":2,
+            "kind":"timeline_envelope",
+            "timeline_envelope":{"envelope":{},"signature":{}},
+            "timeline_key_ring_bundle":{"bundle":{},"signature":{}}
           }
         }
     """.trimIndent()

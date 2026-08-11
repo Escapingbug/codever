@@ -1225,6 +1225,19 @@ describe('MatrixJsSdkGatewayClient', () => {
             expect.objectContaining({ body: 'outgoing' }),
             'txn-1',
         )
+        await expect(client.sendApplicationTimelineEvent({
+            roomId: '!room:example.org',
+            eventType: 'm.room.message',
+            content: {
+                msgtype: 'm.notice',
+                body: 'invalid timeline',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 2,
+                    kind: 'session_root',
+                },
+            },
+            transactionId: 'rejected-timeline',
+        })).rejects.toThrow('must contain a Codever timeline envelope')
         await expect(client.sendApplicationControlEvent({
             roomId: '!room:example.org',
             eventType: 'io.codever.secure_control.v1',
@@ -1240,6 +1253,27 @@ describe('MatrixJsSdkGatewayClient', () => {
             transactionId: 'rejected-control',
         })).rejects.toThrow('must contain a Codever secure envelope')
         expect(sdk.http.authedRequest).not.toHaveBeenCalled()
+        await client.sendApplicationTimelineEvent({
+            roomId: '!room:example.org',
+            eventType: 'm.room.message',
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever timeline event',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 2,
+                    kind: 'timeline_envelope',
+                    timeline_envelope: { envelope: {}, signature: {} },
+                    timeline_key_ring_bundle: { bundle: {}, signature: {} },
+                },
+            },
+            transactionId: 'timeline/txn',
+        })
+        expect(sdk.http.authedRequest).toHaveBeenCalledWith(
+            'PUT',
+            '/rooms/!room%3Aexample.org/send/m.room.message/timeline%2Ftxn',
+            undefined,
+            expect.objectContaining({ body: 'Encrypted Codever timeline event' }),
+        )
         await client.sendApplicationControlEvent({
             roomId: '!room:example.org',
             eventType: 'io.codever.secure_control.v1',
@@ -1261,6 +1295,7 @@ describe('MatrixJsSdkGatewayClient', () => {
             expect.objectContaining({ body: 'Encrypted Codever message' }),
         )
         expect(sdk.sendMessage).toHaveBeenCalledTimes(1)
+        expect(sdk.http.authedRequest).toHaveBeenCalledTimes(2)
         await client.stop()
         expect(sdk.stopClient).toHaveBeenCalledOnce()
     })

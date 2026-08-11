@@ -26,6 +26,17 @@ test("maps legacy native sync progress without exposing the machine code", () =>
   assert.equal(presentation.rawDetailCode, "matrix_sync_connecting");
 });
 
+test("keeps the connection in progress until Gateway state is authoritative", () => {
+  const presentation = deriveConnectionPresentation(
+    "connecting",
+    "matrix_gateway_state_syncing",
+  );
+  assert.equal(presentation.state, "progress");
+  assert.equal(presentation.title, "Syncing conversations");
+  assert.equal(presentation.detail, "Checking your latest Gateway state…");
+  assert.equal(presentation.rawDetailCode, "matrix_gateway_state_syncing");
+});
+
 test("blocked native codes provide actionable copy instead of leaking raw codes", () => {
   const presentation = deriveConnectionPresentation(
     "error",

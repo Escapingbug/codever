@@ -8,20 +8,23 @@ import org.junit.Test
 
 class MatrixAccountWiperTest {
     @Test
-    fun `native cache migration preserves crypto data and removes only legacy cache`() {
+    fun `native cache migration preserves crypto data and removes obsolete timeline caches`() {
         val accountRoot = Files.createTempDirectory("codever-matrix-cache-migration").toFile()
         try {
             val data = accountRoot.resolve("data").apply { mkdirs() }
             data.resolve("crypto.db").writeText("preserve-device-identity")
             val legacyCache = accountRoot.resolve("cache").apply { mkdirs() }
             legacyCache.resolve("sliding-sync.db").writeText("discard")
+            val unboundedCache = accountRoot.resolve("cache-v2").apply { mkdirs() }
+            unboundedCache.resolve("matrix-sdk-event-cache.sqlite3").writeText("discard")
 
             val prepared = MatrixAccountCacheMigration.prepare(accountRoot)
 
             assertTrue(prepared.migrated)
-            assertEquals(accountRoot.resolve("cache-v2").canonicalFile, prepared.directory)
+            assertEquals(accountRoot.resolve("cache-v3").canonicalFile, prepared.directory)
             assertTrue(prepared.directory.isDirectory)
             assertFalse(legacyCache.exists())
+            assertFalse(unboundedCache.exists())
             assertEquals("preserve-device-identity", data.resolve("crypto.db").readText())
         } finally {
             accountRoot.deleteRecursively()
@@ -38,6 +41,7 @@ class MatrixAccountWiperTest {
 
             assertFalse(first.migrated)
             assertFalse(second.migrated)
+            assertEquals(accountRoot.resolve("cache-v3").canonicalFile, second.directory)
             assertEquals("keep", second.directory.resolve("current-cache.db").readText())
         } finally {
             accountRoot.deleteRecursively()

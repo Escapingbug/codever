@@ -17,6 +17,20 @@ import org.junit.Test
 
 class DurableCommandOutboxTest {
     @Test
+    fun `restart recovers a committed command whose send coroutine had not started`() {
+        val fixture = fixture()
+        val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.delete"))
+
+        val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
+        assertEquals(CommandState.RECOVERY_REQUIRED, restored.get(receipt.commandId)?.state)
+        val recoveryLease = restored.claimRecovery(receipt.commandId)!!
+
+        assertEquals(receipt.commandId, recoveryLease.commandId)
+        assertEquals(receipt.sequence, recoveryLease.sequence)
+        assertTrue(recoveryLease.recovery)
+    }
+
+    @Test
     fun `duplicate idempotency returns the original operation without reserving a sequence`() {
         val fixture = fixture()
         val key = UUID.randomUUID().toString()

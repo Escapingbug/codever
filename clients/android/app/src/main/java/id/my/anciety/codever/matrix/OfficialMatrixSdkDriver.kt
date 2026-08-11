@@ -416,12 +416,18 @@ class OfficialMatrixSdkDriver(
         if (kind !is MsgLikeKind.Message && kind !is MsgLikeKind.Other) return
         val eventId = (event.eventOrTransactionId as? EventOrTransactionId.EventId)?.eventId ?: return
         val rawJson = event.lazyProvider.latestJson() ?: return
-        activeFiles.journal.append(
+        // The persistent application /sync receiver is the sole owner of
+        // Codever control and v2 timeline envelopes. Letting the UI Timeline
+        // journal one first can poison event-id dedupe with the SDK's display
+        // JSON before /sync supplies the canonical Matrix event JSON.
+        if (!shouldCaptureMatrixSdkTimelineEvent(rawJson)) return
+        val cursor = activeFiles.journal.append(
             roomId = activeSession.roomBinding.roomId,
             eventId = eventId,
             receivedAt = now(),
             rawJson = rawJson,
-        )?.let(journalAdvanced)
+        ) ?: return
+        journalAdvanced(cursor)
         decryptedEvent(
             MatrixDecryptedEvent(
                 roomId = activeSession.roomBinding.roomId,
@@ -445,11 +451,6 @@ class OfficialMatrixSdkDriver(
                     firstSyncWorkScheduled.set(false)
                     return@launch
                 }
-                ensureTimeline()
-                if (timeline == null) {
-                    firstSyncWorkScheduled.set(false)
-                    return@launch
-                }
                 if (
                     active.get() &&
                     client === expectedClient &&
@@ -458,6 +459,11 @@ class OfficialMatrixSdkDriver(
                     diagnostics.record("matrix.transport.ready")
                     onTransportReady(identity)
                 }
+                // Application-control transport depends on sync, encryption, and the
+                // bound room, not on materializing the UI timeline. Prepare the
+                // timeline concurrently after publishing transport readiness so a
+                // large encrypted history cannot delay commands or reconnects.
+                ensureTimeline()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

@@ -99,6 +99,7 @@ class AttachmentTransferManagerTest {
         var failUpload = false
         private var media = ByteArray(0)
         override val status = MatrixRuntimeStatus(MatrixRuntimePhase.SYNCING, 1, "test")
+        override val commandTransportReady = true
         override fun setObserver(observer: NativeMatrixObserver?) = Unit
         override fun start() = Unit
         override fun publicSession(): PublicMatrixSession? = null

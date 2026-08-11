@@ -80,6 +80,7 @@ class ClientEventHub(
     private val persistence: ClientEventPersistence,
     private val initialSnapshot: ClientSnapshot,
     private val maxReplayEvents: Int = 1_000,
+    private val maxSubscriptionReplayEvents: Int = 1_000,
     private val maxHistoryMessages: Int = 5_000,
     private val maxHistoryMessagesPerSession: Int = 1_000,
     private val maxPersistedStateBytes: Int = 3 * 1024 * 1024,
@@ -107,6 +108,7 @@ class ClientEventHub(
 
     init {
         require(maxReplayEvents in 1..10_000)
+        require(maxSubscriptionReplayEvents in 1..10_000)
         require(maxHistoryMessages in 1..20_000)
         require(maxHistoryMessagesPerSession in 1..maxHistoryMessages)
         require(maxPersistedStateBytes in 4 * 1024..3 * 1024 * 1024)
@@ -138,12 +140,14 @@ class ClientEventHub(
     /** Updates public snapshot state without clearing or advancing the event journal. */
     fun updateSnapshot(snapshot: ClientSnapshot): ClientSnapshot = synchronized(lock) {
         val updated = state.copy(snapshot = snapshotAtHead(snapshot))
-        // The runtime polls lifecycle state once per second. generatedAt changes
-        // on every poll, but persisting that timestamp alone rewrites and
-        // re-encrypts the entire event/history journal for no semantic change.
-        val samePayload = updated.snapshot.copy(generatedAt = state.snapshot.generatedAt) ==
-            state.snapshot
-        if (!samePayload) state = persist(updated)
+        // Trust, commands, pairing and lifecycle each have their own durable
+        // source and are reconstructed at startup. Gateway state is the only
+        // snapshot payload cached here for offline startup.
+        state = if (updated.snapshot.gatewayState != state.snapshot.gatewayState) {
+            persist(updated)
+        } else {
+            updated
+        }
         currentSnapshot()
     }
 
@@ -152,6 +156,25 @@ class ClientEventHub(
         payload: JsonElement,
         snapshot: ClientSnapshot? = null,
         occurredAt: Long = now(),
+    ): ClientEvent = publishInternal(type, payload, snapshot, occurredAt, durable = true)
+
+    /**
+     * Delivers a process-lifecycle event without rewriting durable history.
+     * After a process restart its cursor intentionally resolves to a snapshot.
+     */
+    fun publishTransient(
+        type: ClientEventType,
+        payload: JsonElement,
+        snapshot: ClientSnapshot? = null,
+        occurredAt: Long = now(),
+    ): ClientEvent = publishInternal(type, payload, snapshot, occurredAt, durable = false)
+
+    private fun publishInternal(
+        type: ClientEventType,
+        payload: JsonElement,
+        snapshot: ClientSnapshot?,
+        occurredAt: Long,
+        durable: Boolean,
     ): ClientEvent {
         val event: ClientEvent
         val targets: List<String>
@@ -174,7 +197,7 @@ class ClientEventHub(
                 events = events,
                 snapshot = baseSnapshot.copy(cursor = cursor, generatedAt = now()),
             )
-            state = persist(updated)
+            state = if (durable) persist(updated) else updated
             targets = subscriptions.values.filter { it.active }.map { it.id }
         }
         targets.forEach(::deliverAvailable)
@@ -326,10 +349,14 @@ class ClientEventHub(
 
     fun subscribe(
         afterCursor: String?,
-        requestedMaxReplayEvents: Int = maxReplayEvents,
+        requestedMaxReplayEvents: Int = minOf(maxReplayEvents, maxSubscriptionReplayEvents),
         listener: ClientEventListener,
     ): SubscriptionBootstrap = synchronized(lock) {
-        require(requestedMaxReplayEvents in 1..maxReplayEvents)
+        // The negotiated request limit and this process's retained replay
+        // window are independent. A client may accept up to the protocol
+        // maximum even when the service keeps a smaller journal; an expired
+        // cursor then receives the normal snapshot fallback.
+        require(requestedMaxReplayEvents in 1..maxSubscriptionReplayEvents)
         val id = nextSubscriptionId()
         val barrierSequence = state.headSequence
         val barrierCursor = state.headCursor
@@ -557,23 +584,19 @@ class ClientEventHub(
     )
 
     private fun persist(value: PersistedClientEventState): PersistedClientEventState {
-        val fitted = fitToPersistenceBudget(value)
-        val bytes = ClientEventStateCodec.encode(fitted)
-        try {
-            persistence.save(bytes)
-        } finally {
-            bytes.fill(0)
-        }
-        return fitted
-    }
-
-    private fun fitToPersistenceBudget(value: PersistedClientEventState): PersistedClientEventState {
         var candidate = value.copy(history = value.history.sortedWith(HISTORY_ORDER))
         while (true) {
             val bytes = ClientEventStateCodec.encode(candidate)
             val fits = bytes.size <= maxPersistedStateBytes
+            if (fits) {
+                try {
+                    persistence.save(bytes)
+                } finally {
+                    bytes.fill(0)
+                }
+                return candidate
+            }
             bytes.fill(0)
-            if (fits) return candidate
 
             val oldestEvent = candidate.events.firstOrNull()
             val oldestHistory = candidate.history.firstOrNull()

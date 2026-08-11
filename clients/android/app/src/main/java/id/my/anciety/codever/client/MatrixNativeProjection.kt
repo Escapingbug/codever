@@ -20,20 +20,84 @@ class MatrixNativeProjection {
 
     private val sessions = linkedMapOf<String, JsonObject>()
     private val pendingDeltas = linkedMapOf<String, MutableList<JsonObject>>()
-    private val deletedSessions = mutableSetOf<String>()
+    private val deletedSessions = mutableMapOf<String, NativeRevision>()
     private var checkpoint: JsonObject? = null
     private var latestRevision: NativeRevision? = null
+
+    /**
+     * Restores the projection baseline cached by the Web bridge. The direct
+     * Matrix receiver resumes from a persisted /sync cursor, so after a
+     * process restart it may see an incremental root/lifecycle event before
+     * another checkpoint. Seeding the projector keeps those live events
+     * applicable without replaying old room history.
+     */
+    @Synchronized
+    fun restore(snapshot: JsonObject): JsonObject {
+        require(snapshot.number("version") == 1L)
+        require(snapshot.text("kind") == "gateway_state")
+        val revision = nativeRevision(snapshot)
+        val stateVersion = snapshot.number("state_version") ?: error("Gateway state version is missing.")
+        val activeDeviceCount = snapshot.number("active_device_count")
+            ?: error("Gateway active device count is missing.")
+        val workspace = snapshot["workspace"] as? JsonObject
+            ?: error("Gateway workspace is missing.")
+        val capabilities = snapshot["capabilities"] as? JsonObject
+            ?: error("Gateway capabilities are missing.")
+        val restoredSessions = snapshot["sessions"] as? JsonArray
+            ?: error("Gateway sessions are missing.")
+
+        sessions.clear()
+        pendingDeltas.clear()
+        deletedSessions.clear()
+        restoredSessions.forEach { entry ->
+            val session = entry as? JsonObject ?: error("Gateway session is invalid.")
+            val sessionId = session.text("id") ?: error("Gateway session id is missing.")
+            require(session.number("updated_at") != null)
+            require(session.text("project_id") != null)
+            require(session.text("project_name") != null)
+            require(session.text("cwd") != null)
+            require(session.text("provider") != null)
+            sessions[sessionId] = session
+        }
+        checkpoint = buildJsonObject {
+            put("version", 2)
+            put("kind", "gateway_checkpoint")
+            put("revision", revision.revision)
+            put("revision_epoch", revision.epoch)
+            put("revision_epoch_generation", revision.generation)
+            put("state_version", stateVersion)
+            put("active_device_count", activeDeviceCount)
+            put("workspace", buildJsonObject {
+                put("project", buildJsonObject {
+                    put("id", workspace.text("project_id") ?: error("Workspace project id is missing."))
+                    put("name", workspace.text("project_name") ?: error("Workspace project name is missing."))
+                    put("cwd", workspace.text("cwd") ?: error("Workspace cwd is missing."))
+                })
+                put("provider", workspace.text("provider") ?: error("Workspace provider is missing."))
+                workspace.text("model")?.let { put("model", it) }
+                workspace.text("reasoning_effort")?.let { put("reasoning_effort", it) }
+                put("permission_mode", workspace.text("permission_mode") ?: "default")
+            })
+            put("capabilities", capabilities)
+        }
+        latestRevision = revision
+        return snapshot() ?: error("Gateway state projection could not be restored.")
+    }
 
     @Synchronized
     fun apply(extension: JsonObject): JsonObject? {
         val kind = extension.text("kind")
         if (kind !in NATIVE_KINDS) return snapshot()
         observeRevision(extension)
+        if (kind != "gateway_checkpoint" && isOlderThanCheckpoint(extension)) return snapshot()
         when (kind) {
             "gateway_checkpoint" -> {
                 require(extension.number("version") == 2L)
                 val current = checkpoint?.number("state_version") ?: -1
-                if ((extension.number("state_version") ?: -1) >= current) checkpoint = extension
+                if ((extension.number("state_version") ?: -1) > current) {
+                    checkpoint = extension
+                    applyCheckpointSessions(extension)
+                }
             }
             "gateway_revision" -> Unit
             "session_root" -> applyRoot(extension)
@@ -54,6 +118,48 @@ class MatrixNativeProjection {
             extension.text("activity_phase")?.let { put("activity_phase", JsonPrimitive(it)) }
         })
         return snapshot()
+    }
+
+    private fun applyCheckpointSessions(value: JsonObject) {
+        val inventory = value["sessions"] as? JsonArray ?: return
+        val checkpointRevision = nativeRevision(value)
+        deletedSessions.entries.removeAll { (_, revision) ->
+            compareRevisions(revision, checkpointRevision) < 0
+        }
+        pendingDeltas.entries.removeAll { (_, deltas) ->
+            deltas.removeAll { compareRevisions(nativeRevision(it), checkpointRevision) < 0 }
+            deltas.isEmpty()
+        }
+        sessions.clear()
+        inventory.forEach { entry ->
+            val session = entry as? JsonObject ?: return@forEach
+            val sessionId = session.text("session_id") ?: return@forEach
+            if (sessionId in deletedSessions) return@forEach
+            val project = session["project"] as? JsonObject ?: return@forEach
+            val updatedAt = session.number("updated_at") ?: return@forEach
+            val projectId = project.text("id") ?: return@forEach
+            val projectName = project.text("name") ?: return@forEach
+            val cwd = project.text("cwd") ?: return@forEach
+            val provider = session.text("provider") ?: return@forEach
+            sessions[sessionId] = buildJsonObject {
+                put("id", sessionId)
+                put("title", session.text("title") ?: "Session")
+                put("updated_at", updatedAt)
+                put("status", session.text("status") ?: "idle")
+                if (session["archived"]?.jsonPrimitive?.contentOrNull == "true") {
+                    put("archived", true)
+                }
+                session.text("activity_phase")?.let { put("activity_phase", it) }
+                put("project_id", projectId)
+                put("project_name", projectName)
+                put("cwd", cwd)
+                put("provider", provider)
+                session.text("model")?.let { put("model", it) }
+                session.text("reasoning_effort")?.let { put("reasoning_effort", it) }
+                put("extensions", session["extensions"] as? JsonArray ?: JsonArray(emptyList()))
+            }
+            drainPendingDeltas(sessionId)
+        }
     }
 
     private fun applyRoot(value: JsonObject) {
@@ -113,7 +219,7 @@ class MatrixNativeProjection {
             return
         }
         if (state == "deleted") {
-            deletedSessions += sessionId
+            deletedSessions[sessionId] = nativeRevision(value)
             sessions.remove(sessionId)
             return
         }
@@ -189,14 +295,7 @@ class MatrixNativeProjection {
     }
 
     private fun observeRevision(value: JsonObject) {
-        val next = NativeRevision(
-            revision = value.number("revision") ?: error("Matrix native revision is missing."),
-            epoch = value.text("revision_epoch")
-                ?: error("Matrix native revision epoch is missing."),
-            generation = value.number("revision_epoch_generation")
-                ?: error("Matrix native revision generation is missing."),
-        )
-        require(next.revision >= 0 && next.generation > 0)
+        val next = nativeRevision(value)
         val current = latestRevision
         if (current == null || next.generation > current.generation) {
             latestRevision = next
@@ -207,6 +306,31 @@ class MatrixNativeProjection {
             "Matrix native events disagree on the revision epoch."
         }
         if (next.revision >= current.revision) latestRevision = next
+    }
+
+    private fun nativeRevision(value: JsonObject) = NativeRevision(
+            revision = value.number("revision") ?: error("Matrix native revision is missing."),
+            epoch = value.text("revision_epoch")
+                ?: error("Matrix native revision epoch is missing."),
+            generation = value.number("revision_epoch_generation")
+                ?: error("Matrix native revision generation is missing."),
+        ).also {
+            require(it.revision >= 0 && it.generation > 0)
+        }
+
+    private fun isOlderThanCheckpoint(value: JsonObject): Boolean {
+        val floor = checkpoint?.let(::nativeRevision) ?: return false
+        return compareRevisions(nativeRevision(value), floor) < 0
+    }
+
+    private fun compareRevisions(left: NativeRevision, right: NativeRevision): Int {
+        if (left.generation != right.generation) {
+            return left.generation.compareTo(right.generation)
+        }
+        require(left.epoch == right.epoch) {
+            "Matrix native events disagree on the revision epoch."
+        }
+        return left.revision.compareTo(right.revision)
     }
 
     private companion object {

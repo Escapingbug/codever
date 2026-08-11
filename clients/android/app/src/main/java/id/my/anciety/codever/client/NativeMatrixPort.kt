@@ -19,6 +19,7 @@ interface NativeMatrixObserver {
 
 interface NativeMatrixPort {
     val status: MatrixRuntimeStatus
+    val commandTransportReady: Boolean
     fun setObserver(observer: NativeMatrixObserver?)
     fun start()
     fun publicSession(): PublicMatrixSession?
@@ -49,6 +50,7 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
     )
 
     override val status: MatrixRuntimeStatus get() = runtime.status
+    override val commandTransportReady: Boolean get() = runtime.commandTransportReady
 
     override fun setObserver(observer: NativeMatrixObserver?) {
         this.observer = observer

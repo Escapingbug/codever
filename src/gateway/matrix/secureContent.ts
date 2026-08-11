@@ -948,6 +948,14 @@ export class GatewaySecureContentLayer {
             throw new PermanentMatrixDeliveryError(error)
         }
         return this.sendScheduler.schedule(priority, async () => {
+            if (transport.sendApplicationTimelineEvent) {
+                return transport.sendApplicationTimelineEvent({
+                    roomId: request.roomId,
+                    eventType: 'm.room.message',
+                    transactionId: request.transactionId,
+                    content,
+                })
+            }
             return transport.sendEncryptedRoomEvent({ ...request, content })
         }, {
             coalesceKey,

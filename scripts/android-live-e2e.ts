@@ -16,6 +16,7 @@ const DEFAULT_TIMEOUT_MS = 30_000
 // the UI must acknowledge the user's intent immediately.
 const ACTION_FEEDBACK_TIMEOUT_MS = 1_500
 const LIFECYCLE_TIMEOUT_MS = 15_000
+const E2E_PROJECT_PREFIX = 'Codever Android E2E '
 
 type JsonRecord = Record<string, unknown>
 
@@ -31,6 +32,7 @@ type PageState = {
     activeSessionCount: number
     archivedSessionCount: number
     selectedTitle: string
+    selectedProject: string
     activeProjects: string[]
     archivedProjects: string[]
     archivedBanner: boolean
@@ -246,10 +248,8 @@ class DevtoolsPage {
 
     async openActiveProjectSession(projectName: string): Promise<boolean> {
         return this.evaluate<boolean>(`(() => {
-            const normalized = value => String(value || '').replace(/\\s+/gu, ' ').trim();
-            const section = Array.from(document.querySelectorAll('.project-session-group'))
-                .find(group => normalized(group.querySelector('.project-copy strong')?.textContent || '') === ${json(projectName)});
-            const row = section?.querySelector('button.session-row');
+            const row = Array.from(document.querySelectorAll('button.session-row'))
+                .find(button => button.dataset.projectName === ${json(projectName)});
             if (!row || row.disabled) return false;
             row.click();
             return true;
@@ -270,7 +270,7 @@ class DevtoolsPage {
         return this.evaluate<boolean>(`(() => {
             const normalized = value => String(value || '').replace(/\\s+/gu, ' ').trim();
             const row = Array.from(document.querySelectorAll('button.archived-session-row'))
-                .find(button => normalized(button.querySelector('small')?.textContent || '').startsWith(${json(`${projectName} ·`)}));
+                .find(button => button.dataset.projectName === ${json(projectName)});
             if (!row || row.disabled) return false;
             row.click();
             return true;
@@ -312,10 +312,11 @@ const PAGE_STATE_EXPRESSION = `(() => {
     const normalized = value => String(value || '').replace(/\\s+/gu, ' ').trim();
     const connectionButton = Array.from(document.querySelectorAll('button'))
         .find(button => button.getAttribute('aria-label')?.startsWith('Open connection settings'));
-    const activeProjects = Array.from(document.querySelectorAll('.project-session-toggle .project-copy strong'))
-        .map(element => normalized(element.textContent));
-    const archivedProjects = Array.from(document.querySelectorAll('button.archived-session-row small'))
-        .map(element => normalized(element.textContent).split(' · ')[0] || '');
+    const activeProjects = Array.from(document.querySelectorAll('button.session-row'))
+        .map(element => element.dataset.projectName || '');
+    const archivedProjects = Array.from(document.querySelectorAll('button.archived-session-row'))
+        .map(element => element.dataset.projectName || '');
+    const selectedRow = document.querySelector('button.session-row.selected, button.archived-session-row.selected');
     const archivedCountText = document.querySelector('.archived-session-toggle b')?.textContent || '0';
     return {
         online: navigator.onLine,
@@ -323,6 +324,7 @@ const PAGE_STATE_EXPRESSION = `(() => {
         activeSessionCount: document.querySelectorAll('button.session-row').length,
         archivedSessionCount: Number.parseInt(archivedCountText, 10) || 0,
         selectedTitle: normalized(document.querySelector('.conversation-heading h2')?.textContent),
+        selectedProject: selectedRow?.dataset.projectName || '',
         activeProjects,
         archivedProjects,
         archivedBanner: Boolean(document.querySelector('.archived-session-banner')),
@@ -357,7 +359,7 @@ const initialAirplaneMode = await airplaneMode(serial)
 assert.equal(initialAirplaneMode, false, 'The device must be online before live E2E starts')
 
 const runId = Date.now().toString(36).toUpperCase()
-const testProjects = [`Codever Android E2E ${runId} A`, `Codever Android E2E ${runId} B`]
+const testProjects = [`${E2E_PROJECT_PREFIX}${runId} A`, `${E2E_PROJECT_PREFIX}${runId} B`]
 const pendingCleanup = new Set<string>()
 let page: DevtoolsPage | undefined
 let forwardedPort: string | undefined
@@ -365,11 +367,29 @@ let forwardedPort: string | undefined
 try {
     process.stdout.write(`[1/5] Cold-starting ${PACKAGE_NAME} on ${serial}...\n`)
     ;({ page, port: forwardedPort } = await restartAndAttach(serial, page, forwardedPort))
-    const online = await page.waitFor(
+    let online = await page.waitFor(
         'the paired Gateway connection',
         state => state.online && state.connection.endsWith('Connected'),
     )
     assertHealthy(online)
+    const orphanedProjects = [...new Set([
+        ...online.activeProjects,
+        ...online.archivedProjects,
+    ])].filter(projectName => projectName.startsWith(E2E_PROJECT_PREFIX))
+    if (orphanedProjects.length > 0) {
+        process.stdout.write(`  cleaning ${orphanedProjects.length} orphaned E2E session(s)\n`)
+        for (const projectName of orphanedProjects) {
+            await cleanupProjectSession(page, projectName)
+        }
+        online = await page.waitFor(
+            'orphaned E2E session cleanup',
+            state =>
+                state.connection.endsWith('Connected') &&
+                !state.activeProjects.some(project => project.startsWith(E2E_PROJECT_PREFIX)) &&
+                !state.archivedProjects.some(project => project.startsWith(E2E_PROJECT_PREFIX)),
+        )
+        assertHealthy(online)
+    }
     assert.ok(online.activeSessionCount + online.archivedSessionCount > 0, 'No paired Gateway sessions were visible')
     assert.ok(online.selectedTitle, 'No current conversation was selected')
     const baselineSessionCount = online.activeSessionCount + online.archivedSessionCount
@@ -404,7 +424,6 @@ try {
             projectName,
             baselineSessionCount,
         )
-        pendingCleanup.delete(projectName)
         ;({ page, port: forwardedPort } = await restartAndAttach(serial, page, forwardedPort))
         const restarted = await page.waitFor(
             `Gateway recovery after deleting ${projectName}`,
@@ -424,6 +443,7 @@ try {
             false,
             `Deleted session ${projectName} remained actionable after restart`,
         )
+        pendingCleanup.delete(projectName)
         if (index === 0) {
             process.stdout.write('  first deletion remained absent after process restart\n')
         }
@@ -479,7 +499,9 @@ async function exerciseSessionLifecycle(
         `created session in ${projectName}`,
         state =>
             state.activeProjects.includes(projectName) &&
+            state.selectedProject === projectName &&
             state.selectedTitle === 'New session' &&
+            !state.sessionCreatePending &&
             state.activeSessionCount + state.archivedSessionCount === baselineSessionCount + 1,
         LIFECYCLE_TIMEOUT_MS,
     )
@@ -535,9 +557,12 @@ async function deleteSelectedSession(
         `immediate deletion feedback for ${projectName}`,
         state =>
             !state.dialogs.some(dialog => dialog.startsWith('Delete “')) &&
-            !state.activeProjects.includes(projectName) &&
             state.selectedSessionCount === 0 &&
-            !state.mobileChatOpen,
+            !state.mobileChatOpen &&
+            (
+                state.deletingSessionCount > 0 ||
+                !state.activeProjects.includes(projectName)
+            ),
         ACTION_FEEDBACK_TIMEOUT_MS,
     )
     assertHealthy(feedback)

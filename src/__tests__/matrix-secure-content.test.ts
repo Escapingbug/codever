@@ -14,6 +14,7 @@ import {
 } from '@codever/security'
 import type {
     MatrixApplicationControlEventRequest,
+    MatrixApplicationTimelineEventRequest,
     MatrixSendEventRequest,
     MatrixTransport,
 } from '@/channel/matrix'
@@ -108,11 +109,16 @@ describe('Gateway application-layer Matrix content', () => {
         )
         await layer.initialize(now)
         const sent: MatrixSendEventRequest[] = []
+        const timelineSent: MatrixApplicationTimelineEventRequest[] = []
         const controlSent: MatrixApplicationControlEventRequest[] = []
         const matrix: MatrixTransport = {
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
                 return { eventId: '$event' }
+            },
+            async sendApplicationTimelineEvent(request) {
+                timelineSent.push(request)
+                return { eventId: '$timeline-event' }
             },
             async sendApplicationControlEvent(request) {
                 controlSent.push(request)
@@ -147,13 +153,15 @@ describe('Gateway application-layer Matrix content', () => {
             },
             transactionId: 'transaction-1',
         })
-        expect(sent).toHaveLength(1)
-        expect(JSON.stringify(sent)).not.toContain('agent secret reply')
-        expect(sent[0]?.content['m.relates_to']).toMatchObject({
+        expect(sent).toHaveLength(0)
+        expect(timelineSent).toHaveLength(1)
+        expect(JSON.stringify(timelineSent)).not.toContain('agent secret reply')
+        expect(timelineSent[0]?.eventType).toBe('m.room.message')
+        expect(timelineSent[0]?.content['m.relates_to']).toMatchObject({
             rel_type: 'm.thread',
             event_id: '$session-root',
         })
-        const outgoingExtension = sent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const outgoingExtension = timelineSent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
         const openedGrant = await openSecureEnvelopeBundle(
             outgoingExtension.timeline_key_ring_bundle,
             {

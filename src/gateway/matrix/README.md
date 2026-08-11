@@ -45,9 +45,14 @@ metadata and ciphertext, while the persistent Gateway application key signs
 the envelope and the recipient's application key encrypts its contents. This
 keeps the control path independent from delayed or missing Megolm room keys.
 Session state and conversation history are not control responses: they are
-signed version-2 timeline envelopes restored with Matrix sync, threads, and
-backward pagination. The pre-release state/history RPC event kinds are not
-accepted or emitted.
+signed version-2 timeline envelopes stored as standard `m.room.message`
+events and restored with Matrix sync, threads, and backward pagination. The
+inner envelope already provides end-to-end confidentiality and authentication,
+so these events are sent directly instead of being wrapped in a second Megolm
+layer. This lets a newly paired device read shared history using the timeline
+key grant and lets native clients consume the same durable room events through
+a filtered `/sync`, without an RPC state/history protocol. The pre-release
+state/history RPC event kinds are not accepted or emitted.
 
 ## Command event shape
 

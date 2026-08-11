@@ -20,6 +20,24 @@ import org.junit.Test
 
 class ClientEventHubTest {
     @Test
+    fun `negotiated replay allowance may exceed retained journal`() {
+        val hub = hub(maxReplayEvents = 3)
+        val anchor = hub.publish(ClientEventType.STATUS_CHANGED, JsonPrimitive("anchor"))
+        val first = hub.publish(ClientEventType.STATUS_CHANGED, JsonPrimitive("first"))
+        val second = hub.publish(ClientEventType.STATUS_CHANGED, JsonPrimitive("second"))
+
+        val result = hub.subscribe(
+            anchor.cursor,
+            requestedMaxReplayEvents = 1_000,
+            listener = RecordingListener(),
+        )
+
+        assertTrue(result is SubscriptionBootstrap.Replay)
+        result as SubscriptionBootstrap.Replay
+        assertEquals(listOf(first.cursor, second.cursor), result.events.map(ClientEvent::cursor))
+    }
+
+    @Test
     fun `expired replay cursor returns snapshot at subscribe barrier`() {
         val hub = hub(maxReplayEvents = 3)
         val first = hub.publish(ClientEventType.STATUS_CHANGED, JsonPrimitive("one"))
@@ -195,7 +213,7 @@ class ClientEventHubTest {
     }
 
     @Test
-    fun `snapshot timestamp polling does not rewrite unchanged durable state`() {
+    fun `only cached gateway state rewrites the durable snapshot`() {
         val persistence = CountingPersistence()
         val hub = hub(persistence = persistence)
         val savesBeforePoll = persistence.saveCount
@@ -207,7 +225,35 @@ class ClientEventHubTest {
             generatedAt = 3_000L,
             lifecycle = ClientLifecycle(LifecyclePhase.READY, 3_000L),
         ))
+        assertEquals(savesBeforePoll, persistence.saveCount)
+        hub.updateSnapshot(snapshot().copy(
+            generatedAt = 4_000L,
+            gatewayState = buildJsonObject { put("revision", 1) },
+        ))
         assertEquals(savesBeforePoll + 1, persistence.saveCount)
+    }
+
+    @Test
+    fun `transient lifecycle events deliver without rewriting durable history`() {
+        val persistence = CountingPersistence()
+        val hub = hub(persistence = persistence)
+        val listener = RecordingListener()
+        val subscription = hub.subscribe(null, listener = listener)
+        hub.activate(subscription.subscriptionId, subscription.barrierCursor)
+        val savesBefore = persistence.saveCount
+
+        val event = hub.publishTransient(
+            ClientEventType.STATUS_CHANGED,
+            JsonPrimitive("connecting"),
+        )
+
+        assertEquals(savesBefore, persistence.saveCount)
+        assertEquals(listOf(event), listener.events)
+        val restored = hub(
+            persistence = persistence,
+            cursorGenerator = CountingCursorGenerator(),
+        )
+        assertTrue(restored.subscribe(event.cursor, listener = RecordingListener()) is SubscriptionBootstrap.Snapshot)
     }
 
     @Test

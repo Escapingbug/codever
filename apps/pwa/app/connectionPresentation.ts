@@ -37,6 +37,10 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Finishing setup",
     detail: "Downloading your latest conversations…",
   },
+  matrix_gateway_state_syncing: {
+    title: "Syncing conversations",
+    detail: "Checking your latest Gateway state…",
+  },
   matrix_sync_active: {
     title: "Connected",
     detail: "Messages and conversations are up to date.",

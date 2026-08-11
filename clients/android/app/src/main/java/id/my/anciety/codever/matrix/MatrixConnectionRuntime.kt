@@ -76,10 +76,15 @@ class MatrixConnectionRuntime(
     private var applicationControlReceiverJob: Job? = null
     private var applicationControlReady = CompletableDeferred<Unit>()
     @Volatile
+    private var applicationControlReceiverReady = false
+    @Volatile
     private var applicationControlSince: String? = null
 
     val status: MatrixRuntimeStatus
         get() = stateMachine.status
+
+    val commandTransportReady: Boolean
+        get() = applicationControlReceiverReady
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -429,7 +434,7 @@ class MatrixConnectionRuntime(
         if (currentFiles.sdkCacheMigrated) {
             diagnostics.record(
                 "matrix.cache.migrated",
-                mapOf("stage" to "NATIVE_SYNC_CACHE_V2"),
+                mapOf("stage" to "BOUNDED_TIMELINE_CACHE_V3"),
             )
         }
         val loaded = currentFiles.sessionStore.load() ?: return
@@ -454,6 +459,7 @@ class MatrixConnectionRuntime(
         files = currentFiles
         secrets = migrated
         latestJournalCursor = currentFiles.journal.latestCursor()
+        applicationControlSince = currentFiles.applicationControlCursor.load()
     }
 
     private suspend fun connectLocked() {
@@ -584,6 +590,7 @@ class MatrixConnectionRuntime(
         identity: MatrixTransportIdentity,
     ) {
         if (applicationControlReceiverJob?.isActive == true) return
+        applicationControlReceiverReady = false
         val ready = applicationControlReady
         diagnostics.record("matrix.application_control.receiver_starting")
         applicationControlReceiverJob = scope.launch {
@@ -591,10 +598,28 @@ class MatrixConnectionRuntime(
             var consecutiveFailures = 0
             while (isActive) {
                 val batch = try {
-                    applicationControlSyncClient.sync(session, since)
+                    // A persisted cursor makes this a live sync, but readiness must not
+                    // wait for an empty long poll. Confirm the cursor immediately, then
+                    // use long polling only after the receiver is ready.
+                    applicationControlSyncClient.sync(
+                        session,
+                        since,
+                        longPoll = ready.isCompleted,
+                    )
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    if (
+                        error is MatrixApplicationControlSyncException &&
+                        error.status == 400 &&
+                        since != null
+                    ) {
+                        currentFiles.applicationControlCursor.clear()
+                        since = null
+                        applicationControlSince = null
+                        diagnostics.record("matrix.application_control.cursor_reset")
+                        continue
+                    }
                     if (
                         error is MatrixApplicationControlSyncException &&
                         error.fatal
@@ -645,6 +670,10 @@ class MatrixConnectionRuntime(
                         } else {
                             "matrix.application_control.batch_received"
                         },
+                        mapOf(
+                            "candidates" to batch.candidateEventCount.toString(),
+                            "accepted" to batch.events.size.toString(),
+                        ),
                     )
                 }
                 val receivedAt = System.currentTimeMillis()
@@ -666,13 +695,21 @@ class MatrixConnectionRuntime(
                         onDecryptedEvent(event)
                     }
                 }
+                if (batch.events.isNotEmpty()) {
+                    diagnostics.record(
+                        "matrix.application_control.batch_persisted",
+                        mapOf("appended" to cursors.count { it != null }.toString()),
+                    )
+                }
                 since = batch.nextBatch
+                currentFiles.applicationControlCursor.save(since)
                 applicationControlSince = since
                 if (batch.limited) {
                     diagnostics.record("matrix.application_control.gap_detected")
                     onConvergenceRequired("application_control_limited")
                 }
                 if (ready.complete(Unit)) {
+                    applicationControlReceiverReady = true
                     diagnostics.record("matrix.application_control.receiver_ready")
                     onTransportReady(identity)
                 }
@@ -681,6 +718,7 @@ class MatrixConnectionRuntime(
     }
 
     private fun stopApplicationControlReceiverLocked() {
+        applicationControlReceiverReady = false
         applicationControlReceiverJob?.cancel()
         applicationControlReceiverJob = null
         applicationControlReady.cancel()

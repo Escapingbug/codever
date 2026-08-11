@@ -377,10 +377,12 @@ async function deleteSelectedSession(page: Page, projectName: string): Promise<v
     await dialog.waitFor({ state: 'visible' })
     const startedAt = Date.now()
     await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
-    await waitFor(async () =>
-        !await dialog.isVisible().catch(() => false)
-        && !await projectSessionExists(page, projectName),
-    {
+    await waitFor(async () => {
+        const feedback = await projectSessionFeedback(page, projectName)
+        return !await dialog.isVisible().catch(() => false)
+            && await page.locator('button.session-row.selected').count() === 0
+            && (feedback.deleting || !feedback.exists)
+    }, {
         description: `immediate deletion feedback for ${projectName}`,
         timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
     })
@@ -433,9 +435,22 @@ async function waitForProjectAbsent(page: Page, projectName: string): Promise<vo
 }
 
 async function projectSessionExists(page: Page, projectName: string): Promise<boolean> {
-    return await page.locator('.project-session-group').filter({
-        has: page.locator('.project-copy strong', { hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u') }),
-    }).count() > 0
+    return (await projectSessionFeedback(page, projectName)).exists
+}
+
+async function projectSessionFeedback(
+    page: Page,
+    projectName: string,
+): Promise<{ exists: boolean; deleting: boolean }> {
+    return page.locator('button.session-row').evaluateAll((rows, expectedProject) => {
+        const matching = rows.filter(row =>
+            (row as HTMLElement).dataset.projectName === expectedProject,
+        )
+        return {
+            exists: matching.length > 0,
+            deleting: matching.some(row => row.classList.contains('is-busy')),
+        }
+    }, projectName)
 }
 
 async function openProjectSession(page: Page, projectName: string): Promise<void> {

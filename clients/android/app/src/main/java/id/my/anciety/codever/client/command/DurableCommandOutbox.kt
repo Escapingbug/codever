@@ -36,7 +36,10 @@ class DurableCommandOutbox internal constructor(
         val loaded = store.load() ?: CommandOutboxSnapshot()
         val recovered = loaded.copy(
             commands = loaded.commands.map { command ->
-                if (command.state == CommandState.TRANSMITTING) {
+                if (
+                    command.state == CommandState.QUEUED ||
+                    command.state == CommandState.TRANSMITTING
+                ) {
                     command.copy(
                         state = CommandState.RECOVERY_REQUIRED,
                         updatedAt = monotonicNow(command.updatedAt),

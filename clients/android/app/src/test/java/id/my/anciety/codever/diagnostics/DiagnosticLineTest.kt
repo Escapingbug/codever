@@ -47,6 +47,24 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `matrix event diagnostics allow only counts and security codes`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z matrix.native_event.rejected " +
+                "accepted=2 appended=1 candidates=3 code=BINDING_MISMATCH",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "matrix.native_event.rejected",
+                mapOf(
+                    "candidates" to "3",
+                    "accepted" to "2",
+                    "appended" to "1",
+                    "code" to "BINDING_MISMATCH",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),

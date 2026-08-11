@@ -2644,6 +2644,13 @@ async function decodeHistoricalEvent(
   ) {
     return null;
   }
+  if (
+    isGatewayTimelineEnvelopeExtension(extension) &&
+    !event.isEncrypted() &&
+    sender !== trust.gatewayTransport.userId
+  ) {
+    return null;
+  }
   const plaintext = isGatewayTimelineEnvelopeExtension(extension)
     ? await openGatewayTimelineContent(
         extension!,
@@ -2849,6 +2856,15 @@ export async function processGatewayTimelineEvent(
   if (!trust) {
     seen.add(eventId);
     return;
+  }
+  if (
+    isGatewayTimelineEnvelopeExtension(extension) &&
+    !event.isEncrypted() &&
+    sender !== trust.gatewayTransport.userId
+  ) {
+    throw new Error(
+      "Rejected a Codever timeline event outside the pinned Gateway transport.",
+    );
   }
   if (applicationControl) {
     if (event.isEncrypted() || sender !== trust.gatewayTransport.userId) {

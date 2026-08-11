@@ -3,19 +3,35 @@ import { CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE } from '@codever/protocol
 /**
  * Narrow Matrix transport boundary.
  *
- * Implementations are responsible for Matrix login, sync, encryption, crypto
- * store persistence and media upload. Normal room messages use Matrix E2EE.
- * Application control events are already encrypted and signed by Codever and
- * have a separate, narrowly validated send path.
+ * Implementations are responsible for Matrix login, sync, crypto store
+ * persistence and media upload. User commands use Matrix E2EE. Gateway
+ * timeline and control payloads are already encrypted and signed by Codever
+ * and have separate, narrowly validated direct-send paths.
  */
 export interface MatrixTransport {
     sendEncryptedRoomEvent(request: MatrixSendEventRequest): Promise<MatrixSendEventResult>
+    sendApplicationTimelineEvent?(
+        request: MatrixApplicationTimelineEventRequest,
+    ): Promise<MatrixSendEventResult>
     sendApplicationControlEvent?(
         request: MatrixApplicationControlEventRequest,
     ): Promise<MatrixSendEventResult>
     setTyping?(roomId: string, typing: boolean, timeoutMs?: number): Promise<void>
     uploadEncryptedMedia?(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult>
     downloadEncryptedMedia?(request: MatrixDownloadMediaRequest): Promise<Uint8Array>
+}
+
+/**
+ * A normal Matrix room message whose payload is already encrypted and signed
+ * by Codever's durable timeline envelope. Sending it directly keeps standard
+ * Matrix timeline/thread semantics without adding a second Megolm dependency.
+ */
+export interface MatrixApplicationTimelineEventRequest {
+    roomId: string
+    eventType: 'm.room.message'
+    content: MatrixRoomMessageContent
+    /** Stable homeserver transaction ID for durable, idempotent retries. */
+    transactionId: string
 }
 
 export interface MatrixApplicationControlEventRequest {

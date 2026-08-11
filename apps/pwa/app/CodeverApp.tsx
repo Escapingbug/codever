@@ -72,7 +72,6 @@ import {
 } from "./sessionCreateRecovery";
 import {
   reconcileOptimisticSessionDeletions,
-  setSessionOptimisticallyDeleted,
 } from "./optimisticSessionDeletion";
 import {
   hasShortDeviceInvitation,
@@ -168,6 +167,10 @@ import {
   saveMessageHistory,
   type MessageHistoryCursor,
 } from "./messageHistory";
+import {
+  readSelectedSession,
+  writeSelectedSession,
+} from "./selectedSessionState";
 import {
   CommandRevisionConflictError,
   clearMatrixConfig,
@@ -1773,6 +1776,13 @@ export function CodeverApp() {
     const sessionChanged = selectedSessionIdRef.current !== sessionId;
     selectedSessionIdRef.current = sessionId;
     setSelectedSessionId(sessionId);
+    if (historyScopeRef.current) {
+      writeSelectedSession(
+        window.localStorage,
+        historyScopeRef.current,
+        sessionId,
+      );
+    }
     const openedSession = gatewayState?.sessions.find(
       (session) => session.id === sessionId,
     );
@@ -2030,6 +2040,12 @@ export function CodeverApp() {
         conversationId: normalized.conversationId,
         roomId: normalized.roomId,
       });
+      const rememberedSessionId = readSelectedSession(
+        window.localStorage,
+        historyScopeRef.current,
+      );
+      selectedSessionIdRef.current = rememberedSessionId;
+      setSelectedSessionId(rememberedSessionId);
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
       const connection = await createCodeverClient(normalized, {
@@ -2440,6 +2456,9 @@ export function CodeverApp() {
     setInvitationReauthRequired(false);
     setConnectionError(null);
     setMessages([]);
+    if (historyScope) {
+      writeSelectedSession(window.localStorage, historyScope, null);
+    }
     historyScopeRef.current = "";
     if (historyScope) {
       void clearMessageHistoryScope(historyScope).catch((error) => {
@@ -3454,25 +3473,13 @@ export function CodeverApp() {
     if (!target) return;
     setDeleteTarget(null);
     setDetailsOpen(false);
-    const hidden = setSessionOptimisticallyDeleted(
-      optimisticallyDeletedSessionIdsRef.current,
-      target.id,
-      true,
-    );
-    optimisticallyDeletedSessionIdsRef.current = hidden;
-    setOptimisticallyDeletedSessionIds(hidden);
     if (selectedSessionIdRef.current === target.id) {
       activateLocalSession(null);
       setMobileChatOpen(false);
     }
-    const rollback = () => {
-      const restored = setSessionOptimisticallyDeleted(
-        optimisticallyDeletedSessionIdsRef.current,
-        target.id,
-        false,
-      );
-      optimisticallyDeletedSessionIdsRef.current = restored;
-      setOptimisticallyDeletedSessionIds(restored);
+    const restoreSelection = () => {
+      activateLocalSession(target.id);
+      setMobileChatOpen(true);
     };
     const acknowledged = await runSessionLifecycle(
       "delete",
@@ -3493,9 +3500,9 @@ export function CodeverApp() {
           }
         }
       },
-      rollback,
+      restoreSelection,
     );
-    if (!acknowledged) rollback();
+    if (!acknowledged) restoreSelection();
   }
 
   function selectAttachments(event: ChangeEvent<HTMLInputElement>) {
@@ -4229,6 +4236,8 @@ export function CodeverApp() {
                 return (
                 <button
                   key={session.id}
+                  data-session-id={session.id}
+                  data-project-name={session.projectName}
                   className={`session-row ${
                     selectedSessionId === session.id
                       ? "selected"
@@ -4313,6 +4322,8 @@ export function CodeverApp() {
                     <button
                       type="button"
                       key={session.id}
+                      data-session-id={session.id}
+                      data-project-name={session.projectName}
                       className={`archived-session-row ${
                         selectedSessionId === session.id ? "selected" : ""
                       }`}

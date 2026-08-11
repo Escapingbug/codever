@@ -27,21 +27,31 @@ internal const val CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE =
 
 internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
-    if (
-        root["type"]?.jsonPrimitive?.contentOrNull !=
-        CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE
-    ) {
-        return@runCatching false
-    }
+    val eventType = root["type"]?.jsonPrimitive?.contentOrNull
     val content = root["content"] as? JsonObject ?: return@runCatching false
     val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
-    if (extension["version"]?.jsonPrimitive?.intOrNull != 1) return@runCatching false
-    when (extension["kind"]?.jsonPrimitive?.contentOrNull) {
-        "secure_envelope" -> extension["secure_envelope"] is JsonObject
-        "secure_envelope_bundle" -> extension["secure_envelope_bundle"] is JsonObject
+    when (eventType) {
+        CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE -> {
+            if (extension["version"]?.jsonPrimitive?.intOrNull != 1) {
+                return@runCatching false
+            }
+            when (extension["kind"]?.jsonPrimitive?.contentOrNull) {
+                "secure_envelope" -> extension["secure_envelope"] is JsonObject
+                "secure_envelope_bundle" -> extension["secure_envelope_bundle"] is JsonObject
+                else -> false
+            }
+        }
+        "m.room.message" ->
+            extension["version"]?.jsonPrimitive?.intOrNull == 2 &&
+                extension["kind"]?.jsonPrimitive?.contentOrNull == "timeline_envelope" &&
+                extension["timeline_envelope"] is JsonObject &&
+                extension["timeline_key_ring_bundle"] is JsonObject
         else -> false
     }
 }.getOrDefault(false)
+
+internal fun shouldCaptureMatrixSdkTimelineEvent(rawJson: String): Boolean =
+    !isCodeverApplicationControlEvent(rawJson)
 
 fun interface MatrixApplicationControlTransport {
     suspend fun putJson(
@@ -160,6 +170,7 @@ class RestrictedHttpsMatrixApplicationControlSyncTransport(
 data class MatrixApplicationControlSyncBatch(
     val nextBatch: String,
     val events: List<MatrixDecryptedEvent>,
+    val candidateEventCount: Int,
     val limited: Boolean,
 )
 
@@ -171,9 +182,9 @@ class MatrixApplicationControlSyncException(
 }
 
 /**
- * Receives Codever's custom application-encrypted event without routing it
- * through the Matrix UI timeline. The Rust timeline intentionally omits
- * unknown plaintext event types, while `/sync` preserves their raw JSON.
+ * Receives Codever application-encrypted control and standard room-message
+ * timeline events without relying on the Matrix UI timeline. `/sync` keeps
+ * live state and history responsive even when a UI timeline is rebuilding.
  */
 class MatrixApplicationControlSyncClient(
     private val transport: MatrixApplicationControlSyncTransport =
@@ -182,6 +193,7 @@ class MatrixApplicationControlSyncClient(
     suspend fun sync(
         session: StoredMatrixSession,
         since: String?,
+        longPoll: Boolean = true,
     ): MatrixApplicationControlSyncBatch {
         require(since == null || (since.isNotBlank() && since.length <= 4_096)) {
             "Matrix control sync token is invalid."
@@ -202,6 +214,7 @@ class MatrixApplicationControlSyncClient(
                     })
                     put("types", buildJsonArray {
                         add(JsonPrimitive(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE))
+                        add(JsonPrimitive("m.room.message"))
                     })
                     put(
                         "limit",
@@ -211,7 +224,7 @@ class MatrixApplicationControlSyncClient(
             })
         }.toString()
         val query = buildList {
-            add("timeout=${if (since == null) 0 else LONG_POLL_TIMEOUT_MS}")
+            add("timeout=${if (since == null || !longPoll) 0 else LONG_POLL_TIMEOUT_MS}")
             add("filter=${encode(filter)}")
             if (since != null) add("since=${encode(since)}")
         }.joinToString("&")
@@ -247,10 +260,12 @@ class MatrixApplicationControlSyncClient(
                 ?.jsonPrimitive
                 ?.booleanOrNull
                 ?: false
-            val events = timeline
+            val candidateEvents = timeline
                 ?.get("events")
                 ?.jsonArray
-                ?.mapNotNull { element ->
+                .orEmpty()
+            val events = candidateEvents
+                .mapNotNull { element ->
                     val event = element as? JsonObject ?: return@mapNotNull null
                     if (!isCodeverApplicationControlEvent(event.toString())) {
                         return@mapNotNull null
@@ -272,8 +287,12 @@ class MatrixApplicationControlSyncClient(
                         rawJson = event.toString(),
                     )
                 }
-                .orEmpty()
-            MatrixApplicationControlSyncBatch(nextBatch, events, limited)
+            MatrixApplicationControlSyncBatch(
+                nextBatch = nextBatch,
+                events = events,
+                candidateEventCount = candidateEvents.size,
+                limited = limited,
+            )
         } finally {
             response.body.fill(0)
         }

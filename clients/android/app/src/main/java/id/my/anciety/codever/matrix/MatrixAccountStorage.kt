@@ -8,6 +8,7 @@ data class MatrixAccountFiles(
     val accountScope: String,
     val sessionStore: MatrixSessionStore,
     val journal: DecryptedEventJournal,
+    val applicationControlCursor: MatrixSyncCursorStore,
     val sdkDataPath: String,
     val sdkCachePath: String,
     val sdkCacheMigrated: Boolean,
@@ -37,6 +38,7 @@ class MatrixAccountStorage(
         require(ACCOUNT_SCOPE.matches(files.accountScope)) { "Matrix account scope is invalid." }
         files.sessionStore.clear()
         files.journal.clear()
+        files.applicationControlCursor.clear()
         MatrixAccountWiper.deleteSdkAccountRoot(sdkRoot, files.accountScope)
         sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
     }
@@ -56,6 +58,11 @@ class MatrixAccountStorage(
             ),
             journal = EncryptedBoundedEventJournal(
                 File(root, "journal-$accountScope.enc"),
+                cipher,
+                accountScope,
+            ),
+            applicationControlCursor = EncryptedMatrixSyncCursorStore(
+                File(root, "control-sync-$accountScope.enc"),
                 cipher,
                 accountScope,
             ),
@@ -90,14 +97,21 @@ internal object MatrixAccountCacheMigration {
         check(canonicalAccountRoot.isDirectory || canonicalAccountRoot.mkdirs()) {
             "Matrix SDK account storage could not be created."
         }
-        val legacy = File(canonicalAccountRoot, LEGACY_CACHE_NAME).canonicalFile
+        val obsolete = OBSOLETE_CACHE_NAMES.map { name ->
+            File(canonicalAccountRoot, name).canonicalFile
+        }
         val current = File(canonicalAccountRoot, CURRENT_CACHE_NAME).canonicalFile
-        require(legacy.parentFile == canonicalAccountRoot && current.parentFile == canonicalAccountRoot) {
+        require(
+            obsolete.all { it.parentFile == canonicalAccountRoot } &&
+                current.parentFile == canonicalAccountRoot
+        ) {
             "Matrix SDK cache escaped its account root."
         }
-        val migrated = legacy.exists()
-        check(!migrated || legacy.deleteRecursively()) {
-            "Legacy Matrix SDK cache could not be removed."
+        val migrated = obsolete.any(File::exists)
+        obsolete.forEach { directory ->
+            check(!directory.exists() || directory.deleteRecursively()) {
+                "Legacy Matrix SDK cache could not be removed."
+            }
         }
         check(current.isDirectory || current.mkdirs()) {
             "Matrix SDK cache could not be created."
@@ -105,8 +119,8 @@ internal object MatrixAccountCacheMigration {
         return MatrixCachePreparation(current, migrated)
     }
 
-    private const val LEGACY_CACHE_NAME = "cache"
-    private const val CURRENT_CACHE_NAME = "cache-v2"
+    private val OBSOLETE_CACHE_NAMES = listOf("cache", "cache-v2")
+    private const val CURRENT_CACHE_NAME = "cache-v3"
 }
 
 internal object MatrixAccountWiper {

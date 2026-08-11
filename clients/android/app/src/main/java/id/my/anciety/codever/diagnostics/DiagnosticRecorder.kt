@@ -11,8 +11,12 @@ interface DiagnosticRecorder {
 internal object DiagnosticLine {
     private val safeToken = Regex("^[A-Za-z0-9._:+/-]{1,160}$")
     private val allowedAttributes = setOf(
+        "accepted",
         "action",
+        "appended",
         "available",
+        "candidates",
+        "code",
         "detail",
         "error",
         "phase",

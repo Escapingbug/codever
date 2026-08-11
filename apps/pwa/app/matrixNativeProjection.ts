@@ -23,7 +23,7 @@ const MAX_PENDING_DELTAS_PER_SESSION = 256;
 export class MatrixNativeProjection {
   private readonly sessions = new Map<string, GatewaySessionSummary>();
   private readonly pendingDeltas = new Map<string, SessionDelta[]>();
-  private readonly deletedAt = new Map<string, number>();
+  private readonly deletedAt = new Map<string, NativeRevision>();
   private checkpoint: Extract<MatrixNativeContent, { kind: "gateway_checkpoint" }> | null = null;
   private latestRevision: NativeRevision | null = null;
 
@@ -33,6 +33,7 @@ export class MatrixNativeProjection {
     if (event.kind === "gateway_checkpoint") {
       if (!this.checkpoint || event.state_version > this.checkpoint.state_version) {
         this.checkpoint = event;
+        this.discardStateBeforeCheckpoint(event);
         this.sessions.clear();
         for (const session of event.sessions) {
           if (this.deletedAt.has(session.session_id)) continue;
@@ -59,6 +60,7 @@ export class MatrixNativeProjection {
       }
       return this.snapshot();
     }
+    if (this.isOlderThanCheckpoint(event)) return this.snapshot();
     if (event.kind === "gateway_revision") return this.snapshot();
     if (event.kind === "session_root") {
       if (this.deletedAt.has(event.session_id)) return this.snapshot();
@@ -114,10 +116,7 @@ export class MatrixNativeProjection {
       return;
     }
     if (event.state === "deleted") {
-      this.deletedAt.set(
-        event.session_id,
-        Math.max(event.updated_at, this.deletedAt.get(event.session_id) ?? 0),
-      );
+      this.deletedAt.set(event.session_id, revisionOf(event));
       this.sessions.delete(event.session_id);
       return;
     }
@@ -146,6 +145,21 @@ export class MatrixNativeProjection {
     pending
       .sort((left, right) => left.updated_at - right.updated_at)
       .forEach((event) => this.applyDelta(event));
+  }
+
+  private discardStateBeforeCheckpoint(checkpoint: NativeRevision): void {
+    for (const [sessionId, revision] of this.deletedAt) {
+      if (compareRevisions(revision, checkpoint) < 0) this.deletedAt.delete(sessionId);
+    }
+    for (const [sessionId, pending] of this.pendingDeltas) {
+      const retained = pending.filter(event => compareRevisions(event, checkpoint) >= 0);
+      if (retained.length > 0) this.pendingDeltas.set(sessionId, retained);
+      else this.pendingDeltas.delete(sessionId);
+    }
+  }
+
+  private isOlderThanCheckpoint(event: NativeRevision): boolean {
+    return this.checkpoint !== null && compareRevisions(event, this.checkpoint) < 0;
   }
 
   applySessionStatus(input: Record<string, unknown>): GatewayStateSnapshot | null {
@@ -243,6 +257,16 @@ function revisionOf(value: NativeRevision): NativeRevision {
     revision_epoch: value.revision_epoch,
     revision_epoch_generation: value.revision_epoch_generation,
   };
+}
+
+function compareRevisions(left: NativeRevision, right: NativeRevision): number {
+  if (left.revision_epoch_generation !== right.revision_epoch_generation) {
+    return left.revision_epoch_generation - right.revision_epoch_generation;
+  }
+  if (left.revision_epoch !== right.revision_epoch) {
+    throw new Error("Matrix native events disagree on the revision epoch.");
+  }
+  return left.revision - right.revision;
 }
 
 function nullableProperty(

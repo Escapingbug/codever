@@ -104,6 +104,51 @@ describe("MatrixNativeProjection", () => {
     ]);
   });
 
+  it("does not let historical events mutate a newer checkpoint inventory", () => {
+    const projection = new MatrixNativeProjection();
+    projection.apply({
+      ...checkpoint(),
+      ...revision(5),
+      state_version: 2,
+      sessions: [{
+        session_id: "s-existing",
+        title: "Existing work",
+        updated_at: 7,
+        archived: false,
+        status: "idle" as const,
+        project: { id: "p1", name: "codever", cwd: "/repo" },
+        provider: "codex",
+        extensions: [],
+      }],
+    });
+
+    projection.apply({
+      version: 2,
+      kind: "session_root",
+      ...revision(1),
+      session_id: "s-stale",
+      title: "Stale session",
+      project: { id: "p1", name: "codever", cwd: "/repo" },
+      created_at: 1,
+      updated_at: 1,
+      archived: false,
+      status: "idle",
+      provider: "codex",
+      permission_mode: "default",
+      extensions: [],
+    });
+    projection.apply({
+      version: 2,
+      kind: "session_lifecycle",
+      ...revision(4),
+      session_id: "s-existing",
+      state: "deleted",
+      updated_at: 8,
+    });
+
+    expect(projection.snapshot()?.sessions.map(session => session.id)).toEqual(["s-existing"]);
+  });
+
   it("replays updates that arrive before their thread root", () => {
     const projection = new MatrixNativeProjection();
     projection.apply(checkpoint());

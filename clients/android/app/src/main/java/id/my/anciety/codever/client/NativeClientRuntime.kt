@@ -173,11 +173,23 @@ class NativeClientRuntime(
     private val eventHub = ClientEventHub(
         EncryptedAtomicClientEventPersistence(files.events, cipher, deviceId),
         initialSnapshot(),
+        // Matrix and the per-session history cache remain authoritative. This
+        // window only bridges short WebView detach/reattach gaps.
+        maxReplayEvents = BRIDGE_REPLAY_EVENT_LIMIT,
     )
 
     init {
         gatewayState = eventHub.snapshot().gatewayState
-        if (gatewayState != null) diagnostics.record("gateway.state.cache.restored")
+        if (gatewayState != null) {
+            diagnostics.record("gateway.state.cache.restored")
+            runCatching { nativeProjection.restore(gatewayState!!) }
+                .onFailure { error ->
+                    diagnostics.record(
+                        "gateway.state.projection_restore_failure",
+                        mapOf("error" to diagnosticErrorName(error)),
+                    )
+                }
+        }
         matrix.setObserver(this)
         refreshSnapshot(publishLifecycle = false)
         scope.launch {
@@ -348,7 +360,10 @@ class NativeClientRuntime(
             val public = publicTrust() as PublicTrustState.Trusted
             val nextSnapshot = refreshedSnapshot()
             eventHub.publish(ClientEventType.TRUST_CHANGED, PublicClientJson.encodeTrust(public), nextSnapshot)
-            startGatewayStateSync(recoverTransport = false)
+            startGatewayStateSync(
+                recoverTransport = false,
+                invalidateCurrentState = true,
+            )
             public to snapshot()
         }
     }
@@ -369,7 +384,11 @@ class NativeClientRuntime(
         mutex.withLock {
             val activeTrust = trust
                 ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
-            check(gatewayState != null) { "Gateway state is not synchronized yet." }
+            check(
+                gatewayState != null &&
+                gatewayStateSynchronized &&
+                matrix.commandTransportReady
+            ) { "Gateway command transport is not synchronized yet." }
             CommandAuthorizationPolicy.requireAuthorized(
                 CommandPayloadValidator.validate(payload),
                 activeTrust.certificate.allowedOperations,
@@ -513,9 +532,28 @@ class NativeClientRuntime(
 
     override fun onTransportReady(identity: MatrixTransportIdentity) {
         transportIdentity = identity
+        // A Matrix client resumes from its durable local projection. Once the
+        // room sync and application-control cursor have caught up, that cached
+        // projection is usable while older timeline events continue loading in
+        // the background. First-time pairing still has no Gateway state and
+        // therefore remains connecting until its first checkpoint arrives.
+        if (gatewayState != null) gatewayStateSynchronized = true
         refreshSnapshot(publishLifecycle = true)
+        if (
+            gatewayStateSynchronized &&
+            matrix.commandTransportReady
+        ) {
+            // A process may stop after enqueue committed but before its send
+            // coroutine ran. Once the direct application receiver is ready,
+            // resume that exact durable command without waiting for a new
+            // checkpoint event to mutate the cached Gateway projection.
+            schedulePendingCommandRecoveries(immediate = true)
+        }
         if (trust != null) {
-            startGatewayStateSync(recoverTransport = true)
+            startGatewayStateSync(
+                recoverTransport = true,
+                invalidateCurrentState = false,
+            )
         }
     }
 
@@ -544,6 +582,17 @@ class NativeClientRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    diagnostics.record(
+                        "matrix.native_event.rejected",
+                        mapOf(
+                            "error" to diagnosticErrorName(error),
+                            "code" to if (error is CodeverSecurityException) {
+                                error.code.name
+                            } else {
+                                "NONE"
+                            },
+                        ),
+                    )
                     if (error !is CodeverSecurityException) {
                         publishStatus(lifecycle().phase, "native_event_rejected")
                     }
@@ -772,8 +821,14 @@ class NativeClientRuntime(
         }
     }
 
-    private fun startGatewayStateSync(recoverTransport: Boolean) {
-        gatewayStateSynchronized = false
+    private fun startGatewayStateSync(
+        recoverTransport: Boolean,
+        invalidateCurrentState: Boolean = false,
+    ) {
+        if (invalidateCurrentState) {
+            gatewayStateSynchronized = false
+            refreshSnapshot(publishLifecycle = true)
+        }
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = scope.launch {
             if (recoverTransport) {
@@ -788,7 +843,12 @@ class NativeClientRuntime(
                 }
             }
             if (trust != null && matrix.status.phase == MatrixRuntimePhase.SYNCING) {
-                runCatching { backfillNativeTimeline() }
+                val maxPages = if (gatewayState == null) {
+                    MAX_NATIVE_TIMELINE_BACKFILL_PAGES
+                } else {
+                    CACHED_STATE_CONVERGENCE_PAGES
+                }
+                runCatching { backfillNativeTimeline(maxPages) }
                     .onSuccess { result ->
                         diagnostics.record(
                             "matrix.native_timeline.paginated",
@@ -808,9 +868,11 @@ class NativeClientRuntime(
         }
     }
 
-    private suspend fun backfillNativeTimeline(): MatrixTimelineBackfillResult =
+    private suspend fun backfillNativeTimeline(
+        maxPages: Int = MAX_NATIVE_TIMELINE_BACKFILL_PAGES,
+    ): MatrixTimelineBackfillResult =
         timelinePaginationMutex.withLock {
-            paginateMatrixTimelineToStart(MAX_NATIVE_TIMELINE_BACKFILL_PAGES) {
+            paginateMatrixTimelineToStart(maxPages) {
                 matrix.paginateRoomHistory(100)
             }
         }
@@ -1102,19 +1164,30 @@ class NativeClientRuntime(
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
         val revisionEpoch = extension.string("revision_epoch") ?: return
         if (revisionEpoch.isBlank()) return
+        val changed = gatewayState != extension
         gatewayState = extension
         outbox.updateKnownRevision(revision)
-        eventHub.publish(
-            ClientEventType.GATEWAY_STATE_CHANGED,
-            extension,
-            refreshedSnapshot(),
-        )
         gatewayStateSynchronized = true
+        if (changed) {
+            try {
+                eventHub.publish(
+                    ClientEventType.GATEWAY_STATE_CHANGED,
+                    extension,
+                    refreshedSnapshot(),
+                )
+            } catch (error: Exception) {
+                gatewayStateSynchronized = false
+                throw error
+            }
+        }
         gatewayStateSyncJob?.cancel()
         gatewayStateSyncJob = null
-        diagnostics.record("gateway.state.response.accepted")
+        diagnostics.record(
+            if (changed) "gateway.state.response.accepted" else "gateway.state.response.duplicate",
+        )
         resumePendingSafeRevisionConflict()
         schedulePendingCommandRecoveries(immediate = true)
+        refreshSnapshot(publishLifecycle = true)
     }
 
     private fun acceptCommandAck(extension: JsonObject) {
@@ -1478,13 +1551,24 @@ class NativeClientRuntime(
             status.phase == MatrixRuntimePhase.RETRY_WAIT -> LifecyclePhase.RECONNECTING
             status.phase == MatrixRuntimePhase.BLOCKED -> LifecyclePhase.BLOCKED
             activeTrust == null -> LifecyclePhase.UNPAIRED
+            !matrix.commandTransportReady || !gatewayStateSynchronized -> LifecyclePhase.CONNECTING
             else -> LifecyclePhase.READY
         }
-        return ClientLifecycle(phase, status.since, status.detailCode)
+        val detail = if (
+            phase == LifecyclePhase.CONNECTING &&
+            status.phase == MatrixRuntimePhase.SYNCING &&
+            activeTrust != null &&
+            (!matrix.commandTransportReady || !gatewayStateSynchronized)
+        ) {
+            "matrix_gateway_state_syncing"
+        } else {
+            status.detailCode
+        }
+        return ClientLifecycle(phase, status.since, detail)
     }
 
     private fun publishStatus(phase: LifecyclePhase, detail: String?) {
-        eventHub.publish(
+        eventHub.publishTransient(
             ClientEventType.STATUS_CHANGED,
             buildJsonObject {
                 put("phase", phase.wireValue)
@@ -1582,6 +1666,7 @@ class NativeClientRuntime(
         ?: throw IllegalArgumentException("$key must be an object.")
 
     private companion object {
+        const val BRIDGE_REPLAY_EVENT_LIMIT = 100
         const val PAIRING_REQUEST_MS = 2 * 60_000L
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
@@ -1589,6 +1674,7 @@ class NativeClientRuntime(
         const val COMMAND_ACK_TIMEOUT_MS = 30_000L
         const val MAX_AUTOMATIC_REVISION_RETRIES = 3
         const val MAX_NATIVE_TIMELINE_BACKFILL_PAGES = 100
+        const val CACHED_STATE_CONVERGENCE_PAGES = 1
     }
 }
 

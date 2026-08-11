@@ -23,7 +23,9 @@ import type {
 import type {
     MatrixDownloadMediaRequest,
     MatrixApplicationControlEventRequest,
+    MatrixApplicationTimelineEventRequest,
     MatrixIncomingEvent,
+    MatrixRoomMessageContent,
     MatrixSendEventRequest,
     MatrixSendEventResult,
     MatrixTransport,
@@ -250,16 +252,35 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         return { eventId: result.event_id }
     }
 
+    async sendApplicationTimelineEvent(
+        request: MatrixApplicationTimelineEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
+        assertSecureApplicationTimelineContent(request.content)
+        const result = await this.sendDirectRoomEvent(request)
+        this.onLog?.('[matrix-sdk] application timeline event sent directly')
+        return result
+    }
+
     async sendApplicationControlEvent(
         request: MatrixApplicationControlEventRequest,
     ): Promise<MatrixSendEventResult> {
         if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
         assertSecureApplicationControlContent(request.content)
+        return this.sendDirectRoomEvent(request)
+    }
+
+    private async sendDirectRoomEvent(request: {
+        roomId: string
+        eventType: string
+        transactionId: string
+        content: MatrixRoomMessageContent
+    }): Promise<MatrixSendEventResult> {
         const path = [
             '/rooms/',
             encodeURIComponent(request.roomId),
             '/send/',
-            encodeURIComponent(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE),
+            encodeURIComponent(request.eventType),
             '/',
             encodeURIComponent(request.transactionId),
         ].join('')
@@ -326,6 +347,18 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
             content: event.getContent() as Record<string, unknown>,
             originServerTs: event.getTs(),
         }
+    }
+}
+
+function assertSecureApplicationTimelineContent(content: Record<string, unknown>): void {
+    const extension = asRecord(content['io.codever'])
+    if (
+        extension?.version !== 2
+        || extension.kind !== 'timeline_envelope'
+        || !asRecord(extension.timeline_envelope)
+        || !asRecord(extension.timeline_key_ring_bundle)
+    ) {
+        throw new Error('Application timeline events must contain a Codever timeline envelope')
     }
 }
 
