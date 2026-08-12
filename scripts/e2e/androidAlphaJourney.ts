@@ -388,7 +388,6 @@ export async function runAndroidAlphaJourney(
             await android.signInForPairing(options.testerUserId, options.testerPassword)
         }
         await android.clickButtonPrefix('Connect to ')
-        await tapNativePairingConfirmation(serial, options.runId)
         process.stdout.write('  [A2a/7] Holding the first native sync beyond its watchdog window…\n')
         await firstSyncGate.waitForInterception()
         await waitFor(
@@ -409,6 +408,14 @@ export async function runAndroidAlphaJourney(
             0,
             'A running internally supervised Matrix sync was killed while its first response was delayed',
         )
+        await waitFor(
+            async () => await diagnosticCount(serial, 'matrix.transport.ready') > 0,
+            {
+                description: 'native Matrix transport after releasing the delayed first sync',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await tapNativePairingConfirmation(serial, options.runId)
         const paired = await android.waitFor(
             'fresh native Gateway checkpoint',
             state => state.connection.endsWith('Connected') && state.projectNames.length > 0,
@@ -649,6 +656,7 @@ function isMatrixSyncRequest(path: string): boolean {
 async function closeHttpServer(server: HttpServer): Promise<void> {
     await new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve())
+        server.closeAllConnections()
     })
 }
 

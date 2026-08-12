@@ -34,23 +34,20 @@ class MatrixRuntimeFailurePolicyTest {
     }
 
     @Test
-    fun `running supervisor without a first response is blocked instead of retrying forever`() {
-        val decision = MatrixSyncRestartPolicy.decide(
-            MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT,
-            syncTaskRunning = true,
-        )
+    fun `first response timeouts remain retryable for external supervisors`() {
+        val decision = MatrixSyncRestartPolicy.decide(MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT)
 
-        assertTrue(decision.blocked)
+        assertFalse(decision.blocked)
         assertEquals("matrix_first_sync_timeout", decision.detailCode)
     }
 
     @Test
     fun `stopped and stale tasks remain retryable`() {
         listOf(
-            MatrixSyncRestartReason.TASK_STOPPED to false,
-            MatrixSyncRestartReason.SYNC_STALE to true,
-        ).forEach { (reason, running) ->
-            assertFalse(MatrixSyncRestartPolicy.decide(reason, running).blocked)
+            MatrixSyncRestartReason.TASK_STOPPED,
+            MatrixSyncRestartReason.SYNC_STALE,
+        ).forEach { reason ->
+            assertFalse(MatrixSyncRestartPolicy.decide(reason).blocked)
         }
     }
 }

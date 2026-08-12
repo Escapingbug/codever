@@ -46,9 +46,13 @@ class MatrixSyncLiveness(
         if (!syncTaskRunning) return MatrixSyncRestartReason.TASK_STOPPED
         val currentTime = now()
         return when (phase) {
-            MatrixRuntimePhase.CONNECTING -> attemptStartedAt
-                ?.takeIf { currentTime - it >= firstSyncTimeoutMs }
-                ?.let { MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT }
+            MatrixRuntimePhase.CONNECTING -> if (internallySupervised) {
+                null
+            } else {
+                attemptStartedAt
+                    ?.takeIf { currentTime - it >= firstSyncTimeoutMs }
+                    ?.let { MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT }
+            }
             MatrixRuntimePhase.SYNCING -> if (internallySupervised) {
                 null
             } else {

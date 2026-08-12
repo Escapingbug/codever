@@ -13,7 +13,7 @@ class MatrixSyncLivenessTest {
     )
 
     @Test
-    fun `running task without first response is restarted after deadline`() {
+    fun `externally supervised task without first response is restarted after deadline`() {
         liveness.connectionStarted()
         now += 99
         assertNull(liveness.restartReason(true, MatrixRuntimePhase.CONNECTING))
@@ -21,6 +21,20 @@ class MatrixSyncLivenessTest {
         assertEquals(
             MatrixSyncRestartReason.FIRST_SYNC_TIMEOUT,
             liveness.restartReason(true, MatrixRuntimePhase.CONNECTING),
+        )
+    }
+
+    @Test
+    fun `internally supervised task can wait for its first response`() {
+        liveness.connectionStarted()
+        now += 101
+
+        assertNull(
+            liveness.restartReason(
+                true,
+                MatrixRuntimePhase.CONNECTING,
+                internallySupervised = true,
+            ),
         )
     }
 

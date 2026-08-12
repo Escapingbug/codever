@@ -54,8 +54,11 @@ versioned `codever-native-v2` connection ID. The bound room is subscribed before
 the service starts. `SyncService.RUNNING` means only that its child tasks were
 spawned; readiness requires room-list progress from a completed sync before
 E2EE finalization, timeline construction, and transport publication. A running
-supervisor that produces no first sync within 45 seconds is blocked instead of
-entering an unbounded restart loop.
+SDK supervisor is allowed to keep waiting for that first response: its own
+`ERROR` and `TERMINATED` states are authoritative, so a slow homeserver cannot
+be misreported as a permanent native failure. Drivers without internal
+supervision retain a bounded first-response watchdog and retry instead of
+entering a blocked state.
 
 The SDK writes bounded private sync traces. Diagnostic export converts those
 traces to a fixed vocabulary of levels, targets, categories, and HTTP status

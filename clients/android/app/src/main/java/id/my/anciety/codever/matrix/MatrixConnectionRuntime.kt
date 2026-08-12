@@ -126,7 +126,7 @@ class MatrixConnectionRuntime(
                         null
                     }
                     if (reason != null) {
-                        val decision = MatrixSyncRestartPolicy.decide(reason, running)
+                        val decision = MatrixSyncRestartPolicy.decide(reason)
                         diagnostics.record(
                             "matrix.watchdog.failure",
                             mapOf(
