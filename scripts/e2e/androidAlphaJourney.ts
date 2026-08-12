@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
+import {
+    createServer as createHttpServer,
+    request as requestHttp,
+    type Server as HttpServer,
+} from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Page } from 'playwright-core'
@@ -28,6 +34,14 @@ type PendingCall = {
     resolve(value: JsonRecord): void
     reject(error: Error): void
     timer: ReturnType<typeof setTimeout>
+}
+
+type FirstSyncGate = {
+    readonly port: number
+    intercepted(): number
+    waitForInterception(): Promise<void>
+    release(): void
+    close(): Promise<void>
 }
 
 type AndroidPageState = {
@@ -342,6 +356,7 @@ export async function runAndroidAlphaJourney(
     let android: AndroidWebView | undefined
     let forwardedDevtoolsPort: string | undefined
     let sessionCreated = false
+    let firstSyncGate: FirstSyncGate | undefined
 
     try {
         process.stdout.write('  [A1/7] Building and installing a fresh isolated Android E2E package…\n')
@@ -350,7 +365,8 @@ export async function runAndroidAlphaJourney(
         await adb(serial, 'install', '-r', '-t', apkPath)
         await adb(serial, 'shell', 'pm', 'grant', PACKAGE_NAME, 'android.permission.POST_NOTIFICATIONS')
         await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${options.matrixPort}`)
+        firstSyncGate = await createFirstSyncGate(options.matrixPort)
+        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${firstSyncGate.port}`)
 
         process.stdout.write('  [A2/7] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
@@ -373,6 +389,26 @@ export async function runAndroidAlphaJourney(
         }
         await android.clickButtonPrefix('Connect to ')
         await tapNativePairingConfirmation(serial, options.runId)
+        process.stdout.write('  [A2a/7] Holding the first native sync beyond its watchdog window…\n')
+        await firstSyncGate.waitForInterception()
+        await waitFor(
+            async () => await diagnosticCount(serial, 'matrix.driver.sync_service_state stage=RUNNING') > 0,
+            {
+                description: 'running native Matrix sync service behind the first-sync gate',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await delay(7_000)
+        const prematureTimeouts = await diagnosticCount(
+            serial,
+            'matrix.watchdog.failure reason=FIRST_SYNC_TIMEOUT running=true',
+        )
+        firstSyncGate.release()
+        assert.equal(
+            prematureTimeouts,
+            0,
+            'A running internally supervised Matrix sync was killed while its first response was delayed',
+        )
         const paired = await android.waitFor(
             'fresh native Gateway checkpoint',
             state => state.connection.endsWith('Connected') && state.projectNames.length > 0,
@@ -514,6 +550,7 @@ export async function runAndroidAlphaJourney(
             journeys: [
                 'browser-offline-cache-recovery',
                 'fresh-native-pairing',
+                'delayed-first-native-sync-recovery',
                 'browser-android-session-sync',
                 'background-task-notification',
                 'notification-deep-link-recovery',
@@ -541,7 +578,78 @@ export async function runAndroidAlphaJourney(
         }
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.pwaPort}`)
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
+        firstSyncGate?.release()
+        await firstSyncGate?.close().catch(() => undefined)
     }
+}
+
+async function createFirstSyncGate(targetPort: number): Promise<FirstSyncGate> {
+    let released = false
+    let intercepted = 0
+    let releaseGate: (() => void) | undefined
+    const gate = new Promise<void>(resolve => {
+        releaseGate = resolve
+    })
+    const server = createHttpServer(async (incoming, outgoing) => {
+        const requestPath = incoming.url ?? '/'
+        if (isMatrixSyncRequest(requestPath) && !released) {
+            intercepted += 1
+            await gate
+        }
+        if (incoming.destroyed) return
+
+        const upstream = requestHttp({
+            hostname: '127.0.0.1',
+            port: targetPort,
+            method: incoming.method,
+            path: requestPath,
+            headers: {
+                ...incoming.headers,
+                host: `127.0.0.1:${targetPort}`,
+            },
+        }, response => {
+            outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
+            response.pipe(outgoing)
+        })
+        upstream.on('error', error => {
+            if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'text/plain' })
+            outgoing.end(`Matrix E2E proxy failed: ${formatError(error)}`)
+        })
+        incoming.pipe(upstream)
+    })
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => {
+            server.off('error', reject)
+            resolve()
+        })
+    })
+    const address = server.address() as AddressInfo
+
+    return {
+        port: address.port,
+        intercepted: () => intercepted,
+        waitForInterception: () => waitFor(() => intercepted > 0, {
+            description: 'the APK first Matrix sync request to reach the delay gate',
+            timeoutMs: CONNECT_TIMEOUT_MS,
+        }),
+        release: () => {
+            if (released) return
+            released = true
+            releaseGate?.()
+        },
+        close: () => closeHttpServer(server),
+    }
+}
+
+function isMatrixSyncRequest(path: string): boolean {
+    return /^\/_matrix\/client\/(?:v3|unstable\/[^/]+)\/sync(?:\?|$)/u.test(path)
+}
+
+async function closeHttpServer(server: HttpServer): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        server.close(error => error ? reject(error) : resolve())
+    })
 }
 
 const DOM_HELPERS = `

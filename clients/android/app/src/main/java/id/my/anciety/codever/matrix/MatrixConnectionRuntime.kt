@@ -1,6 +1,7 @@
 package id.my.anciety.codever.matrix
 
 import android.content.Context
+import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,7 +47,9 @@ class MatrixConnectionRuntime(
         OfficialMatrixSdkDriver(scope, diagnostics = diagnostics)
     },
     private val stateMachine: MatrixRuntimeStateMachine = MatrixRuntimeStateMachine(),
-    private val liveness: MatrixSyncLiveness = MatrixSyncLiveness(),
+    private val liveness: MatrixSyncLiveness = MatrixSyncLiveness(
+        firstSyncTimeoutMs = BuildConfig.MATRIX_FIRST_SYNC_TIMEOUT_MS,
+    ),
     private val retryDelayMs: Long = 5_000,
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onConvergenceRequired: (String) -> Unit = {},

@@ -79,6 +79,7 @@ android {
         buildConfigField("String", "NATIVE_BUILD_ID", "\"$androidNativeBuildId\"")
         buildConfigField("String", "APP_ORIGIN", "\"$productionWebOrigin\"")
         buildConfigField("boolean", "ALLOW_INSECURE_E2E_LOOPBACK", "false")
+        buildConfigField("long", "MATRIX_FIRST_SYNC_TIMEOUT_MS", "45_000L")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -104,6 +105,9 @@ android {
             versionNameSuffix = "-e2e"
             buildConfigField("String", "APP_ORIGIN", "\"$e2eWebOrigin\"")
             buildConfigField("boolean", "ALLOW_INSECURE_E2E_LOOPBACK", "true")
+            // Keep the same watchdog path as production while making a
+            // deliberately delayed first-sync regression finish quickly.
+            buildConfigField("long", "MATRIX_FIRST_SYNC_TIMEOUT_MS", "1_000L")
             matchingFallbacks += listOf("debug")
         }
     }
