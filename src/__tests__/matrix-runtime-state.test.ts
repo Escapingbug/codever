@@ -387,4 +387,89 @@ describe('FileCommandReplayStore terminal results', () => {
         const ledger = await readFile(path, 'utf8')
         expect(ledger.match(/"kind":"command_result"/gu)).toHaveLength(1)
     })
+
+    it('retrieves a legacy Android result after authentication fields change on upgrade', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-command-result-upgrade-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'replay.jsonl')
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'legacy-android-command',
+            gatewayId: 'gateway-1',
+            deviceId: 'device-1',
+            sequenceEpoch: 'certificate-1',
+            conversationId: 'conversation-1',
+            revisionEpoch: 'runtime-epoch-1',
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'session.delete',
+            issuedAt: 1_000,
+            expiresAt: 61_000,
+            nonce: '0123456789abcdef-original-auth',
+            payload: {
+                operation: 'session.delete',
+                sessionId: 'session-1',
+            },
+        }
+        const terminal = {
+            revision: 1,
+            outcome: 'succeeded' as const,
+            sessionId: 'session-1',
+        }
+        const original = new FileCommandReplayStore(path)
+        await original.initialize(1_000)
+        await original.claimCommandInOrder(command, 1_000, command.sequenceEpoch)
+        await original.recordCommandResult(command, terminal, command.sequenceEpoch)
+
+        // Fingerprints written before this change were raw SHA-256 strings.
+        const records = (await readFile(path, 'utf8'))
+            .trim()
+            .split('\n')
+            .map(line => JSON.parse(line) as Record<string, unknown>)
+        for (const record of records) {
+            const revision = record.revision as Record<string, unknown> | undefined
+            if (typeof revision?.commandFingerprint === 'string') {
+                revision.commandFingerprint = revision.commandFingerprint.replace(/^v2:/u, '')
+            }
+            if (typeof record.fingerprint === 'string') {
+                record.fingerprint = record.fingerprint.replace(/^v2:/u, '')
+            }
+        }
+        await writeFile(
+            path,
+            `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
+            'utf8',
+        )
+
+        const recoveredCommand: CodeverCommand = {
+            ...command,
+            issuedAt: 2_000,
+            expiresAt: 62_000,
+            nonce: '0123456789abcdef-refreshed-auth',
+        }
+        const recovered = new FileCommandReplayStore(path)
+        await recovered.initialize(2_000)
+        await expect(
+            recovered.claimCommandInOrder(
+                recoveredCommand,
+                2_000,
+                recoveredCommand.sequenceEpoch,
+            ),
+        ).resolves.toEqual({
+            status: 'duplicate',
+            revision: 1,
+            legacyFingerprintRecovery: true,
+        })
+        await expect(
+            recovered.getCommandResult(recoveredCommand, recoveredCommand.sequenceEpoch),
+        ).rejects.toMatchObject({ code: 'replay' })
+        await expect(
+            recovered.getCommandResult(
+                recoveredCommand,
+                recoveredCommand.sequenceEpoch,
+                true,
+            ),
+        ).resolves.toEqual(terminal)
+    })
 })

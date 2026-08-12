@@ -652,7 +652,7 @@ class NativeClientRuntime(
         try {
             sendTrustedControlMessage(
                 signedCommandContent(transmission).toString(),
-                "codever.command.${transmission.commandId}",
+                "codever.command.${transmission.commandId}.${randomNonce()}",
             )
         } catch (error: Exception) {
             mutex.withLock {
@@ -767,7 +767,10 @@ class NativeClientRuntime(
             ?: throw IllegalStateException("Gateway revision epoch is unavailable.")
         val operation = transmission.payload.string("operation")
             ?: throw IllegalArgumentException("Command operation is invalid.")
-        val timestamp = now()
+        // These fields define the durable command fingerprint and must never
+        // change across recovery attempts. The outbox assigns issuedAt once,
+        // before the first send can leave the device.
+        val commandIssuedAt = transmission.issuedAt
         val command = buildJsonObject {
             put("kind", "codever.command")
             put("version", 1)
@@ -781,9 +784,9 @@ class NativeClientRuntime(
             put("sequence", transmission.sequence)
             put("baseRevision", transmission.baseRevision)
             put("operation", operation)
-            put("issuedAt", timestamp)
-            put("expiresAt", timestamp + COMMAND_LIFETIME_MS)
-            put("nonce", randomNonce())
+            put("issuedAt", commandIssuedAt)
+            put("expiresAt", commandIssuedAt + COMMAND_LIFETIME_MS)
+            put("nonce", transmission.nonce)
             put("payload", transmission.payload)
         }
         val signed = buildJsonObject {
@@ -804,6 +807,11 @@ class NativeClientRuntime(
             })
         }
         val certificate = activeTrust.certificate
+        // Matrix redelivery is a new transport attempt around the exact same
+        // authenticated command. A fresh outer envelope lets the Gateway open
+        // the event and reach its durable command-result ledger even when the
+        // homeserver no longer remembers the original transaction ID.
+        val envelopeIssuedAt = now()
         val envelope = SecureEnvelopes.sealSecureEnvelope(
             bindings = SecureEnvelopeBindings(
                 gatewayId = activeTrust.gatewayId,
@@ -820,8 +828,8 @@ class NativeClientRuntime(
             plaintext = content,
             senderIdentity = identity,
             recipientPublicKey = activeTrust.gatewayKey,
-            envelopeId = "codever.${transmission.commandId}",
-            now = timestamp,
+            envelopeId = "codever.${transmission.commandId}.${randomNonce()}",
+            now = envelopeIssuedAt,
             lifetimeMs = COMMAND_LIFETIME_MS,
         )
         return buildJsonObject {

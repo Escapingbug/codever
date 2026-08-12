@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,10 +31,13 @@ class EncryptedCommandOutboxStoreTest {
                 put("text", "highly secret prompt")
             },
         )
-        outbox.claimForTransmission(receipt.commandId)
+        val transmission = outbox.claimForTransmission(receipt.commandId)!!
 
         val bytes = blob.value!!
         assertFalse(bytes.toString(Charsets.UTF_8).contains("highly secret prompt"))
+        val persisted = checkNotNull(store.load()).commands.single()
+        assertEquals(transmission.issuedAt, persisted.authenticationIssuedAt)
+        assertEquals(transmission.nonce, persisted.authenticationNonce)
         val restored = DurableCommandOutbox(store, IncrementingClock(), IncrementingIds())
         assertEquals(CommandState.RECOVERY_REQUIRED, restored.get(receipt.commandId)?.state)
     }
@@ -48,6 +52,29 @@ class EncryptedCommandOutboxStoreTest {
         val other = EncryptedAtomicCommandOutboxStore(blob, cipher, "account-b")
         assertThrows(Exception::class.java) { other.load() }
         assertTrue(blob.value != null)
+    }
+
+    @Test
+    fun `schema one outbox migrates without inventing authentication metadata`() {
+        val store = InMemoryCommandOutboxStore()
+        val outbox = DurableCommandOutbox(store, IncrementingClock(), IncrementingIds())
+        outbox.enqueue(
+            java.util.UUID.randomUUID().toString(),
+            buildJsonObject { put("operation", "session.create") },
+        )
+        val current = CommandOutboxCodec.encode(checkNotNull(store.load()))
+            .toString(Charsets.UTF_8)
+        val legacy = current
+            .replace("\"schemaVersion\":2", "\"schemaVersion\":1")
+            .replace(",\"authenticationIssuedAt\":null", "")
+            .replace(",\"authenticationNonce\":null", "")
+            .toByteArray(Charsets.UTF_8)
+
+        val migrated = CommandOutboxCodec.decode(legacy)
+
+        assertEquals(1, migrated.commands.size)
+        assertNull(migrated.commands.single().authenticationIssuedAt)
+        assertNull(migrated.commands.single().authenticationNonce)
     }
 
     private class MemoryBlobStore : CommandOutboxBlobStore {

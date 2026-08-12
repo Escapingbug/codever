@@ -113,6 +113,8 @@ class DurableCommandOutbox internal constructor(
             sessionId = effectiveSessionId,
             sequence = Math.addExact(snapshot.lastAcknowledgedSequence, 1L),
             baseRevision = snapshot.lastRevision,
+            authenticationIssuedAt = null,
+            authenticationNonce = null,
             revision = null,
             cancelRequested = false,
             completion = null,
@@ -127,9 +129,13 @@ class DurableCommandOutbox internal constructor(
     fun claimForTransmission(commandId: String): CommandTransmission? {
         val command = findCurrent(commandId) ?: return null
         if (command.state != CommandState.QUEUED) return null
+        val now = monotonicNow(command.updatedAt)
         val next = command.copy(
             state = CommandState.TRANSMITTING,
-            updatedAt = monotonicNow(command.updatedAt),
+            updatedAt = now,
+            authenticationIssuedAt = command.authenticationIssuedAt ?: now,
+            authenticationNonce = command.authenticationNonce
+                ?: authenticationNonce(command.commandId),
         )
         replaceAndCommit(command, next)
         return next.toTransmission(recovery = false)
@@ -139,9 +145,16 @@ class DurableCommandOutbox internal constructor(
     fun claimRecovery(commandId: String): CommandTransmission? {
         val command = findCurrent(commandId) ?: return null
         if (command.state != CommandState.RECOVERY_REQUIRED) return null
+        val now = monotonicNow(command.updatedAt)
         val next = command.copy(
             state = CommandState.TRANSMITTING,
-            updatedAt = monotonicNow(command.updatedAt),
+            updatedAt = now,
+            // Schema-v1 outboxes did not retain authentication time. A legacy
+            // command gets one value on its first post-upgrade recovery; all
+            // subsequent attempts are byte-identical at the command layer.
+            authenticationIssuedAt = command.authenticationIssuedAt ?: now,
+            authenticationNonce = command.authenticationNonce
+                ?: authenticationNonce(command.commandId),
         )
         replaceAndCommit(command, next)
         return next.toTransmission(recovery = true)
@@ -273,6 +286,8 @@ class DurableCommandOutbox internal constructor(
                 state = CommandState.QUEUED,
                 updatedAt = now,
                 baseRevision = command.expectedRevision,
+                authenticationIssuedAt = null,
+                authenticationNonce = null,
                 revision = null,
                 completion = null,
                 expectedRevision = null,
@@ -423,6 +438,10 @@ private fun PersistedCommand.toTransmission(recovery: Boolean) = CommandTransmis
     idempotencyKey = idempotencyKey,
     sequence = sequence,
     baseRevision = baseRevision,
+    issuedAt = authenticationIssuedAt
+        ?: error("A transmission lease has no durable authentication timestamp."),
+    nonce = authenticationNonce
+        ?: error("A transmission lease has no durable authentication nonce."),
     payload = payload,
     recovery = recovery,
 )
@@ -435,22 +454,29 @@ private fun requestFingerprint(payload: JsonObject, sessionId: String?): String 
         },
     ).toString().toByteArray(Charsets.UTF_8)
     return try {
-        val alphabet = "0123456789abcdef"
-        MessageDigest.getInstance("SHA-256").digest(canonical).let { digest ->
-            try {
-                buildString(digest.size * 2) {
-                    digest.forEach { byte ->
-                        val value = byte.toInt() and 0xff
-                        append(alphabet[value ushr 4])
-                        append(alphabet[value and 0x0f])
-                    }
-                }
-            } finally {
-                digest.fill(0)
+        sha256Hex(canonical)
+    } finally {
+        canonical.fill(0)
+    }
+}
+
+private fun authenticationNonce(commandId: String): String = sha256Hex(
+    "codever.command.nonce.v1\u0000$commandId".toByteArray(Charsets.UTF_8),
+)
+
+private fun sha256Hex(value: ByteArray): String {
+    val alphabet = "0123456789abcdef"
+    val digest = MessageDigest.getInstance("SHA-256").digest(value)
+    return try {
+        buildString(digest.size * 2) {
+            digest.forEach { byte ->
+                val octet = byte.toInt() and 0xff
+                append(alphabet[octet ushr 4])
+                append(alphabet[octet and 0x0f])
             }
         }
     } finally {
-        canonical.fill(0)
+        digest.fill(0)
     }
 }
 

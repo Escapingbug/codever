@@ -39,7 +39,7 @@ type PendingCall = {
 type MatrixSyncGate = {
     readonly port: number
     intercepted(): number
-    rewrittenCommandTransactions(): number
+    redeliveredCommandTransactions(): number
     observedPutPaths(): string[]
     hold(): number
     waitForInterception(after?: number, description?: string): Promise<void>
@@ -585,7 +585,7 @@ export async function runAndroidAlphaJourney(
         process.stdout.write('  [A7/9] Withholding a committed delete result through automatic Android recovery…\n')
         const deleteReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const deleteGatewayLogStart = options.gatewayOutput().length
-        const rewrittenTransactionStart = syncGate.rewrittenCommandTransactions()
+        const redeliveredTransactionStart = syncGate.redeliveredCommandTransactions()
         const deleteRecoveryStart = await diagnosticCount(
             serial,
             'command.recovery.attempted action=session.delete',
@@ -628,7 +628,7 @@ export async function runAndroidAlphaJourney(
             },
         )
         assert.ok(
-            syncGate.rewrittenCommandTransactions() > rewrittenTransactionStart,
+            syncGate.redeliveredCommandTransactions() > redeliveredTransactionStart,
             'The Alpha fault proxy did not redeliver the recovered Matrix command as a new event. '
                 + `Observed PUT paths: ${JSON.stringify(syncGate.observedPutPaths())}`,
         )
@@ -793,6 +793,7 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
     let intercepted = 0
     let repeatedCommandTransactions = 0
     const observedPutPaths: string[] = []
+    const seenCommandIds = new Set<string>()
     const seenCommandTransactions = new Set<string>()
     let cycle = heldSyncCycle()
     const server = createHttpServer((incoming, outgoing) => {
@@ -801,6 +802,7 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
         const upstreamPath = rewriteRepeatedCommandTransaction(
             incoming.method,
             requestPath,
+            seenCommandIds,
             seenCommandTransactions,
             () => ++repeatedCommandTransactions,
         )
@@ -852,7 +854,7 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
     return {
         port: address.port,
         intercepted: () => intercepted,
-        rewrittenCommandTransactions: () => repeatedCommandTransactions,
+        redeliveredCommandTransactions: () => repeatedCommandTransactions,
         observedPutPaths: () => observedPutPaths.slice(-20),
         hold: () => {
             if (!cycle.held) cycle = heldSyncCycle()
@@ -889,7 +891,8 @@ function isMatrixSyncRequest(path: string): boolean {
 function rewriteRepeatedCommandTransaction(
     method: string | undefined,
     path: string,
-    seen: Set<string>,
+    seenCommandIds: Set<string>,
+    seenTransactions: Set<string>,
     nextSequence: () => number,
 ): string {
     if (method !== 'PUT') return path
@@ -902,14 +905,23 @@ function rewriteRepeatedCommandTransaction(
     } catch {
         return path
     }
-    if (!decodedPathname.includes('/send/io.codever.secure_control.v1/codever.command.')) {
-        return path
-    }
-    if (!seen.has(pathname)) {
-        seen.add(pathname)
-        return path
-    }
-    return `${pathname}-e2e-redelivery-${nextSequence()}${query}`
+    const commandId = decodedPathname.match(
+        /\/send\/io\.codever\.secure_control\.v1\/codever\.command\.([^./?]+)(?:\.|$)/u,
+    )?.[1]
+    if (!commandId) return path
+
+    const redelivery = seenCommandIds.has(commandId)
+    seenCommandIds.add(commandId)
+    const repeatedTransaction = seenTransactions.has(pathname)
+    seenTransactions.add(pathname)
+    const redeliverySequence = redelivery ? nextSequence() : null
+
+    // Existing clients reuse the Matrix transaction ID. Rewrite only that
+    // case so Synapse cannot hide the application-level retry. Fixed clients
+    // use a fresh transaction themselves and pass through unchanged.
+    return repeatedTransaction
+        ? `${pathname}-e2e-redelivery-${redeliverySequence}${query}`
+        : path
 }
 
 async function closeHttpServer(server: HttpServer): Promise<void> {

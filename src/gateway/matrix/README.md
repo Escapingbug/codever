@@ -78,6 +78,14 @@ Unsigned text, a different extension kind, clear-text events, unknown Matrix
 device keys, invalid signatures, expired commands, and replayed command IDs or
 nonces cannot reach `TopicSession`.
 
+Recovery preserves the authenticated command identity but creates a fresh
+Matrix transaction and outer secure envelope for each transport attempt. The
+Gateway can therefore open the retry, match it against the durable command
+ledger, and re-deliver the original result without executing the command a
+second time. Unversioned Android/Gateway ledger entries have a result-only
+migration path: they can retrieve a journaled terminal result but can never
+authorize execution of the retry payload.
+
 ## Crypto initialization
 
 Production configuration must set `crypto.useIndexedDB` to `true` and provide a

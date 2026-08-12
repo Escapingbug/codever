@@ -139,6 +139,8 @@ data class CommandTransmission(
     val idempotencyKey: String,
     val sequence: Long,
     val baseRevision: Long,
+    val issuedAt: Long,
+    val nonce: String,
     val payload: JsonObject,
     val recovery: Boolean,
 ) {
@@ -148,6 +150,10 @@ data class CommandTransmission(
         requireUuid(idempotencyKey)
         requirePositiveJsonInteger(sequence, "Command sequence")
         requireNonnegativeJsonInteger(baseRevision, "Command base revision")
+        requireNonnegativeJsonInteger(issuedAt, "Command authentication timestamp")
+        require(nonce.length in 16..256 && !nonce.any(Char::isISOControl)) {
+            "Command authentication nonce is invalid."
+        }
         require(payload.toString().toByteArray(Charsets.UTF_8).size <= MAX_PAYLOAD_BYTES) {
             "Command payload is too large."
         }
@@ -156,7 +162,7 @@ data class CommandTransmission(
     override fun toString(): String =
         "CommandTransmission(operationId=$operationId, commandId=$commandId, " +
             "idempotencyKey=$idempotencyKey, sequence=$sequence, baseRevision=$baseRevision, " +
-            "payload=<redacted>, recovery=$recovery)"
+            "issuedAt=$issuedAt, nonce=<redacted>, payload=<redacted>, recovery=$recovery)"
 }
 
 enum class RevisionConflictAction {

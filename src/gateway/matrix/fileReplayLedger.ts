@@ -55,6 +55,13 @@ interface PersistedCommandResultEntry {
 export interface CommandClaimResult {
     status: 'accepted' | 'duplicate'
     revision: number
+    /**
+     * The command was accepted by a Gateway with an unversioned fingerprint. Its
+     * authenticated retry may use fresh delivery timestamps/nonces, so the
+     * Gateway may only recover an already-journaled result. It must never
+     * execute the retry payload.
+     */
+    legacyFingerprintRecovery?: true
 }
 
 export class RevisionConflictError extends SecurityError {
@@ -159,18 +166,36 @@ export class FileCommandReplayStore implements ReplayStore {
             const fingerprint = commandFingerprint(command)
             const priorOutcome = this.commandOutcomes.get(commandKey)
             if (priorOutcome) {
-                if (
+                const matchingIdentity =
                     priorOutcome.sequence === command.sequence
-                    && priorOutcome.nonceKey === nonceKey
                     && priorOutcome.baseRevision === command.baseRevision
+                const exactRecovery =
+                    matchingIdentity
+                    && priorOutcome.nonceKey === nonceKey
                     && (
                         priorOutcome.fingerprint === undefined
                         || priorOutcome.fingerprint === fingerprint
                     )
+                if (exactRecovery) {
+                    return {
+                        status: 'duplicate' as const,
+                        revision: priorOutcome.revision,
+                    }
+                }
+                // Android schema-v1 retained the durable business identity but
+                // not the original authentication timestamp/nonce. Old ledger
+                // fingerprints are unversioned, so an upgraded APK cannot
+                // reconstruct their exact hash. Treat this only as a request to
+                // retrieve the prior outcome: callers are explicitly forbidden
+                // from executing the supplied retry payload.
+                if (
+                    matchingIdentity
+                    && isLegacyCommandFingerprint(priorOutcome.fingerprint)
                 ) {
                     return {
                         status: 'duplicate' as const,
                         revision: priorOutcome.revision,
+                        legacyFingerprintRecovery: true as const,
                     }
                 }
                 throw new SecurityError(
@@ -282,12 +307,19 @@ export class FileCommandReplayStore implements ReplayStore {
     getCommandResult(
         command: CodeverCommand,
         sequenceEpoch = 'legacy-v1',
+        allowLegacyFingerprintRecovery = false,
     ): Promise<DurableCommandResult | undefined> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
             const stored = this.commandResults.get(commandKeyFor(command, sequenceEpoch))
             if (!stored) return undefined
-            if (stored.fingerprint !== commandFingerprint(command)) {
+            if (
+                stored.fingerprint !== commandFingerprint(command)
+                && !(
+                    allowLegacyFingerprintRecovery
+                    && isLegacyCommandFingerprint(stored.fingerprint)
+                )
+            ) {
                 throw new SecurityError(
                     'replay',
                     'Command result does not match the authenticated command fingerprint',
@@ -586,8 +618,13 @@ function commandKeyFor(command: CodeverCommand, sequenceEpoch: string): string {
 }
 
 function commandFingerprint(command: CodeverCommand): string {
-    return createHash('sha256')
+    const digest = createHash('sha256')
         .update('codever-command-recovery:v1\0')
         .update(canonicalJson(command))
         .digest('hex')
+    return `v2:${digest}`
+}
+
+function isLegacyCommandFingerprint(value: string | undefined): boolean {
+    return value !== undefined && /^[0-9a-f]{64}$/u.test(value)
 }

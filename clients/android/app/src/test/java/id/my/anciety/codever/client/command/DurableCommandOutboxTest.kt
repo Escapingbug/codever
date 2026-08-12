@@ -67,6 +67,8 @@ class DurableCommandOutboxTest {
         assertEquals(firstLease.operationId, recoveryLease.operationId)
         assertEquals(firstLease.sequence, recoveryLease.sequence)
         assertEquals(firstLease.baseRevision, recoveryLease.baseRevision)
+        assertEquals(firstLease.issuedAt, recoveryLease.issuedAt)
+        assertEquals(firstLease.nonce, recoveryLease.nonce)
         assertTrue(recoveryLease.recovery)
     }
 

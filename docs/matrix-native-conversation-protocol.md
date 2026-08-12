@@ -96,6 +96,16 @@ pairwise signed/encrypted because they are device-specific and executable.
 Command authorization still requires device certificate, Matrix transport
 binding, sequence epoch, replay ledger, and conversation revision checks.
 
+Client command recovery separates durable command identity from transport
+delivery. The command ID, sequence, base revision, payload, authentication
+timestamp, and nonce remain stable until acknowledgement, while every retry
+uses a fresh Matrix transaction ID and a fresh outer secure envelope. This
+prevents homeserver transaction deduplication and envelope replay protection
+from hiding a recovery attempt, while the Gateway replay ledger guarantees
+that the business command executes at most once and re-delivers its journaled
+result. Unversioned pre-upgrade ledger entries may only return an already
+journaled result; their retry payload is never executed.
+
 ## Delivery and rate budget
 
 Timeline delivery is staged in `FileMatrixDeliveryOutbox` before the network

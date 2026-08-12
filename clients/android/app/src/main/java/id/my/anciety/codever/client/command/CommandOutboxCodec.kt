@@ -17,7 +17,8 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 internal object CommandOutboxCodec {
-    private const val SCHEMA_VERSION = 1
+    private const val LEGACY_SCHEMA_VERSION = 1
+    private const val SCHEMA_VERSION = 2
     private const val MAX_PLAINTEXT_BYTES = 3 * 1024 * 1024
     private const val MAX_COMMANDS = 128
     private const val MAX_TOMBSTONES = 4_096
@@ -48,12 +49,13 @@ internal object CommandOutboxCodec {
                 "released",
             ),
         )
-        require(root.requiredLong("schemaVersion") == SCHEMA_VERSION.toLong()) {
+        val schemaVersion = root.requiredLong("schemaVersion")
+        require(schemaVersion in LEGACY_SCHEMA_VERSION.toLong()..SCHEMA_VERSION.toLong()) {
             "Command outbox schema is unsupported."
         }
         val commands = root.requiredArray("commands").also {
             require(it.size <= MAX_COMMANDS) { "Command outbox contains too many commands." }
-        }.map { decodeCommand(it.jsonObject) }
+        }.map { decodeCommand(it.jsonObject, schemaVersion.toInt()) }
         val released = root.requiredArray("released").also {
             require(it.size <= MAX_TOMBSTONES) { "Command outbox contains too many tombstones." }
         }.map { decodeTombstone(it.jsonObject) }
@@ -81,6 +83,8 @@ internal object CommandOutboxCodec {
         putNullableString("sessionId", value.sessionId)
         put("sequence", value.sequence)
         put("baseRevision", value.baseRevision)
+        putNullableLong("authenticationIssuedAt", value.authenticationIssuedAt)
+        putNullableString("authenticationNonce", value.authenticationNonce)
         putNullableLong("revision", value.revision)
         put("cancelRequested", value.cancelRequested)
         put("completion", value.completion?.let(::encodeCompletion) ?: JsonNull)
@@ -88,26 +92,31 @@ internal object CommandOutboxCodec {
         put("payload", value.payload)
     }
 
-    private fun decodeCommand(value: JsonObject): PersistedCommand {
+    private fun decodeCommand(value: JsonObject, schemaVersion: Int): PersistedCommand {
+        val keys = setOf(
+            "operationId",
+            "commandId",
+            "retiredCommandIds",
+            "idempotencyKey",
+            "requestFingerprint",
+            "state",
+            "submittedAt",
+            "updatedAt",
+            "sessionId",
+            "sequence",
+            "baseRevision",
+            "revision",
+            "cancelRequested",
+            "completion",
+            "expectedRevision",
+            "payload",
+        ) + if (schemaVersion >= SCHEMA_VERSION) {
+            setOf("authenticationIssuedAt", "authenticationNonce")
+        } else {
+            emptySet()
+        }
         value.requireExactKeys(
-            setOf(
-                "operationId",
-                "commandId",
-                "retiredCommandIds",
-                "idempotencyKey",
-                "requestFingerprint",
-                "state",
-                "submittedAt",
-                "updatedAt",
-                "sessionId",
-                "sequence",
-                "baseRevision",
-                "revision",
-                "cancelRequested",
-                "completion",
-                "expectedRevision",
-                "payload",
-            ),
+            keys,
         )
         return PersistedCommand(
             operationId = value.requiredString("operationId"),
@@ -121,6 +130,16 @@ internal object CommandOutboxCodec {
             sessionId = value.optionalString("sessionId"),
             sequence = value.requiredLong("sequence"),
             baseRevision = value.requiredLong("baseRevision"),
+            authenticationIssuedAt = if (schemaVersion >= SCHEMA_VERSION) {
+                value.optionalLong("authenticationIssuedAt")
+            } else {
+                null
+            },
+            authenticationNonce = if (schemaVersion >= SCHEMA_VERSION) {
+                value.optionalString("authenticationNonce")
+            } else {
+                null
+            },
             revision = value.optionalLong("revision"),
             cancelRequested = value.requiredBoolean("cancelRequested"),
             completion = value.optionalObject("completion")?.let(::decodeCompletion),
@@ -250,6 +269,17 @@ internal object CommandOutboxCodec {
         require(value.updatedAt >= value.submittedAt) { "Command timestamps are invalid." }
         requirePositiveJsonInteger(value.sequence, "Command sequence")
         requireNonnegativeJsonInteger(value.baseRevision, "Command base revision")
+        value.authenticationIssuedAt?.let {
+            requireNonnegativeJsonInteger(it, "Command authentication timestamp")
+        }
+        value.authenticationNonce?.let {
+            require(it.length in 16..256 && !it.any(Char::isISOControl)) {
+                "Command authentication nonce is invalid."
+            }
+        }
+        require((value.authenticationIssuedAt == null) == (value.authenticationNonce == null)) {
+            "Command authentication metadata is incomplete."
+        }
         value.revision?.let { requireNonnegativeJsonInteger(it, "Command revision") }
         value.expectedRevision?.let { requireNonnegativeJsonInteger(it, "Expected command revision") }
         require(value.payload.toString().toByteArray(Charsets.UTF_8).size <= MAX_PAYLOAD_BYTES) {

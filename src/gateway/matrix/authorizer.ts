@@ -44,7 +44,12 @@ export class StrictMatrixCommandAuthorizer {
         input: unknown,
         context: MatrixCommandContext,
         now = Date.now(),
-    ): Promise<{ command: CodeverCommand; duplicate: boolean; revision: number }> {
+    ): Promise<{
+        command: CodeverCommand
+        duplicate: boolean
+        revision: number
+        legacyFingerprintRecovery?: true
+    }> {
         const signed = signedCommandSchema.parse(input) as SignedCommand
         const policy = this.devices.get(signed.command.deviceId)
         if (!policy) throw new MatrixAuthorizationError('untrusted-device', 'Codever device is not locally trusted')
@@ -95,7 +100,14 @@ export class StrictMatrixCommandAuthorizer {
             now,
             expectedSequenceEpoch,
         )
-        return { command, duplicate: claim.status === 'duplicate', revision: claim.revision }
+        return {
+            command,
+            duplicate: claim.status === 'duplicate',
+            revision: claim.revision,
+            ...(claim.legacyFingerprintRecovery
+                ? { legacyFingerprintRecovery: true as const }
+                : {}),
+        }
     }
 }
 

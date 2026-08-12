@@ -535,12 +535,16 @@ export class MatrixGatewayRunner {
             const terminal = await this.replayStore.getCommandResult(
                 authorized.command,
                 authorized.command.sequenceEpoch,
+                authorized.legacyFingerprintRecovery === true,
             )
             if (terminal) {
                 const task = this.deliverCommandResult(runtime, authorized.command, terminal)
                     .finally(() => this.executionTasks.delete(task))
                 this.executionTasks.add(task)
-            } else if (authorized.command.payload.operation === 'device.invite') {
+            } else if (
+                !authorized.legacyFingerprintRecovery
+                && authorized.command.payload.operation === 'device.invite'
+            ) {
                 // Invitation creation is keyed by commandId in the durable
                 // pairing registry. It is therefore safe to resume the only
                 // side effect whose result may have been interrupted between
