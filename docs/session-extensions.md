@@ -194,10 +194,20 @@ fail-closed boundary, not a silent fallback.
 process, connects it over the authenticated loopback HTTP protocol to the
 session runtime, uses a local simulated HaS endpoint and ACP Agent, and verifies
 the complete sanitize/review/Agent/restore path. It also asserts that denial or
-an offline bound extension results in zero Agent invocations.
+an offline bound extension results in zero Agent invocations. Under Codever's
+test classification this is a protocol integration test, not business E2E.
 
 `apps/pwa/e2e/session-extension-dialog.html` is a test-only browser harness for
 the real new-session component. It is used at phone dimensions to verify that
 HaS is off by default, required configuration is enforced, and the submitted
 `session.create` binding contains only declarative configuration. Neither file
 is part of a production application route.
+
+The privacy journey in `scripts/web-live-e2e.ts` is the business E2E gate. It
+drives the shipped PWA and, in the isolated Alpha gate, the installed APK over a
+disposable encrypted Matrix room and the current Gateway process. It covers
+off-by-default binding, required configuration, exact sanitized review, denial,
+sanitized Agent egress, local restoration, cross-device/restart history,
+extension-offline fail-closed behavior, unbound-session isolation, encrypted
+vault/audit storage, and deletion convergence. See
+`docs/business-e2e-acceptance.md` for the normative requirements.

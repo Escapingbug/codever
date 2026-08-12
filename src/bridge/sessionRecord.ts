@@ -6,6 +6,8 @@ import type { AgentProvider } from '@/providers/provider'
 import type { ProviderCommand } from '@/providers/types'
 
 export interface SessionRecordOptions {
+    /** Stable product-session identity when an owning runtime already has one. */
+    id?: string
     cwd: string
     providerName: string
     groupChatId: number
@@ -46,7 +48,7 @@ export interface SessionRecord {
 }
 
 export class TopicSessionRecord implements SessionRecord {
-    readonly id = randomUUID()
+    readonly id: string
     readonly bus: EventBus
     readonly cwd: string
     readonly providerSettings: Record<string, unknown>
@@ -64,6 +66,8 @@ export class TopicSessionRecord implements SessionRecord {
     private _timeoutExtended = false
 
     constructor(options: SessionRecordOptions) {
+        this.id = options.id ?? randomUUID()
+        if (!this.id) throw new Error('Session record ID must not be empty')
         this.cwd = options.cwd
         this.bus = options.bus ?? new DefaultEventBus()
         this._providerName = options.providerName

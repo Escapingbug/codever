@@ -4862,6 +4862,11 @@ export function CodeverApp() {
             if (message.kind === "permission") {
               const decisionState =
                 decisionStates[message.id] ?? "pending";
+              const permissionDetails =
+                typeof message.raw?.details === "string"
+                  ? message.raw.details
+                  : undefined;
+              const permissionLabels = permissionActionLabels(message.raw);
               return (
                 <div
                   className={`message-row agent-row ${
@@ -4882,6 +4887,9 @@ export function CodeverApp() {
                       Your choice is protected and sent only to your connected
                       computer.
                     </p>
+                    {permissionDetails && (
+                      <pre className="permission-details">{permissionDetails}</pre>
+                    )}
                     {message.historical ? (
                       <div className="decision-state historical">
                         History only · request not replayed
@@ -4896,13 +4904,13 @@ export function CodeverApp() {
                           className="approve-button"
                           onClick={() => void decidePermission(message, "allow_once")}
                         >
-                          Allow once
+                          {permissionLabels.approve}
                         </button>
                         <button
                           className="deny-button"
                           onClick={() => void decidePermission(message, "deny")}
                         >
-                          Deny
+                          {permissionLabels.deny}
                         </button>
                       </div>
                     ) : (
@@ -5528,6 +5536,28 @@ function incomingMessageFromClient(
     attachments: message.attachments,
     toolGroup: message.toolGroup,
     raw: message.semantic ?? {},
+  };
+}
+
+function permissionActionLabels(
+  raw: Record<string, unknown> | undefined,
+): { approve: string; deny: string } {
+  const options = Array.isArray(raw?.options) ? raw.options : [];
+  const labelFor = (value: "allow" | "deny"): string | undefined => {
+    const option = options.find(
+      (candidate) =>
+        candidate !== null &&
+        typeof candidate === "object" &&
+        !Array.isArray(candidate) &&
+        (candidate as Record<string, unknown>).value === value,
+    ) as Record<string, unknown> | undefined;
+    return typeof option?.label === "string" && option.label.trim()
+      ? option.label
+      : undefined;
+  };
+  return {
+    approve: labelFor("allow") ?? "Allow once",
+    deny: labelFor("deny") ?? "Deny",
   };
 }
 

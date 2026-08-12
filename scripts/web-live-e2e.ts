@@ -15,6 +15,11 @@ import {
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidAlphaJourney } from './e2e/androidAlphaJourney.js'
 import {
+    runPrivacyBusinessJourney,
+    startPrivacyBusinessFixture,
+    type PrivacyBusinessFixture,
+} from './e2e/privacyBusinessJourney.js'
+import {
     createDisposableMatrixFixture,
     type DisposableMatrixFixture,
 } from './e2e/localMatrixFixture.js'
@@ -59,6 +64,7 @@ const newSessionPrompt = `new-session reload prompt ${runId}`
 let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
 let pwaProcess: ManagedProcess | undefined
+let privacyFixture: PrivacyBusinessFixture | undefined
 let firstPage: Page | undefined
 let secondPage: Page | undefined
 let thirdPage: Page | undefined
@@ -78,6 +84,8 @@ try {
         tester: { userId: fixture.tester.userId },
         gateway: { userId: fixture.gateway.userId },
     }, null, 2), 'utf8')
+
+    privacyFixture = await startPrivacyBusinessFixture(repositoryRoot, temporaryDirectory)
 
     process.stdout.write('[2/8] Building and starting the current PWA and Gateway…\n')
     pwaBuildOutput = await runProcess(
@@ -122,6 +130,7 @@ try {
                 CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
                 CODEVER_MATRIX_E2E_PROVIDER: '1',
                 CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '3500',
+                CODEVER_SESSION_EXTENSIONS_JSON: privacyFixture.gatewayRegistration,
                 CODEVER_CWD: repositoryRoot,
             },
         },
@@ -188,6 +197,7 @@ try {
         baselineFirst + 1,
         'The newly paired browser did not restore the existing session inventory',
     )
+    await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
     await startHistoryLoadingObservation(secondPage)
     await createSession(secondPage, secondProjectName, secondProjectDirectory)
     await waitForProject(firstPage, secondProjectName)
@@ -235,6 +245,20 @@ try {
     )
     await openProjectSession(secondPage, projectName)
     await openProjectSession(firstPage, projectName)
+
+    process.stdout.write('[5d/8] Running privacy protection through the real PWA, Matrix, and Gateway…\n')
+    await runPrivacyBusinessJourney({
+        repositoryRoot,
+        runId,
+        cwd: repositoryRoot,
+        firstPage,
+        secondPage,
+        directProjectName: secondProjectName,
+        gatewayOutput: () => gatewayProcess!.output,
+        fixture: privacyFixture,
+    })
+    await openProjectSession(firstPage, projectName)
+    await openProjectSession(secondPage, projectName)
 
     process.stdout.write('[6/8] Sending a prompt and restoring its Matrix-native history…\n')
     await sendPrompt(firstPage, prompt)
@@ -315,6 +339,7 @@ try {
             testerUserId: fixture.tester.userId,
             testerPassword: fixture.tester.password,
             providerResponse: PROVIDER_RESPONSE,
+            gatewayOutput: () => gatewayProcess!.output,
             artifactDirectory,
         })
         await openProjectSession(firstPage, projectName)
@@ -416,6 +441,11 @@ try {
         `${pwaBuildOutput}\n${pwaProcess?.output ?? ''}`,
         'utf8',
     )
+    await writeFile(
+        join(artifactDirectory, 'has-privacy.log'),
+        redactSecrets(privacyFixture?.output ?? ''),
+        'utf8',
+    )
     await Promise.all([...browserLogs].map(([name, lines]) =>
         writeFile(
             join(artifactDirectory, `${name}.log`),
@@ -426,12 +456,19 @@ try {
     process.stderr.write(`Business E2E artifacts: ${artifactDirectory}\n`)
     throw error
 } finally {
-    await browser?.close().catch(() => undefined)
+    if (browser) {
+        const closed = await completeWithin(browser.close(), 10_000)
+        if (!closed) process.stderr.write('E2E browser close exceeded 10000ms; continuing bounded cleanup.\n')
+        browser = undefined
+    }
     await gatewayProcess?.stop().catch(error => {
         process.stderr.write(`Could not stop E2E Gateway: ${formatError(error)}\n`)
     })
     await pwaProcess?.stop().catch(error => {
         process.stderr.write(`Could not stop E2E PWA: ${formatError(error)}\n`)
+    })
+    await privacyFixture?.close().catch(error => {
+        process.stderr.write(`Could not stop E2E privacy fixture: ${formatError(error)}\n`)
     })
     await rm(temporaryDirectory, { recursive: true, force: true })
 }
@@ -1136,6 +1173,20 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
         const response = await fetch(url).catch(() => null)
         return response?.ok ?? false
     }, { description: url, timeoutMs })
+}
+
+async function completeWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            operation.then(() => true, () => true),
+            new Promise<boolean>(resolve => {
+                timer = setTimeout(() => resolve(false), timeoutMs)
+            }),
+        ])
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
 }
 
 async function freePort(): Promise<number> {
