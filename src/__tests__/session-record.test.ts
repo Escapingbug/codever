@@ -61,6 +61,17 @@ function createChannel(): ChannelPort & {
 }
 
 describe('SessionRecord metadata boundary', () => {
+    it('uses an owning runtime session identity when one is supplied', () => {
+        const record = createTopicSessionRecord({
+            id: 'stable-app-session-id',
+            cwd: '/repo',
+            providerName: 'mock-provider',
+            groupChatId: -100,
+        })
+
+        expect(record.id).toBe('stable-app-session-id')
+    })
+
     it('contains session metadata without runtime execution APIs', () => {
         const record = createTopicSessionRecord({
             cwd: '/repo',

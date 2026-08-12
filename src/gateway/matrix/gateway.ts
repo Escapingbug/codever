@@ -1429,6 +1429,7 @@ export class MatrixGatewayRunner {
         appSession: AppSessionRecord,
     ): TopicSession {
         const sessionRecord = createTopicSessionRecord({
+            id: appSession.id,
             cwd: room.cwd,
             providerName: room.providerName,
             groupChatId: numericRoomCompatibilityId(
@@ -1612,7 +1613,21 @@ function nativeCheckpointCapabilities(
             name: extension.name,
             description: extension.description,
             version: extension.version,
-            settings: extension.settings,
+            settings: extension.settings.map(setting => ({
+                id: setting.id,
+                type: setting.type,
+                label: setting.label,
+                ...(setting.description ? { description: setting.description } : {}),
+                ...(setting.type === 'text' && setting.required
+                    ? { required: true }
+                    : {}),
+                ...(setting.type === 'text' && setting.placeholder
+                    ? { placeholder: setting.placeholder }
+                    : {}),
+                ...(setting.defaultValue === undefined
+                    ? {}
+                    : { default_value: setting.defaultValue }),
+            })),
         })),
     })) as JsonValue
 }

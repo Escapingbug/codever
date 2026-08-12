@@ -2510,6 +2510,20 @@ select:focus-visible {
   line-height: 1.45;
 }
 
+.permission-details {
+  max-height: 220px;
+  margin: 0 0 10px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #ded9ff;
+  border-radius: 8px;
+  background: #f8f7ff;
+  color: #3f4658;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .file-list {
   display: flex;
   flex-wrap: wrap;

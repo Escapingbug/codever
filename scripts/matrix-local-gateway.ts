@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { createClient } from 'matrix-js-sdk'
@@ -496,7 +497,11 @@ function e2eProvider(name: string): AgentProvider {
     }
     return {
         name,
-        startQuery(): AgentQueryHandle {
+        startQuery(input): AgentQueryHandle {
+            const prompt = providerInputText(input)
+            process.stdout.write(
+                `[e2e-provider] invocation sha256=${createHash('sha256').update(prompt).digest('hex')}\n`,
+            )
             return {
                 events: (async function* () {
                     if (delayMs > 0) {
@@ -505,6 +510,10 @@ function e2eProvider(name: string): AgentProvider {
                     yield {
                         kind: 'text' as const,
                         text: 'Codever deterministic E2E response',
+                    }
+                    yield {
+                        kind: 'text' as const,
+                        text: `\n\nAgent received exactly: ${prompt}`,
                     }
                     yield { kind: 'result' as const, status: 'success' as const }
                 })(),
@@ -516,4 +525,10 @@ function e2eProvider(name: string): AgentProvider {
         getAvailableModels: () => [],
         getAvailablePermissionModes: () => ['default'],
     }
+}
+
+function providerInputText(input: Parameters<AgentProvider['startQuery']>[0]): string {
+    return typeof input === 'string'
+        ? input
+        : input.parts.map(part => part.type === 'text' ? part.text : '').join('\n')
 }
