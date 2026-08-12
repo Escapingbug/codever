@@ -316,6 +316,8 @@ try {
             testerPassword: fixture.tester.password,
             providerResponse: PROVIDER_RESPONSE,
             artifactDirectory,
+            gatewayReplayLedgerPath: join(gatewayDataDirectory, 'gateway-replay.jsonl'),
+            gatewayOutput: () => gatewayProcess!.output,
         })
         await openProjectSession(firstPage, projectName)
     }

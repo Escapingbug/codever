@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import {
     createServer as createHttpServer,
     request as requestHttp,
@@ -36,12 +36,20 @@ type PendingCall = {
     timer: ReturnType<typeof setTimeout>
 }
 
-type FirstSyncGate = {
+type MatrixSyncGate = {
     readonly port: number
     intercepted(): number
-    waitForInterception(): Promise<void>
+    rewrittenCommandTransactions(): number
+    observedPutPaths(): string[]
+    hold(): number
+    waitForInterception(after?: number, description?: string): Promise<void>
     release(): void
     close(): Promise<void>
+}
+
+type CommandReplayEvidence = {
+    commandKey: string
+    revision: number
 }
 
 type AndroidPageState = {
@@ -70,6 +78,8 @@ export type AndroidAlphaJourneyOptions = {
     testerPassword: string
     providerResponse: string
     artifactDirectory: string
+    gatewayReplayLedgerPath: string
+    gatewayOutput(): string
 }
 
 class AndroidWebView {
@@ -310,6 +320,43 @@ class AndroidWebView {
         await this.clickButtonText('Restore')
     }
 
+    async deleteSelected(): Promise<void> {
+        const detailsReady = await this.evaluate<boolean>(`(() => {
+            const details = Array.from(document.querySelectorAll('button'))
+                .find(button => button.getAttribute('aria-label') === 'Conversation details' && button.getClientRects().length > 0);
+            if (!details || details.disabled) return false;
+            if (details.getAttribute('aria-expanded') !== 'true') details.click();
+            return true;
+        })()`)
+        assert.equal(detailsReady, true, 'Could not open Android conversation details')
+        await waitFor(async () => this.evaluate<boolean>(`(() =>
+            Array.from(document.querySelectorAll('button')).some(button =>
+                button.getClientRects().length > 0 &&
+                Array.from(button.querySelectorAll('strong')).some(strong => strong.textContent?.trim() === 'Delete session')
+            )
+        )()`), {
+            description: 'Android Delete session action',
+            timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+        })
+        await this.click(`(() => {
+            const target = Array.from(document.querySelectorAll('button')).find(button =>
+                visible(button) && Array.from(button.querySelectorAll('strong'))
+                    .some(strong => normalized(strong.textContent) === 'Delete session'));
+            return clickResult(target);
+        })()`)
+        await this.waitFor(
+            'Android delete confirmation',
+            state => state.dialogs.some(dialog => dialog.startsWith('Delete ')),
+            UI_FEEDBACK_TIMEOUT_MS,
+        )
+        await this.clickButtonText('Delete session', '[role="alertdialog"]')
+        await this.waitFor(
+            'immediate Android deletion feedback',
+            state => !state.dialogs.some(dialog => dialog.startsWith('Delete ')),
+            UI_FEEDBACK_TIMEOUT_MS,
+        )
+    }
+
     private async click(expression: string): Promise<void> {
         const result = await this.evaluate<{ found: boolean; disabled: boolean }>(
             `(() => { ${DOM_HELPERS} return ${expression}; })()`,
@@ -342,6 +389,7 @@ export async function runAndroidAlphaJourney(
     const backgroundPrompt = `Android background prompt ${options.runId}`
     const browserPrompt = `Browser to Android prompt ${options.runId}`
     const recoveryPrompt = `Android reconnect prompt ${options.runId}`
+    const postCommitRecoveryPrompt = `Android post-commit recovery prompt ${options.runId}`
     const apkPath = join(
         options.repositoryRoot,
         'clients',
@@ -356,19 +404,20 @@ export async function runAndroidAlphaJourney(
     let android: AndroidWebView | undefined
     let forwardedDevtoolsPort: string | undefined
     let sessionCreated = false
-    let firstSyncGate: FirstSyncGate | undefined
+    let syncGate: MatrixSyncGate | undefined
 
     try {
-        process.stdout.write('  [A1/7] Building and installing a fresh isolated Android E2E package…\n')
+        process.stdout.write('  [A1/9] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
         await adbMaybe(serial, 'uninstall', PACKAGE_NAME)
         await adb(serial, 'install', '-r', '-t', apkPath)
+        await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
         await adb(serial, 'shell', 'pm', 'grant', PACKAGE_NAME, 'android.permission.POST_NOTIFICATIONS')
         await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
-        firstSyncGate = await createFirstSyncGate(options.matrixPort)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${firstSyncGate.port}`)
+        syncGate = await createMatrixSyncGate(options.matrixPort)
+        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
 
-        process.stdout.write('  [A2/7] Creating a real one-time invitation and pairing the fresh APK…\n')
+        process.stdout.write('  [A2/9] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
             options.browserPage,
             options.testerPassword,
@@ -388,8 +437,8 @@ export async function runAndroidAlphaJourney(
             await android.signInForPairing(options.testerUserId, options.testerPassword)
         }
         await android.clickButtonPrefix('Connect to ')
-        process.stdout.write('  [A2a/7] Holding the first native sync beyond its watchdog window…\n')
-        await firstSyncGate.waitForInterception()
+        process.stdout.write('  [A2a/9] Holding the first native sync beyond its watchdog window…\n')
+        await syncGate.waitForInterception()
         await waitFor(
             async () => await diagnosticCount(serial, 'matrix.driver.sync_service_state stage=RUNNING') > 0,
             {
@@ -402,7 +451,7 @@ export async function runAndroidAlphaJourney(
             serial,
             'matrix.watchdog.failure reason=FIRST_SYNC_TIMEOUT running=true',
         )
-        firstSyncGate.release()
+        syncGate.release()
         assert.equal(
             prematureTimeouts,
             0,
@@ -425,7 +474,7 @@ export async function runAndroidAlphaJourney(
         await closeBrowserConnectionSettings(options.browserPage)
         await assertForegroundNotification(serial)
 
-        process.stdout.write('  [A3/7] Creating on Android and converging the session into the browser…\n')
+        process.stdout.write('  [A3/9] Creating on Android and converging the session into the browser…\n')
         const creationStarted = Date.now()
         await android.createSession(projectName)
         await android.waitFor(
@@ -443,7 +492,7 @@ export async function runAndroidAlphaJourney(
         await waitForBrowserProject(options.browserPage, projectName)
         await openBrowserProject(options.browserPage, projectName)
 
-        process.stdout.write('  [A4/7] Completing an Android task in the background and opening its notification…\n')
+        process.stdout.write('  [A4/9] Completing an Android task in the background and opening its notification…\n')
         const postedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await android.sendPrompt(backgroundPrompt)
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
@@ -483,7 +532,7 @@ export async function runAndroidAlphaJourney(
             timeoutMs: 5_000,
         })
 
-        process.stdout.write('  [A5/7] Verifying foreground suppression and browser-to-APK history sync…\n')
+        process.stdout.write('  [A5/9] Verifying foreground suppression and browser-to-APK history sync…\n')
         const foregroundPostedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await sendBrowserPrompt(options.browserPage, browserPrompt)
         await waitForBrowserText(options.browserPage, browserPrompt)
@@ -499,11 +548,31 @@ export async function runAndroidAlphaJourney(
         assert.equal(await diagnosticCount(serial, 'notification.task_posted'), foregroundPostedBefore)
         assert.equal((await taskNotificationKeys(serial)).length, 0)
 
-        process.stdout.write('  [A6/7] Recovering one in-flight Android command across a Matrix disconnect…\n')
+        // Separate a pure transport-loss assertion from the preceding
+        // cross-device revision race. Foregrounding explicitly requests an
+        // authoritative checkpoint, so A6 cannot pass or fail depending on
+        // whether the browser prompt's revision happened to arrive first.
+        const stateResponseBaseline = await gatewayStateResponseCount(serial)
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await waitFor(
+            async () => await gatewayStateResponseCount(serial) > stateResponseBaseline,
+            {
+                description: 'authoritative Android Gateway state before transport recovery',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await android.waitFor(
+            'Android connection after authoritative Gateway convergence',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+
+        process.stdout.write('  [A6/9] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${options.matrixPort}`)
+        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
         await waitForBrowserText(options.browserPage, recoveryPrompt)
         await waitForProviderResponseCount(options.browserPage, 3)
         await android.waitFor(
@@ -513,7 +582,134 @@ export async function runAndroidAlphaJourney(
         )
         assert.equal(await browserTextCount(options.browserPage, recoveryPrompt), 1)
 
-        process.stdout.write('  [A7/7] Alternating archive/restore/delete across browser and APK, then restarting…\n')
+        process.stdout.write('  [A7/9] Withholding a committed delete result through automatic Android recovery…\n')
+        const deleteReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
+        const deleteGatewayLogStart = options.gatewayOutput().length
+        const rewrittenTransactionStart = syncGate.rewrittenCommandTransactions()
+        const deleteRecoveryStart = await diagnosticCount(
+            serial,
+            'command.recovery.attempted action=session.delete',
+        )
+        const deleteSyncBaseline = syncGate.hold()
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, projectName)
+        await syncGate.waitForInterception(
+            deleteSyncBaseline,
+            'the Android delete acknowledgement/result sync response to be blocked',
+        )
+        sessionCreated = false
+        const deleteEvidence = await waitForSingleCommittedCommand(
+            options.gatewayReplayLedgerPath,
+            deleteReplayStart,
+            'Android session deletion',
+        )
+        const deleteControlSendStart = await diagnosticCount(
+            serial,
+            'matrix.application_control.sent',
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'command.recovery.attempted action=session.delete',
+            ) > deleteRecoveryStart,
+            {
+                description: 'Android to retry the committed delete after its acknowledgement timeout',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.sent',
+            ) > deleteControlSendStart,
+            {
+                description: 'Android committed-command recovery to reach Matrix',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        assert.ok(
+            syncGate.rewrittenCommandTransactions() > rewrittenTransactionStart,
+            'The Alpha fault proxy did not redeliver the recovered Matrix command as a new event. '
+                + `Observed PUT paths: ${JSON.stringify(syncGate.observedPutPaths())}`,
+        )
+        syncGate.release()
+        await android.waitFor(
+            'post-commit Android deletion result after its forced retry',
+            state =>
+                state.connection.endsWith('Connected') &&
+                !state.projectNames.includes(projectName) &&
+                !state.archivedProjects.includes(projectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        await assertCommandRecordedExactlyOnce(options.gatewayReplayLedgerPath, deleteEvidence)
+        await delay(1_000)
+        assert.doesNotMatch(
+            options.gatewayOutput().slice(deleteGatewayLogStart),
+            /(?:Accepted command id does not match its durable execution record|Secure envelope was already opened|\[matrix-gateway\] rejected .*replay)/iu,
+            'Post-commit Android recovery was rejected as a non-idempotent replay',
+        )
+
+        // A recovered delete must release the single-command native outbox.
+        // Re-create and delete immediately so a stale RECOVERY_REQUIRED entry
+        // cannot masquerade as successful state convergence.
+        await android.createSession(projectName)
+        await android.waitFor(
+            'Android creation after recovered deletion',
+            state => state.projectNames.includes(projectName) && state.selectedProject === projectName,
+        )
+        await waitForBrowserProject(options.browserPage, projectName)
+        sessionCreated = true
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, projectName)
+        await android.waitFor(
+            'Android deletion immediately after recovered deletion',
+            state => !state.projectNames.includes(projectName),
+        )
+        sessionCreated = false
+
+        process.stdout.write('  [A8/9] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
+        const createReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
+        const createSyncBaseline = syncGate.hold()
+        await android.createSession(projectName)
+        await waitForBrowserProject(options.browserPage, projectName)
+        await syncGate.waitForInterception(
+            createSyncBaseline,
+            'the Android create acknowledgement/result sync response to be blocked',
+        )
+        sessionCreated = true
+        const createEvidence = await waitForSingleCommittedCommand(
+            options.gatewayReplayLedgerPath,
+            createReplayStart,
+            'Android session creation',
+        )
+
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        syncGate.release()
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'post-commit Android creation recovery',
+            state =>
+                state.connection.endsWith('Connected') &&
+                state.projectNames.includes(projectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        await assertCommandRecordedExactlyOnce(options.gatewayReplayLedgerPath, createEvidence)
+        await android.openProject(projectName)
+        await openBrowserProject(options.browserPage, projectName)
+        await android.sendPrompt(postCommitRecoveryPrompt)
+        await waitForBrowserText(options.browserPage, postCommitRecoveryPrompt)
+        await waitForBrowserText(options.browserPage, options.providerResponse)
+        assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
+        assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
+
+        process.stdout.write('  [A9/9] Alternating archive/restore/delete across browser and APK, then restarting…\n')
         await archiveBrowserSession(options.browserPage)
         await android.waitFor('browser archive on Android', state => state.archivedBanner)
         await android.restoreSelected()
@@ -562,7 +758,10 @@ export async function runAndroidAlphaJourney(
                 'background-task-notification',
                 'notification-deep-link-recovery',
                 'foreground-notification-suppression',
-                'in-flight-matrix-recovery-exactly-once',
+                'pre-delivery-matrix-recovery-exactly-once',
+                'post-commit-delete-result-loss-recovery-exactly-once',
+                'post-commit-create-result-loss-recovery-exactly-once',
+                'native-outbox-release-after-post-commit-recovery',
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
             ],
@@ -585,38 +784,55 @@ export async function runAndroidAlphaJourney(
         }
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.pwaPort}`)
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
-        firstSyncGate?.release()
-        await firstSyncGate?.close().catch(() => undefined)
+        syncGate?.release()
+        await syncGate?.close().catch(() => undefined)
     }
 }
 
-async function createFirstSyncGate(targetPort: number): Promise<FirstSyncGate> {
-    let released = false
+async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate> {
     let intercepted = 0
-    let releaseGate: (() => void) | undefined
-    const gate = new Promise<void>(resolve => {
-        releaseGate = resolve
-    })
-    const server = createHttpServer(async (incoming, outgoing) => {
+    let repeatedCommandTransactions = 0
+    const observedPutPaths: string[] = []
+    const seenCommandTransactions = new Set<string>()
+    let cycle = heldSyncCycle()
+    const server = createHttpServer((incoming, outgoing) => {
         const requestPath = incoming.url ?? '/'
-        if (isMatrixSyncRequest(requestPath) && !released) {
-            intercepted += 1
-            await gate
-        }
-        if (incoming.destroyed) return
-
+        if (incoming.method === 'PUT') observedPutPaths.push(requestPath)
+        const upstreamPath = rewriteRepeatedCommandTransaction(
+            incoming.method,
+            requestPath,
+            seenCommandTransactions,
+            () => ++repeatedCommandTransactions,
+        )
         const upstream = requestHttp({
             hostname: '127.0.0.1',
             port: targetPort,
             method: incoming.method,
-            path: requestPath,
+            path: upstreamPath,
             headers: {
                 ...incoming.headers,
                 host: `127.0.0.1:${targetPort}`,
             },
         }, response => {
-            outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
-            response.pipe(outgoing)
+            void (async () => {
+                const blockedCycle = cycle
+                if (isMatrixSyncRequest(requestPath) && blockedCycle.held) {
+                    response.pause()
+                    intercepted += 1
+                    await blockedCycle.wait
+                }
+                if (outgoing.destroyed) {
+                    response.destroy()
+                    return
+                }
+                outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
+                response.pipe(outgoing)
+                response.resume()
+            })().catch(error => {
+                response.destroy()
+                if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'text/plain' })
+                outgoing.end(`Matrix E2E proxy failed: ${formatError(error)}`)
+            })
         })
         upstream.on('error', error => {
             if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'text/plain' })
@@ -636,21 +852,64 @@ async function createFirstSyncGate(targetPort: number): Promise<FirstSyncGate> {
     return {
         port: address.port,
         intercepted: () => intercepted,
-        waitForInterception: () => waitFor(() => intercepted > 0, {
-            description: 'the APK first Matrix sync request to reach the delay gate',
-            timeoutMs: CONNECT_TIMEOUT_MS,
-        }),
+        rewrittenCommandTransactions: () => repeatedCommandTransactions,
+        observedPutPaths: () => observedPutPaths.slice(-20),
+        hold: () => {
+            if (!cycle.held) cycle = heldSyncCycle()
+            return intercepted
+        },
+        waitForInterception: (after = 0, description = 'the APK Matrix sync response to reach the delay gate') => waitFor(
+            () => intercepted > after,
+            {
+                description,
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
         release: () => {
-            if (released) return
-            released = true
-            releaseGate?.()
+            if (!cycle.held) return
+            cycle.held = false
+            cycle.release()
         },
         close: () => closeHttpServer(server),
     }
 }
 
+function heldSyncCycle(): { held: boolean; wait: Promise<void>; release(): void } {
+    let release: () => void = () => undefined
+    const wait = new Promise<void>(resolve => {
+        release = resolve
+    })
+    return { held: true, wait, release }
+}
+
 function isMatrixSyncRequest(path: string): boolean {
     return /^\/_matrix\/client\/(?:v3|unstable\/[^/]+)\/sync(?:\?|$)/u.test(path)
+}
+
+function rewriteRepeatedCommandTransaction(
+    method: string | undefined,
+    path: string,
+    seen: Set<string>,
+    nextSequence: () => number,
+): string {
+    if (method !== 'PUT') return path
+    const queryIndex = path.indexOf('?')
+    const pathname = queryIndex >= 0 ? path.slice(0, queryIndex) : path
+    const query = queryIndex >= 0 ? path.slice(queryIndex) : ''
+    let decodedPathname: string
+    try {
+        decodedPathname = decodeURIComponent(pathname)
+    } catch {
+        return path
+    }
+    if (!decodedPathname.includes('/send/io.codever.secure_control.v1/codever.command.')) {
+        return path
+    }
+    if (!seen.has(pathname)) {
+        seen.add(pathname)
+        return path
+    }
+    return `${pathname}-e2e-redelivery-${nextSequence()}${query}`
 }
 
 async function closeHttpServer(server: HttpServer): Promise<void> {
@@ -745,6 +1004,14 @@ async function closeBrowserConnectionSettings(page: Page): Promise<void> {
 async function waitForBrowserProject(page: Page, projectName: string): Promise<void> {
     await waitFor(async () => await browserProjectGroup(page, projectName).count() === 1, {
         description: `browser project ${projectName}`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+    await assertBrowserHealthy(page)
+}
+
+async function waitForBrowserProjectAbsent(page: Page, projectName: string): Promise<void> {
+    await waitFor(async () => await browserProjectGroup(page, projectName).count() === 0, {
+        description: `browser removal of project ${projectName}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
     await assertBrowserHealthy(page)
@@ -952,11 +1219,96 @@ async function diagnosticCount(serial: string, marker: string): Promise<number> 
     return output.split(/\r?\n/u).filter(line => line.includes(marker)).length
 }
 
+async function gatewayStateResponseCount(serial: string): Promise<number> {
+    return await diagnosticCount(serial, 'gateway.state.response.accepted')
+        + await diagnosticCount(serial, 'gateway.state.response.duplicate')
+}
+
 async function installedVersionName(serial: string): Promise<string> {
     const output = await adb(serial, 'shell', 'dumpsys', 'package', PACKAGE_NAME)
     const match = output.match(/versionName=([^\s]+)/u)
     assert.ok(match?.[1], 'The installed Alpha APK version is unavailable')
     return match[1]
+}
+
+async function replayLedgerLineCount(path: string): Promise<number> {
+    return (await replayLedgerEntries(path)).length
+}
+
+async function waitForSingleCommittedCommand(
+    path: string,
+    startLine: number,
+    description: string,
+): Promise<CommandReplayEvidence> {
+    let evidence: CommandReplayEvidence | undefined
+    await waitFor(async () => {
+        const appended = (await replayLedgerEntries(path)).slice(startLine)
+        const acceptances = appended.flatMap(entry => {
+            const revision = asJsonRecord(entry.revision)
+            return revision && typeof revision.commandKey === 'string' && typeof revision.value === 'number'
+                ? [{ commandKey: revision.commandKey, revision: revision.value }]
+                : []
+        })
+        assert.ok(
+            acceptances.length <= 1,
+            `${description} produced ${acceptances.length} durable command acceptances`,
+        )
+        const accepted = acceptances[0]
+        if (!accepted) return false
+        const results = appended.filter(entry =>
+            entry.kind === 'command_result' && entry.commandKey === accepted.commandKey,
+        )
+        assert.ok(
+            results.length <= 1,
+            `${description} produced ${results.length} durable terminal results`,
+        )
+        if (results.length !== 1) return false
+        evidence = accepted
+        return true
+    }, {
+        description: `${description} to commit before Android receives its acknowledgement`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+    assert.ok(evidence, `${description} did not leave durable replay evidence`)
+    return evidence
+}
+
+async function assertCommandRecordedExactlyOnce(
+    path: string,
+    evidence: CommandReplayEvidence,
+): Promise<void> {
+    const entries = await replayLedgerEntries(path)
+    const acceptances = entries.filter(entry => {
+        const revision = asJsonRecord(entry.revision)
+        return revision?.commandKey === evidence.commandKey
+    })
+    const results = entries.filter(entry =>
+        entry.kind === 'command_result' && entry.commandKey === evidence.commandKey,
+    )
+    assert.equal(
+        acceptances.length,
+        1,
+        `Recovered command revision ${evidence.revision} was accepted more than once`,
+    )
+    assert.equal(
+        results.length,
+        1,
+        `Recovered command revision ${evidence.revision} produced more than one terminal result`,
+    )
+}
+
+async function replayLedgerEntries(path: string): Promise<JsonRecord[]> {
+    const text = await readFile(path, 'utf8')
+    return text
+        .split(/\r?\n/u)
+        .filter(line => line.trim().length > 0)
+        .map(line => JSON.parse(line) as JsonRecord)
+}
+
+function asJsonRecord(value: unknown): JsonRecord | null {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as JsonRecord
+        : null
 }
 
 async function gitRevision(repositoryRoot: string): Promise<string> {

@@ -52,6 +52,10 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - Previously synchronized sessions and history remain readable offline.
    - Commands show a truthful queued state and are delivered once after
      reconnect.
+   - Losing acknowledgement and terminal-result delivery after the Gateway
+     commits a create/delete command does not strand the native durable outbox.
+     Recovery must still work when Matrix transaction deduplication is no
+     longer available, and the next create/delete must start immediately.
    - Matrix sync restart, delayed lifecycle delivery, and duplicate timeline
      events converge without stale sessions or review deadlocks.
 6. **Background Android behavior**
@@ -119,6 +123,7 @@ to complete before pairing can continue.
 | History after reload/process restart | Enforced on both browser devices | Enforced for cached history |
 | Archive, restore, and delete | Delete enforced on both devices | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
+| Post-commit ACK/result loss and durable-outbox release | Not applicable | Enforced by the isolated Alpha gate for create and delete |
 | Android foreground-service and completion notifications | Not applicable | Enforced by the isolated Alpha gate |
 
 An unimplemented cell is not implicitly passed. Web local business E2E may be
