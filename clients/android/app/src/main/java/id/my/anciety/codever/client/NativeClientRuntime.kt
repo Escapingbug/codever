@@ -35,6 +35,7 @@ import id.my.anciety.codever.client.events.PublicCommandError
 import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.client.events.SubscriptionBootstrap
 import id.my.anciety.codever.client.events.SubscriptionCursorResult
+import id.my.anciety.codever.client.events.ToolGroupPresentation
 import id.my.anciety.codever.client.events.compactSnapshotCommands
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
@@ -1489,15 +1490,19 @@ class NativeClientRuntime(
                     originDeviceName = extension.string("origin_device_name"),
                 )
             }
-            "message" -> base.copy(
-                kind = ClientMessageKind.AGENT,
-                text = effective.string("body") ?: "",
-                format = when (extension.string("format")) {
-                    "markdown" -> ClientMessageFormat.MARKDOWN
-                    "html" -> ClientMessageFormat.HTML
-                    else -> ClientMessageFormat.PLAIN
-                },
-            )
+            "message" -> {
+                val toolGroup = decodeMatrixToolGroup(extension)
+                base.copy(
+                    kind = if (toolGroup == null) ClientMessageKind.AGENT else ClientMessageKind.TOOL,
+                    text = effective.string("body") ?: "",
+                    format = when (extension.string("format")) {
+                        "markdown" -> ClientMessageFormat.MARKDOWN
+                        "html" -> ClientMessageFormat.HTML
+                        else -> ClientMessageFormat.PLAIN
+                    },
+                    toolGroup = toolGroup,
+                )
+            }
             "decision_request" -> base.copy(
                 kind = ClientMessageKind.PERMISSION,
                 text = extension.string("title") ?: effective.string("body") ?: "Permission required",
@@ -1836,6 +1841,11 @@ class NativeClientRuntime(
         const val MAX_NATIVE_TIMELINE_BACKFILL_PAGES = 100
         const val CACHED_STATE_CONVERGENCE_PAGES = 1
     }
+}
+
+internal fun decodeMatrixToolGroup(extension: JsonObject): ToolGroupPresentation? {
+    val ui = extension["ui"] ?: return null
+    return runCatching { PublicClientJson.decodeToolGroup(ui) }.getOrNull()
 }
 
 internal fun requiresGatewayConvergence(

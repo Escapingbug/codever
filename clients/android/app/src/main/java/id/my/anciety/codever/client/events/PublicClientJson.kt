@@ -317,7 +317,7 @@ object PublicClientJson {
         })
     }
 
-    private fun decodeToolGroup(element: JsonElement): ToolGroupPresentation {
+    internal fun decodeToolGroup(element: JsonElement): ToolGroupPresentation {
         val value = element.strictObject(
             "tool group",
             setOf("kind", "version", "groupId", "tools"),
