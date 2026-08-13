@@ -731,6 +731,47 @@ export async function connectMatrix(
     const recorded = commandLifecycle.recordResult(completion);
     if (recorded) handlers.onCommandResult?.(completion);
   };
+  let lastCommandRecoveryCheckpoint: string | null = null;
+  let commandRecoveryAtCheckpoint: Promise<void> | null = null;
+  const scheduleCommandRecoveryAtCheckpoint = (
+    checkpoint: Extract<MatrixNativeContent, { kind: "gateway_checkpoint" }>,
+    trust: TrustedGateway,
+  ): void => {
+    const checkpointKey = [
+      checkpoint.revision_epoch_generation,
+      checkpoint.revision_epoch,
+      checkpoint.state_version,
+    ].join(":");
+    if (
+      checkpointKey === lastCommandRecoveryCheckpoint ||
+      commandRecoveryAtCheckpoint
+    ) return;
+    lastCommandRecoveryCheckpoint = checkpointKey;
+    commandRecoveryAtCheckpoint = retryPendingCommand(
+      client,
+      config,
+      identity,
+      trust.certificate.certificate.certificateId,
+      trust,
+    ).then((recovered) => {
+      if (!recovered) return;
+      outboundCommandMetadata.set(recovered.reservation.commandId, {
+        reservation: recovered.reservation,
+        payload: structuredClone(recovered.payload),
+      });
+      if (recovered.completion) {
+        const recorded = commandLifecycle.recordResult(recovered.completion);
+        if (recorded) handlers.onCommandResult?.(recovered.completion);
+      }
+    }).finally(() => {
+      commandRecoveryAtCheckpoint = null;
+    });
+    // A checkpoint is a wake-up signal, not part of applying canonical state.
+    // Keep the inbound timeline moving while the durable command is retried.
+    void commandRecoveryAtCheckpoint.catch((error) => {
+      handlers.onStatus("error", formatError(error));
+    });
+  };
   const onNativeContent = async (
     content: MatrixNativeContent,
     eventId: string,
@@ -752,6 +793,10 @@ export async function connectMatrix(
     // change is published. A tab can be closed immediately after rendering.
     await acceptCanonicalNativeCommandResult(content);
     if (state) await onGatewayState(state);
+    if (content.kind === "gateway_checkpoint") {
+      const trust = activeTrust;
+      if (trust) scheduleCommandRecoveryAtCheckpoint(content, trust);
+    }
   };
   const onNativeSessionStatus = async (
     extension: Record<string, unknown>,
@@ -1516,12 +1561,12 @@ export async function connectMatrix(
       );
       throw error;
     }
-    const response = await client.sendMessage(
+    return sendCodeverApplicationControlEvent(
+      client,
       config.roomId,
       content,
-      `codever.${reservation.commandId}`,
+      `codever.command.${reservation.commandId}`,
     );
-    return response.event_id;
   };
   const scanHistoryEvents = async (
     events: readonly MatrixEvent[],
@@ -4114,17 +4159,41 @@ async function retryPendingCommand(
       secure_envelope: secureEnvelope,
     },
   } as unknown as RoomMessageEventContent;
-  const response = await client.sendMessage(
+  const eventId = await sendCodeverApplicationControlEvent(
+    client,
     config.roomId,
     content,
-    `codever.${pending.commandId}.retry.${crypto.randomUUID()}`,
+    `codever.command.${pending.commandId}.retry.${crypto.randomUUID()}`,
   );
   return {
-    eventId: response.event_id,
+    eventId,
     payload: pending.payload,
     reservation: pending,
     expired,
   };
+}
+
+export async function sendCodeverApplicationControlEvent(
+  client: MatrixClient,
+  roomId: string,
+  content: RoomMessageEventContent,
+  transactionId: string,
+): Promise<string> {
+  const path = [
+    "/rooms/",
+    encodeURIComponent(roomId),
+    "/send/",
+    encodeURIComponent(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE),
+    "/",
+    encodeURIComponent(transactionId),
+  ].join("");
+  const response = await client.http.authedRequest<{ event_id: string }>(
+    "PUT" as Parameters<MatrixClient["http"]["authedRequest"]>[0],
+    path,
+    undefined,
+    content,
+  );
+  return response.event_id;
 }
 
 async function readCommandSequenceState(

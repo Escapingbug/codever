@@ -3,6 +3,7 @@ import test from "node:test";
 import { CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE } from "@codever/protocol";
 import {
   parseCodeverEvent,
+  sendCodeverApplicationControlEvent,
   type MatrixConnectionConfig,
   processGatewayTimelineEvent,
 } from "../app/matrix";
@@ -25,6 +26,50 @@ function signedAgentEvent(payload: Record<string, unknown>) {
     },
   };
 }
+
+test("sends browser commands through the direct application control event", async () => {
+  const requests: unknown[][] = [];
+  const eventId = await sendCodeverApplicationControlEvent(
+    {
+      http: {
+        async authedRequest(...input: unknown[]) {
+          requests.push(input);
+          return { event_id: "$command-control" };
+        },
+      },
+      async sendMessage() {
+        throw new Error("Browser commands must not depend on Megolm");
+      },
+    } as never,
+    "!room:example.test",
+    {
+      msgtype: "m.notice",
+      body: "Encrypted Codever message",
+      "io.codever": {
+        version: 1,
+        kind: "secure_envelope",
+        secure_envelope: { ciphertext: "opaque" },
+      },
+    } as never,
+    "codever.command.command-1.retry/recovery-1",
+  );
+
+  assert.equal(eventId, "$command-control");
+  assert.deepEqual(requests, [[
+    "PUT",
+    "/rooms/!room%3Aexample.test/send/io.codever.secure_control.v1/codever.command.command-1.retry%2Frecovery-1",
+    undefined,
+    {
+      msgtype: "m.notice",
+      body: "Encrypted Codever message",
+      "io.codever": {
+        version: 1,
+        kind: "secure_envelope",
+        secure_envelope: { ciphertext: "opaque" },
+      },
+    },
+  ]]);
+});
 
 test("consumes authenticated control results without waiting for Megolm", async () => {
   const gateway = await generateDeviceKeyPair();

@@ -1201,6 +1201,44 @@ describe('MatrixJsSdkGatewayClient', () => {
         expect(createGatewayMatrixScheduler().queueAlgorithm(message)).toBeNull()
     })
 
+    it('rehydrates a persisted thread root that was omitted from initial sync', async () => {
+        const rootEvent = { getId: () => '$persisted-root' } as unknown as MatrixEvent
+        const createThread = vi.fn()
+        const room = {
+            findEventById: vi.fn(() => undefined),
+            getThread: vi.fn(() => undefined),
+            createThread,
+        }
+        const sdk = {
+            getRoom: vi.fn(() => room),
+            fetchRoomEvent: vi.fn(async () => ({
+                event_id: '$persisted-root',
+                type: 'm.room.message',
+                sender: '@gateway:example.org',
+                origin_server_ts: 1,
+                content: { msgtype: 'm.notice', body: 'session root' },
+            })),
+            getEventMapper: vi.fn(() => (event: { room_id?: string }) => {
+                expect(event.room_id).toBe('!room:example.org')
+                return rootEvent
+            }),
+        } as unknown as MatrixClient
+        const client = new MatrixJsSdkGatewayClient(sdk)
+
+        await client.prepareRoomThread('!room:example.org', '$persisted-root')
+
+        expect(sdk.fetchRoomEvent).toHaveBeenCalledWith(
+            '!room:example.org',
+            '$persisted-root',
+        )
+        expect(createThread).toHaveBeenCalledWith(
+            '$persisted-root',
+            rootEvent,
+            [],
+            false,
+        )
+    })
+
     it('enforces crypto-before-sync and maps the v41 SDK send/decrypt surface', async () => {
         let sdkEventListener: ((event: MatrixEvent) => void) | undefined
         const crypto = {

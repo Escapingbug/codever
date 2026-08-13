@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,6 +36,7 @@ type ManagedProcess = {
     child: ChildProcess
     output: string
     waitFor(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>
+    crash(): Promise<void>
     stop(): Promise<void>
 }
 
@@ -64,6 +65,8 @@ const textAttachmentMarker = `TEXT-${runId}`
 const imageAttachmentMarker = `IMAGE-${runId}`
 const textAttachmentResponse = attachmentResponse(textAttachmentMarker)
 const imageAttachmentResponse = attachmentResponse(imageAttachmentMarker)
+const rotationProjectName = `Codever rotation E2E ${runId}`
+const rotationPrompt = `keep the first session running across Gateway restart ${runId}`
 
 let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
@@ -119,26 +122,14 @@ try {
     )
     await waitForHttp(`${pwaUrl}/api/version`, STARTUP_TIMEOUT_MS)
 
-    gatewayProcess = managedProcess(
-        join(repositoryRoot, 'node_modules', '.bin', 'tsx'),
-        [join(repositoryRoot, 'scripts', 'matrix-local-gateway.ts')],
-        {
-            cwd: repositoryRoot,
-            env: {
-                ...process.env,
-                CODEVER_MATRIX_FIXTURE: fixturePath,
-                CODEVER_MATRIX_DATA_DIR: gatewayDataDirectory,
-                CODEVER_MATRIX_GATEWAY_USER: fixture.gateway.username,
-                CODEVER_MATRIX_GATEWAY_PASSWORD: fixture.gateway.password,
-                CODEVER_GATEWAY_NAME: `Codever E2E Gateway ${runId}`,
-                CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
-                CODEVER_MATRIX_E2E_PROVIDER: '1',
-                CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '3500',
-                CODEVER_SESSION_EXTENSIONS_JSON: privacyFixture.gatewayRegistration,
-                CODEVER_CWD: repositoryRoot,
-            },
-        },
-    )
+    gatewayProcess = startGatewayProcess({
+        fixture,
+        fixturePath,
+        gatewayDataDirectory,
+        gatewayAdminSocket,
+        providerDelayMs: 30_000,
+        sessionExtensionsJson: privacyFixture.gatewayRegistration,
+    })
     const pairingMatch = await gatewayProcess.waitFor(
         /Pairing link \(paste fallback\):\s*\n([^\n]+)\n/u,
         STARTUP_TIMEOUT_MS,
@@ -167,6 +158,43 @@ try {
     const baselineFirst = await activeSessionCount(firstPage)
     await createSession(firstPage, projectName, repositoryRoot)
     assert.equal(await activeSessionCount(firstPage), baselineFirst + 1)
+
+    process.stdout.write('[4r/8] Restarting the Gateway during active work, then creating another session…\n')
+    await sendPrompt(firstPage, rotationPrompt)
+    await waitForText(firstPage, rotationPrompt)
+    await waitForProjectWorking(firstPage, projectName)
+    const baselineBeforeRotationCreate = await activeSessionCount(firstPage)
+    await gatewayProcess.crash()
+    // Submit while the browser still owns the durable command sequence but
+    // before the replacement Gateway device announces its transport. This is
+    // the real race: Matrix remains connected, so the UI accepts the command,
+    // while the old Megolm session cannot address the replacement device.
+    const rotationCreateStartedAt = Date.now()
+    await beginSessionCreate(firstPage, rotationProjectName, secondProjectDirectory)
+    gatewayProcess = startGatewayProcess({
+        fixture,
+        fixturePath,
+        gatewayDataDirectory,
+        gatewayAdminSocket,
+        providerDelayMs: 3_500,
+        sessionExtensionsJson: privacyFixture.gatewayRegistration,
+    })
+    await gatewayProcess.waitFor(
+        /Gateway Matrix transport key rotated and signed automatically\./u,
+        STARTUP_TIMEOUT_MS,
+    )
+    await gatewayProcess.waitFor(/Gateway ready with 1 trusted device\(s\)\./u)
+    await settleSessionCreateAcrossGatewayRotation(
+        firstPage,
+        rotationProjectName,
+        baselineBeforeRotationCreate,
+        gatewayProcess,
+        gatewayDataDirectory,
+        rotationCreateStartedAt,
+    )
+    const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
+    assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
+    process.stdout.write('[4r/8] PASS — active work did not block session creation after Gateway rotation.\n')
 
     process.stdout.write('[4a/8] Sending text and image attachments through the real Agent input boundary…\n')
     await sendPromptWithAttachment(firstPage, {
@@ -221,7 +249,7 @@ try {
     const baselineSecond = await activeSessionCount(secondPage)
     assert.equal(
         baselineSecond,
-        baselineFirst + 1,
+        sessionCountAfterRotationCreate,
         'The newly paired browser did not restore the existing session inventory',
     )
     await openProjectSession(secondPage, projectName)
@@ -229,7 +257,7 @@ try {
     await startHistoryLoadingObservation(secondPage, secondProjectName)
     await createSession(secondPage, secondProjectName, secondProjectDirectory)
     await waitForProject(firstPage, secondProjectName)
-    assert.equal(await activeSessionCount(firstPage), baselineFirst + 2)
+    assert.equal(await activeSessionCount(firstPage), sessionCountAfterRotationCreate + 1)
     assert.equal(await activeSessionCount(secondPage), baselineSecond + 1)
     process.stdout.write('[5b/8] Verifying a brand-new empty session never enters history loading…\n')
     await delay(250)
@@ -414,7 +442,7 @@ try {
                 waitForProjectAbsent(thirdPage!, projectName),
                 waitForProjectAbsent(thirdPage!, secondProjectName),
             ])
-            assert.equal(await activeSessionCount(firstPage!), baselineFirst)
+            assert.equal(await activeSessionCount(firstPage!), baselineSecond - 1)
             assert.equal(await activeSessionCount(secondPage!), baselineSecond - 1)
 
             await Promise.all([
@@ -435,12 +463,16 @@ try {
 
     await recordRegression(
         regressionFailures,
-        'Matrix thread roots remain recoverable during browser history loading',
+        'Matrix thread roots remain recoverable after the replacement Gateway becomes ready',
         async () => {
+            const output = gatewayProcess!.output
+            const readyMarker = 'Gateway ready with 1 trusted device(s).'
+            const readyOffset = output.lastIndexOf(readyMarker)
+            assert.notEqual(readyOffset, -1, 'Replacement Gateway never reported ready')
             assert.doesNotMatch(
-                gatewayProcess!.output,
+                output.slice(readyOffset + readyMarker.length),
                 /Couldn't find timeline for thread ID/u,
-                'Gateway/Matrix SDK could not resolve a session thread root',
+                'Ready Gateway/Matrix SDK could not resolve a session thread root',
             )
         },
     )
@@ -614,6 +646,91 @@ async function createSession(page: Page, projectName: string, cwd: string): Prom
         Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
         `Session creation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
     )
+}
+
+async function settleSessionCreateAcrossGatewayRotation(
+    page: Page,
+    projectName: string,
+    baseline: number,
+    gateway: ManagedProcess,
+    dataDirectory: string,
+    startedAt: number,
+): Promise<void> {
+    const queuedNotice = page.locator('.session-panel').getByText(
+        'Session creation is queued securely. Codever will resume this same command without creating a duplicate.',
+        { exact: true },
+    )
+    const outcome = await Promise.race([
+        waitForProject(page, projectName)
+            .then(() => 'created' as const)
+            // The ordinary convergence timeout is shorter than the durable
+            // acknowledgement timeout. Keep observing the warning branch
+            // instead of hiding the transport failure behind a generic wait.
+            .catch(() => new Promise<never>(() => undefined)),
+        queuedNotice.waitFor({ state: 'visible', timeout: 40_000 }).then(() => 'queued' as const),
+    ])
+    if (outcome === 'created') {
+        assert.equal(await activeSessionCount(page), baseline + 1)
+        assert.ok(
+            Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
+            `Session creation after Gateway rotation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
+        )
+        return
+    }
+
+    // Capture the eventual state as well as the user-visible stall. Today the
+    // retry does create the session, but only after showing the durable-queue
+    // warning for a normal foreground action.
+    await waitForProject(page, projectName)
+    assert.equal(await activeSessionCount(page), baseline + 1)
+    assert.equal(
+        await persistedGatewaySessionCount(dataDirectory),
+        baseline + 1,
+        'The queued create command did not converge to exactly one Gateway session',
+    )
+    assert.match(
+        gateway.output,
+        /Can't find the room key to decrypt the event|This message was sent before this device logged in/u,
+        'The create command was queued without the expected Matrix device-rotation failure evidence',
+    )
+    assert.fail(
+        `Session creation entered the durable queue after Gateway Matrix device rotation and took ${Date.now() - startedAt} ms to converge`,
+    )
+}
+
+async function beginSessionCreate(page: Page, projectName: string, cwd: string): Promise<void> {
+    await page.getByRole('button', { name: 'New conversation' }).click()
+    const dialog = page.locator('.new-session-dialog')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.locator('select').first().selectOption('__new_project__')
+    await dialog.getByPlaceholder('My project').fill(projectName)
+    await dialog.getByPlaceholder('/Users/me/Documents/project').fill(cwd)
+    await dialog.getByRole('button', { name: 'Create session', exact: true }).click()
+    await page.locator('.session-create-pending').waitFor({
+        state: 'visible',
+        timeout: UI_FEEDBACK_TIMEOUT_MS,
+    })
+}
+
+async function waitForProjectWorking(page: Page, projectName: string): Promise<void> {
+    await waitFor(async () => {
+        const row = projectGroup(page, projectName).locator('button.session-row').first()
+        const className = await row.getAttribute('class')
+        return className?.includes('session-signal-working') ?? false
+    }, {
+        description: `working session in ${projectName}`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        failFast: () => assertNoPageErrors(page),
+    })
+}
+
+async function persistedGatewaySessionCount(dataDirectory: string): Promise<number> {
+    const state = JSON.parse(await readFile(
+        join(dataDirectory, 'gateway-replay.jsonl.runtime-state.json'),
+        'utf8',
+    )) as { rooms?: Record<string, { appSessions?: unknown[] }> }
+    return Object.values(state.rooms ?? {})
+        .reduce((total, room) => total + (room.appSessions?.length ?? 0), 0)
 }
 
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
@@ -1148,6 +1265,20 @@ function managedProcess(
         waitFor(pattern, timeoutMs = STARTUP_TIMEOUT_MS) {
             return waitForOutput(child, () => output, pattern, timeoutMs)
         },
+        async crash() {
+            if (child.exitCode !== null || child.signalCode !== null) return
+            const exitPromise = new Promise<boolean>(resolve =>
+                child.once('exit', () => resolve(true)),
+            )
+            signalProcessTree(child, 'SIGKILL')
+            const exited = await Promise.race([
+                exitPromise,
+                delay(5_000).then(() => false),
+            ])
+            assert.equal(exited, true, 'The E2E Gateway did not terminate after SIGKILL')
+            child.stdout?.destroy()
+            child.stderr?.destroy()
+        },
         async stop() {
             if (child.exitCode !== null || child.signalCode !== null) return
             const exitPromise = new Promise<boolean>(resolve =>
@@ -1170,6 +1301,36 @@ function managedProcess(
         },
     }
     return result
+}
+
+function startGatewayProcess(input: {
+    fixture: DisposableMatrixFixture
+    fixturePath: string
+    gatewayDataDirectory: string
+    gatewayAdminSocket: string
+    providerDelayMs: number
+    sessionExtensionsJson: string
+}): ManagedProcess {
+    return managedProcess(
+        join(repositoryRoot, 'node_modules', '.bin', 'tsx'),
+        [join(repositoryRoot, 'scripts', 'matrix-local-gateway.ts')],
+        {
+            cwd: repositoryRoot,
+            env: {
+                ...process.env,
+                CODEVER_MATRIX_FIXTURE: input.fixturePath,
+                CODEVER_MATRIX_DATA_DIR: input.gatewayDataDirectory,
+                CODEVER_MATRIX_GATEWAY_USER: input.fixture.gateway.username,
+                CODEVER_MATRIX_GATEWAY_PASSWORD: input.fixture.gateway.password,
+                CODEVER_GATEWAY_NAME: `Codever E2E Gateway ${runId}`,
+                CODEVER_GATEWAY_ADMIN_SOCKET: input.gatewayAdminSocket,
+                CODEVER_MATRIX_E2E_PROVIDER: '1',
+                CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: String(input.providerDelayMs),
+                CODEVER_SESSION_EXTENSIONS_JSON: input.sessionExtensionsJson,
+                CODEVER_CWD: repositoryRoot,
+            },
+        },
+    )
 }
 
 function signalProcessTree(

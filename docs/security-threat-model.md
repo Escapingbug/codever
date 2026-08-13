@@ -7,8 +7,10 @@ delete, reorder or replay ciphertext, but it must not be able to read Codever
 content or cause a local AgentProvider operation.
 
 Codever content is encrypted and signed at the application layer before it is
-passed to the Matrix SDK. Matrix Megolm remains defense in depth; neither the
-homeserver nor the Matrix protocol is a Codever trust root.
+passed to the Matrix SDK. Matrix Megolm remains defense in depth for flows that
+use it; executable control events deliberately bypass Megolm so Gateway device
+rotation cannot block them. Neither the homeserver nor the Matrix protocol is a
+Codever trust root.
 
 ## Trusted components
 
@@ -72,7 +74,8 @@ that passes local validation.
 
 - Captured homeserver traffic contains no prompt, cwd, filename or tool output.
 - Matrix SDK send APIs receive a fixed placeholder body plus opaque ciphertext.
-- An unencrypted event causes zero provider calls.
+- An event without a valid Codever application envelope causes zero provider
+  calls, whether or not the outer Matrix event uses Megolm.
 - An unknown, unverified or key-substituted device causes zero provider calls.
 - Changing any signed field invalidates the command.
 - Wrong-Gateway and wrong-conversation commands are rejected.

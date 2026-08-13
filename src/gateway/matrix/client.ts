@@ -280,36 +280,56 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
             this.client.getRoom(roomId)?.findEventById(rootEventId)
         let rootEvent = findRoot()
         if (!rootEvent) {
-            rootEvent = await new Promise<MatrixEvent>((resolve, reject) => {
-                let timeout: ReturnType<typeof setTimeout> | undefined
-                const onEvent = (event: MatrixEvent): void => {
-                    if (event.getRoomId() !== roomId || event.getId() !== rootEventId) return
-                    cleanup()
-                    resolve(event)
-                }
-                const cleanup = (): void => {
-                    if (timeout) clearTimeout(timeout)
-                    this.client.off(ClientEvent.Event, onEvent)
-                }
-                timeout = setTimeout(() => {
-                    cleanup()
-                    reject(new Error(
-                        `Matrix did not sync event ${rootEventId} in room ${roomId} within ${timeoutMs}ms`,
-                    ))
-                }, timeoutMs)
-                this.client.on(ClientEvent.Event, onEvent)
-                const current = findRoot()
-                if (current) {
-                    cleanup()
-                    resolve(current)
-                }
-            })
+            try {
+                const fetched = await this.client.fetchRoomEvent(roomId, rootEventId)
+                rootEvent = this.client.getEventMapper()({
+                    ...fetched,
+                    room_id: fetched.room_id ?? roomId,
+                })
+            } catch {
+                // A just-created direct event can race its own remote echo on
+                // eventually-consistent homeservers. Keep the live-event path
+                // as a fallback, while persisted roots normally use the fetch.
+                rootEvent = await this.waitForRoomEvent(roomId, rootEventId, findRoot, timeoutMs)
+            }
         }
         const room = this.client.getRoom(roomId)
         if (!room) throw new Error(`Matrix room ${roomId} is not available`)
         if (!room.getThread(rootEventId)) {
             room.createThread(rootEventId, rootEvent, [], false)
         }
+    }
+
+    private async waitForRoomEvent(
+        roomId: string,
+        eventId: string,
+        findEvent: () => MatrixEvent | undefined,
+        timeoutMs: number,
+    ): Promise<MatrixEvent> {
+        return new Promise<MatrixEvent>((resolve, reject) => {
+            let timeout: ReturnType<typeof setTimeout> | undefined
+            const onEvent = (event: MatrixEvent): void => {
+                if (event.getRoomId() !== roomId || event.getId() !== eventId) return
+                cleanup()
+                resolve(event)
+            }
+            const cleanup = (): void => {
+                if (timeout) clearTimeout(timeout)
+                this.client.off(ClientEvent.Event, onEvent)
+            }
+            timeout = setTimeout(() => {
+                cleanup()
+                reject(new Error(
+                    `Matrix did not sync event ${eventId} in room ${roomId} within ${timeoutMs}ms`,
+                ))
+            }, timeoutMs)
+            this.client.on(ClientEvent.Event, onEvent)
+            const current = findEvent()
+            if (current) {
+                cleanup()
+                resolve(current)
+            }
+        })
     }
 
     private async sendDirectRoomEvent(request: {
