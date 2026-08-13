@@ -31,6 +31,7 @@ import { registerConfiguredProviders } from '../src/providers/configured.js'
 import type {
     AgentProvider,
     AgentQueryHandle,
+    AgentQueryInput,
 } from '../src/providers/provider.js'
 import { createSessionExtensionRegistryFromEnvironment } from '../src/runtime/sessionExtensionConfig.js'
 
@@ -496,7 +497,7 @@ function e2eProvider(name: string): AgentProvider {
     }
     return {
         name,
-        startQuery(): AgentQueryHandle {
+        startQuery(input): AgentQueryHandle {
             return {
                 events: (async function* () {
                     if (delayMs > 0) {
@@ -504,7 +505,7 @@ function e2eProvider(name: string): AgentProvider {
                     }
                     yield {
                         kind: 'text' as const,
-                        text: 'Codever deterministic E2E response',
+                        text: await deterministicE2eResponse(input),
                     }
                     yield { kind: 'result' as const, status: 'success' as const }
                 })(),
@@ -516,4 +517,63 @@ function e2eProvider(name: string): AgentProvider {
         getAvailableModels: () => [],
         getAvailablePermissionModes: () => ['default'],
     }
+}
+
+async function deterministicE2eResponse(input: AgentQueryInput): Promise<string> {
+    if (typeof input === 'string') return 'Codever deterministic E2E response'
+    const attachmentMarkerPattern = /CODEVER_E2E_ATTACHMENT_MARKER:([A-Z0-9-]+)/u
+    const fileReferencePattern = /^- ([^:\n]+): (.+) \(([^,\n]+), (\d+) bytes\)$/gmu
+    const attachments: Array<{
+        label: string
+        bytes: Buffer
+        expectedBytes?: number
+    }> = []
+    for (const part of input.parts) {
+        if (part.type === 'text') {
+            for (const match of part.text.matchAll(fileReferencePattern)) {
+                const [, filename, path, , size] = match
+                if (!filename || !path || !size) continue
+                attachments.push({
+                    label: filename,
+                    bytes: await readFile(path),
+                    expectedBytes: Number.parseInt(size, 10),
+                })
+            }
+            continue
+        }
+        if (part.type === 'file') {
+            attachments.push({
+                label: part.filename,
+                bytes: await readFile(part.path),
+                expectedBytes: part.sizeBytes,
+            })
+            continue
+        }
+        attachments.push({
+            label: part.filename ?? part.type,
+            bytes: Buffer.from(part.data, 'base64'),
+            expectedBytes: part.sizeBytes,
+        })
+    }
+    if (attachments.length === 0) return 'Codever deterministic E2E response'
+
+    const markers: string[] = []
+    for (const attachment of attachments) {
+        if (
+            attachment.expectedBytes !== undefined
+            && attachment.bytes.byteLength !== attachment.expectedBytes
+        ) {
+            throw new Error(
+                `E2E Agent received the wrong byte count for ${attachment.label}`,
+            )
+        }
+        const marker = attachment.bytes.toString('utf8').match(attachmentMarkerPattern)?.[1]
+        if (!marker) {
+            throw new Error(
+                `E2E Agent could not read the attachment marker from ${attachment.label}`,
+            )
+        }
+        markers.push(marker)
+    }
+    return `Codever deterministic E2E attachment result: ${markers.join(', ')}`
 }

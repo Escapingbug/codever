@@ -12,14 +12,22 @@ import {
 test("does not leave a pending selection when the session root arrives first", () => {
   assert.deepEqual(
     completedSessionCreateTarget("session-new", new Set(["session-new"])),
-    { pendingSessionId: null, sessionToReveal: "session-new" },
+    {
+      pendingSessionId: null,
+      sessionToReveal: "session-new",
+      skipHistoryRestore: true,
+    },
   );
 });
 
 test("waits for the session root when the command result arrives first", () => {
   assert.deepEqual(
     completedSessionCreateTarget("session-new", new Set()),
-    { pendingSessionId: "session-new", sessionToReveal: null },
+    {
+      pendingSessionId: "session-new",
+      sessionToReveal: null,
+      skipHistoryRestore: true,
+    },
   );
 });
 

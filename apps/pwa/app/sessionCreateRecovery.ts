@@ -19,20 +19,31 @@ export type PendingSessionCreateRecovery = {
 export type CompletedSessionCreateTarget = {
   pendingSessionId: string | null;
   sessionToReveal: string | null;
+  skipHistoryRestore: boolean;
 };
 
 /**
  * Resolves both valid Matrix event orders for a completed session creation.
  * If the native session root is already projected, reveal it immediately and
- * leave no pending marker that could override a later manual selection.
+ * leave no pending marker that could override a later manual selection. A
+ * session revealed by this completion is brand new in either order, so its
+ * first activation must not start an irrelevant history request.
  */
 export function completedSessionCreateTarget(
   sessionId: string,
   knownSessionIds: ReadonlySet<string>,
 ): CompletedSessionCreateTarget {
   return knownSessionIds.has(sessionId)
-    ? { pendingSessionId: null, sessionToReveal: sessionId }
-    : { pendingSessionId: sessionId, sessionToReveal: null };
+    ? {
+        pendingSessionId: null,
+        sessionToReveal: sessionId,
+        skipHistoryRestore: true,
+      }
+    : {
+        pendingSessionId: sessionId,
+        sessionToReveal: null,
+        skipHistoryRestore: true,
+      };
 }
 
 export function readPendingSessionCreateRecovery(
