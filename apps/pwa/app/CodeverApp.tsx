@@ -2973,6 +2973,7 @@ export function CodeverApp() {
     completion: CommandCompletion,
   ): Promise<void> {
     let sessionToReveal: string | null = null;
+    let skipHistoryRestore = false;
     try {
       completedCommandResultsRef.current.delete(commandId);
       if (completion.outcome !== "succeeded") return;
@@ -2983,6 +2984,7 @@ export function CodeverApp() {
         );
         pendingCreatedSessionIdRef.current = target.pendingSessionId;
         sessionToReveal = target.sessionToReveal;
+        skipHistoryRestore = target.skipHistoryRestore;
       }
       setNewSessionOpen(false);
     } finally {
@@ -2993,7 +2995,12 @@ export function CodeverApp() {
     }
     if (sessionToReveal) {
       clearPendingSessionCreateUi();
-      activateLocalSession(sessionToReveal, connection);
+      activateLocalSession(
+        sessionToReveal,
+        connection,
+        true,
+        skipHistoryRestore,
+      );
       setMobileChatOpen(true);
     }
   }

@@ -35,6 +35,9 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - The session converges on both devices within 15 seconds.
    - A prompt, streamed response, terminal result, and completion notification
      are visible on both devices without manual refresh.
+   - Text-file and image attachments are selected through the shipped file
+     input. The Agent response must contain a unique marker that exists only in
+     the attachment bytes, proving the Agent received and processed the content.
 3. **History and restart**
    - Reloading the browser and force-stopping/restarting the APK restore the
      same session and complete history.
@@ -152,6 +155,7 @@ APK storage.
 | Fresh-device pairing and inventory bootstrap | Two isolated browser devices | Enforced by the isolated Alpha gate |
 | Create and immediate feedback | Enforced | Enforced |
 | Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
+| Text-file and image content reaches the Agent | Enforced | Not yet enforced |
 | History after reload/process restart | Enforced on both browser devices | Enforced for cached history |
 | Archive, restore, and delete | Delete enforced on both devices | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |

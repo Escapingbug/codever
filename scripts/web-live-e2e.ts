@@ -60,6 +60,10 @@ const projectName = `Codever Web E2E ${runId}`
 const secondProjectName = `Codever Web E2E second ${runId}`
 const prompt = `business E2E prompt ${runId}`
 const newSessionPrompt = `new-session reload prompt ${runId}`
+const textAttachmentMarker = `TEXT-${runId}`
+const imageAttachmentMarker = `IMAGE-${runId}`
+const textAttachmentResponse = attachmentResponse(textAttachmentMarker)
+const imageAttachmentResponse = attachmentResponse(imageAttachmentMarker)
 
 let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
@@ -164,6 +168,29 @@ try {
     await createSession(firstPage, projectName, repositoryRoot)
     assert.equal(await activeSessionCount(firstPage), baselineFirst + 1)
 
+    process.stdout.write('[4a/8] Sending text and image attachments through the real Agent input boundary…\n')
+    await sendPromptWithAttachment(firstPage, {
+        prompt: 'Read the unique marker from the attached text file and return it.',
+        name: 'agent-input.txt',
+        mimeType: 'text/plain',
+        bytes: Buffer.from(
+            `This value exists only inside the attached file.\nCODEVER_E2E_ATTACHMENT_MARKER:${textAttachmentMarker}\n`,
+            'utf8',
+        ),
+    })
+    await waitForText(firstPage, 'agent-input.txt')
+    await waitForText(firstPage, textAttachmentResponse)
+
+    await sendPromptWithAttachment(firstPage, {
+        prompt: 'Read the unique marker displayed in the attached image and return it.',
+        name: 'agent-input.svg',
+        mimeType: 'image/svg+xml',
+        bytes: svgMarkerImage(imageAttachmentMarker),
+    })
+    await waitForText(firstPage, 'agent-input.svg')
+    await waitForText(firstPage, imageAttachmentResponse)
+    process.stdout.write('[4a/8] PASS — Agent processed content found only inside text and image attachment bytes.\n')
+
     process.stdout.write('[5/8] Pairing a second device and restoring existing state…\n')
     const admin = new GatewayAdminClient({
         socketPath: gatewayAdminSocket,
@@ -197,8 +224,9 @@ try {
         baselineFirst + 1,
         'The newly paired browser did not restore the existing session inventory',
     )
+    await openProjectSession(secondPage, projectName)
     await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
-    await startHistoryLoadingObservation(secondPage)
+    await startHistoryLoadingObservation(secondPage, secondProjectName)
     await createSession(secondPage, secondProjectName, secondProjectDirectory)
     await waitForProject(firstPage, secondProjectName)
     assert.equal(await activeSessionCount(firstPage), baselineFirst + 2)
@@ -594,6 +622,48 @@ async function sendPrompt(page: Page, prompt: string): Promise<void> {
     await page.getByRole('button', { name: 'Send message' }).click()
 }
 
+async function sendPromptWithAttachment(
+    page: Page,
+    attachment: {
+        prompt: string
+        name: string
+        mimeType: string
+        bytes: Buffer
+    },
+): Promise<void> {
+    assert.equal(
+        attachment.prompt.includes(textAttachmentMarker)
+        || attachment.prompt.includes(imageAttachmentMarker),
+        false,
+        'The expected marker must exist only inside attachment bytes',
+    )
+    await page.locator('input.attachment-input[type="file"]').setInputFiles({
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        buffer: attachment.bytes,
+    })
+    await page.getByLabel('Pending attachments').getByText(attachment.name, {
+        exact: true,
+    }).waitFor({ state: 'visible', timeout: UI_FEEDBACK_TIMEOUT_MS })
+    await sendPrompt(page, attachment.prompt)
+}
+
+function attachmentResponse(marker: string): string {
+    return `Codever deterministic E2E attachment result: ${marker}`
+}
+
+function svgMarkerImage(marker: string): Buffer {
+    return Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="180" '
+        + 'viewBox="0 0 1200 180">'
+        + '<rect width="1200" height="180" fill="white"/>'
+        + '<text x="40" y="105" font-family="monospace" font-size="36" fill="black">'
+        + `CODEVER_E2E_ATTACHMENT_MARKER:${marker}`
+        + '</text></svg>',
+        'utf8',
+    )
+}
+
 async function delayMatrixRoomSends(page: Page, milliseconds: number): Promise<void> {
     await page.route('**/_matrix/client/v3/rooms/**/send/**', async route => {
         await delay(milliseconds)
@@ -655,12 +725,20 @@ async function sendIgnoredTimelineNoise(
     }))
 }
 
-async function startHistoryLoadingObservation(page: Page): Promise<void> {
+async function startHistoryLoadingObservation(
+    page: Page,
+    expectedProjectName: string,
+): Promise<void> {
     await page.evaluate(`(() => {
         window.__codeverE2eHistoryObserver?.disconnect();
         document.documentElement.dataset.codeverE2eHistoryLoadingSeen = "false";
+        const expectedProjectName = ${JSON.stringify(expectedProjectName)};
         const inspect = () => {
-            if (document.querySelector(".history-loader.is-loading")) {
+            const selected = document.querySelector("button.session-row.selected");
+            if (
+                selected?.dataset.projectName === expectedProjectName
+                && document.querySelector(".history-loader.is-loading")
+            ) {
                 document.documentElement.dataset.codeverE2eHistoryLoadingSeen = "true";
             }
         };
