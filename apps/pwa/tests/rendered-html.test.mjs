@@ -779,12 +779,13 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /operation: "session\.delete"/);
   assert.match(
     app,
-    /activateLocalSession\(null\)[\s\S]*runSessionLifecycle\([\s\S]*"delete"/,
+    /setSessionDeletionPending\([\s\S]*activateLocalSession\(null\)[\s\S]*runSessionLifecycle\([\s\S]*"delete"/,
   );
   assert.doesNotMatch(
     app,
     /async function deleteSession\(\)[\s\S]*setSessionOptimisticallyDeleted\([\s\S]*runSessionLifecycle\(/,
   );
+  assert.match(app, /sessionsAvailableForAutomaticSelection/);
   assert.match(app, /This session is archived/);
   assert.match(app, /Restore session/);
   assert.match(app, /Delete session/);

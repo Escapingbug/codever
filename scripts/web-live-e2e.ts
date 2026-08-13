@@ -468,6 +468,54 @@ try {
         },
     )
 
+    process.stdout.write('[7a/8] Deleting the only session without reopening or replacing it…\n')
+    await recordRegression(
+        regressionFailures,
+        'deleting the last session keeps every browser in the durable empty state',
+        async () => {
+            await Promise.all([
+                waitForProject(firstPage!, rotationProjectName),
+                waitForProject(secondPage!, rotationProjectName),
+                waitForProject(thirdPage!, rotationProjectName),
+            ])
+            assert.equal(await activeSessionCount(firstPage!), 1)
+            assert.equal(await activeSessionCount(secondPage!), 1)
+            assert.equal(await activeSessionCount(thirdPage!), 1)
+
+            await openProjectSession(firstPage!, rotationProjectName)
+            await deleteSelectedSession(firstPage!, rotationProjectName, {
+                observeUnexpectedSelection: true,
+            })
+            await Promise.all([
+                waitForProjectAbsent(secondPage!, rotationProjectName),
+                waitForProjectAbsent(thirdPage!, rotationProjectName),
+            ])
+            await waitFor(
+                async () => await persistedGatewaySessionCount(
+                    gatewayDataDirectory,
+                ) === 0,
+                {
+                    description: 'Gateway to persist an empty session inventory',
+                    timeoutMs: CONVERGENCE_TIMEOUT_MS,
+                    failFast: () => assertNoPageErrors(firstPage!),
+                },
+            )
+            await assertEmptySessionState(firstPage!)
+            await assertEmptySessionState(secondPage!)
+            await assertEmptySessionState(thirdPage!)
+
+            await reloadAndWaitForConnected(firstPage!)
+            await assertEmptySessionState(firstPage!)
+            assert.equal(
+                await persistedGatewaySessionCount(
+                    gatewayDataDirectory,
+                ),
+                0,
+                'Reloading the empty PWA must not send session.create',
+            )
+        },
+    )
+
     await recordRegression(
         regressionFailures,
         'Matrix thread roots remain recoverable after the replacement Gateway becomes ready',
@@ -988,7 +1036,11 @@ async function settleOrDeleteProject(page: Page, projectName: string): Promise<v
     }
 }
 
-async function deleteSelectedSession(page: Page, projectName: string): Promise<void> {
+async function deleteSelectedSession(
+    page: Page,
+    projectName: string,
+    options: { observeUnexpectedSelection?: boolean } = {},
+): Promise<void> {
     const details = page.getByRole('button', { name: 'Conversation details' })
     if (await details.getAttribute('aria-expanded') !== 'true') await details.click()
     await page.getByRole('button').filter({
@@ -997,17 +1049,32 @@ async function deleteSelectedSession(page: Page, projectName: string): Promise<v
     const dialog = page.getByRole('alertdialog')
     await dialog.waitFor({ state: 'visible' })
     const startedAt = Date.now()
-    await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
-    await waitFor(async () => {
-        const feedback = await projectSessionFeedback(page, projectName)
-        return !await dialog.isVisible().catch(() => false)
-            && await page.locator('button.session-row.selected').count() === 0
-            && (feedback.deleting || !feedback.exists)
-    }, {
-        description: `immediate deletion feedback for ${projectName}`,
-        timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
-    })
-    await waitForProjectAbsent(page, projectName)
+    if (options.observeUnexpectedSelection) {
+        await startPostDeletionSelectionObservation(page)
+    }
+    let unexpectedSelection = false
+    try {
+        await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
+        await waitFor(async () => {
+            const feedback = await projectSessionFeedback(page, projectName)
+            return !await dialog.isVisible().catch(() => false)
+                && await page.locator('button.session-row.selected').count() === 0
+                && (feedback.deleting || !feedback.exists)
+        }, {
+            description: `immediate deletion feedback for ${projectName}`,
+            timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+        })
+        await waitForProjectAbsent(page, projectName)
+    } finally {
+        if (options.observeUnexpectedSelection) {
+            unexpectedSelection = await stopPostDeletionSelectionObservation(page)
+        }
+    }
+    assert.equal(
+        unexpectedSelection,
+        false,
+        'A session became selected again after the last-session deletion was confirmed',
+    )
     assert.ok(
         Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
         `Session deletion exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
@@ -1201,6 +1268,67 @@ async function waitForText(
 
 async function activeSessionCount(page: Page): Promise<number> {
     return page.locator('button.session-row').count()
+}
+
+async function assertEmptySessionState(page: Page): Promise<void> {
+    await waitFor(async () => {
+        const [sessionCount, selectedCount, heading, newSessionOpen] = await Promise.all([
+            activeSessionCount(page),
+            page.locator('button.session-row.selected').count(),
+            page.locator('.conversation-heading h2').textContent(),
+            page.locator('.new-session-dialog').isVisible().catch(() => false),
+        ])
+        return sessionCount === 0
+            && selectedCount === 0
+            && heading === 'No active session'
+            && !newSessionOpen
+    }, {
+        description: 'empty session UI without an automatic replacement selection',
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        failFast: () => assertNoPageErrors(page),
+    })
+    assert.equal(await activeSessionCount(page), 0)
+    assert.equal(await page.locator('button.session-row.selected').count(), 0)
+    assert.equal(
+        await page.locator('.conversation-heading h2').textContent(),
+        'No active session',
+    )
+    assert.equal(
+        await page.locator('.new-session-dialog').isVisible().catch(() => false),
+        false,
+        'Deleting the last session must not open the new-session dialog',
+    )
+    await assertNoBlockingAlert(page)
+}
+
+async function startPostDeletionSelectionObservation(page: Page): Promise<void> {
+    await page.evaluate(`(() => {
+        window.__codeverE2ePostDeleteSelectionObserver?.disconnect();
+        document.documentElement.dataset.codeverE2ePostDeleteSelectionSeen = "false";
+        const inspect = () => {
+            if (document.querySelector('[role="alertdialog"]')) return;
+            if (document.querySelector('button.session-row.selected')) {
+                document.documentElement.dataset.codeverE2ePostDeleteSelectionSeen = "true";
+            }
+        };
+        const observer = new MutationObserver(inspect);
+        observer.observe(document.body, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+        });
+        window.__codeverE2ePostDeleteSelectionObserver = observer;
+    })()`)
+}
+
+async function stopPostDeletionSelectionObservation(page: Page): Promise<boolean> {
+    return page.evaluate(`(() => {
+        window.__codeverE2ePostDeleteSelectionObserver?.disconnect();
+        delete window.__codeverE2ePostDeleteSelectionObserver;
+        const seen = document.documentElement.dataset.codeverE2ePostDeleteSelectionSeen === "true";
+        delete document.documentElement.dataset.codeverE2ePostDeleteSelectionSeen;
+        return seen;
+    })()`)
 }
 
 async function assertNoBlockingAlert(page: Page): Promise<void> {

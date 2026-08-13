@@ -71,8 +71,10 @@ import {
   type PendingSessionCreateRecovery,
 } from "./sessionCreateRecovery";
 import {
-  reconcileOptimisticSessionDeletions,
-} from "./optimisticSessionDeletion";
+  reconcilePendingSessionDeletions,
+  sessionsAvailableForAutomaticSelection,
+  setSessionDeletionPending,
+} from "./pendingSessionDeletion";
 import {
   hasShortDeviceInvitation,
   resolveShortDeviceInvitation,
@@ -511,8 +513,6 @@ export function CodeverApp() {
   const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<
     Map<string, "archive" | "restore" | "delete">
   >(() => new Map());
-  const [optimisticallyDeletedSessionIds, setOptimisticallyDeletedSessionIds] =
-    useState<Set<string>>(() => new Set());
   const [deleteTarget, setDeleteTarget] =
     useState<GatewaySessionSummary | null>(null);
   const [decisionStates, setDecisionStates] = useState<
@@ -558,7 +558,7 @@ export function CodeverApp() {
   const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
   const pendingPromptSessionIdsRef = useRef(new Set<string>());
   const selectedSessionIdRef = useRef<string | null>(null);
-  const optimisticallyDeletedSessionIdsRef = useRef(new Set<string>());
+  const pendingDeletionSessionIdsRef = useRef(new Set<string>());
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
   const pendingOpenedSessionIdRef = useRef<string | null>(null);
   const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
@@ -596,9 +596,7 @@ export function CodeverApp() {
 
   const selected =
     gatewayState?.sessions.find(
-      (session) =>
-        session.id === selectedSessionId &&
-        !optimisticallyDeletedSessionIds.has(session.id),
+      (session) => session.id === selectedSessionId,
     ) ?? null;
   const selectedArchived = selected?.status === "archived";
   const selectedLifecycleAction = selected
@@ -657,11 +655,8 @@ export function CodeverApp() {
     NATIVE_BACK_PRIORITY.app,
   );
   const visibleGatewaySessions = useMemo(
-    () =>
-      (gatewayState?.sessions ?? []).filter(
-        (session) => !optimisticallyDeletedSessionIds.has(session.id),
-      ),
-    [gatewayState, optimisticallyDeletedSessionIds],
+    () => gatewayState?.sessions ?? [],
+    [gatewayState],
   );
   const filteredSessions = useMemo(
     () =>
@@ -2029,8 +2024,7 @@ export function CodeverApp() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
-    optimisticallyDeletedSessionIdsRef.current = new Set();
-    setOptimisticallyDeletedSessionIds(new Set());
+    pendingDeletionSessionIdsRef.current = new Set();
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
     setNewSessionBusy(Boolean(sessionCreateRecovery));
@@ -2144,18 +2138,17 @@ export function CodeverApp() {
             const nextSessionIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
-            const pendingDeletedSessionIds =
-              reconcileOptimisticSessionDeletions(
-                optimisticallyDeletedSessionIdsRef.current,
+            const pendingDeletionSessionIds =
+              reconcilePendingSessionDeletions(
+                pendingDeletionSessionIdsRef.current,
                 nextSessionIds,
               );
             if (
-              pendingDeletedSessionIds.size !==
-              optimisticallyDeletedSessionIdsRef.current.size
+              pendingDeletionSessionIds.size !==
+              pendingDeletionSessionIdsRef.current.size
             ) {
-              optimisticallyDeletedSessionIdsRef.current =
-                pendingDeletedSessionIds;
-              setOptimisticallyDeletedSessionIds(pendingDeletedSessionIds);
+              pendingDeletionSessionIdsRef.current =
+                pendingDeletionSessionIds;
             }
             for (const previousSessionId of knownGatewaySessionIdsRef.current) {
               if (nextSessionIds.has(previousSessionId)) continue;
@@ -2222,8 +2215,9 @@ export function CodeverApp() {
               }
               return next;
             });
-            const selectableSessions = state.gatewayState.sessions.filter(
-              (session) => !pendingDeletedSessionIds.has(session.id),
+            const selectableSessions = sessionsAvailableForAutomaticSelection(
+              state.gatewayState.sessions,
+              pendingDeletionSessionIds,
             );
             const availableIds = new Set(
               selectableSessions.map((session) => session.id),
@@ -2388,8 +2382,7 @@ export function CodeverApp() {
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
     pendingCreatedSessionIdRef.current = null;
-    optimisticallyDeletedSessionIdsRef.current = new Set();
-    setOptimisticallyDeletedSessionIds(new Set());
+    pendingDeletionSessionIdsRef.current = new Set();
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(queuedSessionCreate?.input ?? null);
     setNewSessionBusy(Boolean(queuedSessionCreate));
@@ -3550,11 +3543,21 @@ export function CodeverApp() {
     if (!target) return;
     setDeleteTarget(null);
     setDetailsOpen(false);
+    pendingDeletionSessionIdsRef.current = setSessionDeletionPending(
+      pendingDeletionSessionIdsRef.current,
+      target.id,
+      true,
+    );
     if (selectedSessionIdRef.current === target.id) {
       activateLocalSession(null);
       setMobileChatOpen(false);
     }
     const restoreSelection = () => {
+      pendingDeletionSessionIdsRef.current = setSessionDeletionPending(
+        pendingDeletionSessionIdsRef.current,
+        target.id,
+        false,
+      );
       activateLocalSession(target.id);
       setMobileChatOpen(true);
     };

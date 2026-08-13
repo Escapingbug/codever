@@ -164,7 +164,7 @@ APK storage.
 | Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
 | Text-file and image content reaches the Agent | Enforced | Not yet enforced |
 | History after reload/process restart | Enforced on both browser devices | Enforced for cached history |
-| Archive, restore, and delete | Delete enforced on both devices | Full lifecycle enforced twice |
+| Archive, restore, and delete | Delete enforced on both devices; deleting the only session remains empty across reload without transient reselection or replacement creation | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
 | Post-commit ACK/result loss and durable-outbox release | Not applicable | Enforced by the isolated Alpha gate for create and delete |
 | Stale cross-device command review, discard, and immediate retry | Not yet enforced | Enforced by the isolated Alpha gate |
