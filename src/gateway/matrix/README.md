@@ -56,8 +56,9 @@ state/history RPC event kinds are not accepted or emitted.
 
 ## Command event shape
 
-Commands are encrypted `m.room.message` events. Their decrypted content uses a
-normal text fallback plus the Codever extension:
+Commands use direct `io.codever.secure_control.v1` room events. Their Matrix
+content is an opaque `secure_envelope`; after application-layer decryption the
+inner content uses a normal text fallback plus the Codever extension:
 
 ```json
 {
@@ -74,9 +75,11 @@ normal text fallback plus the Codever extension:
 }
 ```
 
-Unsigned text, a different extension kind, clear-text events, unknown Matrix
-device keys, invalid signatures, expired commands, and replayed command IDs or
-nonces cannot reach `TopicSession`.
+Unsigned text, a different extension kind, invalid application envelopes,
+unknown or revoked application devices, invalid signatures, expired commands,
+and replayed command IDs or nonces cannot reach `TopicSession`. Because the
+outer control event deliberately bypasses Megolm, a Gateway Matrix device
+rotation cannot strand a valid command behind a missing room key.
 
 Recovery preserves the authenticated command identity but creates a fresh
 Matrix transaction and outer secure envelope for each transport attempt. The

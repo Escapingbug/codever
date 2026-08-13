@@ -192,6 +192,8 @@ try {
         gatewayDataDirectory,
         rotationCreateStartedAt,
     )
+    const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
+    assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
     process.stdout.write('[4r/8] PASS — active work did not block session creation after Gateway rotation.\n')
 
     process.stdout.write('[4a/8] Sending text and image attachments through the real Agent input boundary…\n')
@@ -247,7 +249,7 @@ try {
     const baselineSecond = await activeSessionCount(secondPage)
     assert.equal(
         baselineSecond,
-        baselineFirst + 1,
+        sessionCountAfterRotationCreate,
         'The newly paired browser did not restore the existing session inventory',
     )
     await openProjectSession(secondPage, projectName)
@@ -255,7 +257,7 @@ try {
     await startHistoryLoadingObservation(secondPage, secondProjectName)
     await createSession(secondPage, secondProjectName, secondProjectDirectory)
     await waitForProject(firstPage, secondProjectName)
-    assert.equal(await activeSessionCount(firstPage), baselineFirst + 2)
+    assert.equal(await activeSessionCount(firstPage), sessionCountAfterRotationCreate + 1)
     assert.equal(await activeSessionCount(secondPage), baselineSecond + 1)
     process.stdout.write('[5b/8] Verifying a brand-new empty session never enters history loading…\n')
     await delay(250)
@@ -440,7 +442,7 @@ try {
                 waitForProjectAbsent(thirdPage!, projectName),
                 waitForProjectAbsent(thirdPage!, secondProjectName),
             ])
-            assert.equal(await activeSessionCount(firstPage!), baselineFirst)
+            assert.equal(await activeSessionCount(firstPage!), baselineSecond - 1)
             assert.equal(await activeSessionCount(secondPage!), baselineSecond - 1)
 
             await Promise.all([
@@ -461,12 +463,16 @@ try {
 
     await recordRegression(
         regressionFailures,
-        'Matrix thread roots remain recoverable during browser history loading',
+        'Matrix thread roots remain recoverable after the replacement Gateway becomes ready',
         async () => {
+            const output = gatewayProcess!.output
+            const readyMarker = 'Gateway ready with 1 trusted device(s).'
+            const readyOffset = output.lastIndexOf(readyMarker)
+            assert.notEqual(readyOffset, -1, 'Replacement Gateway never reported ready')
             assert.doesNotMatch(
-                gatewayProcess!.output,
+                output.slice(readyOffset + readyMarker.length),
                 /Couldn't find timeline for thread ID/u,
-                'Gateway/Matrix SDK could not resolve a session thread root',
+                'Ready Gateway/Matrix SDK could not resolve a session thread root',
             )
         },
     )
@@ -665,6 +671,10 @@ async function settleSessionCreateAcrossGatewayRotation(
     ])
     if (outcome === 'created') {
         assert.equal(await activeSessionCount(page), baseline + 1)
+        assert.ok(
+            Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
+            `Session creation after Gateway rotation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
+        )
         return
     }
 

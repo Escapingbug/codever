@@ -75,8 +75,9 @@ certificate verification.
 - The Gateway also publishes a root-signed current-transport snapshot in its
   `io.codever.gateway_transport` extended Matrix profile field. A PWA that was
   offline across multiple rotations fetches that fixed field, verifies the
-  persistent Gateway key and Matrix device fingerprint, and then rotates its
-  outbound Megolm session before sending a command. The profile contains only
+  persistent Gateway key and Matrix device fingerprint. Commands use the
+  application-encrypted control event path, so they do not wait for a new
+  outbound Megolm room key after transport rotation. The profile contains only
   public routing keys and requires homeserver support for `m.profile_fields`;
   it does not require room moderator power.
 

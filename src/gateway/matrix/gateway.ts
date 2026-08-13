@@ -1163,6 +1163,13 @@ export class MatrixGatewayRunner {
         sourceCommandId?: string,
     ): Promise<string> {
         if (record.matrixThreadRootEventId) {
+            // The mapping is durable, but matrix-js-sdk's room/thread index is
+            // process-local. Rehydrate it after every Gateway restart instead
+            // of assuming the old root was included in the limited /sync.
+            await this.client.prepareRoomThread?.(
+                runtime.config.roomId,
+                record.matrixThreadRootEventId,
+            )
             port?.setThreadRootEventId(record.matrixThreadRootEventId)
             return record.matrixThreadRootEventId
         }

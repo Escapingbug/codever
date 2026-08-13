@@ -153,8 +153,13 @@ export async function runPrivacyBusinessJourney(
     const contextId = `metapp-private-${options.runId}`
 
     process.stdout.write('  [P1/7] Creating a privacy-bound session through the shipped PWA…\n')
-    await createPrivacySession(options.firstPage, projectName, options.cwd, contextId)
-    await waitForProject(options.secondPage, projectName)
+    const privacySessionId = await createPrivacySession(
+        options.firstPage,
+        projectName,
+        options.cwd,
+        contextId,
+    )
+    await waitForSession(options.secondPage, privacySessionId)
     await assertPrivacyBadge(options.firstPage, projectName)
     await assertPrivacyBadge(options.secondPage, projectName)
 
@@ -209,13 +214,13 @@ export async function runPrivacyBusinessJourney(
     )
 
     process.stdout.write('  [P4/7] Converging and restoring the protected transcript on another browser…\n')
-    await openProjectSession(options.secondPage, projectName)
+    await openSession(options.secondPage, privacySessionId)
     await waitForText(options.secondPage, approvedPrompt)
     await waitForAgentText(options.secondPage, restoredAgentText)
     await options.secondPage.reload({ waitUntil: 'domcontentloaded' })
     await waitForConnected(options.secondPage)
     await waitForProject(options.secondPage, projectName)
-    await openProjectSession(options.secondPage, projectName)
+    await openSession(options.secondPage, privacySessionId)
     await waitForAgentText(options.secondPage, restoredAgentText)
     await assertPrivacyBadge(options.secondPage, projectName)
 
@@ -228,7 +233,7 @@ export async function runPrivacyBusinessJourney(
     await waitForProviderInvocation(options.gatewayOutput, directPrompt, beforeDirect + 1)
     await waitForAgentText(options.firstPage, `${PROVIDER_ECHO_PREFIX}${directPrompt}`)
 
-    await openProjectSession(options.firstPage, projectName)
+    await openSession(options.firstPage, privacySessionId)
     const offlinePrompt = `请联系${SENSITIVE_NAME}处理扩展离线请求 ${options.runId}`
     const beforeOffline = providerInvocationCount(options.gatewayOutput())
     await sendPrompt(options.firstPage, offlinePrompt)
@@ -284,8 +289,8 @@ export async function runPrivacyBusinessJourney(
     process.stdout.write('  [P7/7] Deleting the protected session and converging removal…\n')
     await deleteSelectedSession(options.firstPage)
     await Promise.all([
-        waitForProjectAbsent(options.firstPage, projectName),
-        waitForProjectAbsent(options.secondPage, projectName),
+        waitForSessionAbsent(options.firstPage, privacySessionId),
+        waitForSessionAbsent(options.secondPage, privacySessionId),
     ])
 }
 
@@ -294,7 +299,7 @@ async function createPrivacySession(
     projectName: string,
     cwd: string,
     contextId: string,
-): Promise<void> {
+): Promise<string> {
     await page.getByRole('button', { name: 'New conversation' }).click()
     const dialog = page.locator('.new-session-dialog')
     await dialog.waitFor({ state: 'visible', timeout: CONVERGENCE_TIMEOUT_MS })
@@ -328,10 +333,14 @@ async function createPrivacySession(
         timeout: UI_FEEDBACK_TIMEOUT_MS,
     })
     await waitForProject(page, projectName)
+    const sessionId = await page.locator('button.session-row.selected')
+        .getAttribute('data-session-id')
+    assert.ok(sessionId, 'The new privacy session did not expose its stable session ID')
     assert.ok(
         Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
         `Privacy session creation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
     )
+    return sessionId
 }
 
 async function waitForPrivacyDecision(page: Page, sanitizedPrompt: string): Promise<Locator> {
@@ -374,6 +383,16 @@ async function openProjectSession(page: Page, projectName: string): Promise<void
     if (!(await row.getAttribute('class'))?.includes('selected')) await row.click()
     await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
         description: `selected privacy journey session in ${projectName}`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+}
+
+async function openSession(page: Page, sessionId: string): Promise<void> {
+    const row = page.locator(`button.session-row[data-session-id="${sessionId}"]`)
+    await row.waitFor({ state: 'visible', timeout: CONVERGENCE_TIMEOUT_MS })
+    if (!(await row.getAttribute('class'))?.includes('selected')) await row.click()
+    await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
+        description: `selected privacy session ${sessionId}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
 }
@@ -452,11 +471,23 @@ async function waitForProject(page: Page, projectName: string): Promise<void> {
     })
 }
 
-async function waitForProjectAbsent(page: Page, projectName: string): Promise<void> {
-    await waitFor(async () => await projectGroup(page, projectName).count() === 0, {
-        description: `privacy project ${projectName} to disappear`,
-        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+async function waitForSession(page: Page, sessionId: string): Promise<void> {
+    await page.locator(`button.session-row[data-session-id="${sessionId}"]`).waitFor({
+        state: 'visible',
+        timeout: CONVERGENCE_TIMEOUT_MS,
     })
+}
+
+async function waitForSessionAbsent(page: Page, sessionId: string): Promise<void> {
+    await waitFor(
+        async () => await page.locator(
+            `button.session-row[data-session-id="${sessionId}"]`,
+        ).count() === 0,
+        {
+            description: `privacy session ${sessionId} to disappear`,
+            timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        },
+    )
 }
 
 function projectGroup(page: Page, projectName: string): Locator {
