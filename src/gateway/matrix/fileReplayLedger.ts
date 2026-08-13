@@ -26,6 +26,12 @@ interface PersistedClaimBatch {
         commandFingerprint?: string
         commandOperation?: CommandOperation
     }
+    /**
+     * A terminal failure written in the same fsynced journal record as the
+     * command acceptance. This is used when an authenticated next command
+     * reached the Gateway only after its execution deadline.
+     */
+    terminal?: PersistedCommandResultEntry
 }
 
 interface PersistedCommandOutcome {
@@ -61,6 +67,7 @@ interface PersistedCommandResultEntry {
 export interface CommandClaimResult {
     status: 'accepted' | 'duplicate'
     revision: number
+    terminal?: DurableCommandResult
     /**
      * The command was accepted by a Gateway with an unversioned fingerprint. Its
      * authenticated retry may use fresh delivery timestamps/nonces, so the
@@ -210,12 +217,7 @@ export class FileCommandReplayStore implements ReplayStore {
                     'Accepted command id does not match its durable execution record',
                 )
             }
-            if (command.expiresAt <= now) {
-                throw new SecurityError(
-                    'expired',
-                    'Unknown expired commands cannot enter the replay store',
-                )
-            }
+            const expired = command.expiresAt <= now
             const existingClaims = nextClaims.filter(claim => this.claims.has(claim.key)).length
             const lastSequence = this.sequences.get(scope) ?? 0
             if (existingClaims === nextClaims.length && command.sequence <= lastSequence) {
@@ -247,10 +249,17 @@ export class FileCommandReplayStore implements ReplayStore {
             const staleAppendOnlyPrompt = command.payload.operation === 'prompt'
                 && command.baseRevision < currentRevision
                 && command.baseRevision >= lastStateMutationRevision
-            if (command.baseRevision !== currentRevision && !staleAppendOnlyPrompt) {
+            if (
+                !expired
+                && command.baseRevision !== currentRevision
+                && !staleAppendOnlyPrompt
+            ) {
                 throw new RevisionConflictError(currentRevision, command.baseRevision)
             }
             const revision = currentRevision + 1
+            const terminal = expired
+                ? expiredCommandResult(command, revision)
+                : undefined
 
             const record: PersistedClaimBatch = {
                 version: 1,
@@ -266,12 +275,23 @@ export class FileCommandReplayStore implements ReplayStore {
                     commandFingerprint: fingerprint,
                     commandOperation: command.payload.operation,
                 },
+                ...(terminal
+                    ? {
+                        terminal: {
+                            version: 1,
+                            kind: 'command_result',
+                            commandKey,
+                            fingerprint,
+                            terminal,
+                        },
+                    }
+                    : {}),
             }
             await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             this.sequences.set(scope, command.sequence)
             this.revisions.set(revisionScope, revision)
-            if (command.payload.operation !== 'prompt') {
+            if (!terminal && command.payload.operation !== 'prompt') {
                 this.lastStateMutationRevisions.set(revisionScope, revision)
             }
             this.commandOutcomes.set(commandKey, {
@@ -281,7 +301,17 @@ export class FileCommandReplayStore implements ReplayStore {
                 baseRevision: command.baseRevision,
                 fingerprint,
             })
-            return { status: 'accepted' as const, revision }
+            if (terminal) {
+                this.commandResults.set(commandKey, {
+                    fingerprint,
+                    terminal: structuredClone(terminal),
+                })
+            }
+            return {
+                status: 'accepted' as const,
+                revision,
+                ...(terminal ? { terminal: structuredClone(terminal) } : {}),
+            }
         })
         this.chain = operation.then(() => undefined, () => undefined)
         return operation
@@ -461,7 +491,10 @@ export class FileCommandReplayStore implements ReplayStore {
                 // treated as a conservative state-change barrier. Once a new
                 // prompt has observed that revision, later prompt-only gaps
                 // can be linearized normally.
-                if (value.revision.commandOperation !== 'prompt') {
+                if (
+                    !value.terminal
+                    && value.revision.commandOperation !== 'prompt'
+                ) {
                     this.lastStateMutationRevisions.set(
                         value.revision.scope,
                         value.revision.value,
@@ -482,6 +515,36 @@ export class FileCommandReplayStore implements ReplayStore {
                         value.revision.commandBaseRevision
                         ?? value.revision.value - 1,
                     fingerprint: value.revision.commandFingerprint,
+                })
+            }
+            if (value.terminal) {
+                if (
+                    !value.revision
+                    || value.terminal.commandKey !== value.revision.commandKey
+                ) {
+                    throw new Error(`Atomic command result is not bound to its acceptance at line ${index + 1}`)
+                }
+                const accepted = this.commandOutcomes.get(value.terminal.commandKey)
+                if (!accepted || accepted.fingerprint !== value.terminal.fingerprint) {
+                    throw new Error(`Atomic command result has no matching acceptance at line ${index + 1}`)
+                }
+                if (accepted.revision !== value.terminal.terminal.revision) {
+                    throw new Error(`Atomic command result revision mismatch at line ${index + 1}`)
+                }
+                const existing = this.commandResults.get(value.terminal.commandKey)
+                if (
+                    existing
+                    && (
+                        existing.fingerprint !== value.terminal.fingerprint
+                        || canonicalJson(existing.terminal)
+                            !== canonicalJson(value.terminal.terminal)
+                    )
+                ) {
+                    throw new Error(`Conflicting atomic command result at line ${index + 1}`)
+                }
+                this.commandResults.set(value.terminal.commandKey, {
+                    fingerprint: value.terminal.fingerprint,
+                    terminal: structuredClone(value.terminal.terminal),
                 })
             }
         }
@@ -631,7 +694,25 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
             && !isCommandOperation(revision.commandOperation)
         ) return false
     }
+    if (
+        record.terminal !== undefined
+        && !isPersistedCommandResultEntry(record.terminal)
+    ) return false
     return true
+}
+
+function expiredCommandResult(
+    command: CodeverCommand,
+    revision: number,
+): DurableCommandResult {
+    return {
+        revision,
+        outcome: 'failed',
+        error: 'The command expired before the Gateway accepted it, so it was not executed.',
+        sessionId: 'sessionId' in command.payload
+            ? command.payload.sessionId
+            : null,
+    }
 }
 
 function isCommandOperation(value: unknown): value is CommandOperation {

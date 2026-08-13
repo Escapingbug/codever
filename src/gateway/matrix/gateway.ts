@@ -484,7 +484,25 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
-        if (!authorized.duplicate) {
+        if (authorized.terminal) {
+            // The ledger atomically accepted this sequence as a terminal
+            // failure because it arrived after expiry. Never execute the
+            // stale business operation, but return its authenticated result
+            // so the device can advance and release its durable outbox.
+            this.scheduleGatewayRevision(runtime, authorized.command.commandId)
+            if (this.secureContent) {
+                const task = this.deliverCommandResult(
+                    runtime,
+                    authorized.command,
+                    authorized.terminal,
+                ).catch(error => {
+                    this.log(
+                        `[matrix-gateway] expired result delivery failed: ${formatError(error)}`,
+                    )
+                }).finally(() => this.executionTasks.delete(task))
+                this.executionTasks.add(task)
+            }
+        } else if (!authorized.duplicate) {
             let collaborationDelivery: Promise<unknown> | undefined
             if (
                 this.secureContent

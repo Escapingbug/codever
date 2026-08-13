@@ -18,6 +18,7 @@ import {
     exportDeviceKeyPair,
     generateDeviceKeyPair,
     InMemoryReplayStore,
+    openSecureEnvelope,
     openSecureEnvelopeBundle,
     openMatrixTimelineEnvelope,
     base64UrlDecode,
@@ -109,7 +110,7 @@ describe('strict Matrix command authorization', () => {
         })
     })
 
-    it('recovers an expired command only when the durable ledger already accepted it', async () => {
+    it('recovers accepted commands and durably retires an expired next command without executing it', async () => {
         const fixture = await securityFixture()
         const signed = await signedPrompt(fixture.keys, fixture.now)
         const context = {
@@ -148,11 +149,31 @@ describe('strict Matrix command authorization', () => {
             fixture.keys,
             fixture.now,
             2,
-            1,
+            0,
         )
         await expect(
             restarted.authorizeDelivery(unknownExpired, context, afterExpiry),
-        ).rejects.toMatchObject({ code: 'expired' })
+        ).resolves.toMatchObject({
+            duplicate: false,
+            revision: 2,
+            terminal: {
+                revision: 2,
+                outcome: 'failed',
+                error: expect.stringContaining('expired before the Gateway accepted it'),
+            },
+        })
+        await expect(
+            restarted.authorizeDelivery(unknownExpired, context, afterExpiry),
+        ).resolves.toMatchObject({
+            duplicate: true,
+            revision: 2,
+            command: { commandId: unknownExpired.command.commandId },
+        })
+
+        const fresh = await signedPrompt(fixture.keys, afterExpiry, 3, 2)
+        await expect(
+            restarted.authorizeDelivery(fresh, context, afterExpiry),
+        ).resolves.toMatchObject({ duplicate: false, revision: 3 })
     })
 
     it('rejects a valid app signature arriving through a non-pinned Matrix device', async () => {
@@ -889,6 +910,107 @@ describe('MatrixGatewayRunner', () => {
             'ready',
             'encrypted:!room:example.org',
         ])
+        await runner.stop()
+    })
+
+    it('retires an expired session creation and immediately accepts the next prompt from that device', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        const afterExpiry = fixture.now + 2 * 60_000
+        delete fixture.config.allowInsecureLegacyForTesting
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'expired-command-envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = Date.now() + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        fixture.config.trustedDevices[0]!.allowedOperations = [
+            ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
+            'session.create',
+        ]
+        const client = new FakeMatrixGatewayClient()
+        const dispatched: SessionInput[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => afterExpiry,
+            sessionFactory: () => fakeTopicSession(dispatched),
+        })
+        await runner.start()
+
+        const expired = await signedSessionCreate(
+            fixture.keys,
+            fixture.now,
+            1,
+            0,
+            'certificate-pwa-1',
+        )
+        client.emit(await incomingSecureSigned(
+            expired,
+            fixture.keys,
+            gatewayKeys,
+            afterExpiry,
+            'expired-session-create',
+        ))
+
+        await vi.waitFor(() => expect(client.sent.some(request =>
+            request.transactionId.includes(
+                `codever.command.result.${expired.command.commandId}.failed`,
+            )
+        )).toBe(true))
+        expect(dispatched).toHaveLength(0)
+        const resultRequest = client.sent.find(request =>
+            request.transactionId.includes(
+                `codever.command.result.${expired.command.commandId}.failed`,
+            ),
+        )!
+        const resultExtension = resultRequest.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const openedResult = await openSecureEnvelope(resultExtension.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: gatewayKeys.publicKey,
+            expected: {
+                gatewayId: fixture.config.gatewayId,
+                conversationId: fixture.config.rooms[0]!.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: fixture.config.gatewayId,
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: Date.now(),
+        })
+        expect(openedResult.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'command_result',
+                command_id: expired.command.commandId,
+                sequence: 1,
+                revision: 1,
+                outcome: 'failed',
+                error: expect.stringContaining('expired before the Gateway accepted it'),
+            },
+        })
+
+        client.emit(await incomingSecureSigned(
+            await signedPrompt(
+                fixture.keys,
+                afterExpiry,
+                2,
+                1,
+                'certificate-pwa-1',
+            ),
+            fixture.keys,
+            gatewayKeys,
+            afterExpiry,
+            'fresh-prompt-after-expired-create',
+        ))
+        await vi.waitFor(() => expect(dispatched).toEqual([
+            expect.objectContaining({ kind: 'user_message', text: 'hello from PWA' }),
+        ]))
+
         await runner.stop()
     })
 
@@ -1663,6 +1785,37 @@ async function signedCancel(
         expiresAt: now + 60_000,
         nonce: `fedcba9876543210-${sequence}-${Math.random()}`,
         payload: { operation: 'cancel', sessionId: 'app-session-1' },
+    }
+    return signCommand(command, keys.privateKey, keys.keyId)
+}
+
+async function signedSessionCreate(
+    keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    now: number,
+    sequence: number,
+    baseRevision: number,
+    sequenceEpoch = 'legacy-v1',
+): Promise<SignedCommand> {
+    const command: CodeverCommand = {
+        kind: 'codever.command',
+        version: 1,
+        commandId: `session-create-${sequence}-${Math.random()}`,
+        gatewayId: 'gateway-1',
+        deviceId: 'pwa-device-1',
+        sequenceEpoch,
+        conversationId: 'conversation-1',
+        revisionEpoch: REVISION_EPOCH,
+        sequence,
+        baseRevision,
+        operation: 'session.create',
+        issuedAt: now,
+        expiresAt: now + 60_000,
+        nonce: `0123456789abcdef-create-${sequence}-${Math.random()}`,
+        payload: {
+            operation: 'session.create',
+            cwd: 'C:\\repo',
+            projectName: 'repo',
+        },
     }
     return signCommand(command, keys.privateKey, keys.keyId)
 }

@@ -124,9 +124,12 @@ that passes local validation.
   system account and storage controls as the Gateway identity and session data.
 - The local Gateway checks the trusted-device registry for every command, so a
   CLI revocation blocks new Agent operations without relying on Matrix state.
-- If a queued command exceeds its signed validity window before the Gateway
-  acknowledges it, the PWA fails closed and asks the user to re-pair. A new
-  certificate generation starts a fresh ordered-command epoch.
+- If an authenticated queued command exceeds its signed validity window before
+  the Gateway accepts it, the Gateway atomically consumes only that device's
+  exact next sequence as a terminal failure and never executes the payload.
+  The authenticated result releases the PWA outbox, so later commands continue
+  without re-pairing. Gaps, reused identities, invalid signatures and commands
+  from an inactive certificate still fail closed.
 - Matrix sync tokens are persisted per homeserver, user, Matrix device and
   room. They are availability state, not trust state: an observed device-list
   change is accepted only when the persistent Gateway application key signs

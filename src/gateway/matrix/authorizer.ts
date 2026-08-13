@@ -2,6 +2,7 @@ import { signedCommandSchema, type CodeverCommand, type SignedCommand } from '@c
 import { SecurityError, verifyCommand } from '@codever/security'
 import type { MatrixGatewayTrustedDevice } from './config'
 import type { FileCommandReplayStore } from './fileReplayLedger'
+import type { DurableCommandResult } from './fileReplayLedger'
 
 export interface MatrixCommandContext {
     roomId: string
@@ -48,6 +49,7 @@ export class StrictMatrixCommandAuthorizer {
         command: CodeverCommand
         duplicate: boolean
         revision: number
+        terminal?: DurableCommandResult
         legacyFingerprintRecovery?: true
     }> {
         const signed = signedCommandSchema.parse(input) as SignedCommand
@@ -76,10 +78,10 @@ export class StrictMatrixCommandAuthorizer {
             allowedOperations: policy.allowedOperations,
         }, {
             now,
-            // The replay ledger below is the authority that may recover an
-            // expired command. It accepts only an exact command that it
-            // durably recorded before expiry; every unknown expired command
-            // still fails closed.
+            // The replay ledger below is the authority for expired commands.
+            // It either recovers an exact durable acceptance or atomically
+            // retires the authenticated next sequence as failed, without
+            // executing the stale payload.
             allowExpired: true,
         })
         const expectedSequenceEpoch = policy.sequenceEpoch ?? this.sequenceEpoch
@@ -104,6 +106,7 @@ export class StrictMatrixCommandAuthorizer {
             command,
             duplicate: claim.status === 'duplicate',
             revision: claim.revision,
+            ...(claim.terminal ? { terminal: claim.terminal } : {}),
             ...(claim.legacyFingerprintRecovery
                 ? { legacyFingerprintRecovery: true as const }
                 : {}),

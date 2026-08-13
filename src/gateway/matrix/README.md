@@ -76,10 +76,13 @@ inner content uses a normal text fallback plus the Codever extension:
 ```
 
 Unsigned text, a different extension kind, invalid application envelopes,
-unknown or revoked application devices, invalid signatures, expired commands,
-and replayed command IDs or nonces cannot reach `TopicSession`. Because the
-outer control event deliberately bypasses Megolm, a Gateway Matrix device
-rotation cannot strand a valid command behind a missing room key.
+unknown or revoked application devices, invalid signatures, expired command
+payloads, and replayed command IDs or nonces cannot reach `TopicSession`. An
+expired command that is exactly the authenticated device's next sequence is
+atomically journaled as a terminal failure, so it cannot execute or block later
+commands. Because the outer control event deliberately bypasses Megolm, a
+Gateway Matrix device rotation cannot strand a valid command behind a missing
+room key.
 
 Recovery preserves the authenticated command identity but creates a fresh
 Matrix transaction and outer secure envelope for each transport attempt. The

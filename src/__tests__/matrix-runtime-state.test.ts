@@ -327,6 +327,139 @@ describe('FileGatewayRuntimeStateStore', () => {
 })
 
 describe('FileCommandReplayStore terminal results', () => {
+    it('atomically persists an expired next command as a failed terminal result', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-expired-command-result-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'replay.jsonl')
+        const command: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'expired-session-create',
+            gatewayId: 'gateway-1',
+            deviceId: 'device-1',
+            sequenceEpoch: 'certificate-1',
+            conversationId: 'conversation-1',
+            revisionEpoch: 'runtime-epoch-1',
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'session.create',
+            issuedAt: 1_000,
+            expiresAt: 61_000,
+            nonce: '0123456789abcdef-expired-command',
+            payload: {
+                operation: 'session.create',
+                cwd: '/workspace/codever',
+                projectName: 'Codever',
+            },
+        }
+        const first = new FileCommandReplayStore(path)
+        await first.initialize(121_000)
+        await expect(
+            first.claimCommandInOrder(command, 121_000, command.sequenceEpoch),
+        ).resolves.toMatchObject({
+            status: 'accepted',
+            revision: 1,
+            terminal: {
+                revision: 1,
+                outcome: 'failed',
+                error: expect.stringContaining('expired before the Gateway accepted it'),
+            },
+        })
+
+        const restarted = new FileCommandReplayStore(path)
+        await restarted.initialize(121_001)
+        await expect(
+            restarted.claimCommandInOrder(command, 121_001, command.sequenceEpoch),
+        ).resolves.toEqual({ status: 'duplicate', revision: 1 })
+        await expect(
+            restarted.getCommandResult(command, command.sequenceEpoch),
+        ).resolves.toMatchObject({
+            revision: 1,
+            outcome: 'failed',
+            error: expect.stringContaining('expired before the Gateway accepted it'),
+        })
+
+        const ledger = await readFile(path, 'utf8')
+        expect(ledger.trim().split('\n')).toHaveLength(2)
+        expect(ledger).toContain('"kind":"command_result"')
+    })
+
+    it('does not treat a retired expired state command as a business mutation barrier', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-expired-state-command-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'replay.jsonl')
+        const original: CodeverCommand = {
+            kind: 'codever.command',
+            version: 1,
+            commandId: 'original-prompt',
+            gatewayId: 'gateway-1',
+            deviceId: 'device-1',
+            sequenceEpoch: 'certificate-1',
+            conversationId: 'conversation-1',
+            revisionEpoch: 'runtime-epoch-1',
+            sequence: 1,
+            baseRevision: 0,
+            operation: 'prompt',
+            issuedAt: 1_000,
+            expiresAt: 61_000,
+            nonce: '0123456789abcdef-original-prompt',
+            payload: {
+                operation: 'prompt',
+                sessionId: 'session-1',
+                text: 'first',
+            },
+        }
+        const expiredStateCommand: CodeverCommand = {
+            ...original,
+            commandId: 'expired-delete',
+            deviceId: 'device-2',
+            sequenceEpoch: 'certificate-2',
+            nonce: '0123456789abcdef-expired-delete',
+            operation: 'session.delete',
+            payload: {
+                operation: 'session.delete',
+                sessionId: 'session-1',
+            },
+        }
+        const stalePrompt: CodeverCommand = {
+            ...original,
+            commandId: 'stale-follow-up',
+            sequence: 2,
+            baseRevision: 1,
+            issuedAt: 121_000,
+            expiresAt: 181_000,
+            nonce: '0123456789abcdef-stale-follow-up',
+            payload: {
+                operation: 'prompt',
+                sessionId: 'session-1',
+                text: 'still append-only',
+            },
+        }
+        const store = new FileCommandReplayStore(path)
+        await store.initialize(1_000)
+        await expect(store.claimCommandInOrder(
+            original,
+            1_000,
+            original.sequenceEpoch,
+        )).resolves.toMatchObject({ revision: 1 })
+        await expect(store.claimCommandInOrder(
+            expiredStateCommand,
+            121_000,
+            expiredStateCommand.sequenceEpoch,
+        )).resolves.toMatchObject({
+            revision: 2,
+            terminal: { outcome: 'failed' },
+        })
+
+        const restarted = new FileCommandReplayStore(path)
+        await restarted.initialize(121_000)
+        await expect(restarted.claimCommandInOrder(
+            stalePrompt,
+            121_000,
+            stalePrompt.sequenceEpoch,
+        )).resolves.toMatchObject({ status: 'accepted', revision: 3 })
+    })
+
     it('recovers an exact terminal result after restart and rejects conflicts', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-command-result-'))
         temporaryDirectories.push(directory)
