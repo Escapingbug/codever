@@ -213,16 +213,25 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `revision discard is terminal and allows reuse of the unacknowledged sequence`() {
+    fun `revision discard advances the durable base and allows immediate replacement`() {
         val fixture = fixture()
+        assertTrue(fixture.outbox.updateKnownRevision(212))
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "discard"))
-        fixture.outbox.recordRevisionConflict(receipt.commandId, receipt.sequence, 5)
+        assertEquals(212L, fixture.outbox.claimForTransmission(receipt.commandId)?.baseRevision)
+        fixture.outbox.recordRevisionConflict(receipt.commandId, receipt.sequence, 348)
 
         val discarded = fixture.outbox.resolveRevisionConflict(receipt.commandId, RevisionConflictAction.DISCARD)
         assertEquals(CommandState.CANCELLED, discarded.state)
         assertEquals(CommandState.CANCELLED, fixture.outbox.get(receipt.commandId)?.state)
-        val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "replacement"))
+
+        // The conflict response is an authenticated observation of the
+        // Gateway's current revision. Discarding the stale intent must retain
+        // that observation durably; otherwise every replacement command uses
+        // the same stale base and immediately returns to needs_review.
+        val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
+        val next = restored.enqueue(UUID.randomUUID().toString(), payload("prompt", "replacement"))
         assertEquals(receipt.sequence, next.sequence)
+        assertEquals(348L, restored.claimForTransmission(next.commandId)?.baseRevision)
     }
 
     @Test

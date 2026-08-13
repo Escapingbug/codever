@@ -61,6 +61,10 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
      longer available, and the next create/delete must start immediately.
    - Matrix sync restart, delayed lifecycle delivery, and duplicate timeline
      events converge without stale sessions or review deadlocks.
+   - When another device advances the Gateway while Android is stale, the
+     stale command enters revision review without reaching the Agent. After
+     Discard, the next command uses the authenticated Gateway revision,
+     executes exactly once, and does not enter a second review loop.
 6. **Background Android behavior**
    - The foreground service notification remains present while another app is
      foregrounded.
@@ -160,6 +164,7 @@ APK storage.
 | Archive, restore, and delete | Delete enforced on both devices | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
 | Post-commit ACK/result loss and durable-outbox release | Not applicable | Enforced by the isolated Alpha gate for create and delete |
+| Stale cross-device command review, discard, and immediate retry | Not yet enforced | Enforced by the isolated Alpha gate |
 | Android foreground-service and completion notifications | Not applicable | Enforced by the isolated Alpha gate |
 | Privacy bind, exact review, deny, sanitize, restore, fail-closed, and encrypted local state | Enforced on two browsers | Enforced by the isolated Alpha gate, including process restart |
 
