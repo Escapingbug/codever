@@ -358,6 +358,43 @@ class AndroidWebView {
         assert.deepEqual(result, { filled: true, sent: true, disabled: false })
     }
 
+    async waitForPromptReview(): Promise<void> {
+        await waitFor(async () => this.evaluate<boolean>(`(() => {
+            const cards = Array.from(document.querySelectorAll('.revision-conflict-card'));
+            return cards.some(card => {
+                const title = card.querySelector('strong')?.textContent?.trim();
+                const discard = Array.from(card.querySelectorAll('button'))
+                    .find(button => button.textContent?.trim() === 'Discard');
+                return /^A previous (prompt|action) needs review$/u.test(title || '')
+                    && Boolean(discard && !discard.disabled);
+            });
+        })()`), {
+            description: 'Android stale prompt review card',
+            timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        })
+    }
+
+    async discardPromptReview(): Promise<void> {
+        await this.click(`(() => {
+            const card = Array.from(document.querySelectorAll('.revision-conflict-card'))
+                .find(item => /^A previous (prompt|action) needs review$/u.test(
+                    item.querySelector('strong')?.textContent?.trim() || '',
+                ));
+            const target = Array.from(card?.querySelectorAll('button') || [])
+                .find(button => normalized(button.textContent) === 'Discard' && visible(button));
+            return clickResult(target);
+        })()`)
+        await waitFor(async () => this.evaluate<boolean>(`(() =>
+            !Array.from(document.querySelectorAll('.revision-conflict-card'))
+                .some(card => /^A previous (prompt|action) needs review$/u.test(
+                    card.querySelector('strong')?.textContent?.trim() || '',
+                ))
+        )()`), {
+            description: 'discarded Android prompt review to clear',
+            timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+        })
+    }
+
     async openProject(projectName: string): Promise<void> {
         const opened = await this.evaluate<boolean>(`(() => {
             const groups = Array.from(document.querySelectorAll('.project-session-group'));
@@ -474,6 +511,9 @@ export async function runAndroidAlphaJourney(
     const browserPrompt = `Browser to Android prompt ${options.runId}`
     const recoveryPrompt = `Android reconnect prompt ${options.runId}`
     const postCommitRecoveryPrompt = `Android post-commit recovery prompt ${options.runId}`
+    const browserRevisionAdvancePrompt = `Browser revision advance ${options.runId}`
+    const discardedStalePrompt = `Android stale prompt to discard ${options.runId}`
+    const postDiscardPrompt = `Android prompt after discard ${options.runId}`
     const privacyProjectName = `Codever Alpha Privacy ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
     const apkPath = join(
@@ -494,7 +534,7 @@ export async function runAndroidAlphaJourney(
     let privacySessionCreated = false
 
     try {
-        process.stdout.write('  [A1/9] Building and installing a fresh isolated Android E2E package…\n')
+        process.stdout.write('  [A1/10] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
         await adbMaybe(serial, 'uninstall', PACKAGE_NAME)
         await adb(serial, 'install', '-r', '-t', apkPath)
@@ -504,7 +544,7 @@ export async function runAndroidAlphaJourney(
         syncGate = await createMatrixSyncGate(options.matrixPort)
         await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
 
-        process.stdout.write('  [A2/9] Creating a real one-time invitation and pairing the fresh APK…\n')
+        process.stdout.write('  [A2/10] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
             options.browserPage,
             options.testerPassword,
@@ -524,7 +564,7 @@ export async function runAndroidAlphaJourney(
             await android.signInForPairing(options.testerUserId, options.testerPassword)
         }
         await android.clickButtonPrefix('Connect to ')
-        process.stdout.write('  [A2a/9] Holding the first native sync beyond its watchdog window…\n')
+        process.stdout.write('  [A2a/10] Holding the first native sync beyond its watchdog window…\n')
         await syncGate.waitForInterception()
         await waitFor(
             async () => await diagnosticCount(serial, 'matrix.driver.sync_service_state stage=RUNNING') > 0,
@@ -561,7 +601,7 @@ export async function runAndroidAlphaJourney(
         await closeBrowserConnectionSettings(options.browserPage)
         await assertForegroundNotification(serial)
 
-        process.stdout.write('  [A3/9] Creating on Android and converging the session into the browser…\n')
+        process.stdout.write('  [A3/10] Creating on Android and converging the session into the browser…\n')
         const creationStarted = Date.now()
         await android.createSession(projectName)
         await android.waitFor(
@@ -579,7 +619,7 @@ export async function runAndroidAlphaJourney(
         await waitForBrowserProject(options.browserPage, projectName)
         await openBrowserProject(options.browserPage, projectName)
 
-        process.stdout.write('  [A4/9] Completing an Android task in the background and opening its notification…\n')
+        process.stdout.write('  [A4/10] Completing an Android task in the background and opening its notification…\n')
         const postedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await android.sendPrompt(backgroundPrompt)
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
@@ -619,7 +659,7 @@ export async function runAndroidAlphaJourney(
             timeoutMs: 5_000,
         })
 
-        process.stdout.write('  [A5/9] Verifying foreground suppression and browser-to-APK history sync…\n')
+        process.stdout.write('  [A5/10] Verifying foreground suppression and browser-to-APK history sync…\n')
         const foregroundPostedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await sendBrowserPrompt(options.browserPage, browserPrompt)
         await waitForBrowserText(options.browserPage, browserPrompt)
@@ -655,7 +695,7 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
-        process.stdout.write('  [AP/9] Enforcing privacy sanitize/review/restore through the installed APK…\n')
+        process.stdout.write('  [AP/10] Enforcing privacy sanitize/review/restore through the installed APK…\n')
         await android.createSession(privacyProjectName, { privacyContextId })
         await android.waitFor(
             'immediate native privacy session creation feedback',
@@ -731,7 +771,7 @@ export async function runAndroidAlphaJourney(
         await openBrowserProject(options.browserPage, projectName)
         await android.openProject(projectName)
 
-        process.stdout.write('  [A6/9] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
+        process.stdout.write('  [A6/10] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
@@ -751,7 +791,7 @@ export async function runAndroidAlphaJourney(
             'The recovered Android prompt reached the Agent more than once',
         )
 
-        process.stdout.write('  [A7/9] Withholding a committed delete result through automatic Android recovery…\n')
+        process.stdout.write('  [A7/10] Withholding a committed delete result through automatic Android recovery…\n')
         const deleteReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const deleteGatewayLogStart = options.gatewayOutput().length
         const redeliveredTransactionStart = syncGate.redeliveredCommandTransactions()
@@ -836,7 +876,7 @@ export async function runAndroidAlphaJourney(
         )
         sessionCreated = false
 
-        process.stdout.write('  [A8/9] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
+        process.stdout.write('  [A8/10] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
         const createReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const createSyncBaseline = syncGate.hold()
         await android.createSession(projectName)
@@ -878,7 +918,38 @@ export async function runAndroidAlphaJourney(
         assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
         assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
 
-        process.stdout.write('  [A9/9] Alternating archive/restore/delete across browser and APK, then restarting…\n')
+        process.stdout.write('  [A9/10] Discarding a stale Android prompt and sending again without another conflict…\n')
+        const staleSyncBaseline = syncGate.hold()
+        await sendBrowserPrompt(options.browserPage, browserRevisionAdvancePrompt)
+        await waitForBrowserText(options.browserPage, browserRevisionAdvancePrompt)
+        await waitForProviderResponseCount(options.browserPage, 2)
+        await syncGate.waitForInterception(
+            staleSyncBaseline,
+            'the browser revision advance to be withheld from Android',
+        )
+        await android.sendPrompt(discardedStalePrompt)
+        syncGate.release()
+        await android.waitForPromptReview()
+        assert.equal(
+            await browserTextCount(options.browserPage, discardedStalePrompt),
+            0,
+            'The stale Android prompt reached the Agent before review',
+        )
+        await android.discardPromptReview()
+        await android.sendPrompt(postDiscardPrompt)
+        await waitForBrowserText(options.browserPage, postDiscardPrompt)
+        await waitForProviderResponseCount(options.browserPage, 3)
+        await android.waitFor(
+            'Android prompt immediately after discard',
+            state => state.userMessages.includes(postDiscardPrompt)
+                && state.alerts.length === 0
+                && countText(state.bodyText, options.providerResponse) >= 3,
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(providerDigestCount(options.gatewayOutput(), discardedStalePrompt), 0)
+        assert.equal(providerDigestCount(options.gatewayOutput(), postDiscardPrompt), 1)
+
+        process.stdout.write('  [A10/10] Alternating archive/restore/delete across browser and APK, then restarting…\n')
         await archiveBrowserSession(options.browserPage)
         await android.waitFor('browser archive on Android', state => state.archivedBanner)
         await android.restoreSelected()
@@ -932,6 +1003,7 @@ export async function runAndroidAlphaJourney(
                 'post-commit-delete-result-loss-recovery-exactly-once',
                 'post-commit-create-result-loss-recovery-exactly-once',
                 'native-outbox-release-after-post-commit-recovery',
+                'cross-device-stale-prompt-discard-immediate-retry',
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
             ],

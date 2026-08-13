@@ -267,7 +267,16 @@ class DurableCommandOutbox internal constructor(
             updatedAt = monotonicNow(command.updatedAt),
             expectedRevision = expectedRevision,
         )
-        replaceAndCommit(command, next)
+        // The authenticated conflict is also an authoritative observation of
+        // the current revision. Persist it with the review state so either
+        // resolution path (retry or discard) leaves the next command based on
+        // the revision the Gateway actually reported.
+        commit(
+            snapshot.copy(
+                lastRevision = maxOf(snapshot.lastRevision, expectedRevision),
+                commands = replace(snapshot.commands, command, next),
+            ),
+        )
         return next.toView()
     }
 
