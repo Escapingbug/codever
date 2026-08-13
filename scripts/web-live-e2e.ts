@@ -56,6 +56,8 @@ const gatewayAdminSocket = join(temporaryDirectory, 'gateway-admin.sock')
 const fixturePath = join(temporaryDirectory, 'matrix-fixture.json')
 const secondProjectDirectory = join(temporaryDirectory, 'second-project')
 const pwaPort = await freePort()
+let matrixPort = await freePort()
+while (matrixPort === pwaPort) matrixPort = await freePort()
 const pwaUrl = `http://127.0.0.1:${pwaPort}`
 const projectName = `Codever Web E2E ${runId}`
 const secondProjectName = `Codever Web E2E second ${runId}`
@@ -72,6 +74,7 @@ let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
 let pwaProcess: ManagedProcess | undefined
 let privacyFixture: PrivacyBusinessFixture | undefined
+let matrixFixture: DisposableMatrixFixture | undefined
 let firstPage: Page | undefined
 let secondPage: Page | undefined
 let thirdPage: Page | undefined
@@ -83,7 +86,11 @@ let pwaBuildOutput = ''
 try {
     process.stdout.write('[1/8] Starting official Synapse and creating an isolated encrypted room…\n')
     await mkdir(secondProjectDirectory, { recursive: true })
-    const fixture = await createDisposableMatrixFixture(repositoryRoot)
+    matrixFixture = await createDisposableMatrixFixture({
+        runtimeDirectory: join(temporaryDirectory, 'matrix'),
+        hostPort: matrixPort,
+    })
+    const fixture = matrixFixture
     await writeFile(fixturePath, JSON.stringify({
         homeserver: fixture.homeserver,
         roomId: fixture.roomId,
@@ -389,7 +396,7 @@ try {
             repositoryRoot,
             pwaUrl,
             pwaPort,
-            matrixPort: 8008,
+            matrixPort,
             runId,
             browserPage: firstPage,
             testerUserId: fixture.tester.userId,
@@ -531,6 +538,9 @@ try {
     })
     await privacyFixture?.close().catch(error => {
         process.stderr.write(`Could not stop E2E privacy fixture: ${formatError(error)}\n`)
+    })
+    await matrixFixture?.close().catch(error => {
+        process.stderr.write(`Could not stop E2E Matrix fixture: ${formatError(error)}\n`)
     })
     await rm(temporaryDirectory, { recursive: true, force: true })
 }

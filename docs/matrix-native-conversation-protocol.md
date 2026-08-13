@@ -44,7 +44,7 @@ revision and epoch that produced it. The collaboration prompt carries the same
 metadata immediately, before agent execution finishes. Commands without a
 corresponding session event (`cancel`, `decision`, invitation, failed commands,
 and idempotent delete) emit a small `gateway_revision` room-timeline event.
-Thus every device advances the cross-device compare-and-swap base without a
+Thus every device observes the authoritative cross-device order without a
 state request or a full checkpoint per command.
 
 Clients restore data through native Matrix APIs:
@@ -94,7 +94,10 @@ history appear complete while actually becoming unreadable.
 Commands, acknowledgements, results, conflicts, and invitation control remain
 pairwise signed/encrypted because they are device-specific and executable.
 Command authorization still requires device certificate, Matrix transport
-binding, sequence epoch, replay ledger, and conversation revision checks.
+binding, sequence epoch, and replay ledger checks. The conversation revision
+orders every accepted command; it is a strict compare-and-swap precondition
+for state-dependent mutations, while a stale append-only prompt whose missing
+revisions are also prompts is assigned the next revision by the Gateway.
 
 Client command recovery separates durable command identity from transport
 delivery. The command ID, sequence, base revision, payload, authentication

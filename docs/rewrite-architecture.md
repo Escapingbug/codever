@@ -110,10 +110,12 @@ display data from encrypted Codever events.
    carries a pairwise key-ring bundle for authorized devices, so device count
    changes bytes but never the number of Matrix sends.
 7. Each device owns an independent command sequence, while a durable
-   conversation revision provides cross-device compare-and-swap ordering.
-   Stale concurrent mutations are rejected and shown for user review; only an
-   explicit confirmation creates a new signature against the revision returned
-   by the Gateway.
+   conversation revision gives every accepted command an authoritative
+   cross-device order. Append-only prompts are linearized by the Gateway when
+   the missing revisions contain only other prompts. State-dependent
+   concurrent mutations retain compare-and-swap: a stale mutation is rejected
+   and shown for review before a new signature is created against the revision
+   returned by the Gateway.
 8. Gateway fan-out is staged in a durable, certificate-bound per-recipient
    outbox before older gaps are recovered or any network attempt begins. The
    first recipient confirmation completes the logical send; remaining copies

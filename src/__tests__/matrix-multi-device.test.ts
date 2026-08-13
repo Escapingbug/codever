@@ -1501,6 +1501,118 @@ describe('multi-device Matrix collaboration', () => {
         ).resolves.toBe(1)
     })
 
+    it('linearizes stale cross-device prompts while preserving exactly-once identity', async () => {
+        const directory = await temporaryDirectory()
+        const replayPath = join(directory, 'commands.jsonl')
+        const first = await generateDeviceKeyPair()
+        const second = await generateDeviceKeyPair()
+        const policies: MatrixGatewayTrustedDevice[] = [
+            {
+                ...trusted(
+                    'device-a',
+                    'Alice phone',
+                    first.publicJwk,
+                    'MATRIX_A',
+                    'certificate-a',
+                ),
+                allowedOperations: ['prompt', 'session.delete'],
+            },
+            trusted('device-b', 'Bob laptop', second.publicJwk, 'MATRIX_B', 'certificate-b'),
+        ]
+        const replayStore = new FileCommandReplayStore(replayPath)
+        const authorizer = new StrictMatrixCommandAuthorizer(
+            'gateway-1',
+            policies,
+            replayStore,
+        )
+        await authorizer.initialize(now)
+
+        const firstPrompt = await signedPrompt(
+            first,
+            'device-a',
+            1,
+            0,
+            'runtime-epoch-1',
+            'certificate-a',
+        )
+        const staleSecondPrompt = await signedPrompt(
+            second,
+            'device-b',
+            1,
+            0,
+            'runtime-epoch-1',
+            'certificate-b',
+        )
+
+        await expect(authorizer.authorizeDelivery(
+            firstPrompt,
+            context('device-a'),
+            now,
+        )).resolves.toMatchObject({ duplicate: false, revision: 1 })
+        await expect(authorizer.authorizeDelivery(
+            staleSecondPrompt,
+            context('device-b'),
+            now,
+        )).resolves.toMatchObject({ duplicate: false, revision: 2 })
+        await expect(authorizer.authorizeDelivery(
+            staleSecondPrompt,
+            context('device-b'),
+            now,
+        )).resolves.toMatchObject({ duplicate: true, revision: 2 })
+        await expect(replayStore.getConversationRevision(
+            'gateway-1',
+            'conversation-1',
+            'runtime-epoch-1',
+        )).resolves.toBe(2)
+
+        const restartedAuthorizer = new StrictMatrixCommandAuthorizer(
+            'gateway-1',
+            policies,
+            new FileCommandReplayStore(replayPath),
+        )
+        await restartedAuthorizer.initialize(now)
+        await expect(restartedAuthorizer.authorizeDelivery(
+            await signedPrompt(
+                second,
+                'device-b',
+                2,
+                1,
+                'runtime-epoch-1',
+                'certificate-b',
+            ),
+            context('device-b'),
+            now,
+        )).resolves.toMatchObject({ duplicate: false, revision: 3 })
+        await expect(restartedAuthorizer.authorizeDelivery(
+            await signedSessionDelete(
+                first,
+                'device-a',
+                2,
+                3,
+                'runtime-epoch-1',
+                'certificate-a',
+            ),
+            context('device-a'),
+            now,
+        )).resolves.toMatchObject({ duplicate: false, revision: 4 })
+        await expect(restartedAuthorizer.authorizeDelivery(
+            await signedPrompt(
+                second,
+                'device-b',
+                3,
+                3,
+                'runtime-epoch-1',
+                'certificate-b',
+            ),
+            context('device-b'),
+            now,
+        )).rejects.toMatchObject({
+            code: 'revision_conflict',
+            expectedRevision: 4,
+            receivedBaseRevision: 3,
+        })
+    })
+
     it('rejects a delayed command from the previous certificate after same-device renewal', async () => {
         const directory = await temporaryDirectory()
         const device = await generateDeviceKeyPair()

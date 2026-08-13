@@ -142,7 +142,7 @@ class GatewayStateSyncPolicyTest {
         assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_ARCHIVE))
         assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_RESTORE))
         assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_DELETE))
-        assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.PROMPT))
+        assertEquals(true, shouldAutomaticallyRetryRevisionConflict(CommandOperation.PROMPT))
         assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.SESSION_SETTINGS))
         assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.DECISION))
         assertEquals(false, shouldAutomaticallyRetryRevisionConflict(CommandOperation.DEVICE_INVITE))

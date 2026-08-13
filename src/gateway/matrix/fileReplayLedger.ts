@@ -1,7 +1,12 @@
 import { mkdir, open, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { canonicalJson, type CodeverCommand, type JsonValue } from '@codever/protocol'
+import {
+    canonicalJson,
+    type CodeverCommand,
+    type CommandOperation,
+    type JsonValue,
+} from '@codever/protocol'
 import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
 interface PersistedClaimBatch {
@@ -19,6 +24,7 @@ interface PersistedClaimBatch {
         commandNonceKey?: string
         commandBaseRevision?: number
         commandFingerprint?: string
+        commandOperation?: CommandOperation
     }
 }
 
@@ -87,6 +93,7 @@ export class FileCommandReplayStore implements ReplayStore {
     private readonly claims = new Map<string, number>()
     private readonly sequences = new Map<string, number>()
     private readonly revisions = new Map<string, number>()
+    private readonly lastStateMutationRevisions = new Map<string, number>()
     private readonly commandOutcomes = new Map<string, PersistedCommandOutcome>()
     private readonly commandResults = new Map<string, {
         fingerprint: string
@@ -225,7 +232,22 @@ export class FileCommandReplayStore implements ReplayStore {
                 )
             }
             const currentRevision = this.revisions.get(revisionScope) ?? 0
-            if (command.baseRevision !== currentRevision) {
+            // Prompts append user intent; they do not overwrite the state a
+            // device observed. A second device can therefore be briefly
+            // behind without turning normal conversation handoff into a
+            // user-visible conflict. When every intervening revision is also
+            // a prompt, the Gateway linearizes the new prompt at the current
+            // revision while the durable per-device sequence and command
+            // fingerprint continue to provide exactly-once execution. A
+            // claimed future revision or an intervening state mutation remains
+            // a conflict.
+            const lastStateMutationRevision = this.lastStateMutationRevisions.get(
+                revisionScope,
+            ) ?? 0
+            const staleAppendOnlyPrompt = command.payload.operation === 'prompt'
+                && command.baseRevision < currentRevision
+                && command.baseRevision >= lastStateMutationRevision
+            if (command.baseRevision !== currentRevision && !staleAppendOnlyPrompt) {
                 throw new RevisionConflictError(currentRevision, command.baseRevision)
             }
             const revision = currentRevision + 1
@@ -242,12 +264,16 @@ export class FileCommandReplayStore implements ReplayStore {
                     commandNonceKey: nonceKey,
                     commandBaseRevision: command.baseRevision,
                     commandFingerprint: fingerprint,
+                    commandOperation: command.payload.operation,
                 },
             }
             await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             this.sequences.set(scope, command.sequence)
             this.revisions.set(revisionScope, revision)
+            if (command.payload.operation !== 'prompt') {
+                this.lastStateMutationRevisions.set(revisionScope, revision)
+            }
             this.commandOutcomes.set(commandKey, {
                 revision,
                 sequence: command.sequence,
@@ -431,6 +457,16 @@ export class FileCommandReplayStore implements ReplayStore {
                     throw new Error(`Non-contiguous conversation revision at line ${index + 1}`)
                 }
                 this.revisions.set(value.revision.scope, value.revision.value)
+                // Entries written before commandOperation was persisted are
+                // treated as a conservative state-change barrier. Once a new
+                // prompt has observed that revision, later prompt-only gaps
+                // can be linearized normally.
+                if (value.revision.commandOperation !== 'prompt') {
+                    this.lastStateMutationRevisions.set(
+                        value.revision.scope,
+                        value.revision.value,
+                    )
+                }
                 const legacyNonceKey = value.claims.find(
                     claim => claim.key !== value.revision?.commandKey,
                 )?.key
@@ -590,8 +626,24 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
                 && revision.commandFingerprint.length > 0
             )
         ) return false
+        if (
+            revision.commandOperation !== undefined
+            && !isCommandOperation(revision.commandOperation)
+        ) return false
     }
     return true
+}
+
+function isCommandOperation(value: unknown): value is CommandOperation {
+    return value === 'prompt'
+        || value === 'cancel'
+        || value === 'decision'
+        || value === 'session.settings'
+        || value === 'session.create'
+        || value === 'session.archive'
+        || value === 'session.restore'
+        || value === 'session.delete'
+        || value === 'device.invite'
 }
 
 function isMissingFile(error: unknown): boolean {

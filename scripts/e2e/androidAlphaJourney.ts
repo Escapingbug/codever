@@ -512,8 +512,7 @@ export async function runAndroidAlphaJourney(
     const recoveryPrompt = `Android reconnect prompt ${options.runId}`
     const postCommitRecoveryPrompt = `Android post-commit recovery prompt ${options.runId}`
     const browserRevisionAdvancePrompt = `Browser revision advance ${options.runId}`
-    const discardedStalePrompt = `Android stale prompt to discard ${options.runId}`
-    const postDiscardPrompt = `Android prompt after discard ${options.runId}`
+    const stalePromptToLinearize = `Android stale prompt to linearize ${options.runId}`
     const privacyProjectName = `Codever Alpha Privacy ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
     const apkPath = join(
@@ -918,7 +917,7 @@ export async function runAndroidAlphaJourney(
         assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
         assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
 
-        process.stdout.write('  [A9/10] Discarding a stale Android prompt and sending again without another conflict…\n')
+        process.stdout.write('  [A9/10] Linearizing a stale cross-device Android prompt without user review…\n')
         const staleSyncBaseline = syncGate.hold()
         await sendBrowserPrompt(options.browserPage, browserRevisionAdvancePrompt)
         await waitForBrowserText(options.browserPage, browserRevisionAdvancePrompt)
@@ -927,27 +926,26 @@ export async function runAndroidAlphaJourney(
             staleSyncBaseline,
             'the browser revision advance to be withheld from Android',
         )
-        await android.sendPrompt(discardedStalePrompt)
+        await android.sendPrompt(stalePromptToLinearize)
         syncGate.release()
-        await android.waitForPromptReview()
-        assert.equal(
-            await browserTextCount(options.browserPage, discardedStalePrompt),
-            0,
-            'The stale Android prompt reached the Agent before review',
-        )
-        await android.discardPromptReview()
-        await android.sendPrompt(postDiscardPrompt)
-        await waitForBrowserText(options.browserPage, postDiscardPrompt)
+        await waitForBrowserText(options.browserPage, stalePromptToLinearize)
         await waitForProviderResponseCount(options.browserPage, 3)
         await android.waitFor(
-            'Android prompt immediately after discard',
-            state => state.userMessages.includes(postDiscardPrompt)
+            'linearly accepted Android prompt',
+            state => state.userMessages.filter(message => message === stalePromptToLinearize).length === 1
                 && state.alerts.length === 0
+                && !state.bodyText.includes('needs review')
+                && !state.bodyText.includes('TASK NEEDS ATTENTION')
+                && !state.bodyText.includes('Open connection settings')
                 && countText(state.bodyText, options.providerResponse) >= 3,
             CONNECT_TIMEOUT_MS,
         )
-        assert.equal(providerDigestCount(options.gatewayOutput(), discardedStalePrompt), 0)
-        assert.equal(providerDigestCount(options.gatewayOutput(), postDiscardPrompt), 1)
+        assert.equal(await browserTextCount(options.browserPage, stalePromptToLinearize), 1)
+        assert.equal(
+            providerDigestCount(options.gatewayOutput(), stalePromptToLinearize),
+            1,
+            'The linearly accepted Android prompt did not reach the Agent exactly once',
+        )
 
         process.stdout.write('  [A10/10] Alternating archive/restore/delete across browser and APK, then restarting…\n')
         await archiveBrowserSession(options.browserPage)
@@ -1003,7 +1001,7 @@ export async function runAndroidAlphaJourney(
                 'post-commit-delete-result-loss-recovery-exactly-once',
                 'post-commit-create-result-loss-recovery-exactly-once',
                 'native-outbox-release-after-post-commit-recovery',
-                'cross-device-stale-prompt-discard-immediate-retry',
+                'cross-device-stale-prompt-linearized-exactly-once',
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
             ],
@@ -1458,6 +1456,11 @@ async function tapTaskNotification(serial: string): Promise<void> {
 async function tapNativePairingConfirmation(serial: string, runId: string): Promise<void> {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS
     const path = '/sdcard/codever-alpha-pairing.xml'
+    // The emulator may have received a foreground intent while native Matrix
+    // completed its first sync. Bring the owning Activity back before locating
+    // the platform confirmation dialog.
+    await adb(serial, 'shell', 'am', 'start', '-n', MAIN_ACTIVITY)
+    await delay(250)
     while (Date.now() < deadline) {
         await adbMaybe(serial, 'shell', 'uiautomator', 'dump', path)
         const xml = await adbMaybe(serial, 'shell', 'cat', path)

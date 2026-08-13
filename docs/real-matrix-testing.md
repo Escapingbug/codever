@@ -108,9 +108,10 @@ key, then pair with a fresh Matrix device access token.
 Both PWAs should show two active devices. A prompt from either PWA appears in
 the other with its originating device name and Gateway revision. Agent replies,
 streaming edits and permission requests are independently encrypted to both
-devices. Concurrent writes produce a visible review card on the stale device;
-the action is discarded or re-signed only after the user reviews the latest
-messages and confirms it.
+devices. Concurrent prompts are accepted in Gateway order even if one device
+is briefly behind. A stale state-dependent mutation produces a visible review
+card and is discarded or re-signed only after the user reviews the latest
+state and confirms it.
 
 Use the pairing CLI `list` and `revoke --device DEVICE_ID` commands from
 [pairing-gateway.md](pairing-gateway.md) to revoke one device. The remaining

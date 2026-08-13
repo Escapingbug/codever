@@ -61,10 +61,10 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
      longer available, and the next create/delete must start immediately.
    - Matrix sync restart, delayed lifecycle delivery, and duplicate timeline
      events converge without stale sessions or review deadlocks.
-   - When another device advances the Gateway while Android is stale, the
-     stale command enters revision review without reaching the Agent. After
-     Discard, the next command uses the authenticated Gateway revision,
-     executes exactly once, and does not enter a second review loop.
+   - When another device advances the Gateway with a prompt while Android is
+     stale, Android's append-only prompt is linearly accepted at the next revision,
+     reaches the Agent exactly once, and never shows revision review or a
+     connection failure. State-dependent mutations retain explicit review.
 6. **Background Android behavior**
    - The foreground service notification remains present while another app is
      foregrounded.
@@ -133,11 +133,14 @@ CODEVER_ANDROID_SERIAL=emulator-5554 \
 pnpm test:e2e:alpha-live
 ```
 
-The Web runner starts the official disposable Synapse fixture under
-`dev/matrix`, builds the current PWA production artifact, serves it through the
+The Web runner starts an official disposable Synapse fixture with a per-run
+container, data directory, and host port, builds the current PWA production
+artifact, serves it through the
 local Cloudflare Workers runtime, opens two isolated Chrome contexts, and
 starts the current Gateway with a loopback-only deterministic provider. It
-never falls back to a fake port or development server. The Android runner
+never falls back to a fake port or development server. Concurrent worktrees
+therefore cannot replace each other's Synapse fixture or invalidate each
+other's Matrix access tokens. The Android runner
 validates the installed APK and the actually deployed Matrix/Gateway path.
 The isolated Alpha gate also validates fresh native onboarding. It accepts a
 negotiated one-time Matrix login when the homeserver supports that capability,

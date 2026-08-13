@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -20,6 +20,7 @@ export interface DisposableMatrixFixture {
     gatewayId: string
     tester: MatrixLoginFixture
     gateway: MatrixLoginFixture
+    close(): Promise<void>
 }
 
 type LoginResponse = {
@@ -33,102 +34,146 @@ type LoginResponse = {
  * and an encrypted room for one business-E2E run.
  */
 export async function createDisposableMatrixFixture(
-    repositoryRoot: string,
+    options: {
+        runtimeDirectory: string
+        hostPort: number
+    },
 ): Promise<DisposableMatrixFixture> {
-    const matrixDirectory = join(repositoryRoot, 'dev', 'matrix')
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 12).toLowerCase()
+    const matrixDirectory = options.runtimeDirectory
     const composeFile = join(matrixDirectory, 'docker-compose.yml')
     const dataDirectory = join(matrixDirectory, 'data')
     const homeserverConfig = join(dataDirectory, 'homeserver.yaml')
-    const homeserver = 'http://127.0.0.1:8008'
-
-    await ensureSynapse({
+    const homeserver = `http://127.0.0.1:${options.hostPort}`
+    const containerName = `codever-matrix-e2e-${suffix}`
+    const composeProjectName = `codever-e2e-${suffix}`
+    const compose = [
+        'compose',
+        '--project-name',
+        composeProjectName,
+        '--project-directory',
         matrixDirectory,
+        '-f',
         composeFile,
-        dataDirectory,
-        homeserverConfig,
-        homeserver,
-    })
+    ]
 
-    const suffix = randomUUID().replaceAll('-', '').slice(0, 12).toLowerCase()
+    await mkdir(matrixDirectory, { recursive: true })
+    await writeFile(
+        composeFile,
+        [
+            'services:',
+            '  synapse:',
+            '    image: matrixdotorg/synapse:latest',
+            `    container_name: ${containerName}`,
+            '    environment:',
+            '      SYNAPSE_SERVER_NAME: localhost',
+            '      SYNAPSE_REPORT_STATS: "no"',
+            '    ports:',
+            `      - "127.0.0.1:${options.hostPort}:8008"`,
+            '    volumes:',
+            `      - ${JSON.stringify(`${dataDirectory}:/data`)}`,
+            '    healthcheck:',
+            '      test: ["CMD", "curl", "-fSs", "http://localhost:8008/health"]',
+            '      interval: 5s',
+            '      timeout: 3s',
+            '      retries: 20',
+            '      start_period: 10s',
+            '',
+        ].join('\n'),
+        'utf8',
+    )
+
     const testerUsername = `codever_e2e_t_${suffix}`
     const gatewayUsername = `codever_e2e_g_${suffix}`
     const testerPassword = `codever-e2e-tester-${suffix}`
     const gatewayPassword = `codever-e2e-gateway-${suffix}`
 
-    await registerUser(testerUsername, testerPassword)
-    await registerUser(gatewayUsername, gatewayPassword)
+    let closed = false
+    const close = async () => {
+        if (closed) return
+        closed = true
+        await docker([...compose, 'down', '--volumes', '--remove-orphans'])
+    }
 
-    const testerLogin = await login(
-        homeserver,
-        testerUsername,
-        testerPassword,
-        `CODEVER_WEB_E2E_${suffix.toUpperCase()}`,
-    )
-    const gatewayLogin = await login(
-        homeserver,
-        gatewayUsername,
-        gatewayPassword,
-        `CODEVER_GATEWAY_E2E_${suffix.toUpperCase()}`,
-    )
-    const room = await matrixRequest<{ room_id: string }>(
-        homeserver,
-        '/_matrix/client/v3/createRoom',
-        testerLogin.access_token,
-        {
-            visibility: 'private',
-            preset: 'trusted_private_chat',
-            name: `Codever business E2E ${suffix}`,
-            is_direct: true,
-            invite: [gatewayLogin.user_id],
-            initial_state: [{
-                type: 'm.room.encryption',
-                state_key: '',
-                content: { algorithm: 'm.megolm.v1.aes-sha2' },
-            }],
-        },
-    )
-    await matrixRequest(
-        homeserver,
-        `/_matrix/client/v3/rooms/${encodeURIComponent(room.room_id)}/join`,
-        gatewayLogin.access_token,
-        {},
-    )
+    try {
+        await ensureSynapse({
+            compose,
+            dataDirectory,
+            homeserverConfig,
+            homeserver,
+        })
 
-    return {
-        homeserver,
-        roomId: room.room_id,
-        gatewayId: `codever-e2e-gateway-${suffix}`,
-        tester: {
-            username: testerUsername,
-            password: testerPassword,
-            userId: testerLogin.user_id,
-            deviceId: testerLogin.device_id,
-            accessToken: testerLogin.access_token,
-        },
-        gateway: {
-            username: gatewayUsername,
-            password: gatewayPassword,
-            userId: gatewayLogin.user_id,
-            deviceId: gatewayLogin.device_id,
-            accessToken: gatewayLogin.access_token,
-        },
+        await registerUser(containerName, testerUsername, testerPassword)
+        await registerUser(containerName, gatewayUsername, gatewayPassword)
+
+        const testerLogin = await login(
+            homeserver,
+            testerUsername,
+            testerPassword,
+            `CODEVER_WEB_E2E_${suffix.toUpperCase()}`,
+        )
+        const gatewayLogin = await login(
+            homeserver,
+            gatewayUsername,
+            gatewayPassword,
+            `CODEVER_GATEWAY_E2E_${suffix.toUpperCase()}`,
+        )
+        const room = await matrixRequest<{ room_id: string }>(
+            homeserver,
+            '/_matrix/client/v3/createRoom',
+            testerLogin.access_token,
+            {
+                visibility: 'private',
+                preset: 'trusted_private_chat',
+                name: `Codever business E2E ${suffix}`,
+                is_direct: true,
+                invite: [gatewayLogin.user_id],
+                initial_state: [{
+                    type: 'm.room.encryption',
+                    state_key: '',
+                    content: { algorithm: 'm.megolm.v1.aes-sha2' },
+                }],
+            },
+        )
+        await matrixRequest(
+            homeserver,
+            `/_matrix/client/v3/rooms/${encodeURIComponent(room.room_id)}/join`,
+            gatewayLogin.access_token,
+            {},
+        )
+
+        return {
+            homeserver,
+            roomId: room.room_id,
+            gatewayId: `codever-e2e-gateway-${suffix}`,
+            tester: {
+                username: testerUsername,
+                password: testerPassword,
+                userId: testerLogin.user_id,
+                deviceId: testerLogin.device_id,
+                accessToken: testerLogin.access_token,
+            },
+            gateway: {
+                username: gatewayUsername,
+                password: gatewayPassword,
+                userId: gatewayLogin.user_id,
+                deviceId: gatewayLogin.device_id,
+                accessToken: gatewayLogin.access_token,
+            },
+            close,
+        }
+    } catch (error) {
+        await close().catch(() => {})
+        throw error
     }
 }
 
 async function ensureSynapse(input: {
-    matrixDirectory: string
-    composeFile: string
+    compose: string[]
     dataDirectory: string
     homeserverConfig: string
     homeserver: string
 }): Promise<void> {
-    const compose = [
-        'compose',
-        '--project-directory',
-        input.matrixDirectory,
-        '-f',
-        input.composeFile,
-    ]
     await mkdir(input.dataDirectory, { recursive: true })
     let configExists = true
     try {
@@ -138,7 +183,7 @@ async function ensureSynapse(input: {
         configExists = false
     }
     if (!configExists) {
-        await docker([...compose, 'run', '--rm', 'synapse', 'generate'])
+        await docker([...input.compose, 'run', '--rm', 'synapse', 'generate'])
     }
 
     const config = await readFile(input.homeserverConfig, 'utf8')
@@ -183,8 +228,8 @@ async function ensureSynapse(input: {
         configChanged = true
     }
 
-    await docker([...compose, 'up', '-d', 'synapse'])
-    if (configChanged) await docker([...compose, 'restart', 'synapse'])
+    await docker([...input.compose, 'up', '-d', 'synapse'])
+    if (configChanged) await docker([...input.compose, 'restart', 'synapse'])
     const deadline = Date.now() + 120_000
     let lastError = 'Synapse did not answer'
     while (Date.now() < deadline) {
@@ -200,10 +245,14 @@ async function ensureSynapse(input: {
     throw new Error(`Local Synapse did not become ready: ${lastError}`)
 }
 
-async function registerUser(username: string, password: string): Promise<void> {
+async function registerUser(
+    containerName: string,
+    username: string,
+    password: string,
+): Promise<void> {
     await docker([
         'exec',
-        'codever-matrix-local',
+        containerName,
         'register_new_matrix_user',
         'http://localhost:8008',
         '-c',

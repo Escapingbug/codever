@@ -3829,6 +3829,33 @@ export function CodeverApp() {
             setDraft(value);
           }
         }
+      } else if (nativeCommandReviewRef.current) {
+        // The native outbox is asking the user to resolve an earlier,
+        // state-dependent action. This prompt was not accepted, but that is
+        // neither an Agent error nor a broken connection. Remove the
+        // optimistic copy and restore the exact draft instead of adding the
+        // misleading TASK NEEDS ATTENTION / connection-settings message.
+        optimisticMessagesRef.current.delete(optimisticId);
+        removeLiveMessage(sessionId, optimisticId);
+        if (selectedSessionIdRef.current === sessionId) {
+          setMessages((current) =>
+            current.filter((message) => message.id !== optimisticId),
+          );
+          setDraft(value);
+        }
+        if (submissionHistoryScope) {
+          void deleteMessageHistory(
+            submissionHistoryScope,
+            optimisticId,
+          ).catch((error) => {
+            showUiNotice(
+              "history:update",
+              "history",
+              "warning",
+              `Conversation history could not be updated: ${formatUiError(error)}`,
+            );
+          });
+        }
       } else {
         optimisticMessagesRef.current.delete(optimisticId);
         const failedMessage: ChatMessage = {

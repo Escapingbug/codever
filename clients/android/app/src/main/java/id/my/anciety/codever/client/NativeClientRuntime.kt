@@ -1864,6 +1864,10 @@ internal fun canonicalStateCompletesCommand(
 
 internal fun shouldAutomaticallyRetryRevisionConflict(operation: CommandOperation?): Boolean =
     when (operation) {
+        // Current Gateways linearize stale prompts directly. Keep this client
+        // fallback so an updated APK also hands conversations off cleanly
+        // while a previously deployed Gateway is still being upgraded.
+        CommandOperation.PROMPT,
         CommandOperation.SESSION_CREATE,
         CommandOperation.SESSION_ARCHIVE,
         CommandOperation.SESSION_RESTORE,

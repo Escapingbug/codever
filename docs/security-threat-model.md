@@ -84,10 +84,12 @@ that passes local validation.
 - Reordering device-to-Gateway commands produces a sequence gap and zero
   execution for the out-of-order command.
 - Concurrent commands from different devices carry a Gateway conversation
-  revision. Only a command based on the current revision is accepted; a stale
-  writer receives an application-encrypted conflict. The PWA shows the
-  conflicting action and requires the user to review it before creating a new
-  command ID and signature against the current revision.
+  revision. When all missing revisions are prompts, the Gateway assigns a stale
+  append-only prompt the next revision in arrival order; its device sequence,
+  command ID and durable fingerprint still enforce exactly-once execution. A
+  prompt crossing a state mutation, or a stale state-dependent mutation,
+  receives an application-encrypted conflict, and the PWA requires review
+  before creating a new command ID and signature against the current revision.
 - The PWA advances its durable outbox only after a Gateway-signed secure
   acknowledgement, never from a Matrix transaction acknowledgement.
 - A valid Gateway-signed final result also completes the matching durable
@@ -107,8 +109,9 @@ that passes local validation.
   transaction stream. The Gateway never shares an application group key.
 - Matrix can observe fan-out traffic metadata, including the number and timing
   of opaque events. It cannot identify their plaintext, forge a recipient
-  envelope, or silently reorder accepted cross-device mutations because the
-  Gateway conversation revision is checked locally.
+  envelope, or silently reorder accepted commands: the Gateway durably assigns
+  their conversation revisions, while state-dependent mutations additionally
+  require the current base revision.
 - Physical Matrix event IDs differ by recipient. The Gateway persists the
   per-recipient mapping used by later edits. A device added after the original
   message has no historical target, so its first edit is safely delivered as a

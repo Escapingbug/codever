@@ -797,6 +797,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /Review complete · send/);
   assert.match(app, /discardRevisionConflict/);
   assert.match(app, /error instanceof CommandRevisionConflictError/);
+  assert.match(
+    app,
+    /else if \(nativeCommandReviewRef\.current\)[\s\S]*?setDraft\(value\)[\s\S]*?The command was not sent\. Open connection settings\./,
+  );
   assert.match(app, /completedCommandResultsRef/);
   assert.match(app, /await sent\.completion/);
   assert.match(app, /completion\?\.outcome === "succeeded"/);
