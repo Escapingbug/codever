@@ -596,10 +596,9 @@ export class MatrixGatewayRunner {
             throw error
         }
         if (authorized.terminal) {
-            // The ledger atomically accepted this sequence as a terminal
-            // failure because it arrived after expiry. Never execute the
-            // stale business operation, but return its authenticated result
-            // so the device can advance and release its durable outbox.
+            // Pre-release ledgers may still contain an already accepted
+            // terminal result. Preserve duplicate recovery compatibility,
+            // but new authenticated retries execute through the normal path.
             this.scheduleGatewayRevision(runtime, authorized.command.commandId)
             const task = this.deliverCommandResult(
                 runtime,
@@ -607,7 +606,7 @@ export class MatrixGatewayRunner {
                 authorized.terminal,
             ).catch(error => {
                 this.log(
-                    `[matrix-gateway] expired result delivery failed: ${formatError(error)}`,
+                    `[matrix-gateway] legacy terminal result delivery failed: ${formatError(error)}`,
                 )
             }).finally(() => this.executionTasks.delete(task))
             this.executionTasks.add(task)

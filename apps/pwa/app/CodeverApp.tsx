@@ -222,6 +222,16 @@ type NativeCommandReviewNotice = CodeverCommandReview & {
   busy: boolean;
 };
 
+type PendingSessionLifecycleRecovery = {
+  commandId: string;
+  action: "archive" | "restore" | "delete";
+  sessionId: string;
+  onSucceeded?: () => void | Promise<void>;
+  onFailed?: () => void | Promise<void>;
+  timer: number | null;
+  inFlight: boolean;
+};
+
 const emptyMatrixConfig: MatrixConnectionConfig = {
   homeserver: "",
   userId: "",
@@ -542,6 +552,9 @@ export function CodeverApp() {
     connection: CodeverClient;
   } | null>(null);
   const sessionCreateRecoveryTimerRef = useRef<number | null>(null);
+  const sessionLifecycleRecoveriesRef = useRef(
+    new Map<string, PendingSessionLifecycleRecovery>(),
+  );
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
     (
@@ -1300,6 +1313,7 @@ export function CodeverApp() {
     () => () => {
       matrixStartupGenerationRef.current += 1;
       pairingAbortRef.current?.abort();
+      clearSessionLifecycleRecoveries();
       codeverClientRef.current?.dispose();
     },
     [],
@@ -3458,8 +3472,9 @@ export function CodeverApp() {
       next.set(sessionId, action);
       return next;
     });
+    let connection: CodeverClient | null = null;
     try {
-      const connection = codeverClientRef.current;
+      connection = codeverClientRef.current;
       const sent = await sendRealCommand(
         sessionLifecyclePayload(action, sessionId),
       );
@@ -3483,6 +3498,27 @@ export function CodeverApp() {
       );
       return true;
     } catch (error) {
+      if (error instanceof CommandAcknowledgementTimeoutError && connection) {
+        const recovery: PendingSessionLifecycleRecovery = {
+          commandId: error.commandId,
+          action,
+          sessionId,
+          ...(onSucceeded ? { onSucceeded } : {}),
+          ...(onFailed ? { onFailed } : {}),
+          timer: null,
+          inFlight: false,
+        };
+        sessionLifecycleRecoveriesRef.current.set(error.commandId, recovery);
+        setDetailsOpen(false);
+        showUiNotice(
+          `session:${action}`,
+          "session",
+          "warning",
+          formatUiError(error),
+        );
+        continueSessionLifecycleRecovery(recovery);
+        return true;
+      }
       showUiNotice(
         `session:${action}`,
         "session",
@@ -3497,6 +3533,95 @@ export function CodeverApp() {
       });
       return false;
     }
+  }
+
+  function clearSessionLifecycleRecoveries(): void {
+    for (const recovery of sessionLifecycleRecoveriesRef.current.values()) {
+      if (recovery.timer !== null) window.clearTimeout(recovery.timer);
+    }
+    sessionLifecycleRecoveriesRef.current.clear();
+  }
+
+  function scheduleSessionLifecycleRecovery(
+    recovery: PendingSessionLifecycleRecovery,
+  ): void {
+    if (
+      sessionLifecycleRecoveriesRef.current.get(recovery.commandId) !== recovery
+    ) return;
+    if (recovery.timer !== null) window.clearTimeout(recovery.timer);
+    recovery.timer = window.setTimeout(() => {
+      recovery.timer = null;
+      continueSessionLifecycleRecovery(recovery);
+    }, 5_000);
+  }
+
+  function continueSessionLifecycleRecovery(
+    recovery: PendingSessionLifecycleRecovery,
+  ): void {
+    if (
+      recovery.inFlight ||
+      sessionLifecycleRecoveriesRef.current.get(recovery.commandId) !== recovery
+    ) return;
+    const connection = codeverClientRef.current;
+    if (!connection || connectionStatusRef.current !== "connected") {
+      scheduleSessionLifecycleRecovery(recovery);
+      return;
+    }
+    recovery.inFlight = true;
+    void (async () => {
+      try {
+        const sent = await connection.recoverCommand(recovery.commandId);
+        if (
+          sessionLifecycleRecoveriesRef.current.get(recovery.commandId) !==
+          recovery
+        ) return;
+        sessionLifecycleRecoveriesRef.current.delete(recovery.commandId);
+        recoverUiNotice(`session:${recovery.action}`);
+        await settleSessionLifecycle(
+          connection,
+          sent,
+          recovery.action,
+          recovery.sessionId,
+          recovery.onSucceeded,
+          recovery.onFailed,
+        );
+      } catch (error) {
+        if (
+          sessionLifecycleRecoveriesRef.current.get(recovery.commandId) !==
+          recovery
+        ) return;
+        if (
+          error instanceof CommandAcknowledgementTimeoutError ||
+          isCommandRecoveryPendingError(error) ||
+          connectionStatusRef.current !== "connected"
+        ) {
+          showUiNotice(
+            `session:${recovery.action}`,
+            "session",
+            "warning",
+            "Your computer did not confirm this command. It remains queued for a safe retry.",
+          );
+          scheduleSessionLifecycleRecovery(recovery);
+          return;
+        }
+        sessionLifecycleRecoveriesRef.current.delete(recovery.commandId);
+        await recovery.onFailed?.();
+        showUiNotice(
+          `session:${recovery.action}`,
+          "session",
+          "error",
+          formatUiError(error),
+        );
+        setSessionLifecycleBusy((current) => {
+          if (current.get(recovery.sessionId) !== recovery.action) return current;
+          const next = new Map(current);
+          next.delete(recovery.sessionId);
+          return next;
+        });
+      } finally {
+        recovery.inFlight = false;
+      }
+    })();
   }
 
   async function settleSessionLifecycle(

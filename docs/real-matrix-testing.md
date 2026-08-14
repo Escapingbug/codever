@@ -41,6 +41,9 @@ That run exercises:
 3. Current Room State, per-session threads, history, and offline cache recovery.
 4. Exactly-once command recovery, concurrent mutations, notifications, and
    browser/APK convergence.
+5. A browser deletion submitted while Gateway `/sync` is stalled beyond the
+   watchdog boundary, including in-place sync restart, active Agent
+   preservation, and exactly-once recovery.
 
 ## Manual PWA-to-agent test
 

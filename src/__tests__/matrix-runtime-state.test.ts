@@ -244,7 +244,7 @@ describe('FileGatewayRuntimeStateStore', () => {
 })
 
 describe('FileCommandReplayStore terminal results', () => {
-    it('atomically persists an expired next command as a failed terminal result', async () => {
+    it('atomically accepts an expired durable retry without manufacturing a failure', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-expired-command-result-'))
         temporaryDirectories.push(directory)
         const path = join(directory, 'replay.jsonl')
@@ -276,11 +276,6 @@ describe('FileCommandReplayStore terminal results', () => {
         ).resolves.toMatchObject({
             status: 'accepted',
             revision: 1,
-            terminal: {
-                revision: 1,
-                outcome: 'failed',
-                error: expect.stringContaining('expired before the Gateway accepted it'),
-            },
         })
 
         const restarted = new FileCommandReplayStore(path)
@@ -290,18 +285,14 @@ describe('FileCommandReplayStore terminal results', () => {
         ).resolves.toEqual({ status: 'duplicate', revision: 1 })
         await expect(
             restarted.getCommandResult(command),
-        ).resolves.toMatchObject({
-            revision: 1,
-            outcome: 'failed',
-            error: expect.stringContaining('expired before the Gateway accepted it'),
-        })
+        ).resolves.toBeUndefined()
 
         const ledger = await readFile(path, 'utf8')
         expect(ledger.trim().split('\n')).toHaveLength(2)
-        expect(ledger).toContain('"kind":"command_result"')
+        expect(ledger).not.toContain('"kind":"command_result"')
     })
 
-    it('does not treat a retired expired state command as a business mutation barrier', async () => {
+    it('treats an accepted expired state command as a business mutation barrier', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-expired-state-command-'))
         temporaryDirectories.push(directory)
         const path = join(directory, 'replay.jsonl')
@@ -331,6 +322,7 @@ describe('FileCommandReplayStore terminal results', () => {
             commandId: 'expired-delete',
             deviceId: 'device-2',
             sequenceEpoch: 'certificate-2',
+            baseRevision: 1,
             nonce: '0123456789abcdef-expired-delete',
             operation: 'session.delete',
             payload: {
@@ -363,7 +355,6 @@ describe('FileCommandReplayStore terminal results', () => {
             121_000,
         )).resolves.toMatchObject({
             revision: 2,
-            terminal: { outcome: 'failed' },
         })
 
         const restarted = new FileCommandReplayStore(path)
@@ -371,7 +362,10 @@ describe('FileCommandReplayStore terminal results', () => {
         await expect(restarted.claimCommandInOrder(
             stalePrompt,
             121_000,
-        )).resolves.toMatchObject({ status: 'accepted', revision: 3 })
+        )).rejects.toMatchObject({
+            expectedRevision: 2,
+            receivedBaseRevision: 1,
+        })
     })
 
     it('recovers an exact terminal result after restart and rejects conflicts', async () => {

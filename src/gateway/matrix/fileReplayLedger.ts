@@ -190,7 +190,6 @@ export class FileCommandReplayStore implements ReplayStore {
                     'Accepted command id does not match its durable execution record',
                 )
             }
-            const expired = command.expiresAt <= now
             const existingClaims = nextClaims.filter(claim => this.claims.has(claim.key)).length
             const lastSequence = this.sequences.get(scope) ?? 0
             if (existingClaims === nextClaims.length && command.sequence <= lastSequence) {
@@ -223,16 +222,12 @@ export class FileCommandReplayStore implements ReplayStore {
                 && command.baseRevision < currentRevision
                 && command.baseRevision >= lastStateMutationRevision
             if (
-                !expired
-                && command.baseRevision !== currentRevision
+                command.baseRevision !== currentRevision
                 && !staleAppendOnlyPrompt
             ) {
                 throw new RevisionConflictError(currentRevision, command.baseRevision)
             }
             const revision = currentRevision + 1
-            const terminal = expired
-                ? expiredCommandResult(command, revision)
-                : undefined
 
             const record: PersistedClaimBatch = {
                 version: 2,
@@ -248,23 +243,12 @@ export class FileCommandReplayStore implements ReplayStore {
                     commandFingerprint: fingerprint,
                     commandOperation: command.payload.operation,
                 },
-                ...(terminal
-                    ? {
-                        terminal: {
-                            version: 2,
-                            kind: 'command_result',
-                            commandKey,
-                            fingerprint,
-                            terminal,
-                        },
-                    }
-                    : {}),
             }
             await this.append(record)
             for (const claim of nextClaims) this.claims.set(claim.key, claim.expiresAt)
             this.sequences.set(scope, command.sequence)
             this.revisions.set(revisionScope, revision)
-            if (!terminal && command.payload.operation !== 'prompt') {
+            if (command.payload.operation !== 'prompt') {
                 this.lastStateMutationRevisions.set(revisionScope, revision)
             }
             this.commandOutcomes.set(commandKey, {
@@ -274,16 +258,9 @@ export class FileCommandReplayStore implements ReplayStore {
                 baseRevision: command.baseRevision,
                 fingerprint,
             })
-            if (terminal) {
-                this.commandResults.set(commandKey, {
-                    fingerprint,
-                    terminal: structuredClone(terminal),
-                })
-            }
             return {
                 status: 'accepted' as const,
                 revision,
-                ...(terminal ? { terminal: structuredClone(terminal) } : {}),
             }
         })
         this.chain = operation.then(() => undefined, () => undefined)
@@ -635,20 +612,6 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
         && !isPersistedCommandResultEntry(record.terminal)
     ) return false
     return true
-}
-
-function expiredCommandResult(
-    command: CodeverCommand,
-    revision: number,
-): DurableCommandResult {
-    return {
-        revision,
-        outcome: 'failed',
-        error: 'The command expired before the Gateway accepted it, so it was not executed.',
-        sessionId: 'sessionId' in command.payload
-            ? command.payload.sessionId
-            : null,
-    }
 }
 
 function isCommandOperation(value: unknown): value is CommandOperation {

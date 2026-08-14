@@ -343,8 +343,8 @@ const shutdownTimeoutMs = positiveDurationFromEnvironment(
     10_000,
 )
 let requestStop: (failure?: Error) => void = () => undefined
+let stopping = false
 const stopped = new Promise<{ failure: Error | null; forced: boolean }>(resolve => {
-    let stopping = false
     requestStop = (failure?: Error): void => {
         if (stopping) return
         stopping = true
@@ -372,14 +372,41 @@ const stopped = new Promise<{ failure: Error | null; forced: boolean }>(resolve 
     process.once('SIGINT', () => requestStop())
     process.once('SIGTERM', () => requestStop())
 })
-const stopSyncWatchdog = client.watchSyncHealth({
-    stallTimeoutMs: syncStallTimeoutMs,
-}, error => {
-    process.stderr.write(
-        `[matrix-gateway] ${error.message}; stopping for supervisor restart.\n`,
-    )
-    requestStop(error)
-})
+let stopSyncWatchdog = (): void => undefined
+const armSyncWatchdog = (): void => {
+    stopSyncWatchdog = client.watchSyncHealth({
+        stallTimeoutMs: syncStallTimeoutMs,
+    }, error => {
+        process.stderr.write(
+            `[matrix-gateway] ${error.message}; restarting Matrix sync in place.\n`,
+        )
+        void (async () => {
+            try {
+                await client.restartSync()
+            } catch (restartError) {
+                const failure = restartError instanceof Error
+                    ? restartError
+                    : new Error(formatError(restartError))
+                process.stderr.write(
+                    `[matrix-gateway] Matrix sync restart failed: ${failure.message}\n`,
+                )
+                requestStop(failure)
+                return
+            }
+            if (stopping) return
+            process.stderr.write('[matrix-gateway] Matrix sync restarted in place.\n')
+            try {
+                await runner!.syncState()
+            } catch (stateError) {
+                process.stderr.write(
+                    `[matrix-gateway] post-restart Room State sync failed: ${formatError(stateError)}\n`,
+                )
+            }
+            if (!stopping) armSyncWatchdog()
+        })()
+    })
+}
+armSyncWatchdog()
 const stopResult = await stopped
 stopSyncWatchdog()
 stopPairingRecovery()
@@ -454,8 +481,8 @@ function e2eProvider(name: string): AgentProvider {
         process.env.CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS ?? '0',
         10,
     )
-    if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 30_000) {
-        throw new Error('CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS must be between 0 and 30000')
+    if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 300_000) {
+        throw new Error('CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS must be between 0 and 300000')
     }
     return {
         name,

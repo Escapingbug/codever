@@ -129,6 +129,7 @@ const DEVICE_KEY = "p256-v1";
 const COMMAND_SEQUENCE_STORE = "command-sequences";
 const TIMELINE_KEY_STORE = "matrix-timeline-keys";
 const COMMAND_TTL_MS = 2 * 60_000;
+const COMMAND_RECOVERY_INTERVAL_MS = 30_000;
 const INCOMPLETE_OUTBOX_LEASE_MS = 30_000;
 const LOCAL_STORE_TIMEOUT_MS = 10_000;
 const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
@@ -736,20 +737,12 @@ export async function connectMatrix(
   };
   let lastCommandRecoveryState: string | null = null;
   let commandRecoveryAtState: Promise<void> | null = null;
-  const scheduleCommandRecoveryAtState = (
-    gatewayState: MatrixGatewayState,
+  let commandRecoveryTimer: number | null = null;
+  const recoverPendingCommand = (
     trust: TrustedGateway,
+    reportError: boolean,
   ): void => {
-    const stateKey = [
-      gatewayState.revision_epoch_generation,
-      gatewayState.revision_epoch,
-      gatewayState.state_version,
-    ].join(":");
-    if (
-      stateKey === lastCommandRecoveryState ||
-      commandRecoveryAtState
-    ) return;
-    lastCommandRecoveryState = stateKey;
+    if (commandRecoveryAtState || stopped) return;
     commandRecoveryAtState = retryPendingCommand(
       client,
       config,
@@ -770,8 +763,24 @@ export async function connectMatrix(
       commandRecoveryAtState = null;
     });
     void commandRecoveryAtState.catch((error) => {
-      handlers.onStatus("error", formatError(error));
+      if (reportError) handlers.onStatus("error", formatError(error));
     });
+  };
+  const scheduleCommandRecoveryAtState = (
+    gatewayState: MatrixGatewayState,
+    trust: TrustedGateway,
+  ): void => {
+    const stateKey = [
+      gatewayState.revision_epoch_generation,
+      gatewayState.revision_epoch,
+      gatewayState.state_version,
+    ].join(":");
+    if (
+      stateKey === lastCommandRecoveryState ||
+      commandRecoveryAtState
+    ) return;
+    lastCommandRecoveryState = stateKey;
+    recoverPendingCommand(trust, true);
   };
   const onNativeContent = async (
     content: MatrixNativeContent,
@@ -1357,6 +1366,10 @@ export async function connectMatrix(
 
     assertPersistenceHealthy();
     connectionReady = true;
+    commandRecoveryTimer = window.setInterval(() => {
+      const trust = activeTrust;
+      if (trust) recoverPendingCommand(trust, false);
+    }, COMMAND_RECOVERY_INTERVAL_MS);
     document.addEventListener("visibilitychange", onVisibilityRecovery);
     window.addEventListener("focus", onFocusRecovery);
     window.addEventListener("online", onFocusRecovery);
@@ -1371,6 +1384,10 @@ export async function connectMatrix(
     startupRoom?.off(sdk.RoomStateEvent.Events, onRoomState);
     client.off(sdk.ClientEvent.Sync, onSync);
     removeBrowserRecoveryListeners();
+    if (commandRecoveryTimer !== null) {
+      window.clearInterval(commandRecoveryTimer);
+      commandRecoveryTimer = null;
+    }
     client.stopClient();
     let detail = formatError(error);
     try {
@@ -1501,11 +1518,7 @@ export async function connectMatrix(
           );
           const samePayload =
             JSON.stringify(recovered.payload) === JSON.stringify(payload);
-          if (
-            (!recovered.expired ||
-              retainsCommandUntilResultConsumed(recovered.payload)) &&
-            samePayload
-          ) {
+          if (samePayload) {
             return {
               eventId: recovered.eventId,
               commandId: recovered.reservation.commandId,
@@ -1529,9 +1542,6 @@ export async function connectMatrix(
             );
             commandLifecycle.release(recovered.reservation.commandId);
           }
-          // An expired ordinary command is replayed only to repair its
-          // durable sequence. A recoverable invitation additionally waits for
-          // its terminal result before allowing a different command through.
         } catch (error) {
           if (!(error instanceof RevisionConflictError)) throw error;
           holdRevisionConflict(
@@ -2185,6 +2195,10 @@ export async function connectMatrix(
       startupRoom?.off(sdk.RoomStateEvent.Events, onRoomState);
       client.off(sdk.ClientEvent.Sync, onSync);
       removeBrowserRecoveryListeners();
+      if (commandRecoveryTimer !== null) {
+        window.clearInterval(commandRecoveryTimer);
+        commandRecoveryTimer = null;
+      }
       client.stopClient();
       handlers.onStatus("offline");
       void flushAndReleaseMatrixSyncStore(
@@ -4055,7 +4069,6 @@ async function retryPendingCommand(
   eventId: string;
   payload: CommandPayload;
   reservation: CommandReservation;
-  expired: boolean;
   completion?: CommandCompletion;
 } | null> {
   const scope = commandSequenceScope(config, identity, sequenceEpoch);
@@ -4091,21 +4104,11 @@ async function retryPendingCommand(
     );
     return null;
   }
-  const extension = asRecord(pending.plaintext["io.codever"]);
-  const signed = asRecord(extension?.signed_command);
-  const command = asRecord(signed?.command);
-  if (typeof command?.expiresAt !== "number") {
-    throw new Error(
-      "The queued command is invalid. Re-pair this device to start a fresh secure command sequence.",
-    );
-  }
-  const expired = command.expiresAt <= Date.now();
   if (pending.completion) {
     return {
       eventId: `$codever.durable.${pending.commandId}`,
       payload: pending.payload,
       reservation: pending,
-      expired,
       completion: pending.completion,
     };
   }
@@ -4141,7 +4144,6 @@ async function retryPendingCommand(
     eventId,
     payload: pending.payload,
     reservation: pending,
-    expired,
   };
 }
 

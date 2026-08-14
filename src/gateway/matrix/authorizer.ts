@@ -76,11 +76,13 @@ export class StrictMatrixCommandAuthorizer {
             allowedOperations: policy.allowedOperations,
         }, {
             now,
-            // The replay ledger below is the authority for expired commands.
-            // It either recovers an exact durable acceptance or atomically
-            // retires the authenticated next sequence as failed, without
-            // executing the stale payload.
-            allowExpired: true,
+            // An application-layer delivery arrives inside a fresh envelope
+            // signed by the same locally trusted device key. That fresh proof
+            // of possession renews transport authorization for the durable
+            // command while command id, sequence, revision, and fingerprint
+            // still enforce exactly-once execution in the replay ledger.
+            // Legacy transport-only deliveries have no such renewal proof.
+            allowExpired: context.applicationDeviceId !== undefined,
         })
         const expectedSequenceEpoch = policy.sequenceEpoch
         if (command.sequenceEpoch !== expectedSequenceEpoch) {

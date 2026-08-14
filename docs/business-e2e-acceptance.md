@@ -126,13 +126,18 @@ pnpm test:protocol-integration
 # emulator is connected and explicit mutation permission is supplied.
 CODEVER_WEB_LIVE_E2E=1 pnpm test:e2e:web-live
 
+# Real browser/Gateway recovery across a Matrix /sync stall longer than the
+# command lifetime and watchdog boundary, without restarting the Agent runtime.
+CODEVER_SYNC_STALL_E2E=1 pnpm test:e2e:web-sync-stall
+
 CODEVER_ANDROID_LIVE_E2E=1 \
 CODEVER_ANDROID_SERIAL=emulator-5554 \
 pnpm test:e2e:android-live
 
 # Full isolated Alpha gate: fresh .e2e APK, two browsers, official Synapse,
 # current Gateway, deterministic delayed provider, background notifications,
-# cross-device lifecycle, and in-flight recovery.
+# cross-device lifecycle, in-flight recovery, and long Matrix /sync stall
+# recovery.
 CODEVER_ALPHA_LIVE_E2E=1 \
 CODEVER_ANDROID_SERIAL=emulator-5554 \
 pnpm test:e2e:alpha-live

@@ -119,6 +119,7 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
     private readyWaiters = new Set<{ resolve(): void; reject(error: Error): void }>()
     private syncAbort: AbortController | null = null
     private syncLoopPromise: Promise<void> | null = null
+    private syncRestartPromise: Promise<void> | null = null
     private syncToken: string | null = null
     private lastSyncProgressAt = 0
     private cryptoChain: Promise<void> = Promise.resolve()
@@ -170,8 +171,20 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
         this.started = true
         this.ready = false
         this.readyError = null
+        this.lastSyncProgressAt = Date.now()
         this.syncAbort = new AbortController()
         this.syncLoopPromise = this.runSyncLoop(this.syncAbort.signal)
+    }
+
+    async restartSync(): Promise<void> {
+        if (this.syncRestartPromise) return this.syncRestartPromise
+        const restart = this.restartSyncLoop()
+        this.syncRestartPromise = restart
+        try {
+            await restart
+        } finally {
+            if (this.syncRestartPromise === restart) this.syncRestartPromise = null
+        }
     }
 
     async waitUntilReady(timeoutMs = this.defaultReadyTimeoutMs): Promise<void> {
@@ -360,12 +373,29 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
         if (!this.started && !this.machine) return
         this.started = false
         this.syncAbort?.abort()
+        await this.syncRestartPromise?.catch(() => {})
+        this.syncAbort?.abort()
         await this.syncLoopPromise?.catch(() => {})
         this.syncLoopPromise = null
         this.syncAbort = null
         this.rejectReady(new Error('Matrix client stopped before becoming ready'))
         this.machine?.close()
         this.machine = null
+    }
+
+    private async restartSyncLoop(): Promise<void> {
+        if (!this.started || !this.machine || !this.cryptoConfig) {
+            throw new Error('Matrix sync cannot restart before the client is started')
+        }
+        const previousAbort = this.syncAbort
+        const previousLoop = this.syncLoopPromise
+        previousAbort?.abort()
+        await previousLoop?.catch(() => {})
+        if (!this.started) return
+        this.lastSyncProgressAt = Date.now()
+        const nextAbort = new AbortController()
+        this.syncAbort = nextAbort
+        this.syncLoopPromise = this.runSyncLoop(nextAbort.signal)
     }
 
     private async runSyncLoop(signal: AbortSignal): Promise<void> {
