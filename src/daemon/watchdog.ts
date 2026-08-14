@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import type { DaemonStatus } from './process'
 
 export interface WatchdogState {
@@ -145,7 +145,7 @@ export function installWindowsWatchdogTask(
     }
 
     const runnerPath = options.runnerPath ?? getDefaultWindowsWatchdogRunnerPath()
-    mkdirSync(dirname(runnerPath), { recursive: true })
+    mkdirSync(win32.dirname(runnerPath), { recursive: true })
     writeFileSync(runnerPath, buildHiddenWatchdogRunner(command), 'utf8')
 
     const result = spawnSync('schtasks', [

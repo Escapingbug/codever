@@ -199,10 +199,11 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         const bot = createBot()
         const sessionManager = createSessionManager()
         registerGroupHandlers(bot, { sessionManager, topicSessions: new Map() })
+        const cwd = process.cwd()
 
-        await bot.runCommand('cwd', createContext('D:/codever-worktrees/session-actor-runtime'))
+        await bot.runCommand('cwd', createContext(cwd))
 
-        expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, 'D:/codever-worktrees/session-actor-runtime')
+        expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, cwd)
         expect(sessionManager.unarchiveGroup).toHaveBeenCalledWith('-100:10')
     })
 
@@ -252,6 +253,30 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await bot.runCommand('file', createContext('f1'))
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'file', args: 'f1', source: 'channel' })
+    })
+
+    it('/delivery should dispatch a runtime delivery inspection command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCommand('delivery', createContext('delivery-1'))
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'delivery', args: 'delivery-1', source: 'channel' })
+        expect(session.receiveInput).not.toHaveBeenCalled()
+    })
+
+    it('/retry_delivery should dispatch a runtime delivery retry command', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        const topicSessions = new Map([['-100:10', session]])
+        registerGroupHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+
+        await bot.runCommand('retry_delivery', createContext('delivery-1'))
+
+        expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'retry_delivery', args: 'delivery-1', source: 'channel' })
+        expect(session.receiveInput).not.toHaveBeenCalled()
     })
 
     it('/config timeout should dispatch runtime timeout config command', async () => {
