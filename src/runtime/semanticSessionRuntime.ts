@@ -188,9 +188,15 @@ export class SemanticSessionRuntime {
         let queuedUserInput: QueuedUserInput | null = null
         if (this.isQueuedChannelUserInput(input)) {
             queuedUserInput = this.trackQueuedUserInput()
-            void this.send({ text: 'Agent is working. Your message has been queued. Send /cancel to discard the latest queued message before it starts.', format: 'html' })
+            void this.send({
+                text: 'Agent is working. Your message has been queued. Send /cancel to discard the latest queued message before it starts.',
+                format: 'html',
+            }, { lane: 'control' })
         } else if (input.kind === 'scheduled_message' && (this.state === 'querying' || this.state === 'finalizing')) {
-            void this.send({ text: 'Agent is working. The scheduled message has been queued and will be processed when the current task completes.', format: 'html' })
+            void this.send({
+                text: 'Agent is working. The scheduled message has been queued and will be processed when the current task completes.',
+                format: 'html',
+            }, { lane: 'control' })
         }
 
         const run = this.mailbox.then(() => {

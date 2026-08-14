@@ -547,22 +547,26 @@ describe('Semantic runtime integration chain', () => {
         expect(secondSignalAborted).toBe(false)
     })
 
-    it('notifies the channel immediately when user input arrives during an active turn', async () => {
-        let release!: () => void
-        const hold = new Promise<void>(resolve => {
-            release = resolve
+    it('notifies the channel immediately when user input arrives during an active turn, even when normal delivery is blocked', async () => {
+        let releaseNormalDelivery!: () => void
+        const blockedNormalDelivery = new Promise<void>(resolve => {
+            releaseNormalDelivery = resolve
         })
         const provider = createProvider([], {
             startQuery: vi.fn((prompt: string): AgentQueryHandle => ({
                 events: (async function* () {
                     yield { kind: 'text', text: `response:${prompt}` } as AgentEvent
-                    if (prompt === 'first') await hold
                     yield { kind: 'result', status: 'success' } as AgentEvent
                 })(),
                 interrupt: vi.fn(),
             })),
         })
         const channel = createChannel()
+        vi.mocked(channel.send).mockImplementation(async (message) => {
+            if (message.text === 'response:first') await blockedNormalDelivery
+            channel.sent.push(message)
+            return { messageId: channel.sent.length }
+        })
         const runtime = new SemanticSessionRuntime({
             sessionId: 'session-1',
             cwd: '/repo',
@@ -580,7 +584,7 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent.some(m => m.text.includes('queued'))).toBe(true)
             expect(provider.startQuery).toHaveBeenCalledTimes(1)
         } finally {
-            release()
+            releaseNormalDelivery()
             await first
         }
     })
