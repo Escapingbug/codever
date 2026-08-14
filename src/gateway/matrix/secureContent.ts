@@ -15,6 +15,7 @@ import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
     MATRIX_NATIVE_PROTOCOL_VERSION,
+    capabilityRenewalOfferSchema,
     canonicalJsonBytes,
     matrixNativeContentSchema,
     matrixStateContentSchema,
@@ -419,6 +420,35 @@ export class GatewaySecureContentLayer {
             received_base_revision: receivedBaseRevision,
             revision_epoch: revisionEpoch,
         }, commandDeliveryTransactionId('conflict', commandId), transport)
+    }
+
+    async sendCapabilityRenewalOffer(
+        room: MatrixGatewayRoomConfig,
+        deviceId: string,
+        input: {
+            requestId: string
+            certificateId: string
+            pairingLink: string
+            expiresAt: number
+        },
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        const offer = capabilityRenewalOfferSchema.parse({
+            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            kind: 'capability_renewal_offer',
+            request_id: input.requestId,
+            certificate_id: input.certificateId,
+            pairing_link: input.pairingLink,
+            expires_at: input.expiresAt,
+        })
+        return this.sendToDevice(
+            room,
+            deviceId,
+            offer,
+            `codever.capability-renewal.${input.requestId}`,
+            transport,
+            'Encrypted Codever capability renewal',
+        )
     }
 
     async sendCollaborationPrompt(
@@ -1597,6 +1627,7 @@ function isApplicationControlRequest(request: MatrixSendEventRequest): boolean {
     return kind === 'command_ack'
         || kind === 'command_result'
         || kind === 'revision_conflict'
+        || kind === 'capability_renewal_offer'
 }
 
 function isCoalescibleSnapshot(request: MatrixSendEventRequest): boolean {

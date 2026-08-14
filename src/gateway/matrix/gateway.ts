@@ -3,9 +3,11 @@ import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    capabilityRenewalRequestSchema,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     type CodeverCommand,
+    type CapabilityRenewalRequest,
     type JsonValue,
     type MatrixGatewayCapabilities,
     type MatrixSessionState,
@@ -554,6 +556,15 @@ export class MatrixGatewayRunner {
         const extension = asRecord(
             opened.content[CODEVER_MATRIX_EXTENSION],
         )
+        const capabilityRenewal = capabilityRenewalRequestSchema.safeParse(extension)
+        if (capabilityRenewal.success) {
+            await this.handleCapabilityRenewalRequest(
+                runtime,
+                opened,
+                capabilityRenewal.data,
+            )
+            return
+        }
         if (!extension || extension.version !== 1 || extension.kind !== 'signed_command') return
         this.authorizer.trustDevice(opened.trustedDevice)
         const signedCommand = asRecord(extension.signed_command)
@@ -703,6 +714,47 @@ export class MatrixGatewayRunner {
                 + formatError(error),
             )
         })
+    }
+
+    private async handleCapabilityRenewalRequest(
+        runtime: RoomRuntime,
+        opened: Awaited<ReturnType<GatewaySecureContentLayer['openIncoming']>>,
+        request: CapabilityRenewalRequest,
+    ): Promise<void> {
+        const now = this.now()
+        if (
+            request.gateway_id !== this.config.gatewayId
+            || request.device_id !== opened.authenticatedDeviceId
+            || request.certificate_id !== opened.trustedDevice.sequenceEpoch
+            || !opened.trustedDevice.allowedOperations?.includes('device.invite')
+        ) {
+            throw new Error('Capability renewal request is not bound to the active certificate')
+        }
+        if (
+            request.expires_at <= now
+            || request.issued_at > now + 30_000
+            || request.expires_at - request.issued_at > 2 * 60_000
+        ) {
+            throw new Error('Capability renewal request is outside its validity window')
+        }
+        if (!this.dependencies.createDeviceInvitation) {
+            throw new Error('This Gateway host does not support capability renewal')
+        }
+        const invitation = await this.dependencies.createDeviceInvitation({
+            requestedByDeviceId: opened.authenticatedDeviceId,
+            commandId: `capability-renewal.${request.request_id}`,
+        })
+        await this.secureContent.sendCapabilityRenewalOffer(
+            runtime.config,
+            opened.authenticatedDeviceId,
+            {
+                requestId: request.request_id,
+                certificateId: request.certificate_id,
+                pairingLink: invitation.pairingLink,
+                expiresAt: invitation.expiresAt,
+            },
+            this.client,
+        )
     }
 
     private scheduleExecution(

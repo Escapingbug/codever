@@ -13,6 +13,7 @@ import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+    capabilityRenewalRequestSchema,
     type CodeverCommand,
     type SignedCommand,
 } from '@codever/protocol'
@@ -398,6 +399,115 @@ describe('MatrixGatewayRunner', () => {
                 expiresAt: fixture.now + 5 * 60_000,
             },
         })
+    })
+
+    it('renews an authenticated legacy device certificate outside the command queue', async () => {
+        const fixture = await securityFixture()
+        fixture.config.trustedDevices[0]!.allowedOperations = [
+            ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
+            'device.invite',
+        ]
+        const client = new FakeMatrixGatewayClient()
+        const createDeviceInvitation = vi.fn(async () => ({
+            pairingLink: 'codever://pair?data=renewed-signed-offer',
+            expiresAt: fixture.now + 60_000,
+        }))
+        const rejected: unknown[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            createDeviceInvitation,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession([]),
+            onRejected: (_event, error) => rejected.push(error),
+        })
+        await runner.start()
+        const request = capabilityRenewalRequestSchema.parse({
+            version: 1,
+            kind: 'capability_renewal_request',
+            request_id: 'renewal-1',
+            gateway_id: fixture.config.gatewayId,
+            device_id: 'pwa-device-1',
+            certificate_id: 'certificate-pwa-1',
+            requested_operations: ['session.delete'],
+            issued_at: fixture.now,
+            expires_at: fixture.now + 60_000,
+        })
+        const envelope = await sealSecureEnvelope({
+            plaintext: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever device permission renewal',
+                [CODEVER_MATRIX_EXTENSION]: request,
+            },
+            senderPrivateKey: fixture.keys.privateKey,
+            recipientPublicKey: fixture.gatewayKeys.publicKey,
+            gatewayId: fixture.config.gatewayId,
+            conversationId: fixture.config.rooms[0]!.conversationId,
+            direction: 'device_to_gateway',
+            senderDeviceId: 'pwa-device-1',
+            recipientDeviceId: fixture.config.gatewayId,
+            senderKeyId: fixture.keys.keyId,
+            recipientKeyId: fixture.gatewayKeys.keyId,
+            now: fixture.now,
+        })
+
+        client.emit({
+            roomId: fixture.config.rooms[0]!.roomId,
+            eventId: '$capability-renewal-request',
+            eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+            sender: '@alice:example.org',
+            encrypted: false,
+            content: {
+                msgtype: 'm.notice',
+                body: 'Encrypted Codever device permission renewal',
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'secure_envelope',
+                    secure_envelope: envelope,
+                },
+            },
+        })
+
+        await vi.waitFor(() => expect(createDeviceInvitation).toHaveBeenCalledOnce())
+        expect(createDeviceInvitation).toHaveBeenCalledWith({
+            requestedByDeviceId: 'pwa-device-1',
+            commandId: 'capability-renewal.renewal-1',
+        })
+        await vi.waitFor(() => expect(
+            client.sent.some(candidate =>
+                candidate.transactionId.includes('codever.capability-renewal.renewal-1'),
+            ) || rejected.length > 0,
+        ).toBe(true))
+        expect(rejected).toEqual([])
+        const response = client.sent.find(candidate =>
+            candidate.transactionId.includes('codever.capability-renewal.renewal-1'),
+        )!
+        const extension = response.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const opened = await openSecureEnvelope(extension.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: fixture.gatewayKeys.publicKey,
+            expected: {
+                gatewayId: fixture.config.gatewayId,
+                conversationId: fixture.config.rooms[0]!.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: fixture.config.gatewayId,
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: fixture.gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: Date.now(),
+        })
+        expect(opened.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                version: 1,
+                kind: 'capability_renewal_offer',
+                request_id: 'renewal-1',
+                certificate_id: 'certificate-pwa-1',
+                pairing_link: 'codever://pair?data=renewed-signed-offer',
+            },
+        })
+        expect(rejected).toEqual([])
+        await runner.stop()
     })
 
     it('creates a session atomically in a Gateway-scoped project with reasoning settings', async () => {

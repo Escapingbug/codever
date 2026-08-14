@@ -173,7 +173,7 @@ APK storage.
 | Journey | Web live runner | Android live runner |
 | --- | --- | --- |
 | Fresh-device pairing and inventory bootstrap | Two isolated browser devices | Enforced by the isolated Alpha gate |
-| Previously paired device gains current lifecycle capabilities | Enforced with a legacy signed capability set and an exactly-once delete | Not yet enforced |
+| Previously paired device gains current lifecycle capabilities | Enforced with a legacy signed capability set and an exactly-once delete | Enforced in `scripts/web-live-e2e.ts` |
 | Create and immediate feedback | Enforced | Enforced |
 | Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
 | Text-file and image content reaches the Agent | Enforced | Not yet enforced |

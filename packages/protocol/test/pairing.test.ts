@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   createDeviceInvitationLink,
+  capabilityRenewalOfferSchema,
+  capabilityRenewalRequestSchema,
   decodeDeviceInvitationLink,
   decodePairingLink,
   encodePairingLink,
@@ -35,6 +37,49 @@ const gatewayTransport = {
 }
 
 describe('pairing schemas', () => {
+  it('accepts strict capability renewal messages', () => {
+    expect(capabilityRenewalRequestSchema.parse({
+      version: 1,
+      kind: 'capability_renewal_request',
+      request_id: 'renewal-1',
+      gateway_id: 'gateway-1',
+      device_id: 'phone-1',
+      certificate_id: 'certificate-1',
+      requested_operations: ['session.delete'],
+      issued_at: 1,
+      expires_at: 2,
+    })).toMatchObject({ requested_operations: ['session.delete'] })
+    expect(capabilityRenewalOfferSchema.parse({
+      version: 1,
+      kind: 'capability_renewal_offer',
+      request_id: 'renewal-1',
+      certificate_id: 'certificate-1',
+      pairing_link: 'codever://pair?data=signed-offer',
+      expires_at: 2,
+    })).toMatchObject({ request_id: 'renewal-1' })
+  })
+
+  it('rejects duplicate or invalid capability renewal requests', () => {
+    const request = {
+      version: 1,
+      kind: 'capability_renewal_request',
+      request_id: 'renewal-1',
+      gateway_id: 'gateway-1',
+      device_id: 'phone-1',
+      certificate_id: 'certificate-1',
+      requested_operations: ['session.delete', 'session.delete'],
+      issued_at: 2,
+      expires_at: 2,
+    }
+    expect(capabilityRenewalRequestSchema.safeParse(request).success).toBe(false)
+    expect(capabilityRenewalRequestSchema.safeParse({
+      ...request,
+      requested_operations: ['session.delete'],
+      expires_at: 3,
+      unexpected: true,
+    }).success).toBe(false)
+  })
+
   it('accepts a strict one-time offer', () => {
     expect(
       pairingOfferSchema.parse({

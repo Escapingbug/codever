@@ -204,6 +204,79 @@ test("consumes authenticated control results without waiting for Megolm", async 
     result: { offer_id: "offer-1" },
   }]);
 
+  const renewalExpiresAt = Date.now() + 60_000;
+  const renewalEnvelope = await sealSecureEnvelope({
+    plaintext: {
+      msgtype: "m.notice",
+      body: "Encrypted Codever capability renewal",
+      "io.codever": {
+        version: 1,
+        kind: "capability_renewal_offer",
+        request_id: "renewal-1",
+        certificate_id: "certificate-1",
+        pairing_link: "codever://pair?data=signed-offer",
+        expires_at: renewalExpiresAt,
+        active_device_count: 1,
+      },
+    },
+    gatewayId: config.gatewayId,
+    conversationId: config.conversationId,
+    direction: "gateway_to_device",
+    senderDeviceId: "gateway-1",
+    recipientDeviceId: "device-1",
+    senderKeyId: gateway.keyId,
+    recipientKeyId: device.keyId,
+    senderPrivateKey: gateway.privateKey,
+    recipientPublicKey: device.publicKey,
+    envelopeId: "capability-renewal-offer-1",
+  });
+  const renewalOffers: Array<Record<string, unknown>> = [];
+  await processGatewayTimelineEvent(
+    client as never,
+    {
+      ...event,
+      getId: () => "$capability-renewal-offer-1",
+      getContent: () => ({
+        msgtype: "m.notice",
+        body: "Encrypted Codever capability renewal",
+        "io.codever": {
+          version: 1,
+          kind: "secure_envelope",
+          secure_envelope: renewalEnvelope,
+        },
+      }),
+    } as never,
+    new Set(),
+    config,
+    () => {},
+    undefined,
+    {
+      keyId: device.keyId,
+      privateKey: device.privateKey,
+      publicKey: device.publicKey,
+      publicJwk: device.publicJwk,
+    },
+    () => trust as never,
+    new InMemoryReplayStore(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    (offer) => renewalOffers.push(offer),
+  );
+  assert.deepEqual(renewalOffers, [{
+    version: 1,
+    kind: "capability_renewal_offer",
+    request_id: "renewal-1",
+    certificate_id: "certificate-1",
+    pairing_link: "codever://pair?data=signed-offer",
+    expires_at: renewalExpiresAt,
+    active_device_count: 1,
+  }]);
+
   let oldControlDecrypted = false;
   await processGatewayTimelineEvent(
     {

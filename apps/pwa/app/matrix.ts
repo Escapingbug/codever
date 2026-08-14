@@ -2,6 +2,8 @@ import {
   CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
   CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
   CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+  capabilityRenewalOfferSchema,
+  capabilityRenewalRequestSchema,
   canonicalJson,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
@@ -13,6 +15,8 @@ import {
   signedMatrixTimelineEnvelopeSchema,
   type CodeverAttachment,
   type CodeverCommand,
+  type CapabilityRenewalOffer,
+  type CommandOperation,
   type CommandPayload,
   type JsonValue,
   type MatrixNativeContent,
@@ -50,6 +54,7 @@ import {
   applyGatewayDeviceRotation,
   applyGatewayTransportSnapshot,
   completePairing,
+  inspectPairingLink,
   loadTrustedGateway,
   PairingRejectedError,
   saveTrustedGateway,
@@ -65,6 +70,7 @@ import {
   signedSecureEnvelopeBundleSchema,
   signedSecureEnvelopeSchema,
   type MatrixTransportBinding,
+  type PairingOperation,
   type SignedPairingOffer,
   type SignedPairingRequest,
   type SignedPairingResponse,
@@ -135,6 +141,7 @@ const LOCAL_STORE_TIMEOUT_MS = 10_000;
 const DEVICE_KEYS_UPLOAD_TIMEOUT_MS = 30_000;
 const GATEWAY_DEVICE_TIMEOUT_MS = 15_000;
 const ENCRYPTED_SEND_TIMEOUT_MS = 20_000;
+const CAPABILITY_RENEWAL_TIMEOUT_MS = 30_000;
 
 export type MatrixConnectionConfig = {
   homeserver: string;
@@ -167,6 +174,7 @@ type PendingOutboundCommand = CommandReservation & {
   createdAt: number;
   payload: CommandPayload;
   plaintext?: Record<string, unknown>;
+  needsSigning?: boolean;
   completion?: CommandCompletion;
 };
 
@@ -187,6 +195,12 @@ type DurableGatewayEpochState = {
   stateVersion: number;
   revision: number;
   retiredRevisionEpochs: string[];
+};
+
+type CapabilityRenewalMigration = {
+  version: 1;
+  previousSequenceEpoch: string;
+  createdAt: number;
 };
 
 export type IncomingCodeverMessage = {
@@ -743,12 +757,14 @@ export async function connectMatrix(
     reportError: boolean,
   ): void => {
     if (commandRecoveryAtState || stopped) return;
-    commandRecoveryAtState = retryPendingCommand(
-      client,
-      config,
-      identity,
-      trust.certificate.certificate.certificateId,
-      trust,
+    commandRecoveryAtState = ensurePendingCommandCapability(trust).then(
+      (currentTrust) => retryPendingCommand(
+        client,
+        config,
+        identity,
+        currentTrust.certificate.certificate.certificateId,
+        currentTrust,
+      ),
     ).then((recovered) => {
       if (!recovered) return;
       outboundCommandMetadata.set(recovered.reservation.commandId, {
@@ -1004,6 +1020,24 @@ export async function connectMatrix(
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
   };
+  const capabilityRenewalWaiters = new Map<
+    string,
+    {
+      certificateId: string;
+      resolve: (offer: CapabilityRenewalOffer) => void;
+    }
+  >();
+  const onCapabilityRenewalOffer = (offer: CapabilityRenewalOffer): void => {
+    const waiter = capabilityRenewalWaiters.get(offer.request_id);
+    if (
+      !waiter ||
+      waiter.certificateId !== offer.certificate_id ||
+      offer.expires_at <= Date.now()
+    ) {
+      return;
+    }
+    waiter.resolve(offer);
+  };
   let gatewayStateRecovery: Promise<void> | null = null;
   let lastGatewayStateRecoveryAt = 0;
   const recoverGatewayStateSnapshot = (): void => {
@@ -1071,6 +1105,7 @@ export async function connectMatrix(
           onNativeContent,
           onNativeSessionStatus,
           historical,
+          onCapabilityRenewalOffer,
         ),
       reportInboundError,
     );
@@ -1408,6 +1443,332 @@ export async function connectMatrix(
     }
     handlers.onStatus("error", detail);
   });
+  const completePairingPreview = async (
+    preview: PairingPreview,
+    deviceName: string,
+    signal?: AbortSignal,
+    waitForStartup = true,
+  ): Promise<TrustedGateway> => {
+    if (waitForStartup) await startupReady;
+    if (stopped) throw new Error("Matrix connection is closed.");
+    assertPersistenceHealthy();
+    handlers.onStatus("connected", "Publishing this device’s encryption keys…");
+    await ensureOwnMatrixDeviceKeysPublished();
+    const offerTransport = preview.transport;
+    assertMatchingPairingRoute(config, offerTransport);
+    handlers.onStatus("connected", "Verifying the Gateway device…");
+    await withMatrixTimeout(
+      verifyAndPinGatewayDevice(client, offerTransport),
+      GATEWAY_DEVICE_TIMEOUT_MS,
+      "The Gateway Matrix device could not be verified in time.",
+    );
+    handlers.onStatus("connected", "Preparing the encrypted pairing request…");
+    await withMatrixTimeout(
+      client.getCrypto()?.forceDiscardSession(config.roomId) ??
+        Promise.resolve(),
+      LOCAL_STORE_TIMEOUT_MS,
+      "The encrypted pairing session could not be prepared in time.",
+    );
+    const transport = createMatrixPairingTransport(
+      client,
+      sdk.RoomEvent.Timeline,
+      sdk.MsgType.Notice,
+      config.roomId,
+      (detail) => handlers.onStatus("connected", detail),
+    );
+    const trust = await completePairing(
+      preview,
+      identity,
+      {
+        homeserver: config.homeserver,
+        roomId: config.roomId,
+        userId: config.userId,
+        deviceId: config.matrixDeviceId,
+        ed25519: matrixDeviceKeys.ed25519,
+      },
+      deviceName,
+      transport,
+      signal,
+    );
+    activeTrust = trust;
+    handlers.onTrustUpdated?.(trust);
+    handlers.onStatus("securing", "Loading current sessions from Matrix Room State…");
+    await waitForAuthoritativeRoomState(signal);
+    handlers.onStatus("connected");
+    return trust;
+  };
+  const requestCapabilityRenewalOffer = async (
+    trust: TrustedGateway,
+    requestedOperations: readonly PairingOperation[],
+  ): Promise<CapabilityRenewalOffer> => {
+    const certificate = trust.certificate.certificate;
+    if (!certificate.allowedOperations.includes("device.invite")) {
+      throw new Error(
+        "This device certificate cannot renew its permissions. Pair this device again with a new invitation.",
+      );
+    }
+    const now = Date.now();
+    const request = capabilityRenewalRequestSchema.parse({
+      version: 1,
+      kind: "capability_renewal_request",
+      request_id: crypto.randomUUID(),
+      gateway_id: trust.gatewayId,
+      device_id: certificate.deviceId,
+      certificate_id: certificate.certificateId,
+      requested_operations: [...new Set(requestedOperations)],
+      issued_at: now,
+      expires_at: now + COMMAND_TTL_MS,
+    });
+    const offerPromise = new Promise<CapabilityRenewalOffer>((resolve) => {
+      capabilityRenewalWaiters.set(request.request_id, {
+        certificateId: certificate.certificateId,
+        resolve,
+      });
+    });
+    try {
+      const plaintext = {
+        msgtype: sdk.MsgType.Notice,
+        body: "Encrypted Codever device permission renewal",
+        "io.codever": request,
+      };
+      const secureEnvelope = await sealSecureEnvelope({
+        plaintext,
+        senderPrivateKey: identity.privateKey,
+        recipientPublicKey: trust.gatewayKey.publicKey,
+        gatewayId: trust.gatewayId,
+        conversationId: config.conversationId,
+        direction: "device_to_gateway",
+        senderDeviceId: certificate.deviceId,
+        recipientDeviceId: certificate.gatewayId,
+        senderKeyId: identity.keyId,
+        recipientKeyId: trust.gatewayKey.keyId,
+      });
+      await sendCodeverApplicationControlEvent(
+        client,
+        config.roomId,
+        {
+          msgtype: sdk.MsgType.Notice,
+          body: "Encrypted Codever device permission renewal",
+          "io.codever": {
+            version: 1,
+            kind: "secure_envelope",
+            secure_envelope: secureEnvelope,
+          },
+        } as unknown as RoomMessageEventContent,
+        `codever.capability-renewal.${request.request_id}`,
+      );
+      return await withMatrixTimeout(
+        offerPromise,
+        CAPABILITY_RENEWAL_TIMEOUT_MS,
+        "The Gateway did not renew this device’s permissions in time.",
+      );
+    } finally {
+      capabilityRenewalWaiters.delete(request.request_id);
+    }
+  };
+  let capabilityRenewal: Promise<TrustedGateway> | null = null;
+  const renewCapabilities = async (
+    trust: TrustedGateway,
+    requestedOperations: readonly PairingOperation[],
+  ): Promise<TrustedGateway> => {
+    if (
+      requestedOperations.every((operation) =>
+        trust.certificate.certificate.allowedOperations.includes(operation)
+      )
+    ) {
+      return trust;
+    }
+    capabilityRenewal ??= (async () => {
+      handlers.onStatus(
+        "securing",
+        "Updating this device’s permissions for the current Codever version…",
+      );
+      const offer = await requestCapabilityRenewalOffer(
+        trust,
+        requestedOperations,
+      );
+      const preview = await inspectPairingLink(offer.pairing_link);
+      if (
+        preview.gatewayId !== trust.gatewayId ||
+        canonicalJson(preview.signedOffer.offer.gatewayKey) !==
+          canonicalJson(trust.gatewayKey)
+      ) {
+        throw new Error(
+          "The permission renewal offer belongs to a different Gateway key.",
+        );
+      }
+      if (
+        requestedOperations.some(
+          (operation) =>
+            !preview.signedOffer.offer.allowedOperations.includes(operation),
+        )
+      ) {
+        throw new Error(
+          "The Gateway renewal offer does not authorize the required operation.",
+        );
+      }
+      await saveCapabilityRenewalMigration(
+        config,
+        identity,
+        trust.certificate.certificate.certificateId,
+      );
+      const renewed = await completePairingPreview(
+        preview,
+        trust.certificate.certificate.deviceName,
+        undefined,
+        false,
+      );
+      if (
+        requestedOperations.some(
+          (operation) =>
+            !renewed.certificate.certificate.allowedOperations.includes(operation),
+        )
+      ) {
+        throw new Error(
+          "The renewed device certificate does not authorize the required operation.",
+        );
+      }
+      return renewed;
+    })().finally(() => {
+      capabilityRenewal = null;
+    });
+    const renewed = await capabilityRenewal;
+    if (
+      requestedOperations.some(
+        (operation) =>
+          !renewed.certificate.certificate.allowedOperations.includes(operation),
+      )
+    ) {
+      return renewCapabilities(renewed, requestedOperations);
+    }
+    return renewed;
+  };
+  const ensurePendingCommandCapability = async (
+    trust: TrustedGateway,
+    expectedCommandId?: string,
+  ): Promise<TrustedGateway> => {
+    const currentSequenceEpoch =
+      trust.certificate.certificate.certificateId;
+    const pendingMigration = await readCapabilityRenewalMigration(
+      config,
+      identity,
+    );
+    if (
+      pendingMigration &&
+      pendingMigration.previousSequenceEpoch !== currentSequenceEpoch
+    ) {
+      const migrated = await migratePendingCommandSequenceEpoch(
+        config,
+        identity,
+        pendingMigration.previousSequenceEpoch,
+        currentSequenceEpoch,
+        expectedCommandId,
+      );
+      const currentPending: PendingOutboundCommand | undefined = migrated
+        ? {
+            ...migrated.reservation,
+            createdAt: Date.now(),
+            payload: migrated.payload,
+            needsSigning: true,
+          }
+        : (await readCommandSequenceState(
+            commandSequenceScope(config, identity, currentSequenceEpoch),
+          )).pending;
+      if (
+        currentPending &&
+        expectedCommandId &&
+        currentPending.commandId !== expectedCommandId
+      ) {
+        throw new Error(
+          `Refusing to recover command ${expectedCommandId}; command ${currentPending.commandId} is pending instead.`,
+        );
+      }
+      if (currentPending?.needsSigning) {
+        commandLifecycle.release(currentPending.commandId);
+        outboundCommandMetadata.delete(currentPending.commandId);
+        await preparePendingCommandPlaintext(
+          config,
+          identity,
+          currentSequenceEpoch,
+          currentPending,
+          currentPending.payload,
+        );
+      }
+      await clearCapabilityRenewalMigration(config, identity);
+      return trust;
+    }
+    if (
+      pendingMigration &&
+      Date.now() - pendingMigration.createdAt > 10 * 60_000
+    ) {
+      // A one-time pairing exchange cannot still be live after this window.
+      // Do not clear a fresh marker: another tab may be completing the
+      // renewal and needs it to survive a crash between trust and WAL writes.
+      await clearCapabilityRenewalMigration(config, identity);
+    }
+    const state = await readCommandSequenceState(
+      commandSequenceScope(config, identity, currentSequenceEpoch),
+    );
+    const pending = state.pending;
+    if (!pending) return trust;
+    if (expectedCommandId && pending.commandId !== expectedCommandId) {
+      return trust;
+    }
+    if (pending.needsSigning) {
+      await preparePendingCommandPlaintext(
+        config,
+        identity,
+        currentSequenceEpoch,
+        pending,
+        pending.payload,
+      );
+      return trust;
+    }
+    const operation = pending.payload.operation as PairingOperation;
+    if (trust.certificate.certificate.allowedOperations.includes(operation)) {
+      return trust;
+    }
+    const renewed = await renewCapabilities(trust, [operation]);
+    const nextSequenceEpoch =
+      renewed.certificate.certificate.certificateId;
+    const migrated = await migratePendingCommandSequenceEpoch(
+      config,
+      identity,
+      currentSequenceEpoch,
+      nextSequenceEpoch,
+      expectedCommandId,
+    );
+    if (migrated) {
+      commandLifecycle.release(migrated.reservation.commandId);
+      outboundCommandMetadata.delete(migrated.reservation.commandId);
+      await preparePendingCommandPlaintext(
+        config,
+        identity,
+        nextSequenceEpoch,
+        migrated.reservation,
+        migrated.payload,
+      );
+    }
+    await clearCapabilityRenewalMigration(config, identity);
+    return renewed;
+  };
+  const ensureOperationCapability = async (
+    trust: TrustedGateway,
+    operation: CommandOperation,
+  ): Promise<TrustedGateway> => {
+    const requiresRenewal =
+      !trust.certificate.certificate.allowedOperations.includes(
+        operation as PairingOperation,
+      );
+    const renewed = await renewCapabilities(
+      trust,
+      [operation as PairingOperation],
+    );
+    if (requiresRenewal) {
+      await clearCapabilityRenewalMigration(config, identity);
+    }
+    return renewed;
+  };
   const waitForCommandAcknowledgement = (
     reservation: CommandReservation,
     timeoutMs = 30_000,
@@ -1459,7 +1820,7 @@ export async function connectMatrix(
     await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
-    const trust = activeTrust;
+    let trust = activeTrust;
     if (!trust) {
       throw new Error(
         "Pair and verify the Gateway application key before sending.",
@@ -1475,7 +1836,8 @@ export async function connectMatrix(
         pendingRevisionConflict.payload,
       );
     }
-    const sequenceEpoch = trust.certificate.certificate.certificateId;
+    trust = await ensurePendingCommandCapability(trust);
+    let sequenceEpoch = trust.certificate.certificate.certificateId;
     await assertRevisionInitialized(
       config,
       identity,
@@ -1555,6 +1917,10 @@ export async function connectMatrix(
       }
     }
 
+    trust = await ensureOperationCapability(trust, payload.operation);
+    sequenceEpoch = trust.certificate.certificate.certificateId;
+    await assertRevisionInitialized(config, identity, sequenceEpoch);
+
     const reservation = await reserveCommandSequence(
       config,
       identity,
@@ -1607,7 +1973,7 @@ export async function connectMatrix(
     await startupReady;
     if (stopped) throw new Error("Matrix connection is closed.");
     assertPersistenceHealthy();
-    const trust = activeTrust;
+    let trust = activeTrust;
     if (!trust) {
       throw new Error(
         "Pair and verify the Gateway application key before recovering a command.",
@@ -1623,6 +1989,7 @@ export async function connectMatrix(
         pendingRevisionConflict.payload,
       );
     }
+    trust = await ensurePendingCommandCapability(trust, commandId);
     const sequenceEpoch = trust.certificate.certificate.certificateId;
     await assertRevisionInitialized(config, identity, sequenceEpoch);
     const recovered = await retryPendingCommand(
@@ -1683,63 +2050,35 @@ export async function connectMatrix(
     trust: TrustedGateway,
   ): Promise<string> => {
     assertPersistenceHealthy();
-    let content: RoomMessageEventContent;
-    try {
-      const envelope = await createSignedCommand(
-        config,
-        identity,
-        payload,
-        Date.now(),
-        reservation,
-        sequenceEpoch,
-      );
-      const certificate = trust.certificate.certificate;
-      const plaintext = {
-        msgtype: sdk.MsgType.Text,
-        body: fallbackBody(payload),
-        "io.codever": {
-          version: 1,
-          kind: "signed_command",
-          signed_command: envelope,
-        },
-      } as const;
-      await savePendingCommandPlaintext(
-        config,
-        identity,
-        sequenceEpoch,
-        reservation.commandId,
-        plaintext,
-      );
-      const secureEnvelope = await sealSecureEnvelope({
-        plaintext,
-        senderPrivateKey: identity.privateKey,
-        recipientPublicKey: trust.gatewayKey.publicKey,
-        gatewayId: trust.gatewayId,
-        conversationId: config.conversationId,
-        direction: "device_to_gateway",
-        senderDeviceId: certificate.deviceId,
-        recipientDeviceId: certificate.gatewayId,
-        senderKeyId: identity.keyId,
-        recipientKeyId: trust.gatewayKey.keyId,
-      });
-      content = {
-        msgtype: sdk.MsgType.Notice,
-        body: "Encrypted Codever message",
-        "io.codever": {
-          version: 1,
-          kind: "secure_envelope",
-          secure_envelope: secureEnvelope,
-        },
-      } as unknown as RoomMessageEventContent;
-    } catch (error) {
-      await abandonIncompleteCommand(
-        config,
-        identity,
-        sequenceEpoch,
-        reservation.commandId,
-      );
-      throw error;
-    }
+    const plaintext = await preparePendingCommandPlaintext(
+      config,
+      identity,
+      sequenceEpoch,
+      reservation,
+      payload,
+    );
+    const certificate = trust.certificate.certificate;
+    const secureEnvelope = await sealSecureEnvelope({
+      plaintext: plaintext as JsonValue,
+      senderPrivateKey: identity.privateKey,
+      recipientPublicKey: trust.gatewayKey.publicKey,
+      gatewayId: trust.gatewayId,
+      conversationId: config.conversationId,
+      direction: "device_to_gateway",
+      senderDeviceId: certificate.deviceId,
+      recipientDeviceId: certificate.gatewayId,
+      senderKeyId: identity.keyId,
+      recipientKeyId: trust.gatewayKey.keyId,
+    });
+    const content = {
+      msgtype: sdk.MsgType.Notice,
+      body: "Encrypted Codever message",
+      "io.codever": {
+        version: 1,
+        kind: "secure_envelope",
+        secure_envelope: secureEnvelope,
+      },
+    } as unknown as RoomMessageEventContent;
     return sendCodeverApplicationControlEvent(
       client,
       config.roomId,
@@ -2033,52 +2372,7 @@ export async function connectMatrix(
       ed25519: matrixDeviceKeys.ed25519,
     },
     async pair(preview, deviceName, signal) {
-      await startupReady;
-      if (stopped) throw new Error("Matrix connection is closed.");
-      assertPersistenceHealthy();
-      handlers.onStatus("connected", "Publishing this device’s encryption keys…");
-      await ensureOwnMatrixDeviceKeysPublished();
-      const offerTransport = preview.transport;
-      assertMatchingPairingRoute(config, offerTransport);
-      handlers.onStatus("connected", "Verifying the Gateway device…");
-      await withMatrixTimeout(
-        verifyAndPinGatewayDevice(client, offerTransport),
-        GATEWAY_DEVICE_TIMEOUT_MS,
-        "The Gateway Matrix device could not be verified in time.",
-      );
-      handlers.onStatus("connected", "Preparing the encrypted pairing request…");
-      await withMatrixTimeout(
-        client.getCrypto()?.forceDiscardSession(config.roomId) ??
-          Promise.resolve(),
-        LOCAL_STORE_TIMEOUT_MS,
-        "The encrypted pairing session could not be prepared in time.",
-      );
-      const transport = createMatrixPairingTransport(
-        client,
-        sdk.RoomEvent.Timeline,
-        sdk.MsgType.Notice,
-        config.roomId,
-        (detail) => handlers.onStatus("connected", detail),
-      );
-      const trust = await completePairing(
-        preview,
-        identity,
-        {
-          homeserver: config.homeserver,
-          roomId: config.roomId,
-          userId: config.userId,
-          deviceId: config.matrixDeviceId,
-          ed25519: matrixDeviceKeys.ed25519,
-        },
-        deviceName,
-        transport,
-        signal,
-      );
-      activeTrust = trust;
-      handlers.onStatus("securing", "Loading current sessions from Matrix Room State…");
-      await waitForAuthoritativeRoomState(signal);
-      handlers.onStatus("connected");
-      return trust;
+      return completePairingPreview(preview, deviceName, signal);
     },
     send(payload) {
       const operation = outboundChain.then(() => sendPayload(payload));
@@ -3012,6 +3306,7 @@ export async function processGatewayTimelineEvent(
   ) => Promise<void>,
   onNativeSessionStatus?: (extension: Record<string, unknown>) => Promise<void>,
   historical = false,
+  onCapabilityRenewalOffer?: (offer: CapabilityRenewalOffer) => void,
 ): Promise<void> {
   const eventId = event.getId();
   const sender = event.getSender();
@@ -3138,6 +3433,14 @@ export async function processGatewayTimelineEvent(
       identity,
       decryptedExtension.timeline_key_ring_grant,
     );
+    seen.add(eventId);
+    return;
+  }
+  const capabilityRenewalOffer = capabilityRenewalOfferSchema.safeParse(
+    decryptedExtension,
+  );
+  if (capabilityRenewalOffer.success) {
+    onCapabilityRenewalOffer?.(capabilityRenewalOffer.data);
     seen.add(eventId);
     return;
   }
@@ -3558,6 +3861,120 @@ function commandSequenceScope(
   ]);
 }
 
+function capabilityRenewalMigrationScope(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+): string {
+  return JSON.stringify([
+    "capability-renewal-migration-v1",
+    config.gatewayId,
+    identity.keyId,
+    config.conversationId,
+  ]);
+}
+
+async function saveCapabilityRenewalMigration(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  previousSequenceEpoch: string,
+): Promise<void> {
+  const database = await openIdentityDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(
+        COMMAND_SEQUENCE_STORE,
+        "readwrite",
+      );
+      transaction.objectStore(COMMAND_SEQUENCE_STORE).put(
+        {
+          version: 1,
+          previousSequenceEpoch,
+          createdAt: Date.now(),
+        } satisfies CapabilityRenewalMigration,
+        capabilityRenewalMigrationScope(config, identity),
+      );
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(
+        transaction.error ??
+          new Error("Could not save the device permission migration."),
+      );
+      transaction.onabort = () => reject(
+        transaction.error ??
+          new Error("Could not save the device permission migration."),
+      );
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function readCapabilityRenewalMigration(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+): Promise<CapabilityRenewalMigration | null> {
+  const database = await openIdentityDatabase();
+  try {
+    const value = await new Promise<unknown>((resolve, reject) => {
+      const request = database
+        .transaction(COMMAND_SEQUENCE_STORE, "readonly")
+        .objectStore(COMMAND_SEQUENCE_STORE)
+        .get(capabilityRenewalMigrationScope(config, identity));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(
+        request.error ??
+          new Error("Could not read the device permission migration."),
+      );
+    });
+    const record = asRecord(value);
+    if (!record) return null;
+    if (
+      record.version !== 1 ||
+      typeof record.previousSequenceEpoch !== "string" ||
+      !record.previousSequenceEpoch ||
+      typeof record.createdAt !== "number" ||
+      !Number.isSafeInteger(record.createdAt)
+    ) {
+      throw new Error("The device permission migration record is corrupt.");
+    }
+    return {
+      version: 1,
+      previousSequenceEpoch: record.previousSequenceEpoch,
+      createdAt: record.createdAt,
+    };
+  } finally {
+    database.close();
+  }
+}
+
+async function clearCapabilityRenewalMigration(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+): Promise<void> {
+  const database = await openIdentityDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(
+        COMMAND_SEQUENCE_STORE,
+        "readwrite",
+      );
+      transaction
+        .objectStore(COMMAND_SEQUENCE_STORE)
+        .delete(capabilityRenewalMigrationScope(config, identity));
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(
+        transaction.error ??
+          new Error("Could not complete the device permission migration."),
+      );
+      transaction.onabort = () => reject(
+        transaction.error ??
+          new Error("Could not complete the device permission migration."),
+      );
+    });
+  } finally {
+    database.close();
+  }
+}
+
 function gatewayEpochScope(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -3672,6 +4089,161 @@ async function reserveCommandSequence(
   }
 }
 
+async function migratePendingCommandSequenceEpoch(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  previousSequenceEpoch: string,
+  nextSequenceEpoch: string,
+  expectedCommandId?: string,
+): Promise<{
+  reservation: CommandReservation;
+  payload: CommandPayload;
+} | null> {
+  if (previousSequenceEpoch === nextSequenceEpoch) return null;
+  const database = await openIdentityDatabase();
+  const previousScope = commandSequenceScope(
+    config,
+    identity,
+    previousSequenceEpoch,
+  );
+  const nextScope = commandSequenceScope(config, identity, nextSequenceEpoch);
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction(
+        COMMAND_SEQUENCE_STORE,
+        "readwrite",
+      );
+      const store = transaction.objectStore(COMMAND_SEQUENCE_STORE);
+      const previousRead = store.get(previousScope);
+      const nextRead = store.get(nextScope);
+      let reads = 0;
+      let failure: Error | null = null;
+      let migrated: {
+        reservation: CommandReservation;
+        payload: CommandPayload;
+      } | null = null;
+      const prepare = () => {
+        reads += 1;
+        if (reads !== 2) return;
+        try {
+          const previous = parseCommandSequenceState(previousRead.result);
+          const next = parseCommandSequenceState(nextRead.result);
+          const pending = previous.pending;
+          if (!pending) return;
+          if (expectedCommandId && pending.commandId !== expectedCommandId) {
+            throw new Error(
+              `Refusing to migrate command ${expectedCommandId}; command ${pending.commandId} is pending instead.`,
+            );
+          }
+          if (pending.completion) {
+            throw new Error(
+              "A completed command cannot be migrated to another device certificate.",
+            );
+          }
+          if (!next.revisionInitialized || !next.revisionEpoch) {
+            throw new Error(
+              "Waiting for the current Gateway session state under the renewed device certificate.",
+            );
+          }
+          if (next.pending) {
+            throw new Error(
+              "The renewed device certificate already has a pending command.",
+            );
+          }
+          const reservation: CommandReservation = {
+            commandId: pending.commandId,
+            sequence: next.lastAcknowledged + 1,
+            baseRevision: next.lastRevision,
+            revisionEpoch: next.revisionEpoch,
+          };
+          const payload = structuredClone(pending.payload);
+          store.put(
+            { ...previous, pending: undefined } satisfies CommandSequenceState,
+            previousScope,
+          );
+          store.put(
+            {
+              ...next,
+              pending: {
+                ...reservation,
+                createdAt: Date.now(),
+                payload,
+                needsSigning: true,
+              },
+            } satisfies CommandSequenceState,
+            nextScope,
+          );
+          migrated = { reservation, payload };
+        } catch (error) {
+          failure = error instanceof Error ? error : new Error(String(error));
+          transaction.abort();
+        }
+      };
+      previousRead.onsuccess = prepare;
+      nextRead.onsuccess = prepare;
+      previousRead.onerror = () => transaction.abort();
+      nextRead.onerror = () => transaction.abort();
+      transaction.oncomplete = () => resolve(migrated);
+      transaction.onerror = () => reject(
+        failure ??
+          transaction.error ??
+          new Error("Could not migrate the durable command outbox."),
+      );
+      transaction.onabort = () => reject(
+        failure ??
+          transaction.error ??
+          new Error("Could not migrate the durable command outbox."),
+      );
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function preparePendingCommandPlaintext(
+  config: MatrixConnectionConfig,
+  identity: DeviceIdentity,
+  sequenceEpoch: string,
+  reservation: CommandReservation,
+  payload: CommandPayload,
+): Promise<Record<string, unknown>> {
+  try {
+    const envelope = await createSignedCommand(
+      config,
+      identity,
+      payload,
+      Date.now(),
+      reservation,
+      sequenceEpoch,
+    );
+    const plaintext = {
+      msgtype: "m.text",
+      body: fallbackBody(payload),
+      "io.codever": {
+        version: 1,
+        kind: "signed_command",
+        signed_command: envelope,
+      },
+    };
+    await savePendingCommandPlaintext(
+      config,
+      identity,
+      sequenceEpoch,
+      reservation.commandId,
+      plaintext,
+    );
+    return plaintext;
+  } catch (error) {
+    await abandonIncompleteCommand(
+      config,
+      identity,
+      sequenceEpoch,
+      reservation.commandId,
+    );
+    throw error;
+  }
+}
+
 async function assertRevisionInitialized(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -3708,6 +4280,7 @@ async function savePendingCommandPlaintext(
         pending: {
           ...state.pending,
           plaintext: structuredClone(plaintext),
+          needsSigning: undefined,
         },
       };
     },
@@ -4356,6 +4929,7 @@ function parseCommandSequenceState(value: unknown): CommandSequenceState {
       ...(asRecord(pending.plaintext)
         ? { plaintext: pending.plaintext as Record<string, unknown> }
         : {}),
+      ...(pending.needsSigning === true ? { needsSigning: true } : {}),
       ...(completion ? { completion } : {}),
     },
   };
