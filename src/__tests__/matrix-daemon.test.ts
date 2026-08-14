@@ -1546,7 +1546,7 @@ describe('MatrixJsSdkGatewayClient', () => {
 
         await expect(client.start()).rejects.toThrow('crypto must be initialized')
         await client.initializeCrypto({
-            useIndexedDB: true,
+            backend: 'indexeddb',
             databasePrefix: 'codever-device',
             storageKey: new Uint8Array(32),
         })
@@ -1767,10 +1767,10 @@ describe('Matrix gateway configuration', () => {
     it('forbids accidental in-memory production crypto', async () => {
         const fixture = await securityFixture()
         fixture.config.crypto = {
-            ...fixture.config.crypto,
-            useIndexedDB: false,
+            backend: 'memory',
+            databasePrefix: 'codever-test',
             allowInMemoryForTesting: false,
-        }
+        } as unknown as MatrixGatewayConfig['crypto']
 
         expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow('In-memory Matrix crypto is forbidden')
     })
@@ -1880,7 +1880,7 @@ async function securityFixture() {
             deviceId: 'GATEWAY1',
         },
         crypto: {
-            useIndexedDB: false,
+            backend: 'memory',
             databasePrefix: 'codever-test',
             allowInMemoryForTesting: true,
         },

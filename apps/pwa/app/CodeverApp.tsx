@@ -129,6 +129,7 @@ import {
   sessionSignalLabel,
   summarizeProjectSessions,
 } from "./sessionListOrder";
+import { canonicalGatewayProjects } from "./projectCatalog";
 import {
   EMPTY_UI_NOTICE_STATE,
   noticesForScope,
@@ -459,6 +460,9 @@ export function CodeverApp() {
     useState<MatrixConnectionStatus>("offline");
   const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  // Pairing is an operation layered on top of an already-connected Matrix
+  // sync. A routine "connected" status must not erase its timeout/error.
+  const [pairingError, setPairingError] = useState<string | null>(null);
   const [nativeRuntime, setNativeRuntime] =
     useState<CodeverNativeRuntimeInfo | null>(null);
   const [pwaUpdateState, setPwaUpdateState] = useState<PwaUpdateState>({
@@ -678,6 +682,16 @@ export function CodeverApp() {
   const archivedSessionCount =
     visibleGatewaySessions.filter((session) => session.status === "archived")
       .length ?? 0;
+  const canonicalProjectsById = useMemo(
+    () =>
+      new Map(
+        canonicalGatewayProjects(
+          gatewayState?.workspace,
+          visibleGatewaySessions,
+        ).map((project) => [project.projectId, project]),
+      ),
+    [gatewayState?.workspace, visibleGatewaySessions],
+  );
   const projectGroups = useMemo(() => {
     const groups = new Map<
       string,
@@ -691,11 +705,12 @@ export function CodeverApp() {
     >();
     for (const session of activeFilteredSessions) {
       const key = gatewayProjectKey(matrixConfig.gatewayId, session.projectId);
+      const project = canonicalProjectsById.get(session.projectId) ?? session;
       const group = groups.get(key) ?? {
         key,
         projectId: session.projectId,
-        projectName: session.projectName,
-        cwd: session.cwd,
+        projectName: project.projectName,
+        cwd: project.cwd,
         sessions: [],
       };
       group.sessions.push(session);
@@ -715,7 +730,12 @@ export function CodeverApp() {
       ) || left.projectName.localeCompare(right.projectName),
     );
     return projects;
-  }, [activeFilteredSessions, matrixConfig.gatewayId, sessionReadState]);
+  }, [
+    activeFilteredSessions,
+    canonicalProjectsById,
+    matrixConfig.gatewayId,
+    sessionReadState,
+  ]);
   const connectionPresentation = useMemo(
     () => deriveConnectionPresentation(connectionStatus, connectionDetail),
     [connectionDetail, connectionStatus],
@@ -2107,6 +2127,7 @@ export function CodeverApp() {
           if (trust) {
             setPairingPreview(null);
             setPairingBusy(false);
+            setPairingError(null);
             setConnectionError(null);
           }
         },
@@ -2398,6 +2419,7 @@ export function CodeverApp() {
     setConnectionStatus("offline");
     setConnectionDetail(null);
     setConnectionError(null);
+    setPairingError(null);
     setRunningSessionIds(new Set());
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
@@ -2468,6 +2490,7 @@ export function CodeverApp() {
     setDeviceInvitation(null);
     setInvitationReauthRequired(false);
     setConnectionError(null);
+    setPairingError(null);
     setMessages([]);
     if (historyScope) {
       writeSelectedSession(window.localStorage, historyScope, null);
@@ -2488,6 +2511,7 @@ export function CodeverApp() {
 
   async function openPairingLink(link: string) {
     setConnectionError(null);
+    setPairingError(null);
     try {
       if (
         hasShortDeviceInvitation(
@@ -2528,6 +2552,7 @@ export function CodeverApp() {
 
   async function openDeviceInvitation(link: string) {
     setConnectionError(null);
+    setPairingError(null);
     try {
       const invitation = decodeDeviceInvitationLink(link);
       const preview = await inspectPairingLink(
@@ -2609,7 +2634,7 @@ export function CodeverApp() {
   async function signInForPairing(userId: string, password: string) {
     if (pairingBusy) return;
     setPairingBusy(true);
-    setConnectionError(null);
+    setPairingError(null);
     try {
       detachClientForNativeBootstrap();
       const preview = pairingPreview;
@@ -2843,6 +2868,7 @@ export function CodeverApp() {
     const abort = new AbortController();
     pairingAbortRef.current = abort;
     setPairingBusy(true);
+    setPairingError(null);
     setConnectionError(null);
     try {
       const transport = previewOverride.transport;
@@ -2872,6 +2898,7 @@ export function CodeverApp() {
       setActiveDeviceCount(trust.activeDeviceCount ?? null);
       setMatrixConfig(configForPairing);
       setPairingPreview(null);
+      setPairingError(null);
       setSettingsOpen(false);
       showUiNotice(
         "connection:paired",
@@ -2882,7 +2909,7 @@ export function CodeverApp() {
       );
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
-        setConnectionError(formatUiError(error));
+        setPairingError(formatUiError(error));
       }
     } finally {
       if (pairingAbortRef.current === abort) pairingAbortRef.current = null;
@@ -5319,7 +5346,7 @@ export function CodeverApp() {
         </div>
       )}
 
-      {connectionError && !settingsOpen && (
+      {(pairingError ?? connectionError) && !settingsOpen && (
         <button
           className="connection-toast"
           role="alert"
@@ -5328,7 +5355,7 @@ export function CodeverApp() {
           <span>!</span>
           <span>
             <strong>Connection needs attention</strong>
-            <small>{connectionError}</small>
+            <small>{pairingError ?? connectionError}</small>
           </span>
           <b>Open settings</b>
         </button>
@@ -5365,7 +5392,7 @@ export function CodeverApp() {
         config={matrixConfig}
         status={connectionStatus}
         progressDetail={connectionPresentation.detail}
-        error={connectionError}
+        error={pairingError ?? connectionError}
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
         pairingBusy={pairingBusy}
@@ -5380,6 +5407,7 @@ export function CodeverApp() {
         onClearPairing={() => {
           pairingAbortRef.current?.abort();
           setPairingPreview(null);
+          setPairingError(null);
           setConnectionError(null);
         }}
         onConfirmPairing={() => void confirmPairing()}

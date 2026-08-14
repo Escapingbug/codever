@@ -729,12 +729,16 @@ class MainActivity : ComponentActivity() {
                 if (continuation.isActive) continuation.resume(true)
             }
             .setNegativeButton("Cancel") { _, _ ->
-                if (continuation.isActive) continuation.resume(false)
-            }
-            .setOnCancelListener {
+                diagnostics.record("activity.pairing_confirmation.rejected")
                 if (continuation.isActive) continuation.resume(false)
             }
             .create()
+        // Backgrounding the Activity, a transient window replacement, or an
+        // Android back gesture must not be interpreted as an explicit denial.
+        // Pairing is durable and remains pending until the user chooses one of
+        // the two buttons (or the owning bridge call is genuinely cancelled).
+        dialog.setCancelable(false)
+        dialog.setCanceledOnTouchOutside(false)
         continuation.invokeOnCancellation { dialog.dismiss() }
         dialog.show()
     }

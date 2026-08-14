@@ -163,11 +163,18 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
 
     async initializeCrypto(config: MatrixGatewayCryptoConfig): Promise<void> {
         if (this.cryptoInitialized) return
+        if (config.backend === 'node-sqlite') {
+            throw new Error('matrix-js-sdk cannot use the Node SQLite crypto backend')
+        }
         await this.client.initRustCrypto({
-            useIndexedDB: config.useIndexedDB,
+            useIndexedDB: config.backend === 'indexeddb',
             cryptoDatabasePrefix: config.databasePrefix,
-            ...(config.storageKey ? { storageKey: config.storageKey } : {}),
-            ...(config.storagePassword ? { storagePassword: config.storagePassword } : {}),
+            ...(config.backend === 'indexeddb' && config.storageKey
+                ? { storageKey: config.storageKey }
+                : {}),
+            ...(config.backend === 'indexeddb' && config.storagePassword
+                ? { storagePassword: config.storagePassword }
+                : {}),
         })
         if (!this.client.getCrypto()) throw new Error('Matrix Rust crypto initialization returned no CryptoApi')
         const crypto = this.client.getCrypto()

@@ -12,6 +12,7 @@ import {
     type Page,
     type Route,
 } from 'playwright-core'
+import { decodePairingLink } from '@codever/protocol'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidAlphaJourney } from './e2e/androidAlphaJourney.js'
 import {
@@ -173,9 +174,8 @@ try {
     const baselineBeforeRotationCreate = await activeSessionCount(firstPage)
     await gatewayProcess.crash()
     // Submit while the browser still owns the durable command sequence but
-    // before the replacement Gateway device announces its transport. This is
-    // the real race: Matrix remains connected, so the UI accepts the command,
-    // while the old Megolm session cannot address the replacement device.
+    // before the persistent Gateway device has resumed its sync. Matrix stays
+    // connected, so the UI accepts the command and the WAL must reconcile it.
     const rotationCreateStartedAt = Date.now()
     await beginSessionCreate(firstPage, rotationProjectName, secondProjectDirectory)
     gatewayProcess = startGatewayProcess({
@@ -186,11 +186,20 @@ try {
         providerDelayMs: 3_500,
         sessionExtensionsJson: privacyFixture.gatewayRegistration,
     })
-    await gatewayProcess.waitFor(
-        /Gateway Matrix transport key rotated and signed automatically\./u,
-        STARTUP_TIMEOUT_MS,
-    )
     await gatewayProcess.waitFor(/Gateway ready with 1 trusted device\(s\)\./u)
+    const admin = new GatewayAdminClient({
+        socketPath: gatewayAdminSocket,
+        timeoutMs: 10_000,
+    })
+    const postRestartInvitation = await admin.createInvitation({
+        matrixLogin: 'disabled',
+        appUrl: pwaUrl,
+    })
+    assert.deepEqual(
+        decodePairingLink(postRestartInvitation.pairingLink).offer.gatewayTransport,
+        decodePairingLink(firstPairingLink).offer.gatewayTransport,
+        'Gateway restart changed the Matrix device or encryption identity',
+    )
     await settleSessionCreateAcrossGatewayRotation(
         firstPage,
         rotationProjectName,
@@ -201,7 +210,7 @@ try {
     )
     const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
     assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
-    process.stdout.write('[4r/8] PASS — active work did not block session creation after Gateway rotation.\n')
+    process.stdout.write('[4r/8] PASS — the same encrypted Gateway device recovered active work and queued creation.\n')
 
     process.stdout.write('[4a/8] Sending text and image attachments through the real Agent input boundary…\n')
     await sendPromptWithAttachment(firstPage, {
@@ -227,17 +236,10 @@ try {
     process.stdout.write('[4a/8] PASS — Agent processed content found only inside text and image attachment bytes.\n')
 
     process.stdout.write('[5/8] Pairing a second device and restoring existing state…\n')
-    const admin = new GatewayAdminClient({
-        socketPath: gatewayAdminSocket,
-        timeoutMs: 10_000,
-    })
     // Force the second browser's initial sync to be limited. A session-scoped
     // history implementation must not depend on scanning this whole room.
     await sendIgnoredTimelineNoise(fixture, `${runId}-before-pair`, TIMELINE_NOISE_EVENT_COUNT)
-    const invitation = await admin.createInvitation({
-        matrixLogin: 'disabled',
-        appUrl: pwaUrl,
-    })
+    const invitation = postRestartInvitation
     const secondContext = await browser.newContext()
     secondPage = await secondContext.newPage()
     captureBrowserDiagnostics(secondPage, 'browser-2')
@@ -785,7 +787,9 @@ async function beginSessionCreate(page: Page, projectName: string, cwd: string):
 
 async function waitForProjectWorking(page: Page, projectName: string): Promise<void> {
     await waitFor(async () => {
-        const row = projectGroup(page, projectName).locator('button.session-row').first()
+        const row = page.locator(
+            `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+        ).first()
         const className = await row.getAttribute('class')
         return className?.includes('session-signal-working') ?? false
     }, {
@@ -1225,13 +1229,19 @@ async function openProjectSession(
     projectName: string,
     selectionTimeoutMs = UI_FEEDBACK_TIMEOUT_MS,
 ): Promise<void> {
-    const group = projectGroup(page, projectName)
+    const matchingRows = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+    )
+    const selectedMatchingRow = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}][aria-pressed="true"]`,
+    )
+    const row = await selectedMatchingRow.count() > 0
+        ? selectedMatchingRow.first()
+        : matchingRows.first()
+    await row.waitFor({ state: 'attached', timeout: selectionTimeoutMs })
+    const group = page.locator('.project-session-group').filter({ has: row })
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    const selectedRow = group.locator('button.session-row[aria-pressed="true"]')
-    const row = await selectedRow.count() > 0
-        ? selectedRow.first()
-        : group.locator('button.session-row').first()
     const sessionId = await row.getAttribute('data-session-id')
     assert.ok(sessionId, `Session row in ${projectName} did not expose a stable identity`)
     if (await row.getAttribute('aria-pressed') !== 'true') {
@@ -1292,10 +1302,11 @@ async function openSession(
 }
 
 function projectGroup(page: Page, projectName: string): Locator {
+    const row = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+    ).first()
     return page.locator('.project-session-group').filter({
-        has: page.locator('.project-copy strong', {
-            hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u'),
-        }),
+        has: row,
     })
 }
 
@@ -1666,10 +1677,6 @@ async function capturePage(page: Page | undefined, path: string): Promise<void> 
 
 function redactSecrets(value: string): string {
     return value.replace(/codever:\/\/[^\s]+/gu, '[REDACTED_PAIRING_LINK]')
-}
-
-function escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
 function formatError(error: unknown): string {

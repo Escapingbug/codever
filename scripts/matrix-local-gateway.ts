@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { createClient } from 'matrix-js-sdk'
-import type { Logger } from 'matrix-js-sdk/lib/logger.js'
 import QRCode from 'qrcode'
 import { PairingOfferGuard } from '@codever/security'
 import { FileReplayStore } from '@codever/security/node'
@@ -23,9 +21,9 @@ import {
 } from '../src/gateway/admin/index.js'
 import {
     MatrixGatewayRunner,
-    MatrixJsSdkGatewayClient,
+    MatrixNodeSdkGatewayClient,
+    loadOrCreateMatrixCryptoPassphrase,
     loadOrLoginMatrixGateway,
-    watchMatrixSyncHealth,
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
@@ -41,19 +39,6 @@ interface LocalMatrixFixture {
     roomId: string
     gatewayId: string
     gateway: { userId: string }
-}
-
-const quietLogger: Logger = {
-    trace() {},
-    debug() {},
-    info() {},
-    warn(message) {
-        process.stderr.write(`[matrix] ${String(message)}\n`)
-    },
-    error(message) {
-        process.stderr.write(`[matrix] ${String(message)}\n`)
-    },
-    getChild: () => quietLogger,
 }
 
 const fixture = await readJson<LocalMatrixFixture>(
@@ -93,14 +78,13 @@ const login = await loadOrLoginMatrixGateway({
         ?? (isLoopbackHomeserver(fixture.homeserver) ? 'codever-gateway-local' : undefined),
     onLog: message => process.stderr.write(`[matrix-login] ${message}\n`),
 })
-const sdkClient = createClient({
+const client = new MatrixNodeSdkGatewayClient({
     baseUrl: fixture.homeserver,
     accessToken: login.access_token,
     userId: login.user_id,
     deviceId: login.device_id,
-    logger: quietLogger,
-})
-const client = new MatrixJsSdkGatewayClient(sdkClient, 30_000, message => {
+    initialSyncTimeoutMs: 30_000,
+}, 30_000, message => {
     process.stderr.write(`${message}\n`)
 })
 const identity = await new FileGatewayIdentityStore(
@@ -117,16 +101,19 @@ const pairingService = new GatewayPairingService(
     ),
 )
 
-await client.initializeCrypto({
-    useIndexedDB: false,
-    databasePrefix: `codever-local-gateway-${runId}`,
-    allowInMemoryForTesting: true,
-})
+const cryptoConfig = {
+    backend: 'node-sqlite' as const,
+    storagePath: join(dataDirectory, 'matrix-crypto'),
+    storagePassword: await loadOrCreateMatrixCryptoPassphrase(
+        join(dataDirectory, 'matrix-crypto.passphrase'),
+    ),
+    syncTokenPath: join(dataDirectory, 'matrix-sync-token.json'),
+}
+await client.initializeCrypto(cryptoConfig)
 await client.start()
 await client.waitUntilReady()
 await client.assertRoomEncrypted(fixture.roomId)
-const ownKeys = await sdkClient.getCrypto()?.getOwnDeviceKeys()
-if (!ownKeys) throw new Error('Gateway Matrix device keys are unavailable')
+const ownKeys = client.getOwnDeviceKeys()
 const currentTransport = {
     homeserver: fixture.homeserver,
     roomId: fixture.roomId,
@@ -256,11 +243,7 @@ const config: MatrixGatewayConfig = {
         deviceId: login.device_id,
         initialSyncTimeoutMs: 30_000,
     },
-    crypto: {
-        useIndexedDB: false,
-        databasePrefix: `codever-local-gateway-${runId}`,
-        allowInMemoryForTesting: true,
-    },
+    crypto: cryptoConfig,
     rooms: [{
         roomId: fixture.roomId,
         conversationId: fixture.roomId,
@@ -389,7 +372,7 @@ const stopped = new Promise<{ failure: Error | null; forced: boolean }>(resolve 
     process.once('SIGINT', () => requestStop())
     process.once('SIGTERM', () => requestStop())
 })
-const stopSyncWatchdog = watchMatrixSyncHealth(sdkClient, {
+const stopSyncWatchdog = client.watchSyncHealth({
     stallTimeoutMs: syncStallTimeoutMs,
 }, error => {
     process.stderr.write(

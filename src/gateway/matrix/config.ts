@@ -1,17 +1,27 @@
 import type { CommandOperation } from '@codever/protocol'
 import type { SerializedDeviceKeyPair } from '@codever/security'
 
-export interface MatrixGatewayCryptoConfig {
-    /**
-     * Production gateways must persist the Rust crypto store. In-memory crypto
-     * is available only when explicitly enabled for tests.
-     */
-    useIndexedDB: boolean
-    databasePrefix: string
-    storageKey?: Uint8Array
-    storagePassword?: string
-    allowInMemoryForTesting?: boolean
-}
+export type MatrixGatewayCryptoConfig =
+    | {
+        backend: 'indexeddb'
+        databasePrefix: string
+        storageKey?: Uint8Array
+        storagePassword?: string
+    }
+    | {
+        backend: 'node-sqlite'
+        /** Directory containing the durable Matrix Olm/Megolm SQLite store. */
+        storagePath: string
+        /** Passphrase used by the Rust SDK to encrypt the store at rest. */
+        storagePassword?: string
+        /** Durable /sync cursor committed only after a sync is fully processed. */
+        syncTokenPath: string
+    }
+    | {
+        backend: 'memory'
+        databasePrefix: string
+        allowInMemoryForTesting: true
+    }
 
 export interface MatrixGatewayConnectionConfig {
     baseUrl: string
@@ -81,7 +91,18 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
     requireText(config.connection.accessToken, 'connection.accessToken')
     requireText(config.connection.userId, 'connection.userId')
     requireText(config.connection.deviceId, 'connection.deviceId')
-    requireText(config.crypto.databasePrefix, 'crypto.databasePrefix')
+    if (config.crypto.backend === 'node-sqlite') {
+        requireText(config.crypto.storagePath, 'crypto.storagePath')
+        requireText(config.crypto.syncTokenPath, 'crypto.syncTokenPath')
+    } else {
+        requireText(config.crypto.databasePrefix, 'crypto.databasePrefix')
+    }
+    if (
+        config.crypto.backend === 'memory'
+        && config.crypto.allowInMemoryForTesting !== true
+    ) {
+        throw new Error('In-memory Matrix crypto is forbidden unless explicitly enabled for tests')
+    }
     requireText(config.replayLedgerPath, 'replayLedgerPath')
     if (!config.applicationSecurity) {
         throw new Error('Application-layer Matrix security is required')
@@ -101,10 +122,11 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
         throw new Error('applicationSecurity.gatewayDeviceId must equal gatewayId')
     }
 
-    if (!config.crypto.useIndexedDB && !config.crypto.allowInMemoryForTesting) {
-        throw new Error('In-memory Matrix crypto is forbidden unless allowInMemoryForTesting is explicitly enabled')
-    }
-    if (config.crypto.storageKey && config.crypto.storageKey.byteLength !== 32) {
+    if (
+        config.crypto.backend === 'indexeddb'
+        && config.crypto.storageKey
+        && config.crypto.storageKey.byteLength !== 32
+    ) {
         throw new Error('Matrix crypto storageKey must be exactly 32 bytes')
     }
     if (config.rooms.length === 0) throw new Error('At least one Matrix room is required')

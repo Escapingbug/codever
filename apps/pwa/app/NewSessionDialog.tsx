@@ -13,6 +13,7 @@ import {
   type GatewaySessionSummary,
   type GatewayWorkspaceState,
 } from "./gatewayState";
+import { canonicalGatewayProjects } from "./projectCatalog";
 
 type NewSessionInput = {
   cwd: string;
@@ -55,24 +56,15 @@ function NewSessionDialogContent({
   onCreate,
 }: Props) {
   const projects = useMemo(() => {
-    const values = new Map<
-      string,
-      { id: string; name: string; cwd: string; key: string }
-    >();
-    const add = (project: { projectId: string; projectName: string; cwd: string }) => {
+    return canonicalGatewayProjects(workspace, sessions).map((project) => {
       const key = gatewayProjectKey(gatewayId, project.projectId);
-      if (!values.has(key)) {
-        values.set(key, {
-          id: project.projectId,
-          name: project.projectName,
-          cwd: project.cwd,
-          key,
-        });
-      }
-    };
-    add(workspace);
-    for (const session of sessions) add(session);
-    return [...values.values()];
+      return {
+        id: project.projectId,
+        name: project.projectName,
+        cwd: project.cwd,
+        key,
+      };
+    });
   }, [gatewayId, sessions, workspace]);
   const currentProjectKey = gatewayProjectKey(
     gatewayId,

@@ -366,23 +366,30 @@ async function waitForDecisionState(card: Locator, state: string): Promise<void>
 }
 
 async function assertPrivacyBadge(page: Page, projectName: string): Promise<void> {
-    const group = projectGroup(page, projectName)
+    const row = projectSessionRow(page, projectName)
+    const group = page.locator('.project-session-group').filter({ has: row })
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    await group.locator('.session-extension-badge').filter({ hasText: 'HaS privacy' }).waitFor({
+    await row.locator('.session-extension-badge').filter({ hasText: 'HaS privacy' }).waitFor({
         state: 'visible',
         timeout: CONVERGENCE_TIMEOUT_MS,
     })
 }
 
 async function openProjectSession(page: Page, projectName: string): Promise<void> {
-    const group = projectGroup(page, projectName)
+    const matchingRows = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+    )
+    const selectedMatchingRow = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}][aria-pressed="true"]`,
+    )
+    const row = await selectedMatchingRow.count() > 0
+        ? selectedMatchingRow.first()
+        : matchingRows.first()
+    await row.waitFor({ state: 'attached', timeout: CONVERGENCE_TIMEOUT_MS })
+    const group = page.locator('.project-session-group').filter({ has: row })
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    const selectedRow = group.locator('button.session-row[aria-pressed="true"]')
-    const row = await selectedRow.count() > 0
-        ? selectedRow.first()
-        : group.locator('button.session-row').first()
     const sessionId = await row.getAttribute('data-session-id')
     assert.ok(sessionId, `Privacy session row in ${projectName} has no stable identity`)
     if (await row.getAttribute('aria-pressed') !== 'true') await row.click()
@@ -476,8 +483,8 @@ async function waitForConnected(page: Page): Promise<void> {
 }
 
 async function waitForProject(page: Page, projectName: string): Promise<void> {
-    await projectGroup(page, projectName).waitFor({
-        state: 'visible',
+    await projectSessionRow(page, projectName).waitFor({
+        state: 'attached',
         timeout: CONVERGENCE_TIMEOUT_MS,
     })
 }
@@ -501,10 +508,10 @@ async function waitForSessionAbsent(page: Page, sessionId: string): Promise<void
     )
 }
 
-function projectGroup(page: Page, projectName: string): Locator {
-    return page.locator('.project-session-group').filter({
-        has: page.locator('.project-copy strong', { hasText: projectName }),
-    })
+function projectSessionRow(page: Page, projectName: string): Locator {
+    return page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+    ).first()
 }
 
 async function assertProtectedStorage(

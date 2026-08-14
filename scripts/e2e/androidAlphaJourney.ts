@@ -411,26 +411,25 @@ class AndroidWebView {
         }
         const expanded = await this.evaluate<boolean>(`(() => {
             const groups = Array.from(document.querySelectorAll('.project-session-group'));
-            const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
-            const toggle = group?.querySelector('button.project-session-toggle');
-            if (!group || !toggle) return false;
-            if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
-            return true;
+            for (const group of groups) {
+                const toggle = group.querySelector('button.project-session-toggle');
+                if (toggle?.getAttribute('aria-expanded') !== 'true') toggle.click();
+            }
+            return groups.length > 0;
         })()`)
         assert.equal(expanded, true, `Could not expand Android project ${projectName}`)
         await waitFor(async () => this.evaluate<boolean>(`(() => {
-            const groups = Array.from(document.querySelectorAll('.project-session-group'));
-            const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
-            const row = group?.querySelector('button.session-row');
+            const row = Array.from(document.querySelectorAll('button.session-row'))
+                .find(item => item.dataset.projectName === ${json(projectName)});
             return Boolean(row && row.getClientRects().length > 0 && !row.disabled);
         })()`), {
             description: `visible Android conversation in project ${projectName}`,
             timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
         })
         const opened = await this.evaluate<boolean>(`(() => {
-            const groups = Array.from(document.querySelectorAll('.project-session-group'));
-            const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
-            const row = group?.querySelector('button.session-row');
+            const rows = Array.from(document.querySelectorAll('button.session-row'))
+                .filter(item => item.dataset.projectName === ${json(projectName)});
+            const row = rows.find(item => item.getAttribute('aria-pressed') === 'true') || rows[0];
             if (row && !row.disabled) row.click();
             return Boolean(row && !row.disabled);
         })()`)
@@ -1292,8 +1291,11 @@ const ANDROID_PAGE_STATE = `(() => {
     return {
         connection: connection?.getAttribute('aria-label') || '',
         selectedProject: selected?.dataset.projectName || normalized(document.querySelector('.conversation-heading span')?.textContent?.split('·')[0]),
-        projectNames: Array.from(document.querySelectorAll('.project-session-group .project-copy strong'))
-            .map(element => normalized(element.textContent)),
+        projectNames: Array.from(new Set(
+            Array.from(document.querySelectorAll('button.session-row'))
+                .map(element => element.dataset.projectName || '')
+                .filter(Boolean),
+        )),
         archivedProjects: Array.from(document.querySelectorAll('button.archived-session-row'))
             .map(element => element.dataset.projectName || ''),
         archivedBanner: Boolean(document.querySelector('.archived-session-banner')),
@@ -1359,7 +1361,7 @@ async function closeBrowserConnectionSettings(page: Page): Promise<void> {
 }
 
 async function waitForBrowserProject(page: Page, projectName: string): Promise<void> {
-    await waitFor(async () => await browserProjectGroup(page, projectName).count() === 1, {
+    await waitFor(async () => await browserProjectRows(page, projectName).count() >= 1, {
         description: `browser project ${projectName}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
@@ -1367,7 +1369,7 @@ async function waitForBrowserProject(page: Page, projectName: string): Promise<v
 }
 
 async function waitForBrowserProjectAbsent(page: Page, projectName: string): Promise<void> {
-    await waitFor(async () => await browserProjectGroup(page, projectName).count() === 0, {
+    await waitFor(async () => await browserProjectRows(page, projectName).count() === 0, {
         description: `browser removal of project ${projectName}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
@@ -1375,22 +1377,28 @@ async function waitForBrowserProjectAbsent(page: Page, projectName: string): Pro
 }
 
 async function openBrowserProject(page: Page, projectName: string): Promise<void> {
-    const group = browserProjectGroup(page, projectName)
-    const toggle = group.locator('button.project-session-toggle')
-    if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    await group.locator('button.session-row').first().click()
-    await page.locator('.conversation-heading span', { hasText: projectName }).waitFor({
-        state: 'visible',
-        timeout: UI_FEEDBACK_TIMEOUT_MS,
+    const toggles = page.locator('button.project-session-toggle')
+    for (let index = 0; index < await toggles.count(); index += 1) {
+        const toggle = toggles.nth(index)
+        if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
+    }
+    const rows = browserProjectRows(page, projectName)
+    const selected = page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}][aria-pressed="true"]`,
+    )
+    const row = await selected.count() > 0 ? selected.first() : rows.first()
+    await row.waitFor({ state: 'attached', timeout: UI_FEEDBACK_TIMEOUT_MS })
+    if (await row.getAttribute('aria-pressed') !== 'true') await row.click()
+    await waitFor(async () => await row.getAttribute('aria-pressed') === 'true', {
+        description: `selected browser session for ${projectName}`,
+        timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
     })
 }
 
-function browserProjectGroup(page: Page, projectName: string) {
-    return page.locator('.project-session-group').filter({
-        has: page.locator('.project-copy strong', {
-            hasText: new RegExp(`^${escapeRegex(projectName)}$`, 'u'),
-        }),
-    })
+function browserProjectRows(page: Page, projectName: string) {
+    return page.locator(
+        `button.session-row[data-project-name=${JSON.stringify(projectName)}]`,
+    )
 }
 
 async function sendBrowserPrompt(page: Page, prompt: string): Promise<void> {
@@ -1435,14 +1443,14 @@ async function deleteBrowserSession(page: Page, projectName: string): Promise<vo
     }).click()
     const dialog = page.getByRole('alertdialog')
     await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
-    await waitFor(async () => await browserProjectGroup(page, projectName).count() === 0, {
+    await waitFor(async () => await browserProjectRows(page, projectName).count() === 0, {
         description: `browser deletion of ${projectName}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
 }
 
 async function cleanupBrowserProject(page: Page, projectName: string): Promise<void> {
-    if (await browserProjectGroup(page, projectName).count() === 0) return
+    if (await browserProjectRows(page, projectName).count() === 0) return
     await openBrowserProject(page, projectName)
     await deleteBrowserSession(page, projectName)
 }

@@ -295,9 +295,14 @@ describe('multi-device Matrix collaboration', () => {
             releaseSlow = resolve
         })
         const attempted: string[] = []
+        let confirmAttemptStarted!: () => void
+        const attemptStarted = new Promise<void>(resolve => {
+            confirmAttemptStarted = resolve
+        })
         const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempted.push(request.transactionId)
+                confirmAttemptStarted()
                 await slow
                 return { eventId: '$event-bundle' }
             },
@@ -321,6 +326,11 @@ describe('multi-device Matrix collaboration', () => {
         })
 
         await expect(result).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        // Sealing and scheduler dispatch may itself outlive the deliberately
+        // tiny caller timeout on a busy test host. The durable attempt remains
+        // alive either way, so observe its actual transport boundary before
+        // asserting that only one physical send was started.
+        await attemptStarted
         expect(attempted).toEqual(['logical-slow-fanout'])
         const beforeSlowConfirmation = await readFile(
             `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
