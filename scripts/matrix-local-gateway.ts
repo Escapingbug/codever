@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import QRCode from 'qrcode'
+import { pairingOperationSchema, type PairingOperation } from '@codever/protocol'
 import { PairingOfferGuard } from '@codever/security'
 import { FileReplayStore } from '@codever/security/node'
 import {
@@ -52,6 +53,10 @@ const deterministicE2eProvider = process.env.CODEVER_MATRIX_E2E_PROVIDER === '1'
 if (deterministicE2eProvider && !isLoopbackHomeserver(fixture.homeserver)) {
     throw new Error('CODEVER_MATRIX_E2E_PROVIDER is allowed only with a loopback homeserver')
 }
+const e2eStartupPairingOperations = parseE2eStartupPairingOperations(
+    process.env.CODEVER_MATRIX_E2E_STARTUP_PAIRING_OPERATIONS,
+    deterministicE2eProvider,
+)
 const providerName = deterministicE2eProvider
     ? 'codex'
     : process.env.CODEVER_PROVIDER
@@ -158,6 +163,9 @@ if (active.length === 0) {
     const created = await pairingService.createOffer({
         gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
         gatewayTransport: currentTransport,
+        ...(e2eStartupPairingOperations
+            ? { allowedOperations: e2eStartupPairingOperations }
+            : {}),
         source: { kind: 'gateway-startup' },
     })
     const invitationCode = await pairingVerificationCode(
@@ -460,6 +468,27 @@ function assertAllowedHomeserver(homeserver: string): void {
     if (url.protocol !== 'https:') {
         throw new Error('A non-local Matrix homeserver must use HTTPS')
     }
+}
+
+function parseE2eStartupPairingOperations(
+    serialized: string | undefined,
+    deterministicE2eProvider: boolean,
+): PairingOperation[] | undefined {
+    if (serialized === undefined) return undefined
+    if (!deterministicE2eProvider) {
+        throw new Error(
+            'CODEVER_MATRIX_E2E_STARTUP_PAIRING_OPERATIONS requires the loopback-only E2E provider',
+        )
+    }
+    const candidate: unknown = JSON.parse(serialized)
+    if (!Array.isArray(candidate) || candidate.length === 0) {
+        throw new Error('E2E startup pairing operations must be a non-empty JSON array')
+    }
+    const operations = candidate.map(operation => pairingOperationSchema.parse(operation))
+    if (new Set(operations).size !== operations.length) {
+        throw new Error('E2E startup pairing operations must be unique')
+    }
+    return operations
 }
 
 function isLoopbackHomeserver(homeserver: string): boolean {

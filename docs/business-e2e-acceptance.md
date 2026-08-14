@@ -30,6 +30,9 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - A client does not report `Connected` from cached state alone. It must
    authenticate current Matrix Room State from the running Gateway.
    - An incompatible Gateway fails closed with an actionable update message.
+   - A device paired before new mandatory session-lifecycle capabilities were
+     introduced upgrades its authorization without losing its identity or
+     entering an unrecoverable durable-command retry loop.
 2. **Create and first prompt**
    - A visible pending state appears within 1.5 seconds of confirmation.
    - The session converges on both devices within 15 seconds.
@@ -170,6 +173,7 @@ APK storage.
 | Journey | Web live runner | Android live runner |
 | --- | --- | --- |
 | Fresh-device pairing and inventory bootstrap | Two isolated browser devices | Enforced by the isolated Alpha gate |
+| Previously paired device gains current lifecycle capabilities | Enforced with a legacy signed capability set and an exactly-once delete | Not yet enforced |
 | Create and immediate feedback | Enforced | Enforced |
 | Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
 | Text-file and image content reaches the Agent | Enforced | Not yet enforced |

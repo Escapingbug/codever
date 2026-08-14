@@ -12,7 +12,7 @@ import {
     type Page,
     type Route,
 } from 'playwright-core'
-import { decodePairingLink } from '@codever/protocol'
+import { decodePairingLink, type PairingOperation } from '@codever/protocol'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidAlphaJourney } from './e2e/androidAlphaJourney.js'
 import {
@@ -70,6 +70,15 @@ const textAttachmentResponse = attachmentResponse(textAttachmentMarker)
 const imageAttachmentResponse = attachmentResponse(imageAttachmentMarker)
 const rotationProjectName = `Codever rotation E2E ${runId}`
 const rotationPrompt = `keep the first session running across Gateway restart ${runId}`
+const legacyCapabilityProjectName = `Codever legacy capability ${runId}`
+const LEGACY_PAIRING_OPERATIONS = [
+    'prompt',
+    'cancel',
+    'decision',
+    'session.settings',
+    'session.create',
+    'device.invite',
+] as const satisfies readonly PairingOperation[]
 
 let browser: Browser | undefined
 let gatewayProcess: ManagedProcess | undefined
@@ -137,6 +146,7 @@ try {
         gatewayAdminSocket,
         providerDelayMs: 30_000,
         sessionExtensionsJson: privacyFixture.gatewayRegistration,
+        startupPairingOperations: LEGACY_PAIRING_OPERATIONS,
     })
     const pairingMatch = await gatewayProcess.waitFor(
         /Pairing link \(paste fallback\):\s*\n([^\n]+)\n/u,
@@ -161,6 +171,32 @@ try {
         fixture.tester.password,
     )
     await gatewayProcess.waitFor(/Gateway ready with 1 trusted device\(s\)\./u)
+
+    process.stdout.write('[3u/8] Upgrading a device paired before session lifecycle capabilities…\n')
+    assert.deepEqual(
+        decodePairingLink(firstPairingLink).offer.allowedOperations,
+        [...LEGACY_PAIRING_OPERATIONS],
+        'The legacy-capability fixture did not issue the intended old certificate policy',
+    )
+    const legacyBaseline = await activeSessionCount(firstPage)
+    await createSession(firstPage, legacyCapabilityProjectName, repositoryRoot)
+    await deleteSelectedSession(firstPage, legacyCapabilityProjectName)
+    assert.equal(
+        await activeSessionCount(firstPage),
+        legacyBaseline,
+        'A current client with a pre-lifecycle certificate did not converge after deletion',
+    )
+    assert.equal(
+        await acceptedCommandCount(gatewayDataDirectory, 'session.delete'),
+        1,
+        'Legacy capability recovery must accept the deletion exactly once',
+    )
+    assert.doesNotMatch(
+        gatewayProcess.output,
+        /Command is not bound to the expected execution context/u,
+        'The upgraded client submitted a lifecycle command that its certificate could not authorize',
+    )
+    process.stdout.write('[3u/8] PASS — the legacy device upgraded and deleted exactly once.\n')
 
     process.stdout.write('[4/8] Creating a session through the first device…\n')
     const baselineFirst = await activeSessionCount(firstPage)
@@ -806,6 +842,20 @@ async function persistedGatewaySessionCount(dataDirectory: string): Promise<numb
     )) as { rooms?: Record<string, { appSessions?: unknown[] }> }
     return Object.values(state.rooms ?? {})
         .reduce((total, room) => total + (room.appSessions?.length ?? 0), 0)
+}
+
+async function acceptedCommandCount(
+    dataDirectory: string,
+    operation: string,
+): Promise<number> {
+    const content = await readFile(join(dataDirectory, 'gateway-replay.jsonl'), 'utf8')
+    return content.split(/\r?\n/u)
+        .filter(Boolean)
+        .map(line => JSON.parse(line) as {
+            revision?: { commandOperation?: string }
+        })
+        .filter(entry => entry.revision?.commandOperation === operation)
+        .length
 }
 
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
@@ -1528,6 +1578,7 @@ function startGatewayProcess(input: {
     gatewayAdminSocket: string
     providerDelayMs: number
     sessionExtensionsJson: string
+    startupPairingOperations?: readonly PairingOperation[]
 }): ManagedProcess {
     return managedProcess(
         join(repositoryRoot, 'node_modules', '.bin', 'tsx'),
@@ -1544,6 +1595,12 @@ function startGatewayProcess(input: {
                 CODEVER_GATEWAY_ADMIN_SOCKET: input.gatewayAdminSocket,
                 CODEVER_MATRIX_E2E_PROVIDER: '1',
                 CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: String(input.providerDelayMs),
+                ...(input.startupPairingOperations
+                    ? {
+                        CODEVER_MATRIX_E2E_STARTUP_PAIRING_OPERATIONS:
+                            JSON.stringify(input.startupPairingOperations),
+                    }
+                    : {}),
                 CODEVER_SESSION_EXTENSIONS_JSON: input.sessionExtensionsJson,
                 CODEVER_CWD: repositoryRoot,
             },
