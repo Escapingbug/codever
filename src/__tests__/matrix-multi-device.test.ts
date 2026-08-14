@@ -650,17 +650,23 @@ describe('multi-device Matrix collaboration', () => {
         )
         await outbox.initialize()
         for (let index = 0; index < 4; index += 1) {
-            await outbox.stage({
+            await outbox.stageBundle({
                 deliveryId: `old-bulk-${index}`,
                 logicalKey: `old-bulk-logical-${index}`,
-                recipientDeviceId: policy.deviceId,
-                recipientSequenceEpoch: policy.sequenceEpoch!,
-                recipientPublicKeyId: device.keyId,
+                recipients: [{
+                    recipientDeviceId: policy.deviceId,
+                    recipientSequenceEpoch: policy.sequenceEpoch!,
+                    recipientPublicKeyId: device.keyId,
+                }],
                 request: {
                     roomId: room.roomId,
                     eventType: 'm.room.message',
                     transactionId: `old-bulk-transaction-${index}`,
-                    content: { msgtype: 'm.text', body: `old bulk ${index}` },
+                    content: {
+                        msgtype: 'm.text',
+                        body: `old bulk ${index}`,
+                        [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+                    },
                 },
                 createdAt: now - 10_000 + index,
             })

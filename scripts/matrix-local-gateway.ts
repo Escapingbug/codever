@@ -24,6 +24,7 @@ import {
 import {
     MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
+    loadOrLoginMatrixGateway,
     watchMatrixSyncHealth,
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
@@ -40,12 +41,6 @@ interface LocalMatrixFixture {
     roomId: string
     gatewayId: string
     gateway: { userId: string }
-}
-
-interface LoginResult {
-    user_id: string
-    access_token: string
-    device_id: string
 }
 
 const quietLogger: Logger = {
@@ -79,8 +74,25 @@ const providerName = deterministicE2eProvider
         ?? 'codex'
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
 const sessionExtensionRegistry = createSessionExtensionRegistryFromEnvironment()
+const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
+    ?? join(process.cwd(), 'dev', 'matrix', 'gateway-data')
 const runId = Date.now().toString(36).toUpperCase()
-const login = await loginGateway(fixture.homeserver, `CODEVER_GATEWAY_${runId}`)
+const loginUser = process.env.CODEVER_MATRIX_GATEWAY_USER ?? 'gateway'
+const gatewayMatrixDeviceId = `CODEVER_GATEWAY_${runId}`
+const login = await loadOrLoginMatrixGateway({
+    homeserver: fixture.homeserver,
+    loginUser,
+    deviceId: gatewayMatrixDeviceId,
+    deviceDisplayName: `${
+        process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway'
+    } ${gatewayMatrixDeviceId}`,
+    sessionPath: process.env.CODEVER_MATRIX_GATEWAY_SESSION_FILE
+        ?? join(dataDirectory, 'matrix-session.json'),
+    readPassword: async () => process.env.CODEVER_MATRIX_GATEWAY_PASSWORD
+        ?? await readPasswordFile(process.env.CODEVER_MATRIX_GATEWAY_PASSWORD_FILE)
+        ?? (isLoopbackHomeserver(fixture.homeserver) ? 'codever-gateway-local' : undefined),
+    onLog: message => process.stderr.write(`[matrix-login] ${message}\n`),
+})
 const sdkClient = createClient({
     baseUrl: fixture.homeserver,
     accessToken: login.access_token,
@@ -91,8 +103,6 @@ const sdkClient = createClient({
 const client = new MatrixJsSdkGatewayClient(sdkClient, 30_000, message => {
     process.stderr.write(`${message}\n`)
 })
-const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
-    ?? join(process.cwd(), 'dev', 'matrix', 'gateway-data')
 const identity = await new FileGatewayIdentityStore(
     join(dataDirectory, 'gateway-identity.json'),
 ).loadOrCreate(fixture.gatewayId)
@@ -425,46 +435,6 @@ async function completeWithin(operation: Promise<unknown>, timeoutMs: number): P
     } finally {
         if (timeout) clearTimeout(timeout)
     }
-}
-
-async function loginGateway(
-    homeserver: string,
-    deviceId: string,
-): Promise<LoginResult> {
-    const user = process.env.CODEVER_MATRIX_GATEWAY_USER ?? 'gateway'
-    const password = process.env.CODEVER_MATRIX_GATEWAY_PASSWORD
-        ?? await readPasswordFile(process.env.CODEVER_MATRIX_GATEWAY_PASSWORD_FILE)
-        ?? (isLoopbackHomeserver(homeserver) ? 'codever-gateway-local' : undefined)
-    if (!password) {
-        throw new Error(
-            'A Matrix Gateway password environment value or file is required for a non-local homeserver',
-        )
-    }
-    const requestBody = JSON.stringify({
-        type: 'm.login.password',
-        identifier: { type: 'm.id.user', user },
-        password,
-        device_id: deviceId,
-        initial_device_display_name: `${
-            process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway'
-        } ${deviceId}`,
-    })
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-        const response = await fetch(`${homeserver}/_matrix/client/v3/login`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: requestBody,
-        })
-        if (response.ok) return response.json() as Promise<LoginResult>
-        if (response.status !== 429 || attempt === 3) {
-            throw new Error(`Gateway Matrix login failed: HTTP ${response.status}`)
-        }
-        const body = await response.json() as { retry_after_ms?: number }
-        await new Promise(resolve =>
-            setTimeout(resolve, Math.max(250, body.retry_after_ms ?? 1_000)),
-        )
-    }
-    throw new Error('Gateway Matrix login failed')
 }
 
 async function readPasswordFile(path: string | undefined): Promise<string | undefined> {

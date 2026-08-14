@@ -1477,6 +1477,42 @@ describe('MatrixJsSdkGatewayClient', () => {
         )
     })
 
+    it('waits for an already trusted Matrix device to become visible after initial sync', async () => {
+        const visibleDevice = { getFingerprint: () => 'matrix-ed25519-key' }
+        const crypto = {
+            getUserDeviceInfo: vi.fn()
+                .mockResolvedValueOnce(new Map())
+                .mockResolvedValueOnce(new Map([
+                    ['@alice:example.org', new Map([['PWA1', visibleDevice]])],
+                ])),
+            setDeviceVerified: vi.fn(async () => undefined),
+        }
+        const sdk = {
+            getCrypto: vi.fn(() => crypto),
+        } as unknown as MatrixClient
+        const onLog = vi.fn()
+        const client = new MatrixJsSdkGatewayClient(sdk, 30_000, onLog, {
+            trustedDeviceVisibilityTimeoutMs: 1_000,
+            trustedDeviceVisibilityRetryMs: 0,
+        })
+
+        await client.pinTrustedDevices([{
+            matrixUserId: '@alice:example.org',
+            matrixDeviceId: 'PWA1',
+            matrixDeviceKeys: ['matrix-ed25519-key'],
+        }])
+
+        expect(crypto.getUserDeviceInfo).toHaveBeenCalledTimes(2)
+        expect(crypto.setDeviceVerified).toHaveBeenCalledWith(
+            '@alice:example.org',
+            'PWA1',
+            true,
+        )
+        expect(onLog).toHaveBeenCalledWith(
+            '[matrix-sdk] waiting for 1 trusted Matrix device(s) to become visible',
+        )
+    })
+
     it('enforces crypto-before-sync and maps the v41 SDK send/decrypt surface', async () => {
         let sdkEventListener: ((event: MatrixEvent) => void) | undefined
         const crypto = {

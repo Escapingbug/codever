@@ -40,6 +40,14 @@ import { downloadMatrixMedia } from '@/channel/matrix/sdkTransport'
 
 export type MatrixGatewayEventListener = (event: MatrixIncomingEvent) => void
 
+export interface MatrixGatewayClientOptions {
+    /** Bound eventual consistency of Matrix /keys/query after initial sync. */
+    trustedDeviceVisibilityTimeoutMs?: number
+    trustedDeviceVisibilityRetryMs?: number
+    now?: () => number
+    sleep?: (durationMs: number) => Promise<void>
+}
+
 export interface MatrixSyncWatchdogOptions {
     /** Maximum time without a completed Matrix /sync cycle. */
     stallTimeoutMs: number
@@ -150,6 +158,7 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         private readonly client: MatrixClient,
         private readonly defaultReadyTimeoutMs = 30_000,
         private readonly onLog?: (message: string) => void,
+        private readonly options: MatrixGatewayClientOptions = {},
     ) {}
 
     async initializeCrypto(config: MatrixGatewayCryptoConfig): Promise<void> {
@@ -228,22 +237,57 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         const crypto = this.client.getCrypto()
         if (!crypto) throw new Error('Matrix crypto is unavailable')
         const userIds = [...new Set(devices.map(device => device.matrixUserId))]
-        const deviceMap = await crypto.getUserDeviceInfo(userIds, true)
-        for (const trusted of devices) {
-            const matrixDeviceId = trusted.matrixDeviceId
-            const device = deviceMap.get(trusted.matrixUserId)?.get(matrixDeviceId)
-            if (!device) {
+        const now = this.options.now ?? Date.now
+        const sleep = this.options.sleep ?? wait
+        const timeoutMs = Math.max(
+            0,
+            this.options.trustedDeviceVisibilityTimeoutMs ?? 30_000,
+        )
+        const retryMs = Math.max(
+            0,
+            this.options.trustedDeviceVisibilityRetryMs ?? 500,
+        )
+        const deadline = now() + timeoutMs
+        while (true) {
+            const deviceMap = await crypto.getUserDeviceInfo(userIds, true)
+            const missing: MatrixGatewayPinnedTransportDevice[] = []
+            for (const trusted of devices) {
+                const matrixDeviceId = trusted.matrixDeviceId
+                const device = deviceMap.get(trusted.matrixUserId)?.get(matrixDeviceId)
+                if (!device) {
+                    missing.push(trusted)
+                    continue
+                }
+                const fingerprint = device.getFingerprint()
+                if (!fingerprint || !trusted.matrixDeviceKeys.includes(fingerprint)) {
+                    throw new Error(
+                        `Trusted Matrix device ${trusted.matrixUserId}/${matrixDeviceId} fingerprint does not match`,
+                    )
+                }
+            }
+            if (missing.length === 0) {
+                for (const trusted of devices) {
+                    await crypto.setDeviceVerified(
+                        trusted.matrixUserId,
+                        trusted.matrixDeviceId,
+                        true,
+                    )
+                }
+                return
+            }
+            const remainingMs = deadline - now()
+            if (remainingMs <= 0) {
+                const [first] = missing
                 throw new Error(
-                    `Trusted Matrix device ${trusted.matrixUserId}/${matrixDeviceId} is not visible`,
+                    `Trusted Matrix device ${first?.matrixUserId}/${first?.matrixDeviceId} `
+                    + `is not visible after ${timeoutMs}ms`,
                 )
             }
-            const fingerprint = device.getFingerprint()
-            if (!fingerprint || !trusted.matrixDeviceKeys.includes(fingerprint)) {
-                throw new Error(
-                    `Trusted Matrix device ${trusted.matrixUserId}/${matrixDeviceId} fingerprint does not match`,
-                )
-            }
-            await crypto.setDeviceVerified(trusted.matrixUserId, matrixDeviceId, true)
+            this.onLog?.(
+                `[matrix-sdk] waiting for ${missing.length} trusted Matrix device(s) `
+                + 'to become visible',
+            )
+            await sleep(Math.min(retryMs, remainingMs))
         }
     }
 
@@ -502,6 +546,10 @@ function requirePositiveDuration(value: number, name: string): void {
     if (!Number.isFinite(value) || value <= 0) {
         throw new Error(`${name} must be a positive duration`)
     }
+}
+
+function wait(durationMs: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, durationMs))
 }
 
 function ciphertextFingerprint(value: unknown): string {
