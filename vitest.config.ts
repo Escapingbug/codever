@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 
 export default defineConfig({
     test: {
+        include: ['src/**/*.test.ts'],
         exclude: [
             ...configDefaults.exclude,
             '.worktrees/**',
