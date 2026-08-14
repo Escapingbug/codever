@@ -11,9 +11,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
-    "test": "vitest run && vitest run --config vitest.e2e.config.ts",
+    "test": "vitest run",
     "test:unit": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

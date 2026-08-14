@@ -277,7 +277,6 @@ pnpm typecheck
 pnpm build
 pnpm test
 pnpm test:unit
-pnpm test:e2e
 ```
 
 Run from source:

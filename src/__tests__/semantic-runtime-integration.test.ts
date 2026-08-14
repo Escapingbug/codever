@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -547,22 +547,26 @@ describe('Semantic runtime integration chain', () => {
         expect(secondSignalAborted).toBe(false)
     })
 
-    it('notifies the channel immediately when user input arrives during an active turn', async () => {
-        let release!: () => void
-        const hold = new Promise<void>(resolve => {
-            release = resolve
+    it('notifies the channel immediately when user input arrives during an active turn, even when normal delivery is blocked', async () => {
+        let releaseNormalDelivery!: () => void
+        const blockedNormalDelivery = new Promise<void>(resolve => {
+            releaseNormalDelivery = resolve
         })
         const provider = createProvider([], {
             startQuery: vi.fn((prompt: string): AgentQueryHandle => ({
                 events: (async function* () {
                     yield { kind: 'text', text: `response:${prompt}` } as AgentEvent
-                    if (prompt === 'first') await hold
                     yield { kind: 'result', status: 'success' } as AgentEvent
                 })(),
                 interrupt: vi.fn(),
             })),
         })
         const channel = createChannel()
+        vi.mocked(channel.send).mockImplementation(async (message) => {
+            if (message.text === 'response:first') await blockedNormalDelivery
+            channel.sent.push(message)
+            return { messageId: channel.sent.length }
+        })
         const runtime = new SemanticSessionRuntime({
             sessionId: 'session-1',
             cwd: '/repo',
@@ -580,7 +584,7 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent.some(m => m.text.includes('queued'))).toBe(true)
             expect(provider.startQuery).toHaveBeenCalledTimes(1)
         } finally {
-            release()
+            releaseNormalDelivery()
             await first
         }
     })
@@ -1029,7 +1033,11 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent[0]).toMatchObject({
                 text: 'latest report',
                 format: 'plain',
-                attachments: [{ type: 'document', path: reportPath, filename: 'report.txt' }],
+                attachments: [{
+                    type: 'document',
+                    path: realpathSync(reportPath),
+                    filename: 'report.txt',
+                }],
             })
             expect(runtime.journal.list()).toEqual(expect.arrayContaining([
                 expect.objectContaining({ kind: 'command_result', command: 'send_file' }),
@@ -1086,7 +1094,11 @@ describe('Semantic runtime integration chain', () => {
                 expect.objectContaining({
                     text: 'Release APK',
                     format: 'plain',
-                    attachments: [{ type: 'document', path: apkPath, filename: 'falapk-release.apk' }],
+                    attachments: [{
+                        type: 'document',
+                        path: realpathSync(apkPath),
+                        filename: 'falapk-release.apk',
+                    }],
                 }),
             ])
             expect(channel.sent.map(message => message.text).join('\n')).not.toContain('Session identity not available yet')
@@ -1190,7 +1202,11 @@ describe('Semantic runtime integration chain', () => {
             expect(channel.sent[0]).toMatchObject({
                 text: 'latest plot',
                 format: 'plain',
-                attachments: [{ type: 'photo', path: imagePath, filename: 'plot.png' }],
+                attachments: [{
+                    type: 'photo',
+                    path: realpathSync(imagePath),
+                    filename: 'plot.png',
+                }],
             })
         } finally {
             rmSync(tempDir, { recursive: true, force: true })

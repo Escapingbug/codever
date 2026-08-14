@@ -199,10 +199,11 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         const bot = createBot()
         const sessionManager = createSessionManager()
         registerGroupHandlers(bot, { sessionManager, topicSessions: new Map() })
+        const cwd = process.cwd()
 
-        await bot.runCommand('cwd', createContext('D:/codever-worktrees/session-actor-runtime'))
+        await bot.runCommand('cwd', createContext(cwd))
 
-        expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, 'D:/codever-worktrees/session-actor-runtime')
+        expect(sessionManager.setGroupCwd).toHaveBeenCalledWith(-100, cwd)
         expect(sessionManager.unarchiveGroup).toHaveBeenCalledWith('-100:10')
     })
 
