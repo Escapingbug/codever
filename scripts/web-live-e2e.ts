@@ -262,7 +262,11 @@ try {
     await openProjectSession(secondPage, projectName)
     await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
     await startHistoryLoadingObservation(secondPage, secondProjectName)
-    await createSession(secondPage, secondProjectName, secondProjectDirectory)
+    const secondSessionId = await createSession(
+        secondPage,
+        secondProjectName,
+        secondProjectDirectory,
+    )
     await waitForProject(firstPage, secondProjectName)
     assert.equal(await activeSessionCount(firstPage), sessionCountAfterRotationCreate + 1)
     assert.equal(await activeSessionCount(secondPage), baselineSecond + 1)
@@ -280,7 +284,7 @@ try {
             )
         },
     )
-    await openProjectSession(secondPage, secondProjectName)
+    await openSession(secondPage, secondSessionId)
     await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
     process.stdout.write('[5c/8] Sending in the new session and reloading its originating browser…\n')
     await recordRegression(
@@ -291,18 +295,18 @@ try {
             await waitForText(secondPage!, newSessionPrompt)
             await reloadAndWaitForConnected(secondPage!)
             await waitForProject(secondPage!, secondProjectName)
-            await openProjectSession(secondPage!, secondProjectName)
+            await openSession(secondPage!, secondSessionId)
             let immediateRestoreFailure: unknown
             try {
                 await waitForText(secondPage!, newSessionPrompt, UI_FEEDBACK_TIMEOUT_MS)
             } catch (error) {
                 immediateRestoreFailure = error
             }
-            await waitForText(secondPage!, newSessionPrompt)
-            await waitForText(secondPage!, PROVIDER_RESPONSE)
-            await openProjectSession(firstPage!, secondProjectName)
-            await waitForText(firstPage!, newSessionPrompt)
-            await waitForText(firstPage!, PROVIDER_RESPONSE)
+            await waitForTextAtStage(secondPage!, newSessionPrompt, 'originating browser user prompt after reload')
+            await waitForTextAtStage(secondPage!, PROVIDER_RESPONSE, 'originating browser Agent response after reload')
+            await openSession(firstPage!, secondSessionId)
+            await waitForTextAtStage(firstPage!, newSessionPrompt, 'other browser user prompt')
+            await waitForTextAtStage(firstPage!, PROVIDER_RESPONSE, 'other browser Agent response')
             if (immediateRestoreFailure) throw immediateRestoreFailure
         },
     )
@@ -405,7 +409,6 @@ try {
             gatewayOutput: () => gatewayProcess!.output,
             artifactDirectory,
             gatewayReplayLedgerPath: join(gatewayDataDirectory, 'gateway-replay.jsonl'),
-            gatewayOutput: () => gatewayProcess!.output,
         })
         await openProjectSession(firstPage, projectName)
     }
@@ -684,8 +687,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
         : null
 }
 
-async function createSession(page: Page, projectName: string, cwd: string): Promise<void> {
+async function createSession(page: Page, projectName: string, cwd: string): Promise<string> {
     const baseline = await activeSessionCount(page)
+    const existingSessionIds = new Set(await activeSessionIds(page))
     await page.getByRole('button', { name: 'New conversation' }).click()
     const dialog = page.locator('.new-session-dialog')
     await dialog.waitFor({ state: 'visible' })
@@ -704,6 +708,15 @@ async function createSession(page: Page, projectName: string, cwd: string): Prom
         Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
         `Session creation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
     )
+    const createdSessionIds = (await activeSessionIds(page)).filter(
+        sessionId => !existingSessionIds.has(sessionId),
+    )
+    assert.deepEqual(
+        createdSessionIds.length,
+        1,
+        `Session creation must expose exactly one new stable identity; got ${createdSessionIds.join(', ')}`,
+    )
+    return createdSessionIds[0]!
 }
 
 async function settleSessionCreateAcrossGatewayRotation(
@@ -1215,10 +1228,21 @@ async function openProjectSession(
     const group = projectGroup(page, projectName)
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    const row = group.locator('button.session-row').first()
-    if (!(await row.getAttribute('class'))?.includes('selected')) {
+    const selectedRow = group.locator('button.session-row[aria-pressed="true"]')
+    const row = await selectedRow.count() > 0
+        ? selectedRow.first()
+        : group.locator('button.session-row').first()
+    const sessionId = await row.getAttribute('data-session-id')
+    assert.ok(sessionId, `Session row in ${projectName} did not expose a stable identity`)
+    if (await row.getAttribute('aria-pressed') !== 'true') {
         await row.click()
-        await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
+        await waitFor(async () => await page.locator('button.session-row').evaluateAll(
+            (rows, expectedSessionId) => rows.some(row =>
+                (row as HTMLElement).dataset.sessionId === expectedSessionId
+                && row.getAttribute('aria-pressed') === 'true',
+            ),
+            sessionId,
+        ), {
             description: `selected session in ${projectName}`,
             timeoutMs: selectionTimeoutMs,
             failFast: () => assertNoPageErrors(page),
@@ -1241,6 +1265,30 @@ async function openProjectSession(
         }))
         throw new Error(`${formatError(error)}; state=${JSON.stringify(state)}`)
     }
+}
+
+async function openSession(
+    page: Page,
+    sessionId: string,
+    selectionTimeoutMs = UI_FEEDBACK_TIMEOUT_MS,
+): Promise<void> {
+    const row = page.locator(`button.session-row[data-session-id="${sessionId}"]`)
+    await row.waitFor({ state: 'attached', timeout: selectionTimeoutMs })
+    const group = page.locator('.project-session-group').filter({ has: row })
+    const toggle = group.locator('button.project-session-toggle')
+    if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
+    if (await row.getAttribute('aria-pressed') !== 'true') await row.click()
+    await waitFor(async () =>
+        await row.getAttribute('aria-pressed') === 'true',
+    {
+        description: `selected session ${sessionId}`,
+        timeoutMs: selectionTimeoutMs,
+        failFast: () => assertNoPageErrors(page),
+    })
+    await page.locator('.conversation-heading').waitFor({
+        state: 'visible',
+        timeout: selectionTimeoutMs,
+    })
 }
 
 function projectGroup(page: Page, projectName: string): Locator {
@@ -1266,8 +1314,29 @@ async function waitForText(
     await assertNoBlockingAlert(page)
 }
 
+async function waitForTextAtStage(
+    page: Page,
+    text: string,
+    stage: string,
+): Promise<void> {
+    try {
+        await waitForText(page, text)
+    } catch (error) {
+        throw new Error(`${stage}: ${formatError(error)}`)
+    }
+}
+
 async function activeSessionCount(page: Page): Promise<number> {
     return page.locator('button.session-row').count()
+}
+
+async function activeSessionIds(page: Page): Promise<string[]> {
+    return page.locator('button.session-row').evaluateAll((rows) =>
+        rows.flatMap(row => {
+            const sessionId = (row as HTMLElement).dataset.sessionId
+            return sessionId ? [sessionId] : []
+        }),
+    )
 }
 
 async function assertEmptySessionState(page: Page): Promise<void> {

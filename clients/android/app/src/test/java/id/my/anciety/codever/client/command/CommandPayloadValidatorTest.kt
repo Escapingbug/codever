@@ -228,7 +228,7 @@ class CommandPayloadValidatorTest {
     }
 
     @Test
-    fun `authorization separates certificate grants from current Gateway lifecycle capabilities`() {
+    fun `authorization is exactly the signed certificate grant set`() {
         assertEquals(
             CommandAuthorizationSource.CERTIFICATE_GRANT,
             CommandAuthorizationPolicy.evaluate(
@@ -237,23 +237,23 @@ class CommandPayloadValidatorTest {
             ).source,
         )
         assertEquals(
-            CommandAuthorizationSource.GATEWAY_LIFECYCLE,
+            CommandAuthorizationSource.CERTIFICATE_GRANT,
             CommandAuthorizationPolicy.evaluate(
                 CommandOperation.SESSION_ARCHIVE,
-                emptyList(),
+                listOf(PairingOperation.SESSION_ARCHIVE),
             ).source,
         )
         assertEquals(
-            CommandAuthorizationSource.GATEWAY_LIFECYCLE,
+            CommandAuthorizationSource.CERTIFICATE_GRANT,
             CommandAuthorizationPolicy.evaluate(
                 CommandOperation.DEVICE_INVITE,
-                emptyList(),
+                listOf(PairingOperation.DEVICE_INVITE),
             ).source,
         )
 
         val denied = CommandAuthorizationPolicy.evaluate(
-            CommandOperation.PROMPT,
-            listOf(PairingOperation.SESSION_SELECT),
+            CommandOperation.SESSION_DELETE,
+            listOf(PairingOperation.PROMPT),
         )
         assertFalse(denied.authorized)
         assertEquals(CommandAuthorizationSource.DENIED, denied.source)
@@ -261,14 +261,6 @@ class CommandPayloadValidatorTest {
             CommandAuthorizationPolicy.evaluate(
                 CommandOperation.DEVICE_INVITE,
                 emptyList(),
-                gatewayLifecycleOperations = emptySet(),
-            ).authorized,
-        )
-        assertFalse(
-            CommandAuthorizationPolicy.evaluate(
-                CommandOperation.PROMPT,
-                emptyList(),
-                gatewayLifecycleOperations = setOf(CommandOperation.PROMPT),
             ).authorized,
         )
     }

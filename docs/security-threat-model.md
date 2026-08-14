@@ -48,7 +48,7 @@ Before a request reaches `SemanticSessionRuntime`, the Gateway must verify:
 4. strict mode requests contain a valid Codever command signature that binds
    the protocol version, Gateway, conversation, operation,
    payload hash, command ID, issuance time, expiry and nonce;
-5. the pairing certificate is active and permits the operation;
+5. the pairing certificate is active and explicitly permits the operation;
 6. neither the envelope nor command replay claim has been consumed;
 7. the command sequence is exactly the next value for the current pairing
    certificate generation;
@@ -66,9 +66,11 @@ Codever cannot prevent a malicious homeserver from:
 - withholding a legitimate command or response;
 - presenting stale room state.
 
-Local event journals and provider session state are therefore authoritative for
-execution recovery. Matrix is authoritative only for delivery of ciphertext
-that passes local validation.
+The Gateway's durable command/result ledger and provider session state are
+authoritative for execution recovery. Authenticated Matrix Room State is the
+client authority for the current Gateway/session directory, while signed
+thread events are the transcript authority. Unauthenticated or stale Matrix
+content grants neither execution nor trust.
 
 ## Release tests
 
@@ -96,6 +98,12 @@ that passes local validation.
   reservation atomically. This covers result-before-ack and permanently
   missing-ack delivery without permitting a sequence to be reused.
 - A forged Gateway response is rejected by the PWA.
+- A confirmed pairing request is encrypted and persisted before transport
+  delivery. The verified response is encrypted and persisted before local
+  success is exposed. Recovery retransmits the same signed request, while the
+  Gateway redelivers its durable response only if the exact certificate is
+  still active. A revoked device therefore cannot replay an interrupted
+  pairing to restore local trust.
 - Every Gateway reply is independently encrypted for each active application
   device. Revoking one device removes only that recipient from future fan-out.
 - Collaboration prompts, command results and per-device edit targets use a
@@ -104,7 +112,7 @@ that passes local validation.
 
 ## Current product boundary
 
-- Protocol v1 supports multiple paired application devices in one room. Each
+- The pairing/control protocol supports multiple paired application devices in one room. Each
   device has its own P-256 identity, certificate, command sequence and Matrix
   transaction stream. The Gateway never shares an application group key.
 - Matrix can observe fan-out traffic metadata, including the number and timing
@@ -137,10 +145,10 @@ that passes local validation.
 - The PWA holds an exclusive Web Lock for the full lifetime of each Matrix
   crypto database. A second tab, or a browser without Web Locks, fails closed
   instead of sharing Rust crypto state.
-- An IndexedDB degradation, unexpected close or failed forced checkpoint
+- An IndexedDB degradation, unexpected close or failed local sync-store flush
   permanently disables mutations for that connection. Later sync callbacks
   cannot restore an online state; the device must be rebuilt and re-paired.
-- The first upgrade from a build without a persisted sync token cannot
-  reconstruct device-list changes already omitted by an initial sync. If the
-  signed Gateway Matrix device is absent from the local crypto store, the PWA
-  fails closed and requires a new Matrix device plus application re-pairing.
+- A browser whose persisted sync token or crypto database is evicted cannot
+  infer omitted device-list changes from application state. If the signed
+  Gateway Matrix device is absent from the rebuilt crypto store, the PWA fails
+  closed and requires a new Matrix device plus application re-pairing.

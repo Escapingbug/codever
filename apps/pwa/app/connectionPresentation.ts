@@ -45,10 +45,6 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Connected",
     detail: "Messages and conversations are up to date.",
   },
-  matrix_sync_connecting: {
-    title: "Connecting",
-    detail: "Reaching your computer…",
-  },
   matrix_sync_reconnecting: {
     title: "Reconnecting",
     detail: "Codever will resume automatically when the connection returns.",

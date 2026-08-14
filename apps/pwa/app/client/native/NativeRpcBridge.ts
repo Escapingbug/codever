@@ -16,16 +16,16 @@ import {
 export type NativeBridgeMessageEvent = { data: unknown };
 
 export const NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS = 15_000;
-export const NATIVE_HISTORY_PAGE_TIMEOUT_MS = 45_000;
+export const NATIVE_HISTORY_PAGE_TIMEOUT_MS = 60_000;
 export const NATIVE_PAIRING_COMPLETE_TIMEOUT_MS = 10 * 60_000;
 export const NATIVE_COMMAND_CONFLICT_TIMEOUT_MS = 60_000;
 
 export function nativeBridgeRequestTimeoutMs(method: RequestMethod): number {
   switch (method) {
     case "codever.history.page":
-      // Android may spend up to 30 seconds waiting for the Gateway's Matrix
-      // response. Keep the Web timeout above that native operation deadline so
-      // a valid response is not discarded while it is still in flight.
+      // Android bounds the Matrix relations operation at 45 seconds. Keep the
+      // Web deadline strictly above it so the native timeout/error response is
+      // never discarded by a simultaneous JavaScript timer.
       return NATIVE_HISTORY_PAGE_TIMEOUT_MS;
     case "codever.pairing.complete":
       return NATIVE_PAIRING_COMPLETE_TIMEOUT_MS;

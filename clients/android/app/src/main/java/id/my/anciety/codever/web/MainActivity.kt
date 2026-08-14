@@ -678,16 +678,23 @@ class MainActivity : ComponentActivity() {
             pairingId: String,
             deviceName: String,
         ): Pair<PublicTrustState.Trusted, ClientSnapshot> {
+            diagnostics.record("activity.pairing_completion.entered")
             val binder = awaitServiceBinder()
-            val preview = binder.clientRuntime().pairingPreview(pairingId)
+            val (preview, alreadyConfirmed) = binder.clientRuntime().pairingConfirmation(pairingId)
                 ?: throw IllegalStateException("The pairing preview is no longer available.")
-            val confirmed = withContext(Dispatchers.Main.immediate) {
-                confirmNativePairing(preview.gatewayName, preview.verificationCode)
+            if (!alreadyConfirmed) {
+                val confirmed = withContext(Dispatchers.Main.immediate) {
+                    confirmNativePairing(preview.gatewayName, preview.verificationCode)
+                }
+                if (!confirmed) {
+                    binder.clientRuntime().cancelPairing(pairingId)
+                    throw NativePairingRejectedException(
+                        "Pairing was cancelled on the Android device.",
+                        retryable = false,
+                    )
+                }
             }
-            if (!confirmed) {
-                binder.clientRuntime().cancelPairing(pairingId)
-                throw NativePairingRejectedException("Pairing was cancelled on the Android device.")
-            }
+            diagnostics.record("activity.pairing_completion.confirmed")
             return binder.completePairing(pairingId, deviceName)
         }
 
@@ -718,6 +725,7 @@ class MainActivity : ComponentActivity() {
                     "This grants the Gateway permission to exchange encrypted Codever commands with this device.",
             )
             .setPositiveButton("Pair") { _, _ ->
+                diagnostics.record("activity.pairing_confirmation.accepted")
                 if (continuation.isActive) continuation.resume(true)
             }
             .setNegativeButton("Cancel") { _, _ ->

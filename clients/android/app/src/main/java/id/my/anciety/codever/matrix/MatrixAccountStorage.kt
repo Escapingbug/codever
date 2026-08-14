@@ -7,18 +7,16 @@ import java.io.File
 data class MatrixAccountFiles(
     val accountScope: String,
     val sessionStore: MatrixSessionStore,
-    val journal: DecryptedEventJournal,
     val applicationControlCursor: MatrixSyncCursorStore,
     val sdkDataPath: String,
     val sdkCachePath: String,
-    val sdkCacheMigrated: Boolean,
 )
 
 class MatrixAccountStorage(
     context: Context,
     private val cipher: SecretCipher,
 ) {
-    private val root = File(context.noBackupFilesDir, "matrix-native-v1")
+    private val root = File(context.noBackupFilesDir, "matrix-native-v2")
     private val sdkRoot = File(root, "sdk")
 
     fun findCurrent(): MatrixAccountFiles? {
@@ -37,7 +35,6 @@ class MatrixAccountStorage(
     fun clear(files: MatrixAccountFiles) {
         require(ACCOUNT_SCOPE.matches(files.accountScope)) { "Matrix account scope is invalid." }
         files.sessionStore.clear()
-        files.journal.clear()
         files.applicationControlCursor.clear()
         MatrixAccountWiper.deleteSdkAccountRoot(sdkRoot, files.accountScope)
         sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
@@ -48,16 +45,11 @@ class MatrixAccountStorage(
         root.mkdirsOrThrow()
         val accountRoot = File(sdkRoot, accountScope)
         val data = File(accountRoot, "data").apply { mkdirsOrThrow() }
-        val cache = MatrixAccountCacheMigration.prepare(accountRoot)
+        val cache = MatrixAccountCache.prepare(accountRoot)
         return MatrixAccountFiles(
             accountScope = accountScope,
             sessionStore = EncryptedMatrixSessionStore(
                 File(root, "session-$accountScope.enc"),
-                cipher,
-                accountScope,
-            ),
-            journal = EncryptedBoundedEventJournal(
-                File(root, "journal-$accountScope.enc"),
                 cipher,
                 accountScope,
             ),
@@ -67,8 +59,7 @@ class MatrixAccountStorage(
                 accountScope,
             ),
             sdkDataPath = data.absolutePath,
-            sdkCachePath = cache.directory.absolutePath,
-            sdkCacheMigrated = cache.migrated,
+            sdkCachePath = cache.absolutePath,
         )
     }
 
@@ -82,45 +73,23 @@ class MatrixAccountStorage(
     }
 }
 
-internal data class MatrixCachePreparation(
-    val directory: File,
-    val migrated: Boolean,
-)
-
-/**
- * Rotates only disposable SDK cache state. The data directory contains the
- * Matrix device and crypto store and must survive an APK transport upgrade.
- */
-internal object MatrixAccountCacheMigration {
-    fun prepare(accountRoot: File): MatrixCachePreparation {
+internal object MatrixAccountCache {
+    fun prepare(accountRoot: File): File {
         val canonicalAccountRoot = accountRoot.canonicalFile
         check(canonicalAccountRoot.isDirectory || canonicalAccountRoot.mkdirs()) {
             "Matrix SDK account storage could not be created."
         }
-        val obsolete = OBSOLETE_CACHE_NAMES.map { name ->
-            File(canonicalAccountRoot, name).canonicalFile
-        }
-        val current = File(canonicalAccountRoot, CURRENT_CACHE_NAME).canonicalFile
-        require(
-            obsolete.all { it.parentFile == canonicalAccountRoot } &&
-                current.parentFile == canonicalAccountRoot
-        ) {
+        val current = File(canonicalAccountRoot, CACHE_NAME).canonicalFile
+        require(current.parentFile == canonicalAccountRoot) {
             "Matrix SDK cache escaped its account root."
-        }
-        val migrated = obsolete.any(File::exists)
-        obsolete.forEach { directory ->
-            check(!directory.exists() || directory.deleteRecursively()) {
-                "Legacy Matrix SDK cache could not be removed."
-            }
         }
         check(current.isDirectory || current.mkdirs()) {
             "Matrix SDK cache could not be created."
         }
-        return MatrixCachePreparation(current, migrated)
+        return current
     }
 
-    private val OBSOLETE_CACHE_NAMES = listOf("cache", "cache-v2")
-    private const val CURRENT_CACHE_NAME = "cache-v3"
+    private const val CACHE_NAME = "cache"
 }
 
 internal object MatrixAccountWiper {

@@ -106,9 +106,15 @@ class AttachmentTransferManagerTest {
         override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = error("unused")
         override suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult =
             error("unused")
-        override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) = Unit
-        override suspend fun paginateRoomHistory(limit: Int): Boolean = false
+        override suspend fun sendPairingMessage(contentJson: String) = Unit
+        override suspend fun closePairingChannel() = Unit
+        override suspend fun loadThreadHistory(
+            threadRootEventId: String,
+            from: String?,
+            limit: Int,
+        ) = throw UnsupportedOperationException()
         override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) = Unit
+        override suspend fun refreshApplicationRoomState() = Unit
         override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
             if (failUpload) throw IllegalStateException("upload unavailable")
             media = bytes.copyOf()

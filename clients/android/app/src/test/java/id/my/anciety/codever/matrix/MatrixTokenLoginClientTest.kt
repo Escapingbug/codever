@@ -279,7 +279,7 @@ class MatrixTokenLoginClientTest {
         deviceId = "MATRIX-DEVICE",
         homeserverUrl = "https://matrix.example.org",
         oauthData = null,
-        slidingSyncVersion = SlidingSyncVersion.NONE,
+        slidingSyncVersion = SlidingSyncVersion.NATIVE,
         roomBinding = bootstrap().roomBinding,
     )
 

@@ -14,9 +14,6 @@ export type PersistedChatMessage = {
   eventId?: string;
   operationId?: string;
   requestId?: string;
-  streamId?: string;
-  toolCallId?: string;
-  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   commandId?: string;
   revision?: number;

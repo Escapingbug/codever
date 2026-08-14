@@ -39,21 +39,10 @@ class StoredMatrixSession(
     val slidingSyncVersion: SlidingSyncVersion,
     val roomBinding: MatrixRoomBinding,
 ) {
-    fun forNativeSlidingSync(): StoredMatrixSession {
-        if (slidingSyncVersion == SlidingSyncVersion.NATIVE) return this
-        require(slidingSyncVersion == SlidingSyncVersion.NONE) {
-            "Unsupported Matrix sliding sync version."
+    init {
+        require(slidingSyncVersion == SlidingSyncVersion.NATIVE) {
+            "Only native Matrix sliding sync sessions are supported."
         }
-        return StoredMatrixSession(
-            accessToken = accessToken,
-            refreshToken = refreshToken,
-            userId = userId,
-            deviceId = deviceId,
-            homeserverUrl = homeserverUrl,
-            oauthData = oauthData,
-            slidingSyncVersion = SlidingSyncVersion.NATIVE,
-            roomBinding = roomBinding,
-        )
     }
 
     fun toSdkSession(): Session = Session(
@@ -79,16 +68,18 @@ class StoredMatrixSession(
             }
 
     companion object {
-        fun fromSdkSession(session: Session, roomBinding: MatrixRoomBinding) = StoredMatrixSession(
-            accessToken = session.accessToken,
-            refreshToken = session.refreshToken,
-            userId = session.userId,
-            deviceId = session.deviceId,
-            homeserverUrl = session.homeserverUrl,
-            oauthData = session.oauthData,
-            slidingSyncVersion = session.slidingSyncVersion,
-            roomBinding = roomBinding,
-        )
+        fun fromSdkSession(session: Session, roomBinding: MatrixRoomBinding): StoredMatrixSession {
+            return StoredMatrixSession(
+                accessToken = session.accessToken,
+                refreshToken = session.refreshToken,
+                userId = session.userId,
+                deviceId = session.deviceId,
+                homeserverUrl = session.homeserverUrl,
+                oauthData = session.oauthData,
+                slidingSyncVersion = session.slidingSyncVersion,
+                roomBinding = roomBinding,
+            )
+        }
     }
 }
 

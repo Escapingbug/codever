@@ -55,7 +55,6 @@ import {
 } from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
-import { legacyToolGroupPresentation } from "./presentation";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import {
   registerPwaUpdates,
@@ -84,9 +83,7 @@ import {
   compareChatMessages,
   findOptimisticMessageId,
   isAgentWorkMessage,
-  isLegacyAgentStartupMessage,
   isTransientAgentLifecycleEvent,
-  legacyCommandText,
   mergeChatMessage,
   mergeChatMessages,
   type ChatMessage,
@@ -1296,17 +1293,11 @@ export function CodeverApp() {
     }
     const sessionId =
       incoming.sessionId ?? selectedSessionIdRef.current ?? undefined;
-    const legacyStartup = isLegacyAgentStartupMessage(incoming);
     if (sessionId && !incoming.historical) {
       setSessionAgentActivity(sessionId, (current) => {
-        if (!legacyStartup) return reduceAgentActivity(current, incoming.raw);
-        return current?.phase === "working" || current?.phase === "stopping"
-          ? current
-          : STARTING_AGENT_ACTIVITY;
+        return reduceAgentActivity(current, incoming.raw);
       });
-      const executionSignal = legacyStartup
-        ? "running"
-        : agentExecutionSignal(incoming.raw);
+      const executionSignal = agentExecutionSignal(incoming.raw);
       if (executionSignal === "running") {
         setSessionRunning(sessionId, true);
       } else if (executionSignal === "stopping") {
@@ -1317,7 +1308,6 @@ export function CodeverApp() {
         setSessionStopping(sessionId, false);
       }
     }
-    if (legacyStartup) return;
     const lifecycleFailure = agentLifecycleFailureText(incoming.raw);
     if (
       isTransientAgentLifecycleEvent(incoming.raw) &&
@@ -1342,10 +1332,10 @@ export function CodeverApp() {
             replacementTarget,
           ).catch((error) => {
             showUiNotice(
-              "history:legacy-cleanup",
+              "history:lifecycle-cleanup",
               "history",
               "warning",
-              `Legacy Agent startup history could not be removed: ${formatUiError(error)}`,
+              `Transient lifecycle history could not be removed: ${formatUiError(error)}`,
             );
           });
         }
@@ -2114,6 +2104,11 @@ export function CodeverApp() {
           if (!isCurrentStartup()) return;
           setTrustedGateway(trust);
           setActiveDeviceCount(trust?.activeDeviceCount ?? null);
+          if (trust) {
+            setPairingPreview(null);
+            setPairingBusy(false);
+            setConnectionError(null);
+          }
         },
         onCollaborationState(state) {
           if (!isCurrentStartup()) return;
@@ -3713,19 +3708,8 @@ export function CodeverApp() {
       deliveryState: "sending",
       attachments,
     };
-    optimisticMessagesRef.current.set(optimisticId, {
-      id: optimisticId,
-      text: value,
-      sessionId: optimisticMessage.sessionId,
-    });
-    rememberLiveMessage(sessionId, optimisticMessage);
-    followLatestRef.current = true;
-    setMessages((current) => [
-      ...current,
-      optimisticMessage,
-    ]);
-    if (submissionHistoryScope) {
-      void saveMessageHistory(
+    const optimisticHistoryPersisted = submissionHistoryScope
+      ? saveMessageHistory(
         submissionHistoryScope,
         sessionId,
         [optimisticMessage],
@@ -3736,17 +3720,32 @@ export function CodeverApp() {
           "warning",
           `Conversation history could not be saved: ${formatUiError(error)}`,
         );
-      });
-    }
-    setDraft("");
-    setSessionRunning(sessionId, true);
-    if (!queueBehindActiveTurn) {
-      setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
-    }
+        throw error;
+      })
+      : Promise.resolve();
     setSessionPromptSubmitting(sessionId, true);
     let result: CodeverCommandSendResult | null;
     let acknowledgementTimeout: CommandAcknowledgementTimeoutError | null = null;
     try {
+      // Visibility is the durability boundary: once the user can see the
+      // optimistic message, an immediate reload/background transition must be
+      // able to restore it without waiting for Matrix history pagination.
+      await optimisticHistoryPersisted;
+      optimisticMessagesRef.current.set(optimisticId, {
+        id: optimisticId,
+        text: value,
+        sessionId: optimisticMessage.sessionId,
+      });
+      rememberLiveMessage(sessionId, optimisticMessage);
+      if (selectedSessionIdRef.current === sessionId) {
+        followLatestRef.current = true;
+        setMessages((current) => [...current, optimisticMessage]);
+        setDraft("");
+      }
+      setSessionRunning(sessionId, true);
+      if (!queueBehindActiveTurn) {
+        setSessionAgentActivity(sessionId, SENDING_AGENT_ACTIVITY);
+      }
       result = await sendRealCommand(
         createPromptCommandPayload({
           sessionId,
@@ -4343,6 +4342,7 @@ export function CodeverApp() {
                   key={session.id}
                   data-session-id={session.id}
                   data-project-name={session.projectName}
+                  aria-pressed={selectedSessionId === session.id}
                   className={`session-row ${
                     selectedSessionId === session.id
                       ? "selected"
@@ -4429,6 +4429,7 @@ export function CodeverApp() {
                       key={session.id}
                       data-session-id={session.id}
                       data-project-name={session.projectName}
+                      aria-pressed={selectedSessionId === session.id}
                       className={`archived-session-row ${
                         selectedSessionId === session.id ? "selected" : ""
                       }`}
@@ -4762,7 +4763,6 @@ export function CodeverApp() {
             const agentTurnClass = agentWork
               ? `${previousIsAgentWork ? "agent-turn-continuation" : "agent-turn-start"} ${nextIsAgentWork ? "" : "agent-turn-end"}`
               : "";
-            const legacyCommand = legacyCommandText(message);
             if (message.kind === "notice") {
               return (
                 <div
@@ -4856,35 +4856,8 @@ export function CodeverApp() {
                 </div>
               );
             }
-            if (legacyCommand) {
-              const toolGroup = legacyToolGroupPresentation({
-                groupId: message.eventId ?? message.id,
-                name: "Command",
-                detail: legacyCommand,
-                category: "execute",
-                phase:
-                  !nextIsAgentWork && isStreaming ? "updated" : "completed",
-                timestamp: message.timestamp ?? Date.now(),
-              });
-              return (
-                <div
-                  className={`message-row tool-group-row legacy-command-row ${agentTurnClass} ${
-                    message.historical ? "" : "message-enter"
-                  }`}
-                  key={message.id}
-                >
-                  <ToolGroupCard group={toolGroup} time={message.time} />
-                </div>
-              );
-            }
             if (message.kind === "tool") {
-              const toolGroup =
-                message.toolGroup ??
-                legacyToolGroupPresentation({
-                  groupId: message.eventId ?? message.id,
-                  name: message.text || "Agent tool",
-                  timestamp: message.timestamp ?? Date.now(),
-                });
+              if (!message.toolGroup) return null;
               return (
                 <div
                   className={`message-row tool-group-row ${agentTurnClass} ${
@@ -4892,7 +4865,7 @@ export function CodeverApp() {
                   }`}
                   key={message.id}
                 >
-                  <ToolGroupCard group={toolGroup} time={message.time} />
+                  <ToolGroupCard group={message.toolGroup} time={message.time} />
                 </div>
               );
             }
@@ -4969,28 +4942,14 @@ export function CodeverApp() {
                 }`}
                 key={message.id}
               >
-                <div
-                  className={`agent-mark ${
-                    message.raw?.type === "agent.text.delta" ? "live" : ""
-                  }`}
-                >
-                  C
-                </div>
+                <div className="agent-mark">C</div>
                 <div className="bubble agent-bubble">
                   <span className="agent-label">CODEX</span>
                   {message.format === "markdown" || !message.format ? (
-                    <>
-                      <MarkdownContent content={message.text ?? ""} />
-                      {message.raw?.type === "agent.text.delta" && (
-                        <span className="cursor" aria-hidden="true" />
-                      )}
-                    </>
+                    <MarkdownContent content={message.text ?? ""} />
                   ) : (
                     <p className="message-copy">
                       {message.text}
-                      {message.raw?.type === "agent.text.delta" && (
-                        <span className="cursor" aria-hidden="true" />
-                      )}
                     </p>
                   )}
                   <AttachmentList
@@ -5497,18 +5456,7 @@ function waitForNextPaint(): Promise<void> {
 function agentLifecycleFailureText(
   raw: Record<string, unknown>,
 ): string | null {
-  if (
-    raw.type === "command.completed" &&
-    raw.outcome === "failed"
-  ) {
-    return typeof raw.error === "string" && raw.error.trim()
-      ? raw.error
-      : "The command could not be completed.";
-  }
-  if (
-    (raw.type === "session.updated" && raw.status === "failed") ||
-    (raw.kind === "status" && raw.state === "failed")
-  ) {
+  if (raw.kind === "status" && raw.state === "failed") {
     return typeof raw.error === "string" && raw.error.trim()
       ? raw.error
       : "The agent session failed.";
@@ -5529,9 +5477,6 @@ function chatMessageFromIncoming(
     timestamp: incoming.timestamp,
     operationId: incoming.operationId,
     requestId: incoming.requestId,
-    streamId: incoming.streamId,
-    toolCallId: incoming.toolCallId,
-    toolStatus: incoming.toolStatus,
     replacesEventId: incoming.replacesEventId,
     commandId: incoming.commandId,
     revision: incoming.revision,
@@ -5560,9 +5505,6 @@ function incomingMessageFromClient(
     historical: message.historical,
     operationId: message.operationId,
     requestId: message.requestId,
-    streamId: message.streamId,
-    toolCallId: message.toolCallId,
-    toolStatus: message.toolStatus,
     replacesEventId: message.replacesEventId,
     commandId: message.commandId,
     revision: message.revision,

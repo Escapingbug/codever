@@ -10,7 +10,7 @@ import {
 import { SecurityError, type ReplayClaim, type ReplayStore } from '@codever/security'
 
 interface PersistedClaimBatch {
-    version: 1
+    version: 2
     claims: ReplayClaim[]
     sequence?: {
         scope: string
@@ -20,11 +20,11 @@ interface PersistedClaimBatch {
         scope: string
         value: number
         commandKey: string
-        commandSequence?: number
-        commandNonceKey?: string
-        commandBaseRevision?: number
-        commandFingerprint?: string
-        commandOperation?: CommandOperation
+        commandSequence: number
+        commandNonceKey: string
+        commandBaseRevision: number
+        commandFingerprint: string
+        commandOperation: CommandOperation
     }
     /**
      * A terminal failure written in the same fsynced journal record as the
@@ -36,14 +36,14 @@ interface PersistedClaimBatch {
 
 interface PersistedCommandOutcome {
     revision: number
-    sequence: number | undefined
-    nonceKey: string | undefined
-    baseRevision: number | undefined
-    fingerprint: string | undefined
+    sequence: number
+    nonceKey: string
+    baseRevision: number
+    fingerprint: string
 }
 
 interface PersistedLedgerGeneration {
-    version: 1
+    version: 2
     kind: 'generation'
     generation: string
 }
@@ -57,7 +57,7 @@ export interface DurableCommandResult {
 }
 
 interface PersistedCommandResultEntry {
-    version: 1
+    version: 2
     kind: 'command_result'
     commandKey: string
     fingerprint: string
@@ -68,13 +68,6 @@ export interface CommandClaimResult {
     status: 'accepted' | 'duplicate'
     revision: number
     terminal?: DurableCommandResult
-    /**
-     * The command was accepted by a Gateway with an unversioned fingerprint. Its
-     * authenticated retry may use fresh delivery timestamps/nonces, so the
-     * Gateway may only recover an already-journaled result. It must never
-     * execute the retry payload.
-     */
-    legacyFingerprintRecovery?: true
 }
 
 export class RevisionConflictError extends SecurityError {
@@ -138,7 +131,7 @@ export class FileCommandReplayStore implements ReplayStore {
             const uniqueKeys = new Set(nextClaims.map(claim => claim.key))
             if (uniqueKeys.size !== nextClaims.length) return false
             const record: PersistedClaimBatch = {
-                version: 1,
+                version: 2,
                 claims: nextClaims.map(claim => ({ ...claim })),
             }
             await this.append(record)
@@ -152,7 +145,6 @@ export class FileCommandReplayStore implements ReplayStore {
     claimCommandInOrder(
         command: CodeverCommand,
         now: number,
-        sequenceEpoch = 'legacy-v1',
     ): Promise<CommandClaimResult> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
@@ -163,7 +155,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 command.deviceId,
                 command.conversationId,
                 command.revisionEpoch,
-                sequenceEpoch,
+                command.sequenceEpoch,
             ])
             const revisionScope = conversationRevisionScope(
                 command.gatewayId,
@@ -186,30 +178,11 @@ export class FileCommandReplayStore implements ReplayStore {
                 const exactRecovery =
                     matchingIdentity
                     && priorOutcome.nonceKey === nonceKey
-                    && (
-                        priorOutcome.fingerprint === undefined
-                        || priorOutcome.fingerprint === fingerprint
-                    )
+                    && priorOutcome.fingerprint === fingerprint
                 if (exactRecovery) {
                     return {
                         status: 'duplicate' as const,
                         revision: priorOutcome.revision,
-                    }
-                }
-                // Android schema-v1 retained the durable business identity but
-                // not the original authentication timestamp/nonce. Old ledger
-                // fingerprints are unversioned, so an upgraded APK cannot
-                // reconstruct their exact hash. Treat this only as a request to
-                // retrieve the prior outcome: callers are explicitly forbidden
-                // from executing the supplied retry payload.
-                if (
-                    matchingIdentity
-                    && isLegacyCommandFingerprint(priorOutcome.fingerprint)
-                ) {
-                    return {
-                        status: 'duplicate' as const,
-                        revision: priorOutcome.revision,
-                        legacyFingerprintRecovery: true as const,
                     }
                 }
                 throw new SecurityError(
@@ -262,7 +235,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 : undefined
 
             const record: PersistedClaimBatch = {
-                version: 1,
+                version: 2,
                 claims: nextClaims,
                 sequence: { scope, value: command.sequence },
                 revision: {
@@ -278,7 +251,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 ...(terminal
                     ? {
                         terminal: {
-                            version: 1,
+                            version: 2,
                             kind: 'command_result',
                             commandKey,
                             fingerprint,
@@ -320,11 +293,10 @@ export class FileCommandReplayStore implements ReplayStore {
     recordCommandResult(
         command: CodeverCommand,
         terminal: DurableCommandResult,
-        sequenceEpoch = 'legacy-v1',
     ): Promise<void> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
-            const commandKey = commandKeyFor(command, sequenceEpoch)
+            const commandKey = commandKeyFor(command)
             const accepted = this.commandOutcomes.get(commandKey)
             const fingerprint = commandFingerprint(command)
             if (!accepted || accepted.fingerprint !== fingerprint) {
@@ -344,7 +316,7 @@ export class FileCommandReplayStore implements ReplayStore {
                 return
             }
             const record: PersistedCommandResultEntry = {
-                version: 1,
+                version: 2,
                 kind: 'command_result',
                 commandKey,
                 fingerprint,
@@ -362,20 +334,12 @@ export class FileCommandReplayStore implements ReplayStore {
 
     getCommandResult(
         command: CodeverCommand,
-        sequenceEpoch = 'legacy-v1',
-        allowLegacyFingerprintRecovery = false,
     ): Promise<DurableCommandResult | undefined> {
         const operation = this.chain.then(async () => {
             if (!this.initialized) await this.load()
-            const stored = this.commandResults.get(commandKeyFor(command, sequenceEpoch))
+            const stored = this.commandResults.get(commandKeyFor(command))
             if (!stored) return undefined
-            if (
-                stored.fingerprint !== commandFingerprint(command)
-                && !(
-                    allowLegacyFingerprintRecovery
-                    && isLegacyCommandFingerprint(stored.fingerprint)
-                )
-            ) {
+            if (stored.fingerprint !== commandFingerprint(command)) {
                 throw new SecurityError(
                     'replay',
                     'Command result does not match the authenticated command fingerprint',
@@ -487,10 +451,6 @@ export class FileCommandReplayStore implements ReplayStore {
                     throw new Error(`Non-contiguous conversation revision at line ${index + 1}`)
                 }
                 this.revisions.set(value.revision.scope, value.revision.value)
-                // Entries written before commandOperation was persisted are
-                // treated as a conservative state-change barrier. Once a new
-                // prompt has observed that revision, later prompt-only gaps
-                // can be linearized normally.
                 if (
                     !value.terminal
                     && value.revision.commandOperation !== 'prompt'
@@ -500,20 +460,11 @@ export class FileCommandReplayStore implements ReplayStore {
                         value.revision.value,
                     )
                 }
-                const legacyNonceKey = value.claims.find(
-                    claim => claim.key !== value.revision?.commandKey,
-                )?.key
                 this.commandOutcomes.set(value.revision.commandKey, {
                     revision: value.revision.value,
-                    sequence:
-                        value.revision.commandSequence
-                        ?? value.sequence?.value,
-                    nonceKey:
-                        value.revision.commandNonceKey
-                        ?? legacyNonceKey,
-                    baseRevision:
-                        value.revision.commandBaseRevision
-                        ?? value.revision.value - 1,
+                    sequence: value.revision.commandSequence,
+                    nonceKey: value.revision.commandNonceKey,
+                    baseRevision: value.revision.commandBaseRevision,
                     fingerprint: value.revision.commandFingerprint,
                 })
             }
@@ -561,7 +512,7 @@ export class FileCommandReplayStore implements ReplayStore {
     private async createGeneration(): Promise<void> {
         const generation = randomUUID()
         await this.append({
-            version: 1,
+            version: 2,
             kind: 'generation',
             generation,
         })
@@ -586,7 +537,7 @@ function isPersistedCommandResultEntry(value: unknown): value is PersistedComman
     if (!value || typeof value !== 'object') return false
     const record = value as Record<string, unknown>
     if (
-        record.version !== 1
+        record.version !== 2
         || record.kind !== 'command_result'
         || typeof record.commandKey !== 'string'
         || record.commandKey.length === 0
@@ -620,7 +571,7 @@ function isPersistedCommandResultEntry(value: unknown): value is PersistedComman
 function isPersistedLedgerGeneration(value: unknown): value is PersistedLedgerGeneration {
     if (!value || typeof value !== 'object') return false
     const record = value as Record<string, unknown>
-    return record.version === 1
+    return record.version === 2
         && record.kind === 'generation'
         && typeof record.generation === 'string'
         && record.generation.length > 0
@@ -629,7 +580,7 @@ function isPersistedLedgerGeneration(value: unknown): value is PersistedLedgerGe
 function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
     if (!value || typeof value !== 'object') return false
     const record = value as Record<string, unknown>
-    if (record.version !== 1 || !Array.isArray(record.claims)) return false
+    if (record.version !== 2 || !Array.isArray(record.claims)) return false
     const validClaims = record.claims.every((claim) => {
         if (!claim || typeof claim !== 'object') return false
         const item = claim as Record<string, unknown>
@@ -659,40 +610,25 @@ function isPersistedClaimBatch(value: unknown): value is PersistedClaimBatch {
             && revision.value > 0
             && typeof revision.commandKey === 'string'
             && revision.commandKey.length > 0)) return false
-        if (
-            revision.commandSequence !== undefined
-            && !(
+        if (!(
                 typeof revision.commandSequence === 'number'
                 && Number.isSafeInteger(revision.commandSequence)
                 && revision.commandSequence > 0
-            )
-        ) return false
-        if (
-            revision.commandNonceKey !== undefined
-            && !(
+        )) return false
+        if (!(
                 typeof revision.commandNonceKey === 'string'
                 && revision.commandNonceKey.length > 0
-            )
-        ) return false
-        if (
-            revision.commandBaseRevision !== undefined
-            && !(
+        )) return false
+        if (!(
                 typeof revision.commandBaseRevision === 'number'
                 && Number.isSafeInteger(revision.commandBaseRevision)
                 && revision.commandBaseRevision >= 0
-            )
-        ) return false
-        if (
-            revision.commandFingerprint !== undefined
-            && !(
+        )) return false
+        if (!(
                 typeof revision.commandFingerprint === 'string'
                 && revision.commandFingerprint.length > 0
-            )
-        ) return false
-        if (
-            revision.commandOperation !== undefined
-            && !isCommandOperation(revision.commandOperation)
-        ) return false
+        )) return false
+        if (!isCommandOperation(revision.commandOperation)) return false
     }
     if (
         record.terminal !== undefined
@@ -739,13 +675,13 @@ function conversationRevisionScope(
     return canonicalJson([gatewayId, conversationId, revisionEpoch])
 }
 
-function commandKeyFor(command: CodeverCommand, sequenceEpoch: string): string {
+function commandKeyFor(command: CodeverCommand): string {
     const scope = canonicalJson([
         command.gatewayId,
         command.deviceId,
         command.conversationId,
         command.revisionEpoch,
-        sequenceEpoch,
+        command.sequenceEpoch,
     ])
     return `${scope}:command:${command.commandId}`
 }
@@ -756,8 +692,4 @@ function commandFingerprint(command: CodeverCommand): string {
         .update(canonicalJson(command))
         .digest('hex')
     return `v2:${digest}`
-}
-
-function isLegacyCommandFingerprint(value: string | undefined): boolean {
-    return value !== undefined && /^[0-9a-f]{64}$/u.test(value)
 }

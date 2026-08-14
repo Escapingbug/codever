@@ -9,7 +9,7 @@ import {
 } from "../app/commandLifecycle.ts";
 import {
   acquireMatrixCryptoLock,
-  checkpointAndReleaseMatrixSyncStore,
+  flushAndReleaseMatrixSyncStore,
   matrixCryptoLockName,
   matrixSyncDatabaseName,
   waitForMatrixSyncStoreClose,
@@ -38,12 +38,14 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           id: "session-1",
           title: "Live session",
           updated_at: 1_700_000_000_000,
+          status: "idle",
           project_id: "project-workspace",
           project_name: "workspace",
           cwd: "C:/workspace",
           provider: "codex",
           model: "gpt-5",
           reasoning_effort: "high",
+          extensions: [],
         },
         {
           id: "session-archived",
@@ -55,6 +57,7 @@ test("authenticated Gateway state accepts revision zero and real capabilities", 
           project_name: "workspace",
           cwd: "C:/workspace",
           provider: "codex",
+          extensions: [],
         },
       ],
       workspace: {
@@ -160,6 +163,7 @@ test("authenticated Gateway state exposes only declarative session extension met
       id: "session-private",
       title: "Private session",
       updated_at: 1,
+      status: "idle",
       project_id: "project-1",
       project_name: "workspace",
       cwd: "/workspace",
@@ -240,6 +244,7 @@ test("cached Gateway state survives reload only for the same trust and durable e
         provider: "codex",
         model: "gpt-5.6-sol",
         reasoning_effort: "high",
+        extensions: [],
       },
     ],
     workspace: {
@@ -342,6 +347,35 @@ test("Gateway state rejects a missing or invalid state version", () => {
   assert.throws(
     () => parseGatewayStateExtension({ ...base, state_version: 0 }),
     /state snapshot is malformed/,
+  );
+});
+
+test("Gateway state rejects snapshots without canonical project identities", () => {
+  const base = {
+    version: 1,
+    kind: "gateway_state",
+    state_version: 1,
+    revision: 0,
+    revision_epoch: "epoch-1",
+    revision_epoch_generation: 1,
+    active_device_count: 1,
+    current_session_id: null,
+    sessions: [],
+    workspace: {
+      cwd: "C:/workspace",
+      provider: "codex",
+      permission_mode: "default",
+    },
+    capabilities: {
+      models: [],
+      permission_modes: [{ id: "default", name: "Default" }],
+      can_create_session: true,
+      can_select_session: true,
+    },
+  };
+  assert.throws(
+    () => parseGatewayStateExtension(base),
+    /workspace state is malformed/,
   );
 });
 
@@ -552,7 +586,7 @@ test("Matrix crypto access fails closed without an available Web Lock", async ()
   );
 });
 
-test("reconnect waits for the previous forced sync-state checkpoint", async () => {
+test("reconnect waits for the previous forced local sync-store flush", async () => {
   const calls = [];
   let releaseSave;
   let releaseLock;
@@ -562,7 +596,7 @@ test("reconnect waits for the previous forced sync-state checkpoint", async () =
   const lockGate = new Promise((resolve) => {
     releaseLock = resolve;
   });
-  const closing = checkpointAndReleaseMatrixSyncStore(
+  const closing = flushAndReleaseMatrixSyncStore(
     "sync-close-behavior",
     {
       async save(force) {

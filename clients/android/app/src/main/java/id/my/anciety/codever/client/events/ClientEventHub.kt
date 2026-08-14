@@ -255,12 +255,15 @@ class ClientEventHub(
             val events = mutableListOf<ClientEvent>()
             messages.forEach { message ->
                 val existingIndex = historyIndex[message.eventId]
-                if (existingIndex != null && mutableHistory[existingIndex].message == message) {
+                val acceptedMessage = existingIndex?.let { index ->
+                    preferLiveMessage(mutableHistory[index].message, message)
+                } ?: message
+                if (existingIndex != null && mutableHistory[existingIndex].message == acceptedMessage) {
                     return@forEach
                 }
                 if (existingIndex != null) {
                     mutableHistory[existingIndex] =
-                        mutableHistory[existingIndex].copy(message = message)
+                        mutableHistory[existingIndex].copy(message = acceptedMessage)
                 } else {
                     nextHistorySequence = Math.addExact(nextHistorySequence, 1L)
                     val historyCursor = nextUniqueCursor(historyCursors).also(historyCursors::add)
@@ -269,7 +272,7 @@ class ClientEventHub(
                         sequence = nextHistorySequence,
                         cursor = historyCursor,
                         sessionId = sessionId,
-                        message = message,
+                        message = acceptedMessage,
                     )
                 }
 
@@ -280,7 +283,7 @@ class ClientEventHub(
                     cursor = headCursor,
                     occurredAt = occurredAt,
                     type = ClientEventType.MESSAGE_UPSERTED,
-                    payload = PublicClientJson.encodeMessage(message),
+                    payload = PublicClientJson.encodeMessage(acceptedMessage),
                 )
                 events += event
                 storedEvents += StoredClientEvent(nextEventSequence, event)
@@ -303,6 +306,14 @@ class ClientEventHub(
         targets.forEach(::deliverAvailable)
         return emitted
     }
+
+    /** A paginated copy can fill a gap, but it cannot downgrade a live action to read-only history. */
+    private fun preferLiveMessage(existing: ClientMessage, incoming: ClientMessage): ClientMessage =
+        when {
+            existing.historical == true && incoming.historical != true -> incoming
+            existing.historical != true && incoming.historical == true -> existing
+            else -> incoming
+        }
 
     fun removeMessage(
         sessionId: String,

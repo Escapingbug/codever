@@ -8,23 +8,15 @@ import org.junit.Test
 
 class MatrixAccountWiperTest {
     @Test
-    fun `native cache migration preserves crypto data and removes obsolete timeline caches`() {
+    fun `native cache preparation preserves crypto data`() {
         val accountRoot = Files.createTempDirectory("codever-matrix-cache-migration").toFile()
         try {
             val data = accountRoot.resolve("data").apply { mkdirs() }
             data.resolve("crypto.db").writeText("preserve-device-identity")
-            val legacyCache = accountRoot.resolve("cache").apply { mkdirs() }
-            legacyCache.resolve("sliding-sync.db").writeText("discard")
-            val unboundedCache = accountRoot.resolve("cache-v2").apply { mkdirs() }
-            unboundedCache.resolve("matrix-sdk-event-cache.sqlite3").writeText("discard")
+            val prepared = MatrixAccountCache.prepare(accountRoot)
 
-            val prepared = MatrixAccountCacheMigration.prepare(accountRoot)
-
-            assertTrue(prepared.migrated)
-            assertEquals(accountRoot.resolve("cache-v3").canonicalFile, prepared.directory)
-            assertTrue(prepared.directory.isDirectory)
-            assertFalse(legacyCache.exists())
-            assertFalse(unboundedCache.exists())
+            assertEquals(accountRoot.resolve("cache").canonicalFile, prepared)
+            assertTrue(prepared.isDirectory)
             assertEquals("preserve-device-identity", data.resolve("crypto.db").readText())
         } finally {
             accountRoot.deleteRecursively()
@@ -32,17 +24,15 @@ class MatrixAccountWiperTest {
     }
 
     @Test
-    fun `native cache migration is idempotent`() {
+    fun `native cache preparation is idempotent`() {
         val accountRoot = Files.createTempDirectory("codever-matrix-cache-current").toFile()
         try {
-            val first = MatrixAccountCacheMigration.prepare(accountRoot)
-            first.directory.resolve("current-cache.db").writeText("keep")
-            val second = MatrixAccountCacheMigration.prepare(accountRoot)
+            val first = MatrixAccountCache.prepare(accountRoot)
+            first.resolve("current-cache.db").writeText("keep")
+            val second = MatrixAccountCache.prepare(accountRoot)
 
-            assertFalse(first.migrated)
-            assertFalse(second.migrated)
-            assertEquals(accountRoot.resolve("cache-v3").canonicalFile, second.directory)
-            assertEquals("keep", second.directory.resolve("current-cache.db").readText())
+            assertEquals(accountRoot.resolve("cache").canonicalFile, second)
+            assertEquals("keep", second.resolve("current-cache.db").readText())
         } finally {
             accountRoot.deleteRecursively()
         }

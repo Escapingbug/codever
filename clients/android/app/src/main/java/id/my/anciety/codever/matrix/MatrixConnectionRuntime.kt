@@ -37,6 +37,9 @@ class MatrixConnectionRuntime(
         MatrixApplicationControlClient(),
     private val applicationControlSyncClient: MatrixApplicationControlSyncClient =
         MatrixApplicationControlSyncClient(),
+    private val applicationRoomStateClient: MatrixApplicationRoomStateClient =
+        MatrixApplicationRoomStateClient(),
+    private val threadHistoryClient: MatrixThreadHistoryClient = MatrixThreadHistoryClient(),
     private val networkMonitor: NetworkMonitor = AndroidNetworkMonitor(context),
     private val accountStorage: MatrixAccountStorage = MatrixAccountStorage(
         context,
@@ -51,9 +54,13 @@ class MatrixConnectionRuntime(
         firstSyncTimeoutMs = BuildConfig.MATRIX_FIRST_SYNC_TIMEOUT_MS,
     ),
     private val retryDelayMs: Long = 5_000,
+    private val onPairingTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onConvergenceRequired: (String) -> Unit = {},
-    private val onDecryptedEvent: (MatrixDecryptedEvent) -> Unit = {},
+    private val onDecryptedEvent: suspend (MatrixDecryptedEvent) -> Unit = {},
+    private val onAuthoritativeRoomState: suspend (List<MatrixDecryptedEvent>) -> Unit = {
+        events -> for (event in events) onDecryptedEvent(event)
+    },
 ) {
     private data class ApplicationControlSendContext(
         val session: StoredMatrixSession,
@@ -72,8 +79,6 @@ class MatrixConnectionRuntime(
     private var driver: MatrixSdkDriver? = null
     @Volatile
     private var driverGeneration = 0L
-    @Volatile
-    private var latestJournalCursor = 0L
     private var retryJob: Job? = null
     private var watchdogJob: Job? = null
     private var applicationControlReceiverJob: Job? = null
@@ -163,25 +168,21 @@ class MatrixConnectionRuntime(
         }
     }.await()
 
-    suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false) = scope.async {
+    suspend fun sendPairingMessage(contentJson: String) = scope.async {
         val current = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
             driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
         }
         withTimeout(SEND_OPERATION_TIMEOUT_MS) {
-            current.sendRoomMessage(contentJson, rotateRoomKey)
+            current.sendPairingMessage(contentJson)
         }
     }.await()
 
-    suspend fun paginateRoomHistory(limit: Int): Boolean = scope.async {
-        val current = mutex.withLock {
-            check(started.get()) { "The native Matrix runtime is stopped." }
-            if (!networkAvailable) throw MatrixOfflineException()
-            driver ?: throw IllegalStateException("The native Matrix connection is not ready.")
-        }
+    suspend fun closePairingChannel() = scope.async {
+        val current = mutex.withLock { driver } ?: return@async
         withTimeout(SEND_OPERATION_TIMEOUT_MS) {
-            current.paginateRoomHistory(limit)
+            current.closePairingChannel()
         }
     }.await()
 
@@ -276,7 +277,6 @@ class MatrixConnectionRuntime(
             secrets?.sdkStoreKey?.fill(0)
             secrets = null
             files = null
-            latestJournalCursor = 0
             liveness.reset()
             started.set(false)
             accept(MatrixRuntimeEvent.Stop)
@@ -331,7 +331,60 @@ class MatrixConnectionRuntime(
 
     fun publicSession(): PublicMatrixSession? = secrets?.session?.toPublic()
 
-    fun journalCursor(): Long = latestJournalCursor
+    suspend fun refreshApplicationRoomState() {
+        val session = secrets?.session
+            ?: throw MatrixOfflineException("The Matrix session is unavailable.")
+        val state = applicationRoomStateClient.current(session)
+        diagnostics.record(
+            "matrix.application_state.refreshed",
+            mapOf("accepted" to state.events.size.toString()),
+        )
+        onAuthoritativeRoomState(state.events)
+    }
+
+    suspend fun loadThreadHistory(
+        threadRootEventId: String,
+        from: String?,
+        limit: Int,
+    ): MatrixThreadHistoryBatch {
+        val session = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            secrets?.session ?: throw MatrixOfflineException("The Matrix session is unavailable.")
+        }
+        diagnostics.record(
+            "matrix.thread_history.requested",
+            mapOf("paged" to (from != null).toString(), "limit" to limit.toString()),
+        )
+        return try {
+            withTimeout(HISTORY_OPERATION_TIMEOUT_MS) {
+                threadHistoryClient.page(session, threadRootEventId, from, limit)
+            }.also { batch ->
+                diagnostics.record(
+                    "matrix.thread_history.received",
+                    mapOf(
+                        "events" to batch.events.size.toString(),
+                        "has_more" to (batch.nextBatch != null).toString(),
+                    ),
+                )
+            }
+        } catch (error: TimeoutCancellationException) {
+            diagnostics.record(
+                "matrix.thread_history.failed",
+                mapOf("type" to error::class.java.simpleName),
+            )
+            throw error
+        } catch (error: CancellationException) {
+            diagnostics.record("matrix.thread_history.cancelled")
+            throw error
+        } catch (error: Exception) {
+            diagnostics.record(
+                "matrix.thread_history.failed",
+                mapOf("type" to error::class.java.simpleName),
+            )
+            throw error
+        }
+    }
 
     suspend fun stop(clearSession: Boolean) = mutex.withLock {
         if (!started.compareAndSet(true, false)) return@withLock
@@ -349,7 +402,6 @@ class MatrixConnectionRuntime(
             secrets?.sdkStoreKey?.fill(0)
             secrets = null
             files = null
-            latestJournalCursor = 0
             applicationControlSince = null
         }
         liveness.reset()
@@ -434,12 +486,6 @@ class MatrixConnectionRuntime(
     private fun restorePersistedSessionLocked() {
         if (secrets != null) return
         val currentFiles = accountStorage.findCurrent() ?: return
-        if (currentFiles.sdkCacheMigrated) {
-            diagnostics.record(
-                "matrix.cache.migrated",
-                mapOf("stage" to "BOUNDED_TIMELINE_CACHE_V3"),
-            )
-        }
         val loaded = currentFiles.sessionStore.load() ?: return
         check(
             MatrixIdentifiers.accountStoreName(
@@ -447,21 +493,11 @@ class MatrixConnectionRuntime(
                 loaded.session.userId,
             ) == currentFiles.accountScope,
         ) { "Encrypted Matrix session is bound to a different account scope." }
-        val migratedSession = loaded.session.forNativeSlidingSync()
-        val migrated = if (migratedSession === loaded.session) {
-            loaded
-        } else {
-            PersistedMatrixSecrets(loaded.sdkStoreKey, migratedSession).also {
-                currentFiles.sessionStore.save(it)
-                diagnostics.record(
-                    "matrix.session.migrated",
-                    mapOf("stage" to "NATIVE_SLIDING_SYNC"),
-                )
-            }
+        check(loaded.session.slidingSyncVersion == org.matrix.rustcomponents.sdk.SlidingSyncVersion.NATIVE) {
+            "The stored Matrix session uses an unsupported sync format. Pair this APK again."
         }
         files = currentFiles
-        secrets = migrated
-        latestJournalCursor = currentFiles.journal.latestCursor()
+        secrets = loaded
         applicationControlSince = currentFiles.applicationControlCursor.load()
     }
 
@@ -514,18 +550,9 @@ class MatrixConnectionRuntime(
                             }
                         }
                     },
-                    onJournalAdvanced = { cursor ->
-                        scope.launch {
-                            mutex.withLock {
-                                if (driver === nextDriver && driverGeneration == generation) {
-                                    latestJournalCursor = cursor
-                                }
-                            }
-                        }
-                    },
                     onTransportReady = { identity ->
                         scope.launch {
-                            mutex.withLock {
+                            val current = mutex.withLock {
                                 if (driver === nextDriver && driverGeneration == generation) {
                                     startApplicationControlReceiverLocked(
                                         currentSecrets.session,
@@ -533,14 +560,18 @@ class MatrixConnectionRuntime(
                                         generation,
                                         identity,
                                     )
+                                    true
+                                } else {
+                                    false
                                 }
                             }
+                            // Pairing uses the SDK's encrypted room timeline and
+                            // must not wait for the separate application-control
+                            // /sync cursor used by already trusted commands.
+                            if (current) onPairingTransportReady(identity)
                         }
                     },
-                    onTimelineGap = {
-                        onConvergenceRequired("room_timeline_reset")
-                    },
-                    onDecryptedEvent = onDecryptedEvent,
+                    onPairingEvent = onDecryptedEvent,
                     onRuntimeFailure = { error ->
                         diagnostics.record("matrix.driver.runtime_failure", errorAttributes(error))
                         scope.launch {
@@ -599,6 +630,53 @@ class MatrixConnectionRuntime(
         applicationControlReceiverJob = scope.launch {
             var since = applicationControlSince
             var consecutiveFailures = 0
+            while (isActive) {
+                try {
+                    val currentState = applicationRoomStateClient.current(session)
+                    diagnostics.record(
+                        "matrix.application_state.current_received",
+                        mapOf(
+                            "candidates" to currentState.candidateEventCount.toString(),
+                            "accepted" to currentState.events.size.toString(),
+                        ),
+                    )
+                    // Current Room State is a projection baseline, not an
+                    // append-only journal replay. Always reprocess it after a
+                    // native reconnect, even when its event IDs are unchanged.
+                    onAuthoritativeRoomState(currentState.events)
+                    break
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (error is MatrixApplicationControlSyncException && error.fatal) {
+                        ready.completeExceptionally(error)
+                        scope.launch {
+                            mutex.withLock {
+                                if (driverGeneration == generation) {
+                                    accept(MatrixRuntimeEvent.Failed(
+                                        "matrix_application_state_rejected",
+                                        blocked = true,
+                                    ))
+                                }
+                            }
+                        }
+                        return@launch
+                    }
+                    consecutiveFailures += 1
+                    diagnostics.record(
+                        "matrix.application_state.current_retry",
+                        errorAttributes(error),
+                    )
+                    delay(
+                        (error as? MatrixApplicationControlSyncException)?.retryAfterMs
+                            ?: APPLICATION_CONTROL_RETRY_BASE_MS *
+                                consecutiveFailures.coerceAtMost(
+                                    APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER,
+                                ),
+                    )
+                }
+            }
+            consecutiveFailures = 0
             while (isActive) {
                 val batch = try {
                     // A persisted cursor makes this a live sync, but readiness must not
@@ -679,34 +757,17 @@ class MatrixConnectionRuntime(
                         ),
                     )
                 }
-                val receivedAt = System.currentTimeMillis()
-                val cursors = currentFiles.journal.appendAll(
-                    batch.events.map { event ->
-                        JournalEventInput(
-                            roomId = event.roomId,
-                            eventId = event.eventId,
-                            receivedAt = receivedAt,
-                            rawJson = event.rawJson,
-                            dedupeByEventId = true,
-                        )
-                    },
-                )
-                batch.events.zip(cursors).forEach { (event, cursor) ->
-                    cursor?.let {
-                        latestJournalCursor = cursor
-                        diagnostics.record(
-                            "matrix.application_control.event_received",
-                            mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
-                        )
-                        onDecryptedEvent(event)
-                    }
-                }
-                if (batch.events.isNotEmpty()) {
+                for (event in batch.events) {
+                    onDecryptedEvent(event)
                     diagnostics.record(
-                        "matrix.application_control.batch_persisted",
-                        mapOf("appended" to cursors.count { it != null }.toString()),
+                        "matrix.application_control.event_committed",
+                        mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
                     )
                 }
+                // Commit the Matrix cursor only after every accepted event has
+                // completed its authenticated local state/history transition.
+                // A process exit before this point makes Matrix redeliver the
+                // batch; projection and history stores deduplicate it.
                 since = batch.nextBatch
                 currentFiles.applicationControlCursor.save(since)
                 applicationControlSince = since
@@ -791,6 +852,7 @@ class MatrixConnectionRuntime(
         const val SEND_OPERATION_TIMEOUT_MS = 45_000L
         const val PROFILE_OPERATION_TIMEOUT_MS = 45_000L
         const val LOGIN_TOKEN_OPERATION_TIMEOUT_MS = 45_000L
+        const val HISTORY_OPERATION_TIMEOUT_MS = 45_000L
         const val MEDIA_OPERATION_TIMEOUT_MS = 120_000L
         const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
         const val APPLICATION_CONTROL_RETRY_BASE_MS = 1_000L

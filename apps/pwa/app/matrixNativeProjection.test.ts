@@ -1,217 +1,100 @@
 import { describe, expect, it } from "vitest";
 import { MatrixNativeProjection } from "./matrixNativeProjection";
 
-describe("MatrixNativeProjection", () => {
-  it("rebuilds session inventory from roots and lifecycle deltas", () => {
+describe("MatrixNativeProjection Room State", () => {
+  it("builds inventory from Gateway and per-session current state", async () => {
     const projection = new MatrixNativeProjection();
-    projection.apply(checkpoint());
-    projection.apply({
-      version: 2,
-      kind: "session_root",
-      ...revision(1),
-      session_id: "s1",
+    const entity = sessionState("s1", 2, {
       title: "Investigate sync",
-      project: { id: "p1", name: "codever", cwd: "/repo" },
-      created_at: 1,
-      updated_at: 1,
-      archived: false,
       status: "running",
-      provider: "codex",
-      permission_mode: "default",
-      extensions: [],
     });
-    const state = projection.snapshot();
-    expect(state?.sessions).toMatchObject([{ id: "s1", status: "running" }]);
-    expect(projection.apply({
-      version: 2,
-      kind: "session_lifecycle",
-      ...revision(2),
-      session_id: "s1",
-      state: "archived",
-      updated_at: 2,
-    })?.sessions[0]?.status).toBe("archived");
-    expect(projection.apply({
-      version: 2,
-      kind: "session_lifecycle",
-      ...revision(3),
-      session_id: "s1",
-      state: "deleted",
-      updated_at: 3,
-    })?.sessions).toEqual([]);
-    expect(projection.snapshot()?.revision).toBe(3);
-  });
-
-  it("bootstraps sessions from the latest checkpoint without historical roots", () => {
-    const projection = new MatrixNativeProjection();
-    const state = projection.apply({
-      ...checkpoint(),
-      sessions: [{
-        session_id: "s-existing",
-        title: "Existing work",
-        updated_at: 7,
-        archived: false,
-        status: "idle" as const,
-        project: { id: "p1", name: "codever", cwd: "/repo" },
-        provider: "codex",
-        extensions: [],
-      }],
-    });
-
-    expect(state?.sessions).toMatchObject([{
-      id: "s-existing",
-      title: "Existing work",
-      projectName: "codever",
-    }]);
-  });
-
-  it("does not let a duplicate checkpoint erase newer session roots", () => {
-    const projection = new MatrixNativeProjection();
-    const initial = {
-      ...checkpoint(),
-      sessions: [{
-        session_id: "s-existing",
-        title: "Existing work",
-        updated_at: 7,
-        archived: false,
-        status: "idle" as const,
-        project: { id: "p1", name: "codever", cwd: "/repo" },
-        provider: "codex",
-        extensions: [],
-      }],
-    };
-    projection.apply(initial);
-    projection.apply({
-      version: 2,
-      kind: "session_root",
-      ...revision(2),
-      session_id: "s-new",
-      title: "New work",
-      project: { id: "p2", name: "another", cwd: "/another" },
-      created_at: 8,
-      updated_at: 8,
-      archived: false,
-      status: "idle",
-      provider: "codex",
-      permission_mode: "default",
-      extensions: [],
-    });
-
-    const replayed = projection.apply(initial);
-
-    expect(replayed?.sessions.map((session) => session.id).sort()).toEqual([
-      "s-existing",
-      "s-new",
-    ]);
-  });
-
-  it("does not let historical events mutate a newer checkpoint inventory", () => {
-    const projection = new MatrixNativeProjection();
-    projection.apply({
-      ...checkpoint(),
-      ...revision(5),
-      state_version: 2,
-      sessions: [{
-        session_id: "s-existing",
-        title: "Existing work",
-        updated_at: 7,
-        archived: false,
-        status: "idle" as const,
-        project: { id: "p1", name: "codever", cwd: "/repo" },
-        provider: "codex",
-        extensions: [],
-      }],
-    });
-
-    projection.apply({
-      version: 2,
-      kind: "session_root",
-      ...revision(1),
-      session_id: "s-stale",
-      title: "Stale session",
-      project: { id: "p1", name: "codever", cwd: "/repo" },
-      created_at: 1,
-      updated_at: 1,
-      archived: false,
-      status: "idle",
-      provider: "codex",
-      permission_mode: "default",
-      extensions: [],
-    });
-    projection.apply({
-      version: 2,
-      kind: "session_lifecycle",
-      ...revision(4),
-      session_id: "s-existing",
-      state: "deleted",
-      updated_at: 8,
-    });
-
-    expect(projection.snapshot()?.sessions.map(session => session.id)).toEqual(["s-existing"]);
-  });
-
-  it("replays updates that arrive before their thread root", () => {
-    const projection = new MatrixNativeProjection();
-    projection.apply(checkpoint());
-    projection.apply({
-      version: 2,
-      kind: "session_update",
-      ...revision(2),
-      session_id: "s1",
-      updated_at: 3,
-      title: "Recovered title",
-      model: null,
-    });
-    projection.apply({
-      version: 2,
-      kind: "session_lifecycle",
-      ...revision(3),
-      session_id: "s1",
-      state: "archived",
-      updated_at: 4,
-    });
-
-    const state = projection.apply({
-      version: 2,
-      kind: "session_root",
-      ...revision(1),
-      session_id: "s1",
-      title: "Initial title",
-      project: { id: "p1", name: "codever", cwd: "/repo" },
-      created_at: 1,
-      updated_at: 1,
-      archived: false,
-      status: "idle",
-      provider: "codex",
-      model: "old-model",
-      permission_mode: "default",
-      extensions: [],
-    });
-
+    await projection.applyRoomState(gatewayState(2));
+    const state = await projection.applyRoomState(entity);
     expect(state?.sessions).toMatchObject([{
       id: "s1",
-      title: "Recovered title",
-      status: "archived",
+      title: "Investigate sync",
+      status: "running",
     }]);
-    expect(state?.sessions[0]).not.toHaveProperty("model");
   });
 
-  it("does not resurrect a session deleted before its root is fetched", () => {
-    const projection = new MatrixNativeProjection();
-    projection.apply(checkpoint());
-    projection.apply({
-      version: 2,
-      kind: "session_lifecycle",
-      ...revision(2),
-      session_id: "s1",
-      state: "deleted",
-      updated_at: 4,
+  it("accepts current Room State whether Gateway or session arrives first", async () => {
+    const gatewayFirst = new MatrixNativeProjection();
+    await expect(gatewayFirst.applyRoomState(gatewayState())).resolves.toMatchObject({
+      sessions: [],
     });
-    expect(projection.apply({
+    await expect(gatewayFirst.applyRoomState(sessionState("s1", 2))).resolves.toMatchObject({
+      sessions: [{ id: "s1" }],
+    });
+
+    const sessionFirst = new MatrixNativeProjection();
+    await expect(sessionFirst.applyRoomState(sessionState("s1", 2))).resolves.toBeNull();
+    await expect(sessionFirst.applyRoomState(gatewayState())).resolves.toMatchObject({
+      sessions: [{ id: "s1" }],
+    });
+  });
+
+  it("publishes one complete Room State batch and rolls back invalid batches", async () => {
+    const projection = new MatrixNativeProjection();
+    await expect(projection.applyRoomStateBatch([
+      gatewayState(2),
+      sessionState("s1", 2),
+      sessionState("s2", 3),
+    ])).resolves.toMatchObject({
+      sessions: [{ id: "s2" }, { id: "s1" }],
+    });
+
+    const before = projection.snapshot();
+    await expect(projection.applyRoomStateBatch([
+      tombstone("s1", 4),
+      { ...sessionState("broken", 5), state: "invalid" },
+    ])).rejects.toThrow();
+    expect(projection.snapshot()).toEqual(before);
+  });
+
+  it("replaces one entity without scanning or replaying timeline history", async () => {
+    const projection = new MatrixNativeProjection();
+    const before = sessionState("s1", 2, { title: "Before" });
+    const after = sessionState("s1", 3, {
+      title: "After",
+      status: "running",
+    });
+    await projection.applyRoomState(gatewayState(2));
+    await projection.applyRoomState(before);
+    const state = await projection.applyRoomState(after);
+    expect(state?.sessions).toMatchObject([{ title: "After", status: "running" }]);
+  });
+
+  it("updates one session without waiting for an unrelated global commit", async () => {
+    const projection = new MatrixNativeProjection();
+    const before = sessionState("s1", 2, { title: "Before" });
+    const after = sessionState("s1", 3, { title: "After" });
+    await projection.applyRoomState(before);
+    await projection.applyRoomState(gatewayState(2));
+    await expect(projection.applyRoomState(after)).resolves.toMatchObject({
+      sessions: [{ title: "After" }],
+    });
+  });
+
+  it("keeps a tombstone authoritative over older session state", async () => {
+    const projection = new MatrixNativeProjection();
+    const current = sessionState("s1", 2);
+    const deleted = tombstone("s1", 4);
+    await projection.applyRoomState(gatewayState(2));
+    await projection.applyRoomState(current);
+    await projection.applyRoomState(deleted);
+    await projection.applyRoomState(sessionState("s1", 3, { title: "Stale" }));
+    expect(projection.snapshot()?.sessions).toEqual([]);
+  });
+
+  it("does not let timeline roots create inventory entities", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomState(gatewayState(1));
+    projection.applyTimeline({
       version: 2,
       kind: "session_root",
-      ...revision(1),
-      session_id: "s1",
-      title: "Deleted session",
+      ...revision(2),
+      session_id: "timeline-only",
+      title: "Must not appear",
       project: { id: "p1", name: "codever", cwd: "/repo" },
       created_at: 1,
       updated_at: 1,
@@ -220,13 +103,14 @@ describe("MatrixNativeProjection", () => {
       provider: "codex",
       permission_mode: "default",
       extensions: [],
-    })?.sessions).toEqual([]);
+    });
+    expect(projection.snapshot()?.sessions).toEqual([]);
   });
 
-  it("advances revision from a lightweight room timeline event", () => {
+  it("advances command revision from a lightweight timeline event", async () => {
     const projection = new MatrixNativeProjection();
-    projection.apply(checkpoint());
-    const state = projection.apply({
+    await projection.applyRoomState(gatewayState(1));
+    const state = projection.applyTimeline({
       version: 2,
       kind: "gateway_revision",
       ...revision(4),
@@ -236,22 +120,52 @@ describe("MatrixNativeProjection", () => {
       source_command_id: "command-4",
     });
     expect(state?.revision).toBe(4);
-    expect(state?.sessions).toEqual([]);
+  });
+
+  it("drops retired-epoch entities when Gateway generation advances", async () => {
+    const projection = new MatrixNativeProjection();
+    const old = sessionState("old", 2);
+    await projection.applyRoomState(gatewayState(2));
+    await projection.applyRoomState(old);
+    await projection.applyRoomState({
+      ...gatewayState(1),
+      revision_epoch: "r2",
+      revision_epoch_generation: 2,
+      state_version: 1,
+    });
+    expect(projection.snapshot()?.sessions).toEqual([]);
+  });
+
+  it("allows live presentation status only for an existing Room State entity", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomState(gatewayState(1));
+    projection.applySessionStatus({
+      kind: "status",
+      session_id: "missing",
+      state: "running",
+    });
+    expect(projection.snapshot()?.sessions).toEqual([]);
+    const entity = sessionState("s1", 2);
+    await projection.applyRoomState(entity);
+    await projection.applyRoomState(gatewayState(2));
+    expect(projection.applySessionStatus({
+      kind: "status",
+      session_id: "s1",
+      state: "running",
+      activity_phase: "working",
+    })?.sessions).toMatchObject([{ status: "running", activityPhase: "working" }]);
   });
 });
 
-function checkpoint() {
+function gatewayState(stateVersion = 1) {
   return {
     version: 2,
-    kind: "gateway_checkpoint",
+    kind: "gateway_state",
     gateway_id: "g1",
     conversation_id: "c1",
-    revision: 1,
-    revision_epoch: "r1",
-    revision_epoch_generation: 1,
-    state_version: 1,
+    ...revision(1),
+    state_version: stateVersion,
     active_device_count: 1,
-    sessions: [],
     workspace: {
       project: { id: "p1", name: "codever", cwd: "/repo" },
       provider: "codex",
@@ -267,6 +181,49 @@ function checkpoint() {
       session_extensions: [],
     },
     updated_at: 1,
+  } as const;
+}
+
+function sessionState(
+  sessionId: string,
+  stateVersion: number,
+  overrides: { title?: string; status?: "idle" | "running" } = {},
+) {
+  return {
+    version: 2,
+    kind: "session_state",
+    gateway_id: "g1",
+    conversation_id: "c1",
+    ...revision(stateVersion),
+    state_version: stateVersion,
+    session_id: sessionId,
+    state: "active",
+    session: {
+      session_id: sessionId,
+      thread_root_event_id: `$${sessionId}:example.org`,
+      title: overrides.title ?? sessionId,
+      updated_at: stateVersion,
+      archived: false,
+      status: overrides.status ?? "idle",
+      project: { id: "p1", name: "codever", cwd: "/repo" },
+      provider: "codex",
+      extensions: [],
+    },
+    updated_at: stateVersion,
+  } as const;
+}
+
+function tombstone(sessionId: string, stateVersion: number) {
+  return {
+    version: 2,
+    kind: "session_state",
+    gateway_id: "g1",
+    conversation_id: "c1",
+    ...revision(stateVersion),
+    state_version: stateVersion,
+    session_id: sessionId,
+    state: "deleted",
+    updated_at: stateVersion,
   } as const;
 }
 

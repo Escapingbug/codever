@@ -379,9 +379,20 @@ async function openProjectSession(page: Page, projectName: string): Promise<void
     const group = projectGroup(page, projectName)
     const toggle = group.locator('button.project-session-toggle')
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-    const row = group.locator('button.session-row').first()
-    if (!(await row.getAttribute('class'))?.includes('selected')) await row.click()
-    await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
+    const selectedRow = group.locator('button.session-row[aria-pressed="true"]')
+    const row = await selectedRow.count() > 0
+        ? selectedRow.first()
+        : group.locator('button.session-row').first()
+    const sessionId = await row.getAttribute('data-session-id')
+    assert.ok(sessionId, `Privacy session row in ${projectName} has no stable identity`)
+    if (await row.getAttribute('aria-pressed') !== 'true') await row.click()
+    await waitFor(async () => await page.locator('button.session-row').evaluateAll(
+        (rows, expectedSessionId) => rows.some(row =>
+            (row as HTMLElement).dataset.sessionId === expectedSessionId
+            && row.getAttribute('aria-pressed') === 'true',
+        ),
+        sessionId,
+    ), {
         description: `selected privacy journey session in ${projectName}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
@@ -390,8 +401,8 @@ async function openProjectSession(page: Page, projectName: string): Promise<void
 async function openSession(page: Page, sessionId: string): Promise<void> {
     const row = page.locator(`button.session-row[data-session-id="${sessionId}"]`)
     await row.waitFor({ state: 'visible', timeout: CONVERGENCE_TIMEOUT_MS })
-    if (!(await row.getAttribute('class'))?.includes('selected')) await row.click()
-    await waitFor(async () => (await row.getAttribute('class'))?.includes('selected') ?? false, {
+    if (await row.getAttribute('aria-pressed') !== 'true') await row.click()
+    await waitFor(async () => await row.getAttribute('aria-pressed') === 'true', {
         description: `selected privacy session ${sessionId}`,
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })

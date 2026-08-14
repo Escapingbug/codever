@@ -99,10 +99,9 @@ export function classifyGatewayStateEpoch(
 }
 
 /**
- * Checkpoint versions and semantic revisions advance independently. Matrix
- * native session events deliberately reuse the latest checkpoint version
- * while advancing the conversation revision, so equal state versions are not
- * evidence of a conflicting snapshot.
+ * Gateway metadata versions and semantic revisions advance independently.
+ * Per-session Room State can change without replacing Gateway metadata, so an
+ * equal Gateway state version is not evidence of a conflicting room view.
  */
 export function classifyGatewayStateProgress(
   current: Pick<GatewayStateCacheEpoch, "stateVersion" | "revision">,
@@ -163,7 +162,6 @@ export function parseGatewayStateExtension(
       !session.title ||
       !isNonnegativeInteger(session.updated_at) ||
       !(
-        session.status === undefined ||
         session.status === "idle" ||
         session.status === "running" ||
         session.status === "stopping" ||
@@ -192,17 +190,13 @@ export function parseGatewayStateExtension(
         (typeof session.reasoning_effort === "string" &&
           session.reasoning_effort.length > 0)
       ) ||
-      !(session.cwd === undefined || typeof session.cwd === "string") ||
-      !(session.extensions === undefined || Array.isArray(session.extensions)) ||
-      !(
-        session.project_id === undefined ||
-        (typeof session.project_id === "string" && session.project_id.length > 0)
-      ) ||
-      !(
-        session.project_name === undefined ||
-        (typeof session.project_name === "string" &&
-          session.project_name.length > 0)
-      )
+      typeof session.cwd !== "string" ||
+      session.cwd.length === 0 ||
+      !Array.isArray(session.extensions) ||
+      typeof session.project_id !== "string" ||
+      session.project_id.length === 0 ||
+      typeof session.project_name !== "string" ||
+      session.project_name.length === 0
     ) {
       throw new Error("The authenticated Gateway session summary is malformed.");
     }
@@ -229,13 +223,9 @@ export function parseGatewayStateExtension(
       ...(typeof session.reasoning_effort === "string"
         ? { reasoningEffort: session.reasoning_effort }
         : {}),
-      rawProjectId:
-        typeof session.project_id === "string" ? session.project_id : undefined,
-      rawProjectName:
-        typeof session.project_name === "string"
-          ? session.project_name
-          : undefined,
-      rawCwd: typeof session.cwd === "string" ? session.cwd : undefined,
+      projectId: session.project_id,
+      projectName: session.project_name,
+      cwd: session.cwd,
       extensions: parseSessionExtensionSummaries(session.extensions),
     };
   });
@@ -244,19 +234,15 @@ export function parseGatewayStateExtension(
   if (
     !workspace ||
     typeof workspace.cwd !== "string" ||
+    workspace.cwd.length === 0 ||
     typeof workspace.provider !== "string" ||
     !workspace.provider ||
     typeof workspace.permission_mode !== "string" ||
     !workspace.permission_mode ||
-    !(
-      workspace.project_id === undefined ||
-      (typeof workspace.project_id === "string" && workspace.project_id.length > 0)
-    ) ||
-    !(
-      workspace.project_name === undefined ||
-      (typeof workspace.project_name === "string" &&
-        workspace.project_name.length > 0)
-    ) ||
+    typeof workspace.project_id !== "string" ||
+    workspace.project_id.length === 0 ||
+    typeof workspace.project_name !== "string" ||
+    workspace.project_name.length === 0 ||
     !(
       workspace.reasoning_effort === undefined ||
       (typeof workspace.reasoning_effort === "string" &&
@@ -270,27 +256,16 @@ export function parseGatewayStateExtension(
     throw new Error("The authenticated Gateway workspace state is malformed.");
   }
   const workspaceCwd = workspace.cwd as string;
-  const fallbackProject = legacyProjectIdentity(workspaceCwd);
-  const workspaceProjectId =
-    typeof workspace.project_id === "string"
-      ? workspace.project_id
-      : fallbackProject.id;
-  const workspaceProjectName =
-    typeof workspace.project_name === "string"
-      ? workspace.project_name
-      : fallbackProject.name;
   const sessions: GatewaySessionSummary[] = parsedSessions.map((session) => {
-    const cwd = session.rawCwd ?? workspaceCwd;
-    const fallback = legacyProjectIdentity(cwd);
     return {
       id: session.id,
       title: session.title,
       updatedAt: session.updatedAt,
       status: session.status,
       ...(session.activityPhase ? { activityPhase: session.activityPhase } : {}),
-      projectId: session.rawProjectId ?? fallback.id,
-      projectName: session.rawProjectName ?? fallback.name,
-      cwd,
+      projectId: session.projectId,
+      projectName: session.projectName,
+      cwd: session.cwd,
       provider: session.provider,
       ...(session.model ? { model: session.model } : {}),
       ...(session.reasoningEffort
@@ -407,8 +382,8 @@ export function parseGatewayStateExtension(
     currentSessionId,
     sessions,
     workspace: {
-      projectId: workspaceProjectId,
-      projectName: workspaceProjectName,
+      projectId: workspace.project_id,
+      projectName: workspace.project_name,
       cwd: workspaceCwd,
       provider: workspace.provider,
       ...(typeof workspace.model === "string"
@@ -590,18 +565,6 @@ function gatewayStateExtension(
         }),
       ),
     },
-  };
-}
-
-function legacyProjectIdentity(cwd: string): { id: string; name: string } {
-  const normalized = cwd.replaceAll("\\", "/").replace(/\/+$/u, "") || "/";
-  const name =
-    normalized === "/"
-      ? "/"
-      : normalized.split("/").filter(Boolean).at(-1) ?? normalized;
-  return {
-    id: `legacy-project:${encodeURIComponent(normalized)}`,
-    name,
   };
 }
 

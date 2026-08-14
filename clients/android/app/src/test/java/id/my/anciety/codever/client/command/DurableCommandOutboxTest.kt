@@ -22,12 +22,12 @@ class DurableCommandOutboxTest {
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.delete"))
 
         val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
-        assertEquals(CommandState.RECOVERY_REQUIRED, restored.get(receipt.commandId)?.state)
-        val recoveryLease = restored.claimRecovery(receipt.commandId)!!
+        assertEquals(CommandState.QUEUED, restored.get(receipt.commandId)?.state)
+        val transmission = restored.claimForTransmission(receipt.commandId)!!
 
-        assertEquals(receipt.commandId, recoveryLease.commandId)
-        assertEquals(receipt.sequence, recoveryLease.sequence)
-        assertTrue(recoveryLease.recovery)
+        assertEquals(receipt.commandId, transmission.commandId)
+        assertEquals(receipt.sequence, transmission.sequence)
+        assertFalse(transmission.recovery)
     }
 
     @Test

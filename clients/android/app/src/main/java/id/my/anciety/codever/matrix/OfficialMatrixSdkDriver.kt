@@ -14,13 +14,14 @@ import org.matrix.rustcomponents.sdk.ClientBuilder
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
 import org.matrix.rustcomponents.sdk.CrossProcessLockConfig
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
-import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.MediaSource
+import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
+import org.matrix.rustcomponents.sdk.SlidingSyncVersion
 import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.SyncServiceState
@@ -38,10 +39,8 @@ interface MatrixSdkDriver {
         files: MatrixAccountFiles,
         onSyncUpdate: () -> Unit,
         onSessionUpdated: (StoredMatrixSession) -> Unit,
-        onJournalAdvanced: (Long) -> Unit,
         onTransportReady: (MatrixTransportIdentity) -> Unit,
-        onTimelineGap: () -> Unit,
-        onDecryptedEvent: (MatrixDecryptedEvent) -> Unit,
+        onPairingEvent: suspend (MatrixDecryptedEvent) -> Unit,
         onRuntimeFailure: (Throwable) -> Unit,
     )
 
@@ -51,9 +50,9 @@ interface MatrixSdkDriver {
 
     suspend fun setNetworkAvailable(available: Boolean)
 
-    suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean = false)
+    suspend fun sendPairingMessage(contentJson: String)
 
-    suspend fun paginateRoomHistory(limit: Int): Boolean
+    suspend fun closePairingChannel()
 
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
 
@@ -81,7 +80,6 @@ data class MatrixDecryptedEvent(
 
 class OfficialMatrixSdkDriver(
     private val callbackScope: CoroutineScope,
-    private val now: () -> Long = System::currentTimeMillis,
     private val diagnostics: DiagnosticRecorder = DiagnosticRecorder.None,
 ) : MatrixSdkDriver {
     private var client: Client? = null
@@ -90,30 +88,25 @@ class OfficialMatrixSdkDriver(
     private var roomListService: RoomListService? = null
     private var roomListStateTask: TaskHandle? = null
     private var syncLifecycle: MatrixSyncServiceLifecycle? = null
-    private var timeline: Timeline? = null
-    private var timelineTask: TaskHandle? = null
+    private var pairingTimeline: Timeline? = null
+    private var pairingTimelineTask: TaskHandle? = null
     private var syncedBoundRoomReady = CompletableDeferred<Unit>()
     private val active = AtomicBoolean(false)
-    private val timelineStarting = AtomicBoolean(false)
+    private val pairingTimelineStarting = AtomicBoolean(false)
     private val firstSyncFinalizing = AtomicBoolean(false)
     private val firstSyncWorkScheduled = AtomicBoolean(false)
     private val transportReadyPublished = AtomicBoolean(false)
     private lateinit var activeSession: StoredMatrixSession
-    private lateinit var activeFiles: MatrixAccountFiles
     private var runtimeFailure: (Throwable) -> Unit = {}
-    private var journalAdvanced: (Long) -> Unit = {}
-    private var timelineGap: () -> Unit = {}
-    private var decryptedEvent: (MatrixDecryptedEvent) -> Unit = {}
+    private var pairingEvent: suspend (MatrixDecryptedEvent) -> Unit = {}
 
     override suspend fun start(
         secrets: PersistedMatrixSecrets,
         files: MatrixAccountFiles,
         onSyncUpdate: () -> Unit,
         onSessionUpdated: (StoredMatrixSession) -> Unit,
-        onJournalAdvanced: (Long) -> Unit,
         onTransportReady: (MatrixTransportIdentity) -> Unit,
-        onTimelineGap: () -> Unit,
-        onDecryptedEvent: (MatrixDecryptedEvent) -> Unit,
+        onPairingEvent: suspend (MatrixDecryptedEvent) -> Unit,
         onRuntimeFailure: (Throwable) -> Unit,
     ) {
         check(client == null) { "Matrix SDK driver is already started." }
@@ -123,17 +116,21 @@ class OfficialMatrixSdkDriver(
         firstSyncFinalizing.set(false)
         firstSyncWorkScheduled.set(false)
         transportReadyPublished.set(false)
-        activeSession = secrets.session.forNativeSlidingSync()
-        activeFiles = files
+        check(secrets.session.slidingSyncVersion == SlidingSyncVersion.NATIVE) {
+            "Only native Matrix sliding sync sessions are supported."
+        }
+        activeSession = secrets.session
         runtimeFailure = onRuntimeFailure
-        journalAdvanced = onJournalAdvanced
-        timelineGap = onTimelineGap
-        decryptedEvent = onDecryptedEvent
+        pairingEvent = onPairingEvent
         val delegate = object : ClientSessionDelegate {
             override fun retrieveSessionFromKeychain(userId: String) = files.sessionStore.load()
                 ?.session
                 ?.takeIf { it.userId == userId }
-                ?.forNativeSlidingSync()
+                ?.also {
+                    check(it.slidingSyncVersion == SlidingSyncVersion.NATIVE) {
+                        "Only native Matrix sliding sync sessions are supported."
+                    }
+                }
                 ?.toSdkSession()
                 ?: throw IllegalStateException("The encrypted Matrix session is unavailable.")
 
@@ -272,17 +269,21 @@ class OfficialMatrixSdkDriver(
         client?.enableAllSendQueues(available)
     }
 
-    override suspend fun sendRoomMessage(contentJson: String, rotateRoomKey: Boolean) {
+    override suspend fun sendPairingMessage(contentJson: String) {
+        ensurePairingTimeline()
         val room = awaitBoundRoom()
         check(room.isEncrypted()) { "Refusing to send Codever data to an unencrypted Matrix room." }
-        if (rotateRoomKey) room.discardRoomKey()
+        room.discardRoomKey()
         room.sendRaw("m.room.message", contentJson)
     }
 
-    override suspend fun paginateRoomHistory(limit: Int): Boolean {
-        require(limit in 1..100)
-        ensureTimeline()
-        return timeline?.paginateBackwards(limit.toUShort()) ?: false
+    override suspend fun closePairingChannel() {
+        pairingTimelineTask.cancelAndClose()
+        pairingTimelineTask = null
+        pairingTimeline?.close()
+        pairingTimeline = null
+        pairingTimelineStarting.set(false)
+        diagnostics.record("matrix.pairing_channel.closed")
     }
 
     override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
@@ -316,17 +317,77 @@ class OfficialMatrixSdkDriver(
         }
         val closeFailure = closeSyncServiceResources()
         if (stopFailure == null) stopFailure = closeFailure
-        timelineTask.cancelAndClose()
-        timelineTask = null
-        timeline?.close()
-        timeline = null
+        runCatching { closePairingChannel() }.onFailure {
+            if (stopFailure == null) stopFailure = it
+        }
         client?.close()
         client = null
-        timelineStarting.set(false)
         firstSyncFinalizing.set(false)
         firstSyncWorkScheduled.set(false)
         transportReadyPublished.set(false)
         stopFailure?.let { throw it }
+    }
+
+    private suspend fun ensurePairingTimeline() {
+        if (pairingTimeline != null) return
+        check(pairingTimelineStarting.compareAndSet(false, true)) {
+            "The Matrix pairing channel is already opening."
+        }
+        diagnostics.record("matrix.pairing_channel.opening")
+        try {
+            val room = awaitBoundRoom()
+            val created = room.timeline()
+            val listener = created.addListener(object : TimelineListener {
+                override fun onUpdate(diff: List<TimelineDiff>) {
+                    if (!active.get() || pairingTimeline !== created) return
+                    diff.flatMap(::timelineItems).forEach(::capturePairingEvent)
+                }
+            })
+            pairingTimeline = created
+            pairingTimelineTask = listener
+            diagnostics.record("matrix.pairing_channel.open")
+        } catch (error: Exception) {
+            diagnostics.record("matrix.pairing_channel.failure", errorAttributes(error))
+            throw error
+        } finally {
+            pairingTimelineStarting.set(false)
+        }
+    }
+
+    private fun timelineItems(diff: TimelineDiff): List<TimelineItem> = when (diff) {
+        is TimelineDiff.Append -> diff.values
+        is TimelineDiff.Insert -> listOf(diff.value)
+        is TimelineDiff.PushBack -> listOf(diff.value)
+        is TimelineDiff.PushFront -> listOf(diff.value)
+        is TimelineDiff.Reset -> diff.values
+        is TimelineDiff.Set -> listOf(diff.value)
+        TimelineDiff.Clear,
+        TimelineDiff.PopBack,
+        TimelineDiff.PopFront,
+        is TimelineDiff.Remove,
+        is TimelineDiff.Truncate,
+        -> emptyList()
+    }
+
+    private fun capturePairingEvent(item: TimelineItem) {
+        val event = item.asEvent() ?: return
+        if (!event.isRemote) return
+        val content = event.content as? TimelineItemContent.MsgLike ?: return
+        val kind = content.content.kind
+        if (kind !is MsgLikeKind.Message && kind !is MsgLikeKind.Other) return
+        val eventId = (event.eventOrTransactionId as? EventOrTransactionId.EventId)?.eventId ?: return
+        val rawJson = event.lazyProvider.latestJson() ?: return
+        if (!isCodeverPairingResponseEvent(rawJson)) return
+        val value = MatrixDecryptedEvent(
+            roomId = activeSession.roomBinding.roomId,
+            eventId = eventId,
+            sender = event.sender,
+            timestamp = event.timestamp.toLong(),
+            rawJson = rawJson,
+        )
+        callbackScope.launch {
+            runCatching { pairingEvent(value) }.onFailure(runtimeFailure)
+        }
     }
 
     private fun closeSyncServiceResources(): Throwable? {
@@ -346,97 +407,6 @@ class OfficialMatrixSdkDriver(
         syncLifecycle?.deactivate()
         syncLifecycle = null
         return failure
-    }
-
-    private suspend fun ensureTimeline() {
-        if (timeline != null || !timelineStarting.compareAndSet(false, true)) return
-        diagnostics.record("matrix.timeline.preparing")
-        try {
-            val room = client?.getRoom(activeSession.roomBinding.roomId)
-            if (room == null) {
-                diagnostics.record("matrix.timeline.room_unavailable")
-                return
-            }
-            val created = room.timeline()
-            val listener = created.addListener(object : TimelineListener {
-                override fun onUpdate(diff: List<TimelineDiff>) {
-                    if (!active.get()) return
-                    runCatching { processTimelineDiffs(diff) }.onFailure(runtimeFailure)
-                }
-            })
-            timeline = created
-            timelineTask = listener
-            diagnostics.record("matrix.timeline.ready")
-        } catch (error: Exception) {
-            diagnostics.record("matrix.timeline.failure", errorAttributes(error))
-            throw error
-        } finally {
-            timelineStarting.set(false)
-        }
-    }
-
-    private fun processTimelineDiffs(diffs: List<TimelineDiff>) {
-        if (diffs.any { it is TimelineDiff.Reset }) {
-            diagnostics.record("matrix.timeline.gap_detected")
-            timelineGap()
-        }
-        val items = diffs.flatMap(::timelineItems)
-        if (items.isNotEmpty()) {
-            diagnostics.record(
-                "matrix.timeline.batch_received",
-                mapOf(
-                    "diffs" to diffs.size.toString(),
-                    "items" to items.size.toString(),
-                ),
-            )
-        }
-        items.forEach(::captureDecryptedEvent)
-    }
-
-    private fun timelineItems(diff: TimelineDiff): List<TimelineItem> = when (diff) {
-        is TimelineDiff.Append -> diff.values
-        is TimelineDiff.Insert -> listOf(diff.value)
-        is TimelineDiff.PushBack -> listOf(diff.value)
-        is TimelineDiff.PushFront -> listOf(diff.value)
-        is TimelineDiff.Reset -> diff.values
-        is TimelineDiff.Set -> listOf(diff.value)
-        TimelineDiff.Clear,
-        TimelineDiff.PopBack,
-        TimelineDiff.PopFront,
-        is TimelineDiff.Remove,
-        is TimelineDiff.Truncate,
-        -> emptyList()
-    }
-
-    private fun captureDecryptedEvent(item: TimelineItem) {
-        val event = item.asEvent() ?: return
-        if (!event.isRemote) return
-        val content = event.content as? TimelineItemContent.MsgLike ?: return
-        val kind = content.content.kind
-        if (kind !is MsgLikeKind.Message && kind !is MsgLikeKind.Other) return
-        val eventId = (event.eventOrTransactionId as? EventOrTransactionId.EventId)?.eventId ?: return
-        val rawJson = event.lazyProvider.latestJson() ?: return
-        // The persistent application /sync receiver is the sole owner of
-        // Codever control and v2 timeline envelopes. Letting the UI Timeline
-        // journal one first can poison event-id dedupe with the SDK's display
-        // JSON before /sync supplies the canonical Matrix event JSON.
-        if (!shouldCaptureMatrixSdkTimelineEvent(rawJson)) return
-        val cursor = activeFiles.journal.append(
-            roomId = activeSession.roomBinding.roomId,
-            eventId = eventId,
-            receivedAt = now(),
-            rawJson = rawJson,
-        ) ?: return
-        journalAdvanced(cursor)
-        decryptedEvent(
-            MatrixDecryptedEvent(
-                roomId = activeSession.roomBinding.roomId,
-                eventId = eventId,
-                sender = event.sender,
-                timestamp = event.timestamp.toLong(),
-                rawJson = rawJson,
-            ),
-        )
     }
 
     private fun scheduleInitialSyncFinalization(
@@ -459,11 +429,6 @@ class OfficialMatrixSdkDriver(
                     diagnostics.record("matrix.transport.ready")
                     onTransportReady(identity)
                 }
-                // Application-control transport depends on sync, encryption, and the
-                // bound room, not on materializing the UI timeline. Prepare the
-                // timeline concurrently after publishing transport readiness so a
-                // large encrypted history cannot delay commands or reconnects.
-                ensureTimeline()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -539,7 +504,7 @@ class OfficialMatrixSdkDriver(
     )
 
     private companion object {
-        const val ROOM_LIST_TIMELINE_LIMIT = 100u
+        const val ROOM_LIST_TIMELINE_LIMIT = 0u
         const val E2EE_INITIALIZATION_TIMEOUT_MS = 45_000L
         const val BOUND_ROOM_READY_TIMEOUT_MS = 30_000L
         const val BOUND_ROOM_POLL_INTERVAL_MS = 100L

@@ -96,6 +96,43 @@ class CrossLanguageFixtureTest {
     }
 
     @Test
+    fun `opens TypeScript Matrix Room State envelope with identical bindings`() {
+        val signed = MatrixStateEnvelopeCodec.parse(MATRIX_STATE_FIXTURE)
+        val opened = MatrixStateEnvelopes.open(
+            signed,
+            Base64Url.decode(MATRIX_TIMELINE_KEY),
+            offer.offer.gatewayKey,
+            MatrixStateBindings(
+                gatewayId = "gateway-1",
+                conversationId = "conversation-1",
+                roomId = "!private:example.org",
+                eventType = "io.codever.session.current.v2",
+                stateKey = "session-cross-1",
+                epochId = "epoch-cross-1",
+                stateVersion = 3,
+            ),
+        )
+
+        assertEquals("session-cross-1", opened.getValue("session_id").toString().trim('"'))
+        assertCode(SecurityErrorCode.BINDING_MISMATCH) {
+            MatrixStateEnvelopes.open(
+                signed,
+                Base64Url.decode(MATRIX_TIMELINE_KEY),
+                offer.offer.gatewayKey,
+                MatrixStateBindings(
+                    gatewayId = "gateway-1",
+                    conversationId = "conversation-1",
+                    roomId = "!private:example.org",
+                    eventType = "io.codever.session.current.v2",
+                    stateKey = "another-session",
+                    epochId = "epoch-cross-1",
+                    stateVersion = 3,
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `pairing rejects expiry replay bad signature and unknown fields`() {
         assertCode(SecurityErrorCode.EXPIRED) {
             PairingSecurity.verifyOffer(offer, now = offer.offer.expiresAt)
@@ -123,7 +160,7 @@ class CrossLanguageFixtureTest {
     }
 
     @Test
-    fun `Gateway trust codec persists transport cursor and migrates legacy schema`() {
+    fun `Gateway trust codec persists transport cursor and rejects pre-release schema`() {
         val base = GatewayTrust(offer, request, response)
         val rotatedTransport = base.certificate.gatewayTransport.copy(
             deviceId = "GATEWAY2",
@@ -145,12 +182,9 @@ class CrossLanguageFixtureTest {
             put("request", request.toJson())
             put("response", response.toJson())
         })
-        val migrated = GatewayTrustCodec.decode(legacy)
-        assertEquals(base.certificate.gatewayTransport, migrated.transportTrust.currentTransport)
-        assertEquals(
-            maxOf(base.offer.offer.issuedAt, base.certificate.issuedAt),
-            migrated.transportTrust.lastIssuedAt,
-        )
+        assertThrows(IllegalArgumentException::class.java) {
+            GatewayTrustCodec.decode(legacy)
+        }
     }
 
     @Test
@@ -205,6 +239,9 @@ class CrossLanguageFixtureTest {
         const val MATRIX_TIMELINE_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
         val MATRIX_TIMELINE_FIXTURE = """
 {"envelope":{"kind":"codever.matrix-timeline-envelope","version":2,"envelopeId":"timeline-envelope-cross-1","contentType":"io.codever.matrix-timeline-content.v2","gatewayId":"gateway-1","conversationId":"conversation-1","roomId":"!private:example.org","epochId":"epoch-cross-1","logicalEventId":"logical-cross-1","sessionId":"session-cross-1","threadRootEventId":"${'$'}root-cross-1","issuedAt":1800000000000,"nonce":"YHSWIOmKPkEFH4ux","ciphertext":"diKYKX5H1QgAbs-umbbS-Xq0M3liU4knIxX_DN8_qaF-W6zO2jybXN0eDgpJD2EuOVnbVADMYKvZxKpwJMXFHYDiJziQQYuCe_NkXgSQIjSONt0xnx5uHdl481R4a9gpWK4srd2bRmzJXuGc7BJ1ukkc9Xt8PSFuLxsDlgeouP2ByhT-b916FzByXbyOjvWtuZy6S2kNqz5_Zv625Ikr0b3ydj-93fWjQ_vpz3d503IR1SCzPKseGGl5Wl1UKvLZvosedyygcw"},"signature":{"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","value":"-CYV2cKwoJWOnW2h2wMgpQEluCce9apLsvI5MDrY3y6c_Z6EKh7ASwlK5Y85XprOOB6jPOA4FOkI9vd1zjrsCA"}}
+""".trimIndent()
+        val MATRIX_STATE_FIXTURE = """
+{"envelope":{"kind":"codever.matrix-state-envelope","version":2,"contentType":"io.codever.matrix-state-content.v2","gatewayId":"gateway-1","conversationId":"conversation-1","roomId":"!private:example.org","eventType":"io.codever.session.current.v2","stateKey":"session-cross-1","epochId":"epoch-cross-1","stateVersion":3,"issuedAt":1800000000000,"nonce":"i7v69qGkWp3rYTyR","ciphertext":"tEQBZwmQzwOmgZ18l94nSBlnaNyIJGdBm2xiHP98qJJLOjnjGU4LwLisIPT2xhDrZonzIEgWS3HA2wSha39OJzo0J-548dLF7uPyCO9tuaxGVXOcLvvwOENTobOekZG76NXfulD1hscjzqSkC95S80gLADpTJ5eQO50iK5CqffKM6Ai9arZF5uf7TcPkvU_mIqe973HARMrRxyexvPwplQchNpCCys2djUtgqn4meuE7LtMS30H9w4XuhVRqcw5bHT6AJDTu8IDNv9KTdVk84Z1vxG6EPzUlW8-x4Kijt7dk53N7WixvPA-mhUHWmd9Yp1yOEEZlPwqLrgbYkWPdbeyJDnK5ERgreR4MIOaD8t7z7xEzfdpjJJDxmDxIJhAwsYABNAPFnTIKUIi_2ZXgVPsXzduZx_4rp5QtGNeSWnYYqIJl7cBVJmqi3ShgEGCQ4dWMRzjPlI35vV1Og5XIC69pjHjjIW1e7WcfplKBbfMS_vHUNKP7KYzW7v4oTJ2rB1eCX7dMfAWo3d-STEEk_uBUO6KMZNpv4XPSW-9KiihYIVeTdElWu_S2iqhQtG3OhbqIgzHkmCovEFm0ZoAVaoCaW8Qvc9G2jv5OOG40RDmjEgGu7dmQskaheUCeuVd3f5xQkQDcamoQxEZB_PlCGr7oqBFBTrYeDm2LBBkT-EIelzxRVItyd1jH9oVMlKqzJEh6HIJBBv3G-ZsfZjOd-xx8l1xVuswggUp0tWO-D7pPxHg6qaYe7g"},"signature":{"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","value":"yEtgnXEMasEyfrBdrnL11VPmtLZ2Mszhl6E4kAjcy1F-iZC0ngCmYgWWfWit_G7x7TQFZbj3jBY0hiR5xGtgxQ"}}
 """.trimIndent()
         val FIXTURE = """
 {"offer":{"offer":{"kind":"codever.pairing.offer","version":1,"offerId":"offer-cross-1","gatewayId":"gateway-1","gatewayName":"Cross fixture 😀","gatewayKey":{"version":1,"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","publicKey":{"kty":"EC","crv":"P-256","x":"1siSvHSRoOQTkfn_uzHGRR7mlrF14hRSidQrrkSjQ7w","y":"JLwmVQAUZvm_JOBQI6wBY_h7sNz5TuA2ICpclQk3twA","ext":true,"key_ops":["verify"]}},"gatewayTransport":{"homeserver":"https://matrix.example.org","roomId":"!private:example.org","userId":"@gateway:example.org","deviceId":"GATEWAY1","ed25519":"gateway-ed25519-fingerprint"},"challenge":"QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ","allowedOperations":["prompt","cancel"],"issuedAt":1799999999000,"expiresAt":1800000060000},"signature":{"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","value":"2cYqMy7-_fsEYcqRWjs-ZuxegOx7p6BM8mmNj0sKNs-jbtSOl508GlD5LheamURfb0xsC31DMvhDVn2H9UrIVg"}},"request":{"request":{"kind":"codever.pairing.request","version":1,"requestId":"request-cross-1","offerId":"offer-cross-1","offerDigest":"rBY4CnEkfR0zkPfo_9FHGt4yniN4VPVBIgENaHbIY1c","gatewayId":"gateway-1","deviceId":"phone-1","deviceName":"Fixture phone","deviceKey":{"version":1,"algorithm":"ES256","keyId":"5PI0S-TOtBve2GIOXQVW66lgJvUpCnOzYQ2d6W_FLUQ","publicKey":{"kty":"EC","crv":"P-256","x":"T0mIwuoNwfa4zeB9bNqX-j2bTWCyON-1DBgg1RDQgmI","y":"tUHY9iz2MDqODPBEWb1qDCuGEBjJws4u6rlRj1Nyfmc","ext":true,"key_ops":["verify"]}},"deviceTransport":{"homeserver":"https://matrix.example.org","roomId":"!private:example.org","userId":"@alice:example.org","deviceId":"PHONE1","ed25519":"phone-ed25519-fingerprint"},"requestedOperations":["prompt"],"issuedAt":1800000000000,"expiresAt":1800000030000},"signature":{"algorithm":"ES256","keyId":"5PI0S-TOtBve2GIOXQVW66lgJvUpCnOzYQ2d6W_FLUQ","value":"WzYPNe9tyBHIsbbo5QGNwzVOC1UGEhGnDfBa87CvJOQuP4qYKMzHLmd3rEJtcS9hmyXlghUvbz1bocghTqEKIA"}},"response":{"response":{"kind":"codever.pairing.response","version":1,"offerId":"offer-cross-1","requestId":"request-cross-1","requestDigest":"EJrolsd7CfrE19WOA80PiODaOZwYzCP-PAnsCC1yKdo","gatewayId":"gateway-1","activeDeviceCount":2,"certificate":{"certificate":{"kind":"codever.pairing.certificate","version":1,"certificateId":"certificate-cross-1","offerId":"offer-cross-1","offerDigest":"rBY4CnEkfR0zkPfo_9FHGt4yniN4VPVBIgENaHbIY1c","requestId":"request-cross-1","requestDigest":"EJrolsd7CfrE19WOA80PiODaOZwYzCP-PAnsCC1yKdo","gatewayId":"gateway-1","gatewayKeyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","gatewayTransport":{"homeserver":"https://matrix.example.org","roomId":"!private:example.org","userId":"@gateway:example.org","deviceId":"GATEWAY1","ed25519":"gateway-ed25519-fingerprint"},"deviceId":"phone-1","deviceName":"Fixture phone","deviceKey":{"version":1,"algorithm":"ES256","keyId":"5PI0S-TOtBve2GIOXQVW66lgJvUpCnOzYQ2d6W_FLUQ","publicKey":{"kty":"EC","crv":"P-256","x":"T0mIwuoNwfa4zeB9bNqX-j2bTWCyON-1DBgg1RDQgmI","y":"tUHY9iz2MDqODPBEWb1qDCuGEBjJws4u6rlRj1Nyfmc","ext":true,"key_ops":["verify"]}},"deviceTransport":{"homeserver":"https://matrix.example.org","roomId":"!private:example.org","userId":"@alice:example.org","deviceId":"PHONE1","ed25519":"phone-ed25519-fingerprint"},"allowedOperations":["prompt"],"issuedAt":1800000000001,"expiresAt":1800086400000},"signature":{"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","value":"QNz8YUeaAA2zHUgmxaGTzQIngXx1o4ptWqfUyvmf3iQzKt3vAFK3zS2znPiFgjZrbEiZQTk5YBgKxXVG8ZIhTQ"}},"issuedAt":1800000000002,"expiresAt":1800000090000},"signature":{"algorithm":"ES256","keyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","value":"cIbYQp6Rg17pGKRo0pSjiNeLxMsyiKz2lC5VEiqSip5EG3lXChmnFan-_ZSGv45CfhOpC_OMRPgF3C1FVNHxXg"}},"envelope":{"envelope":{"kind":"codever.secure-envelope","version":1,"envelopeId":"envelope-cross-1","contentType":"io.codever.matrix-content.v1","gatewayId":"gateway-1","conversationId":"conversation-1","direction":"device_to_gateway","senderDeviceId":"phone-1","recipientDeviceId":"gateway-device","senderKeyId":"5PI0S-TOtBve2GIOXQVW66lgJvUpCnOzYQ2d6W_FLUQ","recipientKeyId":"MsGTFCvsPKYo6KybfH4t9cOai5kX99MDFyG5fJ4cs94","issuedAt":1800000000000,"expiresAt":1800000120000,"nonce":"TTqUT-WTd_idpuLB","ciphertext":"BVOkFof0gjhamTL8AiLvdDyuXLEOTlMVGXeKzc3SqeaQXESr4y5nmnJEk2kc3UtWU0gpqsTsUsQtShD3JpxhkzXT08eh_Hci_lOGMtvUsM0y0oh6TZRY"},"signature":{"algorithm":"ES256","keyId":"5PI0S-TOtBve2GIOXQVW66lgJvUpCnOzYQ2d6W_FLUQ","value":"zmDuRA0pTz2HpwzCCH5nysTTKvzvEIOBtC-UNdhyFEbqhXbhg4NhztvvBisqU0pbdszGloMWop7a6rWO-Wb31Q"}}}

@@ -17,7 +17,6 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 internal object CommandOutboxCodec {
-    private const val LEGACY_SCHEMA_VERSION = 1
     private const val SCHEMA_VERSION = 2
     private const val MAX_PLAINTEXT_BYTES = 3 * 1024 * 1024
     private const val MAX_COMMANDS = 128
@@ -50,12 +49,12 @@ internal object CommandOutboxCodec {
             ),
         )
         val schemaVersion = root.requiredLong("schemaVersion")
-        require(schemaVersion in LEGACY_SCHEMA_VERSION.toLong()..SCHEMA_VERSION.toLong()) {
+        require(schemaVersion == SCHEMA_VERSION.toLong()) {
             "Command outbox schema is unsupported."
         }
         val commands = root.requiredArray("commands").also {
             require(it.size <= MAX_COMMANDS) { "Command outbox contains too many commands." }
-        }.map { decodeCommand(it.jsonObject, schemaVersion.toInt()) }
+        }.map { decodeCommand(it.jsonObject) }
         val released = root.requiredArray("released").also {
             require(it.size <= MAX_TOMBSTONES) { "Command outbox contains too many tombstones." }
         }.map { decodeTombstone(it.jsonObject) }
@@ -92,7 +91,7 @@ internal object CommandOutboxCodec {
         put("payload", value.payload)
     }
 
-    private fun decodeCommand(value: JsonObject, schemaVersion: Int): PersistedCommand {
+    private fun decodeCommand(value: JsonObject): PersistedCommand {
         val keys = setOf(
             "operationId",
             "commandId",
@@ -105,16 +104,14 @@ internal object CommandOutboxCodec {
             "sessionId",
             "sequence",
             "baseRevision",
+            "authenticationIssuedAt",
+            "authenticationNonce",
             "revision",
             "cancelRequested",
             "completion",
             "expectedRevision",
             "payload",
-        ) + if (schemaVersion >= SCHEMA_VERSION) {
-            setOf("authenticationIssuedAt", "authenticationNonce")
-        } else {
-            emptySet()
-        }
+        )
         value.requireExactKeys(
             keys,
         )
@@ -130,16 +127,8 @@ internal object CommandOutboxCodec {
             sessionId = value.optionalString("sessionId"),
             sequence = value.requiredLong("sequence"),
             baseRevision = value.requiredLong("baseRevision"),
-            authenticationIssuedAt = if (schemaVersion >= SCHEMA_VERSION) {
-                value.optionalLong("authenticationIssuedAt")
-            } else {
-                null
-            },
-            authenticationNonce = if (schemaVersion >= SCHEMA_VERSION) {
-                value.optionalString("authenticationNonce")
-            } else {
-                null
-            },
+            authenticationIssuedAt = value.optionalLong("authenticationIssuedAt"),
+            authenticationNonce = value.optionalString("authenticationNonce"),
             revision = value.optionalLong("revision"),
             cancelRequested = value.requiredBoolean("cancelRequested"),
             completion = value.optionalObject("completion")?.let(::decodeCompletion),
@@ -280,6 +269,9 @@ internal object CommandOutboxCodec {
         require((value.authenticationIssuedAt == null) == (value.authenticationNonce == null)) {
             "Command authentication metadata is incomplete."
         }
+        require(
+            value.state == CommandState.QUEUED || value.authenticationIssuedAt != null
+        ) { "A submitted command must retain its authentication metadata." }
         value.revision?.let { requireNonnegativeJsonInteger(it, "Command revision") }
         value.expectedRevision?.let { requireNonnegativeJsonInteger(it, "Expected command revision") }
         require(value.payload.toString().toByteArray(Charsets.UTF_8).size <= MAX_PAYLOAD_BYTES) {

@@ -19,16 +19,6 @@ test("maps native progress codes to calm user-facing copy while retaining diagno
   assert.equal(presentation.detail.includes("matrix_"), false);
 });
 
-test("maps legacy native sync progress without exposing the machine code", () => {
-  const presentation = deriveConnectionPresentation(
-    "connecting",
-    "matrix_sync_connecting",
-  );
-  assert.equal(presentation.title, "Connecting");
-  assert.equal(presentation.detail, "Reaching your computer…");
-  assert.equal(presentation.rawDetailCode, "matrix_sync_connecting");
-});
-
 test("keeps the connection in progress until Gateway state is authoritative", () => {
   const presentation = deriveConnectionPresentation(
     "connecting",

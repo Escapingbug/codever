@@ -3,8 +3,12 @@ import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     type CodeverCommand,
     type JsonValue,
+    type MatrixGatewayCapabilities,
+    type MatrixSessionState,
     type SessionExtensionBinding,
     type SessionExtensionSummary,
 } from '@codever/protocol'
@@ -67,6 +71,7 @@ interface RoomRuntime {
     capabilityProvider: AgentProvider | null
     appSessions: Map<string, AppSessionRuntime>
     archivedSessions: Map<string, AppSessionRecord>
+    deletedSessionIds: Set<string>
     revisionEpoch: string
     revisionEpochGeneration: number
     replayGeneration: string
@@ -89,6 +94,12 @@ interface CommandExecutionResult {
     sessionId: string | null
     result?: JsonValue
     nativeRevisionPublished?: boolean
+}
+
+interface NativeRevision {
+    revision: number
+    revision_epoch: string
+    revision_epoch_generation: number
 }
 
 export interface MatrixGatewayDependencies {
@@ -129,7 +140,7 @@ export class MatrixGatewayRunner {
     private readonly replayStore: FileCommandReplayStore
     private readonly runtimeStateStore: FileGatewayRuntimeStateStore
     private readonly authorizer: StrictMatrixCommandAuthorizer
-    private readonly secureContent: GatewaySecureContentLayer | null
+    private readonly secureContent: GatewaySecureContentLayer
     private readonly sessionExtensionRegistry: SessionExtensionRegistry
     private readonly rooms = new Map<string, RoomRuntime>()
     private state: MatrixGatewayState = 'stopped'
@@ -138,6 +149,10 @@ export class MatrixGatewayRunner {
     private eventChain: Promise<void> = Promise.resolve()
     private readonly executionTasks = new Set<Promise<void>>()
     private readonly sessionMutationChains = new Map<string, Promise<void>>()
+    private readonly roomStateChains = new Map<string, Promise<void>>()
+    private readonly dirtySessionStates = new Map<string, Set<string>>()
+    private readonly sessionStateCommandSources = new Map<string, Map<string, string>>()
+    private readonly sessionStatePublishTasks = new Map<string, Promise<void>>()
     private startupFailure: Error | null = null
     private stopPromise: Promise<void> | null = null
 
@@ -159,14 +174,12 @@ export class MatrixGatewayRunner {
         )
         this.sessionExtensionRegistry = dependencies.sessionExtensionRegistry
             ?? new SessionExtensionRegistry()
-        this.secureContent = config.applicationSecurity
-            ? new GatewaySecureContentLayer(
-                config.gatewayId,
-                config.applicationSecurity,
-                config.trustedDevices,
-                dependencies.listTrustedDevices,
-            )
-            : null
+        this.secureContent = new GatewaySecureContentLayer(
+            config.gatewayId,
+            config.applicationSecurity,
+            config.trustedDevices,
+            dependencies.listTrustedDevices,
+        )
     }
 
     getState(): MatrixGatewayState {
@@ -174,69 +187,166 @@ export class MatrixGatewayRunner {
     }
 
     async syncState(roomId?: string): Promise<void> {
-        if (!this.secureContent) return
         const runtimes = roomId
             ? [this.rooms.get(roomId)].filter((runtime): runtime is RoomRuntime => runtime !== undefined)
             : [...this.rooms.values()]
-        await Promise.all(runtimes.map(async runtime => {
-            const stateVersion = await this.runtimeStateStore.incrementStateVersion(
-                runtime.config.roomId,
-                runtimeStateWithoutVersion(runtime),
-            )
-            runtime.stateVersion = stateVersion
+        await Promise.all(runtimes.map(runtime => this.serializeRoomState(runtime, async () => {
+            // An unpaired room has no application-layer recipient and must not
+            // manufacture undecryptable state. Its durable runtime remains
+            // authoritative locally; pairing provisioning will publish it.
+            if (await this.secureContent.activeDeviceCountForRoom(runtime.config) === 0) return
+            const stateVersion = await this.advanceStateVersion(runtime)
             const snapshot = await this.gatewayStateSnapshot(runtime)
-            await this.secureContent!.sendNativeContent(runtime.config, {
-                version: 2,
-                kind: 'gateway_checkpoint',
-                gateway_id: this.config.gatewayId,
-                conversation_id: runtime.config.conversationId,
+            const revision = {
                 revision: snapshot.revision,
                 revision_epoch: snapshot.revisionEpoch,
                 revision_epoch_generation: snapshot.revisionEpochGeneration,
-                state_version: stateVersion,
-                active_device_count:
-                    await this.secureContent!.activeDeviceCountForRoom(runtime.config),
-                sessions: snapshot.sessions.map(session => ({
-                    session_id: session.id,
-                    ...(session.threadRootEventId
-                        ? { thread_root_event_id: session.threadRootEventId }
-                        : {}),
-                    title: session.title,
-                    updated_at: session.updatedAt,
-                    archived: session.archived === true,
-                    status: session.status,
-                    ...(session.activityPhase
-                        ? { activity_phase: session.activityPhase }
-                        : {}),
-                    project: {
-                        id: session.projectId,
-                        name: session.projectName,
-                        cwd: session.cwd,
-                    },
-                    provider: session.provider,
-                    ...(session.model ? { model: session.model } : {}),
-                    ...(session.reasoningEffort
-                        ? { reasoning_effort: session.reasoningEffort }
-                        : {}),
-                    extensions: session.extensions,
+            }
+            const updatedAt = this.now()
+            const desiredStates = [
+                ...snapshot.sessions.map(session =>
+                nativeSessionState(
+                    this.config.gatewayId,
+                    runtime,
+                    session,
+                    stateVersion,
+                    revision,
+                    updatedAt,
+                )),
+                ...[...runtime.deletedSessionIds].map(sessionId => ({
+                    version: 2 as const,
+                    kind: 'session_state' as const,
+                    gateway_id: this.config.gatewayId,
+                    conversation_id: runtime.config.conversationId,
+                    ...revision,
+                    state_version: stateVersion,
+                    session_id: sessionId,
+                    state: 'deleted' as const,
+                    updated_at: updatedAt,
                 })),
-                workspace: {
-                    project: {
-                        id: runtime.workspace.projectId,
-                        name: runtime.workspace.projectName,
-                        cwd: runtime.workspace.cwd,
+            ]
+            const published = new Map(
+                this.secureContent.latestNativeRoomState(runtime.config.roomId)
+                    .filter(state => state.kind === 'session_state')
+                    .map(state => [state.session_id, state]),
+            )
+            const changedStates = desiredStates.filter(state =>
+                !sameSessionEntity(state, published.get(state.session_id))
+            )
+            const gatewayState = await this.gatewayRoomState(
+                runtime,
+                snapshot,
+                stateVersion,
+                revision,
+                updatedAt,
+            )
+            await this.secureContent.setNativeRoomStateBatch(
+                runtime.config,
+                [
+                    ...changedStates.map(content => ({
+                        eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+                        stateKey: content.session_id,
+                        content,
+                    })),
+                    {
+                        eventType: CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+                        stateKey: this.config.gatewayId,
+                        content: gatewayState,
                     },
-                    provider: runtime.workspace.provider,
-                    ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
-                    ...(runtime.workspace.reasoningEffort
-                        ? { reasoning_effort: runtime.workspace.reasoningEffort }
-                        : {}),
-                    permission_mode: runtime.workspace.permissionMode,
+                ],
+                this.client,
+            )
+        })))
+    }
+
+    /**
+     * Pairing commit barrier: establish immutable thread roots and then write
+     * the complete current Room State addressed to the newly active device.
+     * A pairing response must not be sent until this resolves.
+     */
+    async provisionCurrentState(): Promise<void> {
+        if (this.state !== 'running') {
+            throw new Error(`Cannot provision Matrix state while Gateway is ${this.state}`)
+        }
+        await this.ensureSessionRoots()
+        await this.syncState()
+    }
+
+    private async advanceStateVersion(runtime: RoomRuntime): Promise<number> {
+        const stateVersion = await this.runtimeStateStore.incrementStateVersion(
+            runtime.config.roomId,
+            runtimeStateWithoutVersion(runtime),
+        )
+        runtime.stateVersion = Math.max(runtime.stateVersion, stateVersion)
+        return stateVersion
+    }
+
+    private serializeRoomState<T>(runtime: RoomRuntime, operation: () => Promise<T>): Promise<T> {
+        const key = runtime.config.roomId
+        const previous = this.roomStateChains.get(key) ?? Promise.resolve()
+        const current = previous.catch(() => undefined).then(operation)
+        const settled = current.then(() => undefined, () => undefined)
+        this.roomStateChains.set(key, settled)
+        void settled.then(() => {
+            if (this.roomStateChains.get(key) === settled) this.roomStateChains.delete(key)
+        })
+        return current
+    }
+
+    private async publishGatewayState(
+        runtime: RoomRuntime,
+        snapshot: GatewayStateSnapshot,
+        stateVersion: number,
+        revision: NativeRevision,
+        updatedAt: number,
+    ): Promise<void> {
+        await this.secureContent.setNativeRoomState(
+            runtime.config,
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            this.config.gatewayId,
+            await this.gatewayRoomState(
+                runtime,
+                snapshot,
+                stateVersion,
+                revision,
+                updatedAt,
+            ),
+            this.client,
+        )
+    }
+
+    private async gatewayRoomState(
+        runtime: RoomRuntime,
+        snapshot: GatewayStateSnapshot,
+        stateVersion: number,
+        revision: NativeRevision,
+        updatedAt: number,
+    ) {
+        return {
+            version: 2 as const,
+            kind: 'gateway_state' as const,
+            gateway_id: this.config.gatewayId,
+            conversation_id: runtime.config.conversationId,
+            ...revision,
+            state_version: stateVersion,
+            active_device_count:
+                await this.secureContent.activeDeviceCountForRoom(runtime.config),
+            workspace: {
+                project: {
+                    id: runtime.workspace.projectId,
+                    name: runtime.workspace.projectName,
+                    cwd: runtime.workspace.cwd,
                 },
-                capabilities: nativeCheckpointCapabilities(snapshot.capabilities),
-                updated_at: this.now(),
-            }, `codever.gateway.checkpoint.${runtime.revisionEpoch}.${stateVersion}`, this.client)
-        }))
+                provider: runtime.workspace.provider,
+                ...(runtime.workspace.model ? { model: runtime.workspace.model } : {}),
+                ...(runtime.workspace.reasoningEffort
+                    ? { reasoning_effort: runtime.workspace.reasoningEffort }
+                    : {}),
+                permission_mode: runtime.workspace.permissionMode,
+            },
+            capabilities: nativeRoomStateCapabilities(snapshot.capabilities),
+            updated_at: updatedAt,
+        }
     }
 
     private async gatewayStateSnapshot(runtime: RoomRuntime): Promise<GatewayStateSnapshot> {
@@ -341,7 +451,7 @@ export class MatrixGatewayRunner {
             const replayGeneration = this.replayStore.getGeneration()
             await this.runtimeStateStore.initialize(this.config.rooms, replayGeneration)
             await this.authorizer.initialize(this.now())
-            await this.secureContent?.initialize(this.now())
+            await this.secureContent.initialize(this.now())
             await this.createRoomRuntimes()
             this.unsubscribe = this.client.onRoomEvent(event => this.receiveEvent(event))
             await this.client.initializeCrypto(this.config.crypto)
@@ -352,19 +462,19 @@ export class MatrixGatewayRunner {
                 await this.client.assertRoomEncrypted(room.roomId)
             }
             for (const room of this.config.rooms) {
-                void this.secureContent?.retryPendingForRoom(room, this.client).catch(error => {
+                void this.secureContent.retryPendingForRoom(room, this.client).catch(error => {
                     this.log(
                         `[matrix-gateway] pending delivery recovery failed for ${room.roomId}: `
                         + formatError(error),
                     )
-                    this.secureContent?.scheduleRecoveryForRoom(room, this.client)
+                    this.secureContent.scheduleRecoveryForRoom(room, this.client)
                 })
             }
             if (this.startupFailure) throw this.startupFailure
             this.state = 'running'
             await this.ensureSessionRoots()
             await this.syncState().catch(error => {
-                this.log(`[matrix-gateway] initial checkpoint sync failed: ${formatError(error)}`)
+                this.log(`[matrix-gateway] initial Room State sync failed: ${formatError(error)}`)
             })
             const queued = this.startupEvents
             this.startupEvents = []
@@ -383,6 +493,12 @@ export class MatrixGatewayRunner {
         this.state = 'stopping'
         this.stopPromise = (async () => {
             await this.eventChain
+            // Command execution can enqueue lifecycle and Room State work.
+            // Drain until the task set is stable before closing Matrix or
+            // allowing test/deployment cleanup to remove durable stores.
+            while (this.executionTasks.size > 0) {
+                await Promise.allSettled([...this.executionTasks])
+            }
             await this.cleanup()
             this.state = 'stopped'
             this.stopPromise = null
@@ -420,30 +536,26 @@ export class MatrixGatewayRunner {
             event.eventType === CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE
         if (!applicationControl && event.eventType !== 'm.room.message') return
         if (!applicationControl && isMatrixGatewayControlEvent(event.content)) return
-        if (!applicationControl && !event.encrypted) {
-            throw new Error('Clear-text Matrix events cannot execute gateway commands')
-        }
-        if (!applicationControl && !event.senderDeviceId) {
-            throw new Error('Encrypted Matrix event has no cryptographic sender device key')
-        }
-        if (applicationControl && !this.secureContent) {
-            throw new Error('Application control events require Codever application security')
-        }
         const runtime = this.rooms.get(event.roomId)
         if (!runtime) return
+        if (!applicationControl) {
+            const candidate = asRecord(event.content[CODEVER_MATRIX_EXTENSION])
+            if (candidate?.kind === 'signed_command') {
+                throw new Error('Commands require Codever application encryption')
+            }
+            return
+        }
 
-        const opened = this.secureContent
-            ? await this.secureContent.openIncoming(
-                event.content[CODEVER_MATRIX_EXTENSION],
-                runtime.config,
-                this.now(),
-            )
-            : null
+        const opened = await this.secureContent.openIncoming(
+            event.content[CODEVER_MATRIX_EXTENSION],
+            runtime.config,
+            this.now(),
+        )
         const extension = asRecord(
-            (opened?.content ?? event.content)[CODEVER_MATRIX_EXTENSION],
+            opened.content[CODEVER_MATRIX_EXTENSION],
         )
         if (!extension || extension.version !== 1 || extension.kind !== 'signed_command') return
-        if (opened) this.authorizer.trustDevice(opened.trustedDevice)
+        this.authorizer.trustDevice(opened.trustedDevice)
         const signedCommand = asRecord(extension.signed_command)
         const candidateCommand = asRecord(signedCommand?.command)
         const candidateDeviceId = candidateCommand?.deviceId
@@ -462,12 +574,11 @@ export class MatrixGatewayRunner {
                 revisionEpoch: runtime.revisionEpoch,
                 matrixSender: event.sender,
                 matrixDeviceKey: event.senderDeviceId ?? '',
-                ...(opened ? { applicationDeviceId: opened.authenticatedDeviceId } : {}),
+                applicationDeviceId: opened.authenticatedDeviceId,
             }, this.now())
         } catch (error) {
             if (
                 error instanceof RevisionConflictError
-                && this.secureContent
                 && typeof candidateDeviceId === 'string'
                 && typeof candidateCommand?.commandId === 'string'
             ) {
@@ -490,24 +601,19 @@ export class MatrixGatewayRunner {
             // stale business operation, but return its authenticated result
             // so the device can advance and release its durable outbox.
             this.scheduleGatewayRevision(runtime, authorized.command.commandId)
-            if (this.secureContent) {
-                const task = this.deliverCommandResult(
-                    runtime,
-                    authorized.command,
-                    authorized.terminal,
-                ).catch(error => {
-                    this.log(
-                        `[matrix-gateway] expired result delivery failed: ${formatError(error)}`,
-                    )
-                }).finally(() => this.executionTasks.delete(task))
-                this.executionTasks.add(task)
-            }
+            const task = this.deliverCommandResult(
+                runtime,
+                authorized.command,
+                authorized.terminal,
+            ).catch(error => {
+                this.log(
+                    `[matrix-gateway] expired result delivery failed: ${formatError(error)}`,
+                )
+            }).finally(() => this.executionTasks.delete(task))
+            this.executionTasks.add(task)
         } else if (!authorized.duplicate) {
             let collaborationDelivery: Promise<unknown> | undefined
-            if (
-                this.secureContent
-                && authorized.command.payload.operation === 'prompt'
-            ) {
+            if (authorized.command.payload.operation === 'prompt') {
                 const appSession = this.requireAppSession(
                     runtime,
                     authorized.command.payload.sessionId,
@@ -533,8 +639,8 @@ export class MatrixGatewayRunner {
                             appSession.port,
                         ),
                     originDeviceId: authorized.command.deviceId,
-                    originDeviceName: opened?.trustedDevice.deviceName
-                        ?? opened?.trustedDevice.deviceId
+                    originDeviceName: opened.trustedDevice.deviceName
+                        ?? opened.trustedDevice.deviceId
                         ?? authorized.command.deviceId,
                     text: authorized.command.payload.text,
                     attachments: authorized.command.payload.attachments,
@@ -549,20 +655,13 @@ export class MatrixGatewayRunner {
                 authorized.revision,
                 collaborationDelivery,
             )
-        } else if (this.secureContent) {
-            const terminal = await this.replayStore.getCommandResult(
-                authorized.command,
-                authorized.command.sequenceEpoch,
-                authorized.legacyFingerprintRecovery === true,
-            )
+        } else {
+            const terminal = await this.replayStore.getCommandResult(authorized.command)
             if (terminal) {
                 const task = this.deliverCommandResult(runtime, authorized.command, terminal)
                     .finally(() => this.executionTasks.delete(task))
                 this.executionTasks.add(task)
-            } else if (
-                !authorized.legacyFingerprintRecovery
-                && authorized.command.payload.operation === 'device.invite'
-            ) {
+            } else if (authorized.command.payload.operation === 'device.invite') {
                 // Invitation creation is keyed by commandId in the durable
                 // pairing registry. It is therefore safe to resume the only
                 // side effect whose result may have been interrupted between
@@ -589,24 +688,22 @@ export class MatrixGatewayRunner {
                 })
             }
         }
-        if (this.secureContent) {
-            // Matrix delivery is deliberately off the authorization lane. A
-            // stalled homeserver must not delay execution, cancel, or decisions.
-            void this.secureContent.sendCommandAccepted(
-                runtime.config,
-                authorized.command.deviceId,
-                authorized.command.commandId,
-                authorized.command.sequence,
-                authorized.revision,
-                runtime.revisionEpoch,
-                this.client,
-            ).catch(error => {
-                this.log(
-                    `[matrix-gateway] command acknowledgement ${authorized.command.commandId} failed: `
-                    + formatError(error),
-                )
-            })
-        }
+        // Matrix delivery is deliberately off the authorization lane. A
+        // stalled homeserver must not delay execution, cancel, or decisions.
+        void this.secureContent.sendCommandAccepted(
+            runtime.config,
+            authorized.command.deviceId,
+            authorized.command.commandId,
+            authorized.command.sequence,
+            authorized.revision,
+            runtime.revisionEpoch,
+            this.client,
+        ).catch(error => {
+            this.log(
+                `[matrix-gateway] command acknowledgement ${authorized.command.commandId} failed: `
+                + formatError(error),
+            )
+        })
     }
 
     private scheduleExecution(
@@ -660,11 +757,7 @@ export class MatrixGatewayRunner {
                 // Persist the terminal result before staging any Matrix copy.
                 // An exact duplicate command can then recover after a Gateway
                 // restart without repeating the side effect.
-                await this.replayStore.recordCommandResult(
-                    command,
-                    terminal,
-                    command.sequenceEpoch,
-                )
+                await this.replayStore.recordCommandResult(command, terminal)
             } catch (persistenceError) {
                 this.log(
                     `[matrix-gateway] ${outcome} result persistence failed: `
@@ -690,7 +783,7 @@ export class MatrixGatewayRunner {
         command: CodeverCommand,
         terminal: DurableCommandResult,
     ): Promise<void> {
-        await this.secureContent?.sendCommandResult(
+        await this.secureContent.sendCommandResult(
             runtime.config,
             command.deviceId,
             command.commandId,
@@ -741,6 +834,11 @@ export class MatrixGatewayRunner {
                         `[matrix-gateway] session update delivery failed for ${appSession.record.id}: `
                         + formatError(error),
                     ))
+                    this.scheduleNativeSessionState(
+                        runtime,
+                        appSession.record.id,
+                        command.commandId,
+                    )
                 return { sessionId: appSession.record.id }
             }
             case 'cancel': {
@@ -779,6 +877,11 @@ export class MatrixGatewayRunner {
                         `[matrix-gateway] session update delivery failed for ${appSession.record.id}: `
                         + formatError(error),
                     ))
+                this.scheduleNativeSessionState(
+                    runtime,
+                    appSession.record.id,
+                    command.commandId,
+                )
                 return { sessionId: appSession.record.id }
             }
             case 'session.create': {
@@ -795,6 +898,11 @@ export class MatrixGatewayRunner {
                             runtime,
                             record,
                             appSession.port,
+                            command.commandId,
+                        )
+                        this.scheduleNativeSessionState(
+                            runtime,
+                            record.id,
                             command.commandId,
                         )
                     }
@@ -1045,6 +1153,7 @@ export class MatrixGatewayRunner {
             throw error
         }
         this.scheduleSessionLifecycle(runtime, appSession.record, 'archived', sourceCommandId)
+        this.scheduleNativeSessionState(runtime, appSession.record.id, sourceCommandId)
         return { sessionId: appSession.record.id }
     }
 
@@ -1080,6 +1189,7 @@ export class MatrixGatewayRunner {
             throw error
         }
         this.scheduleSessionLifecycle(runtime, record, 'idle', sourceCommandId)
+        this.scheduleNativeSessionState(runtime, record.id, sourceCommandId)
         return { sessionId: record.id }
     }
 
@@ -1110,9 +1220,11 @@ export class MatrixGatewayRunner {
         } else {
             runtime.archivedSessions.delete(record.id)
         }
+        runtime.deletedSessionIds.add(record.id)
         try {
             await this.persistRuntime(runtime)
         } catch (error) {
+            runtime.deletedSessionIds.delete(record.id)
             if (record.archivedAt === null) {
                 runtime.appSessions.set(
                     record.id,
@@ -1124,6 +1236,7 @@ export class MatrixGatewayRunner {
             throw error
         }
         this.scheduleSessionLifecycle(runtime, record, 'deleted', sourceCommandId)
+        this.scheduleNativeSessionState(runtime, record.id, sourceCommandId)
         return { sessionId: record.id, nativeRevisionPublished: true }
     }
 
@@ -1163,8 +1276,8 @@ export class MatrixGatewayRunner {
     }
 
     private async ensureSessionRoots(): Promise<void> {
-        if (!this.secureContent) return
         for (const runtime of this.rooms.values()) {
+            if (await this.secureContent.activeDeviceCountForRoom(runtime.config) === 0) continue
             for (const appSession of runtime.appSessions.values()) {
                 await this.ensureSessionRoot(runtime, appSession.record, appSession.port)
             }
@@ -1190,9 +1303,6 @@ export class MatrixGatewayRunner {
             )
             port?.setThreadRootEventId(record.matrixThreadRootEventId)
             return record.matrixThreadRootEventId
-        }
-        if (!this.secureContent) {
-            throw new Error('Matrix native session roots require application security')
         }
         const status = record.archivedAt !== null
             ? 'idle'
@@ -1256,7 +1366,6 @@ export class MatrixGatewayRunner {
         record: AppSessionRecord,
         sourceCommandId?: string,
     ): Promise<void> {
-        if (!this.secureContent) return
         const threadRootEventId = await this.ensureSessionRoot(
             runtime,
             record,
@@ -1288,7 +1397,6 @@ export class MatrixGatewayRunner {
         state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
         sourceCommandId?: string,
     ): Promise<void> {
-        if (!this.secureContent) return
         const threadRootEventId = await this.ensureSessionRoot(
             runtime,
             record,
@@ -1347,10 +1455,9 @@ export class MatrixGatewayRunner {
     }
 
     private scheduleGatewayRevision(runtime: RoomRuntime, sourceCommandId: string): void {
-        if (!this.secureContent) return
         const task = (async () => {
             const revision = await this.nativeRevision(runtime)
-            await this.secureContent!.sendNativeContent(runtime.config, {
+            await this.secureContent.sendNativeContent(runtime.config, {
                 version: 2,
                 kind: 'gateway_revision',
                 ...revision,
@@ -1359,12 +1466,116 @@ export class MatrixGatewayRunner {
                 updated_at: this.now(),
                 source_command_id: sourceCommandId,
             }, `codever.gateway.revision.${runtime.revisionEpoch}.${revision.revision}`, this.client)
+            // Timeline is the realtime/audit stream. Also advance durable
+            // Gateway metadata so reconnect does not require history replay.
+            await this.serializeRoomState(runtime, async () => {
+                const stateVersion = await this.advanceStateVersion(runtime)
+                const snapshot = await this.gatewayStateSnapshot(runtime)
+                await this.publishGatewayState(
+                    runtime,
+                    snapshot,
+                    stateVersion,
+                    revision,
+                    this.now(),
+                )
+            })
         })()
             .catch(error => this.log(
                 `[matrix-gateway] revision ${sourceCommandId} delivery failed: ${formatError(error)}`,
             ))
             .finally(() => this.executionTasks.delete(task))
         this.executionTasks.add(task)
+    }
+
+    private scheduleNativeSessionState(
+        runtime: RoomRuntime,
+        sessionId: string,
+        sourceCommandId?: string,
+    ): void {
+        if (this.state === 'stopping' || this.state === 'stopped') return
+        const key = `${runtime.config.roomId}\0${sessionId}`
+        let dirty = this.dirtySessionStates.get(runtime.config.roomId)
+        if (!dirty) {
+            dirty = new Set()
+            this.dirtySessionStates.set(runtime.config.roomId, dirty)
+        }
+        dirty.add(sessionId)
+        if (sourceCommandId) {
+            let sources = this.sessionStateCommandSources.get(runtime.config.roomId)
+            if (!sources) {
+                sources = new Map()
+                this.sessionStateCommandSources.set(runtime.config.roomId, sources)
+            }
+            sources.set(sessionId, sourceCommandId)
+        }
+        if (this.sessionStatePublishTasks.has(key)) return
+        const task = (async () => {
+            // Coalesce bursts such as starting -> working into the latest
+            // entity value while preserving a later change that arrives during
+            // an in-flight Matrix PUT.
+            await Promise.resolve()
+            while (this.dirtySessionStates.get(runtime.config.roomId)?.delete(sessionId)) {
+                const commandSource = this.sessionStateCommandSources
+                    .get(runtime.config.roomId)?.get(sessionId)
+                this.sessionStateCommandSources.get(runtime.config.roomId)?.delete(sessionId)
+                await this.serializeRoomState(runtime, () =>
+                    this.publishNativeSessionState(runtime, sessionId, commandSource)
+                )
+            }
+        })()
+            .catch(error => this.log(
+                `[matrix-gateway] session Room State ${sessionId} delivery failed: ${formatError(error)}`,
+            ))
+            .finally(() => {
+                this.sessionStatePublishTasks.delete(key)
+                this.executionTasks.delete(task)
+                if (this.dirtySessionStates.get(runtime.config.roomId)?.has(sessionId)) {
+                    this.scheduleNativeSessionState(runtime, sessionId)
+                }
+            })
+        this.sessionStatePublishTasks.set(key, task)
+        this.executionTasks.add(task)
+    }
+
+    private async publishNativeSessionState(
+        runtime: RoomRuntime,
+        sessionId: string,
+        sourceCommandId?: string,
+    ): Promise<void> {
+        const stateVersion = await this.advanceStateVersion(runtime)
+        const revision = await this.nativeRevision(runtime)
+        const updatedAt = this.now()
+        const snapshot = await this.gatewayStateSnapshot(runtime)
+        const session = snapshot.sessions.find(candidate => candidate.id === sessionId)
+        const content = session
+            ? nativeSessionState(
+                this.config.gatewayId,
+                runtime,
+                session,
+                stateVersion,
+                revision,
+                updatedAt,
+                sourceCommandId,
+            )
+            : {
+                version: 2 as const,
+                kind: 'session_state' as const,
+                gateway_id: this.config.gatewayId,
+                conversation_id: runtime.config.conversationId,
+                ...revision,
+                state_version: stateVersion,
+                session_id: sessionId,
+                state: 'deleted' as const,
+                updated_at: updatedAt,
+                ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
+            }
+        await this.secureContent.setNativeRoomState(
+            runtime.config,
+            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            sessionId,
+            content,
+            this.client,
+        )
     }
 
     private async persistRuntime(runtime: RoomRuntime): Promise<void> {
@@ -1383,6 +1594,7 @@ export class MatrixGatewayRunner {
                 workspace: structuredClone(restored.workspace),
                 appSessions: new Map(),
                 archivedSessions: new Map(),
+                deletedSessionIds: new Set(restored.deletedSessionIds),
                 revisionEpoch: restored.revisionEpoch,
                 revisionEpochGeneration: restored.revisionEpochGeneration,
                 replayGeneration: restored.replayGeneration,
@@ -1412,9 +1624,7 @@ export class MatrixGatewayRunner {
         const effectiveRoom = roomConfigForSession(runtime.config, record)
         const activity = { phase: 'idle' as AgentActivityPhase }
         const port = new MatrixPort({
-            transport: this.secureContent
-                ? this.secureContent.transportForRoom(runtime.config, this.client)
-                : this.client,
+            transport: this.secureContent.transportForRoom(runtime.config, this.client),
             roomId: runtime.config.roomId,
             gatewayId: this.config.gatewayId,
             sessionId: record.id,
@@ -1424,6 +1634,8 @@ export class MatrixGatewayRunner {
             onLog: this.dependencies.onLog,
             onStatusChange: status => {
                 activity.phase = status.activity ?? activityForSessionStatus(status)
+                const current = runtime.appSessions.get(record.id)
+                if (current) this.scheduleNativeSessionState(runtime, current.record.id)
             },
         })
         let capabilityProvider: AgentProvider | null
@@ -1493,8 +1705,7 @@ export class MatrixGatewayRunner {
         this.unsubscribe?.()
         this.unsubscribe = null
         this.startupEvents = []
-        this.secureContent?.stopRetries()
-        await this.client.stop().catch(error => this.log(`[matrix-gateway] client stop failed: ${formatError(error)}`))
+        this.secureContent.stopRetries()
         const runtimes = [...this.rooms.values()]
         this.rooms.clear()
         for (const runtime of runtimes) {
@@ -1509,8 +1720,16 @@ export class MatrixGatewayRunner {
             }
         }
         await Promise.allSettled([...this.executionTasks])
+        await this.secureContent.compactStateOutbox().catch(error => this.log(
+            `[matrix-gateway] Room State outbox compaction failed: ${formatError(error)}`,
+        ))
         this.executionTasks.clear()
         this.sessionMutationChains.clear()
+        this.roomStateChains.clear()
+        this.dirtySessionStates.clear()
+        this.sessionStateCommandSources.clear()
+        this.sessionStatePublishTasks.clear()
+        await this.client.stop().catch(error => this.log(`[matrix-gateway] client stop failed: ${formatError(error)}`))
     }
 
     private now(): number {
@@ -1560,6 +1779,7 @@ function runtimeStateWithoutVersion(
         appSessions: [...runtime.appSessions.values()].map(({ record }) => ({
             ...record,
         })).concat([...runtime.archivedSessions.values()].map(record => ({ ...record }))),
+        deletedSessionIds: [...runtime.deletedSessionIds].sort(),
         workspace: structuredClone(runtime.workspace),
     }
 }
@@ -1606,10 +1826,74 @@ function gatewaySessionSummary(
     }
 }
 
-function nativeCheckpointCapabilities(
+function nativeSessionState(
+    gatewayId: string,
+    runtime: RoomRuntime,
+    session: GatewayStateSnapshot['sessions'][number],
+    stateVersion: number,
+    revision: NativeRevision,
+    updatedAt: number,
+    sourceCommandId?: string,
+) {
+    return {
+        version: 2 as const,
+        kind: 'session_state' as const,
+        gateway_id: gatewayId,
+        conversation_id: runtime.config.conversationId,
+        ...revision,
+        state_version: stateVersion,
+        session_id: session.id,
+        state: session.archived === true ? 'archived' as const : 'active' as const,
+        session: {
+            session_id: session.id,
+            ...(session.threadRootEventId
+                ? { thread_root_event_id: session.threadRootEventId }
+                : {}),
+            title: session.title,
+            updated_at: session.updatedAt,
+            archived: session.archived === true,
+            status: session.status,
+            ...(session.activityPhase
+                ? { activity_phase: session.activityPhase }
+                : {}),
+            project: {
+                id: session.projectId,
+                name: session.projectName,
+                cwd: session.cwd,
+            },
+            provider: session.provider,
+            ...(session.model ? { model: session.model } : {}),
+            ...(session.reasoningEffort
+                ? { reasoning_effort: session.reasoningEffort }
+                : {}),
+            extensions: session.extensions,
+        },
+        updated_at: updatedAt,
+        ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
+    }
+}
+
+function sameSessionEntity(
+    left: MatrixSessionState,
+    right: MatrixSessionState | undefined,
+): boolean {
+    if (!right) return false
+    const normalized = (value: typeof left | typeof right) => ({
+        gateway_id: value.gateway_id,
+        conversation_id: value.conversation_id,
+        revision_epoch: value.revision_epoch,
+        revision_epoch_generation: value.revision_epoch_generation,
+        session_id: value.session_id,
+        state: value.state,
+        ...(value.session ? { session: value.session } : {}),
+    })
+    return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right))
+}
+
+function nativeRoomStateCapabilities(
     capabilities: GatewayStateSnapshot['capabilities'],
-): JsonValue {
-    return JSON.parse(JSON.stringify({
+): MatrixGatewayCapabilities {
+    return {
         models: capabilities.models.map(model => ({
             id: model.id,
             name: model.name,
@@ -1638,23 +1922,29 @@ function nativeCheckpointCapabilities(
             name: extension.name,
             description: extension.description,
             version: extension.version,
-            settings: extension.settings.map(setting => ({
-                id: setting.id,
-                type: setting.type,
-                label: setting.label,
-                ...(setting.description ? { description: setting.description } : {}),
-                ...(setting.type === 'text' && setting.required
-                    ? { required: true }
-                    : {}),
-                ...(setting.type === 'text' && setting.placeholder
-                    ? { placeholder: setting.placeholder }
-                    : {}),
-                ...(setting.defaultValue === undefined
-                    ? {}
-                    : { default_value: setting.defaultValue }),
-            })),
+            settings: extension.settings.map(setting => setting.type === 'text'
+                ? {
+                    id: setting.id,
+                    type: setting.type,
+                    label: setting.label,
+                    ...(setting.description ? { description: setting.description } : {}),
+                    ...(setting.required ? { required: true } : {}),
+                    ...(setting.placeholder ? { placeholder: setting.placeholder } : {}),
+                    ...(setting.defaultValue === undefined
+                        ? {}
+                        : { default_value: setting.defaultValue }),
+                }
+                : {
+                    id: setting.id,
+                    type: setting.type,
+                    label: setting.label,
+                    ...(setting.description ? { description: setting.description } : {}),
+                    ...(setting.defaultValue === undefined
+                        ? {}
+                        : { default_value: setting.defaultValue }),
+                }),
         })),
-    })) as JsonValue
+    }
 }
 
 function workspaceFromRecord(record: AppSessionRecord): WorkspaceState {

@@ -431,7 +431,6 @@ object CommandPayloadValidator {
 
 enum class CommandAuthorizationSource {
     CERTIFICATE_GRANT,
-    GATEWAY_LIFECYCLE,
     DENIED,
 }
 
@@ -441,14 +440,6 @@ data class CommandAuthorizationDecision(
 )
 
 object CommandAuthorizationPolicy {
-    /** Mirrors src/gateway/pairing/matrix.ts withCurrentGatewayOperations. */
-    val CURRENT_GATEWAY_LIFECYCLE_OPERATIONS: Set<CommandOperation> = setOf(
-        CommandOperation.SESSION_ARCHIVE,
-        CommandOperation.SESSION_RESTORE,
-        CommandOperation.SESSION_DELETE,
-        CommandOperation.DEVICE_INVITE,
-    )
-
     /**
      * Evaluates command authority after certificate signature, binding,
      * status, and expiry have already been verified by the pairing layer.
@@ -456,23 +447,20 @@ object CommandAuthorizationPolicy {
     fun evaluate(
         operation: CommandOperation,
         certificateGrants: Collection<PairingOperation>,
-        gatewayLifecycleOperations: Set<CommandOperation> = CURRENT_GATEWAY_LIFECYCLE_OPERATIONS,
     ): CommandAuthorizationDecision {
         val granted = certificateGrants.any { grant -> grant.wireName == operation.wireName }
-        return when {
-            granted -> CommandAuthorizationDecision(true, CommandAuthorizationSource.CERTIFICATE_GRANT)
-            operation in CURRENT_GATEWAY_LIFECYCLE_OPERATIONS && operation in gatewayLifecycleOperations ->
-                CommandAuthorizationDecision(true, CommandAuthorizationSource.GATEWAY_LIFECYCLE)
-            else -> CommandAuthorizationDecision(false, CommandAuthorizationSource.DENIED)
+        return if (granted) {
+            CommandAuthorizationDecision(true, CommandAuthorizationSource.CERTIFICATE_GRANT)
+        } else {
+            CommandAuthorizationDecision(false, CommandAuthorizationSource.DENIED)
         }
     }
 
     fun requireAuthorized(
         payload: ValidatedCommandPayload,
         certificateGrants: Collection<PairingOperation>,
-        gatewayLifecycleOperations: Set<CommandOperation> = CURRENT_GATEWAY_LIFECYCLE_OPERATIONS,
     ) {
-        val decision = evaluate(payload.operation, certificateGrants, gatewayLifecycleOperations)
+        val decision = evaluate(payload.operation, certificateGrants)
         require(decision.authorized) {
             "The pairing certificate does not authorize ${payload.operation.wireName}."
         }

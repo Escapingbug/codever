@@ -1,30 +1,34 @@
 import {
   CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
   signedPairingRequestSchema,
-  type CommandOperation,
   type MatrixTransportBinding,
-  type PairingOperation,
   type SignedPairingRequest,
 } from '@codever/protocol'
 import type { MatrixIncomingEvent } from '@/channel/matrix'
 import { CODEVER_MATRIX_EXTENSION } from '@/channel/matrix'
 import type {
   MatrixGatewayClient,
+  MatrixGatewayPinnedTransportDevice,
   MatrixGatewayTrustedDevice,
 } from '@/gateway/matrix'
 import type { FileTrustedDeviceRegistry, TrustedDeviceRecord } from './registry.js'
 import type { GatewayPairingService } from './service.js'
 
-export interface MatrixPairingWaitOptions {
+export interface MatrixPairingRequestOptions {
   client: MatrixGatewayClient
   service: GatewayPairingService
   registry: FileTrustedDeviceRegistry
   gatewayTransport: MatrixTransportBinding
-  timeoutMs?: number
+  /**
+   * Commits every Gateway-side resource the new device needs before the
+   * signed response makes pairing observable to that device. Throwing keeps
+   * the persisted request recoverable and suppresses the response.
+   */
+  onProvisioned: (record: TrustedDeviceRecord) => void | Promise<void>
   onRejected?: (error: unknown) => void
 }
 
-export interface MatrixPairingListenerOptions extends MatrixPairingWaitOptions {
+export interface MatrixPairingListenerOptions extends MatrixPairingRequestOptions {
   onAccepted?: (record: TrustedDeviceRecord) => void | Promise<void>
   /** Accepts a new request only when its explicit offer is still open. */
   acceptNewOffers?: boolean
@@ -112,38 +116,6 @@ export async function publishMatrixTransportSnapshot(options: {
   )
 }
 
-export async function waitForMatrixPairing(
-  options: MatrixPairingWaitOptions,
-): Promise<TrustedDeviceRecord> {
-  const timeoutMs = options.timeoutMs ?? 10 * 60_000
-  return new Promise<TrustedDeviceRecord>((resolve, reject) => {
-    let handling = false
-    let settled = false
-    const finish = (outcome: { record: TrustedDeviceRecord } | { error: unknown }): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      unsubscribe()
-      if ('record' in outcome) resolve(outcome.record)
-      else reject(outcome.error)
-    }
-    const timeout = setTimeout(
-      () => finish({ error: new Error(`Pairing timed out after ${timeoutMs}ms`) }),
-      timeoutMs,
-    )
-    const unsubscribe = options.client.onRoomEvent((event) => {
-      if (settled || handling || !isPairingEvent(event, options.gatewayTransport.roomId)) return
-      handling = true
-      void acceptMatrixPairing(options, event)
-        .then((record) => finish({ record }))
-        .catch((error) => {
-          handling = false
-          options.onRejected?.(error)
-        })
-    })
-  })
-}
-
 /**
  * Keeps pairing recovery available for the lifetime of the Gateway.
  *
@@ -184,7 +156,7 @@ export function listenForMatrixPairingRequests(
 }
 
 async function acceptMatrixPairing(
-  options: MatrixPairingWaitOptions,
+  options: MatrixPairingRequestOptions,
   event: MatrixIncomingEvent,
 ): Promise<TrustedDeviceRecord> {
   const extension = asRecord(event.content[CODEVER_MATRIX_EXTENSION])
@@ -228,6 +200,16 @@ async function acceptMatrixPairing(
   }
   const trustedDevice = trustedDeviceFromRequest(signedRequest)
   await options.client.pinTrustedDevices?.([trustedDevice])
+  const record = await options.registry.get(accepted.deviceId)
+  if (!record || record.status !== 'active') {
+    throw new Error('Paired device was not persisted')
+  }
+  // The response is the pairing commit marker from the client's point of
+  // view. Publish Room State (including the key bundle for this device)
+  // first, so a client that immediately reads /state can always decrypt a
+  // complete authoritative snapshot. A failed publication is safe to retry:
+  // receiveRequest returns the exact persisted response for this request.
+  await options.onProvisioned(record)
   await options.client.sendEncryptedRoomEvent({
     roomId: options.gatewayTransport.roomId,
     eventType: 'm.room.message',
@@ -242,10 +224,6 @@ async function acceptMatrixPairing(
     },
     transactionId: `codever.pair.response.${accepted.requestId}`,
   })
-  const record = await options.registry.get(accepted.deviceId)
-  if (!record || record.status !== 'active') {
-    throw new Error('Paired device was not persisted')
-  }
   return record
 }
 
@@ -258,13 +236,9 @@ export function trustedDeviceFromRecord(
     deviceName: certificate.deviceName,
     publicKey: certificate.deviceKey.publicKey,
     allowedRoomIds: [certificate.deviceTransport.roomId],
-    // Session lifecycle and device invitations are local Gateway management
-    // capabilities granted to every active paired device. Adding current
-    // operations here keeps certificates issued by earlier Gateway builds
-    // usable without weakening the paired-device trust root.
-    allowedOperations: withCurrentGatewayOperations(
-      executableOperations(certificate.allowedOperations),
-    ),
+    // The signed certificate is the complete authorization policy. There is
+    // no local compatibility grant that can silently widen it.
+    allowedOperations: certificate.allowedOperations,
     matrixUserId: certificate.deviceTransport.userId,
     matrixDeviceId: certificate.deviceTransport.deviceId,
     matrixDeviceKeys: [certificate.deviceTransport.ed25519],
@@ -275,41 +249,12 @@ export function trustedDeviceFromRecord(
 
 function trustedDeviceFromRequest(
   request: SignedPairingRequest,
-): MatrixGatewayTrustedDevice {
+): MatrixGatewayPinnedTransportDevice {
   return {
-    deviceId: request.request.deviceId,
-    deviceName: request.request.deviceName,
-    publicKey: request.request.deviceKey.publicKey,
-    allowedRoomIds: [request.request.deviceTransport.roomId],
-    allowedOperations: executableOperations(request.request.requestedOperations),
     matrixUserId: request.request.deviceTransport.userId,
     matrixDeviceId: request.request.deviceTransport.deviceId,
     matrixDeviceKeys: [request.request.deviceTransport.ed25519],
   }
-}
-
-function executableOperations(
-  operations: readonly PairingOperation[],
-): CommandOperation[] {
-  return operations.filter(
-    (operation): operation is Exclude<PairingOperation, 'session.select'> =>
-      operation !== 'session.select',
-  )
-}
-
-function withCurrentGatewayOperations(
-  operations: readonly CommandOperation[],
-): CommandOperation[] {
-  const currentOperations: CommandOperation[] = [
-    'session.archive',
-    'session.restore',
-    'session.delete',
-    'device.invite',
-  ]
-  return [
-    ...operations,
-    ...currentOperations.filter(operation => !operations.includes(operation)),
-  ]
 }
 
 function isPairingEvent(event: MatrixIncomingEvent, roomId: string): boolean {

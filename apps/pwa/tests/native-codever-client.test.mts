@@ -30,6 +30,8 @@ type Request = {
   params: BridgeMethodParams[RequestMethod];
 };
 
+const NO_RESPONSE = Symbol("no native response");
+
 class RuntimePort implements NativeBridgePort {
   onmessage: NativeBridgePort["onmessage"] = null;
   readonly requests: Request[] = [];
@@ -51,6 +53,7 @@ class RuntimePort implements NativeBridgePort {
   #respond(request: Request): void {
     try {
       const result = this.responder(request);
+      if (result === NO_RESPONSE) return;
       this.onmessage?.({
         data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }),
       });
@@ -326,6 +329,40 @@ test("waits for transient outbox recovery with one idempotency key", async () =>
     },
   }, "cursor-recovered-result");
   await sent.completion;
+  client.dispose();
+});
+
+test("detaching the WebView waiter does not cancel a native-confirmed pairing", async () => {
+  const port = new RuntimePort((request) => {
+    if (request.method === "codever.pairing.inspect") {
+      return {
+        pairingId: "pairing-one",
+        gatewayId: "gateway-one",
+        gatewayName: "Gateway",
+        verificationCode: "123 456",
+        expiresAt: Date.now() + 60_000,
+        requiresNativeConfirmation: true,
+      };
+    }
+    if (request.method === "codever.pairing.complete") {
+      return NO_RESPONSE;
+    }
+    return responseFor(request);
+  });
+  const client = await createTestClient(port);
+  const abort = new AbortController();
+  const pairing = client.pair("codever://pair?data=fixture", "Phone", abort.signal);
+  await nextTurn();
+
+  abort.abort();
+
+  await assert.rejects(pairing, (error) =>
+    error instanceof DOMException && error.name === "AbortError"
+  );
+  assert.equal(
+    port.requests.some((request) => request.method === "codever.pairing.cancel"),
+    false,
+  );
   client.dispose();
 });
 

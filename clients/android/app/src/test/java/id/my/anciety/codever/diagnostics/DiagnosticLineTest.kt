@@ -66,6 +66,23 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `recovery diagnostics retain bounded progress evidence`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z pairing.transaction.restored " +
+                "attempt=2 request=true transport_ready=false",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "pairing.transaction.restored",
+                mapOf(
+                    "request" to "true",
+                    "attempt" to "2",
+                    "transport_ready" to "false",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),

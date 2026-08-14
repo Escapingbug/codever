@@ -11,7 +11,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,7 +54,7 @@ class EncryptedCommandOutboxStoreTest {
     }
 
     @Test
-    fun `schema one outbox migrates without inventing authentication metadata`() {
+    fun `pre-release schema one outbox is rejected instead of inventing authentication metadata`() {
         val store = InMemoryCommandOutboxStore()
         val outbox = DurableCommandOutbox(store, IncrementingClock(), IncrementingIds())
         outbox.enqueue(
@@ -70,11 +69,9 @@ class EncryptedCommandOutboxStoreTest {
             .replace(",\"authenticationNonce\":null", "")
             .toByteArray(Charsets.UTF_8)
 
-        val migrated = CommandOutboxCodec.decode(legacy)
-
-        assertEquals(1, migrated.commands.size)
-        assertNull(migrated.commands.single().authenticationIssuedAt)
-        assertNull(migrated.commands.single().authenticationNonce)
+        assertThrows(IllegalArgumentException::class.java) {
+            CommandOutboxCodec.decode(legacy)
+        }
     }
 
     private class MemoryBlobStore : CommandOutboxBlobStore {

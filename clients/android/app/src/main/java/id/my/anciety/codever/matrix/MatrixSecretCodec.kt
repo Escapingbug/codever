@@ -76,12 +76,6 @@ object MatrixSecretCodec {
             }.getOrElse { throw IllegalArgumentException("Sliding sync version is invalid.") },
             roomBinding = decodeRoomBinding(value.getValue("roomBinding").jsonObject),
         )
-        require(
-            session.slidingSyncVersion == SlidingSyncVersion.NONE ||
-                session.slidingSyncVersion == SlidingSyncVersion.NATIVE,
-        ) {
-            "Matrix sliding sync version is unsupported."
-        }
         return session
     }
 

@@ -31,8 +31,8 @@ The PWA accepts pairing input only in either of these forms:
 The PWA does not accept `?pair=...`. Query strings can be copied into browser
 history, referrer headers, reverse-proxy logs, and hosting analytics, while URL
 fragments stay client-side. The PWA removes a `#pair` fragment from the visible
-URL immediately after reading it. A rejected legacy `?pair` value is also
-removed without being processed.
+URL immediately after reading it. A rejected `?pair` value is also removed
+without being processed.
 
 Before the Matrix request is sent, the PWA persists the exact signed offer and
 signed request locally. It keeps that pending handshake for ten minutes. After

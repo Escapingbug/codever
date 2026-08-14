@@ -38,7 +38,9 @@ import type { DeviceIdentity } from "./matrix";
 export const PAIRING_TRUST_STORAGE_KEY = "codever.pairing.trust.v1";
 export const PENDING_PAIRING_STORAGE_KEY = "codever.pairing.pending.v1";
 const PAIRING_REQUEST_TTL_MS = 2 * 60_000;
-const PENDING_PAIRING_RETENTION_MS = 10 * 60_000;
+// Once signed, this is a durable authorization transaction rather than an
+// invitation draft. The Gateway still rejects a revoked/expired certificate.
+const PENDING_PAIRING_RETENTION_MS = 366 * 24 * 60 * 60_000;
 const MIN_PAIRING_START_WINDOW_MS = 15_000;
 const MAX_CLOCK_SKEW_MS = 30_000;
 
@@ -222,7 +224,6 @@ export async function completePairing(
     signedResponse,
     preview.signedOffer,
     signedRequest,
-    { now: signedResponse.response.issuedAt },
   );
 
   const certificate = response.certificate;

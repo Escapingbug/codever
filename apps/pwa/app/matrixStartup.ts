@@ -13,13 +13,13 @@ export const MATRIX_CRYPTO_LOADING_DETAIL =
 export const MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL =
   "Matrix encryption initialization did not finish within 45 seconds. Keep Codever visible, check the network, and retry.";
 
-export const MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL =
-  "Rebuilding the Matrix sync checkpoint and refreshing trusted device keys…";
+export const MATRIX_SYNC_STORE_RECOVERY_DETAIL =
+  "Rebuilding the local Matrix sync cache and refreshing trusted device keys…";
 
-export const MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL =
-  "Saving the rebuilt Matrix sync checkpoint…";
+export const MATRIX_SYNC_STORE_SAVE_DETAIL =
+  "Saving the rebuilt local Matrix sync cache…";
 
-export function shouldRecoverMatrixSyncCheckpoint(
+export function shouldRebuildMatrixSyncStore(
   hasActiveTrust: boolean,
   savedSyncToken: string | null,
 ): boolean {
@@ -28,9 +28,9 @@ export function shouldRecoverMatrixSyncCheckpoint(
 
 export function matrixInitialSyncLimit(
   hasActiveTrust: boolean,
-  recoveringSyncCheckpoint: boolean,
+  rebuildingSyncStore: boolean,
 ): number {
-  return hasActiveTrust && !recoveringSyncCheckpoint ? 30 : 1;
+  return hasActiveTrust && !rebuildingSyncStore ? 30 : 1;
 }
 
 export function shouldDeferStoredMatrixStartupForPairing(input: {

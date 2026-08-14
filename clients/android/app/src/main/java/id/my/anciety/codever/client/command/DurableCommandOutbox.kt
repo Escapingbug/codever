@@ -36,10 +36,7 @@ class DurableCommandOutbox internal constructor(
         val loaded = store.load() ?: CommandOutboxSnapshot()
         val recovered = loaded.copy(
             commands = loaded.commands.map { command ->
-                if (
-                    command.state == CommandState.QUEUED ||
-                    command.state == CommandState.TRANSMITTING
-                ) {
+                if (command.state == CommandState.TRANSMITTING) {
                     command.copy(
                         state = CommandState.RECOVERY_REQUIRED,
                         updatedAt = monotonicNow(command.updatedAt),
@@ -149,12 +146,12 @@ class DurableCommandOutbox internal constructor(
         val next = command.copy(
             state = CommandState.TRANSMITTING,
             updatedAt = now,
-            // Schema-v1 outboxes did not retain authentication time. A legacy
-            // command gets one value on its first post-upgrade recovery; all
-            // subsequent attempts are byte-identical at the command layer.
-            authenticationIssuedAt = command.authenticationIssuedAt ?: now,
-            authenticationNonce = command.authenticationNonce
-                ?: authenticationNonce(command.commandId),
+            authenticationIssuedAt = requireNotNull(command.authenticationIssuedAt) {
+                "Recoverable command authentication time is missing."
+            },
+            authenticationNonce = requireNotNull(command.authenticationNonce) {
+                "Recoverable command nonce is missing."
+            },
         )
         replaceAndCommit(command, next)
         return next.toTransmission(recovery = true)

@@ -151,7 +151,7 @@ test("does not poison future handoffs when an unmanaged owner is attached", asyn
 test("allows native Matrix response time for history, pairing, and conflict recovery", () => {
   assert.equal(NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS, 15_000);
   assert.equal(NATIVE_COMMAND_CONFLICT_TIMEOUT_MS, 60_000);
-  assert.equal(NATIVE_HISTORY_PAGE_TIMEOUT_MS, 45_000);
+  assert.equal(NATIVE_HISTORY_PAGE_TIMEOUT_MS, 60_000);
   assert.equal(NATIVE_PAIRING_COMPLETE_TIMEOUT_MS, 10 * 60_000);
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.command.resolveConflict"),

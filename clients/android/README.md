@@ -60,6 +60,13 @@ be misreported as a permanent native failure. Drivers without internal
 supervision retain a bounded first-response watchdog and retry instead of
 entering a blocked state.
 
+The bound-room encrypted transport and the application-control receiver expose
+separate readiness barriers. Native pairing can begin as soon as the SDK has a
+verified transport identity; it never waits for the application-control
+`/sync` cursor that gates commands from an already trusted device. Pairing
+storage commits under the domain-state lock, while all Matrix network I/O runs
+after that lock is released.
+
 The SDK writes bounded private sync traces. Diagnostic export converts those
 traces to a fixed vocabulary of levels, targets, categories, and HTTP status
 codes; raw SDK messages and identifiers never enter the shared report.
@@ -85,13 +92,24 @@ chunked attachments up to 50 MiB. Reconnect snapshots reserve their budget for
 active commands and terminal summaries; large terminal results remain
 recoverable through `codever.command.get`.
 
-Pairing uses a native confirmation dialog. Signed pairing rejection, request
+Pairing uses a native confirmation dialog. Its signed certificate is the
+complete command policy; the APK never adds implicit local grants. Signed pairing rejection, request
 binding, Gateway root trust, transport-device rotation, and durable signed
 transport snapshots are verified before changing trust. Commands are validated
 and authorized against the current Gateway certificate before entering the
 encrypted durable outbox. History first replays the encrypted local event
 store, then paginates the signed Matrix room and thread timelines when needed;
 it never requests transcript pages from the Gateway.
+
+Native confirmation signs one request and atomically stores that transaction
+in encrypted no-backup storage before sending it. A verified pairing response
+is stored beside the request before success is exposed. The foreground
+service automatically retransmits the identical request after transport loss,
+WebView replacement, or process restart. A successful trust commit supersedes
+and clears the pre-trust transaction; cancellation, terminal rejection,
+revocation, and authorization expiry clear it explicitly.
+Closing or reloading the hosted Web UI only detaches its waiter and does not
+translate into a pairing cancellation.
 
 ## Secret handling
 
@@ -101,7 +119,8 @@ it never requests transcript pages from the Gateway.
   events never cross the JavaScript bridge.
 - Codever P-256 signing/agreement keys are non-exportable Android Keystore keys.
 - Long-lived Matrix session data, Gateway trust, command outbox, event state,
-  raw journal, and attachment temporary chunks are encrypted at rest.
+  thread-key ring, and attachment temporary chunks are encrypted at rest. Raw
+  Matrix application events are not duplicated into a second native journal.
 - Cleartext traffic, mixed content, file/content access, wildcard bridge
   origins, external frames, redirects during sensitive profile recovery, and
   TLS/certificate errors fail closed.

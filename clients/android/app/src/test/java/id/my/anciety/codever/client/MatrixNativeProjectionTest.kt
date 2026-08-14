@@ -1,220 +1,186 @@
 package id.my.anciety.codever.client
 
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class MatrixNativeProjectionTest {
     @Test
-    fun `restores cached gateway state before accepting a live incremental root`() {
-        val original = MatrixNativeProjection()
-        val cached = original.apply(
-            checkpoint(sessions = JsonArray(listOf(checkpointSession()))),
-        )!!
-        val restored = MatrixNativeProjection()
+    fun `builds inventory from independent Gateway and session Room State`() {
+        val projection = MatrixNativeProjection()
+        val entity = sessionState("session-1", 2)
+        assertNull(projection.applyRoomState(entity))
+        val state = projection.applyRoomState(gatewayState(2))!!
+        assertEquals("session-1", state.sessions().single().getValue("id").jsonPrimitive.content)
+    }
 
-        restored.restore(cached)
-        val state = restored.apply(root(revision = 2))!!
+    @Test
+    fun `Gateway first exposes an empty view then accepts session state independently`() {
+        val projection = MatrixNativeProjection()
+        assertEquals(0, projection.applyRoomState(gatewayState(1))!!.sessions().size)
+        val state = projection.applyRoomState(sessionState("session-1", 2))!!
+        assertEquals("session-1", state.sessions().single().getValue("id").jsonPrimitive.content)
+    }
 
-        assertEquals("2", state.getValue("revision").jsonPrimitive.content)
+    @Test
+    fun `complete Room State batch publishes atomically and invalid batch rolls back`() {
+        val projection = MatrixNativeProjection()
+        val snapshot = projection.applyRoomStateBatch(listOf(
+            gatewayState(2),
+            sessionState("session-1", 2),
+            sessionState("session-2", 3),
+        ))!!
+        assertEquals(setOf("session-1", "session-2"), snapshot.sessions().map {
+            it.getValue("id").jsonPrimitive.content
+        }.toSet())
+
+        val before = projection.snapshot()
+        assertThrows(IllegalArgumentException::class.java) {
+            projection.applyRoomStateBatch(listOf(
+                tombstone("session-1", 4),
+                JsonObject(sessionState("broken", 5) + mapOf(
+                    "state" to JsonPrimitive("invalid"),
+                )),
+            ))
+        }
+        assertEquals(before, projection.snapshot())
+    }
+
+    @Test
+    fun `updates one session without waiting for a global inventory commit`() {
+        val projection = MatrixNativeProjection()
+        val before = sessionState("session-1", 2, "Before")
+        val after = sessionState("session-1", 3, "After")
+        projection.applyRoomState(before)
+        projection.applyRoomState(gatewayState(2))
+        projection.applyRoomState(after)
         assertEquals(
-            setOf("session-existing", "session-1"),
-            state.getValue("sessions").jsonArray
-                .map { it.jsonObject.getValue("id").jsonPrimitive.content }
-                .toSet(),
+            "After",
+            projection.snapshot()!!.sessions().single()
+                .getValue("title").jsonPrimitive.content,
         )
     }
 
     @Test
-    fun `bootstraps existing sessions from a checkpoint without historical roots`() {
+    fun `timeline history advances revision but never creates inventory`() {
         val projection = MatrixNativeProjection()
-        val state = projection.apply(checkpoint(sessions = JsonArray(listOf(checkpointSession()))))!!
-
-        val session = state.getValue("sessions").jsonArray.single().jsonObject
-        assertEquals("session-existing", session.getValue("id").jsonPrimitive.content)
-        assertEquals("Existing work", session.getValue("title").jsonPrimitive.content)
-        assertEquals("codever", session.getValue("project_name").jsonPrimitive.content)
+        projection.applyRoomState(gatewayState(1))
+        projection.applyTimeline(buildJsonObject {
+            put("version", 2); put("kind", "session_root"); putRevision(4)
+            put("session_id", "timeline-only")
+        })
+        assertEquals(0, projection.snapshot()!!.sessions().size)
+        assertEquals("4", projection.snapshot()!!.getValue("revision").jsonPrimitive.content)
     }
 
     @Test
-    fun `does not let a duplicate checkpoint erase a newer session root`() {
+    fun `tombstone prevents stale state from resurrecting a deleted session`() {
         val projection = MatrixNativeProjection()
-        val initial = checkpoint(sessions = JsonArray(listOf(checkpointSession())))
-        projection.apply(initial)
-        projection.apply(root())
-
-        val sessions = projection.apply(initial)!!.getValue("sessions").jsonArray
-        assertEquals(
-            setOf("session-1", "session-existing"),
-            sessions.map { it.jsonObject.getValue("id").jsonPrimitive.content }.toSet(),
-        )
+        val current = sessionState("session-1", 2)
+        val deleted = tombstone("session-1", 4)
+        projection.applyRoomState(current)
+        projection.applyRoomState(gatewayState(2))
+        projection.applyRoomState(deleted)
+        projection.applyRoomState(sessionState("session-1", 3, "Stale"))
+        assertEquals(0, projection.snapshot()!!.sessions().size)
     }
 
     @Test
-    fun `does not let historical events mutate a newer checkpoint inventory`() {
+    fun `new revision generation discards retired generation entities`() {
         val projection = MatrixNativeProjection()
-        projection.apply(checkpoint(
-            sessions = JsonArray(listOf(checkpointSession())),
-            revision = 5,
-            stateVersion = 2,
+        val old = sessionState("old", 2)
+        projection.applyRoomState(old)
+        projection.applyRoomState(gatewayState(2))
+        val next = JsonObject(gatewayState(1) + mapOf(
+            "revision_epoch" to JsonPrimitive("epoch-2"),
+            "revision_epoch_generation" to JsonPrimitive(2),
         ))
-
-        projection.apply(root(revision = 1))
-        projection.apply(buildJsonObject {
-            put("version", 2)
-            put("kind", "session_lifecycle")
-            putRevision(4)
-            put("session_id", "session-existing")
-            put("state", "deleted")
-            put("updated_at", 8)
-        })
-
-        val sessions = projection.snapshot()!!.getValue("sessions").jsonArray
-        assertEquals(
-            listOf("session-existing"),
-            sessions.map { it.jsonObject.getValue("id").jsonPrimitive.content },
-        )
+        projection.applyRoomState(next)
+        assertEquals(0, projection.snapshot()!!.sessions().size)
     }
 
     @Test
-    fun `replays update and lifecycle events that arrive before their root`() {
+    fun `rejects incomplete or duplicate Gateway capabilities`() {
         val projection = MatrixNativeProjection()
-        projection.apply(checkpoint())
-        projection.apply(buildJsonObject {
-            put("version", 2)
-            put("kind", "session_update")
-            putRevision(2)
-            put("session_id", "session-1")
-            put("updated_at", 3)
-            put("title", "Recovered title")
-            put("model", JsonNull)
-        })
-        projection.apply(buildJsonObject {
-            put("version", 2)
-            put("kind", "session_lifecycle")
-            putRevision(3)
-            put("session_id", "session-1")
-            put("state", "archived")
-            put("updated_at", 4)
-        })
-
-        val session = projection.apply(root())!!["sessions"]!!
-            .jsonArray.single().jsonObject
-        assertEquals("Recovered title", session.getValue("title").jsonPrimitive.content)
-        assertEquals("true", session.getValue("archived").jsonPrimitive.content)
-        assertFalse("model" in session)
+        assertThrows(IllegalArgumentException::class.java) {
+            projection.applyRoomState(JsonObject(gatewayState(1) + mapOf(
+                "capabilities" to buildJsonObject { put("can_create_session", true) },
+            )))
+        }
+        val duplicateModes = capabilities(permissionModeIds = listOf("default", "default"))
+        assertThrows(IllegalArgumentException::class.java) {
+            projection.applyRoomState(JsonObject(gatewayState(1) + mapOf(
+                "capabilities" to duplicateModes,
+            )))
+        }
     }
 
-    @Test
-    fun `does not resurrect a session deleted before its root is fetched`() {
-        val projection = MatrixNativeProjection()
-        projection.apply(checkpoint())
-        projection.apply(buildJsonObject {
-            put("version", 2)
-            put("kind", "session_lifecycle")
-            putRevision(2)
-            put("session_id", "session-1")
-            put("state", "deleted")
-            put("updated_at", 4)
-        })
-
-        assertEquals(0, projection.apply(root())!!["sessions"]!!.jsonArray.size)
-        assertEquals(0, projection.apply(root())!!["sessions"]!!.jsonArray.size)
-    }
-
-    @Test
-    fun `advances revision from a lightweight room timeline event`() {
-        val projection = MatrixNativeProjection()
-        projection.apply(checkpoint())
-        val state = projection.apply(buildJsonObject {
-            put("version", 2)
-            put("kind", "gateway_revision")
-            putRevision(4)
-            put("gateway_id", "gateway-1")
-            put("conversation_id", "conversation-1")
-            put("updated_at", 4)
-            put("source_command_id", "command-4")
-        })!!
-        assertEquals("4", state.getValue("revision").jsonPrimitive.content)
-        assertEquals(0, state.getValue("sessions").jsonArray.size)
-    }
-
-    private fun root(revision: Long = 1) = buildJsonObject {
-        put("version", 2)
-        put("kind", "session_root")
-        putRevision(revision)
-        put("session_id", "session-1")
-        put("title", "Initial title")
-        put("project", buildJsonObject {
-            put("id", "project-1")
-            put("name", "codever")
-            put("cwd", "/repo")
-        })
-        put("created_at", 1)
-        put("updated_at", 1)
-        put("archived", false)
-        put("status", "idle")
-        put("provider", "codex")
-        put("model", "old-model")
-        put("permission_mode", "default")
-        put("extensions", JsonArray(emptyList()))
-    }
-
-    private fun checkpoint(
-        sessions: JsonArray? = null,
-        revision: Long = 1,
-        stateVersion: Long = 1,
-    ) = buildJsonObject {
-        put("version", 2)
-        put("kind", "gateway_checkpoint")
-        put("gateway_id", "gateway-1")
-        put("conversation_id", "conversation-1")
-        put("revision", revision)
-        put("revision_epoch", "revision-epoch-1")
-        put("revision_epoch_generation", 1)
-        put("state_version", stateVersion)
+    private fun gatewayState(version: Long) = buildJsonObject {
+        put("version", 2); put("kind", "gateway_state")
+        put("gateway_id", "gateway-1"); put("conversation_id", "conversation-1")
+        putRevision(version); put("state_version", version)
         put("active_device_count", 1)
-        sessions?.let { put("sessions", it) }
         put("workspace", buildJsonObject {
             put("project", buildJsonObject {
-                put("id", "project-1")
-                put("name", "codever")
-                put("cwd", "/repo")
+                put("id", "project-1"); put("name", "codever"); put("cwd", "/repo")
             })
-            put("provider", "codex")
-            put("permission_mode", "default")
+            put("provider", "codex"); put("permission_mode", "default")
         })
-        put("capabilities", buildJsonObject {
-            put("can_create_session", true)
-        })
-        put("updated_at", 1)
+        put("capabilities", capabilities())
+        put("updated_at", version)
     }
 
-    private fun checkpointSession() = buildJsonObject {
-        put("session_id", "session-existing")
-        put("title", "Existing work")
-        put("updated_at", 7)
-        put("archived", false)
-        put("status", "idle")
-        put("project", buildJsonObject {
-            put("id", "project-1")
-            put("name", "codever")
-            put("cwd", "/repo")
+    private fun capabilities(
+        permissionModeIds: List<String> = listOf("default"),
+    ) = buildJsonObject {
+        put("models", JsonArray(emptyList()))
+        put("permission_modes", JsonArray(permissionModeIds.map { id ->
+            buildJsonObject { put("id", id); put("name", "Default") }
+        }))
+        put("can_create_session", true)
+        put("can_select_session", false)
+        put("can_archive_session", true)
+        put("can_delete_session", true)
+        put("session_extensions", JsonArray(emptyList()))
+    }
+
+    private fun sessionState(id: String, version: Long, title: String = "Work") = buildJsonObject {
+        put("version", 2); put("kind", "session_state")
+        put("gateway_id", "gateway-1"); put("conversation_id", "conversation-1")
+        putRevision(version); put("state_version", version)
+        put("session_id", id); put("state", "active")
+        put("session", buildJsonObject {
+            put("session_id", id); put("title", title); put("updated_at", version)
+            put("archived", false); put("status", "idle")
+            put("project", buildJsonObject {
+                put("id", "project-1"); put("name", "codever"); put("cwd", "/repo")
+            })
+            put("provider", "codex"); put("extensions", JsonArray(emptyList()))
         })
-        put("provider", "codex")
-        put("extensions", JsonArray(emptyList()))
+        put("updated_at", version)
+    }
+
+    private fun tombstone(id: String, version: Long) = buildJsonObject {
+        put("version", 2); put("kind", "session_state")
+        put("gateway_id", "gateway-1"); put("conversation_id", "conversation-1")
+        putRevision(version); put("state_version", version)
+        put("session_id", id); put("state", "deleted"); put("updated_at", version)
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.putRevision(revision: Long) {
-        put("revision", revision)
-        put("revision_epoch", "revision-epoch-1")
+        put("revision", revision); put("revision_epoch", "epoch-1")
         put("revision_epoch_generation", 1)
     }
+
+    private fun JsonObject.sessions() = getValue("sessions").jsonArray.map { it.jsonObject }
+    private fun JsonObject.text(key: String) = getValue(key).jsonPrimitive.content
 }

@@ -100,11 +100,21 @@ describe('Gateway pairing', () => {
 
     const retried = await fixture.service.receiveRequest(
       request.signedRequest,
-      now + 3_000,
+      now + 20 * 60_000,
     )
     expect(retried.response).toEqual(accepted.response)
     expect(retried.response.response.certificate.certificate.certificateId)
       .toBe(accepted.response.response.certificate.certificate.certificateId)
+    expect(retried.response.response.expiresAt)
+      .toBe(retried.response.response.certificate.certificate.expiresAt)
+    await expect(
+      verifyPairingResponse(
+        retried.response,
+        signedOffer,
+        request.signedRequest,
+        { now: now + 20 * 60_000 },
+      ),
+    ).resolves.toMatchObject({ requestId: request.signedRequest.request.requestId })
   })
 
   it('completes pairing when the joining device clock is 113ms ahead', async () => {
@@ -125,9 +135,10 @@ describe('Gateway pairing', () => {
 
     const accepted = await fixture.service.receiveRequest(request.signedRequest, now)
 
-    expect(accepted.response.response.issuedAt).toBeGreaterThanOrEqual(
-      request.signedRequest.request.issuedAt,
-    )
+    expect(accepted.response.response.issuedAt)
+      .toBeGreaterThan(signedOffer.offer.issuedAt)
+    expect(accepted.response.response.issuedAt)
+      .toBeLessThan(request.signedRequest.request.issuedAt)
     await expect(
       verifyPairingResponse(
         accepted.response,
@@ -208,6 +219,10 @@ describe('Gateway pairing', () => {
     await fixture.service.receiveRequest(request.signedRequest, now + 2_000)
     await fixture.service.revoke('phone-one', 'lost device', now + 3_000)
 
+    await expect(
+      fixture.service.receiveRequest(request.signedRequest, now + 4_000),
+    ).rejects.toThrow('Pairing approval is no longer active')
+
     await expect(fixture.registry.listActive()).resolves.toEqual([])
     await expect(fixture.registry.get('phone-one')).resolves.toMatchObject({
       status: 'revoked',
@@ -255,22 +270,19 @@ describe('Gateway pairing', () => {
 
     expect(renewed.response.response.activeDeviceCount).toBe(1)
     expect(renewed.response.response.certificate.certificate.allowedOperations)
-      .toEqual(expect.arrayContaining(['session.create']))
-    expect(renewed.response.response.certificate.certificate.allowedOperations)
-      .not.toContain('session.select')
-    const legacyRecord = await fixture.registry.get('phone-one')
-    expect(legacyRecord).not.toBeNull()
-    legacyRecord!.certificate.certificate.allowedOperations.push('session.select')
-    expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
-      .not.toContain('session.select')
-    expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
-      .toContain('device.invite')
-    expect(trustedDeviceFromRecord(legacyRecord!).allowedOperations)
       .toEqual(expect.arrayContaining([
+        'session.create',
         'session.archive',
         'session.restore',
         'session.delete',
+        'device.invite',
       ]))
+    expect(renewed.response.response.certificate.certificate.allowedOperations)
+      .not.toContain('session.select')
+    const activeRecord = await fixture.registry.get('phone-one')
+    expect(activeRecord).not.toBeNull()
+    expect(trustedDeviceFromRecord(activeRecord!).allowedOperations)
+      .toEqual(renewed.response.response.certificate.certificate.allowedOperations)
     expect(renewed.response.response.certificate.certificate.certificateId)
       .not.toBe(first.response.response.certificate.certificate.certificateId)
     await expect(fixture.registry.listActive(now + 5_000)).resolves.toHaveLength(1)

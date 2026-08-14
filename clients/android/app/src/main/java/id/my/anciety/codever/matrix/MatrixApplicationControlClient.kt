@@ -24,14 +24,24 @@ import kotlinx.serialization.json.put
 
 internal const val CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE =
     "io.codever.secure_control.v1"
+internal const val CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE =
+    "io.codever.gateway.current.v2"
+internal const val CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE =
+    "io.codever.session.current.v2"
 
 internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
     val eventType = root["type"]?.jsonPrimitive?.contentOrNull
     val content = root["content"] as? JsonObject ?: return@runCatching false
-    val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
     when (eventType) {
+        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE ->
+            root["state_key"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true &&
+                content["version"]?.jsonPrimitive?.intOrNull == 2 &&
+                content["kind"]?.jsonPrimitive?.contentOrNull == "state_envelope" &&
+                content["state_envelope"] is JsonObject
         CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE -> {
+            val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
             if (extension["version"]?.jsonPrimitive?.intOrNull != 1) {
                 return@runCatching false
             }
@@ -41,20 +51,39 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
                 else -> false
             }
         }
-        "m.room.message" ->
+        "m.room.message" -> {
+            val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
             extension["version"]?.jsonPrimitive?.intOrNull == 2 &&
                 extension["kind"]?.jsonPrimitive?.contentOrNull == "timeline_envelope" &&
                 extension["timeline_envelope"] is JsonObject &&
                 extension["timeline_key_ring_bundle"] is JsonObject
+        }
         else -> false
     }
 }.getOrDefault(false)
 
-internal fun shouldCaptureMatrixSdkTimelineEvent(rawJson: String): Boolean =
-    !isCodeverApplicationControlEvent(rawJson)
+internal fun isCodeverPairingResponseEvent(rawJson: String): Boolean = runCatching {
+    val root = Json.parseToJsonElement(rawJson).jsonObject
+    if (root["type"]?.jsonPrimitive?.contentOrNull != "m.room.message") {
+        return@runCatching false
+    }
+    val extension = root["content"]
+        ?.jsonObject
+        ?.get("io.codever") as? JsonObject ?: return@runCatching false
+    extension["version"]?.jsonPrimitive?.intOrNull == 1 &&
+        when (extension["kind"]?.jsonPrimitive?.contentOrNull) {
+            "pairing_response" -> extension["pairing_response"] is JsonObject
+            "pairing_rejection" -> extension["pairing_rejection"] is JsonObject
+            else -> false
+        }
+}.getOrDefault(false)
 
 internal fun codeverApplicationEventKind(rawJson: String): String = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
+    when (root["type"]?.jsonPrimitive?.contentOrNull) {
+        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE -> return@runCatching "gateway_room_state"
+        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE -> return@runCatching "session_room_state"
+    }
     val extension = root["content"]
         ?.jsonObject
         ?.get("io.codever")
@@ -184,11 +213,144 @@ data class MatrixApplicationControlSyncBatch(
     val limited: Boolean,
 )
 
+data class MatrixApplicationRoomStateBatch(
+    val events: List<MatrixDecryptedEvent>,
+    val candidateEventCount: Int,
+)
+
+data class MatrixThreadHistoryBatch(
+    val events: List<MatrixDecryptedEvent>,
+    val nextBatch: String?,
+)
+
 class MatrixApplicationControlSyncException(
     val status: Int,
     val retryAfterMs: Long?,
 ) : IllegalStateException("Matrix control sync failed ($status).") {
     val fatal: Boolean get() = status == 401 || status == 403
+}
+
+/** Reads current replace-in-place Codever state independently of a /sync cursor. */
+class MatrixApplicationRoomStateClient(
+    private val transport: MatrixApplicationControlSyncTransport =
+        RestrictedHttpsMatrixApplicationControlSyncTransport(),
+) {
+    suspend fun current(session: StoredMatrixSession): MatrixApplicationRoomStateBatch {
+        val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
+        val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
+        val response = transport.getJson(
+            URI("$homeserver/_matrix/client/v3/rooms/${encode(roomId)}/state"),
+            session.accessToken,
+        )
+        return try {
+            if (response.status !in 200..299) {
+                throw MatrixApplicationControlSyncException(
+                    response.status,
+                    parseMatrixRetryAfterMs(response.body),
+                )
+            }
+            val candidates = Json.parseToJsonElement(
+                response.body.toString(Charsets.UTF_8),
+            ).jsonArray
+            val events = candidates
+                .mapNotNull { it as? JsonObject }
+                .filter { event ->
+                    event["sender"]?.jsonPrimitive?.contentOrNull ==
+                        session.roomBinding.gatewayUserId &&
+                        event["type"]?.jsonPrimitive?.contentOrNull in setOf(
+                            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+                            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+                        )
+                }
+                .onEach { event ->
+                    require(isCodeverApplicationControlEvent(event.toString())) {
+                        "Current Codever Matrix Room State has an invalid envelope shape."
+                    }
+                }
+                .sortedBy { event ->
+                    when (event["type"]?.jsonPrimitive?.contentOrNull) {
+                        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE -> 0
+                        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE -> 1
+                        else -> 2
+                    }
+                }
+                .map { event ->
+                    matrixApplicationEvent(roomId, event)
+                        ?: throw IllegalArgumentException(
+                            "Current Codever Matrix Room State has incomplete event metadata.",
+                        )
+                }
+            MatrixApplicationRoomStateBatch(events, candidates.size)
+        } finally {
+            response.body.fill(0)
+        }
+    }
+
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+}
+
+/** Pages one session thread without scanning or materializing the room timeline. */
+class MatrixThreadHistoryClient(
+    private val transport: MatrixApplicationControlSyncTransport =
+        RestrictedHttpsMatrixApplicationControlSyncTransport(),
+) {
+    suspend fun page(
+        session: StoredMatrixSession,
+        threadRootEventId: String,
+        from: String?,
+        limit: Int,
+    ): MatrixThreadHistoryBatch {
+        require(threadRootEventId.isNotBlank() && threadRootEventId.length <= 512)
+        require(from == null || (from.isNotBlank() && from.length <= 4_096))
+        require(limit in 1..100)
+        val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
+        val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
+        val query = buildList {
+            add("dir=b")
+            add("limit=$limit")
+            add("recurse=true")
+            if (from != null) add("from=${encode(from)}")
+        }.joinToString("&")
+        val response = transport.getJson(
+            URI(
+                "$homeserver/_matrix/client/v1/rooms/${encode(roomId)}/relations/" +
+                    "${encode(threadRootEventId)}/${encode("m.thread")}?$query",
+            ),
+            session.accessToken,
+        )
+        return try {
+            if (response.status !in 200..299) {
+                throw MatrixApplicationControlSyncException(
+                    response.status,
+                    parseMatrixRetryAfterMs(response.body),
+                )
+            }
+            val root = Json.parseToJsonElement(
+                response.body.toString(Charsets.UTF_8),
+            ).jsonObject
+            val events = root["chunk"]
+                ?.jsonArray
+                .orEmpty()
+                .mapNotNull { it as? JsonObject }
+                .filter { event ->
+                    event["sender"]?.jsonPrimitive?.contentOrNull ==
+                        session.roomBinding.gatewayUserId &&
+                        isCodeverApplicationControlEvent(event.toString())
+                }
+                .mapNotNull { event -> matrixApplicationEvent(roomId, event) }
+            val nextBatch = root["next_batch"]
+                ?.jsonPrimitive
+                ?.contentOrNull
+                ?.takeIf { it.isNotBlank() && it.length <= 4_096 }
+            MatrixThreadHistoryBatch(events, nextBatch)
+        } finally {
+            response.body.fill(0)
+        }
+    }
+
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 }
 
 /**
@@ -215,7 +377,15 @@ class MatrixApplicationControlSyncClient(
             put("account_data", buildJsonObject { put("types", JsonArray(emptyList())) })
             put("room", buildJsonObject {
                 put("rooms", buildJsonArray { add(JsonPrimitive(roomId)) })
-                put("state", buildJsonObject { put("types", JsonArray(emptyList())) })
+                put("state", buildJsonObject {
+                    put("senders", buildJsonArray {
+                        add(JsonPrimitive(session.roomBinding.gatewayUserId))
+                    })
+                    put("types", buildJsonArray {
+                        add(JsonPrimitive(CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE))
+                        add(JsonPrimitive(CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE))
+                    })
+                })
                 put("ephemeral", buildJsonObject { put("types", JsonArray(emptyList())) })
                 put("account_data", buildJsonObject { put("types", JsonArray(emptyList())) })
                 put("timeline", buildJsonObject {
@@ -225,10 +395,17 @@ class MatrixApplicationControlSyncClient(
                     put("types", buildJsonArray {
                         add(JsonPrimitive(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE))
                         add(JsonPrimitive("m.room.message"))
+                        // Incremental state changes are carried in the room
+                        // timeline when they occur inside the limited window.
+                        // The room `state` filter alone only supplies state
+                        // needed outside that timeline, so both locations must
+                        // admit Codever's authoritative entity events.
+                        add(JsonPrimitive(CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE))
+                        add(JsonPrimitive(CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE))
                     })
                     put(
                         "limit",
-                        if (since == null) CATCHUP_TIMELINE_LIMIT else LIVE_TIMELINE_LIMIT,
+                        if (since == null) INITIAL_TIMELINE_LIMIT else LIVE_TIMELINE_LIMIT,
                     )
                 })
             })
@@ -257,45 +434,44 @@ class MatrixApplicationControlSyncClient(
                 ?.contentOrNull
                 ?.takeIf { it.isNotBlank() && it.length <= 4_096 }
                 ?: throw IllegalStateException("Matrix control sync response is incomplete.")
-            val timeline = root["rooms"]
+            val joinedRoom = root["rooms"]
                 ?.jsonObject
                 ?.get("join")
                 ?.jsonObject
                 ?.get(roomId)
                 ?.jsonObject
-                ?.get("timeline")
+            val timeline = joinedRoom?.get("timeline")
                 ?.jsonObject
             val limited = timeline
                 ?.get("limited")
                 ?.jsonPrimitive
                 ?.booleanOrNull
                 ?: false
-            val candidateEvents = timeline
+            val stateEvents = joinedRoom
+                ?.get("state")
+                ?.jsonObject
                 ?.get("events")
                 ?.jsonArray
                 .orEmpty()
+                .sortedBy { event ->
+                    when ((event as? JsonObject)?.get("type")?.jsonPrimitive?.contentOrNull) {
+                        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE -> 0
+                        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE -> 1
+                        else -> 2
+                    }
+                }
+            val timelineEvents = timeline
+                ?.get("events")
+                ?.jsonArray
+                .orEmpty()
+            val candidateEvents = stateEvents + timelineEvents
             val events = candidateEvents
                 .mapNotNull { element ->
                     val event = element as? JsonObject ?: return@mapNotNull null
                     if (!isCodeverApplicationControlEvent(event.toString())) {
                         return@mapNotNull null
                     }
-                    val eventId = event["event_id"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotBlank() && it.length <= 512 }
-                        ?: return@mapNotNull null
-                    val sender = event["sender"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotBlank() && it.length <= 512 }
-                        ?: return@mapNotNull null
-                    val timestamp = event["origin_server_ts"]?.jsonPrimitive?.longOrNull
-                        ?.takeIf { it >= 0 }
-                        ?: return@mapNotNull null
-                    MatrixDecryptedEvent(
-                        roomId = roomId,
-                        eventId = eventId,
-                        sender = sender,
-                        timestamp = timestamp,
-                        rawJson = event.toString(),
-                    )
+                    matrixApplicationEvent(roomId, event)
                 }
             MatrixApplicationControlSyncBatch(
                 nextBatch = nextBatch,
@@ -320,12 +496,33 @@ class MatrixApplicationControlSyncClient(
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
     private companion object {
-        const val CATCHUP_TIMELINE_LIMIT = 100
+        const val INITIAL_TIMELINE_LIMIT = 0
         const val LIVE_TIMELINE_LIMIT = 100
         const val LONG_POLL_TIMEOUT_MS = 30_000
         const val MAX_RETRY_AFTER_MS = 60_000L
     }
 }
+
+private fun matrixApplicationEvent(roomId: String, event: JsonObject): MatrixDecryptedEvent? {
+    val eventId = event["event_id"]?.jsonPrimitive?.contentOrNull
+        ?.takeIf { it.isNotBlank() && it.length <= 512 }
+        ?: return null
+    val sender = event["sender"]?.jsonPrimitive?.contentOrNull
+        ?.takeIf { it.isNotBlank() && it.length <= 512 }
+        ?: return null
+    val timestamp = event["origin_server_ts"]?.jsonPrimitive?.longOrNull
+        ?.takeIf { it >= 0 }
+        ?: return null
+    return MatrixDecryptedEvent(roomId, eventId, sender, timestamp, event.toString())
+}
+
+private fun parseMatrixRetryAfterMs(body: ByteArray): Long? = runCatching {
+    Json.parseToJsonElement(body.toString(Charsets.UTF_8))
+        .jsonObject["retry_after_ms"]
+        ?.jsonPrimitive
+        ?.longOrNull
+        ?.coerceIn(100, 60_000L)
+}.getOrNull()
 
 /**
  * Sends an already signed and encrypted Codever envelope as a custom Matrix

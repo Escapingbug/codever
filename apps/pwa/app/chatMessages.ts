@@ -1,8 +1,5 @@
 import type { PersistedChatMessage } from "./messageHistory";
 
-export const LEGACY_AGENT_STARTUP_TEXT =
-  "⏳ Agent is starting up, please wait...";
-
 type TranscriptCandidate = {
   kind?: string;
   text?: string;
@@ -17,31 +14,13 @@ export function isTransientAgentLifecycleEvent(
 ): boolean {
   return Boolean(
     raw &&
-      (raw.kind === "status" ||
-        raw.type === "command.accepted" ||
-        raw.type === "command.completed" ||
-        raw.type === "session.updated"),
-  );
-}
-
-export function isLegacyAgentStartupMessage(
-  message: TranscriptCandidate,
-): boolean {
-  return (
-    message.kind === "agent" &&
-    message.raw?.kind === "message" &&
-    message.text === LEGACY_AGENT_STARTUP_TEXT &&
-    message.format === "html" &&
-    (message.attachments?.length ?? 0) === 0
+      raw.kind === "status",
   );
 }
 
 export function isTranscriptMessage(message: TranscriptCandidate): boolean {
   if (message.kind === "error") return true;
-  return (
-    !isTransientAgentLifecycleEvent(message.raw) &&
-    !isLegacyAgentStartupMessage(message)
-  );
+  return !isTransientAgentLifecycleEvent(message.raw);
 }
 
 export type ChatMessage = PersistedChatMessage & {
@@ -63,14 +42,6 @@ export function isAgentWorkMessage(
   message: Pick<ChatMessage, "kind"> | undefined,
 ): boolean {
   return message?.kind === "agent" || message?.kind === "tool";
-}
-
-export function legacyCommandText(
-  message: Pick<ChatMessage, "kind" | "text">,
-): string | undefined {
-  if (message.kind !== "agent" || !message.text) return undefined;
-  const match = message.text.trim().match(/^(?:💻|🖥️?|🖥)\s*\$\s+([\s\S]+)$/u);
-  return match?.[1]?.trim() || undefined;
 }
 
 export function findOptimisticMessageId(
@@ -141,7 +112,9 @@ export function mergeChatMessage(
   if (operationIndex >= 0) {
     return mergeLogicalCopies(current, operationIndex, message);
   }
-  if (exactIndex >= 0) return [...current];
+  if (exactIndex >= 0) {
+    return mergeLogicalCopies(current, exactIndex, message);
+  }
 
   const commandIndex = message.commandId
     ? current.findIndex((entry) => entry.commandId === message.commandId)
@@ -176,50 +149,9 @@ export function mergeChatMessage(
           entry.eventAliases?.includes(replacementTarget),
       )
     : -1;
-  const streamIndex = message.streamId
-    ? current.findIndex((entry) => entry.streamId === message.streamId)
-    : -1;
-  const toolIndex = message.toolCallId
-    ? current.findIndex((entry) => entry.toolCallId === message.toolCallId)
-    : -1;
-  const targetIndex =
-    replaceIndex >= 0
-      ? replaceIndex
-      : streamIndex >= 0
-        ? streamIndex
-        : toolIndex;
+  const targetIndex = replaceIndex;
   if (targetIndex >= 0) {
     const existing = current[targetIndex];
-    if (
-      existing.toolCallId &&
-      existing.toolCallId === message.toolCallId &&
-      !shouldApplyToolStatusUpdate(
-        existing.toolStatus,
-        message.toolStatus,
-      )
-    ) {
-      return [...current];
-    }
-    if (message.raw?.type === "agent.tool.completed") {
-      const next = [...current];
-      next[targetIndex] = {
-        ...existing,
-        ...message,
-        id: existing.id,
-        eventAliases: mergeEventAliases(existing, message),
-        mergedOperationIds: mergeOperationIds(existing, message),
-        text: existing.text || message.text,
-        raw: { ...(existing.raw ?? {}), ...(message.raw ?? {}) },
-        timestamp: existing.timestamp ?? message.timestamp,
-        time: existing.time ?? message.time,
-      };
-      return next;
-    }
-    const text =
-      message.raw?.type === "agent.text.delta" &&
-      existing.text !== message.text
-        ? `${existing.text ?? ""}${message.text ?? ""}`
-        : message.text;
     const next = [...current];
     next[targetIndex] = {
       ...message,
@@ -232,7 +164,11 @@ export function mergeChatMessage(
       // every later update timestamp.
       timestamp: existing.timestamp ?? message.timestamp,
       time: existing.time ?? message.time,
-      text,
+      text: message.text,
+      toolGroup: mergeToolGroupPresentation(
+        existing.toolGroup,
+        message.toolGroup,
+      ),
     };
     return next;
   }
@@ -405,10 +341,44 @@ function insertChatMessage(
   return next;
 }
 
-function shouldApplyToolStatusUpdate(
-  current: "running" | "succeeded" | "failed" | undefined,
-  incoming: "running" | "succeeded" | "failed" | undefined,
-): boolean {
-  const currentIsTerminal = current === "succeeded" || current === "failed";
-  return !(currentIsTerminal && incoming === "running");
+function mergeToolGroupPresentation(
+  current: ChatMessage["toolGroup"],
+  incoming: ChatMessage["toolGroup"],
+): ChatMessage["toolGroup"] {
+  if (!current || !incoming || current.groupId !== incoming.groupId) {
+    return incoming ?? current;
+  }
+  const tools = new Map(current.tools.map((tool) => [tool.id, tool]));
+  for (const candidate of incoming.tools) {
+    const existing = tools.get(candidate.id);
+    if (!existing) {
+      tools.set(candidate.id, candidate);
+      continue;
+    }
+    if (
+      toolPhaseRank(candidate.phase) < toolPhaseRank(existing.phase) ||
+      candidate.updatedAt < existing.updatedAt
+    ) {
+      continue;
+    }
+    tools.set(candidate.id, {
+      ...existing,
+      ...candidate,
+      startedAt: Math.min(existing.startedAt, candidate.startedAt),
+      updatedAt: Math.max(existing.updatedAt, candidate.updatedAt),
+    });
+  }
+  return { ...incoming, tools: [...tools.values()] };
+}
+
+function toolPhaseRank(
+  phase: "started" | "updated" | "completed" | "failed",
+): number {
+  switch (phase) {
+    case "started": return 0;
+    case "updated": return 1;
+    case "completed":
+    case "failed":
+      return 2;
+  }
 }

@@ -809,7 +809,8 @@ class BridgeDispatcher(
             request.id,
             BridgeError.PAIRING_REJECTED,
             error.message ?: "Pairing was rejected.",
-            userAction = "pair_again",
+            retryable = error.retryable,
+            userAction = if (error.retryable) "retry" else "pair_again",
         )
     } catch (error: CodeverSecurityException) {
         val expired = error.code == SecurityErrorCode.EXPIRED

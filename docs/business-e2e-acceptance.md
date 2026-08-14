@@ -28,7 +28,7 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - The browser build, APK native build, Gateway build, and Matrix-native
      protocol version are recorded in the result.
    - A client does not report `Connected` from cached state alone. It must
-     receive a fresh checkpoint from the running Gateway.
+   authenticate current Matrix Room State from the running Gateway.
    - An incompatible Gateway fails closed with an actionable update message.
 2. **Create and first prompt**
    - A visible pending state appears within 1.5 seconds of confirmation.
@@ -42,6 +42,11 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - Reloading the browser and force-stopping/restarting the APK restore the
      same session and complete history.
    - Older history can be paged without Gateway history RPCs.
+   - A cache-cold client restores history through the selected session's Matrix
+     thread only; normal Android startup requests zero room-timeline items.
+   - Killing the Android process after a live batch is received but before its
+     Matrix cursor is committed causes redelivery and exactly-once local
+     projection after restart, not message loss or duplication.
 4. **Archive, restore, and delete**
    - Each action gives visible feedback within 1.5 seconds and converges within
      15 seconds.

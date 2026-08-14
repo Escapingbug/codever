@@ -3,18 +3,11 @@ import test from "node:test";
 const {
   findOptimisticMessageId,
   isAgentWorkMessage,
-  legacyCommandText,
   mergeChatMessage,
   mergeChatMessages,
 } = await import(new URL("../app/chatMessages.ts", import.meta.url).href);
 
-test("recognizes legacy shell messages for the modern command presentation", () => {
-  assert.equal(
-    legacyCommandText({ kind: "agent", text: "💻 $ pnpm test\n--runInBand" }),
-    "pnpm test\n--runInBand",
-  );
-  assert.equal(legacyCommandText({ kind: "agent", text: "Final answer" }), undefined);
-  assert.equal(legacyCommandText({ kind: "user", text: "💻 $ pnpm test" }), undefined);
+test("identifies agent work messages without guessing from their text", () => {
   assert.equal(isAgentWorkMessage({ kind: "agent" }), true);
   assert.equal(isAgentWorkMessage({ kind: "tool" }), true);
   assert.equal(isAgentWorkMessage({ kind: "user" }), false);
@@ -36,8 +29,7 @@ test("authoritative user echo repairs clock-skewed optimistic ordering", () => {
     kind: "agent",
     text: "Checking",
     timestamp: 1_900,
-    streamId: "stream-1",
-    raw: { type: "agent.text.delta" },
+    raw: { kind: "message" },
   };
   const initiallyMisordered = mergeChatMessage(
     [optimistic],
@@ -72,7 +64,7 @@ test("authoritative user echo repairs clock-skewed optimistic ordering", () => {
   assert.equal(repaired[0].optimistic, false);
 });
 
-test("stream completion preserves the logical message timeline position", () => {
+test("a Matrix edit preserves the logical message timeline position", () => {
   const user = {
     id: "$user",
     eventId: "$user",
@@ -86,8 +78,7 @@ test("stream completion preserves the logical message timeline position", () => 
     text: "First",
     time: "10:00",
     timestamp: 1_100,
-    streamId: "stream-1",
-    raw: { type: "agent.text.delta" },
+    raw: { kind: "message" },
   };
   const completed = {
     id: "$completed",
@@ -96,8 +87,8 @@ test("stream completion preserves the logical message timeline position", () => 
     text: "First result",
     time: "10:01",
     timestamp: 2_000,
-    streamId: "stream-1",
-    raw: { type: "agent.text.completed" },
+    replacesEventId: "$delta",
+    raw: { kind: "message" },
   };
 
   const merged = mergeChatMessage(
@@ -121,9 +112,8 @@ test("tool completion updates one card and cannot regress to running", () => {
     kind: "tool",
     text: "Read file",
     timestamp: 1_100,
-    toolCallId: "tool-1",
-    toolStatus: "running",
-    raw: { type: "agent.tool.started", name: "Read file" },
+    toolGroup: toolGroup("started", 1_100),
+    raw: { kind: "message" },
   };
   const completed = {
     id: "$tool-completed",
@@ -131,25 +121,48 @@ test("tool completion updates one card and cannot regress to running", () => {
     kind: "tool",
     text: "Tool succeeded",
     timestamp: 1_200,
-    toolCallId: "tool-1",
-    toolStatus: "succeeded",
-    raw: { type: "agent.tool.completed", status: "succeeded" },
+    replacesEventId: "$tool-started",
+    toolGroup: toolGroup("completed", 1_200),
+    raw: { kind: "message" },
   };
 
   const terminal = mergeChatMessage([started], completed);
   assert.equal(terminal.length, 1);
   assert.equal(terminal[0].id, started.id);
-  assert.equal(terminal[0].text, started.text);
+  assert.equal(terminal[0].text, completed.text);
   assert.equal(terminal[0].timestamp, started.timestamp);
-  assert.equal(terminal[0].toolStatus, "succeeded");
+  assert.equal(terminal[0].toolGroup?.tools[0]?.phase, "completed");
 
   const lateStarted = mergeChatMessage(terminal, {
     ...started,
     id: "$late-tool-started",
+    eventId: "$late-tool-started",
+    replacesEventId: "$tool-started",
   });
   assert.equal(lateStarted.length, 1);
-  assert.equal(lateStarted[0].toolStatus, "succeeded");
+  assert.equal(lateStarted[0].toolGroup?.tools[0]?.phase, "completed");
 });
+
+function toolGroup(
+  phase: "started" | "updated" | "completed" | "failed",
+  updatedAt: number,
+) {
+  return {
+    kind: "tool_group" as const,
+    version: 1 as const,
+    groupId: "group-1",
+    tools: [{
+      id: "tool-1",
+      name: "read_file",
+      title: "Read file",
+      category: "read" as const,
+      phase,
+      isError: phase === "failed",
+      startedAt: 1_100,
+      updatedAt,
+    }],
+  };
+}
 
 test("canonical history wins over a persisted optimistic duplicate", () => {
   const messages = mergeChatMessages([], [
@@ -215,29 +228,12 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
   assert.equal(messages[0].optimistic, false);
 });
 
-test("legacy startup placeholders never enter the visible transcript", () => {
-  const messages = mergeChatMessages([], [
-    {
-      id: "$legacy-startup",
-      eventId: "$legacy-startup",
-      kind: "agent",
-      text: "⏳ Agent is starting up, please wait...",
-      format: "html",
-      attachments: [],
-      timestamp: 1_000,
-      raw: { kind: "message" },
-    },
-  ]);
-
-  assert.deepEqual(messages, []);
-});
-
-test("a transient legacy status edit removes its startup placeholder", () => {
+test("a transient lifecycle edit removes the transcript event it replaces", () => {
   const startup = {
-    id: "$legacy-startup",
-    eventId: "$legacy-startup",
+    id: "$startup",
+    eventId: "$startup",
     kind: "agent",
-    text: "Legacy startup placeholder",
+    text: "Starting",
     timestamp: 1_000,
     raw: { kind: "message" },
   };
@@ -247,7 +243,7 @@ test("a transient legacy status edit removes its startup placeholder", () => {
     kind: "notice",
     text: "Agent started working...",
     timestamp: 1_100,
-    replacesEventId: "$legacy-startup",
+    replacesEventId: "$startup",
     raw: { kind: "status", state: "working" },
   };
 
@@ -360,6 +356,34 @@ test("identical text from different operations remains distinct", () => {
   ]);
 
   assert.equal(merged.length, 2);
+});
+
+test("a live event upgrades an identical historical event regardless of arrival order", () => {
+  const historical = {
+    id: "$permission",
+    eventId: "$permission",
+    operationId: "permission-operation",
+    requestId: "permission-request",
+    kind: "permission",
+    text: "Allow this action?",
+    timestamp: 1_000,
+    historical: true,
+  };
+  const live = {
+    ...historical,
+    text: "Allow this action now?",
+    historical: undefined,
+  };
+
+  const historyThenLive = mergeChatMessages([], [historical, live]);
+  const liveThenHistory = mergeChatMessages([], [live, historical]);
+
+  assert.equal(historyThenLive.length, 1);
+  assert.equal(historyThenLive[0].historical, false);
+  assert.equal(historyThenLive[0].text, live.text);
+  assert.equal(liveThenHistory.length, 1);
+  assert.equal(liveThenHistory[0].historical, false);
+  assert.equal(liveThenHistory[0].text, live.text);
 });
 
 test("optimistic echo matching prefers command id and falls back to session text", () => {

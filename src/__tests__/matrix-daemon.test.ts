@@ -11,6 +11,8 @@ import {
 } from 'matrix-js-sdk'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     type CodeverCommand,
     type SignedCommand,
 } from '@codever/protocol'
@@ -20,6 +22,7 @@ import {
     InMemoryReplayStore,
     openSecureEnvelope,
     openSecureEnvelopeBundle,
+    openMatrixStateEnvelope,
     openMatrixTimelineEnvelope,
     base64UrlDecode,
     sealSecureEnvelope,
@@ -36,6 +39,9 @@ import {
 import {
     CODEVER_MATRIX_EXTENSION,
     type MatrixIncomingEvent,
+    type MatrixApplicationControlEventRequest,
+    type MatrixApplicationStateEventRequest,
+    type MatrixApplicationTimelineEventRequest,
     type MatrixSendEventRequest,
     type MatrixSendEventResult,
 } from '@/channel/matrix'
@@ -249,9 +255,11 @@ describe('strict Matrix command authorization', () => {
 
         const replacementGatewayIdentity = new StrictMatrixCommandAuthorizer(
             fixture.config.gatewayId,
-            fixture.config.trustedDevices,
+            fixture.config.trustedDevices.map(device => ({
+                ...device,
+                sequenceEpoch: 'replacement-gateway-key',
+            })),
             new FileCommandReplayStore(fixture.config.replayLedgerPath),
-            'replacement-gateway-key',
         )
         await replacementGatewayIdentity.initialize(fixture.now)
         await expect(replacementGatewayIdentity.authorize(
@@ -279,6 +287,52 @@ describe('strict Matrix command authorization', () => {
 })
 
 describe('MatrixGatewayRunner', () => {
+    it('starts without a trusted device and publishes state only after pairing provisioning', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        let activeDevices: MatrixGatewayConfig['trustedDevices'] = []
+        fixture.config.trustedDevices = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => fakeTopicSession([]),
+            listTrustedDevices: async () => activeDevices,
+            now: () => fixture.now,
+        })
+
+        await runner.start()
+        expect(runner.getState()).toBe('running')
+        expect(client.sent).toHaveLength(0)
+        expect(client.state.size).toBe(0)
+
+        activeDevices = [{
+            deviceId: 'new-device',
+            publicKey: fixture.keys.publicJwk,
+            allowedRoomIds: ['!room:example.org'],
+            allowedOperations: ['prompt', 'session.create'],
+            matrixUserId: '@new-device:example.org',
+            matrixDeviceId: 'NEW_MATRIX_DEVICE',
+            matrixDeviceKeys: ['new-matrix-ed25519-key'],
+            certificateExpiresAt: Date.now() + 60_000,
+            sequenceEpoch: 'new-device-certificate',
+        }]
+        await runner.provisionCurrentState()
+
+        expect(client.sent).toHaveLength(1)
+        expect(client.sent[0]?.transactionId).toBe('codever.session.root.app-session-1')
+        expect(client.state.size).toBe(2)
+        expect(client.state.has(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ]))).toBe(true)
+        expect(client.state.has(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            'app-session-1',
+        ]))).toBe(true)
+        await runner.stop()
+    })
+
     it('lets an authenticated device create a short-lived pairing invitation', async () => {
         const fixture = await securityFixture()
         const session = fakeTopicSession([])
@@ -298,7 +352,7 @@ describe('MatrixGatewayRunner', () => {
             commandId: 'invite-device',
             gatewayId: fixture.config.gatewayId,
             deviceId: 'pwa-device-1',
-            sequenceEpoch: 'legacy-v1',
+            sequenceEpoch: 'certificate-pwa-1',
             conversationId: fixture.config.rooms[0]!.conversationId,
             revisionEpoch: REVISION_EPOCH,
             sequence: 1,
@@ -397,7 +451,7 @@ describe('MatrixGatewayRunner', () => {
             commandId: 'create-project-session',
             gatewayId: fixture.config.gatewayId,
             deviceId: 'pwa-device-1',
-            sequenceEpoch: 'legacy-v1',
+            sequenceEpoch: 'certificate-pwa-1',
             conversationId: fixture.config.rooms[0]!.conversationId,
             revisionEpoch: REVISION_EPOCH,
             sequence: 1,
@@ -506,7 +560,7 @@ describe('MatrixGatewayRunner', () => {
             commandId: `${operation}-${sequence}`,
             gatewayId: fixture.config.gatewayId,
             deviceId: 'pwa-device-1',
-            sequenceEpoch: 'legacy-v1',
+            sequenceEpoch: 'certificate-pwa-1',
             conversationId: fixture.config.rooms[0]!.conversationId,
             revisionEpoch: REVISION_EPOCH,
             sequence,
@@ -598,7 +652,7 @@ describe('MatrixGatewayRunner', () => {
             commandId: 'archive-with-slow-matrix',
             gatewayId: fixture.config.gatewayId,
             deviceId: 'pwa-device-1',
-            sequenceEpoch: 'legacy-v1',
+            sequenceEpoch: 'certificate-pwa-1',
             conversationId: fixture.config.rooms[0]!.conversationId,
             revisionEpoch: REVISION_EPOCH,
             sequence: 1,
@@ -666,6 +720,7 @@ describe('MatrixGatewayRunner', () => {
             port: secondSession.channelPort,
             session: secondSession,
             capabilityProvider: null,
+            activity: { phase: 'idle' },
         })
         const runner = new MatrixGatewayRunner(fixture.config, {
             client: new FakeMatrixGatewayClient(),
@@ -729,7 +784,13 @@ describe('MatrixGatewayRunner', () => {
             'encrypted:!room:example.org',
         ])
 
-        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+        client.emit(await incomingSecureSigned(
+            await signedPrompt(fixture.keys, fixture.now),
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'signed-prompt',
+        ))
         await vi.waitFor(() => expect(dispatched).toHaveLength(1))
         expect(dispatched[0]).toMatchObject({
             kind: 'user_message',
@@ -747,7 +808,6 @@ describe('MatrixGatewayRunner', () => {
     it('broadcasts an encrypted revision-zero authoritative state and supports explicit resync', async () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()
-        delete fixture.config.allowInsecureLegacyForTesting
         fixture.config.applicationSecurity = {
             gatewayDeviceId: fixture.config.gatewayId,
             gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
@@ -765,43 +825,45 @@ describe('MatrixGatewayRunner', () => {
         })
 
         await runner.start()
-        expect(client.sent).toHaveLength(2)
-        await runner.syncState()
-        expect(client.sent).toHaveLength(3)
-        const checkpoints = client.sent.filter(request =>
-            request.transactionId.startsWith('codever.gateway.checkpoint.'),
-        )
-        expect(checkpoints).toHaveLength(2)
-        expect(checkpoints[0]!.transactionId).not.toBe(checkpoints[1]!.transactionId)
-        const opened = await openNativeTimeline(
-            checkpoints[0]!, fixture.keys, gatewayKeys,
-        )
-        expect(opened.plaintext).toMatchObject({
-            [CODEVER_MATRIX_EXTENSION]: {
-                kind: 'gateway_checkpoint',
-                revision: 0,
-                revision_epoch: REVISION_EPOCH,
-                revision_epoch_generation: 1,
-                state_version: 1,
-                workspace: {
-                    provider: 'mock-provider',
-                    permission_mode: 'default',
-                },
-                capabilities: {
-                    models: [],
-                    permission_modes: [{ id: 'default', name: 'Default' }],
-                    can_create_session: true,
-                    can_select_session: false,
-                },
+        expect(client.sent).toHaveLength(1)
+        const firstGatewayState = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ]))!
+        const opened = await openNativeState(firstGatewayState, fixture.keys, gatewayKeys)
+        expect(opened).toMatchObject({
+            kind: 'gateway_state',
+            revision: 0,
+            revision_epoch: REVISION_EPOCH,
+            revision_epoch_generation: 1,
+            state_version: 1,
+            workspace: {
+                provider: 'mock-provider',
+                permission_mode: 'default',
+            },
+            capabilities: {
+                models: [],
+                permission_modes: [{ id: 'default', name: 'Default' }],
+                can_create_session: true,
+                can_select_session: false,
             },
         })
+        await runner.syncState()
+        const secondGatewayState = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ]))!
+        expect(secondGatewayState.eventId).not.toBe(firstGatewayState.eventId)
+        await expect(openNativeState(secondGatewayState, fixture.keys, gatewayKeys))
+            .resolves.toMatchObject({ state_version: 2 })
         await runner.stop()
     })
 
     it('restores persisted sessions, provider session, workspace, epoch, and state version before first sync', async () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()
-        delete fixture.config.allowInsecureLegacyForTesting
         fixture.config.applicationSecurity = {
             gatewayDeviceId: fixture.config.gatewayId,
             gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
@@ -815,25 +877,39 @@ describe('MatrixGatewayRunner', () => {
         await writeFile(
             `${fixture.config.replayLedgerPath}.runtime-state.json`,
             `${JSON.stringify({
-                version: 1,
+                version: 2,
                 rooms: {
                     '!room:example.org': {
                         revisionEpoch: REVISION_EPOCH,
+                        revisionEpochGeneration: 1,
                         replayGeneration: REPLAY_GENERATION,
                         stateVersion: 4,
                         currentSessionId: 'app-session-1',
+                        deletedSessionIds: [],
                         appSessions: [{
                             id: 'app-session-1',
                             title: 'Restored work',
+                            createdAt: fixture.now - 1_000,
                             updatedAt: fixture.now - 1_000,
-                            provider: 'mock-provider',
-                            model: null,
-                            providerSessionId: 'provider-session-1',
-                        }],
-                        workspace: {
+                            matrixThreadRootEventId: null,
+                            projectId: gatewayProjectIdentity('D:\\restored').id,
+                            projectName: gatewayProjectIdentity('D:\\restored').name,
                             cwd: 'D:\\restored',
                             provider: 'mock-provider',
                             model: null,
+                            reasoningEffort: null,
+                            permissionMode: 'default',
+                            providerSessionId: 'provider-session-1',
+                            archivedAt: null,
+                            extensions: [],
+                        }],
+                        workspace: {
+                            projectId: gatewayProjectIdentity('D:\\restored').id,
+                            projectName: gatewayProjectIdentity('D:\\restored').name,
+                            cwd: 'D:\\restored',
+                            provider: 'mock-provider',
+                            model: null,
+                            reasoningEffort: null,
                             permissionMode: 'default',
                         },
                     },
@@ -866,23 +942,35 @@ describe('MatrixGatewayRunner', () => {
                 title: 'Restored work',
             },
         })
-        const checkpointRequest = client.sent.find(request =>
-            request.transactionId.startsWith('codever.gateway.checkpoint.')
-        )!
-        const opened = await openNativeTimeline(checkpointRequest, fixture.keys, gatewayKeys)
-        expect(opened.plaintext).toMatchObject({
-            [CODEVER_MATRIX_EXTENSION]: {
-                kind: 'gateway_checkpoint',
+        const gatewayState = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ]))!
+        await expect(openNativeState(gatewayState, fixture.keys, gatewayKeys))
+            .resolves.toMatchObject({
+                kind: 'gateway_state',
                 revision_epoch: REVISION_EPOCH,
                 revision_epoch_generation: 1,
                 state_version: 5,
-                sessions: [{
+                workspace: { project: { cwd: 'D:\\restored' } },
+            })
+        const sessionState = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            'app-session-1',
+        ]))!
+        const stateKey = await openNativeStateKey(gatewayState, fixture.keys, gatewayKeys)
+        expect((sessionState.content as Record<string, unknown>).timeline_key_ring_bundle)
+            .toBeUndefined()
+        await expect(openNativeState(sessionState, fixture.keys, gatewayKeys, stateKey))
+            .resolves.toMatchObject({
+                kind: 'session_state',
+                session: {
                     session_id: 'app-session-1',
                     thread_root_event_id: expect.any(String),
-                }],
-                workspace: { project: { cwd: 'D:\\restored' } },
-            },
-        })
+                },
+            })
         const persisted = JSON.parse(
             await readFile(`${fixture.config.replayLedgerPath}.runtime-state.json`, 'utf8'),
         ) as { rooms: Record<string, { stateVersion: number }> }
@@ -894,7 +982,13 @@ describe('MatrixGatewayRunner', () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
         const dispatched: SessionInput[] = []
-        client.onStartEvent = incomingSigned(await signedPrompt(fixture.keys, fixture.now))
+        client.onStartEvent = await incomingSecureSigned(
+            await signedPrompt(fixture.keys, fixture.now),
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'startup-prompt',
+        )
         const runner = new MatrixGatewayRunner(fixture.config, {
             client,
             now: () => fixture.now,
@@ -917,7 +1011,6 @@ describe('MatrixGatewayRunner', () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()
         const afterExpiry = fixture.now + 2 * 60_000
-        delete fixture.config.allowInsecureLegacyForTesting
         fixture.config.applicationSecurity = {
             gatewayDeviceId: fixture.config.gatewayId,
             gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
@@ -1017,7 +1110,6 @@ describe('MatrixGatewayRunner', () => {
     it('keeps cancel responsive while a previously accepted prompt is still running', async () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()
-        delete fixture.config.allowInsecureLegacyForTesting
         fixture.config.applicationSecurity = {
             gatewayDeviceId: fixture.config.gatewayId,
             gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
@@ -1213,8 +1305,14 @@ describe('MatrixGatewayRunner', () => {
             sessionId: 'app-session-1',
             text: 'malicious',
         }
-        client.emit(incomingSigned(tampered))
-        client.emit({ ...incomingSigned(signed, 'clear-event'), encrypted: false })
+        client.emit(await incomingSecureSigned(
+            tampered,
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'tampered',
+        ))
+        client.emit(incomingSigned(signed, 'unencrypted-legacy-command'))
 
         await vi.waitFor(() => expect(rejected).toHaveLength(2))
         expect(dispatched).toHaveLength(0)
@@ -1235,7 +1333,13 @@ describe('MatrixGatewayRunner', () => {
         await runner.start()
 
         client.emit({
-            ...incomingSigned(await signedPrompt(fixture.keys, fixture.now)),
+            ...await incomingSecureSigned(
+                await signedPrompt(fixture.keys, fixture.now),
+                fixture.keys,
+                fixture.gatewayKeys,
+                fixture.now,
+                'own-echo',
+            ),
             sender: fixture.config.connection.userId,
         })
         await runner.stop()
@@ -1258,7 +1362,13 @@ describe('MatrixGatewayRunner', () => {
         })
         await runner.start()
 
-        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+        client.emit(await incomingSecureSigned(
+            await signedPrompt(fixture.keys, fixture.now),
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'revoked-device',
+        ))
         await vi.waitFor(() => expect(rejected).toHaveLength(1))
         expect(dispatched).toEqual([])
         expect(rejected[0]).toEqual(expect.objectContaining({
@@ -1277,7 +1387,13 @@ describe('MatrixGatewayRunner', () => {
             providerFactory: () => provider,
         })
 
-        client.emit(incomingSigned(await signedPrompt(fixture.keys, fixture.now)))
+        client.emit(await incomingSecureSigned(
+            await signedPrompt(fixture.keys, fixture.now),
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'daemon-prompt',
+        ))
 
         await vi.waitFor(() => expect(provider.startQuery).toHaveBeenCalledOnce())
         expect(provider.startQuery).toHaveBeenCalledWith(
@@ -1402,9 +1518,6 @@ describe('MatrixJsSdkGatewayClient', () => {
         await client.waitUntilReady()
         await client.assertRoomEncrypted('!room:example.org')
         await client.pinTrustedDevices([{
-            deviceId: 'pwa-device-1',
-            publicKey: {},
-            allowedRoomIds: ['!room:example.org'],
             matrixUserId: '@alice:example.org',
             matrixDeviceId: 'PWA1',
             matrixDeviceKeys: ['matrix-ed25519-key'],
@@ -1523,8 +1636,47 @@ describe('MatrixJsSdkGatewayClient', () => {
             undefined,
             expect.objectContaining({ body: 'Encrypted Codever message' }),
         )
+        await client.setApplicationRoomState({
+            roomId: '!room:example.org',
+            eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            stateKey: 'session-1',
+            content: {
+                version: 2,
+                kind: 'state_envelope',
+                state_envelope: {
+                    envelope: {
+                        eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+                        stateKey: 'session-1',
+                    },
+                    signature: {},
+                },
+            },
+        })
+        expect(sdk.http.authedRequest).toHaveBeenCalledWith(
+            'PUT',
+            '/rooms/!room%3Aexample.org/state/io.codever.session.current.v2/session-1',
+            undefined,
+            expect.objectContaining({ kind: 'state_envelope' }),
+            expect.any(Object),
+        )
+        await expect(client.setApplicationRoomState({
+            roomId: '!room:example.org',
+            eventType: CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            stateKey: 'gateway-1',
+            content: {
+                version: 2,
+                kind: 'state_envelope',
+                state_envelope: {
+                    envelope: {
+                        eventType: CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+                        stateKey: 'gateway-1',
+                    },
+                    signature: {},
+                },
+            },
+        })).rejects.toThrow('must contain a Codever state envelope')
         expect(sdk.sendMessage).toHaveBeenCalledTimes(1)
-        expect(sdk.http.authedRequest).toHaveBeenCalledTimes(2)
+        expect(sdk.http.authedRequest).toHaveBeenCalledTimes(3)
         await client.stop()
         expect(sdk.stopClient).toHaveBeenCalledOnce()
     })
@@ -1569,7 +1721,7 @@ describe('MatrixJsSdkGatewayClient', () => {
 describe('Matrix gateway configuration', () => {
     it('requires application-layer security unless a test explicitly opts out', async () => {
         const fixture = await securityFixture()
-        fixture.config.allowInsecureLegacyForTesting = false
+        Reflect.deleteProperty(fixture.config, 'applicationSecurity')
 
         expect(() => validateMatrixGatewayConfig(fixture.config)).toThrow(
             'Application-layer Matrix security is required',
@@ -1606,6 +1758,7 @@ describe('Matrix gateway configuration', () => {
 class FakeMatrixGatewayClient implements MatrixGatewayClient {
     readonly lifecycle: string[] = []
     readonly sent: MatrixSendEventRequest[] = []
+    readonly state = new Map<string, MatrixApplicationStateEventRequest & { eventId: string }>()
     readonly encryptedRooms = new Set(['!room:example.org'])
     onStartEvent?: MatrixIncomingEvent
     private listener: MatrixGatewayEventListener | null = null
@@ -1645,6 +1798,31 @@ class FakeMatrixGatewayClient implements MatrixGatewayClient {
         return { eventId: `$outgoing-${++this.nextEventId}` }
     }
 
+    async sendApplicationTimelineEvent(
+        request: MatrixApplicationTimelineEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        this.sent.push(structuredClone(request))
+        return { eventId: `$outgoing-${++this.nextEventId}` }
+    }
+
+    async sendApplicationControlEvent(
+        request: MatrixApplicationControlEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        this.sent.push(structuredClone(request) as unknown as MatrixSendEventRequest)
+        return { eventId: `$outgoing-${++this.nextEventId}` }
+    }
+
+    async setApplicationRoomState(
+        request: MatrixApplicationStateEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        const eventId = `$state-${++this.nextEventId}`
+        this.state.set(
+            JSON.stringify([request.roomId, request.eventType, request.stateKey]),
+            { ...structuredClone(request), eventId },
+        )
+        return { eventId }
+    }
+
     async setTyping(): Promise<void> {}
 
     emit(event: MatrixIncomingEvent): void {
@@ -1654,6 +1832,7 @@ class FakeMatrixGatewayClient implements MatrixGatewayClient {
 
 async function securityFixture() {
     const keys = await generateDeviceKeyPair()
+    const gatewayKeys = await generateDeviceKeyPair()
     const directory = await temporaryDirectory()
     const now = 2_000_000
     const config: MatrixGatewayConfig = {
@@ -1681,15 +1860,22 @@ async function securityFixture() {
             allowedRoomIds: ['!room:example.org'],
             allowedOperations: ['prompt', 'cancel', 'decision', 'session.settings'],
             matrixUserId: '@alice:example.org',
+            matrixDeviceId: 'PWA1',
             matrixDeviceKeys: ['matrix-ed25519-key'],
+            certificateExpiresAt: Date.now() + 60 * 60_000,
+            sequenceEpoch: 'certificate-pwa-1',
         }],
         replayLedgerPath: join(directory, 'replay.jsonl'),
-        allowInsecureLegacyForTesting: true,
+        applicationSecurity: {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(directory, 'envelope-replay.json'),
+        },
     }
     await writeFile(
         config.replayLedgerPath,
         `${JSON.stringify({
-            version: 1,
+            version: 2,
             kind: 'generation',
             generation: REPLAY_GENERATION,
         })}\n`,
@@ -1698,17 +1884,21 @@ async function securityFixture() {
     await writeFile(
         `${config.replayLedgerPath}.runtime-state.json`,
         `${JSON.stringify({
-            version: 1,
+            version: 2,
             rooms: {
                 '!room:example.org': {
                     revisionEpoch: REVISION_EPOCH,
+                    revisionEpochGeneration: 1,
                     replayGeneration: REPLAY_GENERATION,
                     stateVersion: 0,
                     currentSessionId: null,
+                    deletedSessionIds: [],
                     appSessions: [{
                         id: 'app-session-1',
                         title: 'Existing session',
+                        createdAt: now - 1_000,
                         updatedAt: now - 1_000,
+                        matrixThreadRootEventId: null,
                         projectId: gatewayProjectIdentity('C:\\repo').id,
                         projectName: gatewayProjectIdentity('C:\\repo').name,
                         cwd: 'C:\\repo',
@@ -1717,11 +1907,16 @@ async function securityFixture() {
                         reasoningEffort: null,
                         permissionMode: 'default',
                         providerSessionId: null,
+                        archivedAt: null,
+                        extensions: [],
                     }],
                     workspace: {
+                        projectId: gatewayProjectIdentity('C:\\repo').id,
+                        projectName: gatewayProjectIdentity('C:\\repo').name,
                         cwd: 'C:\\repo',
                         provider: 'mock-provider',
                         model: null,
+                        reasoningEffort: null,
                         permissionMode: 'default',
                     },
                 },
@@ -1729,7 +1924,7 @@ async function securityFixture() {
         })}\n`,
         'utf8',
     )
-    return { keys, config, now }
+    return { keys, gatewayKeys, config, now }
 }
 
 async function signedPrompt(
@@ -1737,7 +1932,7 @@ async function signedPrompt(
     now: number,
     sequence = 1,
     baseRevision = sequence - 1,
-    sequenceEpoch = 'legacy-v1',
+    sequenceEpoch = 'certificate-pwa-1',
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -1767,7 +1962,7 @@ async function signedCancel(
     keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
     now: number,
     sequence: number,
-    sequenceEpoch = 'legacy-v1',
+    sequenceEpoch = 'certificate-pwa-1',
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -1794,7 +1989,7 @@ async function signedSessionCreate(
     now: number,
     sequence: number,
     baseRevision: number,
-    sequenceEpoch = 'legacy-v1',
+    sequenceEpoch = 'certificate-pwa-1',
 ): Promise<SignedCommand> {
     const command: CodeverCommand = {
         kind: 'codever.command',
@@ -1951,9 +2146,11 @@ function directRoomRuntime(
                 port: session.channelPort,
                 session,
                 capabilityProvider: null,
+                activity: { phase: 'idle' },
             }]]
             : []),
         archivedSessions: new Map(),
+        deletedSessionIds: new Set<string>(),
         revisionEpoch: REVISION_EPOCH,
         revisionEpochGeneration: 1,
         replayGeneration: REPLAY_GENERATION,
@@ -2008,6 +2205,72 @@ async function openNativeTimeline(
     })
 }
 
+async function openNativeState(
+    request: MatrixApplicationStateEventRequest,
+    recipient: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    gateway: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    knownKey?: Uint8Array,
+) {
+    const content = request.content as {
+        state_envelope: {
+            envelope: { epochId: string; stateVersion: number }
+        }
+        timeline_key_ring_bundle?: unknown
+    }
+    const key = knownKey ?? await openNativeStateKey(request, recipient, gateway)
+    return openMatrixStateEnvelope(content.state_envelope, {
+        timelineKey: key,
+        gatewayPublicKey: gateway.publicKey,
+        expected: {
+            gatewayId: 'gateway-1',
+            conversationId: 'conversation-1',
+            roomId: request.roomId,
+            eventType: request.eventType,
+            stateKey: request.stateKey,
+            epochId: content.state_envelope.envelope.epochId,
+            stateVersion: content.state_envelope.envelope.stateVersion,
+        },
+    })
+}
+
+async function openNativeStateKey(
+    request: MatrixApplicationStateEventRequest,
+    recipient: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    gateway: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+): Promise<Uint8Array> {
+    const content = request.content as {
+        state_envelope: { envelope: { epochId: string } }
+        timeline_key_ring_bundle?: unknown
+    }
+    if (!content.timeline_key_ring_bundle) {
+        throw new Error('Gateway Room State key ring is missing')
+    }
+    const openedGrant = await openSecureEnvelopeBundle(
+        content.timeline_key_ring_bundle,
+        {
+            recipientPrivateKey: recipient.privateKey,
+            senderPublicKey: gateway.publicKey,
+            expected: {
+                gatewayId: 'gateway-1',
+                conversationId: 'conversation-1',
+                direction: 'gateway_to_device',
+                senderDeviceId: 'gateway-1',
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: gateway.keyId,
+                recipientKeyId: recipient.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+        },
+    )
+    const grant = openedGrant.plaintext as {
+        epochs: Array<{ epoch_id: string; key: string }>
+    }
+    const epoch = grant.epochs.find(candidate =>
+        candidate.epoch_id === content.state_envelope.envelope.epochId,
+    )!
+    return base64UrlDecode(epoch.key)
+}
+
 async function initializeDirectRuntime(
     runner: MatrixGatewayRunner,
     config: MatrixGatewayConfig,
@@ -2019,6 +2282,10 @@ async function initializeDirectRuntime(
         ): Promise<void>
     }
     await store.initialize(config.rooms, REPLAY_GENERATION)
+    const secureContent = Reflect.get(runner, 'secureContent') as {
+        initialize(now?: number): Promise<void>
+    }
+    await secureContent.initialize()
 }
 
 function fakeProvider(

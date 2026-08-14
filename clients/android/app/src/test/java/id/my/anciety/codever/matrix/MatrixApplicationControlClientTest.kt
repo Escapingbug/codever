@@ -117,19 +117,41 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `sdk timeline defers application encrypted events to persistent sync`() {
-        val timelineEvent = """
+    fun `pairing bootstrap timeline accepts only signed response shaped events`() {
+        assertTrue(isCodeverPairingResponseEvent("""
+            {
+              "type":"m.room.message",
+              "content":{"io.codever":{
+                "version":1,
+                "kind":"pairing_response",
+                "pairing_response":{}
+              }}
+            }
+        """.trimIndent()))
+        assertTrue(isCodeverPairingResponseEvent("""
+            {
+              "type":"m.room.message",
+              "content":{"io.codever":{
+                "version":1,
+                "kind":"pairing_rejection",
+                "pairing_rejection":{}
+              }}
+            }
+        """.trimIndent()))
+        assertFalse(isCodeverPairingResponseEvent("""
             {
               "type":"m.room.message",
               "content":${timelineContent()}
             }
-        """.trimIndent()
-
-        assertFalse(shouldCaptureMatrixSdkTimelineEvent(timelineEvent))
-        assertTrue(shouldCaptureMatrixSdkTimelineEvent("""
+        """.trimIndent()))
+        assertFalse(isCodeverPairingResponseEvent("""
             {
               "type":"m.room.message",
-              "content":{"msgtype":"m.text","body":"ordinary Matrix message"}
+              "content":{"io.codever":{
+                "version":1,
+                "kind":"pairing_request",
+                "pairing_request":{}
+              }}
             }
         """.trimIndent()))
     }
@@ -174,6 +196,14 @@ class MatrixApplicationControlClientTest {
                   "sender":"@gateway:example.org",
                   "origin_server_ts":1235,
                   "content":${timelineContent()}
+                },
+                {
+                  "type":"io.codever.session.current.v2",
+                  "state_key":"session-live",
+                  "event_id":"${'$'}live-session-state",
+                  "sender":"@gateway:example.org",
+                  "origin_server_ts":1236,
+                  "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
                 }
               ]}}}}
             }
@@ -189,7 +219,10 @@ class MatrixApplicationControlClientTest {
         val batch = client.sync(storedSession(), "s-current")
 
         assertEquals("s-next", batch.nextBatch)
-        assertEquals(listOf("\$control-response", "\$timeline-response"), batch.events.map { it.eventId })
+        assertEquals(
+            listOf("\$control-response", "\$timeline-response", "\$live-session-state"),
+            batch.events.map { it.eventId },
+        )
         assertEquals("@gateway:example.org", batch.events.first().sender)
         assertEquals(1234L, batch.events.first().timestamp)
         assertTrue(batch.limited)
@@ -209,7 +242,12 @@ class MatrixApplicationControlClientTest {
             timeline.getValue("senders").jsonArray.single().jsonPrimitive.content,
         )
         assertEquals(
-            setOf("io.codever.secure_control.v1", "m.room.message"),
+            setOf(
+                "io.codever.secure_control.v1",
+                "m.room.message",
+                "io.codever.gateway.current.v2",
+                "io.codever.session.current.v2",
+            ),
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
@@ -217,18 +255,12 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `initial sync catches up control events instead of only establishing a cursor`() = runBlocking {
+    fun `initial sync establishes a live cursor without room-wide history catchup`() = runBlocking {
         lateinit var endpoint: URI
         val responseBody = """
             {
               "next_batch":"s-catchup",
-              "rooms":{"join":{"!room:example.org":{"timeline":{"events":[{
-                "type":"io.codever.secure_control.v1",
-                "event_id":"${'$'}offline-result",
-                "sender":"@gateway:example.org",
-                "origin_server_ts":1234,
-                "content":${secureContent()}
-              }]}}}}
+              "rooms":{"join":{"!room:example.org":{"timeline":{"events":[]}}}}
             }
         """.trimIndent().toByteArray()
         val client = MatrixApplicationControlSyncClient(
@@ -240,7 +272,7 @@ class MatrixApplicationControlClientTest {
 
         val batch = client.sync(storedSession(), since = null)
 
-        assertEquals(listOf("\$offline-result"), batch.events.map { it.eventId })
+        assertTrue(batch.events.isEmpty())
         assertFalse(batch.limited)
         assertFalse(endpoint.rawQuery.contains("since="))
         assertTrue(endpoint.rawQuery.contains("timeout=0"))
@@ -252,8 +284,147 @@ class MatrixApplicationControlClientTest {
             URLDecoder.decode(encodedFilter, Charsets.UTF_8.name()),
         ).jsonObject.getValue("room").jsonObject
             .getValue("timeline").jsonObject
-        assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
+        assertEquals(0, timeline.getValue("limit").jsonPrimitive.content.toInt())
     }
+
+    @Test
+    fun `current Room State is fetched without a sync cursor and Gateway key state is ordered first`() =
+        runBlocking {
+            lateinit var endpoint: URI
+            val responseBody = """
+                [
+                  {
+                    "type":"io.codever.session.current.v2",
+                    "state_key":"session-1",
+                    "event_id":"${'$'}session-state",
+                    "sender":"@gateway:example.org",
+                    "origin_server_ts":1235,
+                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
+                  },
+                  {
+                    "type":"io.codever.gateway.current.v2",
+                    "state_key":"gateway-1",
+                    "event_id":"${'$'}gateway-state",
+                    "sender":"@gateway:example.org",
+                    "origin_server_ts":1234,
+                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
+                  },
+                  {
+                    "type":"io.codever.gateway.current.v2",
+                    "state_key":"gateway-1",
+                    "event_id":"${'$'}attacker-state",
+                    "sender":"@attacker:example.org",
+                    "origin_server_ts":1236,
+                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
+                  }
+                ]
+            """.trimIndent().toByteArray()
+            val client = MatrixApplicationRoomStateClient(
+                MatrixApplicationControlSyncTransport { target, _ ->
+                    endpoint = target
+                    MatrixHttpResponse(200, responseBody)
+                },
+            )
+
+            val batch = client.current(storedSession())
+
+            assertEquals(
+                listOf("\$gateway-state", "\$session-state"),
+                batch.events.map { it.eventId },
+            )
+            assertEquals(3, batch.candidateEventCount)
+            assertEquals(
+                "https://matrix.example.org/_matrix/client/v3/rooms/%21room%3Aexample.org/state",
+                endpoint.toASCIIString(),
+            )
+            assertTrue(responseBody.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun `current Room State rejects a malformed entity from the bound Gateway`() = runBlocking {
+        val responseBody = """
+            [
+              {
+                "type":"io.codever.session.current.v2",
+                "state_key":"session-1",
+                "event_id":"${'$'}session-state",
+                "sender":"@gateway:example.org",
+                "origin_server_ts":1235,
+                "content":{"version":2,"kind":"state_envelope"}
+              }
+            ]
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationRoomStateClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val error = runCatching { client.current(storedSession()) }.exceptionOrNull()
+
+        assertTrue(error is IllegalArgumentException)
+        assertTrue(error?.message?.contains("invalid envelope shape") == true)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `thread history pages only one session relation and filters untrusted senders`() =
+        runBlocking {
+            lateinit var endpoint: URI
+            val responseBody = """
+                {
+                  "chunk":[
+                    {
+                      "type":"m.room.message",
+                      "event_id":"${'$'}trusted-history",
+                      "sender":"@gateway:example.org",
+                      "origin_server_ts":1235,
+                      "content":${timelineContent()}
+                    },
+                    {
+                      "type":"m.room.message",
+                      "event_id":"${'$'}attacker-history",
+                      "sender":"@attacker:example.org",
+                      "origin_server_ts":1236,
+                      "content":${timelineContent()}
+                    }
+                  ],
+                  "next_batch":"relations-next"
+                }
+            """.trimIndent().toByteArray()
+            val client = MatrixThreadHistoryClient(
+                MatrixApplicationControlSyncTransport { target, token ->
+                    endpoint = target
+                    assertEquals("secret-access-token", token)
+                    MatrixHttpResponse(200, responseBody)
+                },
+            )
+
+            val batch = client.page(
+                storedSession(),
+                threadRootEventId = "\$thread/root",
+                from = "relations/current",
+                limit = 37,
+            )
+
+            assertEquals(listOf("\$trusted-history"), batch.events.map { it.eventId })
+            assertEquals("relations-next", batch.nextBatch)
+            assertEquals(
+                "/_matrix/client/v1/rooms/%21room%3Aexample.org/relations/" +
+                    "%24thread%2Froot/m.thread",
+                endpoint.rawPath,
+            )
+            val query = endpoint.rawQuery.split("&").associate { part ->
+                val (key, value) = part.split("=", limit = 2)
+                key to URLDecoder.decode(value, Charsets.UTF_8.name())
+            }
+            assertFalse(query.containsKey("rel_type"))
+            assertEquals("b", query["dir"])
+            assertEquals("true", query["recurse"])
+            assertEquals("37", query["limit"])
+            assertEquals("relations/current", query["from"])
+            assertTrue(responseBody.all { it == 0.toByte() })
+        }
 
     @Test
     fun `receiver readiness check does not long poll a persisted cursor`() = runBlocking {

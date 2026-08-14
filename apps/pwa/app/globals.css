@@ -1961,20 +1961,6 @@ select:focus-visible {
   font-weight: 800;
 }
 
-.agent-mark.live {
-  box-shadow: 0 0 0 4px rgb(105 87 229 / 10%);
-}
-
-.agent-mark.live::after {
-  position: absolute;
-  inset: -4px;
-  border: 1px solid rgb(105 87 229 / 30%);
-  border-radius: 12px;
-  content: "";
-  pointer-events: none;
-  animation: agent-live-ring 1.4s ease-out infinite;
-}
-
 .agent-activity {
   display: flex;
   max-width: min(500px, 78%);
@@ -2607,22 +2593,6 @@ select:focus-visible {
 .decision-state.denied {
   background: #fff0f1;
   color: #b6505a;
-}
-
-.cursor {
-  display: inline-block;
-  width: 2px;
-  height: 1em;
-  margin-left: 2px;
-  vertical-align: -2px;
-  background: var(--violet);
-  animation: blink 0.8s steps(2, start) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }
 
 .composer-area {
@@ -4525,21 +4495,6 @@ i.connection-state-connected {
   }
 }
 
-@keyframes agent-live-ring {
-  0% {
-    opacity: 0;
-    transform: scale(0.9);
-  }
-
-  28% {
-    opacity: 0.7;
-  }
-
-  100% {
-    opacity: 0;
-    transform: scale(1.16);
-  }
-}
 
 @keyframes history-skeleton-pulse {
   to {
@@ -5555,10 +5510,6 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-  }
-
-  .agent-mark.live {
-    box-shadow: 0 0 0 3px rgb(105 87 229 / 13%);
   }
 
   .history-skeleton {

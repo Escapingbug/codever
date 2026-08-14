@@ -160,11 +160,6 @@ export class NativeBridgeClient implements CodeverClient {
     const result = await withPairingAbort(
       completion,
       signal,
-      () => this.bridge.request("codever.pairing.cancel", {
-        context: this.bridge.context(),
-        idempotencyKey: crypto.randomUUID(),
-        pairingId: preview.pairingId,
-      }),
     );
     this.#applySnapshot(result.snapshot);
     this.#deviceName = deviceName;
@@ -901,13 +896,14 @@ function throwIfAborted(signal?: AbortSignal): void {
 async function withPairingAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal | undefined,
-  cancel: () => Promise<unknown>,
 ): Promise<T> {
   if (!signal) return promise;
   throwIfAborted(signal);
   return new Promise<T>((resolve, reject) => {
     const abort = () => {
-      void cancel().catch(() => {});
+      // Detaching or reloading the hosted UI must not revoke a transaction
+      // that the user already confirmed in native UI. The service owns that
+      // durable request and continues it independently of this waiter.
       reject(new DOMException("The operation was aborted.", "AbortError"));
     };
     signal.addEventListener("abort", abort, { once: true });

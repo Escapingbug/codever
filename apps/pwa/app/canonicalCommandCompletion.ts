@@ -1,4 +1,8 @@
-import type { CommandPayload, MatrixNativeContent } from "@codever/protocol";
+import type {
+  CommandPayload,
+  MatrixNativeContent,
+  MatrixStateContent,
+} from "@codever/protocol";
 
 type CanonicalSessionEvent = Extract<
   MatrixNativeContent,
@@ -11,8 +15,22 @@ type CanonicalSessionEvent = Extract<
  */
 export function canonicalSessionCommandResult(
   payload: CommandPayload,
-  event: MatrixNativeContent,
+  event: MatrixNativeContent | MatrixStateContent,
 ): string | null {
+  if (event.kind === "session_state") {
+    const matchingState =
+      (payload.operation === "session.create" && event.state === "active") ||
+      (payload.operation === "session.settings" && event.state !== "deleted") ||
+      (payload.operation === "session.archive" && event.state === "archived") ||
+      (payload.operation === "session.restore" && event.state === "active") ||
+      (payload.operation === "session.delete" && event.state === "deleted");
+    if (!matchingState) return null;
+    if (
+      payload.operation !== "session.create" &&
+      payload.sessionId !== event.session_id
+    ) return null;
+    return event.session_id;
+  }
   if (!isCanonicalSessionEvent(event)) return null;
   const matchingKind =
     (payload.operation === "session.create" && event.kind === "session_root") ||

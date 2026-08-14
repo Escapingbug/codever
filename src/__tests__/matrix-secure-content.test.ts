@@ -14,6 +14,7 @@ import {
 } from '@codever/security'
 import type {
     MatrixApplicationControlEventRequest,
+    MatrixApplicationStateEventRequest,
     MatrixApplicationTimelineEventRequest,
     MatrixSendEventRequest,
     MatrixTransport,
@@ -33,7 +34,7 @@ afterEach(async () => {
 })
 
 describe('Gateway application-layer Matrix content', () => {
-    it('rejects oversized timeline content before Matrix encryption', async () => {
+    it('does not block a new state entity behind an unrelated durable gap', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-secure-matrix-'))
         temporaryDirectories.push(directory)
         const gateway = await generateDeviceKeyPair()
@@ -58,8 +59,81 @@ describe('Gateway application-layer Matrix content', () => {
             }],
         )
         await layer.initialize(now)
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: '/repo',
+            providerName: 'test',
+        }
+        const firstAttempts: MatrixApplicationStateEventRequest[] = []
+        await expect(layer.setNativeRoomState(
+            room,
+            'io.codever.session.current.v2',
+            'session-old-gap',
+            deletedSessionState('session-old-gap', 1),
+            {
+                async sendEncryptedRoomEvent() {
+                    throw new Error('not used')
+                },
+                async setApplicationRoomState(request) {
+                    firstAttempts.push(request)
+                    throw new Error('old entity offline')
+                },
+            },
+        )).rejects.toThrow('old entity offline')
+        layer.stopRetries()
+
+        const recovered: MatrixApplicationStateEventRequest[] = []
+        await layer.setNativeRoomState(
+            room,
+            'io.codever.session.current.v2',
+            'session-new',
+            deletedSessionState('session-new', 2),
+            {
+                async sendEncryptedRoomEvent() {
+                    throw new Error('not used')
+                },
+                async setApplicationRoomState(request) {
+                    recovered.push(request)
+                    return { eventId: '$new-current-state' }
+                },
+            },
+        )
+        layer.stopRetries()
+
+        expect(firstAttempts.map(request => request.stateKey)).toEqual(['session-old-gap'])
+        expect(recovered.map(request => request.stateKey)).toEqual(['session-new'])
+    })
+
+    it('rejects oversized content and never falls back from application events to Megolm', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-secure-matrix-'))
+        temporaryDirectories.push(directory)
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            {
+                gatewayDeviceId: 'gateway-1',
+                gatewayKeyPair: await exportDeviceKeyPair(gateway),
+                envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            },
+            [{
+                deviceId: 'phone-1',
+                publicKey: device.publicJwk,
+                allowedRoomIds: ['!room:localhost'],
+                allowedOperations: ['prompt'],
+                matrixUserId: '@phone:localhost',
+                matrixDeviceId: 'PHONE_MATRIX',
+                matrixDeviceKeys: ['phone-matrix-ed25519'],
+                certificateExpiresAt: now + 60_000,
+                sequenceEpoch: 'certificate-phone-1',
+            }],
+        )
+        await layer.initialize(now)
+        let megolmCalls = 0
         const transport: MatrixTransport = {
             async sendEncryptedRoomEvent() {
+                megolmCalls += 1
                 throw new Error('oversized content must not reach Matrix')
             },
         }
@@ -80,6 +154,33 @@ describe('Gateway application-layer Matrix content', () => {
                 [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
             },
         })).rejects.toThrow(/Matrix timeline event|too_big|32/i)
+
+        await expect(secureTransport.sendEncryptedRoomEvent({
+            roomId: '!room:localhost',
+            eventType: 'm.room.message',
+            transactionId: 'missing-direct-timeline',
+            content: {
+                msgtype: 'm.text',
+                body: 'small current event',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })).rejects.toThrow('application timeline events')
+        await expect(layer.sendCommandAccepted(
+            {
+                roomId: '!room:localhost',
+                conversationId: 'conversation-1',
+                cwd: '/repo',
+                providerName: 'test',
+            },
+            'phone-1',
+            'missing-direct-control',
+            1,
+            1,
+            'epoch-1',
+            transport,
+        )).rejects.toThrow('application control events')
+        expect(megolmCalls).toBe(0)
+        layer.stopRetries()
     })
 
     it('seals outgoing content and opens authenticated incoming content', async () => {
@@ -282,8 +383,10 @@ describe('Gateway application-layer Matrix content', () => {
                 publicKey: device.publicJwk,
                 allowedRoomIds: ['!room:localhost'],
                 matrixUserId: '@phone:localhost',
+                matrixDeviceId: 'PHONE_MATRIX',
                 matrixDeviceKeys: ['phone-matrix-ed25519'],
                 certificateExpiresAt: now,
+                sequenceEpoch: 'certificate-phone-1',
             }],
         )
         await layer.initialize(now)
@@ -309,3 +412,19 @@ describe('Gateway application-layer Matrix content', () => {
         }, now)).rejects.toThrow(/certificate has expired|not trusted/)
     })
 })
+
+function deletedSessionState(sessionId: string, stateVersion: number) {
+    return {
+        version: 2 as const,
+        kind: 'session_state' as const,
+        gateway_id: 'gateway-1',
+        conversation_id: 'conversation-1',
+        revision: stateVersion,
+        revision_epoch: 'epoch-1',
+        revision_epoch_generation: 1,
+        state_version: stateVersion,
+        session_id: sessionId,
+        state: 'deleted' as const,
+        updated_at: now + stateVersion,
+    }
+}

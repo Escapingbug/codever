@@ -133,7 +133,7 @@ function serializeStoreOperation(
   return current;
 }
 
-export function checkpointMatrixSyncStore(
+export function flushMatrixSyncStore(
   databaseName: string,
   store: ClosableMatrixSyncStore,
 ): Promise<void> {
@@ -147,7 +147,7 @@ export function destroyMatrixSyncStore(
   return serializeStoreOperation(databaseName, () => store.destroy());
 }
 
-export function checkpointAndReleaseMatrixSyncStore(
+export function flushAndReleaseMatrixSyncStore(
   databaseName: string,
   store: ClosableMatrixSyncStore,
   lock: MatrixCryptoLock,

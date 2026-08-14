@@ -35,7 +35,7 @@ test("exports stable, human-readable activity for local transitions", () => {
   });
 });
 
-test("derives starting activity from explicit and legacy Matrix status values", () => {
+test("derives activity from explicit Matrix status phases", () => {
   assert.equal(
     reduceAgentActivity(SENDING_AGENT_ACTIVITY, {
       version: 1,
@@ -48,19 +48,10 @@ test("derives starting activity from explicit and legacy Matrix status values", 
   );
 
   assert.equal(
-    reduceAgentActivity(SENDING_AGENT_ACTIVITY, {
-      version: 1,
-      kind: "status",
-      state: "querying",
-      provider: "codex",
-    }),
-    STARTING_AGENT_ACTIVITY,
-  );
-
-  assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
       kind: "status",
-      state: "querying",
+      state: "running",
+      activity_phase: "starting",
     }),
     WORKING_AGENT_ACTIVITY,
   );
@@ -75,67 +66,53 @@ test("derives starting activity from explicit and legacy Matrix status values", 
   );
 });
 
-test("signed session lifecycle drives every connected device", () => {
+test("authenticated status drives every connected device", () => {
   assert.equal(
     reduceAgentActivity(null, {
-      type: "session.updated",
-      status: "running",
+      kind: "status",
+      state: "running",
+      activity_phase: "working",
     }),
     WORKING_AGENT_ACTIVITY,
   );
   assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
       kind: "status",
-      state: "canceling",
-    }),
-    STOPPING_AGENT_ACTIVITY,
-  );
-  assert.equal(
-    reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
-      type: "session.updated",
-      status: "stopping",
+      state: "stopping",
     }),
     STOPPING_AGENT_ACTIVITY,
   );
   assert.equal(
     reduceAgentActivity(STOPPING_AGENT_ACTIVITY, {
-      type: "session.updated",
-      status: "idle",
+      kind: "status",
+      state: "idle",
     }),
     null,
   );
   assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
-      type: "session.updated",
-      status: "failed",
+      kind: "status",
+      state: "failed",
     }),
     null,
   );
 });
 
-test("execution stays stoppable through partial text and tool completions", () => {
+test("only authenticated status changes the interruptible execution state", () => {
   assert.equal(
     agentExecutionSignal({ kind: "status", state: "running" }),
     "running",
   );
   assert.equal(
-    agentExecutionSignal({ kind: "status", state: "canceling" }),
+    agentExecutionSignal({ kind: "status", state: "stopping" }),
     "stopping",
   );
   assert.equal(
-    agentExecutionSignal({
-      type: "agent.text.completed",
-      streamId: "stream-1",
-      text: "partial answer",
-    }),
+    agentExecutionSignal({ kind: "message", operation_id: "message-1" }),
     null,
   );
   assert.equal(
-    agentExecutionSignal({
-      type: "agent.tool.completed",
-      toolCallId: "tool-1",
-      status: "succeeded",
-    }),
+    agentExecutionSignal({ kind: "decision_request", decision_id: "decision-1" }),
     null,
   );
   assert.equal(
@@ -166,23 +143,19 @@ test("only live events for the selected session may drive activity", () => {
   );
 });
 
-test("tool and permission events provide useful working detail", () => {
-  assert.deepEqual(
+test("visible tools replace activity while permissions provide useful detail", () => {
+  assert.equal(
     reduceAgentActivity(STARTING_AGENT_ACTIVITY, {
-      type: "agent.tool.started",
-      toolCallId: "tool-1",
-      name: "  Read  ",
+      kind: "message",
+      operation_id: "tool-message-1",
+      ui: { kind: "tool_group" },
     }),
-    {
-      phase: "working",
-      label: "Using a tool…",
-      detail: "Read",
-    },
+    null,
   );
   assert.deepEqual(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
-      type: "agent.permission.requested",
-      requestId: "permission-1",
+      kind: "decision_request",
+      decision_id: "permission-1",
       title: "Allow shell access?",
     }),
     {
@@ -193,48 +166,24 @@ test("tool and permission events provide useful working detail", () => {
   );
 });
 
-test("visible replies and terminal events clear transient activity", () => {
-  const events = [
-    { kind: "message", body: "Legacy projected reply" },
-    { type: "agent.text.delta", streamId: "stream-1", text: "Hello" },
-    { type: "agent.text.completed", streamId: "stream-1", text: "Hello" },
-    {
-      type: "agent.tool.completed",
-      toolCallId: "tool-1",
-      status: "succeeded",
-    },
-    { type: "agent.error", code: "agent_failed", message: "Failed" },
-  ];
-
-  for (const event of events) {
-    assert.equal(
-      reduceAgentActivity(WORKING_AGENT_ACTIVITY, event),
-      null,
-      event.type,
-    );
-  }
-});
-
-test("unrelated command completion does not end agent activity", () => {
+test("a visible reply clears transient activity", () => {
   assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
-      type: "command.completed",
-      commandId: "settings-command",
-      outcome: "succeeded",
+      kind: "message",
+      operation_id: "message-1",
     }),
-    WORKING_AGENT_ACTIVITY,
+    null,
   );
 });
 
 test("unrelated and malformed events preserve the current activity", () => {
   assert.equal(
-    reduceAgentActivity(STARTING_AGENT_ACTIVITY, { type: "command.accepted" }),
+    reduceAgentActivity(STARTING_AGENT_ACTIVITY, { kind: "collaboration_command" }),
     STARTING_AGENT_ACTIVITY,
   );
   assert.equal(
     reduceAgentActivity(WORKING_AGENT_ACTIVITY, {
-      type: "session.updated",
-      status: "unknown",
+      kind: "unknown",
     }),
     WORKING_AGENT_ACTIVITY,
   );

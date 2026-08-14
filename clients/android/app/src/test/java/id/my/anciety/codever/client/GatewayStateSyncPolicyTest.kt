@@ -5,56 +5,33 @@ import id.my.anciety.codever.client.command.CommandOutcome
 import id.my.anciety.codever.client.command.CommandOperation
 import id.my.anciety.codever.client.command.CommandState
 import id.my.anciety.codever.client.command.CommandView
+import id.my.anciety.codever.security.codever.MatrixTransportBinding
+import id.my.anciety.codever.security.codever.PairingOperation
+import id.my.anciety.codever.security.codever.PairingPublicKey
+import id.my.anciety.codever.security.codever.PairingRequest
+import id.my.anciety.codever.security.codever.SignedPairingRequest
+import id.my.anciety.codever.security.codever.TestP256Identity
 import java.util.UUID
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class GatewayStateSyncPolicyTest {
     @Test
-    fun `Matrix pagination reports reached start rather than has more`() {
-        assertEquals(true, matrixRoomHistoryHasMore(reachedStart = false))
-        assertEquals(false, matrixRoomHistoryHasMore(reachedStart = true))
-    }
-
-    @Test
-    fun `native timeline backfill continues until Matrix reaches the start`() = runBlocking {
-        val results = ArrayDeque(listOf(false, false, true))
-        val backfill = paginateMatrixTimelineToStart(maxPages = 10) {
-            results.removeFirst()
-        }
-
-        assertEquals(MatrixTimelineBackfillResult(pages = 3, reachedStart = true), backfill)
-        assertEquals(0, results.size)
-    }
-
-    @Test
-    fun `native timeline backfill is bounded when Matrix never reaches the start`() = runBlocking {
-        var calls = 0
-        val backfill = paginateMatrixTimelineToStart(maxPages = 4) {
-            calls += 1
-            false
-        }
-
-        assertEquals(MatrixTimelineBackfillResult(pages = 4, reachedStart = false), backfill)
-        assertEquals(4, calls)
-    }
-
-    @Test
-    fun `gateway state retries back off to one request per minute`() {
-        assertEquals(5_000L, gatewayStateRetryDelayMs(0))
-        assertEquals(15_000L, gatewayStateRetryDelayMs(1))
-        assertEquals(30_000L, gatewayStateRetryDelayMs(2))
-        assertEquals(60_000L, gatewayStateRetryDelayMs(3))
-        assertEquals(60_000L, gatewayStateRetryDelayMs(100))
-    }
-
-    @Test
-    fun `gateway state retry count cannot move backwards`() {
-        assertThrows(IllegalArgumentException::class.java) {
-            gatewayStateRetryDelayMs(-1)
-        }
+    fun `only a complete authoritative batch with one Gateway entity unlocks commands`() {
+        assertEquals(true, authoritativeRoomStateReady(listOf("gateway_state")))
+        assertEquals(
+            true,
+            authoritativeRoomStateReady(
+                listOf("gateway_state", "session_state", "session_state"),
+            ),
+        )
+        assertEquals(false, authoritativeRoomStateReady(emptyList()))
+        assertEquals(false, authoritativeRoomStateReady(listOf("session_state")))
+        assertEquals(
+            false,
+            authoritativeRoomStateReady(listOf("gateway_state", "gateway_state")),
+        )
     }
 
     @Test
@@ -76,6 +53,11 @@ class GatewayStateSyncPolicyTest {
             null,
         ))
         assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_CREATE,
+            "session_state",
+            "active",
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
             CommandOperation.SESSION_SETTINGS,
             "session_update",
             null,
@@ -93,6 +75,11 @@ class GatewayStateSyncPolicyTest {
         assertEquals(true, canonicalStateCompletesCommand(
             CommandOperation.SESSION_DELETE,
             "session_lifecycle",
+            "deleted",
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_DELETE,
+            "session_state",
             "deleted",
         ))
         assertEquals(false, canonicalStateCompletesCommand(
@@ -122,6 +109,65 @@ class GatewayStateSyncPolicyTest {
         assertThrows(IllegalArgumentException::class.java) {
             commandRecoveryDelayMs(-1)
         }
+    }
+
+    @Test
+    fun `authoritative state convergence retries quickly then settles at a bounded interval`() {
+        assertEquals(1_000L, authoritativeStateRefreshDelayMs(0))
+        assertEquals(2_000L, authoritativeStateRefreshDelayMs(1))
+        assertEquals(5_000L, authoritativeStateRefreshDelayMs(2))
+        assertEquals(10_000L, authoritativeStateRefreshDelayMs(3))
+        assertEquals(30_000L, authoritativeStateRefreshDelayMs(4))
+        assertEquals(30_000L, authoritativeStateRefreshDelayMs(100))
+        assertThrows(IllegalArgumentException::class.java) {
+            authoritativeStateRefreshDelayMs(-1)
+        }
+    }
+
+    @Test
+    fun `pairing transaction retries the identical request on a bounded schedule`() {
+        assertEquals(2_000L, pairingRequestRetryDelayMs(0))
+        assertEquals(5_000L, pairingRequestRetryDelayMs(1))
+        assertEquals(10_000L, pairingRequestRetryDelayMs(2))
+        assertEquals(10_000L, pairingRequestRetryDelayMs(100))
+        assertThrows(IllegalArgumentException::class.java) {
+            pairingRequestRetryDelayMs(-1)
+        }
+    }
+
+    @Test
+    fun `confirmed pairing recovery follows the durable authorization lifetime`() {
+        val identity = TestP256Identity.generate()
+        val request = SignedPairingRequest(
+            PairingRequest(
+                requestId = "request-one",
+                offerId = "offer-one",
+                offerDigest = "A".repeat(43),
+                gatewayId = "gateway-one",
+                deviceId = identity.publicIdentity.keyId,
+                deviceName = "Phone",
+                deviceKey = identity.publicIdentity,
+                deviceTransport = MatrixTransportBinding(
+                    "https://matrix.example.org",
+                    "!room:example.org",
+                    "@phone:example.org",
+                    "PHONE",
+                    "A".repeat(43),
+                ),
+                requestedOperations = listOf(PairingOperation.PROMPT),
+                issuedAt = 1_800_000_000_000L,
+                expiresAt = 1_800_000_120_000L,
+            ),
+            id.my.anciety.codever.security.codever.PairingSignature(
+                identity.publicIdentity.keyId,
+                "A".repeat(86),
+            ),
+        )
+
+        assertEquals(
+            1_800_000_000_000L + 366L * 24 * 60 * 60_000,
+            pairingRecoveryExpiresAt(request),
+        )
     }
 
     @Test

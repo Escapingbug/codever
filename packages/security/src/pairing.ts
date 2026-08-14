@@ -49,9 +49,9 @@ const algorithm: EcdsaParams = { name: 'ECDSA', hash: 'SHA-256' }
 const DEFAULT_FUTURE_SKEW_MS = 30_000
 const DEFAULT_OFFER_LIFETIME_MS = 10 * 60_000
 const DEFAULT_REQUEST_LIFETIME_MS = 2 * 60_000
-const DEFAULT_RESPONSE_LIFETIME_MS = 10 * 60_000
 const DEFAULT_REJECTION_LIFETIME_MS = 2 * 60_000
 const DEFAULT_CERTIFICATE_LIFETIME_MS = 366 * 24 * 60 * 60_000
+const DEFAULT_RESPONSE_LIFETIME_MS = DEFAULT_CERTIFICATE_LIFETIME_MS
 // A rotation is part of the durable transport-key chain, not a short-lived
 // command. Keep it verifiable for as long as the longest certificate it can
 // serve; otherwise a PWA that was offline could permanently lose the chain.

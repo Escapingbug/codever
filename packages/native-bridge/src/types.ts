@@ -402,9 +402,6 @@ export type ClientMessage = {
   historical?: boolean;
   operationId?: string;
   requestId?: string;
-  streamId?: string;
-  toolCallId?: string;
-  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   commandId?: string;
   revision?: number;

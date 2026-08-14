@@ -1,5 +1,6 @@
 import type {
     MatrixDownloadMediaRequest,
+    MatrixApplicationStateEventRequest,
     MatrixSendEventRequest,
     MatrixSendEventResult,
     MatrixTransport,
@@ -16,6 +17,7 @@ export class InMemoryMatrixTransport implements MatrixTransport {
     readonly delivered: Array<MatrixSendEventRequest & { eventId: string }> = []
     readonly typing: Array<{ roomId: string; typing: boolean; timeoutMs?: number }> = []
     readonly media = new Map<string, Uint8Array>()
+    readonly state = new Map<string, MatrixApplicationStateEventRequest & { eventId: string }>()
     private readonly transactionResults = new Map<string, MatrixSendEventResult>()
     private nextEventId = 0
     private nextMediaId = 0
@@ -34,6 +36,17 @@ export class InMemoryMatrixTransport implements MatrixTransport {
 
     async setTyping(roomId: string, typing: boolean, timeoutMs?: number): Promise<void> {
         this.typing.push({ roomId, typing, ...(timeoutMs === undefined ? {} : { timeoutMs }) })
+    }
+
+    async setApplicationRoomState(
+        request: MatrixApplicationStateEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        const eventId = `$memory-state-${++this.nextEventId}`
+        this.state.set(
+            JSON.stringify([request.roomId, request.eventType, request.stateKey]),
+            { ...structuredClone(request), eventId },
+        )
+        return { eventId }
     }
 
     async uploadEncryptedMedia(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult> {

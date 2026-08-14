@@ -4,9 +4,9 @@ import { CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE } from '@codever/protocol
  * Narrow Matrix transport boundary.
  *
  * Implementations are responsible for Matrix login, sync, crypto store
- * persistence and media upload. User commands use Matrix E2EE. Gateway
- * timeline and control payloads are already encrypted and signed by Codever
- * and have separate, narrowly validated direct-send paths.
+ * persistence and media upload. Pairing and transport rotation use Matrix
+ * E2EE. Gateway timeline and control payloads are already encrypted and signed
+ * by Codever and have separate, narrowly validated direct-send paths.
  */
 export interface MatrixTransport {
     sendEncryptedRoomEvent(request: MatrixSendEventRequest): Promise<MatrixSendEventResult>
@@ -15,6 +15,9 @@ export interface MatrixTransport {
     ): Promise<MatrixSendEventResult>
     sendApplicationControlEvent?(
         request: MatrixApplicationControlEventRequest,
+    ): Promise<MatrixSendEventResult>
+    setApplicationRoomState?(
+        request: MatrixApplicationStateEventRequest,
     ): Promise<MatrixSendEventResult>
     setTyping?(roomId: string, typing: boolean, timeoutMs?: number): Promise<void>
     uploadEncryptedMedia?(request: MatrixUploadMediaRequest): Promise<MatrixUploadMediaResult>
@@ -40,6 +43,13 @@ export interface MatrixApplicationControlEventRequest {
     content: MatrixRoomMessageContent
     /** Stable homeserver transaction ID for durable, idempotent retries. */
     transactionId: string
+}
+
+export interface MatrixApplicationStateEventRequest {
+    roomId: string
+    eventType: string
+    stateKey: string
+    content: Record<string, unknown>
 }
 
 export interface MatrixSendEventRequest {

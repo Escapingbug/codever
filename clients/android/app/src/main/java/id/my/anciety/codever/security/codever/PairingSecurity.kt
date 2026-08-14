@@ -10,9 +10,9 @@ object PairingSecurity {
     private const val DEFAULT_FUTURE_SKEW_MS = 30_000L
     private const val OFFER_LIFETIME_MS = 10 * 60_000L
     private const val REQUEST_LIFETIME_MS = 2 * 60_000L
-    private const val RESPONSE_LIFETIME_MS = 10 * 60_000L
     private const val REJECTION_LIFETIME_MS = 2 * 60_000L
     private const val CERTIFICATE_LIFETIME_MS = 366L * 24 * 60 * 60_000
+    private const val RESPONSE_LIFETIME_MS = CERTIFICATE_LIFETIME_MS
 
     fun offerDigest(offer: SignedPairingOffer): String =
         CodeverCrypto.sha256Base64Url(CanonicalJson.bytes(offer.toJson()))

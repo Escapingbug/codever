@@ -71,39 +71,6 @@ export function parseToolGroupPresentation(
   };
 }
 
-export function legacyToolGroupPresentation(input: {
-  groupId: string;
-  name: string;
-  timestamp: number;
-  phase?: ToolPhase;
-  isError?: boolean;
-  detail?: string;
-  result?: string;
-  category?: ToolCategory;
-}): ToolGroupPresentation {
-  const name = boundedText(input.name) || "Agent tool";
-  const phase = input.phase ?? "completed";
-  return {
-    kind: "tool_group",
-    version: 1,
-    groupId: boundedText(input.groupId),
-    tools: [
-      {
-        id: boundedText(input.groupId),
-        name,
-        title: name,
-        ...(input.detail ? { detail: boundedText(input.detail) } : {}),
-        ...(input.result ? { result: boundedText(input.result) } : {}),
-        category: input.category ?? "unknown",
-        phase,
-        isError: input.isError ?? phase === "failed",
-        startedAt: input.timestamp,
-        updatedAt: input.timestamp,
-      },
-    ],
-  };
-}
-
 function parseToolPresentationItem(
   value: unknown,
 ): ToolPresentationItem | undefined {

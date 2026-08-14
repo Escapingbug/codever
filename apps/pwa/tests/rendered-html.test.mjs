@@ -110,6 +110,7 @@ test("ships a complete installable offline shell", async () => {
   assert.match(styles, /\.session-extensions\s*\{/);
   assert.match(styles, /\.permission-details\s*\{/);
   assert.match(source, /className="session-row session-create-pending"/);
+  assert.match(source, /aria-pressed=\{selectedSessionId === session\.id\}/);
   assert.match(source, /"Creating session…"/);
   assert.match(source, /"Session queued…"/);
   assert.match(
@@ -118,6 +119,10 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(styles, /\.session-create-spinner\s*\{/);
   assert.match(source, /rememberPendingSessionCreate\(input, sent\.commandId\)/);
+  assert.match(
+    source,
+    /const optimisticHistoryPersisted = submissionHistoryScope[\s\S]*?await optimisticHistoryPersisted;[\s\S]*?result = await sendRealCommand/,
+  );
   assert.match(
     source,
     /error instanceof CommandAcknowledgementTimeoutError[\s\S]*rememberPendingSessionCreate\(input, error\.commandId\)/,
@@ -293,8 +298,8 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
     ]);
 
   assert.match(app, /<MarkdownContent content=\{message\.text \?\? ""\}/);
-  assert.match(app, /<ToolGroupCard group=\{toolGroup\}/);
-  assert.match(app, /legacyCommandText\(message\)/);
+  assert.match(app, /<ToolGroupCard group=\{message\.toolGroup\}/);
+  assert.doesNotMatch(app, /legacyCommandText|legacyToolGroupPresentation/);
   assert.match(app, /className="failed-message-retry"/);
   assert.match(app, /className="jump-to-latest"/);
   assert.doesNotMatch(app, /JSON\.stringify\(message\.raw/);
@@ -398,7 +403,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.equal(matrix.match(/forceDiscardSession\(/gu)?.length, 3);
   const recoveredGatewayEncryptionBranch = matrix.slice(
     matrix.indexOf("if (gatewayTransportChanged)"),
-    matrix.indexOf("if (recoveringSyncCheckpoint)"),
+    matrix.indexOf("if (rebuildingSyncStore)"),
   );
   assert.match(
     recoveredGatewayEncryptionBranch,
@@ -418,10 +423,10 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     matrix,
     /createClient\([\s\S]*syncStore\.startup\(\)[\s\S]*initRustCrypto/,
   );
-  assert.match(matrix, /checkpointMatrixSyncStore/);
-  assert.match(matrix, /checkpointAndReleaseMatrixSyncStore/);
+  assert.match(matrix, /flushMatrixSyncStore/);
+  assert.match(matrix, /flushAndReleaseMatrixSyncStore/);
   assert.doesNotMatch(matrix, /destroyAndReleaseMatrixSyncStore/);
-  assert.match(matrix, /shouldRecoverMatrixSyncCheckpoint/);
+  assert.match(matrix, /shouldRebuildMatrixSyncStore/);
   assert.match(matrix, /acquireMatrixCryptoLock/);
   assert.match(matrix, /getSavedSyncToken\(\)/);
   assert.match(matrix, /assertPersistenceHealthy\(\)/);
@@ -500,10 +505,8 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /routed\.data\.envelope\.recipientKeyId !== expected\.recipientKeyId/);
   assert.match(matrix, /senderPublicKey: trust\.gatewayKey\.publicKey/);
   assert.match(matrix, /replayStore/);
-  assert.match(
-    matrix,
-    /Legacy Matrix plaintext is intentionally ignored/,
-  );
+  assert.match(matrix, /Timeline traffic must use v2 application encryption/);
+  assert.match(matrix, /dedicated application-control event type/);
   assert.doesNotMatch(
     matrix,
     /parseCodeverEvent\([\s\S]{0,160}event\.getSender\(\)/,
@@ -610,7 +613,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(pairing, /await verifyGatewayDeviceRotation/);
   assert.match(pairing, /PAIRING_TRUST_STORAGE_KEY/);
   assert.match(pairing, /PENDING_PAIRING_STORAGE_KEY/);
-  assert.match(pairing, /PENDING_PAIRING_RETENTION_MS = 10 \* 60_000/);
+  assert.match(pairing, /PENDING_PAIRING_RETENTION_MS = 366 \* 24 \* 60 \* 60_000/);
   assert.match(pairing, /MIN_PAIRING_START_WINDOW_MS = 15_000/);
   assert.match(
     pairing,
@@ -618,9 +621,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(pairing, /clearPendingPairing\(\);\s*saveTrustedGateway/);
   assert.match(pairing, /loadPendingPairingRecovery/);
-  assert.match(
+  assert.doesNotMatch(
     pairing,
-    /verifyPairingResponse\([\s\S]*now: signedResponse\.response\.issuedAt/,
+    /verifyPairingResponse\([\s\S]{0,300}now: signedResponse\.response\.issuedAt/,
   );
   assert.match(
     pairing,
@@ -667,12 +670,23 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.doesNotMatch(app, /setActiveDeviceCount\(incoming\.activeDeviceCount\)/);
   assert.doesNotMatch(app, /const sessions:|const initialMessages|appMode/);
   assert.doesNotMatch(matrix, /parseGatewayStateExtension\(decryptedExtension\)/);
-  assert.match(matrix, /loadCachedGatewayState\(/);
+  assert.doesNotMatch(matrix, /loadCachedGatewayState\(/);
   assert.doesNotMatch(matrix, /gatewayStateRequestSchema/);
   assert.doesNotMatch(matrix, /kind: "gateway_state_request"/);
   assert.match(
     matrix,
-    /client\.on\(sdk\.RoomEvent\.Timeline, onTimeline\);[\s\S]*await Promise\.all\(initialTimelineOperations\);[\s\S]*await recoverNativeTimeline\?\.\(\)/,
+    /startupRoom\.on\(sdk\.RoomStateEvent\.Events, onRoomState\);[\s\S]*await loadAuthoritativeRoomState\(\)/,
+  );
+  assert.doesNotMatch(
+    matrix,
+    /const initialTimeline = [^;]*getLiveTimeline\(\)\.getEvents\(\)/,
+    "startup must not queue room history ahead of live conversation events",
+  );
+  assert.match(matrix, /await client\.roomState\(config\.roomId\)/);
+  assert.match(
+    matrix,
+    /const decodedState: MatrixStateContent\[\] = \[gatewayContent\];[\s\S]*for \(const event of sessionEvents\)[\s\S]*nativeProjection\.applyRoomStateBatch\(decodedState\)[\s\S]*authoritativeStateInitialized = true;[\s\S]*await onGatewayState\(snapshot\)/,
+    "a complete Matrix Room State response must reach the UI atomically",
   );
   assert.doesNotMatch(
     matrix,
@@ -680,17 +694,18 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(
     matrix,
-    /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshNativeTimelineAfterReconnect = true/,
+    /state === "RECONNECTING" \|\| state === "CATCHUP"[\s\S]*refreshNativeStateAfterReconnect = true/,
   );
   assert.match(
     matrix,
-    /state === "ERROR"[\s\S]*refreshNativeTimelineAfterReconnect = true[\s\S]*handlers\.onStatus\([\s\S]*"reconnecting"/,
+    /state === "ERROR"[\s\S]*refreshNativeStateAfterReconnect = true[\s\S]*handlers\.onStatus\([\s\S]*"reconnecting"/,
   );
   assert.match(matrix, /createGatewayStateCacheRecord\(/);
-  assert.match(matrix, /parseGatewayStateCacheRecord\(/);
+  assert.doesNotMatch(matrix, /parseGatewayStateCacheRecord\(/);
+  assert.doesNotMatch(matrix, /cachedGatewayState/);
   assert.match(
     matrix,
-    /cachedGatewayState[\s\S]*handlers\.onCollaborationState/,
+    /const state = await nativeProjection\.applyRoomState\(content\);[\s\S]*await onGatewayState\(state\)/,
   );
   assert.match(matrix, /revisionInitialized: false/);
   assert.match(matrix, /classifyGatewayStateProgress/);
@@ -709,6 +724,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /revision_epoch !== "string"/);
   assert.match(matrix, /assertMatchingRevisionEpoch/);
   assert.match(matrix, /Waiting for the current Gateway session state/);
+  assert.match(
+    app,
+    /await optimisticHistoryPersisted;[\s\S]*setMessages\(\(current\) => \[\.\.\.current, optimisticMessage\]\)/,
+    "a visible optimistic prompt must already be locally durable",
+  );
   assert.doesNotMatch(app, />\s*Demo\s*</);
   assert.match(app, /connectCodeverClient/);
   assert.doesNotMatch(app, /connectMatrix/);

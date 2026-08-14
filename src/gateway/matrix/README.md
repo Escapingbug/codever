@@ -7,31 +7,26 @@ Each `trustedDevices` record binds two independent identities:
 - `publicKey` is the Codever P-256 public JWK exported by the PWA. The gateway
   uses it to verify the ES256 signature over every `signed_command`. Matrix
   membership and power levels never replace this signature.
-- `matrixDeviceKeys` contains the raw Matrix Ed25519 fingerprint strings
-  returned by `MatrixEvent.getClaimedEd25519Key()` after successful E2EE
-  decryption. These values are not Matrix device IDs and are not Curve25519
-  sender keys. The PWA pairing export must label them accordingly.
-- `matrixDeviceId` locates the paired device in the Matrix device list. Before
-  sending any agent output, the gateway checks that device's Ed25519
-  fingerprint against `matrixDeviceKeys`, marks only that device verified and
-  enables the SDK's verified-device-only room-key policy. Incoming events are
-  decrypted so their application signature and locally pinned Matrix
-  fingerprint can be checked, while unverified devices never receive outgoing
-  room keys.
+- `matrixDeviceKeys` contains the raw Matrix Ed25519 fingerprint used by the
+  explicit Megolm pairing and transport-rotation channel. These values are not
+  Matrix device IDs and are not Curve25519 sender keys.
+- `matrixDeviceId` locates the paired device in the Matrix device list. The
+  Gateway verifies that transport before the pairing exchange. Connected
+  commands, Room State, and timeline output then rely on the separately pinned
+  Codever application identity and do not depend on Megolm room-key delivery.
 
 The gateway requires both the Codever signature and the locally pinned Matrix
 sender/user plus Ed25519 fingerprint to match.
 
 ## Gateway event delivery shape
 
-One logical Gateway broadcast is one Matrix room event, regardless of the
-number of paired application devices. Its `io.codever` extension has kind
-`secure_envelope_bundle`: the message ciphertext is shared, while every
-recipient has a separately ECDH-derived wrapped content key. The durable
-Matrix outbox persists one bundle record with a snapshot of all recipient
-certificate epochs and application key IDs. Restart recovery therefore retries
-one stable Matrix transaction and abandons the bundle if any staged recipient
-identity has rotated or been revoked.
+One logical Gateway broadcast is one version-2 Matrix timeline envelope,
+regardless of the number of paired application devices. The message ciphertext
+uses the room's retained application key epoch; the accompanying key-ring grant
+wraps those epoch keys separately for every recipient. The durable Matrix
+outbox persists one logical broadcast with the addressed certificate and key
+generations. Restart recovery retries one stable Matrix transaction and never
+transfers a queued grant to a rotated or revoked identity.
 
 Application messages carry a stable `logical_event_id`; edits additionally
 carry `replaces_logical_event_id`. These IDs, not recipient-specific Matrix
@@ -53,6 +48,9 @@ layer. This lets a newly paired device read shared history using the timeline
 key grant and lets native clients consume the same durable room events through
 a filtered `/sync`, without an RPC state/history protocol. The pre-release
 state/history RPC event kinds are not accepted or emitted.
+There is also no Megolm compatibility fallback for connected timeline or
+control traffic: a transport without the direct application event APIs fails
+closed.
 
 ## Command event shape
 
@@ -88,9 +86,8 @@ Recovery preserves the authenticated command identity but creates a fresh
 Matrix transaction and outer secure envelope for each transport attempt. The
 Gateway can therefore open the retry, match it against the durable command
 ledger, and re-deliver the original result without executing the command a
-second time. Unversioned Android/Gateway ledger entries have a result-only
-migration path: they can retrieve a journaled terminal result but can never
-authorize execution of the retry payload.
+second time. The durable fingerprint includes the complete authenticated
+command; a changed retry is rejected instead of entering a migration path.
 
 ## Crypto initialization
 

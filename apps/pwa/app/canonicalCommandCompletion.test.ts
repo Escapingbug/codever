@@ -70,6 +70,43 @@ describe("canonical session command completion", () => {
       update,
     )).toBeNull();
   });
+
+  it("uses one authoritative session Room State entity as command completion", () => {
+    const current = {
+      version: 2 as const,
+      kind: "session_state" as const,
+      gateway_id: "gateway-1",
+      conversation_id: "conversation-1",
+      ...revision,
+      state_version: 14,
+      session_id: "session-new",
+      state: "active" as const,
+      session: {
+        session_id: "session-new",
+        title: "New session",
+        updated_at: 12,
+        archived: false,
+        status: "idle" as const,
+        project: { id: "project-1", name: "Codever", cwd: "/codever" },
+        provider: "codex",
+        extensions: [],
+      },
+      updated_at: 12,
+      source_command_id: "command-create",
+    };
+    expect(canonicalSessionCommandResult(
+      { operation: "session.create" },
+      current,
+    )).toBe("session-new");
+    expect(canonicalSessionCommandResult(
+      { operation: "session.delete", sessionId: "session-new" },
+      { ...current, state: "deleted" as const, session: undefined },
+    )).toBe("session-new");
+    expect(canonicalSessionCommandResult(
+      { operation: "prompt", sessionId: "session-new", text: "hello" },
+      current,
+    )).toBeNull();
+  });
 });
 
 function lifecycle(

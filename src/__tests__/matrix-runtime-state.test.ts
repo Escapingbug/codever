@@ -50,6 +50,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 replayGeneration: initial.replayGeneration,
                 currentSessionId: null,
                 appSessions: [],
+                deletedSessionIds: [],
                 workspace: initial.workspace,
             }),
             store.saveRoom(room.roomId, {
@@ -166,8 +167,8 @@ describe('FileGatewayRuntimeStateStore', () => {
         })
     })
 
-    it('migrates an existing runtime epoch to generation one without changing the epoch', async () => {
-        const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-migration-'))
+    it('rejects the removed pre-release runtime-state schema', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-v1-'))
         temporaryDirectories.push(directory)
         const path = join(directory, 'runtime-state.json')
         const room = {
@@ -180,13 +181,13 @@ describe('FileGatewayRuntimeStateStore', () => {
             version: 1,
             rooms: {
                 [room.roomId]: {
-                    revisionEpoch: 'legacy-runtime-epoch',
+                    revisionEpoch: 'old-runtime-epoch',
                     replayGeneration: 'ledger-generation-1',
                     stateVersion: 7,
                     currentSessionId: 'legacy-session',
                     appSessions: [{
                         id: 'legacy-session',
-                        title: 'Legacy session',
+                        title: 'Old session',
                         updatedAt: 1,
                         provider: 'mock-provider',
                         model: null,
@@ -202,34 +203,9 @@ describe('FileGatewayRuntimeStateStore', () => {
             },
         })}\n`, 'utf8')
 
-        const migrated = new FileGatewayRuntimeStateStore(path)
-        await migrated.initialize([room], 'ledger-generation-1')
-        expect(migrated.getRoom(room.roomId)).toMatchObject({
-            revisionEpoch: 'legacy-runtime-epoch',
-            revisionEpochGeneration: 1,
-            stateVersion: 7,
-            workspace: {
-                projectName: 'repo',
-                reasoningEffort: null,
-            },
-            appSessions: [{
-                id: 'legacy-session',
-                projectName: 'repo',
-                cwd: 'C:\\repo',
-                reasoningEffort: null,
-                permissionMode: 'default',
-                archivedAt: null,
-                extensions: [],
-            }],
-        })
-        expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
-            rooms: {
-                [room.roomId]: {
-                    revisionEpochGeneration: 1,
-                    appSessions: [{ extensions: [] }],
-                },
-            },
-        })
+        const store = new FileGatewayRuntimeStateStore(path)
+        await expect(store.initialize([room], 'ledger-generation-1'))
+            .rejects.toThrow('Invalid Gateway runtime state version')
     })
 
     it('recovers a fully written final replay record even if the trailing newline is lost', async () => {
@@ -249,81 +225,22 @@ describe('FileGatewayRuntimeStateStore', () => {
         await expect(recovered.claimAll([claim], Date.now())).resolves.toBe(false)
     })
 
-    it('recovers an expired command from a ledger written before recovery metadata existed', async () => {
-        const directory = await mkdtemp(join(tmpdir(), 'codever-replay-command-recovery-'))
+    it('rejects the removed pre-release replay-ledger schema', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-replay-v1-'))
         temporaryDirectories.push(directory)
         const ledgerPath = join(directory, 'replay.jsonl')
-        const now = 2_000_000
-        const command: CodeverCommand = {
-            kind: 'codever.command',
+        await writeFile(ledgerPath, `${JSON.stringify({
             version: 1,
-            commandId: 'legacy-command-1',
-            gatewayId: 'gateway-1',
-            deviceId: 'device-1',
-            sequenceEpoch: 'certificate-1',
-            conversationId: 'conversation-1',
-            revisionEpoch: 'revision-epoch-1',
-            sequence: 1,
-            baseRevision: 0,
-            operation: 'prompt',
-            issuedAt: now,
-            expiresAt: now + 60_000,
-            nonce: '0123456789abcdef-legacy-command',
-            payload: {
-                operation: 'prompt',
-                sessionId: 'session-1',
-                text: 'recover me',
-            },
-        }
-        const first = new FileCommandReplayStore(ledgerPath)
-        await first.initialize(now)
-        await expect(
-            first.claimCommandInOrder(command, now, command.sequenceEpoch),
-        ).resolves.toEqual({ status: 'accepted', revision: 1 })
-        await expect(
-            first.claimCommandInOrder(
-                {
-                    ...command,
-                    payload: {
-                        operation: 'prompt',
-                        sessionId: 'session-1',
-                        text: 'different payload',
-                    },
-                },
-                now + 1,
-                command.sequenceEpoch,
-            ),
-        ).rejects.toMatchObject({ code: 'replay' })
+            kind: 'generation',
+            generation: 'old-generation',
+        })}\n`, 'utf8')
 
-        const records = (await readFile(ledgerPath, 'utf8'))
-            .trim()
-            .split('\n')
-            .map(line => JSON.parse(line) as Record<string, unknown>)
-        for (const record of records) {
-            const revision = record.revision as Record<string, unknown> | undefined
-            if (!revision) continue
-            delete revision.commandSequence
-            delete revision.commandNonceKey
-            delete revision.commandBaseRevision
-            delete revision.commandFingerprint
-        }
-        await writeFile(
-            ledgerPath,
-            `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
-            'utf8',
+        const store = new FileCommandReplayStore(ledgerPath)
+        await expect(store.initialize()).rejects.toThrow(
+            'Invalid command replay ledger entry at line 1',
         )
-
-        const afterExpiry = now + 2 * 60_000
-        const recovered = new FileCommandReplayStore(ledgerPath)
-        await recovered.initialize(afterExpiry)
-        await expect(
-            recovered.claimCommandInOrder(
-                command,
-                afterExpiry,
-                command.sequenceEpoch,
-            ),
-        ).resolves.toEqual({ status: 'duplicate', revision: 1 })
     })
+
 })
 
 describe('FileCommandReplayStore terminal results', () => {
@@ -355,7 +272,7 @@ describe('FileCommandReplayStore terminal results', () => {
         const first = new FileCommandReplayStore(path)
         await first.initialize(121_000)
         await expect(
-            first.claimCommandInOrder(command, 121_000, command.sequenceEpoch),
+            first.claimCommandInOrder(command, 121_000),
         ).resolves.toMatchObject({
             status: 'accepted',
             revision: 1,
@@ -369,10 +286,10 @@ describe('FileCommandReplayStore terminal results', () => {
         const restarted = new FileCommandReplayStore(path)
         await restarted.initialize(121_001)
         await expect(
-            restarted.claimCommandInOrder(command, 121_001, command.sequenceEpoch),
+            restarted.claimCommandInOrder(command, 121_001),
         ).resolves.toEqual({ status: 'duplicate', revision: 1 })
         await expect(
-            restarted.getCommandResult(command, command.sequenceEpoch),
+            restarted.getCommandResult(command),
         ).resolves.toMatchObject({
             revision: 1,
             outcome: 'failed',
@@ -440,12 +357,10 @@ describe('FileCommandReplayStore terminal results', () => {
         await expect(store.claimCommandInOrder(
             original,
             1_000,
-            original.sequenceEpoch,
         )).resolves.toMatchObject({ revision: 1 })
         await expect(store.claimCommandInOrder(
             expiredStateCommand,
             121_000,
-            expiredStateCommand.sequenceEpoch,
         )).resolves.toMatchObject({
             revision: 2,
             terminal: { outcome: 'failed' },
@@ -456,7 +371,6 @@ describe('FileCommandReplayStore terminal results', () => {
         await expect(restarted.claimCommandInOrder(
             stalePrompt,
             121_000,
-            stalePrompt.sequenceEpoch,
         )).resolves.toMatchObject({ status: 'accepted', revision: 3 })
     })
 
@@ -470,7 +384,7 @@ describe('FileCommandReplayStore terminal results', () => {
             commandId: 'device-invite-command',
             gatewayId: 'gateway-1',
             deviceId: 'device-1',
-            sequenceEpoch: 'legacy-v1',
+            sequenceEpoch: 'certificate-1',
             conversationId: 'conversation-1',
             revisionEpoch: 'runtime-epoch-1',
             sequence: 1,
@@ -521,88 +435,4 @@ describe('FileCommandReplayStore terminal results', () => {
         expect(ledger.match(/"kind":"command_result"/gu)).toHaveLength(1)
     })
 
-    it('retrieves a legacy Android result after authentication fields change on upgrade', async () => {
-        const directory = await mkdtemp(join(tmpdir(), 'codever-command-result-upgrade-'))
-        temporaryDirectories.push(directory)
-        const path = join(directory, 'replay.jsonl')
-        const command: CodeverCommand = {
-            kind: 'codever.command',
-            version: 1,
-            commandId: 'legacy-android-command',
-            gatewayId: 'gateway-1',
-            deviceId: 'device-1',
-            sequenceEpoch: 'certificate-1',
-            conversationId: 'conversation-1',
-            revisionEpoch: 'runtime-epoch-1',
-            sequence: 1,
-            baseRevision: 0,
-            operation: 'session.delete',
-            issuedAt: 1_000,
-            expiresAt: 61_000,
-            nonce: '0123456789abcdef-original-auth',
-            payload: {
-                operation: 'session.delete',
-                sessionId: 'session-1',
-            },
-        }
-        const terminal = {
-            revision: 1,
-            outcome: 'succeeded' as const,
-            sessionId: 'session-1',
-        }
-        const original = new FileCommandReplayStore(path)
-        await original.initialize(1_000)
-        await original.claimCommandInOrder(command, 1_000, command.sequenceEpoch)
-        await original.recordCommandResult(command, terminal, command.sequenceEpoch)
-
-        // Fingerprints written before this change were raw SHA-256 strings.
-        const records = (await readFile(path, 'utf8'))
-            .trim()
-            .split('\n')
-            .map(line => JSON.parse(line) as Record<string, unknown>)
-        for (const record of records) {
-            const revision = record.revision as Record<string, unknown> | undefined
-            if (typeof revision?.commandFingerprint === 'string') {
-                revision.commandFingerprint = revision.commandFingerprint.replace(/^v2:/u, '')
-            }
-            if (typeof record.fingerprint === 'string') {
-                record.fingerprint = record.fingerprint.replace(/^v2:/u, '')
-            }
-        }
-        await writeFile(
-            path,
-            `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
-            'utf8',
-        )
-
-        const recoveredCommand: CodeverCommand = {
-            ...command,
-            issuedAt: 2_000,
-            expiresAt: 62_000,
-            nonce: '0123456789abcdef-refreshed-auth',
-        }
-        const recovered = new FileCommandReplayStore(path)
-        await recovered.initialize(2_000)
-        await expect(
-            recovered.claimCommandInOrder(
-                recoveredCommand,
-                2_000,
-                recoveredCommand.sequenceEpoch,
-            ),
-        ).resolves.toEqual({
-            status: 'duplicate',
-            revision: 1,
-            legacyFingerprintRecovery: true,
-        })
-        await expect(
-            recovered.getCommandResult(recoveredCommand, recoveredCommand.sequenceEpoch),
-        ).rejects.toMatchObject({ code: 'replay' })
-        await expect(
-            recovered.getCommandResult(
-                recoveredCommand,
-                recoveredCommand.sequenceEpoch,
-                true,
-            ),
-        ).resolves.toEqual(terminal)
-    })
 })

@@ -1,16 +1,23 @@
 import {
   CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+  CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+  CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
   canonicalJson,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
   matrixNativeContentSchema,
+  matrixStateEventContentSchema,
+  matrixStateContentSchema,
   matrixTimelineKeyRingGrantSchema,
+  signedMatrixStateEnvelopeSchema,
   signedMatrixTimelineEnvelopeSchema,
   type CodeverAttachment,
   type CodeverCommand,
   type CommandPayload,
   type JsonValue,
   type MatrixNativeContent,
+  type MatrixGatewayState,
+  type MatrixStateContent,
   type SignedCommand,
 } from "@codever/protocol";
 import {
@@ -20,6 +27,7 @@ import {
   encryptMedia,
   openSecureEnvelopeBundle,
   openSecureEnvelope,
+  openMatrixStateEnvelope,
   openMatrixTimelineEnvelope,
   sealSecureEnvelope,
   SecurityError,
@@ -72,8 +80,8 @@ import {
 } from "./durableCommandRecovery";
 import {
   acquireMatrixCryptoLock,
-  checkpointAndReleaseMatrixSyncStore,
-  checkpointMatrixSyncStore,
+  flushAndReleaseMatrixSyncStore,
+  flushMatrixSyncStore,
   matrixCryptoLockName,
   matrixSyncDatabaseName,
   waitForMatrixSyncStoreClose,
@@ -83,12 +91,10 @@ import {
   classifyGatewayStateProgress,
   createGatewayStateCacheRecord,
   isIgnorableGatewayStateReplay,
-  parseGatewayStateCacheRecord,
   type GatewayStateCacheBinding,
   type GatewayStateSnapshot,
 } from "./gatewayState";
 import {
-  legacyToolGroupPresentation,
   messageFormat,
   parseToolGroupPresentation,
   type MessageFormat,
@@ -98,10 +104,10 @@ import {
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_DETAIL,
   MATRIX_CRYPTO_INITIALIZATION_TIMEOUT_MS,
   MATRIX_CRYPTO_LOADING_DETAIL,
-  MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL,
-  MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL,
+  MATRIX_SYNC_STORE_RECOVERY_DETAIL,
+  MATRIX_SYNC_STORE_SAVE_DETAIL,
   matrixInitialSyncLimit,
-  shouldRecoverMatrixSyncCheckpoint,
+  shouldRebuildMatrixSyncStore,
 } from "./matrixStartup";
 import { processMatrixEventWithDecryptionRetry } from "./matrixDecryptionRetry";
 import { MatrixNativeProjection } from "./matrixNativeProjection";
@@ -198,9 +204,6 @@ export type IncomingCodeverMessage = {
   originDeviceName?: string;
   activeDeviceCount?: number;
   requestId?: string;
-  streamId?: string;
-  toolCallId?: string;
-  toolStatus?: "running" | "succeeded" | "failed";
   replacesEventId?: string;
   format: MessageFormat;
   toolGroup?: ToolGroupPresentation;
@@ -528,8 +531,7 @@ export async function connectMatrix(
   let stopped = false;
   let initialSyncComplete = false;
   let connectionReady = false;
-  let refreshNativeTimelineAfterReconnect = false;
-  let recoverNativeTimeline: (() => Promise<void>) | null = null;
+  let refreshNativeStateAfterReconnect = false;
   let persistenceFailure: string | null = null;
   const failPersistence = (detail: string) => {
     if (persistenceFailure) return;
@@ -573,6 +575,7 @@ export async function connectMatrix(
   const historyChains = new Map<string, Promise<unknown>>();
   const inFlightHistoryLoads = new Map<string, Promise<MatrixHistoryPage>>();
   const nativeProjection = new MatrixNativeProjection();
+  let roomStateChain: Promise<void> = Promise.resolve();
   const outboundCommandMetadata = new Map<
     string,
     { reservation: CommandReservation; payload: CommandPayload }
@@ -695,7 +698,7 @@ export async function connectMatrix(
     });
   };
   const acceptCanonicalNativeCommandResult = async (
-    content: MatrixNativeContent,
+    content: MatrixNativeContent | MatrixStateContent,
   ): Promise<void> => {
     const sourceCommandId = "source_command_id" in content
       ? content.source_command_id
@@ -731,23 +734,23 @@ export async function connectMatrix(
     const recorded = commandLifecycle.recordResult(completion);
     if (recorded) handlers.onCommandResult?.(completion);
   };
-  let lastCommandRecoveryCheckpoint: string | null = null;
-  let commandRecoveryAtCheckpoint: Promise<void> | null = null;
-  const scheduleCommandRecoveryAtCheckpoint = (
-    checkpoint: Extract<MatrixNativeContent, { kind: "gateway_checkpoint" }>,
+  let lastCommandRecoveryState: string | null = null;
+  let commandRecoveryAtState: Promise<void> | null = null;
+  const scheduleCommandRecoveryAtState = (
+    gatewayState: MatrixGatewayState,
     trust: TrustedGateway,
   ): void => {
-    const checkpointKey = [
-      checkpoint.revision_epoch_generation,
-      checkpoint.revision_epoch,
-      checkpoint.state_version,
+    const stateKey = [
+      gatewayState.revision_epoch_generation,
+      gatewayState.revision_epoch,
+      gatewayState.state_version,
     ].join(":");
     if (
-      checkpointKey === lastCommandRecoveryCheckpoint ||
-      commandRecoveryAtCheckpoint
+      stateKey === lastCommandRecoveryState ||
+      commandRecoveryAtState
     ) return;
-    lastCommandRecoveryCheckpoint = checkpointKey;
-    commandRecoveryAtCheckpoint = retryPendingCommand(
+    lastCommandRecoveryState = stateKey;
+    commandRecoveryAtState = retryPendingCommand(
       client,
       config,
       identity,
@@ -764,11 +767,9 @@ export async function connectMatrix(
         if (recorded) handlers.onCommandResult?.(recovered.completion);
       }
     }).finally(() => {
-      commandRecoveryAtCheckpoint = null;
+      commandRecoveryAtState = null;
     });
-    // A checkpoint is a wake-up signal, not part of applying canonical state.
-    // Keep the inbound timeline moving while the durable command is retried.
-    void commandRecoveryAtCheckpoint.catch((error) => {
+    void commandRecoveryAtState.catch((error) => {
       handlers.onStatus("error", formatError(error));
     });
   };
@@ -778,31 +779,218 @@ export async function connectMatrix(
   ): Promise<void> => {
     if (content.kind === "session_root") {
       sessionRootEventIds.set(content.session_id, eventId);
-    } else if (content.kind === "gateway_checkpoint") {
-      for (const session of content.sessions) {
-        if (session.thread_root_event_id) {
-          sessionRootEventIds.set(
-            session.session_id,
-            session.thread_root_event_id,
-          );
-        }
-      }
     }
-    const state = nativeProjection.apply(content);
+    const state = nativeProjection.applyTimeline(content);
     // The durable command must be terminal before its visible inventory
     // change is published. A tab can be closed immediately after rendering.
     await acceptCanonicalNativeCommandResult(content);
     if (state) await onGatewayState(state);
-    if (content.kind === "gateway_checkpoint") {
-      const trust = activeTrust;
-      if (trust) scheduleCommandRecoveryAtCheckpoint(content, trust);
-    }
   };
   const onNativeSessionStatus = async (
     extension: Record<string, unknown>,
   ): Promise<void> => {
     const state = nativeProjection.applySessionStatus(extension);
     if (state) await onGatewayState(state);
+  };
+  const onRoomStateContent = async (
+    content: MatrixStateContent,
+    publish = true,
+    recoverCommands = true,
+  ): Promise<void> => {
+    if (content.kind === "session_state" && content.session?.thread_root_event_id) {
+      sessionRootEventIds.set(
+        content.session_id,
+        content.session.thread_root_event_id,
+      );
+    }
+    // Room State is sufficient proof for desired-state commands. This keeps
+    // command completion independent from thread-history loading and makes a
+    // freshly created/deleted entity self-describing after reload.
+    await acceptCanonicalNativeCommandResult(content);
+    const state = await nativeProjection.applyRoomState(content);
+    if (publish && state) await onGatewayState(state);
+    if (recoverCommands && content.kind === "gateway_state") {
+      const trust = activeTrust;
+      if (trust) scheduleCommandRecoveryAtState(content, trust);
+    }
+  };
+  const decodeRoomStateEvent = async (
+    event: MatrixEvent,
+  ): Promise<MatrixStateContent | null> => {
+    const eventType = event.getType();
+    if (
+      eventType !== CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
+      eventType !== CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+    ) return null;
+    const stateKey = event.getStateKey();
+    const sender = event.getSender();
+    const trust = activeTrust;
+    if (!stateKey || !sender || !trust) return null;
+    if (sender !== trust.gatewayTransport.userId) {
+      throw new Error("Rejected Codever Room State outside the pinned Gateway transport.");
+    }
+    if (
+      (eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE && stateKey !== config.gatewayId)
+    ) {
+      throw new Error("Rejected Codever Room State with an invalid state key.");
+    }
+    const content = matrixStateEventContentSchema.parse(event.getContent());
+    const signed = signedMatrixStateEnvelopeSchema.parse(content.state_envelope);
+    let key = await loadTimelineKey(config, identity, signed.envelope.epochId);
+    if (!key) {
+      if (!content.timeline_key_ring_bundle) {
+        throw new Error("The current Codever Room State key is unavailable.");
+      }
+      const bundle = signedSecureEnvelopeBundleSchema.parse(content.timeline_key_ring_bundle);
+      const certificate = trust.certificate.certificate;
+      const addressed = bundle.bundle.recipients.some(
+        (recipient) =>
+          recipient.recipientDeviceId === certificate.deviceId &&
+          recipient.recipientKeyId === identity.keyId,
+      );
+      if (!addressed) return null;
+      const openedGrant = await openSecureEnvelopeBundle(
+        content.timeline_key_ring_bundle,
+        {
+          recipientPrivateKey: identity.privateKey,
+          senderPublicKey: trust.gatewayKey.publicKey,
+          expected: {
+            gatewayId: trust.gatewayId,
+            conversationId: config.conversationId,
+            direction: "gateway_to_device",
+            senderDeviceId: certificate.gatewayId,
+            recipientDeviceId: certificate.deviceId,
+            senderKeyId: trust.gatewayKey.keyId,
+            recipientKeyId: identity.keyId,
+          },
+          replayStore: historyReplayStore,
+          now: bundle.bundle.issuedAt,
+        },
+      );
+      await saveTimelineKeyRing(config, identity, openedGrant.plaintext);
+      key = await loadTimelineKey(config, identity, signed.envelope.epochId);
+    }
+    if (!key) throw new Error("The current Codever Room State key is unavailable.");
+    const plaintext = await openMatrixStateEnvelope(content.state_envelope, {
+      timelineKey: key,
+      gatewayPublicKey: trust.gatewayKey.publicKey,
+      expected: {
+        gatewayId: config.gatewayId,
+        conversationId: config.conversationId,
+        roomId: config.roomId,
+        eventType,
+        stateKey,
+        epochId: signed.envelope.epochId,
+        stateVersion: signed.envelope.stateVersion,
+      },
+    });
+    if (
+      (plaintext.kind === "gateway_state" && stateKey !== plaintext.gateway_id) ||
+      (plaintext.kind === "session_state" && stateKey !== plaintext.session_id)
+    ) {
+      throw new Error("Codever Room State entity binding does not match its state key.");
+    }
+    return matrixStateContentSchema.parse(plaintext);
+  };
+  let authoritativeStateInitialized = false;
+  const processRoomStateEvent = async (event: MatrixEvent): Promise<void> => {
+    const content = await decodeRoomStateEvent(event);
+    if (!content) return;
+    // Live state received during startup is authenticated and retained, but it
+    // must not expose a partial inventory before the complete /state snapshot
+    // has crossed its atomic publication barrier.
+    await onRoomStateContent(content, authoritativeStateInitialized);
+  };
+  const enqueueRoomStateEvent = (event: MatrixEvent): Promise<void> => {
+    const operation = roomStateChain.then(() => processRoomStateEvent(event));
+    roomStateChain = operation.catch(() => undefined);
+    return operation;
+  };
+  const loadAuthoritativeRoomState = async (): Promise<void> => {
+    // The SDK restores room.currentState from its persisted /sync token before
+    // it performs a network sync. Treating that cache as authoritative makes a
+    // reload temporarily show an old inventory. Fetch the server's current
+    // Room State directly so startup, foreground recovery, and reconnect all
+    // cross a real current-state barrier.
+    const currentState = await client.roomState(config.roomId);
+    const codeverState = currentState
+      .filter((event) =>
+        event.type === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE ||
+        event.type === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+      )
+      .map((event) => new sdk.MatrixEvent(event));
+    const gatewayEvent = codeverState.find((event) =>
+      event.getType() === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
+      event.getStateKey() === config.gatewayId,
+    );
+    const sessionEvents = codeverState.filter((event) =>
+      event.getType() === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+    );
+    if (!gatewayEvent) {
+      throw new Error("The Gateway has not published current Matrix Room State.");
+    }
+    const operation = roomStateChain.then(async () => {
+      // Gateway state establishes the revision epoch. Apply every session
+      // entity inside the same projection transaction, then publish exactly
+      // one complete inventory to the UI. A Matrix /state response is a
+      // snapshot, not a sequence of user-visible incremental states.
+      const gatewayContent = await decodeRoomStateEvent(gatewayEvent);
+      if (!gatewayContent || gatewayContent.kind !== "gateway_state") {
+        throw new Error("The Gateway Room State is unavailable.");
+      }
+      const decodedState: MatrixStateContent[] = [gatewayContent];
+      for (const event of sessionEvents) {
+        const content = await decodeRoomStateEvent(event);
+        if (content) decodedState.push(content);
+      }
+      const snapshot = await nativeProjection.applyRoomStateBatch(decodedState);
+      if (!snapshot) throw new Error("The Gateway Room State is unavailable.");
+      for (const content of decodedState) {
+        if (content.kind === "session_state" && content.session?.thread_root_event_id) {
+          sessionRootEventIds.set(
+            content.session_id,
+            content.session.thread_root_event_id,
+          );
+        }
+        await acceptCanonicalNativeCommandResult(content);
+      }
+      authoritativeStateInitialized = true;
+      await onGatewayState(snapshot);
+      const trust = activeTrust;
+      if (trust) scheduleCommandRecoveryAtState(gatewayContent, trust);
+    });
+    roomStateChain = operation.catch(() => undefined);
+    await operation;
+  };
+  const waitForAuthoritativeRoomState = async (
+    signal?: AbortSignal,
+    timeoutMs = 30_000,
+  ): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
+    do {
+      if (signal?.aborted) throw signal.reason;
+      try {
+        await loadAuthoritativeRoomState();
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          window.clearTimeout(timer);
+          reject(signal.reason);
+        };
+        const timer = window.setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, 250);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    } while (Date.now() < deadline);
+    throw new Error(
+      `The Gateway did not publish complete current Matrix Room State after pairing: ${formatError(lastError)}`,
+    );
   };
   const reportInboundError = (error: unknown) => {
     handlers.onStatus("error", formatError(error));
@@ -822,7 +1010,7 @@ export async function connectMatrix(
     }
     lastGatewayStateRecoveryAt = Date.now();
     handlers.onConvergenceRequired?.();
-    gatewayStateRecovery = (recoverNativeTimeline?.() ?? Promise.resolve())
+    gatewayStateRecovery = loadAuthoritativeRoomState()
       .catch(reportInboundError)
       .finally(() => {
         gatewayStateRecovery = null;
@@ -832,6 +1020,10 @@ export async function connectMatrix(
     if (!room || room.roomId !== config.roomId) return;
     // A limited sync is recovered from Matrix's own thread/timeline APIs.
     recoverGatewayStateSnapshot();
+  };
+  const onRoomState = (event: MatrixEvent): void => {
+    if (stopped || event.getRoomId() !== config.roomId) return;
+    void enqueueRoomStateEvent(event).catch(reportInboundError);
   };
   const onVisibilityRecovery = (): void => {
     if (document.visibilityState === "visible") recoverGatewayStateSnapshot();
@@ -909,35 +1101,35 @@ export async function connectMatrix(
       // Do not close this IndexedDB connection synchronously: MatrixClient
       // still finishes background stop work after stopClient() returns, and
       // closing here can make an immediate post-pairing reconnect degrade to
-      // memory. The forced checkpoint is serialized before the next client
+      // memory. The forced local-store flush is serialized before the next client
       // opens the same database; the stopped client no longer writes to it.
-      void checkpointMatrixSyncStore(
+      void flushMatrixSyncStore(
         syncStoreDatabaseName,
         syncStore,
       ).catch((error) => {
         if (!stopped) {
           failPersistence(
-            `Matrix sync state could not be checkpointed: ${formatError(error)}.`,
+            `The local Matrix sync cache could not be saved: ${formatError(error)}.`,
           );
         }
       });
-      if (connectionReady && refreshNativeTimelineAfterReconnect) {
-        refreshNativeTimelineAfterReconnect = false;
-        void recoverNativeTimeline?.().catch((error) => {
-          refreshNativeTimelineAfterReconnect = true;
+      if (connectionReady && refreshNativeStateAfterReconnect) {
+        refreshNativeStateAfterReconnect = false;
+        void loadAuthoritativeRoomState().catch((error) => {
+          refreshNativeStateAfterReconnect = true;
           reportInboundError(error);
         });
       }
       if (connectionReady) handlers.onStatus("connected");
     } else if (state === "RECONNECTING" || state === "CATCHUP") {
-      refreshNativeTimelineAfterReconnect = true;
+      refreshNativeStateAfterReconnect = true;
       handlers.onStatus("reconnecting");
     } else if (state === "ERROR") {
       // The Matrix SDK can emit ERROR between successful sync attempts. Treat
       // this as recoverable here; startup/authentication failures are surfaced
       // by the bounded connection path instead of flashing a fatal UI while
       // the SDK is already retrying.
-      refreshNativeTimelineAfterReconnect = true;
+      refreshNativeStateAfterReconnect = true;
       handlers.onStatus(
         "reconnecting",
         "Encrypted sync was interrupted. Retrying automatically…",
@@ -947,7 +1139,7 @@ export async function connectMatrix(
     }
   };
 
-  let recoveringSyncCheckpoint = false;
+  let rebuildingSyncStore = false;
   let startupRoom: Room | null = null;
   handlers.onStatus("connecting", "Opening the encrypted device store…");
   try {
@@ -959,7 +1151,7 @@ export async function connectMatrix(
       "The Matrix sync database did not open in time.",
     );
     const savedSyncToken = await syncStore.getSavedSyncToken();
-    recoveringSyncCheckpoint = shouldRecoverMatrixSyncCheckpoint(
+    rebuildingSyncStore = shouldRebuildMatrixSyncStore(
       Boolean(activeTrust),
       savedSyncToken,
     );
@@ -996,14 +1188,14 @@ export async function connectMatrix(
     client.on(sdk.ClientEvent.Sync, onSync);
     handlers.onStatus(
       "connecting",
-      recoveringSyncCheckpoint
-        ? MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL
+      rebuildingSyncStore
+        ? MATRIX_SYNC_STORE_RECOVERY_DETAIL
         : "Starting the first encrypted sync…",
     );
     await client.startClient({
       initialSyncLimit: matrixInitialSyncLimit(
         Boolean(activeTrust),
-        recoveringSyncCheckpoint,
+        rebuildingSyncStore,
       ),
     });
     await waitForInitialSync(client, sdk.ClientEvent.Sync);
@@ -1034,7 +1226,7 @@ export async function connectMatrix(
     let detail = formatError(error);
     try {
       await withMatrixTimeout(
-        checkpointAndReleaseMatrixSyncStore(
+        flushAndReleaseMatrixSyncStore(
           syncStoreDatabaseName,
           syncStore,
           cryptoLock,
@@ -1044,7 +1236,7 @@ export async function connectMatrix(
       );
     } catch (cleanupError) {
       await cryptoLock.release().catch(() => undefined);
-      detail = `${detail} The local Matrix stores could not be checkpointed or closed cleanly: ${formatError(
+      detail = `${detail} The local Matrix stores could not be saved or closed cleanly: ${formatError(
         cleanupError,
       )} Reload this page before retrying.`;
     }
@@ -1052,7 +1244,7 @@ export async function connectMatrix(
     throw new Error(detail);
   }
   if (!matrixDeviceKeys) {
-    await checkpointAndReleaseMatrixSyncStore(
+    await flushAndReleaseMatrixSyncStore(
       syncStoreDatabaseName,
       syncStore,
       cryptoLock,
@@ -1060,7 +1252,7 @@ export async function connectMatrix(
     throw new Error("Matrix device keys were not initialized.");
   }
   if (!startupRoom) {
-    await checkpointAndReleaseMatrixSyncStore(
+    await flushAndReleaseMatrixSyncStore(
       syncStoreDatabaseName,
       syncStore,
       cryptoLock,
@@ -1129,61 +1321,37 @@ export async function connectMatrix(
       }
     }
 
-    if (recoveringSyncCheckpoint) {
-      handlers.onStatus("securing", MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL);
+    if (rebuildingSyncStore) {
+      handlers.onStatus("securing", MATRIX_SYNC_STORE_SAVE_DETAIL);
       await withMatrixTimeout(
-        checkpointMatrixSyncStore(syncStoreDatabaseName, syncStore),
+        flushMatrixSyncStore(syncStoreDatabaseName, syncStore),
         LOCAL_STORE_TIMEOUT_MS,
-        "The rebuilt Matrix sync checkpoint could not be saved in time.",
+        "The rebuilt local Matrix sync cache could not be saved in time.",
       );
       assertStartupActive();
       if (!(await syncStore.getSavedSyncToken())) {
         throw new Error(
-          "The Matrix sync checkpoint was rebuilt but could not be persisted. Check this browser’s storage settings and try again.",
+          "The local Matrix sync cache was rebuilt but could not be persisted. Check this browser’s storage settings and try again.",
         );
       }
     }
 
-    // Take the complete timeline snapshot and install the live listener in the
-    // same turn. Events received while Gateway verification was running are in
-    // this snapshot; later events are serialized behind it without a gap.
-    const initialTimeline = [...startupRoom.getLiveTimeline().getEvents()];
-    const initialTimelineOperations = initialTimeline.map((event) =>
-      enqueueInboundEvent(event, true),
-    );
+    // Install live listeners before the authoritative state read so neither
+    // control-state nor new conversation events can fall into a startup gap.
+    // Do not replay the SDK's initial room timeline here. Session history is
+    // loaded through its thread/history API on demand; putting old room events
+    // onto the live inbound queue would let arbitrary history volume delay a
+    // newly arriving prompt or Agent result on another device.
     client.on(sdk.RoomEvent.Timeline, onTimeline);
     client.on(sdk.RoomEvent.TimelineReset, onTimelineReset);
-    await Promise.all(initialTimelineOperations);
-    // A fresh device can see old session roots before the later key-ring grant
-    // in the same initial sync. Retry only events that deliberately remained
-    // unseen until that grant was authenticated and persisted.
-    for (const event of initialTimeline) {
-      const eventId = event.getId();
-      if (eventId && !seen.has(eventId)) {
-        await enqueueInboundEvent(event, true);
-      }
-    }
-    assertStartupActive();
+    startupRoom.on(sdk.RoomStateEvent.Events, onRoomState);
 
     if (activeTrust) {
-      const cachedGatewayState = await loadCachedGatewayState(
-        config,
-        identity,
-        activeTrust.certificate.certificate.certificateId,
-      );
-      assertStartupActive();
-      if (cachedGatewayState) {
-        handlers.onCollaborationState?.({
-          revision: cachedGatewayState.revision,
-          activeDeviceCount: cachedGatewayState.activeDeviceCount,
-          gatewayState: cachedGatewayState,
-        });
-      }
       handlers.onStatus(
         "securing",
-        "Restoring sessions from the encrypted Matrix timeline…",
+        "Loading current sessions from Matrix Room State…",
       );
-      await recoverNativeTimeline?.();
+      await loadAuthoritativeRoomState();
       assertStartupActive();
     }
 
@@ -1200,13 +1368,14 @@ export async function connectMatrix(
     stopped = true;
     client.off(sdk.RoomEvent.Timeline, onTimeline);
     client.off(sdk.RoomEvent.TimelineReset, onTimelineReset);
+    startupRoom?.off(sdk.RoomStateEvent.Events, onRoomState);
     client.off(sdk.ClientEvent.Sync, onSync);
     removeBrowserRecoveryListeners();
     client.stopClient();
     let detail = formatError(error);
     try {
       await withMatrixTimeout(
-        checkpointAndReleaseMatrixSyncStore(
+        flushAndReleaseMatrixSyncStore(
           syncStoreDatabaseName,
           syncStore,
           cryptoLock,
@@ -1581,7 +1750,6 @@ export async function connectMatrix(
       const eventId = event.getId();
       if (!eventId) continue;
       const decoded = await decodeHistoricalEvent(
-        client,
         event,
         config,
         identity,
@@ -1637,7 +1805,7 @@ export async function connectMatrix(
     const page = await client.relations(
       config.roomId,
       rootEventId,
-      null,
+      sdk.RelationType.Thread,
       null,
       {
         dir: sdk.Direction.Backward,
@@ -1661,26 +1829,6 @@ export async function connectMatrix(
     const nextToken = await fetchSessionRelations(room, sessionId, limit);
     initializedHistoryRelations.add(sessionId);
     historyRelationTokens.set(sessionId, nextToken);
-  };
-  recoverNativeTimeline = async (): Promise<void> => {
-    const room = client.getRoom(config.roomId);
-    if (!room) throw new Error("The Matrix room is not available.");
-    await room.fetchRoomThreads();
-    for (const thread of room.getThreads()) {
-      if (thread.rootEvent) await enqueueInboundEvent(thread.rootEvent, true);
-      for (const event of thread.liveTimeline.getEvents()) {
-        const eventId = event.getId();
-        if (eventId && !seen.has(eventId)) {
-          await enqueueInboundEvent(event, true);
-        }
-      }
-    }
-    for (const event of room.getLiveTimeline().getEvents()) {
-      const eventId = event.getId();
-      if (eventId && !seen.has(eventId)) {
-        await enqueueInboundEvent(event, true);
-      }
-    }
   };
   const takeHistory = (
     sessionId: string,
@@ -1917,6 +2065,8 @@ export async function connectMatrix(
         signal,
       );
       activeTrust = trust;
+      handlers.onStatus("securing", "Loading current sessions from Matrix Room State…");
+      await waitForAuthoritativeRoomState(signal);
       handlers.onStatus("connected");
       return trust;
     },
@@ -2032,11 +2182,12 @@ export async function connectMatrix(
       stopped = true;
       client.off(sdk.RoomEvent.Timeline, onTimeline);
       client.off(sdk.RoomEvent.TimelineReset, onTimelineReset);
+      startupRoom?.off(sdk.RoomStateEvent.Events, onRoomState);
       client.off(sdk.ClientEvent.Sync, onSync);
       removeBrowserRecoveryListeners();
       client.stopClient();
       handlers.onStatus("offline");
-      void checkpointAndReleaseMatrixSyncStore(
+      void flushAndReleaseMatrixSyncStore(
         syncStoreDatabaseName,
         syncStore,
         cryptoLock,
@@ -2436,15 +2587,8 @@ export function parseCodeverEvent(
   }
   if (effectiveExtension.kind === "message") {
     const ui = asRecord(effectiveExtension.ui);
-    const toolGroup =
-      parseToolGroupPresentation(ui) ??
-      (ui?.kind === "tool_card"
-        ? legacyToolGroupPresentation({
-            groupId: eventId,
-            name: body || "Agent tool",
-            timestamp,
-          })
-        : undefined);
+    const toolGroup = parseToolGroupPresentation(ui);
+    if (effectiveExtension.ui !== undefined && !toolGroup) return null;
     return {
       eventId,
       sender,
@@ -2493,113 +2637,7 @@ export function parseCodeverEvent(
       raw: effectiveExtension,
     };
   }
-  if (effectiveExtension.kind !== "signed_event") return null;
-
-  const envelope =
-    asRecord(effectiveExtension.signed_event) ??
-    asRecord(effectiveExtension.envelope);
-  const event = asRecord(envelope?.event);
-  const payload = asRecord(event?.payload);
-  if (!payload || typeof payload.type !== "string") return null;
-  const common = {
-    eventId,
-    sender,
-    timestamp,
-    encrypted,
-    ...collaborationMetadata,
-    ...replacementMetadata,
-    raw: payload,
-  };
-
-  switch (payload.type) {
-    case "agent.text.delta":
-    case "agent.text.completed":
-      return {
-        ...common,
-        kind: "agent",
-        text: typeof payload.text === "string" ? payload.text : "",
-        format: "markdown",
-        ...(typeof payload.streamId === "string"
-          ? { streamId: payload.streamId }
-          : {}),
-      };
-    case "agent.tool.started":
-    case "agent.tool.completed": {
-      const name =
-        typeof payload.name === "string"
-          ? payload.name
-          : payload.type === "agent.tool.completed"
-            ? `Tool ${String(payload.status ?? "completed")}`
-            : "Agent tool";
-      const failed =
-        payload.status === "failed" ||
-        payload.status === "error" ||
-        payload.isError === true;
-      const phase =
-        payload.type === "agent.tool.completed"
-          ? failed
-            ? "failed"
-            : "completed"
-          : "started";
-      const groupId =
-        typeof payload.toolCallId === "string"
-          ? payload.toolCallId
-          : typeof payload.toolUseId === "string"
-            ? payload.toolUseId
-            : eventId;
-      return {
-        ...common,
-        kind: "tool",
-        text: name,
-        format: "plain",
-        toolGroup: legacyToolGroupPresentation({
-          groupId,
-          name,
-          timestamp,
-          phase,
-          isError: failed,
-        }),
-        ...(typeof payload.toolCallId === "string"
-          ? { toolCallId: payload.toolCallId }
-          : {}),
-        ...(payload.type === "agent.tool.started"
-          ? { toolStatus: "running" as const }
-          : payload.status === "succeeded" || payload.status === "failed"
-            ? { toolStatus: payload.status }
-            : {}),
-      };
-    }
-    case "agent.permission.requested":
-      return {
-        ...common,
-        kind: "permission",
-        text:
-          typeof payload.title === "string"
-            ? payload.title
-            : "Permission required",
-        format: "plain",
-        ...(typeof payload.requestId === "string"
-          ? { requestId: payload.requestId }
-          : {}),
-      };
-    case "agent.error":
-      return {
-        ...common,
-        kind: "error",
-        text:
-          typeof payload.message === "string"
-            ? payload.message
-            : "The agent reported an error.",
-        format: "plain",
-      };
-    default:
-      return {
-        ...common,
-        kind: "notice",
-        text: humanizeField(payload.type),
-        format: "plain",
-      };
-  }
+  return null;
 }
 
 type DecodedHistoricalEvent = {
@@ -2801,7 +2839,6 @@ async function openGatewaySecureEnvelope(
  * already-authenticated archive unreadable.
  */
 async function decodeHistoricalEvent(
-  client: MatrixClient,
   event: MatrixEvent,
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -2811,46 +2848,26 @@ async function decodeHistoricalEvent(
   const eventId = event.getId();
   const sender = event.getSender();
   if (!eventId || !sender || sender === config.userId || !trust) return null;
-  if (event.getType() === "m.room.encrypted" || event.isEncrypted()) {
-    await client.decryptEventIfNeeded(event);
-  }
-  if (event.isDecryptionFailure() || event.getType() !== "m.room.message") {
+  if (event.isEncrypted() || event.getType() !== "m.room.message") {
     return null;
   }
   const content = asRecord(event.getContent());
   const extension = asRecord(content?.["io.codever"]);
-  if (
-    !content ||
-    (!isGatewaySecureEnvelopeExtension(extension) &&
-      !isGatewayTimelineEnvelopeExtension(extension))
-  ) {
+  if (!content || !isGatewayTimelineEnvelopeExtension(extension)) {
     return null;
   }
-  if (
-    isGatewayTimelineEnvelopeExtension(extension) &&
-    !event.isEncrypted() &&
-    sender !== trust.gatewayTransport.userId
-  ) {
+  if (sender !== trust.gatewayTransport.userId) {
     return null;
   }
-  const plaintext = isGatewayTimelineEnvelopeExtension(extension)
-    ? await openGatewayTimelineContent(
-        extension!,
-        content,
-        config,
-        identity,
-        trust,
-        replayStore,
-        true,
-      )
-    : await openGatewaySecureEnvelope(
-        extension!,
-        config,
-        identity,
-        trust,
-        replayStore,
-        true,
-      );
+  const plaintext = await openGatewayTimelineContent(
+    extension,
+    content,
+    config,
+    identity,
+    trust,
+    replayStore,
+    true,
+  );
   if (plaintext === null) return null;
   const decryptedContent = asRecord(plaintext);
   if (!decryptedContent) {
@@ -3025,15 +3042,18 @@ export async function processGatewayTimelineEvent(
     seen.add(eventId);
     return;
   }
+  const acceptedEnvelope = applicationControl
+    ? isGatewaySecureEnvelopeExtension(extension)
+    : !event.isEncrypted() && isGatewayTimelineEnvelopeExtension(extension);
   if (
-    (!isGatewaySecureEnvelopeExtension(extension) &&
-      !isGatewayTimelineEnvelopeExtension(extension)) ||
+    !acceptedEnvelope ||
     !identity ||
     !getTrust ||
     !replayStore
   ) {
-    // Legacy Matrix plaintext is intentionally ignored. Pairing and signed
-    // device rotation are the only non-envelope control events.
+    // Pairing and signed device rotation are the only non-envelope control
+    // events. Timeline traffic must use v2 application encryption; command
+    // traffic must use the dedicated application-control event type.
     seen.add(eventId);
     return;
   }
@@ -3042,11 +3062,7 @@ export async function processGatewayTimelineEvent(
     seen.add(eventId);
     return;
   }
-  if (
-    isGatewayTimelineEnvelopeExtension(extension) &&
-    !event.isEncrypted() &&
-    sender !== trust.gatewayTransport.userId
-  ) {
+  if (!applicationControl && sender !== trust.gatewayTransport.userId) {
     throw new Error(
       "Rejected a Codever timeline event outside the pinned Gateway transport.",
     );
@@ -3060,9 +3076,9 @@ export async function processGatewayTimelineEvent(
   }
   let plaintext: JsonValue | null;
   try {
-    plaintext = isGatewayTimelineEnvelopeExtension(extension)
+    plaintext = !applicationControl
       ? await openGatewayTimelineContent(
-          extension!,
+          extension,
           content,
           config,
           identity,
@@ -3071,7 +3087,7 @@ export async function processGatewayTimelineEvent(
           historical,
         ) as JsonValue | null
       : await openGatewaySecureEnvelope(
-          extension!,
+          extension,
           config,
           identity,
           trust,
@@ -3088,7 +3104,7 @@ export async function processGatewayTimelineEvent(
     throw error;
   }
   if (plaintext === null) {
-    if (isGatewayTimelineEnvelopeExtension(extension)) {
+    if (!applicationControl) {
       return;
     }
     // This untrusted header is used only to route away another device's
@@ -3563,50 +3579,6 @@ function gatewayStateCacheScope(binding: GatewayStateCacheBinding): string {
   ]);
 }
 
-async function loadCachedGatewayState(
-  config: MatrixConnectionConfig,
-  identity: DeviceIdentity,
-  certificateId: string,
-): Promise<GatewayStateSnapshot | null> {
-  const database = await openIdentityDatabase();
-  const binding = gatewayStateCacheBinding(config, identity, certificateId);
-  try {
-    return await new Promise<GatewayStateSnapshot | null>((resolve, reject) => {
-      const transaction = database.transaction(
-        COMMAND_SEQUENCE_STORE,
-        "readonly",
-      );
-      const store = transaction.objectStore(COMMAND_SEQUENCE_STORE);
-      const epochRead = store.get(gatewayEpochScope(config, identity));
-      const cacheRead = store.get(gatewayStateCacheScope(binding));
-      transaction.oncomplete = () => {
-        try {
-          const epoch = parseDurableGatewayEpochState(epochRead.result);
-          resolve(
-            epoch
-              ? parseGatewayStateCacheRecord(cacheRead.result, binding, epoch)
-              : null,
-          );
-        } catch (error) {
-          reject(error);
-        }
-      };
-      transaction.onerror = () =>
-        reject(
-          transaction.error ??
-            new Error("Could not read the cached Gateway state."),
-        );
-      transaction.onabort = () =>
-        reject(
-          transaction.error ??
-            new Error("Could not read the cached Gateway state."),
-        );
-    });
-  } finally {
-    database.close();
-  }
-}
-
 async function reserveCommandSequence(
   config: MatrixConnectionConfig,
   identity: DeviceIdentity,
@@ -3866,8 +3838,8 @@ async function initializeKnownRevision(
             revisionEpoch,
             revisionEpochGeneration,
           );
-          // Timeline recovery replays authenticated older checkpoints. They
-          // are history, not fatal connection errors, and must never replace
+          // Recovery may observe authenticated older Room State versions. They
+          // are stale state, not fatal connection errors, and must never replace
           // a newer durable projection.
           if (isIgnorableGatewayStateReplay(epochStatus)) return;
           if (epochStatus === "conflict") {

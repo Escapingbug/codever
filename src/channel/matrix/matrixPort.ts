@@ -185,8 +185,8 @@ export class MatrixPort implements ChannelPort {
         }
 
         const activity = status.activity ?? matrixActivityPhase(status.state)
-        // Keep the established Matrix state vocabulary for older clients;
-        // activity_phase carries the precise presentation lifecycle.
+        // `state` is the coarse semantic status; `activity_phase` carries the
+        // more precise presentation lifecycle.
         const state = activity === 'starting' ? 'running' : matrixSessionStatus(status.state)
         const body = [
             matrixSessionStatusLabel(activity),

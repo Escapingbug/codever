@@ -53,9 +53,6 @@ object PublicClientJson {
         value.historical?.let { put("historical", it) }
         value.operationId?.let { put("operationId", it) }
         value.requestId?.let { put("requestId", it) }
-        value.streamId?.let { put("streamId", it) }
-        value.toolCallId?.let { put("toolCallId", it) }
-        value.toolStatus?.let { put("toolStatus", it.wireValue) }
         value.replacesEventId?.let { put("replacesEventId", it) }
         value.commandId?.let { put("commandId", it) }
         value.revision?.let { put("revision", it) }
@@ -84,9 +81,6 @@ object PublicClientJson {
             historical = value.optionalBoolean("historical"),
             operationId = value.optionalString("operationId", 512),
             requestId = value.optionalString("requestId", 512),
-            streamId = value.optionalString("streamId", 512),
-            toolCallId = value.optionalString("toolCallId", 512),
-            toolStatus = value.optionalString("toolStatus", 128)?.let(ClientToolStatus::fromWire),
             replacesEventId = value.optionalString("replacesEventId", 512),
             commandId = value.optionalString("commandId", 512),
             revision = value.optionalLong("revision"),
@@ -395,7 +389,7 @@ object PublicClientJson {
 
     private val MESSAGE_KEYS = setOf(
         "eventId", "sender", "timestamp", "encrypted", "kind", "text", "sessionId",
-        "historical", "operationId", "requestId", "streamId", "toolCallId", "toolStatus",
+        "historical", "operationId", "requestId",
         "replacesEventId", "commandId", "revision", "originDeviceId", "originDeviceName",
         "activeDeviceCount", "format", "attachments", "toolGroup", "semantic",
     )

@@ -129,11 +129,22 @@ describe('long-lived Matrix pairing recovery', () => {
     })
     const first = await service.receiveRequest(request.signedRequest)
     const client = new FakePairingClient()
+    const onRejected = vi.fn()
+    let provisioningAttempts = 0
     const stop = listenForMatrixPairingRequests({
       client,
       service,
       registry,
       gatewayTransport,
+      onProvisioned: async record => {
+        provisioningAttempts += 1
+        expect(record.certificate.certificate.deviceId).toBe('phone-one')
+        expect(client.sent).toHaveLength(0)
+        if (provisioningAttempts === 1) {
+          throw new Error('Room State publication interrupted')
+        }
+      },
+      onRejected,
     })
 
     client.emit({
@@ -154,10 +165,36 @@ describe('long-lived Matrix pairing recovery', () => {
       },
     })
 
+    await vi.waitFor(() => expect(onRejected).toHaveBeenCalledOnce())
+    expect(client.sent).toHaveLength(0)
+    await expect(registry.listActive()).resolves.toHaveLength(1)
+
+    // The same signed request is recoverable after the durable pairing record
+    // was written but Room State publication failed. No pairing response is
+    // observable until provisioning succeeds.
+    client.emit({
+      roomId: gatewayTransport.roomId,
+      eventId: '$request-retry-after-state-failure',
+      eventType: 'm.room.message',
+      sender: deviceTransport.userId,
+      senderDeviceId: deviceTransport.ed25519,
+      encrypted: true,
+      content: {
+        msgtype: 'm.text',
+        body: 'Pairing request',
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 1,
+          kind: 'pairing_request',
+          pairing_request: request.signedRequest,
+        },
+      },
+    })
+
     await vi.waitFor(() => expect(client.sent).toHaveLength(1))
+    expect(provisioningAttempts).toBe(2)
     const extension = client.sent[0]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
     expect(extension.pairing_response).toEqual(first.response)
-    expect(client.pinned).toHaveLength(1)
+    expect(client.pinned).toHaveLength(2)
     await expect(registry.listActive()).resolves.toHaveLength(1)
 
     const unusedOffer = await service.createOffer({
@@ -202,6 +239,7 @@ describe('long-lived Matrix pairing recovery', () => {
       registry,
       gatewayTransport,
       acceptNewOffers: true,
+      onProvisioned: () => undefined,
     })
     client.emit({
       roomId: gatewayTransport.roomId,
@@ -303,6 +341,7 @@ describe('long-lived Matrix pairing recovery', () => {
       registry,
       gatewayTransport,
       acceptNewOffers: true,
+      onProvisioned: () => undefined,
       onRejected,
     })
 

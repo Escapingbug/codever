@@ -75,8 +75,10 @@ enum class PairingOperation(val wireName: String) {
     DECISION("decision"),
     SESSION_SETTINGS("session.settings"),
     SESSION_CREATE("session.create"),
-    DEVICE_INVITE("device.invite"),
-    SESSION_SELECT("session.select");
+    SESSION_ARCHIVE("session.archive"),
+    SESSION_RESTORE("session.restore"),
+    SESSION_DELETE("session.delete"),
+    DEVICE_INVITE("device.invite");
 
     companion object {
         fun parse(value: String): PairingOperation = entries.firstOrNull { it.wireName == value }

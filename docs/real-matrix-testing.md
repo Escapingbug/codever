@@ -1,9 +1,9 @@
 # Real Matrix testing
 
-The rewrite has two real test paths. The automated path is a legacy Matrix
-transport smoke test. The manual path exercises pairing, the application
-envelope, secure command acknowledgement, key rotation and a real configured
-Codever provider.
+The rewrite has one automated Alpha path plus an optional manual development
+path. Both exercise pairing, application encryption, secure command
+acknowledgement, Room State, thread history, and a configured provider. There
+is no insecure legacy transport test mode.
 
 ## Prerequisites
 
@@ -18,31 +18,29 @@ The local environment uses the official Synapse container, binds it only to
 `dev/matrix/data` directory. Its deliberately relaxed login rate limit is not
 safe for a public server.
 
-## Automated legacy transport smoke test
+## Automated Alpha acceptance
 
 From the repository root:
 
 ```powershell
-.\scripts\matrix-local.ps1 bootstrap
-npm run test:matrix-live
+$env:CODEVER_ALPHA_LIVE_E2E = '1'
+$env:CODEVER_ANDROID_SERIAL = 'emulator-5554'
+pnpm test:e2e:alpha-live
 ```
 
 A passing run ends with:
 
 ```text
-[5/5] PASS — decrypted Gateway reply received ...
+[8/8] PASS — real browser, Synapse, Gateway, E2EE, history, and deletion converged.
 ```
 
 That run exercises:
 
-1. Separate PWA and Gateway Matrix accounts and fresh devices.
-2. Matrix Rust crypto and an encrypted Megolm room.
-3. Signed command validation, replay checks and provider execution.
-4. A reply delivered through the real Matrix room.
-
-This script explicitly enables `allowInsecureLegacyForTesting`; it does **not**
-prove the PWA pairing certificate or ECDH/HKDF/AES-GCM application envelope.
-Use the manual path below for that security boundary.
+1. Separate browser, APK, and Gateway Matrix devices.
+2. Pairing certificates and application-layer encrypted control events.
+3. Current Room State, per-session threads, history, and offline cache recovery.
+4. Exactly-once command recovery, concurrent mutations, notifications, and
+   browser/APK convergence.
 
 ## Manual PWA-to-agent test
 
@@ -134,8 +132,8 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
 
 ## Current test boundary
 
-- Browser crypto and the Matrix `/sync` checkpoint are persisted in
-  device-scoped IndexedDB databases. The PWA forces a checkpoint after initial
+- Browser crypto and the Matrix `/sync` token are persisted in
+  device-scoped IndexedDB databases. The PWA flushes the local store after initial
   sync and on explicit disconnect so a later reconnect can consume device-list
   changes that happened while it was offline.
 - Keep only one Codever tab open for a given Matrix device. The PWA enforces
@@ -143,8 +141,7 @@ Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
   instance can share the Rust crypto database.
 - If a previously signed Gateway Matrix device is not visible to the Matrix
   crypto store, the PWA fails closed instead of trusting room state. This can
-  occur on the first upgrade from an older build that never persisted a sync
-  token; sign in as a new Matrix device and pair it again.
+  occur after browser storage eviction; sign in as a new Matrix device and pair it again.
 - The localhost Gateway intentionally uses an in-memory Matrix crypto store and
   a fresh Matrix device on every start. This is allowed only by the explicit
   local-test flag. The fresh device is signed by the persistent Gateway P-256

@@ -16,7 +16,6 @@ import {
     publishMatrixTransportSnapshot,
     pairingVerificationCode,
     trustedDeviceFromRecord,
-    waitForMatrixPairing,
 } from '../src/gateway/pairing/index.js'
 import {
     FileMatrixLoginTokenIssuer,
@@ -152,7 +151,12 @@ const invitationCoordinator = new DeviceInvitationCoordinator(
     },
 )
 
-let active = await registry.listActive()
+const active = await registry.listActive()
+let startupPairing: {
+    link: string
+    expiresAt: number
+    verificationCode: string
+} | null = null
 if (active.length === 0) {
     const created = await pairingService.createOffer({
         gatewayName: process.env.CODEVER_GATEWAY_NAME ?? 'Codever local Gateway',
@@ -164,29 +168,11 @@ if (active.length === 0) {
         created.signedOffer.offer.challenge,
         created.signedOffer.offer.gatewayKey.keyId,
     )
-    process.stdout.write('\nPair this Gateway from Codever:\n\n')
-    process.stdout.write(await QRCode.toString(created.link, {
-        type: 'terminal',
-        small: true,
-        errorCorrectionLevel: 'L',
-    }))
-    process.stdout.write(`\nInvitation code: ${formatCode(invitationCode)}\n`)
-    process.stdout.write(`Pairing link (paste fallback):\n${created.link}\n\n`)
-    process.stdout.write('Waiting for one encrypted pairing request…\n')
-    const paired = await waitForMatrixPairing({
-        client,
-        service: pairingService,
-        registry,
-        gatewayTransport: currentTransport,
-        timeoutMs: Math.max(1, created.signedOffer.offer.expiresAt - Date.now()),
-        onRejected: error => {
-            process.stderr.write(`[matrix-pairing] rejected: ${formatError(error)}\n`)
-        },
-    })
-    process.stdout.write(
-        `Paired ${paired.certificate.certificate.deviceName}. Starting the agent…\n`,
-    )
-    active = await registry.listActive()
+    startupPairing = {
+        link: created.link,
+        expiresAt: created.signedOffer.offer.expiresAt,
+        verificationCode: invitationCode,
+    }
 } else {
     const rotated = await announceMatrixDeviceRotation({
         client,
@@ -235,9 +221,17 @@ const stopPairingRecovery = listenForMatrixPairingRequests({
     // Only offers persisted by GatewayPairingService can be accepted, so the
     // listener can remain available for invitations created by an active PWA.
     acceptNewOffers: true,
+    onProvisioned: async () => {
+        if (!runner || runner.getState() !== 'running') {
+            throw new Error('Gateway Room State is not ready for pairing')
+        }
+        await runner.provisionCurrentState()
+    },
     onAccepted: async record => {
         process.stdout.write(`Device ${record.certificate.certificate.deviceName} is now active.\n`)
-        await runner?.syncState()
+        process.stdout.write(
+            `Gateway ready with ${(await registry.listActive()).length} trusted device(s).\n`,
+        )
     },
     onRejected: error => {
         process.stderr.write(`[matrix-pairing-recovery] rejected: ${formatError(error)}\n`)
@@ -324,6 +318,20 @@ const adminServer = await startGatewayAdminServer({
     onLog: message => process.stdout.write(`${message}\n`),
 })
 process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)
+if (startupPairing) {
+    process.stdout.write('\nPair this Gateway from Codever:\n\n')
+    process.stdout.write(await QRCode.toString(startupPairing.link, {
+        type: 'terminal',
+        small: true,
+        errorCorrectionLevel: 'L',
+    }))
+    process.stdout.write(`\nInvitation code: ${formatCode(startupPairing.verificationCode)}\n`)
+    process.stdout.write(`Pairing link (paste fallback):\n${startupPairing.link}\n\n`)
+    process.stdout.write(
+        `Waiting for one encrypted pairing request until ${startupPairing.expiresAt}. `
+        + 'Gateway will commit current Room State before accepting it.\n',
+    )
+}
 process.stdout.write(`Provider: ${providerName}\nWorking directory: ${cwd}\n`)
 if (sessionExtensionRegistry.descriptors().length > 0) {
     process.stdout.write(

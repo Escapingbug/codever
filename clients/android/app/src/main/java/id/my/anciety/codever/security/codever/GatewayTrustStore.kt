@@ -124,19 +124,16 @@ object GatewayTrustCodec {
             throw IllegalArgumentException("Gateway trust payload is invalid.", error)
         }
         val schemaVersion = root.requiredLong("schemaVersion")
-        require(schemaVersion == 1L || schemaVersion == 2L) { "Gateway trust schema is unsupported." }
-        val expectedKeys = if (schemaVersion == 1L) {
-            setOf("schemaVersion", "offer", "request", "response")
-        } else {
-            setOf("schemaVersion", "offer", "request", "response", "transportTrust")
-        }
-        root.requireExactKeys(expectedKeys, "Gateway trust")
+        require(schemaVersion == 2L) { "Gateway trust schema is unsupported." }
+        root.requireExactKeys(
+            setOf("schemaVersion", "offer", "request", "response", "transportTrust"),
+            "Gateway trust",
+        )
         val trust = GatewayTrust(
             PairingCodec.parseOffer(root.requiredObject("offer")),
             PairingCodec.parseRequest(root.requiredObject("request")),
             PairingCodec.parseResponse(root.requiredObject("response")),
         )
-        if (schemaVersion == 1L) return trust
         val transport = root.requiredObject("transportTrust")
         transport.requireExactKeys(setOf("currentTransport", "lastIssuedAt"), "Gateway transport trust")
         return trust.copy(

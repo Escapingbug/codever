@@ -213,6 +213,32 @@ class ClientEventHubTest {
     }
 
     @Test
+    fun `live message wins over an identical historical event in either arrival order`() {
+        val historical = message("permission-1", 1, text = "historical").copy(
+            kind = ClientMessageKind.PERMISSION,
+            requestId = "request-1",
+            historical = true,
+        )
+        val live = historical.copy(text = "live", historical = null)
+
+        val historyThenLive = hub()
+        historyThenLive.upsertMessage("session-1", historical)
+        assertEquals(1, historyThenLive.upsertMessages("session-1", listOf(live)).size)
+        assertEquals(
+            live,
+            historyThenLive.historyPage("session-1", limit = 10).messages.single(),
+        )
+
+        val liveThenHistory = hub()
+        liveThenHistory.upsertMessage("session-1", live)
+        assertTrue(liveThenHistory.upsertMessages("session-1", listOf(historical)).isEmpty())
+        assertEquals(
+            live,
+            liveThenHistory.historyPage("session-1", limit = 10).messages.single(),
+        )
+    }
+
+    @Test
     fun `only cached gateway state rewrites the durable snapshot`() {
         val persistence = CountingPersistence()
         val hub = hub(persistence = persistence)

@@ -6,12 +6,12 @@ import {
   MATRIX_CRYPTO_LOADING_DETAIL,
   MATRIX_STARTUP_BACKGROUND_RECOVERY_MS,
   MATRIX_STARTUP_FOREGROUND_BUDGET_MS,
-  MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL,
-  MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL,
+  MATRIX_SYNC_STORE_RECOVERY_DETAIL,
+  MATRIX_SYNC_STORE_SAVE_DETAIL,
   matrixInitialSyncLimit,
   shouldDeferStoredMatrixStartupForPairing,
   shouldReloadInterruptedMatrixStartup,
-  shouldRecoverMatrixSyncCheckpoint,
+  shouldRebuildMatrixSyncStore,
 } from "../app/matrixStartup.ts";
 import { processMatrixEventWithDecryptionRetry } from "../app/matrixDecryptionRetry.ts";
 
@@ -133,17 +133,17 @@ test("defers stored native startup while an invitation owns the bridge", () => {
   );
 });
 
-test("recovers a trusted browser whose sync checkpoint was evicted", () => {
-  assert.equal(shouldRecoverMatrixSyncCheckpoint(true, null), true);
-  assert.equal(shouldRecoverMatrixSyncCheckpoint(true, ""), true);
-  assert.equal(shouldRecoverMatrixSyncCheckpoint(true, "s123"), false);
-  assert.equal(shouldRecoverMatrixSyncCheckpoint(false, null), false);
-  assert.match(MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL, /Rebuilding/u);
-  assert.match(MATRIX_SYNC_CHECKPOINT_RECOVERY_DETAIL, /trusted device keys/u);
-  assert.match(MATRIX_SYNC_CHECKPOINT_SAVE_DETAIL, /Saving/u);
+test("rebuilds a trusted browser whose local sync store was evicted", () => {
+  assert.equal(shouldRebuildMatrixSyncStore(true, null), true);
+  assert.equal(shouldRebuildMatrixSyncStore(true, ""), true);
+  assert.equal(shouldRebuildMatrixSyncStore(true, "s123"), false);
+  assert.equal(shouldRebuildMatrixSyncStore(false, null), false);
+  assert.match(MATRIX_SYNC_STORE_RECOVERY_DETAIL, /Rebuilding/u);
+  assert.match(MATRIX_SYNC_STORE_RECOVERY_DETAIL, /trusted device keys/u);
+  assert.match(MATRIX_SYNC_STORE_SAVE_DETAIL, /Saving/u);
 });
 
-test("uses a minimal timeline while rebuilding a trusted sync checkpoint", () => {
+test("uses a minimal timeline while rebuilding a trusted local sync store", () => {
   assert.equal(matrixInitialSyncLimit(true, true), 1);
   assert.equal(matrixInitialSyncLimit(true, false), 30);
   assert.equal(matrixInitialSyncLimit(false, false), 1);

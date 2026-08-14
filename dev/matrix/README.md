@@ -22,16 +22,17 @@ Useful commands:
 .\scripts\matrix-local.ps1 stop
 ```
 
-Run the automated legacy Matrix transport check with:
+Run the automated secure Alpha acceptance with:
 
 ```powershell
-npm run test:matrix-live
+$env:CODEVER_ALPHA_LIVE_E2E = '1'
+$env:CODEVER_ANDROID_SERIAL = 'emulator-5554'
+pnpm test:e2e:alpha-live
 ```
 
-This creates fresh Matrix devices, checks Megolm transport, signed commands,
-replay protection and a deterministic provider reply. It explicitly uses the
-legacy test-only path; use the manual PWA flow below to exercise pairing and
-the independent application-encryption envelope.
+This creates fresh Matrix devices and checks pairing, application encryption,
+Room State, thread history, replay protection, cross-device convergence, and a
+deterministic provider reply.
 
 Run the actual Gateway pairing experience with:
 

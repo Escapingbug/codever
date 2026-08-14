@@ -121,24 +121,44 @@ display data from encrypted Codever events.
    first recipient confirmation completes the logical send; remaining copies
    continue in the background. Before matrix-js-sdk, one Gateway-wide scheduler
    reserves a lane for acknowledgements, command results, revision conflicts,
-   decisions and history pages; normal fan-out is admitted with bounded
+   and decisions; normal fan-out is admitted with bounded
    concurrency (at most two Matrix SDK calls) and durable recovery is globally
    serial and lower priority. A recipient
    watchdog bounds only the caller's wait: the raw transport promise remains
    in-flight until it really settles, so a timeout cannot submit the same stable
    Matrix transaction twice. Queued replacements and status updates use
    last-write-wins coalescing and leave a durable `superseded` tombstone.
-9. Each PWA Matrix device persists its `/sync` checkpoint separately. Offline
+9. Each PWA Matrix device persists its local `/sync` token separately. Offline
    device-list changes can therefore be caught up before a Gateway-signed
-   transport rotation is pinned; the sync checkpoint itself grants no trust.
+   transport rotation is pinned; the local sync cache itself grants no trust.
    If incremental rotations fell outside the local timeline, the PWA fetches
    the Gateway's root-signed current transport from its fixed extended Matrix
    profile field before it verifies the Matrix device and sends a command.
-10. Late-joining devices receive retained room-key epochs in the next event
-    addressed to them, then restore roots and transcripts with Matrix
-    `/threads`, `/sync`, and backward timeline pagination. History reads create
+10. Late-joining devices receive retained room-key epochs in current Gateway
+    Room State or the next timeline event addressed to them, then restore roots
+    from session Room State and transcripts with Matrix thread relations.
+    History reads create
     no Gateway event and consume no command sequence or revision. The
     pre-release state/history RPC handlers have been removed.
+11. Current Gateway/session inventory is native Matrix Room State. Each state
+    key converges independently within the authenticated Gateway revision
+    epoch; there is no application-level inventory checkpoint or digest.
+    `/sync` cursors and local projections are caches only; reconnect reads
+    current Room State and never reconstructs inventory by replaying the room
+    timeline.
+12. Android normal startup asks the SDK room list for zero timeline items.
+    The SDK Timeline is opened only during the explicit, pre-trust Megolm
+    pairing exchange and is closed immediately afterwards. After pairing, a
+    dedicated `/sync` receives application-encrypted live events and commits
+    their authenticated local transition before persisting its Matrix token;
+    history uses per-session relations and never scans the room timeline.
+13. Pairing has a single commit order. A zero-device Gateway may start without
+    publishing application state. Once it durably accepts a device, it creates
+    any missing session thread roots and publishes the complete current Room
+    State with a key bundle addressed to that device before sending the signed
+    pairing response. Both sides retry the same persisted request/response
+    transaction after interruption; no timing delay or manual checkpoint is
+    part of correctness.
 
 The normative details are in
 [`matrix-native-conversation-protocol.md`](matrix-native-conversation-protocol.md).
@@ -183,15 +203,11 @@ can then decrypt an image preview or download the original bytes. Telegram-only
 `/file_f1` hints are disabled for the first-party Matrix client; incidental
 `file://` text is not treated as permission to exfiltrate a local file.
 
-## Compatibility modes
+## Command authority
 
-Strict mode is the default. Only Codever-signed commands may invoke the local
-runtime.
-
-An explicit compatibility mode may authorize a pinned Matrix device for text
-commands. It still requires a decrypted event from the exact locally pinned
-device and persistent replay detection. Room membership alone never authorizes
-execution.
+Only application-encrypted, Codever-signed commands issued under an active
+pairing certificate may invoke the local runtime. Matrix text, room membership,
+power levels, and Megolm identity are never an execution compatibility path.
 
 ## Migration boundary
 

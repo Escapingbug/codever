@@ -8,6 +8,11 @@ import id.my.anciety.codever.security.codever.EncryptedTrustBlobStore
 import id.my.anciety.codever.security.codever.Base64Url
 import id.my.anciety.codever.security.codever.ReplayClaim
 import id.my.anciety.codever.security.codever.ReplayStore
+import id.my.anciety.codever.security.codever.CanonicalJson
+import id.my.anciety.codever.security.codever.PairingCodec
+import id.my.anciety.codever.security.codever.SignedPairingOffer
+import id.my.anciety.codever.security.codever.SignedPairingRequest
+import id.my.anciety.codever.security.codever.SignedPairingResponse
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -28,6 +33,7 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
     val trust = File(root, "gateway-trust.enc")
     val replay = File(root, "replay.enc")
     val timelineKeys = File(root, "matrix-timeline-keys.enc")
+    val pairing = File(root, "pairing-transaction.enc")
     val transfers = File(root, "transfers").apply {
         check(isDirectory || mkdirs()) { "Native transfer storage could not be created." }
     }
@@ -39,12 +45,136 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
             trust,
             replay,
             timelineKeys,
-            // Remove data written by pre-release builds that used Gateway RPC history.
-            File(root, "history-checkpoints.enc"),
+            pairing,
         ).forEach { file ->
             AtomicFile(file).delete()
         }
         transfers.listFiles().orEmpty().forEach(File::delete)
+    }
+}
+
+data class PersistedPairingTransaction(
+    val offer: SignedPairingOffer,
+    val request: SignedPairingRequest?,
+    val response: SignedPairingResponse?,
+)
+
+internal interface PairingTransactionBlobStore {
+    fun exists(): Boolean
+    fun read(): ByteArray
+    fun write(bytes: ByteArray)
+    fun clear()
+}
+
+private class AtomicPairingTransactionBlobStore(file: File) : PairingTransactionBlobStore {
+    private val atomic = AtomicFile(file)
+    override fun exists(): Boolean = atomic.baseFile.exists()
+    override fun read(): ByteArray = atomic.readFully()
+    override fun write(bytes: ByteArray) = atomic.writeExactly(bytes)
+    override fun clear() = atomic.delete()
+}
+
+/**
+ * Durable pre-trust pairing transaction. It stores only public signed
+ * documents; encryption prevents the invitation challenge and device metadata
+ * from leaking through local backup or filesystem inspection.
+ */
+internal class AtomicEncryptedPairingTransactionStore(
+    private val blobs: PairingTransactionBlobStore,
+    private val cipher: SecretCipher,
+    scope: String,
+) {
+    constructor(file: File, cipher: SecretCipher, scope: String) : this(
+        AtomicPairingTransactionBlobStore(file),
+        cipher,
+        scope,
+    )
+
+    private val associatedData =
+        "codever.pairing.transaction.v1\u0000$scope".toByteArray(Charsets.UTF_8)
+
+    init {
+        require(scope.length in 1..512)
+    }
+
+    @Synchronized
+    fun load(): PersistedPairingTransaction? {
+        if (!blobs.exists()) return null
+        val encrypted = blobs.read()
+        val plaintext = try {
+            val envelope = SecretEnvelope.decode(encrypted)
+            try {
+                cipher.decrypt(envelope, associatedData)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            encrypted.fill(0)
+        }
+        return try {
+            require(plaintext.size <= MAX_BYTES) { "Pairing transaction is too large." }
+            val root = Json.parseToJsonElement(plaintext.toString(Charsets.UTF_8)).jsonObject
+            require(root.keys == setOf("schemaVersion", "offer", "request", "response")) {
+                "Pairing transaction has an invalid shape."
+            }
+            require(root.getValue("schemaVersion").jsonPrimitive.longOrNull == 1L) {
+                "Unsupported pairing transaction version."
+            }
+            val offer = PairingCodec.parseOffer(root.getValue("offer").toString())
+            val request = root["request"]?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+                ?.let { PairingCodec.parseRequest(it.toString()) }
+            val response = root["response"]?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+                ?.let { PairingCodec.parseResponse(it.toString()) }
+            require(response == null || request != null) {
+                "A persisted pairing response requires its signed request."
+            }
+            PersistedPairingTransaction(offer, request, response)
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    @Synchronized
+    fun save(value: PersistedPairingTransaction) {
+        val plaintext = CanonicalJson.bytes(buildJsonObject {
+            put("schemaVersion", 1)
+            put("offer", value.offer.toJson())
+            if (value.request == null) {
+                put("request", kotlinx.serialization.json.JsonNull)
+            } else {
+                put("request", value.request.toJson())
+            }
+            if (value.response == null) {
+                put("response", kotlinx.serialization.json.JsonNull)
+            } else {
+                put("response", value.response.toJson())
+            }
+        })
+        require(plaintext.size <= MAX_BYTES) { "Pairing transaction is too large." }
+        val encrypted = try {
+            val envelope = cipher.encrypt(plaintext, associatedData)
+            try {
+                SecretEnvelope.encode(envelope)
+            } finally {
+                envelope.iv.fill(0)
+                envelope.ciphertext.fill(0)
+            }
+        } finally {
+            plaintext.fill(0)
+        }
+        try {
+            blobs.write(encrypted)
+        } finally {
+            encrypted.fill(0)
+        }
+    }
+
+    @Synchronized
+    fun clear() = blobs.clear()
+
+    private companion object {
+        const val MAX_BYTES = 512 * 1024
     }
 }
 

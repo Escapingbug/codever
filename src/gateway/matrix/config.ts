@@ -33,26 +33,27 @@ export interface MatrixGatewayRoomConfig {
     providerSettings?: Record<string, unknown>
 }
 
-export interface MatrixGatewayTrustedDevice {
+export interface MatrixGatewayPinnedTransportDevice {
+    matrixUserId: string
+    matrixDeviceId: string
+    matrixDeviceKeys: string[]
+}
+
+export interface MatrixGatewayTrustedDevice extends MatrixGatewayPinnedTransportDevice {
     /** Codever application-layer device ID carried inside the signed command. */
     deviceId: string
     deviceName?: string
     publicKey: JsonWebKey
     allowedRoomIds: string[]
     allowedOperations?: CommandOperation[]
-    /** Defense in depth; these Matrix assertions never replace app signatures. */
-    matrixUserId: string
-    /** Matrix device ID used only to locate the device whose key is pinned. */
-    matrixDeviceId?: string
     /**
      * Raw Ed25519 fingerprints returned by
      * MatrixEvent.getClaimedEd25519Key() after E2EE decryption. These are not
      * Matrix device IDs and not Curve25519 sender keys.
      */
-    matrixDeviceKeys: string[]
-    certificateExpiresAt?: number
+    certificateExpiresAt: number
     /** Pairing-certificate generation used to reset ordered command state. */
-    sequenceEpoch?: string
+    sequenceEpoch: string
 }
 
 export interface MatrixGatewayApplicationSecurityConfig {
@@ -70,9 +71,7 @@ export interface MatrixGatewayConfig {
     rooms: MatrixGatewayRoomConfig[]
     trustedDevices: MatrixGatewayTrustedDevice[]
     replayLedgerPath: string
-    applicationSecurity?: MatrixGatewayApplicationSecurityConfig
-    /** Explicit escape hatch for legacy transport smoke tests only. */
-    allowInsecureLegacyForTesting?: boolean
+    applicationSecurity: MatrixGatewayApplicationSecurityConfig
     startupEventQueueLimit?: number
 }
 
@@ -84,27 +83,22 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
     requireText(config.connection.deviceId, 'connection.deviceId')
     requireText(config.crypto.databasePrefix, 'crypto.databasePrefix')
     requireText(config.replayLedgerPath, 'replayLedgerPath')
-    if (!config.applicationSecurity && !config.allowInsecureLegacyForTesting) {
+    if (!config.applicationSecurity) {
         throw new Error('Application-layer Matrix security is required')
     }
-    if (config.applicationSecurity && config.allowInsecureLegacyForTesting) {
-        throw new Error('allowInsecureLegacyForTesting cannot be combined with applicationSecurity')
+    requireText(config.applicationSecurity.gatewayDeviceId, 'applicationSecurity.gatewayDeviceId')
+    requireText(config.applicationSecurity.envelopeReplayLedgerPath, 'applicationSecurity.envelopeReplayLedgerPath')
+    if (
+        config.applicationSecurity.deliveryAttemptTimeoutMs !== undefined
+        && (
+            !Number.isFinite(config.applicationSecurity.deliveryAttemptTimeoutMs)
+            || config.applicationSecurity.deliveryAttemptTimeoutMs <= 0
+        )
+    ) {
+        throw new Error('applicationSecurity.deliveryAttemptTimeoutMs must be positive')
     }
-    if (config.applicationSecurity) {
-        requireText(config.applicationSecurity.gatewayDeviceId, 'applicationSecurity.gatewayDeviceId')
-        requireText(config.applicationSecurity.envelopeReplayLedgerPath, 'applicationSecurity.envelopeReplayLedgerPath')
-        if (
-            config.applicationSecurity.deliveryAttemptTimeoutMs !== undefined
-            && (
-                !Number.isFinite(config.applicationSecurity.deliveryAttemptTimeoutMs)
-                || config.applicationSecurity.deliveryAttemptTimeoutMs <= 0
-            )
-        ) {
-            throw new Error('applicationSecurity.deliveryAttemptTimeoutMs must be positive')
-        }
-        if (config.applicationSecurity.gatewayDeviceId !== config.gatewayId) {
-            throw new Error('applicationSecurity.gatewayDeviceId must equal gatewayId in protocol v1')
-        }
+    if (config.applicationSecurity.gatewayDeviceId !== config.gatewayId) {
+        throw new Error('applicationSecurity.gatewayDeviceId must equal gatewayId')
     }
 
     if (!config.crypto.useIndexedDB && !config.crypto.allowInMemoryForTesting) {
@@ -114,7 +108,6 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
         throw new Error('Matrix crypto storageKey must be exactly 32 bytes')
     }
     if (config.rooms.length === 0) throw new Error('At least one Matrix room is required')
-    if (config.trustedDevices.length === 0) throw new Error('At least one locally trusted Codever device is required')
 
     assertUnique(config.rooms.map(room => room.roomId), 'room ID')
     assertUnique(config.rooms.map(room => room.conversationId), 'conversation ID')
@@ -146,14 +139,9 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
         ) {
             throw new Error(`Trusted device ${device.deviceId} has an invalid certificate expiry`)
         }
-        if (device.sequenceEpoch !== undefined) {
-            requireText(device.sequenceEpoch, 'trustedDevice.sequenceEpoch')
-        }
-        if (config.applicationSecurity && device.certificateExpiresAt === undefined) {
+        requireText(device.sequenceEpoch, 'trustedDevice.sequenceEpoch')
+        if (device.certificateExpiresAt === undefined) {
             throw new Error(`Trusted device ${device.deviceId} requires certificateExpiresAt for application security`)
-        }
-        if (config.applicationSecurity && device.sequenceEpoch === undefined) {
-            throw new Error(`Trusted device ${device.deviceId} requires sequenceEpoch for application security`)
         }
         for (const roomId of device.allowedRoomIds) {
             if (!roomIds.has(roomId)) {

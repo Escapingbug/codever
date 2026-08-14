@@ -52,5 +52,5 @@ with a random AES-256-GCM content key, wraps that key independently for each
 recipient with P-256 ECDH/HKDF/AES-GCM, and signs the complete bundle. Opening
 a bundle still requires the locally paired device ID, application key ID,
 Gateway signing key, conversation binding, validity window, and replay claims.
-The legacy single-recipient envelope remains the device-to-Gateway command
-format and a PWA compatibility read path.
+The single-recipient envelope is the current device-to-Gateway command and
+targeted Gateway-to-device control format.

@@ -13,18 +13,28 @@ internal object DiagnosticLine {
     private val allowedAttributes = setOf(
         "accepted",
         "action",
+        "attempt",
         "appended",
         "available",
         "candidates",
         "code",
+        "count",
         "detail",
         "error",
+        "events",
+        "has_more",
         "kind",
+        "limit",
+        "paged",
         "phase",
         "reason",
+        "received",
+        "request",
         "running",
         "source",
         "stage",
+        "transport_ready",
+        "type",
     )
 
     fun encode(timestamp: String, event: String, attributes: Map<String, String>): String {

@@ -933,9 +933,6 @@ export function parseClientMessage(
       "historical",
       "operationId",
       "requestId",
-      "streamId",
-      "toolCallId",
-      "toolStatus",
       "replacesEventId",
       "commandId",
       "revision",
@@ -962,19 +959,23 @@ export function parseClientMessage(
   const semantic = value.semantic === undefined
     ? undefined
     : parseJsonObject(value.semantic, `${label}.semantic`);
+  const kind = enumValue(value.kind, `${label}.kind`, [
+    "notice",
+    "user",
+    "agent",
+    "tool",
+    "permission",
+    "error",
+  ]);
+  if ((kind === "tool") !== (toolGroup !== undefined)) {
+    invalidParams(`${label}.toolGroup must be present only for tool messages.`);
+  }
   return {
     eventId: opaqueId(value.eventId, `${label}.eventId`),
     sender: opaqueId(value.sender, `${label}.sender`),
     timestamp: nonnegativeInteger(value.timestamp, `${label}.timestamp`),
     encrypted: requiredBoolean(value.encrypted, `${label}.encrypted`),
-    kind: enumValue(value.kind, `${label}.kind`, [
-      "notice",
-      "user",
-      "agent",
-      "tool",
-      "permission",
-      "error",
-    ]),
+    kind,
     ...(value.text === undefined
       ? {}
       : { text: requiredString(value.text, `${label}.text`, 2_000_000, true) }),
@@ -982,8 +983,6 @@ export function parseClientMessage(
       "sessionId",
       "operationId",
       "requestId",
-      "streamId",
-      "toolCallId",
       "replacesEventId",
       "commandId",
       "originDeviceId",
@@ -992,15 +991,6 @@ export function parseClientMessage(
     ...(value.historical === undefined
       ? {}
       : { historical: requiredBoolean(value.historical, `${label}.historical`) }),
-    ...(value.toolStatus === undefined
-      ? {}
-      : {
-          toolStatus: enumValue(value.toolStatus, `${label}.toolStatus`, [
-            "running",
-            "succeeded",
-            "failed",
-          ]),
-        }),
     ...(value.revision === undefined
       ? {}
       : { revision: nonnegativeInteger(value.revision, `${label}.revision`) }),

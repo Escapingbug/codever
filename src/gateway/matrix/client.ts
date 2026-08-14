@@ -12,17 +12,21 @@ import { AllDevicesIsolationMode } from 'matrix-js-sdk/lib/crypto-api/index.js'
 import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     canonicalJson,
 } from '@codever/protocol'
 import { toArrayBuffer } from '@codever/security'
 import type {
     MatrixGatewayConnectionConfig,
     MatrixGatewayCryptoConfig,
+    MatrixGatewayPinnedTransportDevice,
     MatrixGatewayTrustedDevice,
 } from './config'
 import type {
     MatrixDownloadMediaRequest,
     MatrixApplicationControlEventRequest,
+    MatrixApplicationStateEventRequest,
     MatrixApplicationTimelineEventRequest,
     MatrixIncomingEvent,
     MatrixRoomMessageContent,
@@ -51,7 +55,7 @@ export interface MatrixGatewayClient extends MatrixTransport {
     start(): Promise<void>
     waitUntilReady(timeoutMs?: number): Promise<void>
     assertRoomEncrypted(roomId: string): Promise<void>
-    pinTrustedDevices?(devices: MatrixGatewayTrustedDevice[]): Promise<void>
+    pinTrustedDevices?(devices: MatrixGatewayPinnedTransportDevice[]): Promise<void>
     prepareRoomThread?(roomId: string, rootEventId: string, timeoutMs?: number): Promise<void>
     setExtendedProfileProperty?(key: string, value: unknown): Promise<void>
     stop(): Promise<void>
@@ -220,13 +224,13 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         }
     }
 
-    async pinTrustedDevices(devices: MatrixGatewayTrustedDevice[]): Promise<void> {
+    async pinTrustedDevices(devices: MatrixGatewayPinnedTransportDevice[]): Promise<void> {
         const crypto = this.client.getCrypto()
         if (!crypto) throw new Error('Matrix crypto is unavailable')
         const userIds = [...new Set(devices.map(device => device.matrixUserId))]
         const deviceMap = await crypto.getUserDeviceInfo(userIds, true)
         for (const trusted of devices) {
-            const matrixDeviceId = trusted.matrixDeviceId ?? trusted.deviceId
+            const matrixDeviceId = trusted.matrixDeviceId
             const device = deviceMap.get(trusted.matrixUserId)?.get(matrixDeviceId)
             if (!device) {
                 throw new Error(
@@ -269,6 +273,29 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
         if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
         assertSecureApplicationControlContent(request.content)
         return this.sendDirectRoomEvent(request)
+    }
+
+    async setApplicationRoomState(
+        request: MatrixApplicationStateEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        if (!this.cryptoInitialized || !this.started) throw new Error('Matrix client is not ready')
+        assertSecureApplicationStateContent(request)
+        const path = [
+            '/rooms/',
+            encodeURIComponent(request.roomId),
+            '/state/',
+            encodeURIComponent(request.eventType),
+            '/',
+            encodeURIComponent(request.stateKey),
+        ].join('')
+        const result = await this.client.http.authedRequest<{ event_id: string }>(
+            Method.Put,
+            path,
+            undefined,
+            request.content,
+            { localTimeoutMs: this.defaultReadyTimeoutMs },
+        )
+        return { eventId: result.event_id }
     }
 
     async prepareRoomThread(
@@ -437,6 +464,27 @@ function assertSecureApplicationControlContent(content: Record<string, unknown>)
         )
     ) {
         throw new Error('Application control events must contain a Codever secure envelope')
+    }
+}
+
+function assertSecureApplicationStateContent(request: MatrixApplicationStateEventRequest): void {
+    const content = request.content
+    const stateEnvelope = asRecord(content.state_envelope)
+    const signedEnvelope = asRecord(stateEnvelope?.envelope)
+    const expectsKeyRing = request.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+    const isSessionState = request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+    if (
+        content.version !== 2
+        || content.kind !== 'state_envelope'
+        || !stateEnvelope
+        || !signedEnvelope
+        || signedEnvelope.eventType !== request.eventType
+        || signedEnvelope.stateKey !== request.stateKey
+        || !(expectsKeyRing || isSessionState)
+        || (expectsKeyRing && !asRecord(content.timeline_key_ring_bundle))
+        || (isSessionState && content.timeline_key_ring_bundle !== undefined)
+    ) {
+        throw new Error('Application state events must contain a Codever state envelope')
     }
 }
 

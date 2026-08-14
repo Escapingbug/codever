@@ -54,19 +54,6 @@ class MatrixSecurityTest {
         decrypted.fill(0)
     }
 
-    @Test
-    fun `legacy sync v2 session migrates to native sliding sync without changing identity`() {
-        val legacy = session(SlidingSyncVersion.NONE)
-
-        val migrated = legacy.forNativeSlidingSync()
-
-        assertEquals(SlidingSyncVersion.NATIVE, migrated.slidingSyncVersion)
-        assertEquals(legacy.accessToken, migrated.accessToken)
-        assertEquals(legacy.deviceId, migrated.deviceId)
-        assertEquals(legacy.roomBinding, migrated.roomBinding)
-        assertTrue(migrated === migrated.forNativeSlidingSync())
-    }
-
     private fun bootstrap() = MatrixBootstrap(
         homeserver = "https://matrix.example.org",
         oneTimeLoginToken = LOGIN_TOKEN,

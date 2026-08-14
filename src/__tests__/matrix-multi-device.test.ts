@@ -61,12 +61,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await layer.initialize(now)
         const sent: MatrixSendEventRequest[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
                 return { eventId: `$event-${sent.length}` }
             },
-        }
+        })
         const room = {
             roomId: '!room:localhost',
             conversationId: 'conversation-1',
@@ -180,7 +180,7 @@ describe('multi-device Matrix collaboration', () => {
         const sent: MatrixSendEventRequest[] = []
         const eventIds = new Map<string, string>()
         let failOnce = true
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
                 if (failOnce) {
@@ -193,7 +193,7 @@ describe('multi-device Matrix collaboration', () => {
                 eventIds.set(request.transactionId, eventId)
                 return { eventId }
             },
-        }
+        })
         const room = {
             roomId: '!room:localhost',
             conversationId: 'conversation-1',
@@ -295,13 +295,13 @@ describe('multi-device Matrix collaboration', () => {
             releaseSlow = resolve
         })
         const attempted: string[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempted.push(request.transactionId)
                 await slow
                 return { eventId: '$event-bundle' }
             },
-        }
+        })
         const room = {
             roomId: '!room:localhost',
             conversationId: 'conversation-1',
@@ -382,7 +382,7 @@ describe('multi-device Matrix collaboration', () => {
             providerName: 'test',
         }
 
-        await layer.transportForRoom(room, {
+        await layer.transportForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempted.push(request.transactionId)
                 if (request.transactionId === 'old-stuck-transaction') {
@@ -390,7 +390,7 @@ describe('multi-device Matrix collaboration', () => {
                 }
                 return { eventId: '$new-reply' }
             },
-        }).sendEncryptedRoomEvent({
+        })).sendEncryptedRoomEvent({
             roomId: room.roomId,
             eventType: 'm.room.message',
             transactionId: 'new-logical-transaction',
@@ -430,11 +430,11 @@ describe('multi-device Matrix collaboration', () => {
             async () => [policy],
         )
         await original.initialize(now)
-        const secureTransport = original.transportForRoom(room, {
+        const secureTransport = original.transportForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent() {
                 throw new Error('temporary weak network')
             },
-        })
+        }))
 
         await expect(secureTransport.sendEncryptedRoomEvent({
             roomId: room.roomId,
@@ -456,12 +456,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await restarted.initialize(now)
         const recovered: MatrixSendEventRequest[] = []
-        await restarted.retryPendingForRoom(room, {
+        await restarted.retryPendingForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 recovered.push(request)
                 return { eventId: '$recovered-weak-network' }
             },
-        })
+        }))
 
         expect(recovered).toHaveLength(1)
         const plaintext = await openFor(recovered[0]!, device, gateway, 'device-a')
@@ -498,13 +498,13 @@ describe('multi-device Matrix collaboration', () => {
         const hung = new Promise<void>(resolve => {
             releaseHung = resolve
         })
-        const originalTransport: MatrixTransport = {
+        const originalTransport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attemptedTransactions.push(request.transactionId)
                 await hung
                 return { eventId: '$hung-late-confirmation' }
             },
-        }
+        })
         let queued!: ChannelDeliveryQueuedError
         try {
             await layer.transportForRoom(room, originalTransport).sendEncryptedRoomEvent({
@@ -524,13 +524,13 @@ describe('multi-device Matrix collaboration', () => {
         layer.stopRetries()
 
         let recoveryTransportCalls = 0
-        const recovery = layer.retryPendingForRoom(room, {
+        const recovery = layer.retryPendingForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 recoveryTransportCalls += 1
                 attemptedTransactions.push(request.transactionId)
                 return { eventId: '$must-not-duplicate' }
             },
-        })
+        }))
         await vi.waitFor(() => expect(attemptedTransactions).toHaveLength(1))
         expect(recoveryTransportCalls).toBe(0)
 
@@ -594,11 +594,11 @@ describe('multi-device Matrix collaboration', () => {
         try {
             let queued!: ChannelDeliveryQueuedError
             try {
-                await layer.transportForRoom(room, {
+                await layer.transportForRoom(room, applicationTransport({
                     async sendEncryptedRoomEvent() {
                         return { eventId: '$persisted-before-waiter' }
                     },
-                }).sendEncryptedRoomEvent({
+                })).sendEncryptedRoomEvent({
                     roomId: room.roomId,
                     eventType: 'm.room.message',
                     transactionId: 'confirmation-race',
@@ -677,7 +677,7 @@ describe('multi-device Matrix collaboration', () => {
             releaseRecovery = resolve
         })
         const attempted: string[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempted.push(request.transactionId)
                 if (request.transactionId === 'old-bulk-transaction-0') {
@@ -685,7 +685,7 @@ describe('multi-device Matrix collaboration', () => {
                 }
                 return { eventId: `$priority-${attempted.length}` }
             },
-        }
+        })
 
         const recovery = layer.retryPendingForRoom(room, transport)
         await vi.waitFor(() => expect(attempted).toEqual(['old-bulk-transaction-0']))
@@ -764,13 +764,13 @@ describe('multi-device Matrix collaboration', () => {
             releaseNormal = resolve
         })
         const attempted: string[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempted.push(request.transactionId)
                 if (request.transactionId === 'hung-normal') await normalGate
                 return { eventId: `$canonical-priority-${attempted.length}` }
             },
-        }
+        })
         const secureTransport = layer.transportForRoom(room, transport)
         const normalContent = {
             msgtype: 'm.text' as const,
@@ -843,7 +843,7 @@ describe('multi-device Matrix collaboration', () => {
         }
         const eventsByTransaction = new Map<string, string>()
         const timeline: MatrixSendEventRequest[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 const existing = eventsByTransaction.get(request.transactionId)
                 if (existing) return { eventId: existing }
@@ -852,7 +852,7 @@ describe('multi-device Matrix collaboration', () => {
                 timeline.push(request)
                 return { eventId }
             },
-        }
+        })
 
         await layer.sendCommandAccepted(
             room,
@@ -963,7 +963,7 @@ describe('multi-device Matrix collaboration', () => {
             releaseFirstEdit = resolve
         })
         const sent: MatrixSendEventRequest[] = []
-        const transport: MatrixTransport = {
+        const transport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 sent.push(request)
                 if (request.transactionId === 'coalesce-edit-one') {
@@ -971,7 +971,7 @@ describe('multi-device Matrix collaboration', () => {
                 }
                 return { eventId: `$coalesce-${sent.length}` }
             },
-        }
+        })
         const secureTransport = layer.transportForRoom(room, transport)
         const original = await secureTransport.sendEncryptedRoomEvent({
             roomId: room.roomId,
@@ -1069,13 +1069,13 @@ describe('multi-device Matrix collaboration', () => {
         )
         await firstLayer.initialize(now)
         const firstAttempts: MatrixSendEventRequest[] = []
-        const failingTransport: MatrixTransport = {
+        const failingTransport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 firstAttempts.push(request)
                 if (envelopeRecipient(request) === 'device-b') throw new Error('device-b offline')
                 return { eventId: `$first-${firstAttempts.length}` }
             },
-        }
+        })
 
         await firstLayer.sendCollaborationPrompt(room, {
             commandId: 'command-durable',
@@ -1116,12 +1116,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await restarted.initialize(now)
         const recovered: MatrixSendEventRequest[] = []
-        const recoveredTransport: MatrixTransport = {
+        const recoveredTransport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 recovered.push(request)
                 return { eventId: `$recovered-${recovered.length}` }
             },
-        }
+        })
         await restarted.retryPendingForRoom(room, recoveredTransport, 'command-durable')
 
         expect(recovered).toHaveLength(1)
@@ -1203,11 +1203,11 @@ describe('multi-device Matrix collaboration', () => {
             originDeviceId: 'device-a',
             originDeviceName: 'Alice phone',
             text: 'must remain bound to the old certificate',
-        }, {
+        }, applicationTransport({
             async sendEncryptedRoomEvent() {
                 throw new Error('bundle transport offline')
             },
-        })).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        }))).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
         originalActive = []
         original.stopRetries()
 
@@ -1219,12 +1219,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await rotated.initialize(now)
         const rotatedAttempts: MatrixSendEventRequest[] = []
-        await rotated.retryPendingForRoom(room, {
+        await rotated.retryPendingForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 rotatedAttempts.push(request)
                 return { eventId: '$must-not-send' }
             },
-        }, 'rotated-command')
+        }), 'rotated-command')
 
         expect(rotatedAttempts).toHaveLength(1)
         expect(bundleRecipients(rotatedAttempts[0]!)).toEqual(['device-a'])
@@ -1244,12 +1244,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await oldIdentityReturns.initialize(now)
         const resurrectionAttempts: MatrixSendEventRequest[] = []
-        await oldIdentityReturns.retryPendingForRoom(room, {
+        await oldIdentityReturns.retryPendingForRoom(room, applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 resurrectionAttempts.push(request)
                 return { eventId: '$must-not-resurrect' }
             },
-        }, 'rotated-command')
+        }), 'rotated-command')
         expect(resurrectionAttempts).toEqual([])
     })
 
@@ -1284,7 +1284,9 @@ describe('multi-device Matrix collaboration', () => {
             9,
             'runtime-epoch-1',
             'succeeded',
-            { sendEncryptedRoomEvent: async () => { throw new Error('offline') } },
+            applicationTransport({
+                sendEncryptedRoomEvent: async () => { throw new Error('offline') },
+            }),
         )).rejects.toThrow('offline')
         original.stopRetries()
 
@@ -1296,13 +1298,13 @@ describe('multi-device Matrix collaboration', () => {
         )
         await restarted.initialize(now)
         const attempts: MatrixSendEventRequest[] = []
-        const recoveringTransport: MatrixTransport = {
+        const recoveringTransport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attempts.push(request)
                 if (attempts.length === 1) throw new Error('first startup retry failed')
                 return { eventId: '$recovered-after-backoff' }
             },
-        }
+        })
         await restarted.retryPendingForRoom(room, recoveringTransport).catch(() => {
             restarted.scheduleRecoveryForRoom(room, recoveringTransport)
         })
@@ -1854,6 +1856,18 @@ function context(deviceId: string, revisionEpoch = 'runtime-epoch-1') {
         matrixSender: `@${deviceId}:localhost`,
         matrixDeviceKey: 'ignored-with-app-envelope',
         applicationDeviceId: deviceId,
+    }
+}
+
+function applicationTransport(transport: MatrixTransport): MatrixTransport {
+    const send = transport.sendEncryptedRoomEvent.bind(transport)
+    return {
+        ...transport,
+        sendEncryptedRoomEvent: send,
+        sendApplicationTimelineEvent: transport.sendApplicationTimelineEvent
+            ?? (request => send(request as MatrixSendEventRequest)),
+        sendApplicationControlEvent: transport.sendApplicationControlEvent
+            ?? (request => send(request as unknown as MatrixSendEventRequest)),
     }
 }
 

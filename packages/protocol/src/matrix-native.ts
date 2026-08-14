@@ -1,9 +1,16 @@
 import { z } from 'zod'
-import { jsonValueSchema, signatureSchema } from './schema.js'
+import { signatureSchema } from './schema.js'
+import { signedSecureEnvelopeBundleSchema } from './secure-envelope.js'
 
 export const MATRIX_NATIVE_PROTOCOL_VERSION = 2 as const
 export const CODEVER_MATRIX_TIMELINE_CONTENT_TYPE =
   'io.codever.matrix-timeline-content.v2' as const
+export const CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE =
+  'io.codever.gateway.current.v2' as const
+export const CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE =
+  'io.codever.session.current.v2' as const
+export const CODEVER_MATRIX_STATE_CONTENT_TYPE =
+  'io.codever.matrix-state-content.v2' as const
 
 const opaqueId = z.string().min(1).max(256)
 const timestamp = z.number().int().nonnegative()
@@ -148,6 +155,104 @@ const projectSummarySchema = z
   })
   .strict()
 
+const matrixCapabilityOptionSchema = z
+  .object({
+    id: opaqueId,
+    name: z.string().min(1).max(256),
+  })
+  .strict()
+
+const matrixSessionExtensionSettingSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      type: z.literal('text'),
+      label: z.string().min(1).max(256),
+      description: z.string().max(2_048).optional(),
+      required: z.boolean().optional(),
+      placeholder: z.string().max(512).optional(),
+      default_value: z.string().max(4_096).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      type: z.literal('boolean'),
+      label: z.string().min(1).max(256),
+      description: z.string().max(2_048).optional(),
+      default_value: z.boolean().optional(),
+    })
+    .strict(),
+])
+
+const matrixSessionExtensionCapabilitySchema = z
+  .object({
+    id: opaqueId,
+    name: z.string().min(1).max(256),
+    description: z.string().min(1).max(4_096),
+    version: z.string().min(1).max(128),
+    settings: z.array(matrixSessionExtensionSettingSchema).max(32),
+  })
+  .strict()
+  .superRefine((extension, context) => {
+    const ids = new Set<string>()
+    extension.settings.forEach((setting, index) => {
+      if (ids.has(setting.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['settings', index, 'id'],
+          message: 'Session extension setting IDs must be unique',
+        })
+      }
+      ids.add(setting.id)
+    })
+  })
+
+export const matrixGatewayCapabilitiesSchema = z
+  .object({
+    models: z.array(
+      matrixCapabilityOptionSchema.safeExtend({
+        default_reasoning_level: z.string().min(1).max(64).optional(),
+        supported_reasoning_levels: z.array(
+          z.object({
+            effort: z.string().min(1).max(64),
+            description: z.string().max(4_096).optional(),
+          }).strict(),
+        ).max(64).optional(),
+      }).strict(),
+    ).max(256),
+    permission_modes: z.array(matrixCapabilityOptionSchema).max(128),
+    can_create_session: z.boolean(),
+    can_select_session: z.boolean(),
+    can_archive_session: z.boolean(),
+    can_delete_session: z.boolean(),
+    session_extensions: z.array(matrixSessionExtensionCapabilitySchema).max(128),
+  })
+  .strict()
+  .superRefine((capabilities, context) => {
+    for (const [field, values] of [
+      ['models', capabilities.models],
+      ['permission_modes', capabilities.permission_modes],
+      ['session_extensions', capabilities.session_extensions],
+    ] as const) {
+      const ids = new Set<string>()
+      values.forEach((value, index) => {
+        if (ids.has(value.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: [field, index, 'id'],
+            message: `${field} IDs must be unique`,
+          })
+        }
+        ids.add(value.id)
+      })
+    }
+  })
+
+export type MatrixGatewayCapabilities = z.infer<
+  typeof matrixGatewayCapabilitiesSchema
+>
+
 export const matrixSessionRootSchema = z
   .object({
     version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
@@ -218,7 +323,7 @@ export const matrixSessionLifecycleSchema = z
 
 export type MatrixSessionLifecycle = z.infer<typeof matrixSessionLifecycleSchema>
 
-const matrixCheckpointSessionSchema = z
+const matrixRoomSessionSchema = z
   .object({
     session_id: opaqueId,
     thread_root_event_id: z.string().min(1).max(512).optional(),
@@ -243,10 +348,10 @@ const matrixCheckpointSessionSchema = z
   })
   .strict()
 
-export const matrixGatewayCheckpointSchema = z
+export const matrixGatewayStateSchema = z
   .object({
     version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
-    kind: z.literal('gateway_checkpoint'),
+    kind: z.literal('gateway_state'),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
     revision: z.number().int().nonnegative(),
@@ -254,7 +359,6 @@ export const matrixGatewayCheckpointSchema = z
     revision_epoch_generation: z.number().int().positive(),
     state_version: z.number().int().nonnegative(),
     active_device_count: z.number().int().positive(),
-    sessions: z.array(matrixCheckpointSessionSchema).max(2_048),
     workspace: z
       .object({
         project: projectSummarySchema,
@@ -264,12 +368,115 @@ export const matrixGatewayCheckpointSchema = z
         permission_mode: z.string().min(1).max(128),
       })
       .strict(),
-    capabilities: jsonValueSchema,
+    capabilities: matrixGatewayCapabilitiesSchema,
     updated_at: timestamp,
   })
   .strict()
 
-export type MatrixGatewayCheckpoint = z.infer<typeof matrixGatewayCheckpointSchema>
+export type MatrixGatewayState = z.infer<
+  typeof matrixGatewayStateSchema
+>
+
+export const matrixSessionStateSchema = z
+  .object({
+    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    kind: z.literal('session_state'),
+    gateway_id: opaqueId,
+    conversation_id: opaqueId,
+    ...revisionFields,
+    state_version: z.number().int().nonnegative(),
+    session_id: opaqueId,
+    state: z.enum(['active', 'archived', 'deleted']),
+    session: matrixRoomSessionSchema.optional(),
+    updated_at: timestamp,
+    /** The desired-state command whose durable result is this entity value. */
+    source_command_id: opaqueId.optional(),
+  })
+  .strict()
+  .superRefine((state, context) => {
+    if (state.state === 'deleted' && state.session !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['session'],
+        message: 'Deleted session state must be a tombstone without session data',
+      })
+    }
+    if (state.state !== 'deleted' && state.session === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['session'],
+        message: 'Active and archived session state requires session data',
+      })
+    }
+    if (state.session && state.session.session_id !== state.session_id) {
+      context.addIssue({
+        code: 'custom',
+        path: ['session', 'session_id'],
+        message: 'Nested session ID must match the state entity ID',
+      })
+    }
+  })
+
+export type MatrixSessionState = z.infer<
+  typeof matrixSessionStateSchema
+>
+
+export const matrixStateEnvelopeHeaderSchema = z
+  .object({
+    kind: z.literal('codever.matrix-state-envelope'),
+    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    contentType: z.literal(CODEVER_MATRIX_STATE_CONTENT_TYPE),
+    gatewayId: opaqueId,
+    conversationId: opaqueId,
+    roomId: opaqueId,
+    eventType: z.enum([
+      CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+      CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+    ]),
+    stateKey: opaqueId,
+    epochId: opaqueId,
+    stateVersion: z.number().int().nonnegative(),
+    issuedAt: timestamp,
+    nonce: base64Url.length(16),
+  })
+  .strict()
+
+export const matrixStateEnvelopeSchema = matrixStateEnvelopeHeaderSchema
+  .safeExtend({ ciphertext: base64Url.min(22).max(32 * 1024) })
+  .strict()
+
+export const signedMatrixStateEnvelopeSchema = z
+  .object({
+    envelope: matrixStateEnvelopeSchema,
+    signature: signatureSchema,
+  })
+  .strict()
+
+export type SignedMatrixStateEnvelope = z.infer<
+  typeof signedMatrixStateEnvelopeSchema
+>
+
+export const matrixStateContentSchema = z.discriminatedUnion('kind', [
+  matrixGatewayStateSchema,
+  matrixSessionStateSchema,
+])
+
+export type MatrixStateContent = z.infer<typeof matrixStateContentSchema>
+
+export const matrixStateEventContentSchema = z
+  .object({
+    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    kind: z.literal('state_envelope'),
+    state_envelope: signedMatrixStateEnvelopeSchema,
+    // Gateway state distributes the addressed key ring. Session entities reuse
+    // that epoch key so their independent replacement events stay small.
+    timeline_key_ring_bundle: signedSecureEnvelopeBundleSchema.optional(),
+  })
+    .strict()
+
+export type MatrixStateEventContent = z.infer<
+  typeof matrixStateEventContentSchema
+>
 
 export const matrixGatewayRevisionSchema = z
   .object({
@@ -289,7 +496,6 @@ export const matrixNativeContentSchema = z.discriminatedUnion('kind', [
   matrixSessionRootSchema,
   matrixSessionUpdateSchema,
   matrixSessionLifecycleSchema,
-  matrixGatewayCheckpointSchema,
   matrixGatewayRevisionSchema,
 ])
 

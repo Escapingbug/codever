@@ -63,17 +63,6 @@ enum class ClientMessageFormat(val wireValue: String) {
     }
 }
 
-enum class ClientToolStatus(val wireValue: String) {
-    RUNNING("running"),
-    SUCCEEDED("succeeded"),
-    FAILED("failed");
-
-    companion object {
-        fun fromWire(value: String): ClientToolStatus = entries.singleOrNull { it.wireValue == value }
-            ?: throw IllegalArgumentException("Unknown client tool status.")
-    }
-}
-
 /**
  * Public, already-authenticated Codever message. It deliberately cannot carry
  * a raw Matrix event or any Matrix session secret.
@@ -90,9 +79,6 @@ data class ClientMessage(
     val historical: Boolean? = null,
     val operationId: String? = null,
     val requestId: String? = null,
-    val streamId: String? = null,
-    val toolCallId: String? = null,
-    val toolStatus: ClientToolStatus? = null,
     val replacesEventId: String? = null,
     val commandId: String? = null,
     val revision: Long? = null,
@@ -111,8 +97,6 @@ data class ClientMessage(
         optionalOpaqueId(sessionId, "sessionId")
         optionalOpaqueId(operationId, "operationId")
         optionalOpaqueId(requestId, "requestId")
-        optionalOpaqueId(streamId, "streamId")
-        optionalOpaqueId(toolCallId, "toolCallId")
         optionalOpaqueId(replacesEventId, "replacesEventId")
         optionalOpaqueId(commandId, "commandId")
         optionalOpaqueId(originDeviceId, "originDeviceId")
@@ -120,6 +104,9 @@ data class ClientMessage(
         require(revision == null || revision >= 0)
         require(activeDeviceCount == null || activeDeviceCount > 0)
         require(attachments == null || attachments.size <= 10)
+        require((kind == ClientMessageKind.TOOL) == (toolGroup != null)) {
+            "toolGroup must be present only for tool messages."
+        }
         requireWireBytes("ClientMessage", MAX_BRIDGE_EVENT_PAYLOAD_BYTES) {
             PublicClientJson.encodeMessage(this)
         }

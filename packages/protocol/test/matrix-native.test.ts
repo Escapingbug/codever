@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
-  matrixGatewayCheckpointSchema,
+  CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+  CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+  matrixGatewayStateSchema,
+  matrixSessionStateSchema,
   matrixGatewayRevisionSchema,
   matrixSessionLifecycleSchema,
   matrixSessionRootSchema,
@@ -51,10 +54,10 @@ describe('Matrix native conversation protocol', () => {
     }).source_command_id).toBe('command-delete-1')
   })
 
-  it('carries the current session inventory for a newly paired device', () => {
-    const checkpoint = matrixGatewayCheckpointSchema.parse({
+  it('carries current Gateway metadata for a newly paired device', () => {
+    const state = matrixGatewayStateSchema.parse({
       version: 2,
-      kind: 'gateway_checkpoint',
+      kind: 'gateway_state',
       gateway_id: 'gateway-1',
       conversation_id: 'conversation-1',
       revision: 5,
@@ -62,7 +65,83 @@ describe('Matrix native conversation protocol', () => {
       revision_epoch_generation: 1,
       state_version: 3,
       active_device_count: 2,
-      sessions: [{
+      workspace: {
+        project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
+        provider: 'codex',
+        permission_mode: 'default',
+      },
+      capabilities: {
+        models: [],
+        permission_modes: [{ id: 'default', name: 'Default' }],
+        can_create_session: true,
+        can_select_session: false,
+        can_archive_session: true,
+        can_delete_session: true,
+        session_extensions: [],
+      },
+      updated_at: 20,
+    })
+    expect(state.workspace.project.id).toBe('project-1')
+  })
+
+  it('rejects incomplete or duplicate Gateway capabilities', () => {
+    const base = {
+      version: 2,
+      kind: 'gateway_state',
+      gateway_id: 'gateway-1',
+      conversation_id: 'conversation-1',
+      revision: 5,
+      revision_epoch: 'epoch-1',
+      revision_epoch_generation: 1,
+      state_version: 3,
+      active_device_count: 1,
+      workspace: {
+        project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
+        provider: 'codex',
+        permission_mode: 'default',
+      },
+      updated_at: 20,
+    }
+    expect(matrixGatewayStateSchema.safeParse({
+      ...base,
+      capabilities: { can_create_session: true },
+    }).success).toBe(false)
+    expect(matrixGatewayStateSchema.safeParse({
+      ...base,
+      capabilities: {
+        models: [],
+        permission_modes: [
+          { id: 'default', name: 'Default' },
+          { id: 'default', name: 'Duplicate' },
+        ],
+        can_create_session: true,
+        can_select_session: false,
+        can_archive_session: true,
+        can_delete_session: true,
+        session_extensions: [],
+      },
+    }).success).toBe(false)
+  })
+
+  it('models each current session as its own Matrix room-state entity', () => {
+    expect(CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE).toBe(
+      'io.codever.gateway.current.v2',
+    )
+    expect(CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE).toBe(
+      'io.codever.session.current.v2',
+    )
+    expect(matrixSessionStateSchema.parse({
+      version: 2,
+      kind: 'session_state',
+      gateway_id: 'gateway-1',
+      conversation_id: 'conversation-1',
+      revision: 5,
+      revision_epoch: 'epoch-1',
+      revision_epoch_generation: 1,
+      state_version: 3,
+      session_id: 'session-1',
+      state: 'active',
+      session: {
         session_id: 'session-1',
         thread_root_event_id: '$session-root:example.org',
         title: 'Fix sync',
@@ -72,19 +151,43 @@ describe('Matrix native conversation protocol', () => {
         project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
         provider: 'codex',
         extensions: [],
-      }],
-      workspace: {
-        project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
-        provider: 'codex',
-        permission_mode: 'default',
       },
-      capabilities: { canCreateSession: true },
       updated_at: 20,
+      source_command_id: 'command-create-1',
+    })).toMatchObject({
+      source_command_id: 'command-create-1',
+      session: { thread_root_event_id: '$session-root:example.org' },
     })
-    expect(checkpoint.sessions[0]?.session_id).toBe('session-1')
-    expect(checkpoint.sessions[0]?.thread_root_event_id).toBe(
-      '$session-root:example.org',
-    )
+  })
+
+  it('requires deleted session state to be a data-free tombstone', () => {
+    const base = {
+      version: 2 as const,
+      kind: 'session_state' as const,
+      gateway_id: 'gateway-1',
+      conversation_id: 'conversation-1',
+      revision: 6,
+      revision_epoch: 'epoch-1',
+      revision_epoch_generation: 1,
+      state_version: 4,
+      session_id: 'session-1',
+      state: 'deleted' as const,
+      updated_at: 21,
+    }
+    expect(matrixSessionStateSchema.parse(base).state).toBe('deleted')
+    expect(matrixSessionStateSchema.safeParse({
+      ...base,
+      session: {
+        session_id: 'session-1',
+        title: 'stale',
+        updated_at: 20,
+        archived: false,
+        status: 'idle',
+        project: { id: 'p', name: 'p', cwd: '/p' },
+        provider: 'codex',
+        extensions: [],
+      },
+    }).success).toBe(false)
   })
 
   it('advances cross-device concurrency without publishing a state snapshot', () => {

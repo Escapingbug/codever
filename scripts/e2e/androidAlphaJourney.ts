@@ -396,13 +396,41 @@ class AndroidWebView {
     }
 
     async openProject(projectName: string): Promise<void> {
-        const opened = await this.evaluate<boolean>(`(() => {
+        const onConversation = await this.evaluate<boolean>(`(() =>
+            document.querySelector('.app-shell')?.classList.contains('mobile-chat-open') === true
+        )()`)
+        if (onConversation) {
+            await this.clickAria('Back to conversations')
+            await waitFor(
+                async () => !(await this.state()).mobileChatOpen,
+                {
+                    description: 'Android conversation list after using the visible mobile Back control',
+                    timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+                },
+            )
+        }
+        const expanded = await this.evaluate<boolean>(`(() => {
             const groups = Array.from(document.querySelectorAll('.project-session-group'));
             const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
             const toggle = group?.querySelector('button.project-session-toggle');
             if (!group || !toggle) return false;
             if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
-            const row = group.querySelector('button.session-row');
+            return true;
+        })()`)
+        assert.equal(expanded, true, `Could not expand Android project ${projectName}`)
+        await waitFor(async () => this.evaluate<boolean>(`(() => {
+            const groups = Array.from(document.querySelectorAll('.project-session-group'));
+            const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
+            const row = group?.querySelector('button.session-row');
+            return Boolean(row && row.getClientRects().length > 0 && !row.disabled);
+        })()`), {
+            description: `visible Android conversation in project ${projectName}`,
+            timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+        })
+        const opened = await this.evaluate<boolean>(`(() => {
+            const groups = Array.from(document.querySelectorAll('.project-session-group'));
+            const group = groups.find(item => item.querySelector('.project-copy strong')?.textContent?.trim() === ${json(projectName)});
+            const row = group?.querySelector('button.session-row');
             if (row && !row.disabled) row.click();
             return Boolean(row && !row.disabled);
         })()`)
@@ -590,9 +618,52 @@ export async function runAndroidAlphaJourney(
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )
+        process.stdout.write('  [A2b/10] Killing Android after native confirmation and resuming the durable pairing transaction…\n')
+        const requestPersistenceBaseline = await diagnosticCount(
+            serial,
+            'pairing.transaction.request_persisted',
+        )
+        const pairingSyncBaseline = syncGate.hold()
         await tapNativePairingConfirmation(serial, options.runId)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'pairing.transaction.request_persisted',
+            ) > requestPersistenceBaseline,
+            {
+                description: 'durable signed native pairing request before process death',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await syncGate.waitForInterception(
+            pairingSyncBaseline,
+            'a held Matrix sync after the signed native pairing request was persisted',
+        )
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        syncGate.release()
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'pairing.transaction.restored request=true',
+            ) > 0,
+            {
+                description: 'native pairing transaction restoration after process death',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
         const paired = await android.waitFor(
-            'fresh native Gateway checkpoint',
+            'fresh native Gateway Room State',
             state => state.connection.endsWith('Connected') && state.projectNames.length > 0,
             CONNECT_TIMEOUT_MS,
         )
@@ -676,11 +747,39 @@ export async function runAndroidAlphaJourney(
 
         // Separate a pure transport-loss assertion from the preceding
         // cross-device revision race. Foregrounding explicitly requests an
-        // authoritative checkpoint before the independent privacy journey
+        // authoritative Room State before the independent privacy journey
         // advances the shared state again.
         const stateResponseBaseline = await gatewayStateResponseCount(serial)
+        const backgroundLifecycleBaseline = await diagnosticCount(
+            serial,
+            'service.ui_foreground running=false',
+        )
+        const foregroundLifecycleBaseline = await diagnosticCount(
+            serial,
+            'service.ui_foreground running=true',
+        )
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'service.ui_foreground running=false',
+            ) > backgroundLifecycleBaseline,
+            {
+                description: 'Android Activity background lifecycle before foreground recovery',
+                timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+            },
+        )
         await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'service.ui_foreground running=true',
+            ) > foregroundLifecycleBaseline,
+            {
+                description: 'Android Activity foreground lifecycle before Gateway convergence',
+                timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+            },
+        )
         await waitFor(
             async () => await gatewayStateResponseCount(serial) > stateResponseBaseline,
             {
@@ -992,6 +1091,7 @@ export async function runAndroidAlphaJourney(
                 'browser-offline-cache-recovery',
                 'fresh-native-pairing',
                 'delayed-first-native-sync-recovery',
+                'native-confirmed-pairing-process-death-recovery',
                 'browser-android-session-sync',
                 'background-task-notification',
                 'notification-deep-link-recovery',
@@ -1499,8 +1599,8 @@ async function diagnosticCount(serial: string, marker: string): Promise<number> 
 }
 
 async function gatewayStateResponseCount(serial: string): Promise<number> {
-    return await diagnosticCount(serial, 'gateway.state.response.accepted')
-        + await diagnosticCount(serial, 'gateway.state.response.duplicate')
+    return await diagnosticCount(serial, 'gateway.room_state.accepted')
+        + await diagnosticCount(serial, 'gateway.room_state.duplicate')
 }
 
 async function installedVersionName(serial: string): Promise<string> {

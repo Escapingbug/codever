@@ -5,7 +5,7 @@ import {
 } from "./gatewayState";
 
 describe("Gateway state progress", () => {
-  it("accepts a Matrix-native revision advance on the current checkpoint", () => {
+  it("accepts a Matrix-native revision advance on current Gateway metadata", () => {
     expect(
       classifyGatewayStateProgress(
         { stateVersion: 1, revision: 0 },
@@ -14,7 +14,7 @@ describe("Gateway state progress", () => {
     ).toBe("advance");
   });
 
-  it("accepts checkpoint and revision advances independently", () => {
+  it("accepts metadata-version and revision advances independently", () => {
     expect(
       classifyGatewayStateProgress(
         { stateVersion: 1, revision: 1 },

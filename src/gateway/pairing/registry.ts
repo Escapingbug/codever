@@ -356,22 +356,16 @@ export class FileTrustedDeviceRegistry {
   /**
    * Reserves a strictly increasing Gateway timestamp in the same durable file
    * as pairing state. Gaps are harmless; going backwards after a restart is
-   * not. `minimum` is used only for compatibility with older clients that
-   * compared a joining device's request clock with the Gateway response clock.
+   * not. A joining device's independent wall clock is deliberately irrelevant.
    */
-  async reserveGatewayIssuedAt(
-    now = Date.now(),
-    minimum = 0,
-  ): Promise<number> {
-    for (const [label, value] of [['now', now], ['minimum', minimum]] as const) {
-      if (!Number.isSafeInteger(value) || value < 0) {
-        throw new RangeError(`Gateway ${label} timestamp is invalid`)
-      }
+  async reserveGatewayIssuedAt(now = Date.now()): Promise<number> {
+    if (!Number.isSafeInteger(now) || now < 0) {
+      throw new RangeError('Gateway now timestamp is invalid')
     }
     return this.file.transaction(initialState, (state) => {
       validateState(state)
       const previous = latestGatewayIssuedAt(state)
-      const issuedAt = Math.max(now, minimum, previous + 1)
+      const issuedAt = Math.max(now, previous + 1)
       if (!Number.isSafeInteger(issuedAt)) {
         throw new RangeError('Gateway timestamp exceeds the safe integer range')
       }

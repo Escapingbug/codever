@@ -20,7 +20,6 @@ export class StrictMatrixCommandAuthorizer {
         private readonly gatewayId: string,
         trustedDevices: MatrixGatewayTrustedDevice[],
         private readonly replayStore: FileCommandReplayStore,
-        private readonly sequenceEpoch = 'legacy-v1',
     ) {
         for (const device of trustedDevices) this.devices.set(device.deviceId, device)
     }
@@ -50,7 +49,6 @@ export class StrictMatrixCommandAuthorizer {
         duplicate: boolean
         revision: number
         terminal?: DurableCommandResult
-        legacyFingerprintRecovery?: true
     }> {
         const signed = signedCommandSchema.parse(input) as SignedCommand
         const policy = this.devices.get(signed.command.deviceId)
@@ -84,7 +82,7 @@ export class StrictMatrixCommandAuthorizer {
             // executing the stale payload.
             allowExpired: true,
         })
-        const expectedSequenceEpoch = policy.sequenceEpoch ?? this.sequenceEpoch
+        const expectedSequenceEpoch = policy.sequenceEpoch
         if (command.sequenceEpoch !== expectedSequenceEpoch) {
             throw new MatrixAuthorizationError(
                 'sequence-epoch-mismatch',
@@ -97,19 +95,12 @@ export class StrictMatrixCommandAuthorizer {
                 `Expected revision epoch ${context.revisionEpoch}`,
             )
         }
-        const claim = await this.replayStore.claimCommandInOrder(
-            command,
-            now,
-            expectedSequenceEpoch,
-        )
+        const claim = await this.replayStore.claimCommandInOrder(command, now)
         return {
             command,
             duplicate: claim.status === 'duplicate',
             revision: claim.revision,
             ...(claim.terminal ? { terminal: claim.terminal } : {}),
-            ...(claim.legacyFingerprintRecovery
-                ? { legacyFingerprintRecovery: true as const }
-                : {}),
         }
     }
 }

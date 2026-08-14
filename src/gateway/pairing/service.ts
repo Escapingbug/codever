@@ -46,7 +46,6 @@ import {
 const DEFAULT_OFFER_LIFETIME_MS = 5 * 60_000
 const MAX_OFFER_LIFETIME_MS = 10 * 60_000
 const REQUEST_LIFETIME_MS = 2 * 60_000
-const RESPONSE_LIFETIME_MS = 10 * 60_000
 const REJECTION_LIFETIME_MS = 2 * 60_000
 const CERTIFICATE_LIFETIME_MS = 365 * 24 * 60 * 60_000
 // Rotations form a durable chain for clients that may be offline. This matches
@@ -59,6 +58,9 @@ const allOperations: PairingOperation[] = [
   'decision',
   'session.settings',
   'session.create',
+  'session.archive',
+  'session.restore',
+  'session.delete',
   'device.invite',
 ]
 
@@ -144,6 +146,15 @@ export class GatewayPairingService {
         throw new Error('Pairing request ID conflicts with a different signed request')
       }
       if (existing.status === 'approved' && existing.response) {
+        const active = await this.registry.get(signedRequest.request.deviceId)
+        if (
+          active?.status !== 'active'
+          || active.certificate.certificate.expiresAt <= now
+          || active.certificate.certificate.certificateId
+            !== existing.response.response.certificate.certificate.certificateId
+        ) {
+          throw new Error('Pairing approval is no longer active')
+        }
         return {
           requestId: signedRequest.request.requestId,
           deviceId: signedRequest.request.deviceId,
@@ -221,13 +232,7 @@ export class GatewayPairingService {
     ) {
       throw new RangeError('Certificate lifetime is outside policy')
     }
-    // Keep Gateway documents monotonic across restarts. The request minimum is
-    // a compatibility concession for older PWAs; protocol causality itself is
-    // established by signed digests, not this timestamp.
-    const issuedAt = await this.registry.reserveGatewayIssuedAt(
-      now,
-      request.request.issuedAt,
-    )
+    const issuedAt = await this.registry.reserveGatewayIssuedAt(now)
     const certificateDocument: PairingCertificate = {
       kind: 'codever.pairing.certificate',
       version: 1,
@@ -278,9 +283,11 @@ export class GatewayPairingService {
       activeDeviceCount: activeDevices.length + (replacesActiveDevice ? 0 : 1),
       certificate,
       issuedAt,
-      // The offer is already atomically consumed. Keep the exact persisted
-      // response retryable after that short invitation window closes.
-      expiresAt: issuedAt + RESPONSE_LIFETIME_MS,
+      // This is the durable commit proof for the same authorization as the
+      // certificate, not another short-lived invitation. Keeping both windows
+      // identical lets an interrupted client recover until the authorization
+      // expires while registry status still enforces revocation.
+      expiresAt: certificateDocument.expiresAt,
     }
     const response = await signPairingResponse(
       responseDocument,
@@ -400,7 +407,7 @@ function pairingRejectionDetails(error: unknown): {
       retryable: false,
     }
   }
-  if (/denied|rejected/iu.test(message)) {
+  if (/denied|rejected|no longer active/iu.test(message)) {
     return {
       code: 'gateway_rejected',
       message: 'The Gateway rejected this pairing request. Scan a new invitation.',

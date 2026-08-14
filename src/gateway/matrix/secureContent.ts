@@ -6,16 +6,20 @@ import {
     sealSecureEnvelopeBundle,
     sealSecureEnvelope,
     sealMatrixTimelineEnvelope,
+    sealMatrixStateEnvelope,
     type DeviceKeyPair,
 } from '@codever/security'
 import { createHash, randomUUID } from 'node:crypto'
 import { FileReplayStore } from '@codever/security/node'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+    CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
     MATRIX_NATIVE_PROTOCOL_VERSION,
     canonicalJsonBytes,
     matrixNativeContentSchema,
+    matrixStateContentSchema,
     type MatrixNativeContent,
+    type MatrixStateContent,
     type MatrixTimelineKeyRingGrant,
     type CodeverAttachment,
     type JsonValue,
@@ -47,6 +51,10 @@ import {
     type DurableMatrixDelivery,
 } from './fileDeliveryOutbox'
 import { FileTimelineKeyStore, type TimelineKeyRing } from './fileTimelineKeyStore'
+import {
+    FileMatrixStateOutbox,
+    type DurableMatrixStateDelivery,
+} from './fileStateOutbox'
 
 export interface OpenedGatewayMatrixContent {
     content: Record<string, unknown>
@@ -117,11 +125,15 @@ export class GatewaySecureContentLayer {
     private readonly replayStore: FileReplayStore
     private readonly deliveryOutbox: FileMatrixDeliveryOutbox
     private readonly timelineKeyStore: FileTimelineKeyStore
+    private readonly stateOutbox: FileMatrixStateOutbox
     /** Logical Matrix event ID -> per-recipient physical event ID. */
     private readonly deliveryIds = new Map<string, Map<string, string>>()
     private readonly retryingRooms = new Map<string, Promise<void>>()
     private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
     private readonly retryAttempts = new Map<string, number>()
+    private readonly stateRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    private readonly stateRetryAttempts = new Map<string, number>()
+    private readonly stateRoomChains = new Map<string, Promise<unknown>>()
     private readonly inFlightDeliveries = new Map<string, Promise<MatrixSendEventResult>>()
     private readonly sendScheduler = new MatrixSendScheduler()
     private readonly deliveryConfirmations = new Map<string, {
@@ -144,6 +156,9 @@ export class GatewaySecureContentLayer {
         this.timelineKeyStore = new FileTimelineKeyStore(
             `${config.envelopeReplayLedgerPath}.timeline-keys.json`,
         )
+        this.stateOutbox = new FileMatrixStateOutbox(
+            `${config.envelopeReplayLedgerPath}.state-outbox.jsonl`,
+        )
     }
 
     async initialize(now = Date.now()): Promise<void> {
@@ -151,6 +166,7 @@ export class GatewaySecureContentLayer {
         await this.replayStore.prune(now)
         await this.deliveryOutbox.initialize()
         await this.timelineKeyStore.initialize()
+        await this.stateOutbox.initialize()
         for (const mapping of this.deliveryOutbox.logicalEventMappings()) {
             this.deliveryIds.set(mapping.eventId, mapping.recipientEvents)
         }
@@ -160,6 +176,14 @@ export class GatewaySecureContentLayer {
         for (const timer of this.retryTimers.values()) clearTimeout(timer)
         this.retryTimers.clear()
         this.retryAttempts.clear()
+        for (const timer of this.stateRetryTimers.values()) clearTimeout(timer)
+        this.stateRetryTimers.clear()
+        this.stateRetryAttempts.clear()
+    }
+
+    compactStateOutbox(): Promise<void> {
+        return Promise.allSettled([...this.stateRoomChains.values()])
+            .then(() => this.stateOutbox.compact())
     }
 
     transportForRoom(room: MatrixGatewayRoomConfig, transport: MatrixTransport): MatrixTransport {
@@ -213,10 +237,107 @@ export class GatewaySecureContentLayer {
         }, room, transport, 'control')
     }
 
+    async setNativeRoomState(
+        room: MatrixGatewayRoomConfig,
+        eventType: string,
+        stateKey: string,
+        content: MatrixStateContent,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        const [result] = await this.setNativeRoomStateBatch(room, [{
+            eventType,
+            stateKey,
+            content,
+        }], transport)
+        if (!result) throw new Error('Matrix Room State batch produced no delivery')
+        return result
+    }
+
+    /**
+     * Durably stages one logical Room State transaction before sending any of
+     * it. Gateway key distribution is delivered before session entities so a
+     * newly rotated epoch is readable when each independent entity arrives.
+     */
+    async setNativeRoomStateBatch(
+        room: MatrixGatewayRoomConfig,
+        entries: readonly {
+            eventType: string
+            stateKey: string
+            content: MatrixStateContent
+        }[],
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult[]> {
+        const createdAt = Date.now()
+        const deliveries = entries.map((entry, index) => {
+            const native = matrixStateContentSchema.parse(entry.content)
+            if (native.gateway_id !== this.gatewayId) {
+                throw new Error('Matrix state Gateway binding is incorrect')
+            }
+            if (native.conversation_id !== room.conversationId) {
+                throw new Error('Matrix state conversation binding is incorrect')
+            }
+            return this.stateOutbox.createDelivery({
+                roomId: room.roomId,
+                eventType: entry.eventType,
+                stateKey: entry.stateKey,
+                stateVersion: native.state_version,
+                content: native,
+                // Preserve transaction ordering in the durable outbox even
+                // when an entire batch is created in one millisecond.
+                createdAt: createdAt + index,
+            })
+        })
+        await this.stateOutbox.stageBatch(deliveries)
+        const gatewayDeliveries = deliveries.filter(delivery =>
+            delivery.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+        )
+        return this.serializeStateRoom(room.roomId, async () => {
+            try {
+                // Gateway state distributes the current epoch key. Publish it
+                // before any entity that may have been encrypted after a recipient
+                // change; session entities remain independently authoritative.
+                const gatewayResults: MatrixSendEventResult[] = []
+                for (const delivery of gatewayDeliveries) {
+                    gatewayResults.push(await this.deliverState(delivery, room, transport))
+                }
+                // A Room State PUT owns only the entities staged by this call.
+                // Unrelated durable gaps are retried in the recovery lane; making
+                // a new session wait for every older entity creates a global
+                // delivery barrier and lets status churn block business actions.
+                const entityDeliveries = deliveries
+                    .filter(delivery =>
+                        delivery.eventType !== CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+                    )
+                    .map(delivery => this.stateOutbox.latestForEntity(delivery))
+                    .filter((delivery, index, all) =>
+                        this.stateOutbox.isPending(delivery.deliveryId)
+                        && all.findIndex(candidate =>
+                            candidate.deliveryId === delivery.deliveryId
+                        ) === index
+                    )
+                const entityResults = await runBounded(
+                    entityDeliveries.map(delivery => () =>
+                        this.deliverState(delivery, room, transport)
+                    ),
+                    2,
+                )
+                await this.stateOutbox.compactIfNeeded()
+                return [...gatewayResults, ...entityResults]
+            } catch (error) {
+                this.scheduleStateRetry(room, transport)
+                throw error
+            }
+        })
+    }
+
     async activeDeviceCountForRoom(room: MatrixGatewayRoomConfig): Promise<number> {
         return (await this.currentTrustedDevices()).filter(device =>
             device.allowedRoomIds.includes(room.roomId)
         ).length
+    }
+
+    latestNativeRoomState(roomId: string): MatrixStateContent[] {
+        return this.stateOutbox.latestForRoom(roomId).map(delivery => delivery.content)
     }
 
     async openIncoming(
@@ -405,6 +526,184 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
     ): void {
         this.schedulePendingRetry(room, transport)
+        this.scheduleStateRetry(room, transport)
+    }
+
+    private scheduleStateRetry(
+        room: MatrixGatewayRoomConfig,
+        transport: MatrixTransport,
+    ): void {
+        if (this.stateRetryTimers.has(room.roomId)) return
+        const attempt = this.stateRetryAttempts.get(room.roomId) ?? 0
+        const delayMs = Math.min(250 * (2 ** attempt), 30_000)
+        const timer = setTimeout(() => {
+            this.stateRetryTimers.delete(room.roomId)
+            void this.retryStateForRoom(room, transport)
+                .then(() => this.stateRetryAttempts.delete(room.roomId))
+                .catch(() => {
+                    this.stateRetryAttempts.set(room.roomId, attempt + 1)
+                    this.scheduleStateRetry(room, transport)
+                })
+        }, delayMs)
+        timer.unref?.()
+        this.stateRetryTimers.set(room.roomId, timer)
+    }
+
+    private async retryStateForRoom(
+        room: MatrixGatewayRoomConfig,
+        transport: MatrixTransport,
+    ): Promise<void> {
+        await this.serializeStateRoom(room.roomId, async () => {
+            const pending = this.stateOutbox.latestPendingForRoom(room.roomId)
+            const ordered = [
+                ...pending.filter(delivery =>
+                    delivery.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+                ),
+                ...pending.filter(delivery =>
+                    delivery.eventType !== CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+                ),
+            ]
+            for (const delivery of ordered) {
+                await this.deliverState(delivery, room, transport)
+            }
+            await this.stateOutbox.compactIfNeeded()
+        })
+    }
+
+    private serializeStateRoom<T>(roomId: string, operation: () => Promise<T>): Promise<T> {
+        const previous = this.stateRoomChains.get(roomId) ?? Promise.resolve()
+        const current = previous.catch(() => undefined).then(operation)
+        const settled = current.then(() => undefined, () => undefined)
+        this.stateRoomChains.set(roomId, settled)
+        void settled.then(() => {
+            if (this.stateRoomChains.get(roomId) === settled) this.stateRoomChains.delete(roomId)
+        })
+        return current
+    }
+
+    private async deliverState(
+        delivery: DurableMatrixStateDelivery,
+        room: MatrixGatewayRoomConfig,
+        transport: MatrixTransport,
+    ): Promise<MatrixSendEventResult> {
+        return this.stateOutbox.serializeEntity(delivery, async () => {
+            if (!this.stateOutbox.isPending(delivery.deliveryId)) {
+                return { eventId: `$codever-state-already-delivered-${delivery.deliveryId}` }
+            }
+            const latest = this.stateOutbox.latestForEntity(delivery)
+            if (latest.deliveryId !== delivery.deliveryId) {
+                await this.stateOutbox.supersedeOlder(latest)
+                return { eventId: `$codever-superseded-${delivery.deliveryId}` }
+            }
+            if (!transport.setApplicationRoomState) {
+                throw new Error('Matrix transport does not support application Room State')
+            }
+            const sealed = await this.sealNativeRoomState(delivery, room)
+            const result = await transport.setApplicationRoomState({
+                roomId: delivery.roomId,
+                eventType: delivery.eventType,
+                stateKey: delivery.stateKey,
+                content: sealed,
+            })
+            await this.stateOutbox.markDelivered(delivery.deliveryId, result.eventId)
+            await this.stateOutbox.supersedeOlder(delivery)
+            return result
+        })
+    }
+
+    private async sealNativeRoomState(
+        delivery: DurableMatrixStateDelivery,
+        room: MatrixGatewayRoomConfig,
+    ): Promise<Record<string, unknown>> {
+        const now = Date.now()
+        const recipients = (await this.currentTrustedDevices(now))
+            .filter(device => device.allowedRoomIds.includes(room.roomId))
+            .sort((left, right) => left.deviceId.localeCompare(right.deviceId))
+        if (recipients.length === 0) {
+            throw new Error(`No active application-layer recipients for room ${room.roomId}`)
+        }
+        const keyRing = await this.timelineKeyStore.ensureRoom(
+            room.roomId,
+            recipients.map(recipient => recipient.deviceId),
+            now,
+        )
+        const active = keyRing.epochs.find(epoch => epoch.epochId === keyRing.activeEpochId)
+        if (!active) throw new Error(`Timeline key ring for ${room.roomId} has no active epoch`)
+        const keys = this.requireGatewayKeys()
+        const stateEnvelope = await sealMatrixStateEnvelope({
+            plaintext: delivery.content,
+            timelineKey: active.key,
+            gatewayPrivateKey: keys.privateKey,
+            gatewayKeyId: keys.keyId,
+            gatewayId: this.gatewayId,
+            conversationId: room.conversationId,
+            roomId: room.roomId,
+            eventType: delivery.eventType,
+            stateKey: delivery.stateKey,
+            epochId: active.epochId,
+            stateVersion: delivery.stateVersion,
+            now,
+        })
+        let timelineKeyRingBundle: Awaited<ReturnType<typeof sealSecureEnvelopeBundle>> | undefined
+        // Gateway metadata is the single key-distribution entity.
+        // Per-session state reuses the active room epoch and therefore stays
+        // small regardless of the number of paired devices.
+        if (delivery.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE) {
+            const addressedRecipients = await Promise.all(recipients.map(async recipient => {
+                this.assertCertificateActive(recipient, now)
+                if (recipient.certificateExpiresAt === undefined) {
+                    throw new Error(`Trusted device ${recipient.deviceId} has no certificate expiry`)
+                }
+                return {
+                    recipientDeviceId: recipient.deviceId,
+                    recipientKeyId: await publicKeyId(recipient.publicKey),
+                    recipientPublicKey: recipient.publicKey,
+                    certificateExpiresAt: recipient.certificateExpiresAt,
+                }
+            }))
+            const grant: MatrixTimelineKeyRingGrant = {
+                kind: 'timeline_key_ring_grant',
+                version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                gateway_id: this.gatewayId,
+                conversation_id: room.conversationId,
+                room_id: room.roomId,
+                active_epoch_id: keyRing.activeEpochId,
+                epochs: keyRing.epochs.map(epoch => ({
+                    epoch_id: epoch.epochId,
+                    key: base64UrlEncode(epoch.key),
+                    created_at: epoch.createdAt,
+                })),
+            }
+            const expiresAt = Math.min(...addressedRecipients.map(
+                recipient => recipient.certificateExpiresAt,
+            ))
+            timelineKeyRingBundle = await sealSecureEnvelopeBundle({
+                plaintext: grant,
+                gatewayId: this.gatewayId,
+                conversationId: room.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: this.config.gatewayDeviceId,
+                senderKeyId: keys.keyId,
+                senderPrivateKey: keys.privateKey,
+                recipients: addressedRecipients.map(({ certificateExpiresAt: _, ...recipient }) =>
+                    recipient,
+                ),
+                envelopeId: `state.${delivery.deliveryId}.keys`,
+                now,
+                lifetimeMs: Math.min(expiresAt - now, 366 * 24 * 60 * 60_000),
+            })
+        }
+        const content = {
+            version: MATRIX_NATIVE_PROTOCOL_VERSION,
+            kind: 'state_envelope',
+            state_envelope: stateEnvelope,
+            ...(timelineKeyRingBundle ? { timeline_key_ring_bundle: timelineKeyRingBundle } : {}),
+        }
+        const bytes = canonicalJsonBytes(content).byteLength
+        if (bytes > MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES) {
+            throw new Error(`Matrix state event content is ${bytes} bytes; limit is ${MAX_MATRIX_TIMELINE_EVENT_CONTENT_BYTES}`)
+        }
+        return content
     }
 
     private async sealOutgoingToAll(
@@ -555,7 +854,7 @@ export class GatewaySecureContentLayer {
         await this.deliveryOutbox.stage(delivery)
         let result: MatrixSendEventResult
         try {
-            result = await this.deliverDurable(
+            result = await this.deliverDurableControl(
                 delivery,
                 room,
                 recipient,
@@ -659,7 +958,7 @@ export class GatewaySecureContentLayer {
                 )
                 continue
             }
-            const result = await this.deliverDurable(
+            const result = await this.deliverDurableControl(
                 delivery,
                 room,
                 recipient,
@@ -734,7 +1033,7 @@ export class GatewaySecureContentLayer {
         return this.observeDeliveryAttempt(lateCompletion)
     }
 
-    private async deliverDurable(
+    private async deliverDurableControl(
         delivery: DurableMatrixDelivery,
         room: MatrixGatewayRoomConfig,
         recipient: MatrixGatewayTrustedDevice,
@@ -747,7 +1046,7 @@ export class GatewaySecureContentLayer {
         if (inFlight) return this.observeDeliveryAttempt(inFlight)
 
         const lateCompletion = (async () => {
-            const result = await this.sealOutgoing(
+            const result = await this.sealOutgoingControl(
                 delivery.request,
                 room,
                 recipient,
@@ -949,15 +1248,17 @@ export class GatewaySecureContentLayer {
             throw new PermanentMatrixDeliveryError(error)
         }
         return this.sendScheduler.schedule(priority, async () => {
-            if (transport.sendApplicationTimelineEvent) {
-                return transport.sendApplicationTimelineEvent({
-                    roomId: request.roomId,
-                    eventType: 'm.room.message',
-                    transactionId: request.transactionId,
-                    content,
-                })
+            if (!transport.sendApplicationTimelineEvent) {
+                throw new PermanentMatrixDeliveryError(
+                    new Error('Matrix transport does not support application timeline events'),
+                )
             }
-            return transport.sendEncryptedRoomEvent({ ...request, content })
+            return transport.sendApplicationTimelineEvent({
+                roomId: request.roomId,
+                eventType: 'm.room.message',
+                transactionId: request.transactionId,
+                content,
+            })
         }, {
             coalesceKey,
             onSuperseded,
@@ -965,7 +1266,7 @@ export class GatewaySecureContentLayer {
         })
     }
 
-    private async sealOutgoing(
+    private async sealOutgoingControl(
         request: MatrixSendEventRequest,
         room: MatrixGatewayRoomConfig,
         recipient: MatrixGatewayTrustedDevice,
@@ -974,6 +1275,11 @@ export class GatewaySecureContentLayer {
         coalesceKey?: string,
         onSuperseded?: () => Promise<void>,
     ): Promise<MatrixSendEventResult> {
+        if (!isApplicationControlRequest(request)) {
+            throw new PermanentMatrixDeliveryError(
+                new Error('Recipient delivery only supports application control events'),
+            )
+        }
         return this.sendScheduler.schedule(priority, async () => {
             let secureEnvelope: SignedSecureEnvelope
             try {
@@ -1014,16 +1320,15 @@ export class GatewaySecureContentLayer {
                     secure_envelope: secureEnvelope,
                 },
             }
-            if (isApplicationControlRequest(request) && transport.sendApplicationControlEvent) {
-                return transport.sendApplicationControlEvent({
-                    roomId: request.roomId,
-                    eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
-                    transactionId: request.transactionId,
-                    content,
-                })
+            if (!transport.sendApplicationControlEvent) {
+                throw new PermanentMatrixDeliveryError(
+                    new Error('Matrix transport does not support application control events'),
+                )
             }
-            return transport.sendEncryptedRoomEvent({
-                ...request,
+            return transport.sendApplicationControlEvent({
+                roomId: request.roomId,
+                eventType: CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
+                transactionId: request.transactionId,
                 content,
             })
         }, {
@@ -1547,6 +1852,26 @@ function withDeliveryAttemptTimeout<T>(promise: Promise<T>, timeoutMs: number): 
     return Promise.race([promise, deadline]).finally(() => {
         if (timeout) clearTimeout(timeout)
     })
+}
+
+async function runBounded<T>(
+    operations: Array<() => Promise<T>>,
+    concurrency: number,
+): Promise<T[]> {
+    const results = new Array<T>(operations.length)
+    let nextIndex = 0
+    const workers = Array.from(
+        { length: Math.min(concurrency, operations.length) },
+        async () => {
+            while (nextIndex < operations.length) {
+                const index = nextIndex
+                nextIndex += 1
+                results[index] = await operations[index]!()
+            }
+        },
+    )
+    await Promise.all(workers)
+    return results
 }
 
 function formatError(error: unknown): string {

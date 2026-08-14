@@ -14,14 +14,31 @@ import {
   sealSecureEnvelope,
 } from "@codever/security";
 
-function signedAgentEvent(payload: Record<string, unknown>) {
+function structuredToolEvent(input: {
+  phase: "started" | "updated" | "completed" | "failed";
+  isError?: boolean;
+}) {
+  const timestamp = input.phase === "started" ? 1_700_000_000_000 : 1_700_000_000_100;
   return {
-    body: "Encrypted Codever message",
+    body: "Read file",
     "io.codever": {
       version: 1,
-      kind: "signed_event",
-      signed_event: {
-        event: { payload },
+      kind: "message",
+      format: "plain",
+      ui: {
+        kind: "tool_group",
+        version: 1,
+        groupId: "tool-call-1",
+        tools: [{
+          id: "tool-call-1",
+          name: "Read file",
+          title: "Read file",
+          category: "read",
+          phase: input.phase,
+          isError: input.isError ?? false,
+          startedAt: 1_700_000_000_000,
+          updatedAt: timestamp,
+        }],
       },
     },
   };
@@ -187,17 +204,17 @@ test("consumes authenticated control results without waiting for Megolm", async 
     result: { offer_id: "offer-1" },
   }]);
 
-  let legacyDecrypted = false;
+  let oldControlDecrypted = false;
   await processGatewayTimelineEvent(
     {
       async decryptEventIfNeeded() {
-        legacyDecrypted = true;
+        oldControlDecrypted = true;
       },
     } as never,
     {
       ...event,
-      getId: () => "$legacy-control-result",
-      getType: () => legacyDecrypted ? "m.room.message" : "m.room.encrypted",
+      getId: () => "$old-control-result",
+      getType: () => oldControlDecrypted ? "m.room.message" : "m.room.encrypted",
       isEncrypted: () => true,
     } as never,
     new Set(),
@@ -219,8 +236,8 @@ test("consumes authenticated control results without waiting for Megolm", async 
       results.push(result as unknown as Record<string, unknown>);
     },
   );
-  assert.equal(legacyDecrypted, true);
-  assert.equal(results.length, 2);
+  assert.equal(oldControlDecrypted, true);
+  assert.equal(results.length, 1);
 
   await assert.rejects(
     processGatewayTimelineEvent(
@@ -253,24 +270,14 @@ test("preserves a stable tool call ID and lifecycle status across updates", () =
     "@gateway:example.com",
     1_700_000_000_000,
     true,
-    signedAgentEvent({
-      type: "agent.tool.started",
-      toolCallId: "tool-call-1",
-      name: "Read file",
-      input: { path: "README.md" },
-    }),
+    structuredToolEvent({ phase: "started" }),
   );
   const completed = parseCodeverEvent(
     "$tool-completed",
     "@gateway:example.com",
     1_700_000_000_100,
     true,
-    signedAgentEvent({
-      type: "agent.tool.completed",
-      toolCallId: "tool-call-1",
-      status: "succeeded",
-      output: { lines: 12 },
-    }),
+    structuredToolEvent({ phase: "completed" }),
   );
 
   assert.ok(started);
@@ -278,31 +285,34 @@ test("preserves a stable tool call ID and lifecycle status across updates", () =
     {
       kind: started.kind,
       text: started.text,
-      toolCallId: started.toolCallId,
-      toolStatus: started.toolStatus,
+      groupId: started.toolGroup?.groupId,
+      toolId: started.toolGroup?.tools[0]?.id,
+      phase: started.toolGroup?.tools[0]?.phase,
     },
     {
       kind: "tool",
       text: "Read file",
-      toolCallId: "tool-call-1",
-      toolStatus: "running",
+      groupId: "tool-call-1",
+      toolId: "tool-call-1",
+      phase: "started",
     },
   );
   assert.ok(completed);
   assert.deepEqual(
     {
       kind: completed.kind,
-      toolCallId: completed.toolCallId,
-      toolStatus: completed.toolStatus,
+      groupId: completed.toolGroup?.groupId,
+      toolId: completed.toolGroup?.tools[0]?.id,
+      phase: completed.toolGroup?.tools[0]?.phase,
     },
     {
       kind: "tool",
-      toolCallId: "tool-call-1",
-      toolStatus: "succeeded",
+      groupId: "tool-call-1",
+      toolId: "tool-call-1",
+      phase: "completed",
     },
   );
-  assert.equal("name" in completed.raw, false);
-  assert.equal(completed.toolCallId, started.toolCallId);
+  assert.equal(completed.toolGroup?.groupId, started.toolGroup?.groupId);
 });
 
 test("exposes a failed terminal tool status", () => {
@@ -311,24 +321,20 @@ test("exposes a failed terminal tool status", () => {
     "@gateway:example.com",
     1_700_000_000_200,
     true,
-    signedAgentEvent({
-      type: "agent.tool.completed",
-      toolCallId: "tool-call-2",
-      status: "failed",
-    }),
+    structuredToolEvent({ phase: "failed", isError: true }),
   );
 
   assert.ok(failed);
   assert.deepEqual(
     {
       kind: failed.kind,
-      toolCallId: failed.toolCallId,
-      toolStatus: failed.toolStatus,
+      phase: failed.toolGroup?.tools[0]?.phase,
+      isError: failed.toolGroup?.tools[0]?.isError,
     },
     {
       kind: "tool",
-      toolCallId: "tool-call-2",
-      toolStatus: "failed",
+      phase: "failed",
+      isError: true,
     },
   );
 });

@@ -58,9 +58,8 @@ export function agentActivityForPhase(
  * Reduces an authenticated `IncomingCodeverMessage.raw` value into the
  * transient Agent activity shown by the conversation UI.
  *
- * Unknown events preserve the current activity. Terminal events clear it.
- * Text deltas also clear it because the visible streaming reply takes over as
- * the progress indicator.
+ * Unknown events preserve the current activity. A visible message clears it
+ * because the transcript itself becomes the progress indicator.
  */
 export function reduceAgentActivity(
   current: AgentActivity | null,
@@ -93,40 +92,14 @@ export function reduceAgentActivity(
   }
 
   if (event.kind === "message") return null;
-
-  switch (event.type) {
-    case "session.updated":
-      switch (event.status) {
-        case "running":
-          return WORKING_AGENT_ACTIVITY;
-        case "stopping":
-          return STOPPING_AGENT_ACTIVITY;
-        case "idle":
-        case "failed":
-          return null;
-        default:
-          return current;
-      }
-    case "agent.tool.started":
-      return createActivity(
-        "working",
-        "Using a tool…",
-        optionalNonemptyString(event.name),
-      );
-    case "agent.permission.requested":
-      return createActivity(
-        "working",
-        "Waiting for permission…",
-        optionalNonemptyString(event.title),
-      );
-    case "agent.text.delta":
-    case "agent.text.completed":
-    case "agent.tool.completed":
-    case "agent.error":
-      return null;
-    default:
-      return current;
+  if (event.kind === "decision_request") {
+    return createActivity(
+      "working",
+      "Waiting for permission…",
+      optionalNonemptyString(event.title),
+    );
   }
+  return current;
 }
 
 /**
@@ -142,31 +115,23 @@ export function agentExecutionSignal(raw: unknown): AgentExecutionSignal {
   const statusPhase =
     event.kind === "status" ? event.activity_phase ?? event.state : undefined;
   if (
-    (event.kind === "status" &&
+    event.kind === "status" &&
       (statusPhase === "starting" ||
         statusPhase === "querying" ||
         statusPhase === "running" ||
-        statusPhase === "working")) ||
-    (event.type === "session.updated" && event.status === "running") ||
-    event.type === "agent.text.delta" ||
-    event.type === "agent.tool.started" ||
-    event.type === "agent.permission.requested"
+        statusPhase === "working")
   ) {
     return "running";
   }
   if (
-    (event.kind === "status" &&
-      (statusPhase === "canceling" || statusPhase === "stopping")) ||
-    (event.type === "session.updated" && event.status === "stopping")
+    event.kind === "status" &&
+      (statusPhase === "canceling" || statusPhase === "stopping")
   ) {
     return "stopping";
   }
   if (
-    (event.kind === "status" &&
-      (statusPhase === "idle" || statusPhase === "failed")) ||
-    (event.type === "session.updated" &&
-      (event.status === "idle" || event.status === "failed")) ||
-    event.type === "agent.error"
+    event.kind === "status" &&
+      (statusPhase === "idle" || statusPhase === "failed")
   ) {
     return "stopped";
   }
