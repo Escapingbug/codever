@@ -322,13 +322,11 @@ function insertChatMessage(
 ): ChatMessage[] {
   const next = [...current];
   const laterIndex = next.findIndex((entry) => {
-    if (
-      message.kind === "user" &&
-      message.revision !== undefined &&
-      entry.kind === "user" &&
-      entry.revision !== undefined
-    ) {
-      return entry.revision > message.revision;
+    if (message.kind === "user" && entry.kind === "user") {
+      const revisionOrder = compareUserRevisionOrder(entry, message);
+      if (revisionOrder !== null && revisionOrder !== 0) {
+        return revisionOrder > 0;
+      }
     }
     return (
       message.timestamp !== undefined &&
@@ -339,6 +337,71 @@ function insertChatMessage(
   if (laterIndex >= 0) next.splice(laterIndex, 0, message);
   else next.push(message);
   return next;
+}
+
+type UserRevisionOrder = {
+  revision: number;
+  epoch: string;
+  generation?: number;
+};
+
+/**
+ * Revisions are monotonic only inside one Gateway revision epoch. An epoch
+ * rotation resets the revision counter, so comparing the bare numbers can
+ * move a newly resumed prompt far back into an older conversation. Epoch
+ * generation orders modern messages across rotations; incomplete legacy
+ * metadata deliberately falls back to the Matrix timestamp.
+ */
+function compareUserRevisionOrder(
+  left: ChatMessage,
+  right: ChatMessage,
+): number | null {
+  const leftOrder = userRevisionOrder(left);
+  const rightOrder = userRevisionOrder(right);
+  if (!leftOrder || !rightOrder) return null;
+
+  if (leftOrder.epoch === rightOrder.epoch) {
+    if (
+      leftOrder.generation !== undefined &&
+      rightOrder.generation !== undefined &&
+      leftOrder.generation !== rightOrder.generation
+    ) {
+      return null;
+    }
+    return leftOrder.revision - rightOrder.revision;
+  }
+  if (
+    leftOrder.generation !== undefined &&
+    rightOrder.generation !== undefined &&
+    leftOrder.generation !== rightOrder.generation
+  ) {
+    return leftOrder.generation - rightOrder.generation;
+  }
+  return null;
+}
+
+function userRevisionOrder(message: ChatMessage): UserRevisionOrder | null {
+  if (
+    message.revision === undefined ||
+    !Number.isSafeInteger(message.revision) ||
+    message.revision < 0
+  ) {
+    return null;
+  }
+  const epoch = message.raw?.revision_epoch;
+  if (typeof epoch !== "string" || !epoch) return null;
+  const candidateGeneration = message.raw?.revision_epoch_generation;
+  const generation =
+    typeof candidateGeneration === "number" &&
+    Number.isSafeInteger(candidateGeneration) &&
+    candidateGeneration > 0
+      ? candidateGeneration
+      : undefined;
+  return {
+    revision: message.revision,
+    epoch,
+    ...(generation === undefined ? {} : { generation }),
+  };
 }
 
 function mergeToolGroupPresentation(

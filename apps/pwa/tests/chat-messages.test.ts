@@ -64,6 +64,100 @@ test("authoritative user echo repairs clock-skewed optimistic ordering", () => {
   assert.equal(repaired[0].optimistic, false);
 });
 
+test("a new revision epoch keeps a resumed prompt after old conversation history", () => {
+  const current = [
+    {
+      id: "$old-user",
+      eventId: "$old-user",
+      kind: "user",
+      timestamp: 1_000,
+      revision: 80,
+      raw: revisionMetadata("old-epoch", 1),
+    },
+    {
+      id: "$old-agent",
+      eventId: "$old-agent",
+      kind: "agent",
+      timestamp: 2_000,
+    },
+  ];
+  const resumedPrompt = {
+    id: "$resumed-user",
+    eventId: "$resumed-user",
+    kind: "user",
+    timestamp: 100_000,
+    revision: 1,
+    raw: revisionMetadata("new-epoch", 2),
+  };
+
+  const messages = mergeChatMessage(current, resumedPrompt);
+
+  assert.deepEqual(
+    messages.map((message: { id: string }) => message.id),
+    ["$old-user", "$old-agent", "$resumed-user"],
+  );
+});
+
+test("user revisions remain authoritative inside one revision epoch", () => {
+  const laterRevision = {
+    id: "$revision-2",
+    eventId: "$revision-2",
+    kind: "user",
+    timestamp: 1_000,
+    revision: 2,
+    raw: revisionMetadata("same-epoch", 4),
+  };
+  const earlierRevisionDeliveredLater = {
+    id: "$revision-1",
+    eventId: "$revision-1",
+    kind: "user",
+    timestamp: 100_000,
+    revision: 1,
+    raw: revisionMetadata("same-epoch", 4),
+  };
+
+  const messages = mergeChatMessage(
+    [laterRevision],
+    earlierRevisionDeliveredLater,
+  );
+
+  assert.deepEqual(
+    messages.map((message: { id: string }) => message.id),
+    ["$revision-1", "$revision-2"],
+  );
+});
+
+test("legacy user messages without revision epoch metadata fall back to time", () => {
+  const oldMessage = {
+    id: "$legacy-old",
+    eventId: "$legacy-old",
+    kind: "user",
+    timestamp: 1_000,
+    revision: 80,
+  };
+  const newMessage = {
+    id: "$legacy-new",
+    eventId: "$legacy-new",
+    kind: "user",
+    timestamp: 100_000,
+    revision: 1,
+  };
+
+  const messages = mergeChatMessage([oldMessage], newMessage);
+
+  assert.deepEqual(
+    messages.map((message: { id: string }) => message.id),
+    ["$legacy-old", "$legacy-new"],
+  );
+});
+
+function revisionMetadata(epoch: string, generation: number) {
+  return {
+    revision_epoch: epoch,
+    revision_epoch_generation: generation,
+  };
+}
+
 test("a Matrix edit preserves the logical message timeline position", () => {
   const user = {
     id: "$user",
