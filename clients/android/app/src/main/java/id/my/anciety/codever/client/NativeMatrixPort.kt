@@ -48,6 +48,10 @@ interface NativeMatrixPort {
     suspend fun stop(clearSession: Boolean)
     suspend fun revokeSession()
     suspend fun close()
+
+    fun injectNetworkAvailabilityForE2e(available: Boolean) {
+        throw UnsupportedOperationException("Synthetic Matrix networking is unavailable.")
+    }
 }
 
 class MatrixNativePort(context: Context) : NativeMatrixPort {
@@ -97,4 +101,6 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         runtime.revokeSession()
     }
     override suspend fun close() = runtime.close()
+    override fun injectNetworkAvailabilityForE2e(available: Boolean) =
+        runtime.injectNetworkAvailabilityForE2e(available)
 }

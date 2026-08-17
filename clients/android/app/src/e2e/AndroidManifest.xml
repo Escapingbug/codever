@@ -27,6 +27,11 @@
         <receiver
             android:name="id.my.anciety.codever.e2e.MatrixSessionFaultReceiver"
             android:exported="true" />
+
+        <!-- Deterministic network callback fixture; absent from production variants. -->
+        <receiver
+            android:name="id.my.anciety.codever.e2e.NetworkAvailabilityFaultReceiver"
+            android:exported="true" />
     </application>
 
 </manifest>

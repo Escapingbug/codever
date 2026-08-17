@@ -65,8 +65,21 @@ class CodeverConnectionService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
-        when (ServiceStartPolicy.decide(intent?.action, preferences.restoreEnabled)) {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ServiceActions.E2E_NETWORK_AVAILABILITY) {
+            check(BuildConfig.ALLOW_INSECURE_E2E_LOOPBACK) {
+                "Synthetic network transitions are available only in E2E builds."
+            }
+            check(intent.hasExtra(E2E_NETWORK_AVAILABLE_EXTRA)) {
+                "The synthetic network transition is incomplete."
+            }
+            val available = intent.getBooleanExtra(E2E_NETWORK_AVAILABLE_EXTRA, false)
+            serviceScope.launch(Dispatchers.IO) {
+                awaitClientRuntime().injectNetworkAvailabilityForE2e(available)
+            }
+            return START_STICKY
+        }
+        return when (ServiceStartPolicy.decide(intent?.action, preferences.restoreEnabled)) {
             ServiceStartDecision.KEEP_RUNNING -> {
                 diagnostics.record("service.start", mapOf("source" to (intent?.action ?: "sticky")))
                 preferences.restoreEnabled = true
@@ -85,6 +98,7 @@ class CodeverConnectionService : Service() {
                 START_NOT_STICKY
             }
         }
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -345,6 +359,7 @@ class CodeverConnectionService : Service() {
     companion object Controller {
         private const val NOTIFICATION_CHANNEL_ID = "codever-connection"
         private const val NOTIFICATION_ID = 1101
+        const val E2E_NETWORK_AVAILABLE_EXTRA = "available"
 
         fun startFromUser(context: Context) {
             ServicePreferenceStore(context).restoreEnabled = true

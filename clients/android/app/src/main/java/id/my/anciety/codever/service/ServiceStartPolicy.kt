@@ -3,6 +3,8 @@ package id.my.anciety.codever.service
 object ServiceActions {
     const val START = "id.my.anciety.codever.action.START"
     const val DISCONNECT = "id.my.anciety.codever.action.DISCONNECT"
+    const val E2E_NETWORK_AVAILABILITY =
+        "id.my.anciety.codever.action.E2E_NETWORK_AVAILABILITY"
 }
 
 enum class ServiceStartDecision {

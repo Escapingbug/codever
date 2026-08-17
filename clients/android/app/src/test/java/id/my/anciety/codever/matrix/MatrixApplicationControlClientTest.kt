@@ -362,7 +362,7 @@ class MatrixApplicationControlClientTest {
 
         val error = runCatching { client.current(storedSession()) }.exceptionOrNull()
 
-        assertTrue(error is IllegalArgumentException)
+        assertTrue(error is MatrixApplicationControlPayloadException)
         assertTrue(error?.message?.contains("invalid envelope shape") == true)
         assertTrue(responseBody.all { it == 0.toByte() })
     }
@@ -443,6 +443,97 @@ class MatrixApplicationControlClientTest {
 
         assertTrue(endpoint.rawQuery.contains("since=s-current"))
         assertTrue(endpoint.rawQuery.contains("timeout=0"))
+    }
+
+    @Test
+    fun `sync tolerates null optional room sections without poisoning its cursor`() = runBlocking {
+        val responseBody = """
+            {
+              "next_batch":"s-after-null-sections",
+              "rooms":{"join":{"!room:example.org":{
+                "state":null,
+                "timeline":{"limited":null,"events":null}
+              }}}
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val batch = client.sync(storedSession(), since = "s-before-null-sections")
+
+        assertEquals("s-after-null-sections", batch.nextBatch)
+        assertTrue(batch.events.isEmpty())
+        assertEquals(0, batch.candidateEventCount)
+        assertFalse(batch.limited)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `sync isolates malformed optional candidates and still advances its cursor`() = runBlocking {
+        val responseBody = """
+            {
+              "next_batch":"s-after-malformed-candidates",
+              "rooms":{"join":{"!room:example.org":{"state":{"events":[
+                null,
+                {"type":null,"sender":{"unexpected":true}},
+                {
+                  "type":"m.room.message",
+                  "event_id":"${'$'}trusted-after-malformed",
+                  "sender":"@gateway:example.org",
+                  "origin_server_ts":2345,
+                  "content":${timelineContent()}
+                }
+              ]},"timeline":{"events":[]}}}}
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val batch = client.sync(storedSession(), since = "s-before-malformed-candidates")
+
+        assertEquals("s-after-malformed-candidates", batch.nextBatch)
+        assertEquals(listOf("\$trusted-after-malformed"), batch.events.map { it.eventId })
+        assertEquals(3, batch.candidateEventCount)
+    }
+
+    @Test
+    fun `sync reports a malformed envelope as a bounded protocol failure`() = runBlocking {
+        val responseBody = "[]".toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val error = runCatching {
+            client.sync(storedSession(), since = "s-before-invalid-envelope")
+        }.exceptionOrNull()
+
+        assertTrue(error is MatrixApplicationControlPayloadException)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `sync reports invalid JSON as a bounded protocol failure`() = runBlocking {
+        val responseBody = "{".toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val error = runCatching {
+            client.sync(storedSession(), since = "s-before-invalid-json")
+        }.exceptionOrNull()
+
+        assertTrue(error is MatrixApplicationControlPayloadException)
+        assertTrue(responseBody.all { it == 0.toByte() })
     }
 
     private fun secureContent() = """

@@ -31,7 +31,14 @@ sealed interface MatrixRuntimeEvent {
 
     data object NetworkLost : MatrixRuntimeEvent
 
-    data object NetworkAvailable : MatrixRuntimeEvent
+    /**
+     * A connectivity callback does not imply that Matrix stopped syncing.
+     * Android may briefly revoke NET_CAPABILITY_VALIDATED while the SDK's
+     * existing sync service remains healthy, so recovery must preserve that
+     * observed runtime fact instead of waiting for a callback that may never
+     * be emitted again.
+     */
+    data class NetworkAvailable(val syncRunning: Boolean) : MatrixRuntimeEvent
 
     data object RetryScheduled : MatrixRuntimeEvent
 
@@ -78,10 +85,11 @@ class MatrixRuntimeStateMachine(
             } else {
                 state(MatrixRuntimePhase.OFFLINE, "network_unavailable")
             }
-            MatrixRuntimeEvent.NetworkAvailable -> when (status.phase) {
-                MatrixRuntimePhase.OFFLINE,
-                MatrixRuntimePhase.RETRY_WAIT,
-                -> state(MatrixRuntimePhase.CONNECTING, "matrix_sync_reconnecting")
+            is MatrixRuntimeEvent.NetworkAvailable -> when {
+                event.syncRunning -> state(MatrixRuntimePhase.SYNCING, "matrix_sync_active")
+                status.phase == MatrixRuntimePhase.OFFLINE ||
+                    status.phase == MatrixRuntimePhase.RETRY_WAIT ->
+                    state(MatrixRuntimePhase.CONNECTING, "matrix_sync_reconnecting")
                 else -> status
             }
             MatrixRuntimeEvent.RetryScheduled ->

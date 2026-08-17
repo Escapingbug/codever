@@ -140,6 +140,10 @@ class NativeClientRuntime(
     private val onCommandCompletion: (CommandOperation, DurableCompletion) -> Unit = { _, _ -> },
     private val now: () -> Long = System::currentTimeMillis,
 ) : NativeMatrixObserver {
+    internal fun injectNetworkAvailabilityForE2e(available: Boolean) {
+        matrix.injectNetworkAvailabilityForE2e(available)
+    }
+
     private data class PendingPairing(
         val offer: SignedPairingOffer,
         var request: SignedPairingRequest? = null,

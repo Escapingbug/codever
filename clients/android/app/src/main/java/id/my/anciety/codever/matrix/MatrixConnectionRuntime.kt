@@ -5,6 +5,7 @@ import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -70,6 +71,8 @@ class MatrixConnectionRuntime(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val networkTransitionMutex = Mutex()
+    private val networkTransitionGeneration = AtomicLong(0)
     private val started = AtomicBoolean(false)
     private var networkAvailable = networkMonitor.isAvailable()
     @Volatile
@@ -150,6 +153,17 @@ class MatrixConnectionRuntime(
                 }
             }
         }
+    }
+
+    internal fun injectNetworkAvailabilityForE2e(available: Boolean) {
+        check(BuildConfig.ALLOW_INSECURE_E2E_LOOPBACK) {
+            "Synthetic network transitions are available only in E2E builds."
+        }
+        diagnostics.record(
+            "matrix.network.e2e_injected",
+            mapOf("available" to available.toString()),
+        )
+        onNetworkChanged(available)
     }
 
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = scope.async {
@@ -418,70 +432,102 @@ class MatrixConnectionRuntime(
     }
 
     private fun onNetworkChanged(available: Boolean) {
+        val transitionGeneration = networkTransitionGeneration.incrementAndGet()
         scope.launch {
-            val currentDriver = mutex.withLock {
-                networkAvailable = available
-                diagnostics.record(
-                    "matrix.network.changed",
-                    mapOf("available" to available.toString()),
-                )
-                if (!available) {
-                    accept(MatrixRuntimeEvent.NetworkLost)
-                } else {
-                    accept(MatrixRuntimeEvent.NetworkAvailable)
+            // ConnectivityManager may emit a rapid false/true burst when a
+            // validated network changes capabilities. Serialize the matching
+            // SDK controls so an older pause cannot finish after a newer
+            // resume and leave native transport state inverted.
+            networkTransitionMutex.withLock networkTransition@{
+                if (transitionGeneration != networkTransitionGeneration.get()) {
+                    diagnostics.record(
+                        "matrix.network.coalesced",
+                        mapOf("available" to available.toString()),
+                    )
+                    return@networkTransition
                 }
-                driver
-            }
-            if (!available) {
-                try {
-                    withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
-                        currentDriver?.setNetworkAvailable(false)
+                val currentDriver = mutex.withLock {
+                    networkAvailable = available
+                    diagnostics.record(
+                        "matrix.network.changed",
+                        mapOf("available" to available.toString()),
+                    )
+                    if (!available) accept(MatrixRuntimeEvent.NetworkLost)
+                    driver
+                }
+                if (transitionGeneration != networkTransitionGeneration.get()) {
+                    return@networkTransition
+                }
+                if (!available) {
+                    try {
+                        withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
+                            currentDriver?.setNetworkAvailable(false)
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        diagnostics.record("matrix.network.pause_failure", errorAttributes(error))
                     }
+                    return@networkTransition
+                }
+                val resumeError = try {
+                    withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
+                        currentDriver?.setNetworkAvailable(true)
+                    }
+                    null
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    diagnostics.record("matrix.network.pause_failure", errorAttributes(error))
+                    error
                 }
-                return@launch
-            }
-            val resumeError = try {
-                withTimeout(NETWORK_CONTROL_TIMEOUT_MS) {
-                    currentDriver?.setNetworkAvailable(true)
+                if (transitionGeneration != networkTransitionGeneration.get()) {
+                    return@networkTransition
                 }
-                null
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                error
-            }
-            mutex.withLock {
-                if (!started.get() || !networkAvailable) return@withLock
-                if (currentDriver != null && driver !== currentDriver) return@withLock
-                if (resumeError != null && currentDriver != null) {
-                    diagnostics.record("matrix.network.resume_failure", errorAttributes(resumeError))
-                    accept(
-                        MatrixRuntimeEvent.Failed(
-                            "matrix_send_queue_resume_failed",
-                            blocked = false,
-                        ),
-                    )
-                    stopApplicationControlReceiverLocked()
-                    stopDriver(currentDriver)
-                    if (driver === currentDriver) {
-                        driver = null
-                        driverGeneration += 1
+                val recovered = mutex.withLock runtimeState@{
+                    if (transitionGeneration != networkTransitionGeneration.get()) {
+                        return@runtimeState false
                     }
-                    scheduleRetryLocked()
-                    return@withLock
+                    if (!started.get() || !networkAvailable) return@runtimeState false
+                    if (currentDriver != null && driver !== currentDriver) {
+                        return@runtimeState false
+                    }
+                    if (resumeError != null && currentDriver != null) {
+                        diagnostics.record(
+                            "matrix.network.resume_failure",
+                            errorAttributes(resumeError),
+                        )
+                        accept(
+                            MatrixRuntimeEvent.Failed(
+                                "matrix_send_queue_resume_failed",
+                                blocked = false,
+                            ),
+                        )
+                        stopApplicationControlReceiverLocked()
+                        stopDriver(currentDriver)
+                        if (driver === currentDriver) {
+                            driver = null
+                            driverGeneration += 1
+                        }
+                        scheduleRetryLocked()
+                        return@runtimeState false
+                    }
+                    val running = runCatching {
+                        driver?.isSyncRunning() == true
+                    }.getOrDefault(false)
+                    accept(MatrixRuntimeEvent.NetworkAvailable(syncRunning = running))
+                    if (running) {
+                        liveness.syncUpdated()
+                    } else if (started.get() && secrets != null) {
+                        runCatching { connectLocked() }
+                    }
+                    true
                 }
-                val running = runCatching { driver?.isSyncRunning() == true }.getOrDefault(false)
-                if (running) liveness.networkResumed()
-                if (started.get() && secrets != null && !running) {
-                    runCatching { connectLocked() }
+                if (!recovered || transitionGeneration != networkTransitionGeneration.get()) {
+                    return@networkTransition
                 }
-            }
-            if (resumeError == null && currentDriver != null) {
-                onConvergenceRequired("network_recovered")
+                if (resumeError == null && currentDriver != null) {
+                    onConvergenceRequired("network_recovered")
+                }
             }
         }
     }
@@ -665,6 +711,24 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    if (error is MatrixApplicationControlPayloadException) {
+                        diagnostics.record(
+                            "matrix.application_state.current_rejected",
+                            errorAttributes(error),
+                        )
+                        ready.completeExceptionally(error)
+                        scope.launch {
+                            mutex.withLock {
+                                if (driverGeneration == generation) {
+                                    accept(MatrixRuntimeEvent.Failed(
+                                        "matrix_application_state_malformed",
+                                        blocked = true,
+                                    ))
+                                }
+                            }
+                        }
+                        return@launch
+                    }
                     if (error is MatrixApplicationControlSyncException && error.fatal) {
                         ready.completeExceptionally(error)
                         scope.launch {
@@ -707,6 +771,24 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    if (error is MatrixApplicationControlPayloadException) {
+                        diagnostics.record(
+                            "matrix.application_control.receiver_rejected",
+                            errorAttributes(error),
+                        )
+                        ready.completeExceptionally(error)
+                        scope.launch {
+                            mutex.withLock {
+                                if (driverGeneration == generation) {
+                                    accept(MatrixRuntimeEvent.Failed(
+                                        "matrix_application_control_malformed",
+                                        blocked = true,
+                                    ))
+                                }
+                            }
+                        }
+                        return@launch
+                    }
                     if (
                         error is MatrixApplicationControlSyncException &&
                         error.status == 400 &&

@@ -18,6 +18,8 @@ const PACKAGE_NAME = 'id.my.anciety.codever.e2e'
 const MAIN_ACTIVITY = `${PACKAGE_NAME}/id.my.anciety.codever.web.MainActivity`
 const LEGACY_OUTBOX_SEEDER = `${PACKAGE_NAME}/id.my.anciety.codever.e2e.LegacyOutboxSeederReceiver`
 const MATRIX_SESSION_FAULT = `${PACKAGE_NAME}/id.my.anciety.codever.e2e.MatrixSessionFaultReceiver`
+const NETWORK_AVAILABILITY_FAULT =
+    `${PACKAGE_NAME}/id.my.anciety.codever.e2e.NetworkAvailabilityFaultReceiver`
 const CONNECT_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
@@ -45,6 +47,9 @@ type MatrixSyncGate = {
     redeliveredCommandTransactions(): number
     observedCommandIds(): string[]
     observedPutPaths(): string[]
+    injectNullOptionalSections(): number
+    waitForNullOptionalInjection(after: number): Promise<void>
+    waitForInjectedCursorAdvance(after: number): Promise<void>
     hold(): number
     waitForInterception(after?: number, description?: string): Promise<void>
     release(): void
@@ -570,7 +575,6 @@ export async function runAndroidAlphaJourney(
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
     let migrationSessionCreated = false
-
     try {
         process.stdout.write('  [A1/12] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
@@ -879,6 +883,75 @@ export async function runAndroidAlphaJourney(
         privacySessionCreated = false
         await openBrowserProject(options.browserPage, projectName)
         await android.openProject(projectName)
+
+        process.stdout.write('  [A5n/12] Flapping Android connectivity while native Matrix sync remains alive…\n')
+        let offlineTransitions = await diagnosticCount(
+            serial,
+            'matrix.state detail=network_unavailable phase=OFFLINE',
+        )
+        let activeTransitions = await diagnosticCount(
+            serial,
+            'matrix.state detail=matrix_sync_active phase=SYNCING',
+        )
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+            await injectNetworkAvailability(serial, false)
+            await waitFor(
+                async () => await diagnosticCount(
+                    serial,
+                    'matrix.state detail=network_unavailable phase=OFFLINE',
+                ) > offlineTransitions,
+                {
+                    description: `native offline transition for network flap ${attempt}`,
+                    timeoutMs: CONNECT_TIMEOUT_MS,
+                },
+            )
+            offlineTransitions = await diagnosticCount(
+                serial,
+                'matrix.state detail=network_unavailable phase=OFFLINE',
+            )
+            await injectNetworkAvailability(serial, true)
+            await waitFor(
+                async () => await diagnosticCount(
+                    serial,
+                    'matrix.state detail=matrix_sync_active phase=SYNCING',
+                ) > activeTransitions,
+                {
+                    description: `active native sync after network flap ${attempt}`,
+                    timeoutMs: CONNECT_TIMEOUT_MS,
+                },
+            )
+            activeTransitions = await diagnosticCount(
+                serial,
+                'matrix.state detail=matrix_sync_active phase=SYNCING',
+            )
+        }
+        await android.waitFor(
+            'connected Android after repeated OS network flaps',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+
+        process.stdout.write('  [A5p/12] Injecting nullable Matrix sync sections and proving cursor progress…\n')
+        const rawArgumentFailures = await diagnosticCount(
+            serial,
+            'matrix.application_control.receiver_retry error=IllegalArgumentException',
+        )
+        const injectionBaseline = syncGate.injectNullOptionalSections()
+        await syncGate.waitForNullOptionalInjection(injectionBaseline)
+        await syncGate.waitForInjectedCursorAdvance(injectionBaseline)
+        assert.equal(
+            await diagnosticCount(
+                serial,
+                'matrix.application_control.receiver_retry error=IllegalArgumentException',
+            ),
+            rawArgumentFailures,
+            'A nullable optional Matrix sync section escaped as an unbounded parser retry.',
+        )
+        await android.waitFor(
+            'connected Android after nullable Matrix sync response',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
 
         process.stdout.write('  [A6/12] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
@@ -1238,6 +1311,8 @@ export async function runAndroidAlphaJourney(
                 'background-task-notification',
                 'notification-deep-link-recovery',
                 'foreground-notification-suppression',
+                'running-native-sync-survives-repeated-os-network-flaps',
+                'nullable-matrix-sync-sections-advance-native-cursor',
                 'android-privacy-sanitize-review-deny-restore-restart',
                 'pre-delivery-matrix-recovery-exactly-once',
                 'post-commit-delete-result-loss-recovery-exactly-once',
@@ -1283,15 +1358,47 @@ export async function runAndroidAlphaJourney(
     }
 }
 
+async function injectNetworkAvailability(serial: string, available: boolean): Promise<void> {
+    const output = await adb(
+        serial,
+        'shell',
+        'am',
+        'broadcast',
+        '-f',
+        '0x20',
+        '-n',
+        NETWORK_AVAILABILITY_FAULT,
+        '--ez',
+        'available',
+        available ? 'true' : 'false',
+    )
+    assert.match(
+        output,
+        /Broadcast completed: result=-1, data="network-availability-injected"/u,
+        `The E2E APK could not inject network availability=${available}: ${output}`,
+    )
+}
+
 async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate> {
     let intercepted = 0
     let repeatedCommandTransactions = 0
+    let requestedNullOptionalInjections = 0
+    let completedNullOptionalInjections = 0
+    let injectedCursorAdvances = 0
+    let injectedNextBatch: string | undefined
     const observedPutPaths: string[] = []
     const seenCommandIds = new Set<string>()
     const seenCommandTransactions = new Set<string>()
     let cycle = heldSyncCycle()
     const server = createHttpServer((incoming, outgoing) => {
         const requestPath = incoming.url ?? '/'
+        if (
+            injectedNextBatch &&
+            applicationControlSince(requestPath) === injectedNextBatch
+        ) {
+            injectedCursorAdvances += 1
+            injectedNextBatch = undefined
+        }
         if (incoming.method === 'PUT') observedPutPaths.push(requestPath)
         const upstreamPath = rewriteRepeatedCommandTransaction(
             incoming.method,
@@ -1308,6 +1415,7 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
             headers: {
                 ...incoming.headers,
                 host: `127.0.0.1:${targetPort}`,
+                'accept-encoding': 'identity',
             },
         }, response => {
             void (async () => {
@@ -1319,6 +1427,29 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
                 }
                 if (outgoing.destroyed) {
                     response.destroy()
+                    return
+                }
+                if (
+                    requestedNullOptionalInjections > completedNullOptionalInjections &&
+                    applicationControlRoomId(requestPath)
+                ) {
+                    const mutated = await nullOptionalMatrixSyncResponse(
+                        response,
+                        applicationControlRoomId(requestPath)!,
+                    )
+                    completedNullOptionalInjections += 1
+                    injectedNextBatch = mutated.nextBatch
+                    const headers = { ...response.headers }
+                    delete headers['content-length']
+                    delete headers['content-encoding']
+                    delete headers['transfer-encoding']
+                    headers['content-length'] = String(mutated.body.byteLength)
+                    outgoing.writeHead(
+                        response.statusCode ?? 502,
+                        response.statusMessage,
+                        headers,
+                    )
+                    outgoing.end(mutated.body)
                     return
                 }
                 outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
@@ -1351,6 +1482,24 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
         redeliveredCommandTransactions: () => repeatedCommandTransactions,
         observedCommandIds: () => [...seenCommandIds],
         observedPutPaths: () => observedPutPaths.slice(-20),
+        injectNullOptionalSections: () => {
+            requestedNullOptionalInjections += 1
+            return completedNullOptionalInjections
+        },
+        waitForNullOptionalInjection: after => waitFor(
+            () => completedNullOptionalInjections > after,
+            {
+                description: 'the nullable Matrix sync response injection',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
+        waitForInjectedCursorAdvance: after => waitFor(
+            () => injectedCursorAdvances > after,
+            {
+                description: 'the native application sync cursor to advance past nullable sections',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
         hold: () => {
             if (!cycle.held) cycle = heldSyncCycle()
             return intercepted
@@ -1368,6 +1517,84 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
             cycle.release()
         },
         close: () => closeHttpServer(server),
+    }
+}
+
+function applicationControlRoomId(path: string): string | undefined {
+    let url: URL
+    try {
+        url = new URL(path, 'http://matrix-e2e.invalid')
+    } catch {
+        return undefined
+    }
+    if (url.pathname !== '/_matrix/client/v3/sync') return undefined
+    const encodedFilter = url.searchParams.get('filter')
+    if (!encodedFilter) return undefined
+    try {
+        const filter = JSON.parse(encodedFilter) as JsonRecord
+        const room = filter.room as JsonRecord | undefined
+        const rooms = room?.rooms
+        const timeline = room?.timeline as JsonRecord | undefined
+        const types = timeline?.types
+        return Array.isArray(rooms) &&
+            typeof rooms[0] === 'string' &&
+            Array.isArray(types) &&
+            types.includes('io.codever.secure_control.v1')
+            ? rooms[0]
+            : undefined
+    } catch {
+        return undefined
+    }
+}
+
+function applicationControlSince(path: string): string | undefined {
+    if (!applicationControlRoomId(path)) return undefined
+    try {
+        return new URL(path, 'http://matrix-e2e.invalid').searchParams.get('since') ?? undefined
+    } catch {
+        return undefined
+    }
+}
+
+async function nullOptionalMatrixSyncResponse(
+    response: AsyncIterable<Uint8Array | string>,
+    roomId: string,
+): Promise<{ body: Buffer; nextBatch: string }> {
+    const chunks: Buffer[] = []
+    for await (const chunk of response) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    const root = JSON.parse(Buffer.concat(chunks).toString('utf8')) as JsonRecord
+    const nextBatch = root.next_batch
+    assert.ok(
+        typeof nextBatch === 'string' && nextBatch.length > 0,
+        'Injected Matrix sync response has no cursor',
+    )
+    const rooms = root.rooms && typeof root.rooms === 'object' && !Array.isArray(root.rooms)
+        ? root.rooms as JsonRecord
+        : {}
+    const joined = rooms.join && typeof rooms.join === 'object' && !Array.isArray(rooms.join)
+        ? rooms.join as JsonRecord
+        : {}
+    const currentRoom = joined[roomId] &&
+        typeof joined[roomId] === 'object' &&
+        !Array.isArray(joined[roomId])
+        ? joined[roomId] as JsonRecord
+        : {}
+    const timeline = currentRoom.timeline &&
+        typeof currentRoom.timeline === 'object' &&
+        !Array.isArray(currentRoom.timeline)
+        ? currentRoom.timeline as JsonRecord
+        : { events: null }
+    timeline.limited = null
+    currentRoom.state = null
+    currentRoom.timeline = timeline
+    joined[roomId] = currentRoom
+    rooms.join = joined
+    root.rooms = rooms
+    return {
+        body: Buffer.from(JSON.stringify(root), 'utf8'),
+        nextBatch,
     }
 }
 

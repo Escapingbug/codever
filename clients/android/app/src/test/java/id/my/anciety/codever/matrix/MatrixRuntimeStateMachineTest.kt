@@ -10,10 +10,32 @@ class MatrixRuntimeStateMachineTest {
     @Test
     fun `restored session reconnects through offline and syncing states`() {
         assertPhase(MatrixRuntimePhase.OFFLINE, MatrixRuntimeEvent.Start(true, false))
-        assertPhase(MatrixRuntimePhase.CONNECTING, MatrixRuntimeEvent.NetworkAvailable)
+        assertPhase(
+            MatrixRuntimePhase.CONNECTING,
+            MatrixRuntimeEvent.NetworkAvailable(syncRunning = false),
+        )
         assertPhase(MatrixRuntimePhase.SYNCING, MatrixRuntimeEvent.SyncUpdated)
         assertPhase(MatrixRuntimePhase.OFFLINE, MatrixRuntimeEvent.NetworkLost)
-        assertPhase(MatrixRuntimePhase.CONNECTING, MatrixRuntimeEvent.NetworkAvailable)
+        assertPhase(
+            MatrixRuntimePhase.CONNECTING,
+            MatrixRuntimeEvent.NetworkAvailable(syncRunning = false),
+        )
+    }
+
+    @Test
+    fun `validated network flap keeps a running sync in the active phase`() {
+        assertPhase(MatrixRuntimePhase.RESTORING, MatrixRuntimeEvent.Start(true, true))
+        assertPhase(MatrixRuntimePhase.CONNECTING, MatrixRuntimeEvent.SessionReady(true))
+        assertPhase(MatrixRuntimePhase.SYNCING, MatrixRuntimeEvent.SyncUpdated)
+
+        repeat(3) {
+            assertPhase(MatrixRuntimePhase.OFFLINE, MatrixRuntimeEvent.NetworkLost)
+            assertPhase(
+                MatrixRuntimePhase.SYNCING,
+                MatrixRuntimeEvent.NetworkAvailable(syncRunning = true),
+            )
+            assertEquals("matrix_sync_active", machine.status.detailCode)
+        }
     }
 
     @Test

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   CODEVER_GATEWAY_TRANSPORT_PROFILE_FIELD,
   signedPairingRequestSchema,
@@ -193,7 +194,10 @@ async function acceptMatrixPairing(
             pairing_rejection: rejection,
           },
         },
-        transactionId: `codever.pair.rejection.${signedRequest.request.requestId}`,
+        transactionId: pairingDeliveryTransactionId(
+          'rejection',
+          signedRequest.request.requestId,
+        ),
       })
     }
     throw error
@@ -222,9 +226,20 @@ async function acceptMatrixPairing(
         pairing_response: accepted.response,
       },
     },
-    transactionId: `codever.pair.response.${accepted.requestId}`,
+    // Matrix transaction IDs are idempotency keys, not application message
+    // IDs. The signed response is intentionally stable for this request, but
+    // every recovery delivery must become a fresh timeline event so a client
+    // process that missed the previous event can observe the replay.
+    transactionId: pairingDeliveryTransactionId('response', accepted.requestId),
   })
   return record
+}
+
+function pairingDeliveryTransactionId(
+  kind: 'response' | 'rejection',
+  requestId: string,
+): string {
+  return `codever.pair.${kind}.${requestId}.${randomUUID()}`
 }
 
 export function trustedDeviceFromRecord(

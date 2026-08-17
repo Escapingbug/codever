@@ -139,7 +139,7 @@ describe('long-lived Matrix pairing recovery', () => {
       onProvisioned: async record => {
         provisioningAttempts += 1
         expect(record.certificate.certificate.deviceId).toBe('phone-one')
-        expect(client.sent).toHaveLength(0)
+        expect(client.sent).toHaveLength(Math.max(0, provisioningAttempts - 2))
         if (provisioningAttempts === 1) {
           throw new Error('Room State publication interrupted')
         }
@@ -197,6 +197,34 @@ describe('long-lived Matrix pairing recovery', () => {
     expect(client.pinned).toHaveLength(2)
     await expect(registry.listActive()).resolves.toHaveLength(1)
 
+    // A restarted client may have missed the first response event entirely.
+    // Retrying the exact durable request must preserve the signed response,
+    // while using a fresh Matrix transaction so the homeserver publishes a
+    // new event instead of idempotently returning the old event ID.
+    client.emit({
+      roomId: gatewayTransport.roomId,
+      eventId: '$request-retry-after-response-loss',
+      eventType: 'm.room.message',
+      sender: deviceTransport.userId,
+      senderDeviceId: deviceTransport.ed25519,
+      encrypted: true,
+      content: {
+        msgtype: 'm.text',
+        body: 'Pairing request',
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 1,
+          kind: 'pairing_request',
+          pairing_request: request.signedRequest,
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+    expect(provisioningAttempts).toBe(3)
+    const replayExtension = client.sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    expect(replayExtension.pairing_response).toEqual(extension.pairing_response)
+    expect(client.sent[1]?.transactionId).not.toBe(client.sent[0]?.transactionId)
+
     const unusedOffer = await service.createOffer({
       gatewayName: 'Gateway',
       gatewayTransport,
@@ -228,7 +256,7 @@ describe('long-lived Matrix pairing recovery', () => {
       },
     })
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(client.sent).toHaveLength(1)
+    expect(client.sent).toHaveLength(2)
     await expect(registry.getOffer(unusedOffer.signedOffer.offer.offerId))
       .resolves.toBeDefined()
 
@@ -256,7 +284,7 @@ describe('long-lived Matrix pairing recovery', () => {
         },
       },
     })
-    await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+    await vi.waitFor(() => expect(client.sent).toHaveLength(3))
     await expect(registry.listActive()).resolves.toHaveLength(2)
     stopNewPairing()
 
@@ -276,7 +304,7 @@ describe('long-lived Matrix pairing recovery', () => {
       },
     })
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(client.sent).toHaveLength(2)
+    expect(client.sent).toHaveLength(3)
   })
 
   it('returns an immediate signed rejection for a verified approval failure', async () => {
@@ -393,6 +421,15 @@ describe('long-lived Matrix pairing recovery', () => {
       },
     })
     await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+    const replayedRejection = client.sent[1]?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    await expect(
+      verifyPairingRejection(
+        replayedRejection.pairing_rejection,
+        secondOffer.signedOffer,
+        secondRequest.signedRequest,
+      ),
+    ).resolves.toMatchObject({ code: 'device_conflict', retryable: false })
+    expect(client.sent[1]?.transactionId).not.toBe(client.sent[0]?.transactionId)
     await vi.waitFor(() => expect(onRejected).toHaveBeenCalledTimes(2))
     stop()
   })

@@ -24,7 +24,7 @@ const SYNC_STALL_TIMEOUT_MS = 120_000
 const WATCHDOG_TIMEOUT_MS = SYNC_STALL_TIMEOUT_MS + 45_000
 const POST_RESTART_CONVERGENCE_TIMEOUT_MS = 30_000
 const QUEUED_WARNING =
-    'Your computer did not confirm this command. It remains queued for a safe retry.'
+    'Your computer did not acknowledge this command. It is saved for reconciliation; do not submit it again.'
 
 if (
     process.env[ENABLE_ENV] !== '1'
