@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -95,6 +95,52 @@ describe('FileMatrixStateOutbox', () => {
             currentSession,
         ])
     })
+
+    it('loads a delivered Gateway state written before command cursors existed', async () => {
+        const { path, outbox } = await fixture()
+        const delivery = outbox.createDelivery(gatewayInput(1))
+        await outbox.stage(delivery)
+        await outbox.markDelivered(delivery.deliveryId, '$legacy-gateway-state')
+        await removeGatewayCommandSequences(path)
+
+        const restarted = new FileMatrixStateOutbox(path)
+        await restarted.initialize()
+
+        expect(restarted.pendingForRoom('!room:example.org')).toEqual([])
+        expect(restarted.latestForRoom('!room:example.org')).toEqual([
+            {
+                ...delivery,
+                content: {
+                    ...delivery.content,
+                    command_sequences: [],
+                },
+            },
+        ])
+    })
+
+    it('retires an undelivered legacy Gateway state instead of retrying it', async () => {
+        const { path, outbox } = await fixture()
+        const legacy = outbox.createDelivery(gatewayInput(1))
+        await outbox.stage(legacy)
+        await removeGatewayCommandSequences(path)
+
+        const restarted = new FileMatrixStateOutbox(path)
+        await restarted.initialize()
+
+        expect(restarted.pendingForRoom('!room:example.org')).toEqual([])
+        expect((await readFile(path, 'utf8')).split('\n').filter(Boolean).map(line =>
+            JSON.parse(line) as { kind: string; deliveryId: string }
+        )).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                kind: 'superseded',
+                deliveryId: legacy.deliveryId,
+            }),
+        ]))
+
+        const secondRestart = new FileMatrixStateOutbox(path)
+        await secondRestart.initialize()
+        expect(secondRestart.pendingForRoom('!room:example.org')).toEqual([])
+    })
 })
 
 async function fixture() {
@@ -127,4 +173,61 @@ function input(stateVersion: number) {
         },
         createdAt: stateVersion,
     }
+}
+
+function gatewayInput(stateVersion: number) {
+    return {
+        roomId: '!room:example.org',
+        eventType: 'io.codever.gateway.current.v2',
+        stateKey: 'gateway-1',
+        stateVersion,
+        content: {
+            version: 2 as const,
+            kind: 'gateway_state' as const,
+            gateway_id: 'gateway-1',
+            conversation_id: 'conversation-1',
+            revision: stateVersion,
+            revision_epoch: 'epoch-1',
+            revision_epoch_generation: 1,
+            state_version: stateVersion,
+            active_device_count: 1,
+            command_sequences: [{
+                device_id: 'device-1',
+                sequence_epoch: 'certificate-1',
+                sequence: 3,
+            }],
+            workspace: {
+                project: {
+                    id: 'project-1',
+                    name: 'Project 1',
+                    cwd: '/work/project-1',
+                },
+                provider: 'codex',
+                permission_mode: 'default',
+            },
+            capabilities: {
+                models: [],
+                permission_modes: [],
+                can_create_session: true,
+                can_select_session: false,
+                can_archive_session: true,
+                can_delete_session: true,
+                session_extensions: [],
+            },
+            updated_at: stateVersion,
+        },
+        createdAt: stateVersion,
+    }
+}
+
+async function removeGatewayCommandSequences(path: string): Promise<void> {
+    const records = (await readFile(path, 'utf8')).split(/\r?\n/u).filter(Boolean)
+        .map(line => JSON.parse(line) as Record<string, unknown>)
+    for (const record of records) {
+        const content = record.content
+        if (content && typeof content === 'object' && !Array.isArray(content)) {
+            delete (content as Record<string, unknown>).command_sequences
+        }
+    }
+    await writeFile(path, `${records.map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8')
 }

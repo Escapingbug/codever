@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -209,6 +209,7 @@ try {
     await waitForProjectWorking(firstPage, projectName)
     const baselineBeforeRotationCreate = await activeSessionCount(firstPage)
     await gatewayProcess.crash()
+    await downgradeGatewayStateOutboxToLegacy(gatewayDataDirectory)
     // Submit while the browser still owns the durable command sequence but
     // before the persistent Gateway device has resumed its sync. Matrix stays
     // connected, so the UI accepts the command and the WAL must reconcile it.
@@ -246,7 +247,7 @@ try {
     )
     const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
     assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
-    process.stdout.write('[4r/8] PASS — the same encrypted Gateway device recovered active work and queued creation.\n')
+    process.stdout.write('[4r/8] PASS — the same encrypted Gateway device migrated its legacy state outbox, recovered active work, and accepted queued creation.\n')
 
     process.stdout.write('[4a/8] Sending text and image attachments through the real Agent input boundary…\n')
     await sendPromptWithAttachment(firstPage, {
@@ -842,6 +843,56 @@ async function persistedGatewaySessionCount(dataDirectory: string): Promise<numb
     )) as { rooms?: Record<string, { appSessions?: unknown[] }> }
     return Object.values(state.rooms ?? {})
         .reduce((total, room) => total + (room.appSessions?.length ?? 0), 0)
+}
+
+async function downgradeGatewayStateOutboxToLegacy(dataDirectory: string): Promise<void> {
+    const path = join(dataDirectory, 'envelope-replay.json.state-outbox.jsonl')
+    const records = (await readFile(path, 'utf8')).split(/\r?\n/u).filter(Boolean)
+        .map(line => JSON.parse(line) as {
+            kind?: string
+            deliveryId?: string
+            roomId?: string
+            eventType?: string
+            stateKey?: string
+            stateVersion?: number
+            content?: Record<string, unknown>
+        })
+    const migratedDeliveryIds = new Map<string, string>()
+    for (const record of records) {
+        if (
+            record.kind !== 'pending'
+            || record.content?.kind !== 'gateway_state'
+            || !Object.prototype.hasOwnProperty.call(record.content, 'command_sequences')
+        ) continue
+        if (
+            typeof record.deliveryId !== 'string'
+            || typeof record.roomId !== 'string'
+            || typeof record.eventType !== 'string'
+            || typeof record.stateKey !== 'string'
+            || typeof record.stateVersion !== 'number'
+        ) throw new Error('Gateway state outbox fixture record is incomplete')
+        const previousDeliveryId = record.deliveryId
+        delete record.content.command_sequences
+        const legacyDeliveryId = createHash('sha256')
+            .update('codever-matrix-state:v2\0')
+            .update(JSON.stringify([record.roomId, record.eventType, record.stateKey]))
+            .update('\0')
+            .update(String(record.stateVersion))
+            .update('\0')
+            .update(JSON.stringify(record.content))
+            .digest('hex')
+        record.deliveryId = legacyDeliveryId
+        migratedDeliveryIds.set(previousDeliveryId, legacyDeliveryId)
+    }
+    assert.ok(
+        migratedDeliveryIds.size > 0,
+        'Gateway upgrade E2E could not find a current Gateway state outbox record to downgrade',
+    )
+    for (const record of records) {
+        if (record.kind === 'pending' || typeof record.deliveryId !== 'string') continue
+        record.deliveryId = migratedDeliveryIds.get(record.deliveryId) ?? record.deliveryId
+    }
+    await writeFile(path, `${records.map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8')
 }
 
 async function acceptedCommandCount(

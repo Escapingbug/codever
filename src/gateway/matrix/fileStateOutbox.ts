@@ -33,6 +33,18 @@ interface StateSupersededEntry {
 type StateOutboxEntry = StatePendingEntry | StateDeliveredEntry | StateSupersededEntry
 export type DurableMatrixStateDelivery = Omit<StatePendingEntry, 'version' | 'kind'>
 
+interface DecodedStateOutboxEntry {
+    entry: StateOutboxEntry
+    /**
+     * Gateway state written before per-device command cursors existed cannot
+     * be retried: a current native client would be unable to reconcile its
+     * durable command sequence from that state. Delivered values remain a
+     * useful semantic cache, while pending values are retired during load and
+     * replaced by the authoritative state published during Gateway startup.
+     */
+    legacyGatewayStateWithoutCommandSequences: boolean
+}
+
 export class FileMatrixStateOutbox {
     private readonly pending = new Map<string, DurableMatrixStateDelivery>()
     private readonly deliveries = new Map<string, DurableMatrixStateDelivery>()
@@ -58,24 +70,44 @@ export class FileMatrixStateOutbox {
             await truncateAndSync(this.path, validLength)
             bytes = bytes.subarray(0, validLength)
         }
+        const legacyGatewayDeliveries = new Set<string>()
         for (const [index, line] of bytes.toString('utf8').split(/\r?\n/u).entries()) {
             if (!line.trim()) continue
             this.recordCount += 1
-            let entry: StateOutboxEntry
+            let decoded: DecodedStateOutboxEntry
             try {
-                entry = validateEntry(JSON.parse(line))
+                decoded = validateEntry(JSON.parse(line))
             } catch (error) {
                 throw new Error(`Invalid Matrix state outbox record at line ${index + 1}: ${formatError(error)}`)
             }
+            const { entry } = decoded
             if (entry.kind === 'pending') {
                 const { version: _version, kind: _kind, ...delivery } = entry
                 this.deliveries.set(entry.deliveryId, delivery)
+                if (decoded.legacyGatewayStateWithoutCommandSequences) {
+                    legacyGatewayDeliveries.add(entry.deliveryId)
+                }
                 if (!this.terminal.has(entry.deliveryId)) {
                     this.pending.set(entry.deliveryId, delivery)
                 }
             } else {
                 this.pending.delete(entry.deliveryId)
                 this.terminal.add(entry.deliveryId)
+            }
+        }
+        const unsafeLegacyPending = [...legacyGatewayDeliveries]
+            .filter(deliveryId => this.pending.has(deliveryId))
+        if (unsafeLegacyPending.length > 0) {
+            const supersededAt = Date.now()
+            await this.appendMany(unsafeLegacyPending.map(deliveryId => ({
+                version: 1 as const,
+                kind: 'superseded' as const,
+                deliveryId,
+                supersededAt,
+            })))
+            for (const deliveryId of unsafeLegacyPending) {
+                this.pending.delete(deliveryId)
+                this.terminal.add(deliveryId)
             }
         }
     }
@@ -308,7 +340,7 @@ function latestByEntity(
     return [...latest.values()]
 }
 
-function validateEntry(value: unknown): StateOutboxEntry {
+function validateEntry(value: unknown): DecodedStateOutboxEntry {
     const entry = asRecord(value)
     if (!entry || entry.version !== 1 || typeof entry.kind !== 'string') {
         throw new TypeError('unsupported record')
@@ -322,10 +354,21 @@ function validateEntry(value: unknown): StateOutboxEntry {
             || typeof entry.stateVersion !== 'number'
             || typeof entry.createdAt !== 'number'
         ) throw new TypeError('invalid pending record')
+        const content = asRecord(entry.content)
+        const legacyGatewayStateWithoutCommandSequences =
+            content?.kind === 'gateway_state'
+            && !Object.prototype.hasOwnProperty.call(content, 'command_sequences')
         return {
-            ...entry,
-            content: matrixStateContentSchema.parse(entry.content),
-        } as unknown as StatePendingEntry
+            entry: {
+                ...entry,
+                content: matrixStateContentSchema.parse(
+                    legacyGatewayStateWithoutCommandSequences
+                        ? { ...content, command_sequences: [] }
+                        : entry.content,
+                ),
+            } as unknown as StatePendingEntry,
+            legacyGatewayStateWithoutCommandSequences,
+        }
     }
     if (entry.kind === 'delivered') {
         if (
@@ -333,13 +376,19 @@ function validateEntry(value: unknown): StateOutboxEntry {
             || typeof entry.eventId !== 'string'
             || typeof entry.deliveredAt !== 'number'
         ) throw new TypeError('invalid delivered record')
-        return entry as unknown as StateDeliveredEntry
+        return {
+            entry: entry as unknown as StateDeliveredEntry,
+            legacyGatewayStateWithoutCommandSequences: false,
+        }
     }
     if (entry.kind === 'superseded') {
         if (typeof entry.deliveryId !== 'string' || typeof entry.supersededAt !== 'number') {
             throw new TypeError('invalid superseded record')
         }
-        return entry as unknown as StateSupersededEntry
+        return {
+            entry: entry as unknown as StateSupersededEntry,
+            legacyGatewayStateWithoutCommandSequences: false,
+        }
     }
     throw new TypeError('unknown record kind')
 }
