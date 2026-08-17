@@ -145,6 +145,7 @@ class NativeClientRuntime(
         var request: SignedPairingRequest? = null,
         var receivedResponse: SignedPairingResponse? = null,
         var response: CompletableDeferred<SignedPairingResponse>? = null,
+        val repairingSession: Boolean = false,
     )
 
     private data class ActivePairingCompletion(
@@ -192,21 +193,22 @@ class NativeClientRuntime(
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
     private val nativeProjection = MatrixNativeProjection()
     private val restoredTrust = runCatching { trustStore.load() }
-    private val restoredPairing: Result<PersistedPairingTransaction?> =
-        if (restoredTrust.getOrNull() != null) {
-            runCatching { pairingStore.clear() }
-                .onFailure { error ->
-                    diagnostics.record(
-                        "pairing.transaction.stale_cleanup_failure",
-                        mapOf("error" to diagnosticErrorName(error)),
-                    )
+    private val restoredPairing: Result<PersistedPairingTransaction?> = runCatching {
+        pairingStore.load()?.let(::validateRestoredPairingTransaction)?.let transaction@{ transaction ->
+            restoredTrust.getOrNull()?.let { activeTrust ->
+                if (
+                    transaction.response?.response?.certificate?.certificate?.certificateId ==
+                    activeTrust.certificate.certificateId
+                ) {
+                    pairingStore.clear()
+                    diagnostics.record("pairing.transaction.stale_cleanup")
+                    return@transaction null
                 }
-            Result.success(null)
-        } else {
-            runCatching {
-                pairingStore.load()?.let(::validateRestoredPairingTransaction)
+                MatrixSessionRepairPolicy.requirePinnedOffer(activeTrust, transaction.offer)
             }
+            transaction
         }
+    }
     @Volatile private var transportIdentity: MatrixTransportIdentity? = null
     @Volatile private var trust: GatewayTrust? = restoredTrust.getOrNull()
     @Volatile private var trustStorageBlocked = restoredTrust.isFailure
@@ -217,7 +219,12 @@ class NativeClientRuntime(
     @Volatile private var gatewayConvergenceFallbackJob: Job? = null
     @Volatile private var gatewayConvergenceMinimumRevision: Long? = null
     @Volatile private var pendingPairing: PendingPairing? = restoredPairing.getOrNull()?.let {
-        PendingPairing(it.offer, it.request, it.response)
+        PendingPairing(
+            it.offer,
+            it.request,
+            it.response,
+            repairingSession = restoredTrust.getOrNull() != null,
+        )
     }
     @Volatile private var activePairingCompletion: ActivePairingCompletion? = null
     @Volatile private var pairingAutoResumeJob: Job? = null
@@ -376,10 +383,17 @@ class NativeClientRuntime(
     }
 
     suspend fun inspectPairing(link: String): NativePairingPreview = mutex.withLock {
-        check(trust == null) { "Disconnect the current Gateway before pairing another one." }
         val offer = PairingCodec.decodePairingLink(link)
         PairingSecurity.verifyOffer(offer, now = now())
         assertOfferRoute(offer)
+        val activeTrust = trust
+        val repairingSession = activeTrust != null
+        if (activeTrust != null) {
+            check(MatrixSessionRepairPolicy.required(activeTrust, matrix.publicSession())) {
+                "Disconnect the current Gateway before pairing another one."
+            }
+            MatrixSessionRepairPolicy.requirePinnedOffer(activeTrust, offer)
+        }
         pendingPairing?.let { current ->
             if (current.offer == offer) {
                 pairingStorageBlocked = false
@@ -391,7 +405,7 @@ class NativeClientRuntime(
         }
         pairingStore.save(PersistedPairingTransaction(offer, null, null))
         clearPreTrustEvents()
-        pendingPairing = PendingPairing(offer)
+        pendingPairing = PendingPairing(offer, repairingSession = repairingSession)
         pairingStorageBlocked = false
         val preview = NativePairingPreview(
             pairingId = offer.offer.offerId,
@@ -444,7 +458,7 @@ class NativeClientRuntime(
                         }
                     }
                     if (
-                        trust == null &&
+                        (trust == null || pending.repairingSession) &&
                         pendingPairing === pending &&
                         pending.request != null
                     ) {
@@ -483,6 +497,19 @@ class NativeClientRuntime(
             val transport = transportIdentity
                 ?: throw IllegalStateException("Matrix encryption keys are not ready yet.")
             assertOfferRoute(pending.offer)
+            trust?.takeIf { pending.repairingSession }?.let { activeTrust ->
+                MatrixSessionRepairPolicy.requirePinnedOffer(activeTrust, pending.offer)
+                MatrixSessionRepairPolicy.requireReplacement(
+                    activeTrust,
+                    MatrixTransportBinding(
+                        homeserver = session.homeserver,
+                        roomId = session.roomBinding.roomId,
+                        userId = session.userId,
+                        deviceId = transport.deviceId,
+                        ed25519 = transport.ed25519,
+                    ),
+                )
+            }
             val signedRequest = existingRequest ?: run {
                 val issuedAt = now()
                 val request = PairingRequest(
@@ -808,7 +835,11 @@ class NativeClientRuntime(
     override fun onPairingTransportReady(identity: MatrixTransportIdentity) {
         transportIdentity = identity
         diagnostics.record("matrix.pairing_transport.ready")
-        if (trust == null && !pairingStorageBlocked && pendingPairing?.request != null) {
+        if (
+            (trust == null || pendingPairing?.repairingSession == true) &&
+            !pairingStorageBlocked &&
+            pendingPairing?.request != null
+        ) {
             resumeConfirmedPairing()
         }
     }
@@ -825,7 +856,11 @@ class NativeClientRuntime(
                 recoverTransport = true,
                 invalidateCurrentState = false,
             )
-        } else if (!pairingStorageBlocked && pendingPairing?.request != null) {
+        } else if (
+            pendingPairing?.repairingSession == true &&
+            !pairingStorageBlocked &&
+            pendingPairing?.request != null
+        ) {
             resumeConfirmedPairing()
         }
     }
@@ -2061,7 +2096,10 @@ class NativeClientRuntime(
 
     private suspend fun abandonPairing(pending: PendingPairing, reason: String) {
         mutex.withLock {
-            if (pendingPairing !== pending || trust != null) return
+            if (
+                pendingPairing !== pending ||
+                (trust != null && !pending.repairingSession)
+            ) return
             pairingStore.clear()
             pendingPairing = null
             pairingStorageBlocked = false
@@ -2243,6 +2281,8 @@ class NativeClientRuntime(
         val activeTrust = trust
         val phase = when {
             status.phase == MatrixRuntimePhase.STOPPED -> LifecyclePhase.STOPPED
+            status.phase == MatrixRuntimePhase.WAITING_FOR_SESSION && activeTrust != null ->
+                LifecyclePhase.BLOCKED
             status.phase == MatrixRuntimePhase.WAITING_FOR_SESSION -> LifecyclePhase.UNPAIRED
             status.phase == MatrixRuntimePhase.BOOTSTRAPPING -> LifecyclePhase.STARTING
             status.phase == MatrixRuntimePhase.RESTORING -> LifecyclePhase.SECURING
@@ -2255,6 +2295,12 @@ class NativeClientRuntime(
             else -> LifecyclePhase.READY
         }
         val detail = if (
+            phase == LifecyclePhase.BLOCKED &&
+            status.phase == MatrixRuntimePhase.WAITING_FOR_SESSION &&
+            activeTrust != null
+        ) {
+            "matrix_session_repair_required"
+        } else if (
             phase == LifecyclePhase.CONNECTING &&
             status.phase == MatrixRuntimePhase.SYNCING &&
             activeTrust != null &&

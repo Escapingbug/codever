@@ -17,6 +17,7 @@ const execFileAsync = promisify(execFile)
 const PACKAGE_NAME = 'id.my.anciety.codever.e2e'
 const MAIN_ACTIVITY = `${PACKAGE_NAME}/id.my.anciety.codever.web.MainActivity`
 const LEGACY_OUTBOX_SEEDER = `${PACKAGE_NAME}/id.my.anciety.codever.e2e.LegacyOutboxSeederReceiver`
+const MATRIX_SESSION_FAULT = `${PACKAGE_NAME}/id.my.anciety.codever.e2e.MatrixSessionFaultReceiver`
 const CONNECT_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
@@ -89,6 +90,7 @@ export type AndroidAlphaJourneyOptions = {
 class AndroidWebView {
     private nextId = 0
     private readonly pending = new Map<number, PendingCall>()
+    private closing = false
 
     private constructor(private readonly socket: WebSocket) {
         socket.addEventListener('message', event => {
@@ -106,6 +108,11 @@ class AndroidWebView {
             }
         })
         socket.addEventListener('close', () => {
+            if (this.closing) {
+                for (const pending of this.pending.values()) clearTimeout(pending.timer)
+                this.pending.clear()
+                return
+            }
             for (const pending of this.pending.values()) {
                 clearTimeout(pending.timer)
                 pending.reject(new Error('The Android WebView debugger closed.'))
@@ -134,6 +141,7 @@ class AndroidWebView {
     }
 
     close(): void {
+        this.closing = true
         this.socket.close()
     }
 
@@ -564,7 +572,7 @@ export async function runAndroidAlphaJourney(
     let migrationSessionCreated = false
 
     try {
-        process.stdout.write('  [A1/11] Building and installing a fresh isolated Android E2E package…\n')
+        process.stdout.write('  [A1/12] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
         await adbMaybe(serial, 'uninstall', PACKAGE_NAME)
         await adb(serial, 'install', '-r', '-t', apkPath)
@@ -574,7 +582,7 @@ export async function runAndroidAlphaJourney(
         syncGate = await createMatrixSyncGate(options.matrixPort)
         await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
 
-        process.stdout.write('  [A2/11] Creating a real one-time invitation and pairing the fresh APK…\n')
+        process.stdout.write('  [A2/12] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
             options.browserPage,
             options.testerPassword,
@@ -594,7 +602,7 @@ export async function runAndroidAlphaJourney(
             await android.signInForPairing(options.testerUserId, options.testerPassword)
         }
         await android.clickButtonPrefix('Connect to ')
-        process.stdout.write('  [A2a/11] Holding the first native sync beyond its watchdog window…\n')
+        process.stdout.write('  [A2a/12] Holding the first native sync beyond its watchdog window…\n')
         await syncGate.waitForInterception()
         await waitFor(
             async () => await diagnosticCount(serial, 'matrix.driver.sync_service_state stage=RUNNING') > 0,
@@ -621,7 +629,7 @@ export async function runAndroidAlphaJourney(
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )
-        process.stdout.write('  [A2b/11] Killing Android after native confirmation and resuming the durable pairing transaction…\n')
+        process.stdout.write('  [A2b/12] Killing Android after native confirmation and resuming the durable pairing transaction…\n')
         const requestPersistenceBaseline = await diagnosticCount(
             serial,
             'pairing.transaction.request_persisted',
@@ -674,7 +682,7 @@ export async function runAndroidAlphaJourney(
         await closeBrowserConnectionSettings(options.browserPage)
         await assertForegroundNotification(serial)
 
-        process.stdout.write('  [A3/11] Creating on Android and converging the session into the browser…\n')
+        process.stdout.write('  [A3/12] Creating on Android and converging the session into the browser…\n')
         const creationStarted = Date.now()
         await android.createSession(projectName)
         await android.waitFor(
@@ -692,7 +700,7 @@ export async function runAndroidAlphaJourney(
         await waitForBrowserProject(options.browserPage, projectName)
         await openBrowserProject(options.browserPage, projectName)
 
-        process.stdout.write('  [A4/11] Completing an Android task in the background and opening its notification…\n')
+        process.stdout.write('  [A4/12] Completing an Android task in the background and opening its notification…\n')
         const postedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await android.sendPrompt(backgroundPrompt)
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
@@ -732,7 +740,7 @@ export async function runAndroidAlphaJourney(
             timeoutMs: 5_000,
         })
 
-        process.stdout.write('  [A5/11] Verifying foreground suppression and browser-to-APK history sync…\n')
+        process.stdout.write('  [A5/12] Verifying foreground suppression and browser-to-APK history sync…\n')
         const foregroundPostedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await sendBrowserPrompt(options.browserPage, browserPrompt)
         await waitForBrowserText(options.browserPage, browserPrompt)
@@ -872,7 +880,7 @@ export async function runAndroidAlphaJourney(
         await openBrowserProject(options.browserPage, projectName)
         await android.openProject(projectName)
 
-        process.stdout.write('  [A6/11] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
+        process.stdout.write('  [A6/12] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
@@ -892,7 +900,7 @@ export async function runAndroidAlphaJourney(
             'The recovered Android prompt reached the Agent more than once',
         )
 
-        process.stdout.write('  [A7/11] Withholding a committed delete result through automatic Android recovery…\n')
+        process.stdout.write('  [A7/12] Withholding a committed delete result through automatic Android recovery…\n')
         const deleteReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const deleteGatewayLogStart = options.gatewayOutput().length
         const redeliveredTransactionStart = syncGate.redeliveredCommandTransactions()
@@ -977,7 +985,7 @@ export async function runAndroidAlphaJourney(
         )
         sessionCreated = false
 
-        process.stdout.write('  [A8/11] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
+        process.stdout.write('  [A8/12] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
         const createReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const createSyncBaseline = syncGate.hold()
         await android.createSession(projectName)
@@ -1019,7 +1027,7 @@ export async function runAndroidAlphaJourney(
         assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
         assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
 
-        process.stdout.write('  [A9/11] Linearizing a stale cross-device Android prompt without user review…\n')
+        process.stdout.write('  [A9/12] Linearizing a stale cross-device Android prompt without user review…\n')
         const staleSyncBaseline = syncGate.hold()
         await sendBrowserPrompt(options.browserPage, browserRevisionAdvancePrompt)
         await waitForBrowserText(options.browserPage, browserRevisionAdvancePrompt)
@@ -1049,7 +1057,7 @@ export async function runAndroidAlphaJourney(
             'The linearly accepted Android prompt did not reach the Agent exactly once',
         )
 
-        process.stdout.write('  [A10/11] Alternating archive/restore/delete across browser and APK, then restarting…\n')
+        process.stdout.write('  [A10/12] Alternating archive/restore/delete across browser and APK, then restarting…\n')
         await archiveBrowserSession(options.browserPage)
         await android.waitFor('browser archive on Android', state => state.archivedBanner)
         await android.restoreSelected()
@@ -1080,7 +1088,7 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
-        process.stdout.write('  [A11/11] Cover-installing over an encrypted legacy submitted command…\n')
+        process.stdout.write('  [A11/12] Cover-installing over an encrypted legacy submitted command…\n')
         const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
         const migrationCountBefore = await diagnosticCount(serial, migrationDiagnostic)
         android.close()
@@ -1166,6 +1174,51 @@ export async function runAndroidAlphaJourney(
             'The quarantined command was transmitted on a later restart.',
         )
 
+        process.stdout.write('  [A12/12] Repairing a selectively missing Matrix session without replacing Codever trust…\n')
+        const repairInvitation = await createBrowserDeviceInvitation(
+            options.browserPage,
+            options.testerPassword,
+        )
+        await closeBrowserConnectionSettings(options.browserPage)
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await removePersistedMatrixSession(serial)
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        const repairState = await android.waitFor(
+            'actionable native Matrix session repair state',
+            state => state.connection.includes('Connection repair required')
+                && state.dialogs.some(dialog => dialog.startsWith('Repair connection')),
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.match(repairState.bodyText, /another connected Codever device/iu)
+        assert.match(repairState.bodyText, /device identity.*stay the same/iu)
+        await android.navigate(`${options.pwaUrl}/#pair=${encodeURIComponent(repairInvitation.link)}`)
+        await android.waitFor(
+            'same-Gateway repair invitation preview',
+            state => state.bodyText.toLocaleLowerCase().includes('computer found'),
+            CONNECT_TIMEOUT_MS,
+        )
+        if (!repairInvitation.includesMatrixLogin) {
+            await android.signInForPairing(options.testerUserId, options.testerPassword)
+        }
+        await android.clickButtonPrefix('Connect to ')
+        await tapNativePairingConfirmation(serial, options.runId)
+        await android.waitFor(
+            'connected Android after same-device Matrix session repair',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.ok(
+            await diagnosticCount(serial, 'matrix.session.restore stage=missing') > 0,
+            'The selective Matrix session loss was not recorded in diagnostics.',
+        )
+
         const versionName = await installedVersionName(serial)
         await mkdir(options.artifactDirectory, { recursive: true })
         await writeFile(join(options.artifactDirectory, 'alpha-result.json'), JSON.stringify({
@@ -1197,6 +1250,8 @@ export async function runAndroidAlphaJourney(
                 'ambiguous-legacy-command-quarantine-no-replay',
                 'post-migration-command-lane-recovery',
                 'one-time-outbox-migration-across-restart',
+                'trusted-device-missing-matrix-session-detection',
+                'same-device-matrix-session-repair',
             ],
         }, null, 2), 'utf8')
         process.stdout.write(`  Alpha APK ${versionName} passed fresh pairing, cross-device, background, notification, and recovery acceptance.\n`)
@@ -1739,6 +1794,22 @@ async function seedLegacySubmittedCommand(serial: string, runId: string): Promis
     const commandId = result?.[2]
     assert.ok(commandId, `The E2E APK did not return its legacy command id: ${output}`)
     return commandId
+}
+
+async function removePersistedMatrixSession(serial: string): Promise<void> {
+    const output = await adb(
+        serial,
+        'shell',
+        'am',
+        'broadcast',
+        '-f',
+        '0x20',
+        '-n',
+        MATRIX_SESSION_FAULT,
+    )
+    const result = output.match(/Broadcast completed: result=(-?\d+), data="([^"]+)"/u)
+    assert.equal(result?.[1], '-1', `The E2E APK could not remove its Matrix session: ${output}`)
+    assert.equal(result?.[2], 'matrix-session-removed')
 }
 
 async function replayLedgerLineCount(path: string): Promise<number> {

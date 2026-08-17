@@ -21,6 +21,11 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Setup required",
     detail: "Connect this device to your computer to continue.",
   },
+  matrix_session_repair_required: {
+    title: "Connection repair required",
+    detail:
+      "This device still trusts your computer, but its local sign-in is missing. Use a new invitation from that computer to repair it.",
+  },
   matrix_session_restoring: {
     title: "Restoring connection",
     detail: "Loading the saved secure connection…",

@@ -314,7 +314,10 @@ class MatrixConnectionRuntime(
             throw error
         }
         val candidateFiles = accountStorage.forSession(session)
-        accountStorage.clear(candidateFiles)
+        // Never delete the only durable login before its atomic replacement is
+        // ready. A process death in this window previously left Gateway trust
+        // intact but made the Matrix session impossible to restore.
+        accountStorage.prepareForBootstrap(candidateFiles)
         applicationControlSince = null
         val nextFiles = accountStorage.forSession(session)
         val nextSecrets = PersistedMatrixSecrets(
@@ -485,8 +488,16 @@ class MatrixConnectionRuntime(
 
     private fun restorePersistedSessionLocked() {
         if (secrets != null) return
-        val currentFiles = accountStorage.findCurrent() ?: return
-        val loaded = currentFiles.sessionStore.load() ?: return
+        val currentFiles = accountStorage.findCurrent()
+        if (currentFiles == null) {
+            diagnostics.record("matrix.session.restore", mapOf("stage" to "missing"))
+            return
+        }
+        val loaded = currentFiles.sessionStore.load()
+        if (loaded == null) {
+            diagnostics.record("matrix.session.restore", mapOf("stage" to "missing"))
+            return
+        }
         check(
             MatrixIdentifiers.accountStoreName(
                 loaded.session.homeserverUrl,
@@ -499,6 +510,7 @@ class MatrixConnectionRuntime(
         files = currentFiles
         secrets = loaded
         applicationControlSince = currentFiles.applicationControlCursor.load()
+        diagnostics.record("matrix.session.restore", mapOf("stage" to "restored"))
     }
 
     private suspend fun connectLocked() {
@@ -545,7 +557,12 @@ class MatrixConnectionRuntime(
                         scope.launch {
                             mutex.withLock {
                                 if (driver === nextDriver && driverGeneration == generation) {
-                                    secrets = PersistedMatrixSecrets(currentSecrets.sdkStoreKey, updated)
+                                    val updatedSecrets = PersistedMatrixSecrets(
+                                        currentSecrets.sdkStoreKey,
+                                        updated,
+                                    )
+                                    currentFiles.sessionStore.save(updatedSecrets)
+                                    secrets = updatedSecrets
                                 }
                             }
                         }

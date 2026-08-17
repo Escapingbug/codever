@@ -40,6 +40,14 @@ class MatrixAccountStorage(
         sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
     }
 
+    /** Clears replaceable SDK state without opening a delete-before-save gap for the login. */
+    fun prepareForBootstrap(files: MatrixAccountFiles) {
+        require(ACCOUNT_SCOPE.matches(files.accountScope)) { "Matrix account scope is invalid." }
+        files.applicationControlCursor.clear()
+        MatrixAccountWiper.deleteSdkAccountRoot(sdkRoot, files.accountScope)
+        sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
+    }
+
     private fun scoped(accountScope: String): MatrixAccountFiles {
         require(ACCOUNT_SCOPE.matches(accountScope)) { "Matrix account scope is invalid." }
         root.mkdirsOrThrow()

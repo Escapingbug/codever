@@ -23,6 +23,7 @@ type Props = {
   config: MatrixConnectionConfig;
   status: MatrixConnectionStatus;
   progressDetail: string | null;
+  repairRequired: boolean;
   error: string | null;
   pairingPreview: PairingPreview | null;
   trustedGateway: CodeverPublicTrust | null;
@@ -59,6 +60,7 @@ function MatrixSettingsDialog({
   error,
   pairingPreview,
   trustedGateway,
+  repairRequired,
   pairingBusy,
   deviceInvitation,
   invitationBusy,
@@ -89,7 +91,8 @@ function MatrixSettingsDialog({
     status === "securing" ||
     pairingBusy ||
     invitationBusy;
-  const needsAccount = Boolean(pairingPreview) && !trustedGateway;
+  const needsAccount =
+    Boolean(pairingPreview) && (!trustedGateway || repairRequired);
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const requestClose = () => {
@@ -124,7 +127,11 @@ function MatrixSettingsDialog({
           <div>
             <span className="eyebrow">Devices</span>
             <h2 id="matrix-settings-title">
-              {trustedGateway ? "Connection" : "Connect a computer"}
+              {repairRequired
+                ? "Repair connection"
+                : trustedGateway
+                  ? "Connection"
+                  : "Connect a computer"}
             </h2>
           </div>
           <button
@@ -148,6 +155,7 @@ function MatrixSettingsDialog({
         <PairingWizard
           preview={pairingPreview}
           trustedGateway={trustedGateway}
+          repairRequired={repairRequired}
           busy={busy}
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}

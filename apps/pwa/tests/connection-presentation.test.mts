@@ -41,6 +41,17 @@ test("blocked native codes provide actionable copy instead of leaking raw codes"
   assert.equal(presentation.detail.includes("matrix_sdk_internal_failure"), false);
 });
 
+test("missing native session with retained trust is presented as a repairable state", () => {
+  const presentation = deriveConnectionPresentation(
+    "error",
+    "matrix_session_repair_required",
+  );
+  assert.equal(presentation.state, "blocked");
+  assert.equal(presentation.title, "Connection repair required");
+  assert.match(presentation.detail, /local sign-in is missing/i);
+  assert.match(presentation.detail, /new invitation/i);
+});
+
 test("unknown machine codes remain diagnostic-only and use status fallback copy", () => {
   const presentation = deriveConnectionPresentation(
     "reconnecting",

@@ -3553,6 +3553,21 @@ select:focus-visible {
   margin: 16px 22px;
 }
 
+.connection-repair-notice {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 0.9rem;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.connection-repair-notice p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .pairing-hero,
 .pairing-device,
 .paired-gateway-card {

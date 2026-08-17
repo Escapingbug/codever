@@ -43,6 +43,8 @@ import {
   type AgentActivity,
 } from "./agentActivity";
 import { MatrixSettings } from "./MatrixSettings";
+import { waitForUiCommit } from "./uiScheduling";
+import { hasPairingRoute, pairingRouteFromUrl } from "./pairingRoute";
 import {
   NewSessionDialog,
   type NewSessionInput,
@@ -545,6 +547,7 @@ export function CodeverApp() {
   const pwaUpdateRef = useRef<PwaUpdateHandle | null>(null);
   const pwaReloadBlockedRef = useRef(false);
   const connectionStatusRef = useRef<MatrixConnectionStatus>("offline");
+  const matrixSessionRepairRequiredRef = useRef(false);
   const pendingSessionCreateRecoveryRef =
     useRef<PendingSessionCreateRecovery | null>(null);
   const sessionCreateRecoveryInFlightRef = useRef<{
@@ -753,6 +756,12 @@ export function CodeverApp() {
     () => deriveConnectionPresentation(connectionStatus, connectionDetail),
     [connectionDetail, connectionStatus],
   );
+  const matrixSessionRepairRequired =
+    connectionDetail === "matrix_session_repair_required";
+
+  useEffect(() => {
+    if (matrixSessionRepairRequired) setSettingsOpen(true);
+  }, [matrixSessionRepairRequired]);
   const composerNotices = [
     ...noticesForScope(uiNotices, "composer"),
     ...noticesForScope(uiNotices, "attachment"),
@@ -1164,37 +1173,22 @@ export function CodeverApp() {
   }, []);
 
   useEffect(() => {
-    const url = new URL(window.location.href);
-    const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
-    const link = hash.get("pair");
-    const invitation = hash.get("invite");
-    const shortInvitation =
-      hash.has("i") || hash.has("k") ? url.toString() : null;
+    const route = pairingRouteFromUrl(window.location.href);
+    const link = route.pairingLink;
+    const invitation = route.deviceInvitation;
+    const shortInvitation = route.shortInvitation;
     const deferStoredStartupForPairing =
       shouldDeferStoredMatrixStartupForPairing({
         pairingLink: link,
         deviceInvitation: invitation,
         shortInvitation,
       });
-    const rejectedQueryPairing =
-      url.searchParams.has("pair") ||
-      url.searchParams.has("invite") ||
-      url.searchParams.has("i") ||
-      url.searchParams.has("k");
-    if (link || invitation || shortInvitation || rejectedQueryPairing) {
-      hash.delete("pair");
-      hash.delete("invite");
-      hash.delete("i");
-      hash.delete("k");
-      url.searchParams.delete("pair");
-      url.searchParams.delete("invite");
-      url.searchParams.delete("i");
-      url.searchParams.delete("k");
-      const nextHash = hash.toString();
+    const rejectedQueryPairing = route.rejectedQueryPairing;
+    if (hasPairingRoute(route)) {
       window.history.replaceState(
         window.history.state,
         "",
-        `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ""}`,
+        route.sanitizedPath,
       );
     }
     if (invitation) void openDeviceInvitation(invitation);
@@ -1284,6 +1278,26 @@ export function CodeverApp() {
       setConnectionError(`Saved trust could not be verified: ${formatUiError(error)}`);
     });
     // URL fragments and persisted pairing recovery are consumed once at boot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const openRuntimePairingRoute = () => {
+      const route = pairingRouteFromUrl(window.location.href);
+      if (!route.pairingLink && !route.deviceInvitation && !route.shortInvitation) return;
+      window.history.replaceState(
+        window.history.state,
+        "",
+        route.sanitizedPath,
+      );
+      if (route.deviceInvitation) void openDeviceInvitation(route.deviceInvitation);
+      else if (route.pairingLink) void openPairingLink(route.pairingLink);
+      else if (route.shortInvitation) void openPairingLink(route.shortInvitation);
+    };
+    window.addEventListener("hashchange", openRuntimePairingRoute);
+    return () => window.removeEventListener("hashchange", openRuntimePairingRoute);
+    // Runtime invitation delivery is intentionally registered once. The
+    // handlers read current refs/state and own their async serialization.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2005,6 +2019,11 @@ export function CodeverApp() {
     closeSettings = true,
     recoveringInterruptedStartup = false,
   ): Promise<CodeverClient | null> {
+    // Native status callbacks may run before createCodeverClient() returns.
+    // Remember a repair result synchronously so the routine post-connect close
+    // cannot immediately undo the recovery dialog opened by that callback.
+    let keepSettingsOpenForRepair = false;
+    matrixSessionRepairRequiredRef.current = false;
     const storedSessionCreateRecovery = pendingSessionCreateRecoveryRef.current;
     const sessionCreateRecovery =
       storedSessionCreateRecovery &&
@@ -2101,11 +2120,18 @@ export function CodeverApp() {
             matrixStartupRef.current.phase = presentedStatus;
           }
           connectionStatusRef.current = presentedStatus;
+          matrixSessionRepairRequiredRef.current =
+            presentedStatus === "error" &&
+            detail === "matrix_session_repair_required";
           setConnectionStatus(presentedStatus);
           setConnectionDetail(presentedStatus === "offline" ? null : detail ?? null);
           if (presentedStatus === "error") {
             const presentation = deriveConnectionPresentation(presentedStatus, detail);
             setConnectionError(presentation.detail);
+            if (detail === "matrix_session_repair_required") {
+              keepSettingsOpenForRepair = true;
+              setSettingsOpen(true);
+            }
           } else if (
             presentedStatus === "reconnecting" ||
             presentedStatus === "offline"
@@ -2370,7 +2396,7 @@ export function CodeverApp() {
       }
       codeverClientRef.current = connection;
       setDeviceKeyId(connection.deviceId);
-      if (closeSettings) setSettingsOpen(false);
+      if (closeSettings && !keepSettingsOpenForRepair) setSettingsOpen(false);
       void connection.ready
         .then(() => {
           if (codeverClientRef.current !== connection) return;
@@ -2583,6 +2609,8 @@ export function CodeverApp() {
         gatewayMatrixEd25519: transport.ed25519,
         ...(invitation.matrixLogin
           ? { userId: invitation.matrixLogin.userId }
+          : matrixSessionRepairRequiredRef.current
+            ? { accessToken: "", matrixDeviceId: "" }
           : {}),
       };
       setPairingPreview(preview);
@@ -3359,7 +3387,7 @@ export function CodeverApp() {
     try {
       // Let React commit the pending row before Matrix encryption, IndexedDB,
       // acknowledgement, and command-result work begins.
-      await waitForNextPaint();
+      await waitForUiCommit();
       connection = codeverClientRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
@@ -5517,6 +5545,7 @@ export function CodeverApp() {
         config={matrixConfig}
         status={connectionStatus}
         progressDetail={connectionPresentation.detail}
+        repairRequired={matrixSessionRepairRequired}
         error={pairingError ?? connectionError}
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
@@ -5598,12 +5627,6 @@ function commandNoticeFor(payload: CommandPayload): {
     };
   }
   return { key: `composer:${payload.operation}`, scope: "composer" };
-}
-
-function waitForNextPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    window.requestAnimationFrame(() => resolve());
-  });
 }
 
 function agentLifecycleFailureText(

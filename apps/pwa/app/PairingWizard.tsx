@@ -22,6 +22,7 @@ import { useDialogFocus } from "./dialogFocus";
 type Props = {
   preview: PairingPreview | null;
   trustedGateway: CodeverPublicTrust | null;
+  repairRequired: boolean;
   busy: boolean;
   canConfirm: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
@@ -38,6 +39,7 @@ type Props = {
 export function PairingWizard({
   preview,
   trustedGateway,
+  repairRequired,
   busy,
   canConfirm,
   deviceInvitation,
@@ -89,7 +91,7 @@ export function PairingWizard({
   const qrDataUrl =
     qrCode.link === deviceInvitation?.link ? qrCode.dataUrl : "";
 
-  if (trustedGateway && !preview) {
+  if (trustedGateway && !preview && !repairRequired) {
     return (
       <div className="device-invitation-flow">
         <section className="paired-gateway-card" aria-label="Connected computer">
@@ -289,15 +291,28 @@ export function PairingWizard({
 
   return (
     <section className="pairing-start">
+      {repairRequired && trustedGateway && (
+        <div className="connection-repair-notice" role="status">
+          <strong>Repair this device’s connection</strong>
+          <p>
+            This APK still recognizes {trustedGateway.gatewayName}, but its
+            local Matrix sign-in is missing. On another connected Codever
+            device, choose Add another device, then scan or paste that one-time
+            invitation here. Your Codever device identity and approved Gateway
+            will stay the same.
+          </p>
+        </div>
+      )}
       <div className="pairing-hero">
         <span className="pairing-lock" aria-hidden="true">
           ↗
         </span>
         <div>
-          <h3>Connect to your computer</h3>
+          <h3>{repairRequired ? "Get a repair invitation" : "Connect to your computer"}</h3>
           <p>
-            Open Codever on your computer and choose Add device. Then scan its
-            QR code or paste the one-time invitation shown there.
+            Open Codever on another connected device and choose Add another
+            device. Then scan its QR code or paste the one-time invitation
+            shown there.
           </p>
         </div>
       </div>

@@ -22,6 +22,11 @@
         <receiver
             android:name="id.my.anciety.codever.e2e.LegacyOutboxSeederReceiver"
             android:exported="true" />
+
+        <!-- Test-only selective credential-loss fixture. Trust and device keys remain intact. -->
+        <receiver
+            android:name="id.my.anciety.codever.e2e.MatrixSessionFaultReceiver"
+            android:exported="true" />
     </application>
 
 </manifest>
