@@ -122,6 +122,20 @@ describe("MatrixNativeProjection Room State", () => {
     expect(state?.revision).toBe(4);
   });
 
+  it("projects a fresh Gateway heartbeat without advancing semantic state", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomState(gatewayState(1));
+    const heartbeat = await projection.applyRoomState({
+      ...gatewayState(1),
+      updated_at: 42,
+    });
+    expect(heartbeat).toMatchObject({
+      stateVersion: 1,
+      revision: 1,
+      updatedAt: 42,
+    });
+  });
+
   it("drops retired-epoch entities when Gateway generation advances", async () => {
     const projection = new MatrixNativeProjection();
     const old = sessionState("old", 2);

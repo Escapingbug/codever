@@ -115,7 +115,7 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /"Session queued…"/);
   assert.match(
     source,
-    /setPendingSessionCreate\(input\);[\s\S]*?setNewSessionOpen\(false\);[\s\S]*?await waitForNextPaint\(\);[\s\S]*?operation: "session\.create"/,
+    /setPendingSessionCreate\(input\);[\s\S]*?setNewSessionOpen\(false\);[\s\S]*?await waitForUiCommit\(\);[\s\S]*?operation: "session\.create"/,
   );
   assert.match(styles, /\.session-create-spinner\s*\{/);
   assert.match(source, /rememberPendingSessionCreate\(input, sent\.commandId\)/);
@@ -342,6 +342,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     packageJson,
     codeverClient,
     webCodeverClient,
+    pairingRoute,
   ] = await Promise.all([
       readFile(new URL("app/matrix.ts", appRoot), "utf8"),
       readFile(new URL("app/pairing.ts", appRoot), "utf8"),
@@ -365,6 +366,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
         new URL("app/client/web/WebCodeverClient.ts", appRoot),
         "utf8",
       ),
+      readFile(new URL("app/pairingRoute.ts", appRoot), "utf8"),
     ]);
 
   assert.match(packageJson, /"matrix-js-sdk": "41\.0\.0"/);
@@ -384,12 +386,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /Publishing this device’s encryption keys/);
   assert.match(
     matrix,
-    /async pair[\s\S]*await startupReady[\s\S]*await ensureOwnMatrixDeviceKeysPublished\(\)/,
+    /completePairingPreview[\s\S]*await startupReady[\s\S]*await ensureOwnMatrixDeviceKeysPublished\(\)[\s\S]*async pair[\s\S]*completePairingPreview/,
   );
   assert.doesNotMatch(
     matrix.slice(
-      matrix.indexOf("await waitForInitialSync"),
-      matrix.indexOf("const waitForCommandAcknowledgement"),
+      matrix.indexOf("const finishMatrixStartup"),
+      matrix.indexOf("const startupReady"),
     ),
     /Publishing this device’s encryption keys/,
   );
@@ -415,7 +417,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(
     matrix,
-    /async pair[\s\S]*verifyAndPinGatewayDevice[\s\S]*createMatrixPairingTransport/,
+    /completePairingPreview[\s\S]*verifyAndPinGatewayDevice[\s\S]*createMatrixPairingTransport/,
   );
   assert.match(matrix, /new sdk\.IndexedDBStore\(\{/);
   assert.match(matrix, /store: syncStore/);
@@ -735,10 +737,11 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(settings, /Native APK/);
   assert.match(settings, /connection-error-build/);
   assert.match(app, /onNativeRuntime/);
-  assert.match(app, /const link = hash\.get\("pair"\)/);
+  assert.match(app, /pairingRouteFromUrl\(window\.location\.href\)/);
+  assert.match(pairingRoute, /const pairingLink = hash\.get\("pair"\)/);
   assert.doesNotMatch(app, /searchParams\.get\("pair"\)/);
-  assert.match(app, /url\.searchParams\.has\("pair"\)/);
-  assert.match(app, /url\.searchParams\.delete\("pair"\)/);
+  assert.match(pairingRoute, /url\.searchParams\.has\("pair"\)/);
+  assert.match(pairingRoute, /url\.searchParams\.delete\("pair"\)/);
   assert.doesNotMatch(pairing, /url\.searchParams\.get\("(?:pair|data)"\)/);
   assert.match(pairing, /url\.searchParams\.has\("pair"\)/);
   assert.match(app, /window\.history\.replaceState/);

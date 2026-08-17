@@ -4,6 +4,7 @@ import { deriveComposerState } from "../app/composerState.ts";
 
 const ready = {
   connectionStatus: "connected" as const,
+  gatewayAvailable: true,
   hasGatewayState: true,
   hasSelectedSession: true,
   selectedArchived: false,
@@ -22,6 +23,18 @@ test("allows a new message to be queued while the agent is running", () => {
       canSend: true,
       mode: "queue",
       reason: "Agent is working · Send queues this message",
+    },
+  );
+});
+
+test("keeps drafts editable but blocks sending when Matrix is online and the Gateway is stale", () => {
+  assert.deepEqual(
+    deriveComposerState({ ...ready, gatewayAvailable: false }),
+    {
+      canType: true,
+      canSend: false,
+      mode: "blocked",
+      reason: "Your computer's Codever Gateway is offline. Your draft will be kept.",
     },
   );
 });

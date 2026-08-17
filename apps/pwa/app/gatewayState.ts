@@ -64,6 +64,8 @@ export type GatewayStateSnapshot = {
   revisionEpoch: string;
   revisionEpochGeneration: number;
   activeDeviceCount: number;
+  /** Signed Gateway heartbeat time. Missing only in a legacy local cache. */
+  updatedAt?: number;
   currentSessionId: string | null;
   sessions: GatewaySessionSummary[];
   workspace: GatewayWorkspaceState;
@@ -143,6 +145,10 @@ export function parseGatewayStateExtension(
     extension.revision_epoch.length === 0 ||
     !isPositiveInteger(extension.revision_epoch_generation) ||
     !isPositiveInteger(extension.active_device_count) ||
+    !(
+      extension.updated_at === undefined ||
+      isNonnegativeInteger(extension.updated_at)
+    ) ||
     !(
       extension.current_session_id === null ||
       typeof extension.current_session_id === "string"
@@ -379,6 +385,9 @@ export function parseGatewayStateExtension(
     revisionEpoch: extension.revision_epoch,
     revisionEpochGeneration: extension.revision_epoch_generation,
     activeDeviceCount: extension.active_device_count,
+    ...(typeof extension.updated_at === "number"
+      ? { updatedAt: extension.updated_at }
+      : {}),
     currentSessionId,
     sessions,
     workspace: {
@@ -480,6 +489,7 @@ function gatewayStateExtension(
     revision_epoch: state.revisionEpoch,
     revision_epoch_generation: state.revisionEpochGeneration,
     active_device_count: state.activeDeviceCount,
+    ...(state.updatedAt === undefined ? {} : { updated_at: state.updatedAt }),
     current_session_id: state.currentSessionId,
     sessions: state.sessions.map((session) => ({
       id: session.id,

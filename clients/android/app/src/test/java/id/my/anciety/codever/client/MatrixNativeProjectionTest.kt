@@ -83,6 +83,19 @@ class MatrixNativeProjectionTest {
     }
 
     @Test
+    fun `Gateway heartbeat refreshes public liveness without advancing semantic state`() {
+        val projection = MatrixNativeProjection()
+        projection.applyRoomState(gatewayState(1))
+        val heartbeat = JsonObject(gatewayState(1) + mapOf(
+            "updated_at" to JsonPrimitive(42),
+        ))
+        val snapshot = projection.applyRoomState(heartbeat)!!
+        assertEquals("1", snapshot.getValue("state_version").jsonPrimitive.content)
+        assertEquals("1", snapshot.getValue("revision").jsonPrimitive.content)
+        assertEquals("42", snapshot.getValue("updated_at").jsonPrimitive.content)
+    }
+
+    @Test
     fun `tombstone prevents stale state from resurrecting a deleted session`() {
         val projection = MatrixNativeProjection()
         val current = sessionState("session-1", 2)

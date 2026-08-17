@@ -977,6 +977,45 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
+    it('refreshes signed Gateway liveness without advancing semantic state', async () => {
+        const fixture = await securityFixture()
+        const gatewayKeys = await generateDeviceKeyPair()
+        fixture.config.applicationSecurity = {
+            gatewayDeviceId: fixture.config.gatewayId,
+            gatewayKeyPair: await exportDeviceKeyPair(gatewayKeys),
+            envelopeReplayLedgerPath: join(
+                await temporaryDirectory(),
+                'envelope-replay.json',
+            ),
+        }
+        fixture.config.trustedDevices[0]!.certificateExpiresAt = Date.now() + 60_000
+        fixture.config.trustedDevices[0]!.sequenceEpoch = 'certificate-pwa-1'
+        fixture.config.gatewayHeartbeatIntervalMs = 5
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+
+        await runner.start()
+        const key = JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ])
+        const first = client.state.get(key)!
+        const firstState = await openNativeState(first, fixture.keys, gatewayKeys)
+        await vi.waitFor(() => expect(client.state.get(key)?.eventId).not.toBe(first.eventId))
+        const heartbeat = await openNativeState(client.state.get(key)!, fixture.keys, gatewayKeys)
+
+        expect(heartbeat).toMatchObject({
+            state_version: firstState.state_version,
+            revision: firstState.revision,
+        })
+        expect(heartbeat.updated_at).toBeGreaterThanOrEqual(firstState.updated_at as number)
+        await runner.stop()
+    })
+
     it('restores persisted sessions, provider session, workspace, epoch, and state version before first sync', async () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()

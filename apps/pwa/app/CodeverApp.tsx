@@ -101,6 +101,7 @@ import {
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
 } from "./connectionPresentation";
+import { deriveGatewayLiveness } from "./gatewayLiveness";
 import {
   formatUserFacingError,
   isCommandRecoveryPendingError,
@@ -487,6 +488,7 @@ export function CodeverApp() {
   );
   const [gatewayState, setGatewayState] =
     useState<GatewayStateSnapshot | null>(null);
+  const [gatewayLivenessNow, setGatewayLivenessNow] = useState(() => Date.now());
   const [, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
@@ -752,15 +754,35 @@ export function CodeverApp() {
     matrixConfig.gatewayId,
     sessionReadState,
   ]);
-  const connectionPresentation = useMemo(
+  const matrixConnectionPresentation = useMemo(
     () => deriveConnectionPresentation(connectionStatus, connectionDetail),
     [connectionDetail, connectionStatus],
   );
+  const gatewayLiveness = deriveGatewayLiveness({
+    matrixStatus: connectionStatus,
+    trusted: trustedGateway !== null,
+    gatewayUpdatedAt: gatewayState?.updatedAt,
+    now: gatewayLivenessNow,
+  });
+  const gatewayAvailable = gatewayLiveness.available;
+  const displayedConnectionStatus = gatewayLiveness.state === "offline"
+    ? "offline"
+    : connectionStatus;
+  const connectionPresentation = gatewayLiveness.state === "offline"
+    ? deriveConnectionPresentation("offline", "matrix_gateway_offline")
+    : matrixConnectionPresentation;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setGatewayLivenessNow(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const matrixSessionRepairRequired =
     connectionDetail === "matrix_session_repair_required";
 
   useEffect(() => {
-    if (matrixSessionRepairRequired) setSettingsOpen(true);
+    if (!matrixSessionRepairRequired) return;
+    const timer = window.setTimeout(() => setSettingsOpen(true), 0);
+    return () => window.clearTimeout(timer);
   }, [matrixSessionRepairRequired]);
   const composerNotices = [
     ...noticesForScope(uiNotices, "composer"),
@@ -768,8 +790,7 @@ export function CodeverApp() {
   ];
   const sessionNotices = noticesForScope(uiNotices, "session");
   const historyNotices = noticesForScope(uiNotices, "history");
-  const matrixConnected =
-    connectionStatus === "connected" || connectionStatus === "reconnecting";
+  const gatewayConnected = gatewayAvailable;
   const isStreaming = Boolean(
     selectedSessionId && runningSessionIds.has(selectedSessionId),
   );
@@ -783,13 +804,14 @@ export function CodeverApp() {
     selectedSessionId && submittingPromptSessionIds.has(selectedSessionId),
   );
   const sessionReady = Boolean(
-    connectionStatus === "connected" &&
+    gatewayAvailable &&
       gatewayState &&
       selected &&
       !selectedArchived,
   );
   const composerState = deriveComposerState({
     connectionStatus,
+    gatewayAvailable,
     hasGatewayState: Boolean(gatewayState),
     hasSelectedSession: Boolean(selected),
     selectedArchived,
@@ -3969,7 +3991,9 @@ export function CodeverApp() {
         "composer:send",
         "composer",
         "warning",
-        "The message is still queued securely. Codever will reconcile it without sending a duplicate.",
+        gatewayLiveness.state === "offline"
+          ? "Your computer's Codever Gateway is offline. This message is saved for reconciliation and has not been submitted again."
+          : "Your computer did not acknowledge this message. It is saved for reconciliation; do not send it again while Codever determines whether it ran.",
       );
       return;
     }
@@ -4356,7 +4380,7 @@ export function CodeverApp() {
               onClick={() => setNewSessionOpen(true)}
               disabled={
                 newSessionBusy ||
-                !matrixConnected ||
+                !gatewayAvailable ||
                 !gatewayState?.capabilities.canCreateSession
               }
             >
@@ -4381,8 +4405,8 @@ export function CodeverApp() {
         </label>
 
         <button
-          className={`gateway-card gateway-card-button connection-state-${connectionStatus} ${
-            connectionStatus === "offline" || connectionStatus === "error"
+          className={`gateway-card gateway-card-button connection-state-${displayedConnectionStatus} ${
+            displayedConnectionStatus === "offline" || displayedConnectionStatus === "error"
               ? "offline"
               : ""
           }`}
@@ -4398,7 +4422,7 @@ export function CodeverApp() {
             </strong>
             <span className="gateway-status-copy">
               <i
-                className={`connection-dot connection-state-${connectionStatus}`}
+                className={`connection-dot connection-state-${displayedConnectionStatus}`}
               />{" "}
               {trustedGateway
                 ? connectionPresentation.title
@@ -4406,7 +4430,7 @@ export function CodeverApp() {
             </span>
             <span className="gateway-mobile-status" aria-hidden="true">
               <i
-                className={`connection-dot connection-state-${connectionStatus}`}
+                className={`connection-dot connection-state-${displayedConnectionStatus}`}
               />{" "}
               {trustedGateway ? connectionPresentation.title : "Connect"}
             </span>
@@ -4433,12 +4457,12 @@ export function CodeverApp() {
               <span className="session-copy">
                 <span className="session-title-line">
                   <strong>
-                    {connectionStatus === "connected"
+                    {gatewayAvailable
                       ? "Creating session…"
                       : "Session queued…"}
                   </strong>
                   <time>
-                    {connectionStatus === "connected" ? "now" : "waiting"}
+                    {gatewayAvailable ? "now" : "waiting"}
                   </time>
                 </span>
                 <span className="session-preview-line">
@@ -4535,7 +4559,7 @@ export function CodeverApp() {
                     {sessionInitials(session.title)}
                     {signal === "working" && (
                       <i
-                        className={`agent-active ${matrixConnected ? "" : "is-paused"}`}
+                        className={`agent-active ${gatewayConnected ? "" : "is-paused"}`}
                         aria-hidden="true"
                       />
                     )}
@@ -4739,13 +4763,13 @@ export function CodeverApp() {
             <h2>{conversationTitle}</h2>
             <span>
               <i
-                className={`connection-dot connection-state-${connectionStatus} ${
-                  connectionStatus === "offline" || connectionStatus === "error"
+                className={`connection-dot connection-state-${displayedConnectionStatus} ${
+                  displayedConnectionStatus === "offline" || displayedConnectionStatus === "error"
                     ? "offline-dot"
                     : ""
                 }`}
               />{" "}
-              {connectionStatus === "connected"
+              {gatewayAvailable
                 ? gatewayState
                   ? selectedArchived
                     ? `${activeWorkspace?.projectName || "Project"} · archived`
@@ -4815,6 +4839,7 @@ export function CodeverApp() {
                     className="session-menu-primary"
                     disabled={
                       selectedLifecycleBusy ||
+                      !gatewayAvailable ||
                       !gatewayState?.capabilities.canArchiveSession
                     }
                     onClick={() => void restoreSession(selected.id)}
@@ -4831,6 +4856,7 @@ export function CodeverApp() {
                     className="session-menu-primary"
                     disabled={
                       selectedLifecycleBusy ||
+                      !gatewayAvailable ||
                       !gatewayState?.capabilities.canArchiveSession
                     }
                     onClick={() => void archiveSession(selected.id)}
@@ -4849,6 +4875,7 @@ export function CodeverApp() {
                   className="session-menu-danger"
                   disabled={
                     selectedLifecycleBusy ||
+                    !gatewayAvailable ||
                     !gatewayState?.capabilities.canDeleteSession
                   }
                   onClick={() => {
@@ -4878,6 +4905,7 @@ export function CodeverApp() {
               type="button"
               disabled={
                 selectedLifecycleBusy ||
+                !gatewayAvailable ||
                 !gatewayState?.capabilities.canArchiveSession
               }
               onClick={() => void restoreSession(selected.id)}
@@ -5294,7 +5322,7 @@ export function CodeverApp() {
               placeholder={
                 selectedArchived
                   ? "Restore this session to continue"
-                  : matrixConnected
+                  : gatewayAvailable
                   ? `Message ${activeProvider}…`
                   : trustedGateway
                     ? "Connect your computer to send messages"
@@ -5543,7 +5571,7 @@ export function CodeverApp() {
       <MatrixSettings
         open={settingsOpen}
         config={matrixConfig}
-        status={connectionStatus}
+        status={displayedConnectionStatus}
         progressDetail={connectionPresentation.detail}
         repairRequired={matrixSessionRepairRequired}
         error={pairingError ?? connectionError}

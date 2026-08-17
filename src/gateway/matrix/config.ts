@@ -83,6 +83,8 @@ export interface MatrixGatewayConfig {
     replayLedgerPath: string
     applicationSecurity: MatrixGatewayApplicationSecurityConfig
     startupEventQueueLimit?: number
+    /** Refreshes signed Gateway Room State so clients can distinguish Matrix availability from Gateway availability. */
+    gatewayHeartbeatIntervalMs?: number
 }
 
 export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
@@ -174,6 +176,15 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
 
     if (config.startupEventQueueLimit !== undefined && config.startupEventQueueLimit < 1) {
         throw new Error('startupEventQueueLimit must be at least 1')
+    }
+    if (
+        config.gatewayHeartbeatIntervalMs !== undefined
+        && (
+            !Number.isFinite(config.gatewayHeartbeatIntervalMs)
+            || config.gatewayHeartbeatIntervalMs <= 0
+        )
+    ) {
+        throw new Error('gatewayHeartbeatIntervalMs must be positive')
     }
 }
 

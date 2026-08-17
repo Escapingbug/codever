@@ -14,6 +14,7 @@
     "build:rewrite": "pnpm --recursive --if-present build",
     "dev": "tsx src/index.ts",
     "dev:matrix-gateway": "tsx scripts/matrix-local-gateway.ts",
+    "activate:matrix-gateway:macos": "tsx scripts/macos-matrix-gateway-release.ts",
     "test": "vitest run && pnpm run test:protocol-integration",
     "test:rewrite": "pnpm --recursive --if-present test",
     "test:unit": "vitest run",

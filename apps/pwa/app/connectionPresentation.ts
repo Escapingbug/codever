@@ -46,6 +46,11 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Syncing conversations",
     detail: "Checking your latest Gateway state…",
   },
+  matrix_gateway_offline: {
+    title: "Computer offline",
+    detail:
+      "This device can reach Matrix, but your Codever Gateway has not checked in. Start Codever on the computer to continue.",
+  },
   matrix_sync_active: {
     title: "Connected",
     detail: "Messages and conversations are up to date.",

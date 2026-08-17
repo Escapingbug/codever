@@ -265,6 +265,10 @@ const config: MatrixGatewayConfig = {
         gatewayKeyPair: identity.serialized,
         envelopeReplayLedgerPath: join(dataDirectory, 'envelope-replay.json'),
     },
+    gatewayHeartbeatIntervalMs: positiveDurationFromEnvironment(
+        'CODEVER_MATRIX_GATEWAY_HEARTBEAT_INTERVAL_MS',
+        30_000,
+    ),
 }
 runner = new MatrixGatewayRunner(config, {
     client,

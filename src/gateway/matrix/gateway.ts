@@ -157,6 +157,7 @@ export class MatrixGatewayRunner {
     private readonly sessionStatePublishTasks = new Map<string, Promise<void>>()
     private startupFailure: Error | null = null
     private stopPromise: Promise<void> | null = null
+    private gatewayHeartbeatTimer: ReturnType<typeof setInterval> | null = null
 
     constructor(
         private readonly config: MatrixGatewayConfig,
@@ -505,6 +506,7 @@ export class MatrixGatewayRunner {
             await this.syncState().catch(error => {
                 this.log(`[matrix-gateway] initial Room State sync failed: ${formatError(error)}`)
             })
+            this.startGatewayHeartbeat()
             const queued = this.startupEvents
             this.startupEvents = []
             for (const event of queued) this.enqueue(event)
@@ -520,6 +522,7 @@ export class MatrixGatewayRunner {
         if (this.state === 'stopped') return
         if (this.state === 'stopping') return this.stopPromise ?? Promise.resolve()
         this.state = 'stopping'
+        this.stopGatewayHeartbeat()
         this.stopPromise = (async () => {
             await this.eventChain
             // Command execution can enqueue lifecycle and Room State work.
@@ -1780,6 +1783,7 @@ export class MatrixGatewayRunner {
     }
 
     private async cleanup(): Promise<void> {
+        this.stopGatewayHeartbeat()
         this.unsubscribe?.()
         this.unsubscribe = null
         this.startupEvents = []
@@ -1808,6 +1812,39 @@ export class MatrixGatewayRunner {
         this.sessionStateCommandSources.clear()
         this.sessionStatePublishTasks.clear()
         await this.client.stop().catch(error => this.log(`[matrix-gateway] client stop failed: ${formatError(error)}`))
+    }
+
+    private startGatewayHeartbeat(): void {
+        this.stopGatewayHeartbeat()
+        const intervalMs = this.config.gatewayHeartbeatIntervalMs ?? 30_000
+        this.gatewayHeartbeatTimer = setInterval(() => {
+            if (this.state !== 'running') return
+            const task = Promise.all([...this.rooms.values()].map(runtime =>
+                this.serializeRoomState(runtime, async () => {
+                    if (await this.secureContent.activeDeviceCountForRoom(runtime.config) === 0) return
+                    const snapshot = await this.gatewayStateSnapshot(runtime)
+                    await this.publishGatewayState(
+                        runtime,
+                        snapshot,
+                        runtime.stateVersion,
+                        await this.nativeRevision(runtime),
+                        this.now(),
+                    )
+                }),
+            )).then(() => undefined)
+                .catch(error => this.log(
+                    `[matrix-gateway] Gateway heartbeat failed: ${formatError(error)}`,
+                ))
+                .finally(() => this.executionTasks.delete(task))
+            this.executionTasks.add(task)
+        }, intervalMs)
+        this.gatewayHeartbeatTimer.unref?.()
+    }
+
+    private stopGatewayHeartbeat(): void {
+        if (this.gatewayHeartbeatTimer === null) return
+        clearInterval(this.gatewayHeartbeatTimer)
+        this.gatewayHeartbeatTimer = null
     }
 
     private now(): number {

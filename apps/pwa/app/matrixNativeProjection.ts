@@ -164,6 +164,7 @@ export class MatrixNativeProjection {
       revision_epoch: revision.revision_epoch,
       revision_epoch_generation: revision.revision_epoch_generation,
       active_device_count: gateway.active_device_count,
+      updated_at: gateway.updated_at,
       current_session_id: null,
       sessions: sessions.map((session) => ({
         id: session.id,

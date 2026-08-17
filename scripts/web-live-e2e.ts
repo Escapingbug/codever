@@ -117,7 +117,10 @@ try {
         ['build'],
         {
             cwd: join(repositoryRoot, 'apps', 'pwa'),
-            env: process.env,
+            env: {
+                ...process.env,
+                VITE_CODEVER_GATEWAY_HEARTBEAT_STALE_MS: '12000',
+            },
         },
         STARTUP_TIMEOUT_MS,
     )
@@ -213,8 +216,9 @@ try {
     // Submit while the browser still owns the durable command sequence but
     // before the persistent Gateway device has resumed its sync. Matrix stays
     // connected, so the UI accepts the command and the WAL must reconcile it.
-    const rotationCreateStartedAt = Date.now()
     await beginSessionCreate(firstPage, rotationProjectName, secondProjectDirectory)
+    await verifyGatewayOfflineDraft(firstPage, `gateway-offline draft ${runId}`)
+    const gatewayRecoveryStartedAt = Date.now()
     gatewayProcess = startGatewayProcess({
         fixture,
         fixturePath,
@@ -243,7 +247,7 @@ try {
         baselineBeforeRotationCreate,
         gatewayProcess,
         gatewayDataDirectory,
-        rotationCreateStartedAt,
+        gatewayRecoveryStartedAt,
     )
     const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
     assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
@@ -764,7 +768,7 @@ async function settleSessionCreateAcrossGatewayRotation(
     baseline: number,
     gateway: ManagedProcess,
     dataDirectory: string,
-    startedAt: number,
+    recoveryStartedAt: number,
 ): Promise<void> {
     const queuedNotice = page.locator('.session-panel').getByText(
         'Session creation is queued securely. Codever will resume this same command without creating a duplicate.',
@@ -782,7 +786,7 @@ async function settleSessionCreateAcrossGatewayRotation(
     if (outcome === 'created') {
         assert.equal(await activeSessionCount(page), baseline + 1)
         assert.ok(
-            Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
+            Date.now() - recoveryStartedAt <= CONVERGENCE_TIMEOUT_MS,
             `Session creation after Gateway rotation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
         )
         return
@@ -804,7 +808,7 @@ async function settleSessionCreateAcrossGatewayRotation(
         'The create command was queued without the expected Matrix device-rotation failure evidence',
     )
     assert.fail(
-        `Session creation entered the durable queue after Gateway Matrix device rotation and took ${Date.now() - startedAt} ms to converge`,
+        `Session creation entered the durable queue after Gateway Matrix device rotation and took ${Date.now() - recoveryStartedAt} ms after recovery began`,
     )
 }
 
@@ -1214,6 +1218,29 @@ async function waitForConnected(page: Page): Promise<void> {
 async function reloadAndWaitForConnected(page: Page): Promise<void> {
     await page.reload()
     await waitForConnected(page)
+}
+
+async function verifyGatewayOfflineDraft(page: Page, draft: string): Promise<void> {
+    const connectionButton = page.locator(
+        'button[aria-label^="Open connection settings,"]',
+    )
+    await waitFor(async () => {
+        const label = await connectionButton.getAttribute('aria-label')
+        return label?.endsWith('Computer offline') ?? false
+    }, {
+        description: 'Matrix-connected browser to detect the stopped Gateway',
+        timeoutMs: 25_000,
+        failFast: () => assertNoPageErrors(page),
+    })
+    const composer = page.locator('textarea[aria-label^="Message "]')
+    await composer.fill(draft)
+    assert.equal(await composer.inputValue(), draft, 'Gateway-offline draft was not retained')
+    assert.equal(
+        await page.getByRole('button', { name: 'Send message' }).isDisabled(),
+        true,
+        'The UI allowed a new command after the Gateway heartbeat expired',
+    )
+    await composer.fill('')
 }
 
 async function verifyBrowserOfflineHistory(
@@ -1646,6 +1673,7 @@ function startGatewayProcess(input: {
                 CODEVER_GATEWAY_ADMIN_SOCKET: input.gatewayAdminSocket,
                 CODEVER_MATRIX_E2E_PROVIDER: '1',
                 CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: String(input.providerDelayMs),
+                CODEVER_MATRIX_GATEWAY_HEARTBEAT_INTERVAL_MS: '5000',
                 ...(input.startupPairingOperations
                     ? {
                         CODEVER_MATRIX_E2E_STARTUP_PAIRING_OPERATIONS:

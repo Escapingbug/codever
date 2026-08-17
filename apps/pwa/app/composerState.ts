@@ -8,6 +8,7 @@ export type ComposerConnectionStatus =
 
 export interface ComposerStateInput {
   connectionStatus: ComposerConnectionStatus;
+  gatewayAvailable: boolean;
   hasGatewayState: boolean;
   hasSelectedSession: boolean;
   selectedArchived: boolean;
@@ -55,6 +56,11 @@ export function deriveComposerState(input: ComposerStateInput): ComposerState {
   }
   if (!input.hasGatewayState) {
     return blocked("Syncing your conversations…");
+  }
+  if (!input.gatewayAvailable) {
+    return blocked(
+      "Your computer's Codever Gateway is offline. Your draft will be kept.",
+    );
   }
   if (!input.hasSelectedSession) {
     return blocked("Create or select a session before sending.");

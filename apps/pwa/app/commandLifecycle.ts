@@ -22,7 +22,7 @@ export class CommandAcknowledgementTimeoutError extends Error {
 
   constructor(commandId: string, sequence: number) {
     super(
-      "Your computer did not confirm this command. It remains queued for a safe retry.",
+      "Your computer did not acknowledge this command. It is saved for reconciliation; do not submit it again.",
     );
     this.name = "CommandAcknowledgementTimeoutError";
     this.commandId = commandId;

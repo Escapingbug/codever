@@ -196,6 +196,7 @@ class MatrixNativeProjection {
             put("revision_epoch_generation", revision.generation)
             put("state_version", currentGateway.number("state_version")!!)
             put("active_device_count", currentGateway.number("active_device_count")!!)
+            put("updated_at", currentGateway.number("updated_at")!!)
             put("command_sequences", currentGateway.getValue("command_sequences"))
             put("current_session_id", kotlinx.serialization.json.JsonNull)
             put("sessions", JsonArray(sessions))
