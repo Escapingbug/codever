@@ -28,6 +28,7 @@ export interface MacosGatewayReleaseDependencies {
     restart?: (reloadLaunchAgent: boolean) => Promise<void>
     healthCheck?: () => Promise<void>
     sleep?: (milliseconds: number) => Promise<void>
+    launchctl?: (arguments_: readonly string[]) => Promise<void>
 }
 
 /**
@@ -55,8 +56,16 @@ export async function activateMacosGatewayRelease(
         [previousTarget, releaseDirectory].filter((value): value is string => Boolean(value)),
     )
     const reloadLaunchAgent = stablePlist !== originalPlist
+    const sleep = dependencies.sleep ?? (milliseconds =>
+        new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds)))
     const restart = dependencies.restart ?? (reload =>
-        restartLaunchAgent(input.serviceLabel, launchAgentPath, reload))
+        restartLaunchAgent(
+            input.serviceLabel,
+            launchAgentPath,
+            reload,
+            dependencies.launchctl ?? runLaunchctl,
+            sleep,
+        ))
     const healthCheck = dependencies.healthCheck ?? (() =>
         new GatewayAdminClient({
             socketPath: input.adminSocketPath,
@@ -66,9 +75,6 @@ export async function activateMacosGatewayRelease(
                 throw new Error(`Gateway reported ${status.state}`)
             }
         }))
-    const sleep = dependencies.sleep ?? (milliseconds =>
-        new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds)))
-
     if (reloadLaunchAgent) await atomicWrite(launchAgentPath, stablePlist)
     await replaceSymlink(currentLink, releaseDirectory)
     try {
@@ -159,20 +165,41 @@ async function restartLaunchAgent(
     label: string,
     plistPath: string,
     reload: boolean,
+    launchctl: (arguments_: readonly string[]) => Promise<void>,
+    sleep: (milliseconds: number) => Promise<void>,
 ): Promise<void> {
     const userDomain = `gui/${process.getuid?.() ?? 0}`
     const service = `${userDomain}/${label}`
     if (reload) {
-        await runLaunchctl(['bootout', service]).catch(() => undefined)
-        await runLaunchctl(['bootstrap', userDomain, plistPath])
+        await launchctl(['bootout', service]).catch(() => undefined)
+        await bootstrapLaunchAgent(launchctl, userDomain, plistPath, sleep)
     }
     try {
-        await runLaunchctl(['kickstart', '-k', service])
+        await launchctl(['kickstart', '-k', service])
     } catch (error) {
         if (reload) throw error
-        await runLaunchctl(['bootstrap', userDomain, plistPath])
-        await runLaunchctl(['kickstart', '-k', service])
+        await bootstrapLaunchAgent(launchctl, userDomain, plistPath, sleep)
+        await launchctl(['kickstart', '-k', service])
     }
+}
+
+async function bootstrapLaunchAgent(
+    launchctl: (arguments_: readonly string[]) => Promise<void>,
+    userDomain: string,
+    plistPath: string,
+    sleep: (milliseconds: number) => Promise<void>,
+): Promise<void> {
+    let lastError: unknown = new Error('launchctl bootstrap did not run')
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+            await launchctl(['bootstrap', userDomain, plistPath])
+            return
+        } catch (error) {
+            lastError = error
+        }
+        if (attempt < 4) await sleep(250 * (attempt + 1))
+    }
+    throw lastError
 }
 
 function runLaunchctl(arguments_: readonly string[]): Promise<void> {

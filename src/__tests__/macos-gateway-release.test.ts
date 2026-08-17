@@ -37,6 +37,49 @@ describe('macOS Matrix Gateway release activation', () => {
         }
     })
 
+    it('retries a transient bootstrap failure after unloading the old service', async () => {
+        const root = await releaseFixture()
+        try {
+            const oldRelease = join(root, 'releases', 'old')
+            const nextRelease = join(root, 'releases', 'next')
+            const plistPath = join(root, 'gateway.plist')
+            await writeFile(
+                plistPath,
+                `<string>${join(oldRelease, 'runtime', 'node')}</string>\n<string>${join(oldRelease, 'ops', 'matrix-local-gateway.js')}</string>`,
+            )
+            let bootstrapAttempts = 0
+            const launchctl = vi.fn(async (arguments_: readonly string[]) => {
+                if (arguments_[0] === 'bootstrap' && bootstrapAttempts++ === 0) {
+                    throw new Error('Bootstrap failed: 5: Input/output error')
+                }
+            })
+            const sleep = vi.fn(async () => undefined)
+
+            await activateMacosGatewayRelease({
+                releaseDirectory: nextRelease,
+                installRoot: root,
+                launchAgentPath: plistPath,
+                serviceLabel: 'com.codever.test-gateway',
+                adminSocketPath: join(root, 'admin.sock'),
+            }, {
+                launchctl,
+                sleep,
+                healthCheck: async () => undefined,
+            })
+
+            expect(bootstrapAttempts).toBe(2)
+            expect(sleep).toHaveBeenCalledWith(250)
+            expect(launchctl).toHaveBeenLastCalledWith([
+                'kickstart',
+                '-k',
+                `gui/${process.getuid?.() ?? 0}/com.codever.test-gateway`,
+            ])
+            expect(await readlink(join(root, 'current'))).toBe(nextRelease)
+        } finally {
+            await rm(root, { recursive: true, force: true })
+        }
+    })
+
     it('atomically switches the stable release and rolls back when health verification fails', async () => {
         const root = await releaseFixture()
         try {
