@@ -65,6 +65,10 @@ describe('Matrix native conversation protocol', () => {
       revision_epoch_generation: 1,
       state_version: 3,
       active_device_count: 2,
+      command_sequences: [
+        { device_id: 'device-1', sequence_epoch: 'certificate-1', sequence: 4 },
+        { device_id: 'device-2', sequence_epoch: 'certificate-2', sequence: 2 },
+      ],
       workspace: {
         project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
         provider: 'codex',
@@ -95,6 +99,7 @@ describe('Matrix native conversation protocol', () => {
       revision_epoch_generation: 1,
       state_version: 3,
       active_device_count: 1,
+      command_sequences: [],
       workspace: {
         project: { id: 'project-1', name: 'codever', cwd: '/srv/codever' },
         provider: 'codex',

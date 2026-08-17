@@ -324,6 +324,18 @@ export class MatrixGatewayRunner {
         revision: NativeRevision,
         updatedAt: number,
     ) {
+        const activeDevices = await this.activeTrustedDevicesForRoom(runtime)
+        const commandSequences = await Promise.all(activeDevices.map(async device => ({
+            device_id: device.deviceId,
+            sequence_epoch: device.sequenceEpoch,
+            sequence: await this.replayStore.getCommandSequence(
+                this.config.gatewayId,
+                device.deviceId,
+                runtime.config.conversationId,
+                runtime.revisionEpoch,
+                device.sequenceEpoch,
+            ),
+        })))
         return {
             version: 2 as const,
             kind: 'gateway_state' as const,
@@ -331,8 +343,8 @@ export class MatrixGatewayRunner {
             conversation_id: runtime.config.conversationId,
             ...revision,
             state_version: stateVersion,
-            active_device_count:
-                await this.secureContent.activeDeviceCountForRoom(runtime.config),
+            active_device_count: activeDevices.length,
+            command_sequences: commandSequences,
             workspace: {
                 project: {
                     id: runtime.workspace.projectId,
@@ -441,6 +453,21 @@ export class MatrixGatewayRunner {
                 sessionExtensions: this.sessionExtensionRegistry.descriptors(),
             },
         }
+    }
+
+    private async activeTrustedDevicesForRoom(
+        runtime: RoomRuntime,
+    ): Promise<readonly import('./config').MatrixGatewayTrustedDevice[]> {
+        const devices = this.dependencies.listTrustedDevices
+            ? await this.dependencies.listTrustedDevices()
+            : this.config.trustedDevices
+        const now = this.now()
+        return devices
+            .filter(device =>
+                device.allowedRoomIds.includes(runtime.config.roomId)
+                && device.certificateExpiresAt > now
+            )
+            .sort((left, right) => left.deviceId.localeCompare(right.deviceId))
     }
 
     async start(): Promise<void> {

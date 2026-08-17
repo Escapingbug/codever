@@ -359,6 +359,22 @@ export const matrixGatewayStateSchema = z
     revision_epoch_generation: z.number().int().positive(),
     state_version: z.number().int().nonnegative(),
     active_device_count: z.number().int().positive(),
+    command_sequences: z
+      .array(z.object({
+        device_id: opaqueId,
+        sequence_epoch: opaqueId,
+        sequence: z.number().int().nonnegative(),
+      }).strict())
+      .max(256)
+      .superRefine((values, context) => {
+        const identities = values.map(value => `${value.device_id}\u0000${value.sequence_epoch}`)
+        if (new Set(identities).size !== identities.length) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Gateway command sequence identities must be unique',
+          })
+        }
+      }),
     workspace: z
       .object({
         project: projectSummarySchema,

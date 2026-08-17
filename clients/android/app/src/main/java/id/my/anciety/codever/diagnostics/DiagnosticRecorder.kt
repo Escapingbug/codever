@@ -31,6 +31,8 @@ internal object DiagnosticLine {
         "received",
         "request",
         "running",
+        "quarantined",
+        "schema",
         "source",
         "stage",
         "transport_ready",

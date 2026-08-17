@@ -1,5 +1,6 @@
 package id.my.anciety.codever.service
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -354,8 +355,20 @@ class CodeverConnectionService : Service() {
             val enabled = ServicePreferenceStore(context).restoreEnabled
             val notificationsAvailable = NotificationManagerCompat.from(context).areNotificationsEnabled()
             if (!ServiceStartPolicy.shouldRestoreAfterBoot(enabled, notificationsAvailable)) return false
-            start(context)
-            return true
+            return try {
+                start(context)
+                true
+            } catch (_: ForegroundServiceStartNotAllowedException) {
+                // Android can redeliver BOOT_COMPLETED after a package is
+                // explicitly un-stopped, outside the boot-time FGS allowance.
+                // Keep the durable restore preference and let the next visible
+                // Activity start the same service from a user-allowed context.
+                NativeDiagnosticLog.get(context).record(
+                    "service.restore_deferred",
+                    mapOf("reason" to "foreground_start_disallowed"),
+                )
+                false
+            }
         }
 
         private fun start(context: Context) {

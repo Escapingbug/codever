@@ -83,6 +83,18 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `outbox migration diagnostics retain only schema and aggregate quarantine count`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z command.outbox.migrated quarantined=1 schema=2",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "command.outbox.migrated",
+                mapOf("schema" to "2", "quarantined" to "1"),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),

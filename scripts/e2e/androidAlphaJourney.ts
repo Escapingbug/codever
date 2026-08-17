@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile)
 
 const PACKAGE_NAME = 'id.my.anciety.codever.e2e'
 const MAIN_ACTIVITY = `${PACKAGE_NAME}/id.my.anciety.codever.web.MainActivity`
+const LEGACY_OUTBOX_SEEDER = `${PACKAGE_NAME}/id.my.anciety.codever.e2e.LegacyOutboxSeederReceiver`
 const CONNECT_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
@@ -41,6 +42,7 @@ type MatrixSyncGate = {
     readonly port: number
     intercepted(): number
     redeliveredCommandTransactions(): number
+    observedCommandIds(): string[]
     observedPutPaths(): string[]
     hold(): number
     waitForInterception(after?: number, description?: string): Promise<void>
@@ -541,6 +543,7 @@ export async function runAndroidAlphaJourney(
     const browserRevisionAdvancePrompt = `Browser revision advance ${options.runId}`
     const stalePromptToLinearize = `Android stale prompt to linearize ${options.runId}`
     const privacyProjectName = `Codever Alpha Privacy ${options.runId}`
+    const migrationProjectName = `Codever Alpha Upgrade ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
     const apkPath = join(
         options.repositoryRoot,
@@ -558,9 +561,10 @@ export async function runAndroidAlphaJourney(
     let sessionCreated = false
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
+    let migrationSessionCreated = false
 
     try {
-        process.stdout.write('  [A1/10] Building and installing a fresh isolated Android E2E package…\n')
+        process.stdout.write('  [A1/11] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
         await adbMaybe(serial, 'uninstall', PACKAGE_NAME)
         await adb(serial, 'install', '-r', '-t', apkPath)
@@ -570,7 +574,7 @@ export async function runAndroidAlphaJourney(
         syncGate = await createMatrixSyncGate(options.matrixPort)
         await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
 
-        process.stdout.write('  [A2/10] Creating a real one-time invitation and pairing the fresh APK…\n')
+        process.stdout.write('  [A2/11] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
             options.browserPage,
             options.testerPassword,
@@ -590,7 +594,7 @@ export async function runAndroidAlphaJourney(
             await android.signInForPairing(options.testerUserId, options.testerPassword)
         }
         await android.clickButtonPrefix('Connect to ')
-        process.stdout.write('  [A2a/10] Holding the first native sync beyond its watchdog window…\n')
+        process.stdout.write('  [A2a/11] Holding the first native sync beyond its watchdog window…\n')
         await syncGate.waitForInterception()
         await waitFor(
             async () => await diagnosticCount(serial, 'matrix.driver.sync_service_state stage=RUNNING') > 0,
@@ -617,7 +621,7 @@ export async function runAndroidAlphaJourney(
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )
-        process.stdout.write('  [A2b/10] Killing Android after native confirmation and resuming the durable pairing transaction…\n')
+        process.stdout.write('  [A2b/11] Killing Android after native confirmation and resuming the durable pairing transaction…\n')
         const requestPersistenceBaseline = await diagnosticCount(
             serial,
             'pairing.transaction.request_persisted',
@@ -670,7 +674,7 @@ export async function runAndroidAlphaJourney(
         await closeBrowserConnectionSettings(options.browserPage)
         await assertForegroundNotification(serial)
 
-        process.stdout.write('  [A3/10] Creating on Android and converging the session into the browser…\n')
+        process.stdout.write('  [A3/11] Creating on Android and converging the session into the browser…\n')
         const creationStarted = Date.now()
         await android.createSession(projectName)
         await android.waitFor(
@@ -688,7 +692,7 @@ export async function runAndroidAlphaJourney(
         await waitForBrowserProject(options.browserPage, projectName)
         await openBrowserProject(options.browserPage, projectName)
 
-        process.stdout.write('  [A4/10] Completing an Android task in the background and opening its notification…\n')
+        process.stdout.write('  [A4/11] Completing an Android task in the background and opening its notification…\n')
         const postedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await android.sendPrompt(backgroundPrompt)
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
@@ -728,7 +732,7 @@ export async function runAndroidAlphaJourney(
             timeoutMs: 5_000,
         })
 
-        process.stdout.write('  [A5/10] Verifying foreground suppression and browser-to-APK history sync…\n')
+        process.stdout.write('  [A5/11] Verifying foreground suppression and browser-to-APK history sync…\n')
         const foregroundPostedBefore = await diagnosticCount(serial, 'notification.task_posted')
         await sendBrowserPrompt(options.browserPage, browserPrompt)
         await waitForBrowserText(options.browserPage, browserPrompt)
@@ -792,7 +796,7 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
-        process.stdout.write('  [AP/10] Enforcing privacy sanitize/review/restore through the installed APK…\n')
+        process.stdout.write('  [AP/11] Enforcing privacy sanitize/review/restore through the installed APK…\n')
         await android.createSession(privacyProjectName, { privacyContextId })
         await android.waitFor(
             'immediate native privacy session creation feedback',
@@ -868,7 +872,7 @@ export async function runAndroidAlphaJourney(
         await openBrowserProject(options.browserPage, projectName)
         await android.openProject(projectName)
 
-        process.stdout.write('  [A6/10] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
+        process.stdout.write('  [A6/11] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
@@ -888,7 +892,7 @@ export async function runAndroidAlphaJourney(
             'The recovered Android prompt reached the Agent more than once',
         )
 
-        process.stdout.write('  [A7/10] Withholding a committed delete result through automatic Android recovery…\n')
+        process.stdout.write('  [A7/11] Withholding a committed delete result through automatic Android recovery…\n')
         const deleteReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const deleteGatewayLogStart = options.gatewayOutput().length
         const redeliveredTransactionStart = syncGate.redeliveredCommandTransactions()
@@ -973,7 +977,7 @@ export async function runAndroidAlphaJourney(
         )
         sessionCreated = false
 
-        process.stdout.write('  [A8/10] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
+        process.stdout.write('  [A8/11] Losing create acknowledgement after Gateway commit, then restarting Android…\n')
         const createReplayStart = await replayLedgerLineCount(options.gatewayReplayLedgerPath)
         const createSyncBaseline = syncGate.hold()
         await android.createSession(projectName)
@@ -1015,7 +1019,7 @@ export async function runAndroidAlphaJourney(
         assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
         assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
 
-        process.stdout.write('  [A9/10] Linearizing a stale cross-device Android prompt without user review…\n')
+        process.stdout.write('  [A9/11] Linearizing a stale cross-device Android prompt without user review…\n')
         const staleSyncBaseline = syncGate.hold()
         await sendBrowserPrompt(options.browserPage, browserRevisionAdvancePrompt)
         await waitForBrowserText(options.browserPage, browserRevisionAdvancePrompt)
@@ -1045,7 +1049,7 @@ export async function runAndroidAlphaJourney(
             'The linearly accepted Android prompt did not reach the Agent exactly once',
         )
 
-        process.stdout.write('  [A10/10] Alternating archive/restore/delete across browser and APK, then restarting…\n')
+        process.stdout.write('  [A10/11] Alternating archive/restore/delete across browser and APK, then restarting…\n')
         await archiveBrowserSession(options.browserPage)
         await android.waitFor('browser archive on Android', state => state.archivedBanner)
         await android.restoreSelected()
@@ -1076,6 +1080,92 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
+        process.stdout.write('  [A11/11] Cover-installing over an encrypted legacy submitted command…\n')
+        const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
+        const migrationCountBefore = await diagnosticCount(serial, migrationDiagnostic)
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        const quarantinedCommandId = await seedLegacySubmittedCommand(serial, options.runId)
+
+        // `-r` is the important boundary here: identity, encrypted storage,
+        // Matrix login, and app data survive exactly as they do for a real APK
+        // update. A fresh uninstall/install cannot exercise this regression.
+        await adb(serial, 'install', '-r', '-t', apkPath)
+        await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
+        await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
+        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'connected Android after legacy outbox cover-install migration',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+        await waitFor(
+            async () => await diagnosticCount(serial, migrationDiagnostic) === migrationCountBefore + 1,
+            {
+                description: 'one atomic schema-2 command outbox migration',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        assert.ok(
+            !syncGate.observedCommandIds().includes(quarantinedCommandId),
+            'The ambiguous legacy submitted command was retransmitted after upgrade.',
+        )
+
+        // A migration is only useful when it frees the single-command lane.
+        // Exercise a new command all the way through Gateway convergence.
+        await android.createSession(migrationProjectName)
+        await android.waitFor(
+            'new Android session after legacy outbox migration',
+            state => state.projectNames.includes(migrationProjectName)
+                && state.selectedProject === migrationProjectName,
+            CONNECT_TIMEOUT_MS,
+        )
+        migrationSessionCreated = true
+        await waitForBrowserProject(options.browserPage, migrationProjectName)
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, migrationProjectName)
+        await android.waitFor(
+            'Android deletion after legacy outbox migration',
+            state => !state.projectNames.includes(migrationProjectName)
+                && !state.archivedProjects.includes(migrationProjectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        migrationSessionCreated = false
+
+        const migrationCountAfter = await diagnosticCount(serial, migrationDiagnostic)
+        assert.equal(migrationCountAfter, migrationCountBefore + 1)
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'second Android restart after one-time outbox migration',
+            state => state.connection.endsWith('Connected')
+                && !state.projectNames.includes(migrationProjectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(
+            await diagnosticCount(serial, migrationDiagnostic),
+            migrationCountAfter,
+            'The legacy outbox migrated more than once.',
+        )
+        assert.ok(
+            !syncGate.observedCommandIds().includes(quarantinedCommandId),
+            'The quarantined command was transmitted on a later restart.',
+        )
+
         const versionName = await installedVersionName(serial)
         await mkdir(options.artifactDirectory, { recursive: true })
         await writeFile(join(options.artifactDirectory, 'alpha-result.json'), JSON.stringify({
@@ -1103,6 +1193,10 @@ export async function runAndroidAlphaJourney(
                 'cross-device-stale-prompt-linearized-exactly-once',
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
+                'legacy-encrypted-outbox-cover-install-migration',
+                'ambiguous-legacy-command-quarantine-no-replay',
+                'post-migration-command-lane-recovery',
+                'one-time-outbox-migration-across-restart',
             ],
         }, null, 2), 'utf8')
         process.stdout.write(`  Alpha APK ${versionName} passed fresh pairing, cross-device, background, notification, and recovery acceptance.\n`)
@@ -1119,6 +1213,9 @@ export async function runAndroidAlphaJourney(
         }
         if (privacySessionCreated) {
             await cleanupBrowserProject(options.browserPage, privacyProjectName).catch(() => undefined)
+        }
+        if (migrationSessionCreated) {
+            await cleanupBrowserProject(options.browserPage, migrationProjectName).catch(() => undefined)
         }
         android?.close()
         if (forwardedDevtoolsPort) {
@@ -1197,6 +1294,7 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
         port: address.port,
         intercepted: () => intercepted,
         redeliveredCommandTransactions: () => repeatedCommandTransactions,
+        observedCommandIds: () => [...seenCommandIds],
         observedPutPaths: () => observedPutPaths.slice(-20),
         hold: () => {
             if (!cycle.held) cycle = heldSyncCycle()
@@ -1616,6 +1714,31 @@ async function installedVersionName(serial: string): Promise<string> {
     const match = output.match(/versionName=([^\s]+)/u)
     assert.ok(match?.[1], 'The installed Alpha APK version is unavailable')
     return match[1]
+}
+
+async function seedLegacySubmittedCommand(serial: string, runId: string): Promise<string> {
+    const output = await adb(
+        serial,
+        'shell',
+        'am',
+        'broadcast',
+        '-f',
+        '0x20', // Intent.FLAG_INCLUDE_STOPPED_PACKAGES
+        '-n',
+        LEGACY_OUTBOX_SEEDER,
+        '--es',
+        'run_id',
+        runId,
+    )
+    const result = output.match(/Broadcast completed: result=(-?\d+), data="([^"]+)"/u)
+    assert.equal(
+        result?.[1],
+        '-1',
+        `The E2E APK could not seed its encrypted legacy outbox: ${output}`,
+    )
+    const commandId = result?.[2]
+    assert.ok(commandId, `The E2E APK did not return its legacy command id: ${output}`)
+    return commandId
 }
 
 async function replayLedgerLineCount(path: string): Promise<number> {

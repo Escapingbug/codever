@@ -129,6 +129,11 @@ class MatrixNativeProjectionTest {
         put("gateway_id", "gateway-1"); put("conversation_id", "conversation-1")
         putRevision(version); put("state_version", version)
         put("active_device_count", 1)
+        put("command_sequences", JsonArray(listOf(buildJsonObject {
+            put("device_id", "device-1")
+            put("sequence_epoch", "certificate-1")
+            put("sequence", 0)
+        })))
         put("workspace", buildJsonObject {
             put("project", buildJsonObject {
                 put("id", "project-1"); put("name", "codever"); put("cwd", "/repo")

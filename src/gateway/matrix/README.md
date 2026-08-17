@@ -89,6 +89,14 @@ ledger, and re-deliver the original result without executing the command a
 second time. The durable fingerprint includes the complete authenticated
 command; a changed retry is rejected instead of entering a migration path.
 
+Authenticated Gateway Room State also carries the durable accepted command
+sequence for every active application device and certificate epoch. A client
+reconciles that cursor before enabling command submission. This lets an APK
+upgrade quarantine an old locally ambiguous command without guessing whether
+the Gateway accepted it: the next command fills an unaccepted sequence or
+continues after an accepted one, while the quarantined command is never sent
+again.
+
 ## Crypto initialization
 
 Production configuration must set `crypto.useIndexedDB` to `true` and provide a

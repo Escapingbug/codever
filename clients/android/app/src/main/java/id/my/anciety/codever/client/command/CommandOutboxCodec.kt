@@ -16,8 +16,14 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
+internal data class DecodedCommandOutbox(
+    val snapshot: CommandOutboxSnapshot,
+    val migration: CommandOutboxMigration? = null,
+)
+
 internal object CommandOutboxCodec {
-    private const val SCHEMA_VERSION = 2
+    private const val LEGACY_SCHEMA_VERSION = 1
+    private const val SCHEMA_VERSION = 3
     private const val MAX_PLAINTEXT_BYTES = 3 * 1024 * 1024
     private const val MAX_COMMANDS = 128
     private const val MAX_TOMBSTONES = 4_096
@@ -36,7 +42,9 @@ internal object CommandOutboxCodec {
         return encoded
     }
 
-    fun decode(bytes: ByteArray): CommandOutboxSnapshot {
+    fun decode(bytes: ByteArray): CommandOutboxSnapshot = decodeForStorage(bytes).snapshot
+
+    internal fun decodeForStorage(bytes: ByteArray): DecodedCommandOutbox {
         require(bytes.size <= MAX_PLAINTEXT_BYTES) { "Command outbox is too large." }
         val root = json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
         root.requireExactKeys(
@@ -49,23 +57,25 @@ internal object CommandOutboxCodec {
             ),
         )
         val schemaVersion = root.requiredLong("schemaVersion")
-        require(schemaVersion == SCHEMA_VERSION.toLong()) {
+        require(schemaVersion in LEGACY_SCHEMA_VERSION.toLong()..SCHEMA_VERSION.toLong()) {
             "Command outbox schema is unsupported."
         }
         val commands = root.requiredArray("commands").also {
             require(it.size <= MAX_COMMANDS) { "Command outbox contains too many commands." }
-        }.map { decodeCommand(it.jsonObject) }
+        }.map { decodeCommand(it.jsonObject, schemaVersion.toInt()) }
         val released = root.requiredArray("released").also {
             require(it.size <= MAX_TOMBSTONES) { "Command outbox contains too many tombstones." }
-        }.map { decodeTombstone(it.jsonObject) }
+        }.map { decodeTombstone(it.jsonObject, schemaVersion.toInt()) }
         val snapshot = CommandOutboxSnapshot(
             lastAcknowledgedSequence = root.requiredLong("lastAcknowledgedSequence"),
             lastRevision = root.requiredLong("lastRevision"),
             commands = commands,
             released = released,
         )
-        validateSnapshot(snapshot)
-        return snapshot
+        validateSnapshot(snapshot, requireSubmittedAuthentication = schemaVersion == SCHEMA_VERSION.toLong())
+        val decoded = migrateLegacySnapshot(snapshot, schemaVersion.toInt())
+        validateSnapshot(decoded.snapshot, requireSubmittedAuthentication = true)
+        return decoded
     }
 
     private fun encodeCommand(value: PersistedCommand): JsonObject = buildJsonObject {
@@ -91,7 +101,7 @@ internal object CommandOutboxCodec {
         put("payload", value.payload)
     }
 
-    private fun decodeCommand(value: JsonObject): PersistedCommand {
+    private fun decodeCommand(value: JsonObject, schemaVersion: Int): PersistedCommand {
         val keys = setOf(
             "operationId",
             "commandId",
@@ -104,14 +114,16 @@ internal object CommandOutboxCodec {
             "sessionId",
             "sequence",
             "baseRevision",
-            "authenticationIssuedAt",
-            "authenticationNonce",
             "revision",
             "cancelRequested",
             "completion",
             "expectedRevision",
             "payload",
-        )
+        ) + if (schemaVersion >= 2) {
+            setOf("authenticationIssuedAt", "authenticationNonce")
+        } else {
+            emptySet()
+        }
         value.requireExactKeys(
             keys,
         )
@@ -127,8 +139,16 @@ internal object CommandOutboxCodec {
             sessionId = value.optionalString("sessionId"),
             sequence = value.requiredLong("sequence"),
             baseRevision = value.requiredLong("baseRevision"),
-            authenticationIssuedAt = value.optionalLong("authenticationIssuedAt"),
-            authenticationNonce = value.optionalString("authenticationNonce"),
+            authenticationIssuedAt = if (schemaVersion >= 2) {
+                value.optionalLong("authenticationIssuedAt")
+            } else {
+                null
+            },
+            authenticationNonce = if (schemaVersion >= 2) {
+                value.optionalString("authenticationNonce")
+            } else {
+                null
+            },
             revision = value.optionalLong("revision"),
             cancelRequested = value.requiredBoolean("cancelRequested"),
             completion = value.optionalObject("completion")?.let(::decodeCompletion),
@@ -180,25 +200,37 @@ internal object CommandOutboxCodec {
     private fun encodeTombstone(value: ReleasedCommandTombstone): JsonObject = buildJsonObject {
         put("operationId", value.operationId)
         put("commandId", value.commandId)
+        put("retiredCommandIds", buildJsonArray {
+            value.retiredCommandIds.forEach { add(JsonPrimitive(it)) }
+        })
         put("idempotencyKey", value.idempotencyKey)
         put("requestFingerprint", value.requestFingerprint)
         put("releasedAt", value.releasedAt)
     }
 
-    private fun decodeTombstone(value: JsonObject): ReleasedCommandTombstone {
+    private fun decodeTombstone(value: JsonObject, schemaVersion: Int): ReleasedCommandTombstone {
         value.requireExactKeys(
-            setOf("operationId", "commandId", "idempotencyKey", "requestFingerprint", "releasedAt"),
+            setOf("operationId", "commandId", "idempotencyKey", "requestFingerprint", "releasedAt") +
+                if (schemaVersion >= SCHEMA_VERSION) setOf("retiredCommandIds") else emptySet(),
         )
         return ReleasedCommandTombstone(
             operationId = value.requiredString("operationId"),
             commandId = value.requiredString("commandId"),
+            retiredCommandIds = if (schemaVersion >= SCHEMA_VERSION) {
+                value.requiredArray("retiredCommandIds").map { it.requiredStringValue() }
+            } else {
+                emptyList()
+            },
             idempotencyKey = value.requiredString("idempotencyKey"),
             requestFingerprint = value.requiredString("requestFingerprint"),
             releasedAt = value.requiredLong("releasedAt"),
         )
     }
 
-    private fun validateSnapshot(value: CommandOutboxSnapshot) {
+    private fun validateSnapshot(
+        value: CommandOutboxSnapshot,
+        requireSubmittedAuthentication: Boolean = true,
+    ) {
         requireNonnegativeJsonInteger(value.lastAcknowledgedSequence, "Last acknowledged sequence")
         requireNonnegativeJsonInteger(value.lastRevision, "Last revision")
         require(value.commands.size <= MAX_COMMANDS && value.released.size <= MAX_TOMBSTONES) {
@@ -219,6 +251,7 @@ internal object CommandOutboxCodec {
             value.released.forEach {
                 add(it.operationId)
                 add(it.commandId)
+                addAll(it.retiredCommandIds)
             }
         }
         require(durableIds.distinct().size == durableIds.size) {
@@ -230,10 +263,15 @@ internal object CommandOutboxCodec {
         require(value.commands.none { command -> value.released.any { it.idempotencyKey == command.idempotencyKey } }) {
             "Active and released commands overlap."
         }
-        value.commands.forEach(::validateCommand)
+        value.commands.forEach { validateCommand(it, requireSubmittedAuthentication) }
         value.released.forEach {
             requireOpaqueId(it.operationId, "operationId")
             requireOpaqueId(it.commandId, "commandId")
+            it.retiredCommandIds.forEach { retiredId -> requireOpaqueId(retiredId, "retiredCommandId") }
+            require(
+                it.commandId !in it.retiredCommandIds &&
+                    it.retiredCommandIds.distinct().size == it.retiredCommandIds.size
+            ) { "Released command retired ids are invalid." }
             requireUuid(it.idempotencyKey)
             requireFingerprint(it.requestFingerprint)
             requireNonnegativeJsonInteger(it.releasedAt, "Released command timestamp")
@@ -244,7 +282,7 @@ internal object CommandOutboxCodec {
         }
     }
 
-    private fun validateCommand(value: PersistedCommand) {
+    private fun validateCommand(value: PersistedCommand, requireSubmittedAuthentication: Boolean) {
         requireOpaqueId(value.operationId, "operationId")
         requireOpaqueId(value.commandId, "commandId")
         value.retiredCommandIds.forEach { requireOpaqueId(it, "retiredCommandId") }
@@ -269,9 +307,11 @@ internal object CommandOutboxCodec {
         require((value.authenticationIssuedAt == null) == (value.authenticationNonce == null)) {
             "Command authentication metadata is incomplete."
         }
-        require(
-            value.state == CommandState.QUEUED || value.authenticationIssuedAt != null
-        ) { "A submitted command must retain its authentication metadata." }
+        if (requireSubmittedAuthentication) {
+            require(
+                value.state == CommandState.QUEUED || value.authenticationIssuedAt != null
+            ) { "A submitted command must retain its authentication metadata." }
+        }
         value.revision?.let { requireNonnegativeJsonInteger(it, "Command revision") }
         value.expectedRevision?.let { requireNonnegativeJsonInteger(it, "Expected command revision") }
         require(value.payload.toString().toByteArray(Charsets.UTF_8).size <= MAX_PAYLOAD_BYTES) {
@@ -285,6 +325,40 @@ internal object CommandOutboxCodec {
         require((value.state == CommandState.NEEDS_REVIEW) == (value.expectedRevision != null)) {
             "Revision conflict metadata is inconsistent."
         }
+    }
+
+    private fun migrateLegacySnapshot(
+        value: CommandOutboxSnapshot,
+        schemaVersion: Int,
+    ): DecodedCommandOutbox {
+        if (schemaVersion == SCHEMA_VERSION) return DecodedCommandOutbox(value)
+        val quarantined = value.commands.filter { command ->
+            command.state != CommandState.QUEUED && command.authenticationIssuedAt == null
+        }
+        require(value.released.size + quarantined.size <= MAX_TOMBSTONES) {
+            "Command outbox cannot safely quarantine legacy commands."
+        }
+        val quarantinedIds = quarantined.mapTo(mutableSetOf(), PersistedCommand::commandId)
+        val migrated = value.copy(
+            commands = value.commands.filterNot { it.commandId in quarantinedIds },
+            released = value.released + quarantined.map { command ->
+                ReleasedCommandTombstone(
+                    operationId = command.operationId,
+                    commandId = command.commandId,
+                    retiredCommandIds = command.retiredCommandIds,
+                    idempotencyKey = command.idempotencyKey,
+                    requestFingerprint = command.requestFingerprint,
+                    releasedAt = command.updatedAt,
+                )
+            },
+        )
+        return DecodedCommandOutbox(
+            snapshot = migrated,
+            migration = CommandOutboxMigration(
+                fromSchemaVersion = schemaVersion,
+                quarantinedCommandCount = quarantined.size,
+            ),
+        )
     }
 
     private fun requireFingerprint(value: String) {

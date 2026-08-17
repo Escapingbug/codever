@@ -196,6 +196,7 @@ class MatrixNativeProjection {
             put("revision_epoch_generation", revision.generation)
             put("state_version", currentGateway.number("state_version")!!)
             put("active_device_count", currentGateway.number("active_device_count")!!)
+            put("command_sequences", currentGateway.getValue("command_sequences"))
             put("current_session_id", kotlinx.serialization.json.JsonNull)
             put("sessions", JsonArray(sessions))
             put("workspace", buildJsonObject {
@@ -244,7 +245,7 @@ class MatrixNativeProjection {
             setOf(
                 "version", "kind", "gateway_id", "conversation_id", "revision",
                 "revision_epoch", "revision_epoch_generation", "state_version",
-                "active_device_count", "workspace", "capabilities", "updated_at",
+                "active_device_count", "command_sequences", "workspace", "capabilities", "updated_at",
             ),
             "Matrix Gateway state",
         )
@@ -254,10 +255,34 @@ class MatrixNativeProjection {
         value.requiredOpaqueId("conversation_id", "Matrix Gateway state")
         require(value.requiredLong("state_version", "Matrix Gateway state") >= 0)
         require(value.requiredLong("active_device_count", "Matrix Gateway state") > 0)
+        validateCommandSequences(
+            value.requiredArray("command_sequences", 256, "Matrix Gateway state"),
+        )
         value.requiredTimestamp("updated_at", "Matrix Gateway state")
         validateWorkspace(value.requiredObject("workspace", "Matrix Gateway state"))
         validateCapabilities(value.requiredObject("capabilities", "Matrix Gateway state"))
         nativeRevision(value)
+    }
+
+    private fun validateCommandSequences(values: List<JsonElement>) {
+        val identities = mutableSetOf<Pair<String, String>>()
+        values.forEach { element ->
+            val value = element as? JsonObject
+                ?: throw IllegalArgumentException("Matrix Gateway command sequence is invalid.")
+            value.requireExactKeys(
+                setOf("device_id", "sequence_epoch", "sequence"),
+                "Matrix Gateway command sequence",
+            )
+            val deviceId = value.requiredOpaqueId("device_id", "Matrix Gateway command sequence")
+            val sequenceEpoch = value.requiredOpaqueId(
+                "sequence_epoch",
+                "Matrix Gateway command sequence",
+            )
+            require(value.requiredLong("sequence", "Matrix Gateway command sequence") >= 0)
+            require(identities.add(deviceId to sequenceEpoch)) {
+                "Matrix Gateway command sequence identity is duplicated."
+            }
+        }
     }
 
     private fun validateSession(value: JsonObject) {

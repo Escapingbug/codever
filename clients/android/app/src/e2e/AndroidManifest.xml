@@ -11,6 +11,17 @@
     <application
         android:networkSecurityConfig="@xml/network_security_config_e2e"
         android:usesCleartextTraffic="true"
-        tools:replace="android:networkSecurityConfig,android:usesCleartextTraffic" />
+        tools:replace="android:networkSecurityConfig,android:usesCleartextTraffic">
+
+        <!--
+            Test-only upgrade fixture. The Alpha journey invokes this receiver
+            explicitly while the app is stopped so it can cover-install a new
+            APK over a real encrypted legacy command outbox. It is absent from
+            every production build variant.
+        -->
+        <receiver
+            android:name="id.my.anciety.codever.e2e.LegacyOutboxSeederReceiver"
+            android:exported="true" />
+    </application>
 
 </manifest>

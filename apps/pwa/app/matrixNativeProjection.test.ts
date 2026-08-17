@@ -166,6 +166,9 @@ function gatewayState(stateVersion = 1) {
     ...revision(1),
     state_version: stateVersion,
     active_device_count: 1,
+    command_sequences: [
+      { device_id: "device-1", sequence_epoch: "certificate-1", sequence: 0 },
+    ],
     workspace: {
       project: { id: "p1", name: "codever", cwd: "/repo" },
       provider: "codex",

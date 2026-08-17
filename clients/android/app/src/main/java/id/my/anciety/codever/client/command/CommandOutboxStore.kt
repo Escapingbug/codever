@@ -38,9 +38,15 @@ internal data class PersistedCommand(
 internal data class ReleasedCommandTombstone(
     val operationId: String,
     val commandId: String,
+    val retiredCommandIds: List<String> = emptyList(),
     val idempotencyKey: String,
     val requestFingerprint: String,
     val releasedAt: Long,
+)
+
+internal data class CommandOutboxMigration(
+    val fromSchemaVersion: Int,
+    val quarantinedCommandCount: Int,
 )
 
 internal data class CommandOutboxSnapshot(
@@ -98,6 +104,7 @@ internal class EncryptedAtomicCommandOutboxStore(
     private val blobStore: CommandOutboxBlobStore,
     private val cipher: SecretCipher,
     accountScope: String,
+    private val onMigration: (CommandOutboxMigration) -> Unit = {},
 ) : CommandOutboxStore {
     private val associatedData: ByteArray
 
@@ -108,10 +115,16 @@ internal class EncryptedAtomicCommandOutboxStore(
         associatedData = "codever.command.outbox.v1\u0000$accountScope".toByteArray(Charsets.UTF_8)
     }
 
-    constructor(file: File, cipher: SecretCipher, accountScope: String) : this(
+    constructor(
+        file: File,
+        cipher: SecretCipher,
+        accountScope: String,
+        onMigration: (CommandOutboxMigration) -> Unit = {},
+    ) : this(
         AtomicCommandOutboxBlobStore(file),
         cipher,
         accountScope,
+        onMigration,
     )
 
     @Synchronized
@@ -129,11 +142,19 @@ internal class EncryptedAtomicCommandOutboxStore(
             envelope.iv.fill(0)
             envelope.ciphertext.fill(0)
         }
-        return try {
-            CommandOutboxCodec.decode(plaintext)
+        val decoded = try {
+            CommandOutboxCodec.decodeForStorage(plaintext)
         } finally {
             plaintext.fill(0)
         }
+        decoded.migration?.let { migration ->
+            // The AtomicFile replacement is the migration commit point. A
+            // crash before it preserves the complete legacy blob; a crash
+            // after it leaves only the complete current schema.
+            save(decoded.snapshot)
+            onMigration(migration)
+        }
+        return decoded.snapshot
     }
 
     @Synchronized

@@ -283,6 +283,13 @@ describe('FileCommandReplayStore terminal results', () => {
         await expect(
             restarted.claimCommandInOrder(command, 121_001),
         ).resolves.toEqual({ status: 'duplicate', revision: 1 })
+        await expect(restarted.getCommandSequence(
+            command.gatewayId,
+            command.deviceId,
+            command.conversationId,
+            command.revisionEpoch,
+            command.sequenceEpoch,
+        )).resolves.toBe(1)
         await expect(
             restarted.getCommandResult(command),
         ).resolves.toBeUndefined()

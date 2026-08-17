@@ -175,7 +175,15 @@ class NativeClientRuntime(
         cipher,
         now,
     )
-    private val outbox = DurableCommandOutbox.encrypted(files.commands, cipher, deviceId)
+    private val outbox = DurableCommandOutbox.encrypted(files.commands, cipher, deviceId) { migration ->
+        diagnostics.record(
+            "command.outbox.migrated",
+            mapOf(
+                "schema" to migration.fromSchemaVersion.toString(),
+                "quarantined" to migration.quarantinedCommandCount.toString(),
+            ),
+        )
+    }
     private val transfers = AttachmentTransferManager(files.transfers, matrix, cipher, now)
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
@@ -1675,6 +1683,9 @@ class NativeClientRuntime(
         if (revisionEpoch.isBlank()) return
         val changed = gatewayState != extension
         gatewayState = extension
+        if (authoritative) {
+            outbox.updateKnownSequence(authoritativeDeviceSequence(extension))
+        }
         outbox.updateKnownRevision(revision)
         if (authoritative) gatewayStateSynchronized = true
         val convergenceRevision = gatewayConvergenceMinimumRevision
@@ -1703,6 +1714,22 @@ class NativeClientRuntime(
         resumePendingSafeRevisionConflict()
         schedulePendingCommandRecoveries(immediate = true)
         refreshSnapshot(publishLifecycle = true)
+    }
+
+    private fun authoritativeDeviceSequence(state: JsonObject): Long {
+        val sequenceEpoch = trust?.certificate?.certificateId
+            ?: throw NativeTrustRequiredException("Gateway trust is unavailable.")
+        val entries = state["command_sequences"] as? JsonArray
+            ?: throw IllegalArgumentException("Gateway command sequences are unavailable.")
+        val matches = entries.mapNotNull { it as? JsonObject }.filter { entry ->
+            entry.string("device_id") == deviceId &&
+                entry.string("sequence_epoch") == sequenceEpoch
+        }
+        require(matches.size == 1) {
+            "Gateway state does not contain exactly one command sequence for this device."
+        }
+        return matches.single().long("sequence")?.takeIf { it >= 0 }
+            ?: throw IllegalArgumentException("Gateway command sequence is invalid.")
     }
 
     private fun acceptCommandAck(extension: JsonObject) {

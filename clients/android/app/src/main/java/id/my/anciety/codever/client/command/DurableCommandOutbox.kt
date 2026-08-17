@@ -354,6 +354,20 @@ class DurableCommandOutbox internal constructor(
         return true
     }
 
+    /**
+     * Reconciles the device's ordered-command cursor from authenticated
+     * Gateway Room State. This is intentionally monotonic: an older Room State
+     * event cannot roll back a locally acknowledged command, while an upgrade
+     * can discover that a quarantined legacy submission was accepted remotely.
+     */
+    @Synchronized
+    fun updateKnownSequence(sequence: Long): Boolean {
+        requireNonnegativeJsonInteger(sequence, "Known Gateway command sequence")
+        if (sequence <= snapshot.lastAcknowledgedSequence) return false
+        commit(snapshot.copy(lastAcknowledgedSequence = sequence))
+        return true
+    }
+
     @Synchronized
     fun get(commandId: String): CommandView? = findCurrent(commandId)?.toView()
 
@@ -371,6 +385,7 @@ class DurableCommandOutbox internal constructor(
         val tombstone = ReleasedCommandTombstone(
             operationId = command.operationId,
             commandId = command.commandId,
+            retiredCommandIds = command.retiredCommandIds,
             idempotencyKey = command.idempotencyKey,
             requestFingerprint = command.requestFingerprint,
             releasedAt = nonnegativeNow(),
@@ -414,7 +429,9 @@ class DurableCommandOutbox internal constructor(
         require(
             candidate !in additionallyForbidden && snapshot.commands.none {
                 it.operationId == candidate || it.commandId == candidate || candidate in it.retiredCommandIds
-            } && snapshot.released.none { it.operationId == candidate || it.commandId == candidate },
+            } && snapshot.released.none {
+                it.operationId == candidate || it.commandId == candidate || candidate in it.retiredCommandIds
+            },
         ) { "$field collides with an existing durable identifier." }
     }
 
@@ -422,12 +439,13 @@ class DurableCommandOutbox internal constructor(
         private const val MAX_ACTIVE_COMMANDS = 128
         private const val MAX_RELEASED_TOMBSTONES = 4_096
 
-        fun encrypted(
+        internal fun encrypted(
             file: File,
             cipher: SecretCipher,
             accountScope: String,
+            onMigration: (CommandOutboxMigration) -> Unit = {},
         ): DurableCommandOutbox = DurableCommandOutbox(
-            EncryptedAtomicCommandOutboxStore(file, cipher, accountScope),
+            EncryptedAtomicCommandOutboxStore(file, cipher, accountScope, onMigration),
         )
     }
 }

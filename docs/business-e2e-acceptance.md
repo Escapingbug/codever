@@ -181,6 +181,7 @@ APK storage.
 | Archive, restore, and delete | Delete enforced on both devices; deleting the only session remains empty across reload without transient reselection or replacement creation | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
 | Post-commit ACK/result loss and durable-outbox release | Not applicable | Enforced by the isolated Alpha gate for create and delete |
+| APK cover-install over a legacy encrypted submitted command | Not applicable | Enforced: ambiguous command is quarantined without replay, Gateway sequence is reconciled, new create/delete succeeds, and migration runs once across restart |
 | Stale cross-device command review, discard, and immediate retry | Not yet enforced | Enforced by the isolated Alpha gate |
 | Android foreground-service and completion notifications | Not applicable | Enforced by the isolated Alpha gate |
 | Privacy bind, exact review, deny, sanitize, restore, fail-closed, and encrypted local state | Enforced on two browsers | Enforced by the isolated Alpha gate, including process restart |

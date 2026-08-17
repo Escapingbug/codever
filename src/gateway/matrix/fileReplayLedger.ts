@@ -150,13 +150,13 @@ export class FileCommandReplayStore implements ReplayStore {
             if (!this.initialized) await this.load()
             await this.pruneInternal(now)
 
-            const scope = canonicalJson([
+            const scope = commandSequenceScope(
                 command.gatewayId,
                 command.deviceId,
                 command.conversationId,
                 command.revisionEpoch,
                 command.sequenceEpoch,
-            ])
+            )
             const revisionScope = conversationRevisionScope(
                 command.gatewayId,
                 command.conversationId,
@@ -347,6 +347,27 @@ export class FileCommandReplayStore implements ReplayStore {
             return this.revisions.get(
                 conversationRevisionScope(gatewayId, conversationId, revisionEpoch),
             ) ?? 0
+        })
+        this.chain = operation.then(() => undefined, () => undefined)
+        return operation
+    }
+
+    getCommandSequence(
+        gatewayId: string,
+        deviceId: string,
+        conversationId: string,
+        revisionEpoch: string,
+        sequenceEpoch: string,
+    ): Promise<number> {
+        const operation = this.chain.then(async () => {
+            if (!this.initialized) await this.load()
+            return this.sequences.get(commandSequenceScope(
+                gatewayId,
+                deviceId,
+                conversationId,
+                revisionEpoch,
+                sequenceEpoch,
+            )) ?? 0
         })
         this.chain = operation.then(() => undefined, () => undefined)
         return operation
@@ -636,6 +657,16 @@ function conversationRevisionScope(
     revisionEpoch: string,
 ): string {
     return canonicalJson([gatewayId, conversationId, revisionEpoch])
+}
+
+function commandSequenceScope(
+    gatewayId: string,
+    deviceId: string,
+    conversationId: string,
+    revisionEpoch: string,
+    sequenceEpoch: string,
+): string {
+    return canonicalJson([gatewayId, deviceId, conversationId, revisionEpoch, sequenceEpoch])
 }
 
 function commandKeyFor(command: CodeverCommand): string {
