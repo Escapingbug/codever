@@ -1252,12 +1252,20 @@ export class GatewaySecureContentLayer {
                 logicalEventId: stableLogicalEventId(logicalDeliveryKey(request)),
                 now,
             })
+            const outerRelation = matrixOuterRelation(
+                request.content['m.relates_to'],
+                logicalEventId =>
+                    this.deliveryOutbox.physicalEventIdForStableLogicalEventId(logicalEventId),
+            )
+            // The authenticated plaintext uses stable Codever IDs so every
+            // client can merge the edit. Matrix itself must receive the
+            // physical `$...` event ID in the visible relation.
             content = {
                 msgtype: 'm.notice',
                 body: 'Encrypted Codever timeline event',
-                ...(request.content['m.relates_to'] === undefined
+                ...(outerRelation === undefined
                     ? {}
-                    : { 'm.relates_to': request.content['m.relates_to'] }),
+                    : { 'm.relates_to': outerRelation }),
                 [CODEVER_MATRIX_EXTENSION]: {
                     version: MATRIX_NATIVE_PROTOCOL_VERSION,
                     kind: 'timeline_envelope',
@@ -1667,6 +1675,22 @@ function contentForRecipient(
     if (newExtension?.replaces_event_id === logicalTarget) {
         newExtension.replaces_event_id = physicalTarget
     }
+    return copy
+}
+
+function matrixOuterRelation(
+    value: unknown,
+    physicalEventIdForLogicalId: (logicalEventId: string) => string | undefined,
+): Record<string, unknown> | undefined {
+    const relation = asRecord(value)
+    if (!relation) return undefined
+    const copy = structuredClone(relation)
+    if (copy.rel_type !== 'm.replace' || typeof copy.event_id !== 'string') return copy
+    const physicalEventId = copy.event_id.startsWith('$')
+        ? copy.event_id
+        : physicalEventIdForLogicalId(copy.event_id)
+    if (!physicalEventId) return undefined
+    copy.event_id = physicalEventId
     return copy
 }
 

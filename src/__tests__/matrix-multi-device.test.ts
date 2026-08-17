@@ -130,6 +130,10 @@ describe('multi-device Matrix collaboration', () => {
             },
         })).resolves.toBeDefined()
         expect(sent).toHaveLength(2)
+        expect(sent[1]!.content['m.relates_to']).toMatchObject({
+            rel_type: 'm.replace',
+            event_id: '$event-1',
+        })
         const firstEdit = await openFor(sent[1]!, first, gateway, 'device-a')
         const secondEdit = await openFor(sent[1]!, second, gateway, 'device-b')
         expect(firstEdit['m.relates_to']).toMatchObject({ event_id: stableOriginalId })
@@ -154,6 +158,115 @@ describe('multi-device Matrix collaboration', () => {
         expect(afterRevoke[CODEVER_MATRIX_EXTENSION]).toMatchObject({
             active_device_count: 1,
         })
+    })
+
+    it('restores the physical Matrix edit target when a logical edit retries after restart', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const original = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await original.initialize(now)
+        const attempts: MatrixSendEventRequest[] = []
+        const secureTransport = original.transportForRoom(room, applicationTransport({
+            async sendEncryptedRoomEvent(request) {
+                attempts.push(request)
+                if (request.transactionId === 'terminal-edit') {
+                    throw new Error('temporary edit delivery failure')
+                }
+                return { eventId: '$running-tool' }
+            },
+        }))
+        const running = await secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'running-tool',
+            content: {
+                msgtype: 'm.text',
+                body: 'running',
+                [CODEVER_MATRIX_EXTENSION]: { version: 1, kind: 'message' },
+            },
+        })
+        const runningPlaintext = await openFor(attempts[0]!, device, gateway, 'device-a')
+        const runningLogicalId = (
+            runningPlaintext[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        ).logical_event_id
+
+        await expect(secureTransport.sendEncryptedRoomEvent({
+            roomId: room.roomId,
+            eventType: 'm.room.message',
+            transactionId: 'terminal-edit',
+            content: {
+                msgtype: 'm.text',
+                body: '* completed',
+                'm.relates_to': { rel_type: 'm.replace', event_id: running.eventId },
+                'm.new_content': {
+                    msgtype: 'm.text',
+                    body: 'completed',
+                    [CODEVER_MATRIX_EXTENSION]: {
+                        version: 1,
+                        kind: 'message',
+                        replaces_event_id: running.eventId,
+                    },
+                },
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: 1,
+                    kind: 'message',
+                    replaces_event_id: running.eventId,
+                },
+            },
+        })).rejects.toBeInstanceOf(ChannelDeliveryQueuedError)
+        original.stopRetries()
+
+        const restarted = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await restarted.initialize(now)
+        const recovered: MatrixSendEventRequest[] = []
+        await restarted.retryPendingForRoom(room, applicationTransport({
+            async sendEncryptedRoomEvent(request) {
+                recovered.push(request)
+                return { eventId: '$completed-tool' }
+            },
+        }))
+
+        expect(recovered).toHaveLength(1)
+        expect(recovered[0]!.content['m.relates_to']).toMatchObject({
+            rel_type: 'm.replace',
+            event_id: '$running-tool',
+        })
+        const recoveredPlaintext = await openFor(
+            recovered[0]!,
+            device,
+            gateway,
+            'device-a',
+        )
+        expect(recoveredPlaintext['m.relates_to']).toMatchObject({
+            event_id: runningLogicalId,
+        })
+        expect(recoveredPlaintext[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+            replaces_logical_event_id: runningLogicalId,
+        })
+        restarted.stopRetries()
     })
 
     it('retries one stable bundle transaction and uses logical edit IDs for a newly joined device', async () => {

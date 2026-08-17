@@ -110,6 +110,7 @@ export class FileMatrixDeliveryOutbox {
     private readonly failed = new Set<string>()
     private readonly logicalEvents = new Map<string, string>()
     private readonly eventLogicalKeys = new Map<string, string>()
+    private readonly physicalEventsByStableLogicalId = new Map<string, string>()
     private writeChain: Promise<void> = Promise.resolve()
     private readonly transitionChains = new Map<string, Promise<void>>()
 
@@ -172,10 +173,10 @@ export class FileMatrixDeliveryOutbox {
                 this.delivered.set(entry.deliveryId, entry.eventId)
                 const delivery = this.deliveries.get(entry.deliveryId)
                     ?? this.bundleDeliveries.get(entry.deliveryId)
-                if (delivery) this.eventLogicalKeys.set(entry.eventId, delivery.logicalKey)
+                if (delivery) this.indexPhysicalEvent(delivery.logicalKey, entry.eventId)
             } else if (entry.kind === 'logical_event') {
                 this.logicalEvents.set(entry.logicalKey, entry.eventId)
-                this.eventLogicalKeys.set(entry.eventId, entry.logicalKey)
+                this.indexPhysicalEvent(entry.logicalKey, entry.eventId)
             } else if (entry.kind === 'abandoned') {
                 this.pending.delete(entry.deliveryId)
                 this.pendingBundles.delete(entry.deliveryId)
@@ -253,7 +254,7 @@ export class FileMatrixDeliveryOutbox {
             this.delivered.set(deliveryId, eventId)
             const delivery = this.deliveries.get(deliveryId)
                 ?? this.bundleDeliveries.get(deliveryId)
-            if (delivery) this.eventLogicalKeys.set(eventId, delivery.logicalKey)
+            if (delivery) this.indexPhysicalEvent(delivery.logicalKey, eventId)
         })
     }
 
@@ -312,7 +313,7 @@ export class FileMatrixDeliveryOutbox {
                 recordedAt,
             })
             this.logicalEvents.set(logicalKey, eventId)
-            this.eventLogicalKeys.set(eventId, logicalKey)
+            this.indexPhysicalEvent(logicalKey, eventId)
         })
     }
 
@@ -365,6 +366,11 @@ export class FileMatrixDeliveryOutbox {
         return logicalKey ? stableLogicalEventId(logicalKey) : undefined
     }
 
+    /** Resolve an authenticated application edit identity to its Matrix receipt. */
+    physicalEventIdForStableLogicalEventId(logicalEventId: string): string | undefined {
+        return this.physicalEventsByStableLogicalId.get(logicalEventId)
+    }
+
     logicalEventMappings(): Array<{
         logicalKey: string
         eventId: string
@@ -393,6 +399,11 @@ export class FileMatrixDeliveryOutbox {
             }
         }
         return result
+    }
+
+    private indexPhysicalEvent(logicalKey: string, eventId: string): void {
+        this.eventLogicalKeys.set(eventId, logicalKey)
+        this.physicalEventsByStableLogicalId.set(stableLogicalEventId(logicalKey), eventId)
     }
 
     private async append(entry: DeliveryEntry): Promise<void> {
