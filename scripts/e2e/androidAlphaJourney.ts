@@ -24,6 +24,7 @@ const CONNECT_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
 const RETURN_TIMEOUT_MS = 8_000
+const DOZE_OBSERVATION_MS = 5_000
 const FOREGROUND_NOTIFICATION_ID = '1101'
 const TASK_NOTIFICATION_TITLE = 'Agent task completed'
 
@@ -102,7 +103,10 @@ class AndroidWebView {
     private readonly pending = new Map<number, PendingCall>()
     private closing = false
 
-    private constructor(private readonly socket: WebSocket) {
+    private constructor(
+        private readonly socket: WebSocket,
+        private readonly ensureInteractive: () => Promise<void>,
+    ) {
         socket.addEventListener('message', event => {
             const response = JSON.parse(String(event.data)) as JsonRecord
             const id = typeof response.id === 'number' ? response.id : undefined
@@ -131,7 +135,10 @@ class AndroidWebView {
         })
     }
 
-    static async connect(url: string): Promise<AndroidWebView> {
+    static async connect(
+        url: string,
+        ensureInteractive: () => Promise<void>,
+    ): Promise<AndroidWebView> {
         const socket = new WebSocket(url)
         await new Promise<void>((resolve, reject) => {
             const timer = setTimeout(
@@ -147,7 +154,7 @@ class AndroidWebView {
                 reject(new Error('Could not open the Android WebView debugger.'))
             }, { once: true })
         })
-        return new AndroidWebView(socket)
+        return new AndroidWebView(socket, ensureInteractive)
     }
 
     close(): void {
@@ -156,6 +163,7 @@ class AndroidWebView {
     }
 
     async evaluate<T>(expression: string): Promise<T> {
+        await this.ensureInteractive()
         const response = await this.call('Runtime.evaluate', {
             expression,
             awaitPromise: true,
@@ -190,6 +198,7 @@ class AndroidWebView {
     }
 
     async navigate(url: string): Promise<void> {
+        await this.ensureInteractive()
         await this.call('Page.navigate', { url })
     }
 
@@ -556,6 +565,10 @@ export async function runAndroidAlphaJourney(
     const projectName = `Codever Alpha Android ${options.runId}`
     const backgroundPrompt = `Android background prompt ${options.runId}`
     const browserPrompt = `Browser to Android prompt ${options.runId}`
+    const backgroundBrowserPrompt = `Browser while Android UI is closed ${options.runId}`
+    const stickyRestartPrompt = `Browser after Android sticky restart ${options.runId}`
+    const dozeRecoveryPrompt = `Browser during Android deep idle ${options.runId}`
+    const bootRecoveryPrompt = `Browser after Android reboot ${options.runId}`
     const recoveryPrompt = `Android reconnect prompt ${options.runId}`
     const postCommitRecoveryPrompt = `Android post-commit recovery prompt ${options.runId}`
     const browserRevisionAdvancePrompt = `Browser revision advance ${options.runId}`
@@ -584,6 +597,8 @@ export async function runAndroidAlphaJourney(
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
     let migrationSessionCreated = false
+    let deviceIdleForced = false
+    let deliveredDuringForcedIdle: boolean | undefined
     try {
         process.stdout.write('  [A1/12] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
@@ -600,7 +615,7 @@ export async function runAndroidAlphaJourney(
             options.browserPage,
             options.testerPassword,
         )
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
             serial,
             options.pwaUrl,
@@ -671,7 +686,7 @@ export async function runAndroidAlphaJourney(
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
         syncGate.release()
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
             serial,
             options.pwaUrl,
@@ -769,6 +784,211 @@ export async function runAndroidAlphaJourney(
         assert.equal(await diagnosticCount(serial, 'notification.task_posted'), foregroundPostedBefore)
         assert.equal((await taskNotificationKeys(serial)).length, 0)
 
+        process.stdout.write('  [A5a/12] Receiving and persisting browser work while the Android UI stays closed…\n')
+        const backgroundLifecycleBefore = await diagnosticCount(
+            serial,
+            'service.ui_foreground running=false',
+        )
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'service.ui_foreground running=false',
+            ) > backgroundLifecycleBefore,
+            {
+                description: 'Android Activity to leave the foreground before native-only receipt',
+                timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+            },
+        )
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await assertPackageActivityBackground(serial)
+        const backgroundEventBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.event_committed',
+        )
+        const backgroundResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        await sendBrowserPrompt(options.browserPage, backgroundBrowserPrompt)
+        await waitForBrowserText(options.browserPage, backgroundBrowserPrompt)
+        await waitForProviderResponseCount(options.browserPage, backgroundResponseBefore + 1)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.event_committed',
+            ) > backgroundEventBefore,
+            {
+                description: 'native Matrix event commit while the Android Activity remains closed',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+
+        process.stdout.write('  [A5b/12] Recreating the killed sticky service without opening Android…\n')
+        const serviceCreatedBefore = await diagnosticCount(serial, 'service.created')
+        const receiverReadyBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.receiver_ready',
+        )
+        const oldPid = await packageProcessId(serial)
+        await killPackageProcess(serial, oldPid)
+        const restartedPid = await waitForNewPackageProcess(serial, oldPid)
+        assert.notEqual(restartedPid, oldPid)
+        await waitFor(
+            async () => await diagnosticCount(serial, 'service.created') > serviceCreatedBefore,
+            {
+                description: 'sticky Android foreground service recreation',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.receiver_ready',
+            ) > receiverReadyBefore,
+            {
+                description: 'native Matrix receiver after sticky process recreation',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+        const stickyEventBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.event_committed',
+        )
+        const stickyResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        await sendBrowserPrompt(options.browserPage, stickyRestartPrompt)
+        await waitForBrowserText(options.browserPage, stickyRestartPrompt)
+        await waitForProviderResponseCount(options.browserPage, stickyResponseBefore + 1)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.event_committed',
+            ) > stickyEventBefore,
+            {
+                description: 'native Matrix receipt after sticky process recreation',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+
+        process.stdout.write('  [A5c/12] Recovering deep-idle Matrix work without opening Android…\n')
+        const dozeEventBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.event_committed',
+        )
+        const dozeResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        await adb(serial, 'shell', 'dumpsys', 'battery', 'unplug')
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_SLEEP')
+        const idleResult = await adb(serial, 'shell', 'dumpsys', 'deviceidle', 'force-idle')
+        assert.match(idleResult, /forced|idle/iu, `Android did not enter forced idle: ${idleResult}`)
+        deviceIdleForced = true
+        await sendBrowserPrompt(options.browserPage, dozeRecoveryPrompt)
+        await waitForBrowserText(options.browserPage, dozeRecoveryPrompt)
+        await waitForProviderResponseCount(options.browserPage, dozeResponseBefore + 1)
+        await delay(DOZE_OBSERVATION_MS)
+        deliveredDuringForcedIdle = await diagnosticCount(
+            serial,
+            'matrix.application_control.event_committed',
+        ) > dozeEventBefore
+        await adb(serial, 'shell', 'dumpsys', 'deviceidle', 'unforce')
+        await adb(serial, 'shell', 'dumpsys', 'battery', 'reset')
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+        deviceIdleForced = false
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.event_committed',
+            ) > dozeEventBefore,
+            {
+                description: 'native Matrix catch-up after Android exits deep idle',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+
+        process.stdout.write('  [A5d/12] Rebooting Android and receiving work before its Activity opens…\n')
+        const bootServiceBefore = await diagnosticCount(serial, 'service.created')
+        const bootReceiverBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.receiver_ready',
+        )
+        await rebootEmulator(serial)
+        await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
+        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
+        await waitFor(
+            async () => await diagnosticCount(serial, 'service.created') > bootServiceBefore,
+            {
+                description: 'persistent Android service restoration after reboot',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.receiver_ready',
+            ) > bootReceiverBefore,
+            {
+                description: 'native Matrix receiver after Android reboot',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+        const bootEventBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.event_committed',
+        )
+        const bootResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        await sendBrowserPrompt(options.browserPage, bootRecoveryPrompt)
+        await waitForBrowserText(options.browserPage, bootRecoveryPrompt)
+        await waitForProviderResponseCount(options.browserPage, bootResponseBefore + 1)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.event_committed',
+            ) > bootEventBefore,
+            {
+                description: 'native Matrix receipt after reboot without opening the Activity',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        await android.waitFor(
+            'durable native history accumulated while its Activity was absent',
+            state =>
+                state.connection.endsWith('Connected') &&
+                state.bodyText.includes(backgroundBrowserPrompt) &&
+                state.bodyText.includes(stickyRestartPrompt) &&
+                state.bodyText.includes(dozeRecoveryPrompt) &&
+                state.bodyText.includes(bootRecoveryPrompt),
+            CONNECT_TIMEOUT_MS,
+        )
+
         // Separate a pure transport-loss assertion from the preceding
         // cross-device revision race. Foregrounding explicitly requests an
         // authoritative Room State before the independent privacy journey
@@ -793,7 +1013,7 @@ export async function runAndroidAlphaJourney(
                 timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
             },
         )
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         await waitFor(
             async () => await diagnosticCount(
                 serial,
@@ -869,7 +1089,7 @@ export async function runAndroidAlphaJourney(
             forwardedDevtoolsPort = undefined
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
             'privacy session inventory after Android process restart',
@@ -963,7 +1183,7 @@ export async function runAndroidAlphaJourney(
             forwardedDevtoolsPort = undefined
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
             serial,
             options.pwaUrl,
@@ -1032,7 +1252,7 @@ export async function runAndroidAlphaJourney(
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
         syncGate.releaseGapBackfill()
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
             serial,
             options.pwaUrl,
@@ -1062,16 +1282,20 @@ export async function runAndroidAlphaJourney(
         )
 
         process.stdout.write('  [A6/12] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
+        const recoveryResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
         await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
         await waitForBrowserText(options.browserPage, recoveryPrompt)
-        await waitForProviderResponseCount(options.browserPage, 3)
+        await waitForProviderResponseCount(options.browserPage, recoveryResponseBefore + 1)
         await android.waitFor(
             'recovered prompt exactly once on Android',
             state => state.userMessages.filter(message => message === recoveryPrompt).length === 1
-                && countText(state.bodyText, options.providerResponse) >= 3,
+                && countText(state.bodyText, options.providerResponse) >= recoveryResponseBefore + 1,
             CONNECT_TIMEOUT_MS,
         )
         assert.equal(await browserTextCount(options.browserPage, recoveryPrompt), 1)
@@ -1190,7 +1414,7 @@ export async function runAndroidAlphaJourney(
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
         syncGate.release()
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
             'post-commit Android creation recovery',
@@ -1258,7 +1482,7 @@ export async function runAndroidAlphaJourney(
             forwardedDevtoolsPort = undefined
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
             'durable cross-device deletion after Android process restart',
@@ -1288,7 +1512,7 @@ export async function runAndroidAlphaJourney(
         await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
         await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
         await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
             'connected Android after legacy outbox cover-install migration',
@@ -1337,7 +1561,7 @@ export async function runAndroidAlphaJourney(
             forwardedDevtoolsPort = undefined
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
             'second Android restart after one-time outbox migration',
@@ -1369,7 +1593,7 @@ export async function runAndroidAlphaJourney(
         }
         await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
         await removePersistedMatrixSession(serial)
-        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         const repairState = await android.waitFor(
             'actionable native Matrix session repair state',
@@ -1410,6 +1634,7 @@ export async function runAndroidAlphaJourney(
             androidPackage: PACKAGE_NAME,
             androidVersionName: versionName,
             protocol: 'matrix-native-v2',
+            deliveredDuringForcedIdle,
             journeys: [
                 'browser-offline-cache-recovery',
                 'fresh-native-pairing',
@@ -1417,6 +1642,10 @@ export async function runAndroidAlphaJourney(
                 'native-confirmed-pairing-process-death-recovery',
                 'browser-android-session-sync',
                 'background-task-notification',
+                'native-receives-browser-work-without-activity',
+                'sticky-service-process-recreation-without-activity',
+                'deep-idle-catch-up-without-activity',
+                'boot-restores-native-receiver-without-activity',
                 'notification-deep-link-recovery',
                 'foreground-notification-suppression',
                 'running-native-sync-survives-repeated-os-network-flaps',
@@ -1448,6 +1677,11 @@ export async function runAndroidAlphaJourney(
         })
         throw error
     } finally {
+        if (deviceIdleForced) {
+            await adbMaybe(serial, 'shell', 'dumpsys', 'deviceidle', 'unforce')
+            await adbMaybe(serial, 'shell', 'dumpsys', 'battery', 'reset')
+            await adbMaybe(serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+        }
         if (sessionCreated) {
             await cleanupBrowserProject(options.browserPage, projectName).catch(() => undefined)
         }
@@ -2107,18 +2341,12 @@ async function attachWebView(
         if (!pid) {
             if (!activityRestarted && Date.now() - startedAt >= 5_000) {
                 activityRestarted = true
-                const launch = await adbMaybe(
-                    serial,
-                    'shell',
-                    'am',
-                    'start',
-                    '-W',
-                    '-n',
-                    MAIN_ACTIVITY,
-                )
-                lastError = launch
-                    ? 'WebView process was absent; Activity restart requested'
-                    : 'WebView process was absent and Activity restart failed'
+                try {
+                    await startMainActivity(serial)
+                    lastError = 'WebView process was absent; Activity restart requested'
+                } catch (error) {
+                    lastError = `WebView process was absent and Activity restart failed: ${formatError(error)}`
+                }
             }
             await delay(250)
             continue
@@ -2135,7 +2363,13 @@ async function attachWebView(
             const targets = await response.json() as CdpTarget[]
             const target = targets.find(candidate => candidate.type === 'page' && candidate.url.startsWith(pwaUrl))
             if (!target?.webSocketDebuggerUrl) throw new Error('The Alpha WebView page target is not ready')
-            return { page: await AndroidWebView.connect(target.webSocketDebuggerUrl), port }
+            return {
+                page: await AndroidWebView.connect(
+                    target.webSocketDebuggerUrl,
+                    () => ensurePackageActivityForeground(serial),
+                ),
+                port,
+            }
         } catch (error) {
             lastError = formatError(error)
             await adbMaybe(serial, 'forward', '--remove', `tcp:${port}`)
@@ -2434,6 +2668,106 @@ async function captureFailureArtifacts(
         }
     }).catch(() => undefined)
     process.stderr.write(`Android Alpha failure artifacts: ${options.artifactDirectory}\n`)
+}
+
+async function packageProcessId(serial: string): Promise<string> {
+    const output = await adb(serial, 'shell', 'pidof', PACKAGE_NAME)
+    const pid = output.trim().split(/\s+/u)[0]
+    assert.match(pid ?? '', /^\d+$/u, `The Android package PID is unavailable: ${output}`)
+    return pid
+}
+
+async function killPackageProcess(serial: string, pid: string): Promise<void> {
+    assert.match(pid, /^\d+$/u, 'Refusing to signal a non-numeric Android process id')
+    await adb(serial, 'shell', 'run-as', PACKAGE_NAME, 'kill', '-9', pid)
+}
+
+async function waitForNewPackageProcess(serial: string, previousPid: string): Promise<string> {
+    let currentPid: string | undefined
+    await waitFor(async () => {
+        const output = await adbMaybe(serial, 'shell', 'pidof', PACKAGE_NAME)
+        const candidate = output.trim().split(/\s+/u)[0]
+        if (!candidate || !/^\d+$/u.test(candidate) || candidate === previousPid) return false
+        currentPid = candidate
+        return true
+    }, {
+        description: 'Android sticky foreground-service process recreation',
+        timeoutMs: CONNECT_TIMEOUT_MS,
+    })
+    assert.ok(currentPid)
+    return currentPid
+}
+
+async function assertPackageActivityBackground(serial: string): Promise<void> {
+    const output = await adb(serial, 'shell', 'dumpsys', 'activity', 'activities')
+    const resumed = resumedActivityLine(output)
+    assert.ok(resumed, 'Android did not report a resumed Activity')
+    assert.ok(
+        !resumed.includes(PACKAGE_NAME),
+        `Codever Activity unexpectedly entered the foreground: ${resumed.trim()}`,
+    )
+}
+
+async function ensurePackageActivityForeground(serial: string): Promise<void> {
+    const activities = await adb(serial, 'shell', 'dumpsys', 'activity', 'activities')
+    if (resumedActivityLine(activities)?.includes(PACKAGE_NAME)) return
+    await startMainActivity(serial)
+    await waitFor(async () => {
+        const current = await adbMaybe(serial, 'shell', 'dumpsys', 'activity', 'activities')
+        return resumedActivityLine(current)?.includes(PACKAGE_NAME) == true
+    }, {
+        description: 'Codever Activity after another emulator app took the foreground',
+        timeoutMs: RETURN_TIMEOUT_MS,
+    })
+}
+
+async function startMainActivity(serial: string): Promise<void> {
+    let lastError: unknown
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+            await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+            return
+        } catch (error) {
+            lastError = error
+            process.stderr.write(
+                `Android Activity start attempt ${attempt}/3 failed: ${formatError(error)}\n`,
+            )
+            if (attempt < 3) await delay(500 * attempt)
+        }
+    }
+    throw lastError
+}
+
+function resumedActivityLine(output: string): string | undefined {
+    return output.split(/\r?\n/u).find(line =>
+        line.includes('topResumedActivity=') || line.includes('mResumedActivity:'),
+    )
+}
+
+async function rebootEmulator(serial: string): Promise<void> {
+    await adb(serial, 'reboot')
+    await execFileAsync('adb', ['-s', serial, 'wait-for-device'], {
+        encoding: 'utf8',
+        timeout: CONNECT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+    })
+    await waitFor(
+        async () => await adbMaybe(serial, 'shell', 'getprop', 'sys.boot_completed') === '1',
+        {
+            description: 'Android emulator boot completion',
+            timeoutMs: CONNECT_TIMEOUT_MS,
+        },
+    )
+    await waitFor(
+        async () => {
+            const output = await adbMaybe(serial, 'shell', 'dumpsys', 'activity', 'activities')
+            return output.includes('topResumedActivity=') || output.includes('mResumedActivity:')
+        },
+        {
+            description: 'Android launcher after reboot',
+            timeoutMs: CONNECT_TIMEOUT_MS,
+        },
+    )
 }
 
 async function adb(serial: string, ...args: string[]): Promise<string> {
