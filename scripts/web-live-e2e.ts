@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -452,6 +452,54 @@ try {
             gatewayOutput: () => gatewayProcess!.output,
             artifactDirectory,
             gatewayReplayLedgerPath: join(gatewayDataDirectory, 'gateway-replay.jsonl'),
+            rotateGatewayReplayGeneration: async () => {
+                const replayLedgerPath = join(gatewayDataDirectory, 'gateway-replay.jsonl')
+                const runtimeStatePath = `${replayLedgerPath}.runtime-state.json`
+                const before = await readGatewayRuntimeEpoch(runtimeStatePath, fixture.roomId)
+                const sessionCountBefore = await persistedGatewaySessionCount(
+                    gatewayDataDirectory,
+                )
+
+                await gatewayProcess!.crash()
+                await rename(
+                    replayLedgerPath,
+                    `${replayLedgerPath}.before-android-epoch-${before.revisionEpochGeneration}`,
+                )
+                gatewayProcess = startGatewayProcess({
+                    fixture,
+                    fixturePath,
+                    gatewayDataDirectory,
+                    gatewayAdminSocket,
+                    providerDelayMs: 3_500,
+                    sessionExtensionsJson: privacyFixture!.gatewayRegistration,
+                })
+                await gatewayProcess.waitFor(/Gateway ready with \d+ trusted device\(s\)\./u)
+
+                const after = await waitForGatewayRuntimeEpochAdvance(
+                    runtimeStatePath,
+                    fixture.roomId,
+                    before.revisionEpochGeneration,
+                )
+                assert.notEqual(
+                    after.replayGeneration,
+                    before.replayGeneration,
+                    'Rebuilding the replay ledger did not create a new replay generation',
+                )
+                assert.equal(
+                    after.revisionEpochGeneration,
+                    before.revisionEpochGeneration + 1,
+                    'Gateway replay recovery did not rotate the revision epoch exactly once',
+                )
+                assert.equal(
+                    await persistedGatewaySessionCount(gatewayDataDirectory),
+                    sessionCountBefore,
+                    'Gateway replay recovery lost the persisted session inventory',
+                )
+                return {
+                    previousRevisionEpochGeneration: before.revisionEpochGeneration,
+                    currentRevisionEpochGeneration: after.revisionEpochGeneration,
+                }
+            },
         })
         await openProjectSession(firstPage, projectName)
     }
@@ -847,6 +895,55 @@ async function persistedGatewaySessionCount(dataDirectory: string): Promise<numb
     )) as { rooms?: Record<string, { appSessions?: unknown[] }> }
     return Object.values(state.rooms ?? {})
         .reduce((total, room) => total + (room.appSessions?.length ?? 0), 0)
+}
+
+type GatewayRuntimeEpoch = {
+    replayGeneration: string
+    revisionEpochGeneration: number
+}
+
+async function readGatewayRuntimeEpoch(
+    runtimeStatePath: string,
+    roomId: string,
+): Promise<GatewayRuntimeEpoch> {
+    const state = JSON.parse(await readFile(runtimeStatePath, 'utf8')) as {
+        rooms?: Record<string, {
+            replayGeneration?: unknown
+            revisionEpochGeneration?: unknown
+        }>
+    }
+    const room = state.rooms?.[roomId]
+    assert.ok(room, `Gateway runtime state does not contain room ${roomId}`)
+    assert.equal(
+        typeof room.replayGeneration,
+        'string',
+        'Gateway runtime state has no replay generation',
+    )
+    assert.ok(
+        Number.isSafeInteger(room.revisionEpochGeneration)
+            && Number(room.revisionEpochGeneration) > 0,
+        'Gateway runtime state has no valid revision epoch generation',
+    )
+    return {
+        replayGeneration: room.replayGeneration as string,
+        revisionEpochGeneration: room.revisionEpochGeneration as number,
+    }
+}
+
+async function waitForGatewayRuntimeEpochAdvance(
+    runtimeStatePath: string,
+    roomId: string,
+    previousGeneration: number,
+): Promise<GatewayRuntimeEpoch> {
+    let current: GatewayRuntimeEpoch | undefined
+    await waitFor(async () => {
+        current = await readGatewayRuntimeEpoch(runtimeStatePath, roomId)
+        return current.revisionEpochGeneration > previousGeneration
+    }, {
+        description: 'Gateway revision epoch rotation after replay-ledger rebuild',
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+    return current!
 }
 
 async function downgradeGatewayStateOutboxToLegacy(dataDirectory: string): Promise<void> {

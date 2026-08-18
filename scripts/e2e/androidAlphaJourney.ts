@@ -48,6 +48,9 @@ type MatrixSyncGate = {
     redeliveredCommandTransactions(): number
     observedCommandIds(): string[]
     observedPutPaths(): string[]
+    blockNextCommand(): number
+    waitForBlockedCommand(after: number): Promise<void>
+    releaseBlockedCommand(): void
     injectNullOptionalSections(): number
     waitForNullOptionalInjection(after: number): Promise<void>
     waitForInjectedCursorAdvance(after: number): Promise<void>
@@ -96,6 +99,10 @@ export type AndroidAlphaJourneyOptions = {
     artifactDirectory: string
     gatewayReplayLedgerPath: string
     gatewayOutput(): string
+    rotateGatewayReplayGeneration(): Promise<{
+        previousRevisionEpochGeneration: number
+        currentRevisionEpochGeneration: number
+    }>
 }
 
 class AndroidWebView {
@@ -564,6 +571,9 @@ export async function runAndroidAlphaJourney(
 
     const projectName = `Codever Alpha Android ${options.runId}`
     const backgroundPrompt = `Android background prompt ${options.runId}`
+    const idleEpochPrompt = `Android after idle Gateway epoch ${options.runId}`
+    const epochQueuedPrompt = `Android queued across Gateway epoch ${options.runId}`
+    const postEpochPrompt = `Android after Gateway epoch ${options.runId}`
     const browserPrompt = `Browser to Android prompt ${options.runId}`
     const backgroundBrowserPrompt = `Browser while Android UI is closed ${options.runId}`
     const stickyRestartPrompt = `Browser after Android sticky restart ${options.runId}`
@@ -768,18 +778,207 @@ export async function runAndroidAlphaJourney(
             timeoutMs: 5_000,
         })
 
+        process.stdout.write('  [AE1/12] Keeping an idle, previously used APK across a Gateway epoch rotation…\n')
+        const idleGatewayStateBefore = await diagnosticCount(
+            serial,
+            'gateway.room_state.accepted',
+        )
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+
+        const idleRotation = await options.rotateGatewayReplayGeneration()
+        assert.equal(
+            idleRotation.currentRevisionEpochGeneration,
+            idleRotation.previousRevisionEpochGeneration + 1,
+            'The idle-APK fixture did not advance the Gateway revision epoch exactly once',
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'gateway.room_state.accepted',
+            ) > idleGatewayStateBefore,
+            {
+                description: 'the background APK to accept the rotated Gateway epoch',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await assertPackageActivityBackground(serial)
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        await android.waitFor(
+            'the retained APK after idle Gateway epoch rotation',
+            state => state.connection.endsWith('Connected') && state.selectedProject === projectName,
+            CONNECT_TIMEOUT_MS,
+        )
+
+        const idleEpochResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        const idlePromptCompletionBefore = await diagnosticCount(
+            serial,
+            'command.completion.received action=prompt available=true stage=succeeded',
+        )
+        await android.sendPrompt(idleEpochPrompt)
+        await requireBrowserPromptAfterGatewayEpoch({
+            page: options.browserPage,
+            prompt: idleEpochPrompt,
+            serial,
+            gatewayOutput: options.gatewayOutput,
+            rotation: idleRotation,
+            stage: 'idle retained APK',
+        })
+        await waitForProviderResponseCount(options.browserPage, idleEpochResponseBefore + 1)
+        await android.waitFor(
+            'the idle-epoch Android prompt and Agent response',
+            state =>
+                state.userMessages.filter(message => message === idleEpochPrompt).length === 1 &&
+                countText(state.bodyText, options.providerResponse) >= idleEpochResponseBefore + 1,
+            CONNECT_TIMEOUT_MS,
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'command.completion.received action=prompt available=true stage=succeeded',
+            ) > idlePromptCompletionBefore,
+            {
+                description: 'durable idle-epoch prompt completion before the next command',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            },
+        )
+        assert.equal(await browserTextCount(options.browserPage, idleEpochPrompt), 1)
+        assert.equal(
+            providerDigestCount(options.gatewayOutput(), idleEpochPrompt),
+            1,
+            'The first Android prompt after an idle Gateway epoch was not executed exactly once',
+        )
+        assertNoGatewayEpochRejection(options.gatewayOutput(), 'idle retained APK prompt')
+        process.stdout.write('  [AE1/12] PASS — an idle retained APK accepted the new command sequence and received its Agent reply.\n')
+
+        process.stdout.write('  [AE2/12] Preserving APK data and an in-flight prompt across another Gateway epoch rotation…\n')
+        const epochResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
+        const blockedCommandBefore = syncGate.blockNextCommand()
+        await android.sendPrompt(epochQueuedPrompt)
+        await syncGate.waitForBlockedCommand(blockedCommandBefore)
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await assertPackageActivityBackground(serial)
+        await assertForegroundNotification(serial)
+
+        const pendingGatewayStateBefore = await diagnosticCount(
+            serial,
+            'gateway.room_state.accepted',
+        )
+        const rotation = await options.rotateGatewayReplayGeneration()
+        assert.equal(
+            rotation.currentRevisionEpochGeneration,
+            rotation.previousRevisionEpochGeneration + 1,
+            'The Alpha fixture did not advance the Gateway revision epoch exactly once',
+        )
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'gateway.room_state.accepted',
+            ) > pendingGatewayStateBefore,
+            {
+                description: 'the background APK to accept a new epoch with a durable command pending',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        syncGate.releaseBlockedCommand()
+
+        await requireBrowserPromptAfterGatewayEpoch({
+            page: options.browserPage,
+            prompt: epochQueuedPrompt,
+            serial,
+            gatewayOutput: options.gatewayOutput,
+            rotation,
+            stage: 'durable pending Android command',
+        })
+        await waitForProviderResponseCount(options.browserPage, epochResponseBefore + 1)
+        assert.equal(await browserTextCount(options.browserPage, epochQueuedPrompt), 1)
+        assert.equal(
+            providerDigestCount(options.gatewayOutput(), epochQueuedPrompt),
+            1,
+            'The command queued across a Gateway epoch did not reach the Agent exactly once',
+        )
+        assertNoGatewayEpochRejection(options.gatewayOutput(), 'pending Android prompt')
+        await waitFor(async () => (await taskNotificationKeys(serial)).length === 1, {
+            description: 'one completion notification for the epoch-recovered background prompt',
+            timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        })
+        await assertPackageActivityBackground(serial)
+        await tapTaskNotification(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        await android.waitFor(
+            'the epoch-recovered prompt and reply after reopening Android',
+            state =>
+                state.connection.endsWith('Connected') &&
+                state.userMessages.filter(message => message === epochQueuedPrompt).length === 1 &&
+                countText(state.bodyText, options.providerResponse) >= epochResponseBefore + 1,
+            RETURN_TIMEOUT_MS,
+        )
+        await waitFor(async () => (await taskNotificationKeys(serial)).length === 0, {
+            description: 'epoch recovery notification auto-cancel after opening',
+            timeoutMs: 5_000,
+        })
+
+        await android.sendPrompt(postEpochPrompt)
+        await waitForBrowserText(options.browserPage, postEpochPrompt)
+        await waitForProviderResponseCount(options.browserPage, epochResponseBefore + 2)
+        await android.waitFor(
+            'a normal Android prompt after epoch recovery',
+            state =>
+                state.userMessages.filter(message => message === postEpochPrompt).length === 1 &&
+                countText(state.bodyText, options.providerResponse) >= epochResponseBefore + 2,
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(await browserTextCount(options.browserPage, postEpochPrompt), 1)
+        assert.equal(
+            providerDigestCount(options.gatewayOutput(), postEpochPrompt),
+            1,
+            'The first new Android command in the rotated Gateway epoch was not executed exactly once',
+        )
+        assertNoGatewayEpochRejection(options.gatewayOutput(), 'post-recovery Android prompt')
+        process.stdout.write('  [AE2/12] PASS — retained APK state, queued recovery, background delivery, and the next prompt crossed the Gateway epoch exactly once.\n')
+
         process.stdout.write('  [A5/12] Verifying foreground suppression and browser-to-APK history sync…\n')
         const foregroundPostedBefore = await diagnosticCount(serial, 'notification.task_posted')
+        const foregroundResponseBefore = await browserTextCount(
+            options.browserPage,
+            options.providerResponse,
+        )
         await sendBrowserPrompt(options.browserPage, browserPrompt)
         await waitForBrowserText(options.browserPage, browserPrompt)
         await android.waitFor(
             'browser prompt on Android',
             state => state.bodyText.includes(browserPrompt),
         )
-        await waitForProviderResponseCount(options.browserPage, 2)
+        await waitForProviderResponseCount(options.browserPage, foregroundResponseBefore + 1)
         await android.waitFor(
             'browser agent response on Android',
-            state => countText(state.bodyText, options.providerResponse) >= 2,
+            state => countText(state.bodyText, options.providerResponse) >= foregroundResponseBefore + 1,
         )
         assert.equal(await diagnosticCount(serial, 'notification.task_posted'), foregroundPostedBefore)
         assert.equal((await taskNotificationKeys(serial)).length, 0)
@@ -1642,6 +1841,10 @@ export async function runAndroidAlphaJourney(
                 'native-confirmed-pairing-process-death-recovery',
                 'browser-android-session-sync',
                 'background-task-notification',
+                'idle-retained-native-resets-command-sequence-across-gateway-replay-epoch',
+                'retained-native-command-recovers-across-gateway-replay-epoch',
+                'background-queued-command-crosses-gateway-epoch-exactly-once',
+                'post-epoch-native-prompt-reaches-agent-exactly-once',
                 'native-receives-browser-work-without-activity',
                 'sticky-service-process-recreation-without-activity',
                 'deep-idle-catch-up-without-activity',
@@ -1738,10 +1941,30 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
     const observedPutPaths: string[] = []
     const seenCommandIds = new Set<string>()
     const seenCommandTransactions = new Set<string>()
+    const blockedCommandIds = new Set<string>()
+    let blockNextCommand = false
+    let blockedCommandRequests = 0
     let cycle = heldSyncCycle()
     let gapCycle = releasedSyncCycle()
     const server = createHttpServer((incoming, outgoing) => {
         const requestPath = incoming.url ?? '/'
+        const commandId = matrixCommandId(incoming.method, requestPath)
+        if (commandId && (blockNextCommand || blockedCommandIds.has(commandId))) {
+            blockNextCommand = false
+            blockedCommandIds.add(commandId)
+            blockedCommandRequests += 1
+            incoming.resume()
+            const body = Buffer.from(JSON.stringify({
+                errcode: 'M_UNKNOWN',
+                error: 'Injected Android command upload failure before Gateway epoch rotation.',
+            }), 'utf8')
+            outgoing.writeHead(503, {
+                'content-type': 'application/json',
+                'content-length': String(body.byteLength),
+            })
+            outgoing.end(body)
+            return
+        }
         if (pendingGap && matrixGapRequestMatches(requestPath, pendingGap)) {
             const requestedGap = pendingGap
             const blockedCycle = gapCycle
@@ -1879,6 +2102,21 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
         redeliveredCommandTransactions: () => repeatedCommandTransactions,
         observedCommandIds: () => [...seenCommandIds],
         observedPutPaths: () => observedPutPaths.slice(-20),
+        blockNextCommand: () => {
+            blockNextCommand = true
+            return blockedCommandRequests
+        },
+        waitForBlockedCommand: after => waitFor(
+            () => blockedCommandRequests > after,
+            {
+                description: 'the APK command upload to reach the epoch-rotation fault gate',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
+        releaseBlockedCommand: () => {
+            blockNextCommand = false
+            blockedCommandIds.clear()
+        },
         injectNullOptionalSections: () => {
             requestedNullOptionalInjections += 1
             return completedNullOptionalInjections
@@ -2095,20 +2333,11 @@ function rewriteRepeatedCommandTransaction(
     seenTransactions: Set<string>,
     nextSequence: () => number,
 ): string {
-    if (method !== 'PUT') return path
+    const commandId = matrixCommandId(method, path)
+    if (!commandId) return path
     const queryIndex = path.indexOf('?')
     const pathname = queryIndex >= 0 ? path.slice(0, queryIndex) : path
     const query = queryIndex >= 0 ? path.slice(queryIndex) : ''
-    let decodedPathname: string
-    try {
-        decodedPathname = decodeURIComponent(pathname)
-    } catch {
-        return path
-    }
-    const commandId = decodedPathname.match(
-        /\/send\/io\.codever\.secure_control\.v1\/codever\.command\.([^./?]+)(?:\.|$)/u,
-    )?.[1]
-    if (!commandId) return path
 
     const redelivery = seenCommandIds.has(commandId)
     seenCommandIds.add(commandId)
@@ -2122,6 +2351,20 @@ function rewriteRepeatedCommandTransaction(
     return repeatedTransaction
         ? `${pathname}-e2e-redelivery-${redeliverySequence}${query}`
         : path
+}
+
+function matrixCommandId(method: string | undefined, path: string): string | undefined {
+    if (method !== 'PUT') return undefined
+    const pathname = path.split('?', 1)[0] ?? path
+    let decodedPathname: string
+    try {
+        decodedPathname = decodeURIComponent(pathname)
+    } catch {
+        return undefined
+    }
+    return decodedPathname.match(
+        /\/send\/io\.codever\.secure_control\.v1\/codever\.command\.([^./?]+)(?:\.|$)/u,
+    )?.[1]
 }
 
 async function closeHttpServer(server: HttpServer): Promise<void> {
@@ -2271,6 +2514,50 @@ async function waitForBrowserText(page: Page, text: string): Promise<void> {
         timeoutMs: CONVERGENCE_TIMEOUT_MS,
     })
     await assertBrowserHealthy(page)
+}
+
+async function requireBrowserPromptAfterGatewayEpoch(input: {
+    page: Page
+    prompt: string
+    serial: string
+    gatewayOutput(): string
+    rotation: {
+        previousRevisionEpochGeneration: number
+        currentRevisionEpochGeneration: number
+    }
+    stage: string
+}): Promise<void> {
+    try {
+        await waitForBrowserText(input.page, input.prompt)
+    } catch (error) {
+        const initialFailures = await diagnosticCount(
+            input.serial,
+            'command.transmission.failure action=prompt',
+        )
+        const recoveryFailures = await diagnosticCount(
+            input.serial,
+            'command.recovery.failure',
+        )
+        const rejection = input.gatewayOutput().match(
+            /\[matrix-gateway\] rejected [^\n]+Expected (?:command sequence|revision epoch)[^\n]*/iu,
+        )?.[0]
+        throw new Error(
+            `ANDROID GATEWAY EPOCH REGRESSION (${input.stage}): revision epoch generation `
+            + `${input.rotation.previousRevisionEpochGeneration} -> `
+            + `${input.rotation.currentRevisionEpochGeneration}, but the prompt never reached `
+            + `the browser/Agent. Native transmission failures=${initialFailures}, `
+            + `recovery failures=${recoveryFailures}, Gateway rejection=`
+            + `${JSON.stringify(rejection ?? 'none')}. ${formatError(error)}`,
+        )
+    }
+}
+
+function assertNoGatewayEpochRejection(output: string, stage: string): void {
+    assert.doesNotMatch(
+        output,
+        /\[matrix-gateway\] rejected .*Expected (?:command sequence|revision epoch)/iu,
+        `Gateway rejected the ${stage} against the rotated command scope`,
+    )
 }
 
 async function browserTextCount(page: Page, text: string): Promise<number> {
