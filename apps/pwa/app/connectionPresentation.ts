@@ -127,6 +127,11 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Connection could not resume",
     detail: "Restart Codever. If this continues, export diagnostics for support.",
   },
+  matrix_application_control_baseline_too_large: {
+    title: "Conversation sync needs attention",
+    detail:
+      "The Matrix server returned more current state than this client can safely process. Export diagnostics for support.",
+  },
 };
 
 const DEFAULT_COPY: Record<MatrixConnectionStatus, DetailCopy> = {

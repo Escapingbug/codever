@@ -50,6 +50,9 @@ type MatrixSyncGate = {
     injectNullOptionalSections(): number
     waitForNullOptionalInjection(after: number): Promise<void>
     waitForInjectedCursorAdvance(after: number): Promise<void>
+    injectOversizedApplicationBacklog(): number
+    waitForOversizedApplicationBacklog(after: number): Promise<void>
+    waitForFreshCursorAfterOversizedBacklog(after: number): Promise<void>
     hold(): number
     waitForInterception(after?: number, description?: string): Promise<void>
     release(): void
@@ -953,6 +956,30 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
+        process.stdout.write('  [A5q/12] Recovering a persisted cursor from an oversized Matrix backlog…\n')
+        const oversizedCursorResets = await diagnosticCount(
+            serial,
+            'matrix.application_control.cursor_reset reason=response_too_large',
+        )
+        const oversizedBaseline = syncGate.injectOversizedApplicationBacklog()
+        await syncGate.waitForOversizedApplicationBacklog(oversizedBaseline)
+        await syncGate.waitForFreshCursorAfterOversizedBacklog(oversizedBaseline)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.cursor_reset reason=response_too_large',
+            ) > oversizedCursorResets,
+            {
+                description: 'oversized Matrix backlog cursor reset diagnostic',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await android.waitFor(
+            'connected Android after oversized Matrix backlog recovery',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+
         process.stdout.write('  [A6/12] Recovering one pre-delivery Android command across a Matrix disconnect…\n')
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
@@ -1313,6 +1340,7 @@ export async function runAndroidAlphaJourney(
                 'foreground-notification-suppression',
                 'running-native-sync-survives-repeated-os-network-flaps',
                 'nullable-matrix-sync-sections-advance-native-cursor',
+                'oversized-matrix-backlog-resets-stale-cursor-and-reconnects',
                 'android-privacy-sanitize-review-deny-restore-restart',
                 'pre-delivery-matrix-recovery-exactly-once',
                 'post-commit-delete-result-loss-recovery-exactly-once',
@@ -1386,6 +1414,10 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
     let completedNullOptionalInjections = 0
     let injectedCursorAdvances = 0
     let injectedNextBatch: string | undefined
+    let requestedOversizedBacklogs = 0
+    let completedOversizedBacklogs = 0
+    let freshCursorsAfterOversizedBacklog = 0
+    let awaitingFreshCursor = false
     const observedPutPaths: string[] = []
     const seenCommandIds = new Set<string>()
     const seenCommandTransactions = new Set<string>()
@@ -1398,6 +1430,14 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
         ) {
             injectedCursorAdvances += 1
             injectedNextBatch = undefined
+        }
+        if (
+            awaitingFreshCursor &&
+            applicationControlRoomId(requestPath) &&
+            applicationControlSince(requestPath) === undefined
+        ) {
+            awaitingFreshCursor = false
+            freshCursorsAfterOversizedBacklog += 1
         }
         if (incoming.method === 'PUT') observedPutPaths.push(requestPath)
         const upstreamPath = rewriteRepeatedCommandTransaction(
@@ -1452,6 +1492,24 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
                     outgoing.end(mutated.body)
                     return
                 }
+                if (
+                    requestedOversizedBacklogs > completedOversizedBacklogs &&
+                    applicationControlSince(requestPath)
+                ) {
+                    response.resume()
+                    completedOversizedBacklogs += 1
+                    awaitingFreshCursor = true
+                    const body = oversizedMatrixSyncResponse()
+                    const headers = { ...response.headers }
+                    delete headers['content-length']
+                    delete headers['content-encoding']
+                    delete headers['transfer-encoding']
+                    headers['content-type'] = 'application/json'
+                    headers['content-length'] = String(body.byteLength)
+                    outgoing.writeHead(200, headers)
+                    outgoing.end(body)
+                    return
+                }
                 outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
                 response.pipe(outgoing)
                 response.resume()
@@ -1497,6 +1555,24 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
             () => injectedCursorAdvances > after,
             {
                 description: 'the native application sync cursor to advance past nullable sections',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
+        injectOversizedApplicationBacklog: () => {
+            requestedOversizedBacklogs += 1
+            return completedOversizedBacklogs
+        },
+        waitForOversizedApplicationBacklog: after => waitFor(
+            () => completedOversizedBacklogs > after,
+            {
+                description: 'the oversized Matrix application backlog injection',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        ),
+        waitForFreshCursorAfterOversizedBacklog: after => waitFor(
+            () => freshCursorsAfterOversizedBacklog > after,
+            {
+                description: 'the native Matrix receiver to replace its stale cursor',
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         ),
@@ -1596,6 +1672,16 @@ async function nullOptionalMatrixSyncResponse(
         body: Buffer.from(JSON.stringify(root), 'utf8'),
         nextBatch,
     }
+}
+
+function oversizedMatrixSyncResponse(): Buffer {
+    const responseLimit = 2 * 1024 * 1024
+    const padding = 'x'.repeat(responseLimit + 64 * 1024)
+    return Buffer.from(JSON.stringify({
+        next_batch: 's-oversized-backlog',
+        rooms: { join: {} },
+        padding,
+    }), 'utf8')
 }
 
 function heldSyncCycle(): { held: boolean; wait: Promise<void>; release(): void } {

@@ -771,6 +771,19 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    val cursorResetReason = applicationControlCursorResetReason(error, since)
+                    if (cursorResetReason != null) {
+                        currentFiles.applicationControlCursor.clear()
+                        since = null
+                        applicationControlSince = null
+                        diagnostics.record(
+                            "matrix.application_control.cursor_reset",
+                            mapOf("reason" to cursorResetReason),
+                        )
+                        onConvergenceRequired("application_control_cursor_reset")
+                        consecutiveFailures = 0
+                        continue
+                    }
                     if (error is MatrixApplicationControlPayloadException) {
                         diagnostics.record(
                             "matrix.application_control.receiver_rejected",
@@ -791,17 +804,6 @@ class MatrixConnectionRuntime(
                     }
                     if (
                         error is MatrixApplicationControlSyncException &&
-                        error.status == 400 &&
-                        since != null
-                    ) {
-                        currentFiles.applicationControlCursor.clear()
-                        since = null
-                        applicationControlSince = null
-                        diagnostics.record("matrix.application_control.cursor_reset")
-                        continue
-                    }
-                    if (
-                        error is MatrixApplicationControlSyncException &&
                         error.fatal
                     ) {
                         diagnostics.record(
@@ -815,6 +817,29 @@ class MatrixConnectionRuntime(
                                     accept(
                                         MatrixRuntimeEvent.Failed(
                                             "matrix_application_control_sync_rejected",
+                                            blocked = true,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        return@launch
+                    }
+                    if (error is MatrixApplicationControlResponseTooLargeException) {
+                        diagnostics.record(
+                            "matrix.application_control.receiver_rejected",
+                            mapOf(
+                                "error" to error.javaClass.simpleName,
+                                "reason" to "baseline_response_too_large",
+                            ),
+                        )
+                        ready.completeExceptionally(error)
+                        scope.launch {
+                            mutex.withLock {
+                                if (driverGeneration == generation) {
+                                    accept(
+                                        MatrixRuntimeEvent.Failed(
+                                            "matrix_application_control_baseline_too_large",
                                             blocked = true,
                                         ),
                                     )

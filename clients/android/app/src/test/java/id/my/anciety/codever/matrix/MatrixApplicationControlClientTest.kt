@@ -250,8 +250,33 @@ class MatrixApplicationControlClientTest {
             ),
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
-        assertEquals(100, timeline.getValue("limit").jsonPrimitive.content.toInt())
+        assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
         assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `oversized persisted cursor response resets to a fresh bounded baseline`() {
+        assertEquals(
+            "response_too_large",
+            applicationControlCursorResetReason(
+                MatrixApplicationControlResponseTooLargeException(2 * 1024 * 1024),
+                "s-stale",
+            ),
+        )
+        assertEquals(
+            "server_rejected",
+            applicationControlCursorResetReason(
+                MatrixApplicationControlSyncException(400, null),
+                "s-invalid",
+            ),
+        )
+        assertEquals(
+            null,
+            applicationControlCursorResetReason(
+                MatrixApplicationControlResponseTooLargeException(2 * 1024 * 1024),
+                since = null,
+            ),
+        )
     }
 
     @Test

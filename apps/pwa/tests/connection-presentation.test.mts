@@ -41,6 +41,20 @@ test("blocked native codes provide actionable copy instead of leaking raw codes"
   assert.equal(presentation.detail.includes("matrix_sdk_internal_failure"), false);
 });
 
+test("an unrecoverably large Matrix baseline is visible instead of syncing forever", () => {
+  const presentation = deriveConnectionPresentation(
+    "error",
+    "matrix_application_control_baseline_too_large",
+  );
+  assert.equal(presentation.state, "blocked");
+  assert.equal(presentation.title, "Conversation sync needs attention");
+  assert.match(presentation.detail, /export diagnostics/i);
+  assert.equal(
+    presentation.detail.includes("matrix_application_control_baseline_too_large"),
+    false,
+  );
+});
+
 test("missing native session with retained trust is presented as a repairable state", () => {
   const presentation = deriveConnectionPresentation(
     "error",

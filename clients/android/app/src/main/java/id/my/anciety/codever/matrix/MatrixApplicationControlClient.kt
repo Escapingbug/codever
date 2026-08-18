@@ -189,8 +189,10 @@ class RestrictedHttpsMatrixApplicationControlSyncTransport(
                     val read = stream.read(buffer)
                     if (read < 0) break
                     total += read
-                    require(total <= MAX_RESPONSE_BYTES) {
-                        "Matrix control sync response is too large."
+                    if (total > MAX_RESPONSE_BYTES) {
+                        throw MatrixApplicationControlResponseTooLargeException(
+                            MAX_RESPONSE_BYTES,
+                        )
                     }
                     output.write(buffer, 0, read)
                 }
@@ -230,8 +232,26 @@ class MatrixApplicationControlSyncException(
     val fatal: Boolean get() = status == 401 || status == 403
 }
 
+class MatrixApplicationControlResponseTooLargeException(
+    val maximumBytes: Int,
+) : IllegalStateException(
+    "Matrix control sync response exceeded the $maximumBytes-byte safety limit.",
+)
+
 class MatrixApplicationControlPayloadException(message: String) :
     IllegalStateException(message)
+
+internal fun applicationControlCursorResetReason(
+    error: Throwable,
+    since: String?,
+): String? {
+    if (since == null) return null
+    return when {
+        error is MatrixApplicationControlResponseTooLargeException -> "response_too_large"
+        error is MatrixApplicationControlSyncException && error.status == 400 -> "server_rejected"
+        else -> null
+    }
+}
 
 /** Reads current replace-in-place Codever state independently of a /sync cursor. */
 class MatrixApplicationRoomStateClient(
@@ -418,7 +438,11 @@ class MatrixApplicationControlSyncClient(
                     })
                     put(
                         "limit",
-                        if (since == null) INITIAL_TIMELINE_LIMIT else LIVE_TIMELINE_LIMIT,
+                        if (since == null) {
+                            INITIAL_TIMELINE_LIMIT
+                        } else {
+                            LIVE_TIMELINE_LIMIT
+                        },
                     )
                 })
             })
@@ -517,7 +541,11 @@ class MatrixApplicationControlSyncClient(
 
     private companion object {
         const val INITIAL_TIMELINE_LIMIT = 0
-        const val LIVE_TIMELINE_LIMIT = 100
+        // Gateway timeline content is capped at 40 KiB. Keep one /sync page
+        // comfortably below the 2 MiB response budget after Matrix metadata
+        // and JSON framing. Larger backlogs are recovered through the
+        // authoritative Room State baseline and per-thread history paging.
+        const val LIVE_TIMELINE_LIMIT = 32
         const val LONG_POLL_TIMEOUT_MS = 30_000
         const val MAX_RETRY_AFTER_MS = 60_000L
     }
