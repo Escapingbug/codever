@@ -139,6 +139,8 @@ data class CommandTransmission(
     val idempotencyKey: String,
     val sequence: Long,
     val baseRevision: Long,
+    val revisionEpoch: String?,
+    val revisionEpochGeneration: Long?,
     val issuedAt: Long,
     val nonce: String,
     val payload: JsonObject,
@@ -150,6 +152,13 @@ data class CommandTransmission(
         requireUuid(idempotencyKey)
         requirePositiveJsonInteger(sequence, "Command sequence")
         requireNonnegativeJsonInteger(baseRevision, "Command base revision")
+        require((revisionEpoch == null) == (revisionEpochGeneration == null)) {
+            "Command revision epoch metadata is incomplete."
+        }
+        revisionEpoch?.let { requireOpaqueId(it, "revisionEpoch") }
+        revisionEpochGeneration?.let {
+            requirePositiveJsonInteger(it, "Command revision epoch generation")
+        }
         requireNonnegativeJsonInteger(issuedAt, "Command authentication timestamp")
         require(nonce.length in 16..256 && !nonce.any(Char::isISOControl)) {
             "Command authentication nonce is invalid."
@@ -162,8 +171,19 @@ data class CommandTransmission(
     override fun toString(): String =
         "CommandTransmission(operationId=$operationId, commandId=$commandId, " +
             "idempotencyKey=$idempotencyKey, sequence=$sequence, baseRevision=$baseRevision, " +
+            "revisionEpoch=<redacted>, revisionEpochGeneration=$revisionEpochGeneration, " +
             "issuedAt=$issuedAt, nonce=<redacted>, payload=<redacted>, recovery=$recovery)"
 }
+
+internal data class CommandEpochMigration(
+    val previousCommandId: String,
+    val currentCommandId: String,
+)
+
+internal data class GatewayCommandScopeReconciliation(
+    val epochChanged: Boolean,
+    val migratedCommands: List<CommandEpochMigration>,
+)
 
 enum class RevisionConflictAction {
     RETRY,

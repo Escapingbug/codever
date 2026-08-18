@@ -17,6 +17,8 @@ internal data class PersistedCommand(
     val sessionId: String?,
     val sequence: Long,
     val baseRevision: Long,
+    val revisionEpoch: String?,
+    val revisionEpochGeneration: Long?,
     val authenticationIssuedAt: Long?,
     val authenticationNonce: String?,
     val revision: Long?,
@@ -30,7 +32,9 @@ internal data class PersistedCommand(
             "retiredCommandIds=$retiredCommandIds, idempotencyKey=$idempotencyKey, " +
             "requestFingerprint=$requestFingerprint, state=$state, submittedAt=$submittedAt, " +
             "updatedAt=$updatedAt, sessionId=$sessionId, sequence=$sequence, " +
-            "baseRevision=$baseRevision, authenticationIssuedAt=$authenticationIssuedAt, " +
+            "baseRevision=$baseRevision, revisionEpoch=<redacted>, " +
+            "revisionEpochGeneration=$revisionEpochGeneration, " +
+            "authenticationIssuedAt=$authenticationIssuedAt, " +
             "authenticationNonce=<redacted>, revision=$revision, cancelRequested=$cancelRequested, " +
             "completion=$completion, expectedRevision=$expectedRevision, payload=<redacted>)"
 }
@@ -52,6 +56,8 @@ internal data class CommandOutboxMigration(
 internal data class CommandOutboxSnapshot(
     val lastAcknowledgedSequence: Long = 0,
     val lastRevision: Long = 0,
+    val revisionEpoch: String? = null,
+    val revisionEpochGeneration: Long? = null,
     val commands: List<PersistedCommand> = emptyList(),
     val released: List<ReleasedCommandTombstone> = emptyList(),
 )

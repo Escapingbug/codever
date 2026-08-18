@@ -1203,13 +1203,27 @@ export async function runAndroidAlphaJourney(
         )
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
         await waitFor(
-            async () => await diagnosticCount(
-                serial,
-                'service.ui_foreground running=false',
-            ) > backgroundLifecycleBaseline,
+            async () => {
+                const backgroundRecorded = await diagnosticCount(
+                    serial,
+                    'service.ui_foreground running=false',
+                ) > backgroundLifecycleBaseline
+                if (!backgroundRecorded) return false
+                const activities = await adbMaybe(
+                    serial,
+                    'shell',
+                    'dumpsys',
+                    'activity',
+                    'activities',
+                )
+                return resumedActivityLine(activities)?.includes(PACKAGE_NAME) == false
+            },
             {
                 description: 'Android Activity background lifecycle before foreground recovery',
-                timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+                // Immediately after an emulator reboot, recording the
+                // lifecycle plus two ADB reads can exceed the normal 1.5s UI
+                // budget even though HOME already owns the foreground.
+                timeoutMs: 5_000,
             },
         )
         await startMainActivity(serial)

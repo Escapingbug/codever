@@ -615,11 +615,18 @@ try {
         'Matrix thread roots remain recoverable after the replacement Gateway becomes ready',
         async () => {
             const output = gatewayProcess!.output
-            const readyMarker = 'Gateway ready with 1 trusted device(s).'
-            const readyOffset = output.lastIndexOf(readyMarker)
-            assert.notEqual(readyOffset, -1, 'Replacement Gateway never reported ready')
+            const readyMatches = [...output.matchAll(
+                /Gateway ready with (\d+) trusted device\(s\)\./gu,
+            )]
+            const readyMatch = readyMatches.at(-1)
+            assert.ok(readyMatch, 'Replacement Gateway never reported ready')
+            assert.ok(
+                Number(readyMatch[1]) > 0,
+                'Replacement Gateway reported ready without any trusted device',
+            )
+            const readyOffset = readyMatch.index + readyMatch[0].length
             assert.doesNotMatch(
-                output.slice(readyOffset + readyMarker.length),
+                output.slice(readyOffset),
                 /Couldn't find timeline for thread ID/u,
                 'Ready Gateway/Matrix SDK could not resolve a session thread root',
             )

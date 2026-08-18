@@ -12,6 +12,7 @@ import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -66,8 +67,7 @@ class EncryptedCommandOutboxStoreTest {
         outbox.claimForTransmission(receipt.commandId)
         val current = CommandOutboxCodec.encode(checkNotNull(store.load()))
             .toString(Charsets.UTF_8)
-        val legacy = current
-            .replace("\"schemaVersion\":3", "\"schemaVersion\":2")
+        val legacy = downgradeOutboxSchema(current, 2)
             .replace(Regex("\"authenticationIssuedAt\":[0-9]+"), "\"authenticationIssuedAt\":null")
             .replace(Regex("\"authenticationNonce\":\"[^\"]+\""), "\"authenticationNonce\":null")
             .toByteArray(Charsets.UTF_8)
@@ -93,14 +93,14 @@ class EncryptedCommandOutboxStoreTest {
         outbox.claimForTransmission(receipt.commandId)
         val legacy = CommandOutboxCodec.encode(checkNotNull(store.load()))
             .toString(Charsets.UTF_8)
-            .replace("\"schemaVersion\":3", "\"schemaVersion\":2")
+            .let { downgradeOutboxSchema(it, 2) }
             .replace(Regex("\"authenticationIssuedAt\":[0-9]+"), "\"authenticationIssuedAt\":null")
             .replace(Regex("\"authenticationNonce\":\"[^\"]+\""), "\"authenticationNonce\":null")
             .toByteArray(Charsets.UTF_8)
         val migratedStore = InMemoryCommandOutboxStore(CommandOutboxCodec.decode(legacy))
         val restored = DurableCommandOutbox(migratedStore, IncrementingClock(), ids)
 
-        assertTrue(restored.updateKnownSequence(receipt.sequence))
+        restored.reconcileGatewayScope("epoch-current", 1, receipt.sequence, 0)
         val next = restored.enqueue(
             java.util.UUID.randomUUID().toString(),
             buildJsonObject { put("operation", "session.create") },
@@ -119,7 +119,7 @@ class EncryptedCommandOutboxStoreTest {
         )
         val legacy = CommandOutboxCodec.encode(checkNotNull(store.load()))
             .toString(Charsets.UTF_8)
-            .replace("\"schemaVersion\":3", "\"schemaVersion\":1")
+            .let { downgradeOutboxSchema(it, 1) }
             .replace(",\"authenticationIssuedAt\":null", "")
             .replace(",\"authenticationNonce\":null", "")
             .toByteArray(Charsets.UTF_8)
@@ -158,6 +158,34 @@ class EncryptedCommandOutboxStoreTest {
     }
 
     @Test
+    fun `schema three authenticated command retains its lease for epoch reconciliation`() {
+        val sourceStore = InMemoryCommandOutboxStore()
+        val ids = IncrementingIds()
+        val source = DurableCommandOutbox(sourceStore, IncrementingClock(), ids)
+        val receipt = source.enqueue(
+            java.util.UUID.randomUUID().toString(),
+            buildJsonObject { put("operation", "session.create") },
+        )
+        val lease = source.claimForTransmission(receipt.commandId)!!
+        val schemaThree = CommandOutboxCodec.encode(checkNotNull(sourceStore.load()))
+            .toString(Charsets.UTF_8)
+            .let { downgradeOutboxSchema(it, 3) }
+            .toByteArray(Charsets.UTF_8)
+
+        val decoded = CommandOutboxCodec.decode(schemaThree)
+        val decodedCommand = decoded.commands.single()
+        assertEquals(lease.issuedAt, decodedCommand.authenticationIssuedAt)
+        assertEquals(lease.nonce, decodedCommand.authenticationNonce)
+        assertNull(decodedCommand.revisionEpoch)
+        assertNull(decoded.revisionEpoch)
+
+        val restoredStore = InMemoryCommandOutboxStore(decoded)
+        val restored = DurableCommandOutbox(restoredStore, IncrementingClock(), ids)
+        val reconciliation = restored.reconcileGatewayScope("epoch-current", 2, 0, 0)
+        assertEquals(receipt.commandId, reconciliation.migratedCommands.single().previousCommandId)
+    }
+
+    @Test
     fun `encrypted store atomically rewrites legacy quarantine to current schema`() {
         val blob = MemoryBlobStore()
         val cipher = JvmAesGcmCipher()
@@ -171,7 +199,7 @@ class EncryptedCommandOutboxStoreTest {
         outbox.claimForTransmission(receipt.commandId)
         val legacy = decryptOutbox(checkNotNull(blob.value), cipher, scope)
             .toString(Charsets.UTF_8)
-            .replace("\"schemaVersion\":3", "\"schemaVersion\":2")
+            .let { downgradeOutboxSchema(it, 2) }
             .replace(Regex("\"authenticationIssuedAt\":[0-9]+"), "\"authenticationIssuedAt\":null")
             .replace(Regex("\"authenticationNonce\":\"[^\"]+\""), "\"authenticationNonce\":null")
             .toByteArray(Charsets.UTF_8)
@@ -184,7 +212,7 @@ class EncryptedCommandOutboxStoreTest {
         assertEquals(1, migrated.released.size)
         assertEquals(CommandOutboxMigration(2, 1), migrations.single())
         val rewritten = decryptOutbox(checkNotNull(blob.value), cipher, scope)
-        assertTrue(rewritten.toString(Charsets.UTF_8).contains("\"schemaVersion\":3"))
+        assertTrue(rewritten.toString(Charsets.UTF_8).contains("\"schemaVersion\":4"))
         assertTrue(CommandOutboxCodec.decode(rewritten).commands.isEmpty())
     }
 
@@ -202,7 +230,7 @@ class EncryptedCommandOutboxStoreTest {
         outbox.claimForTransmission(receipt.commandId)
         val legacy = decryptOutbox(checkNotNull(blob.value), cipher, scope)
             .toString(Charsets.UTF_8)
-            .replace("\"schemaVersion\":3", "\"schemaVersion\":2")
+            .let { downgradeOutboxSchema(it, 2) }
             .replace(Regex("\"authenticationIssuedAt\":[0-9]+"), "\"authenticationIssuedAt\":null")
             .replace(Regex("\"authenticationNonce\":\"[^\"]+\""), "\"authenticationNonce\":null")
             .toByteArray(Charsets.UTF_8)
@@ -215,6 +243,11 @@ class EncryptedCommandOutboxStoreTest {
         }
         assertArrayEquals(original, blob.value)
     }
+
+    private fun downgradeOutboxSchema(value: String, targetVersion: Int): String = value
+        .replace("\"schemaVersion\":4", "\"schemaVersion\":$targetVersion")
+        .replace(",\"revisionEpoch\":null", "")
+        .replace(",\"revisionEpochGeneration\":null", "")
 
     private class MemoryBlobStore : CommandOutboxBlobStore {
         var value: ByteArray? = null

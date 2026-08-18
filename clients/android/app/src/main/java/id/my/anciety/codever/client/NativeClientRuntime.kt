@@ -88,6 +88,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -193,6 +194,7 @@ class NativeClientRuntime(
     }
     private val transfers = AttachmentTransferManager(files.transfers, matrix, cipher, now)
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
+    private val commandTransmissionJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
@@ -762,6 +764,7 @@ class NativeClientRuntime(
 
     fun releaseCommand(commandId: String): Boolean {
         ackTimeouts.remove(commandId)?.cancel()
+        cancelCommandTransmission(commandId)
         cancelScheduledCommandRecovery(commandId)
         outbox.get(commandId)?.operationId?.let(automaticRevisionRetryAttempts::remove)
         val released = outbox.release(commandId)
@@ -809,6 +812,7 @@ class NativeClientRuntime(
             ackTimeouts.remove(commandId)?.cancel()
             outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
         }
+        cancelAllCommandTransmissions()
         cancelAllCommandRecoveries()
         automaticRevisionRetryAttempts.clear()
         authoritativeStateRefreshJob?.cancel()
@@ -839,6 +843,7 @@ class NativeClientRuntime(
         matrix.setObserver(null)
         ackTimeouts.values.forEach(Job::cancel)
         ackTimeouts.clear()
+        cancelAllCommandTransmissions()
         cancelAllCommandRecoveries()
         automaticRevisionRetryAttempts.clear()
         authoritativeStateRefreshJob?.cancel()
@@ -936,18 +941,23 @@ class NativeClientRuntime(
 
     override suspend fun onAuthoritativeRoomState(events: List<MatrixDecryptedEvent>) {
         mutex.withLock {
+            var stage = "decode"
             try {
                 val decoded = mutableListOf<JsonObject>()
                 for (event in events) {
                     decodeMatrixRoomStateEvent(event)?.let(decoded::add)
                 }
+                stage = "materialize"
                 val materialized = materializeMatrixSessionDirectory(decoded)
+                stage = "project"
                 val snapshot = nativeProjection.applyRoomStateBatch(materialized)
+                stage = "completion"
                 materialized.forEach(::acceptCanonicalCommandCompletion)
                 if (
                     snapshot != null &&
                     authoritativeRoomStateReady(materialized.mapNotNull { it.string("kind") })
                 ) {
+                    stage = "gateway"
                     acceptGatewayState(snapshot, authoritative = true)
                 }
             } catch (error: CancellationException) {
@@ -957,6 +967,7 @@ class NativeClientRuntime(
                     "matrix.native_state_batch.rejected",
                     mapOf(
                         "error" to diagnosticErrorName(error),
+                        "stage" to stage,
                         "code" to if (error is CodeverSecurityException) {
                             error.code.name
                         } else {
@@ -973,22 +984,39 @@ class NativeClientRuntime(
     }
 
     private fun launchCommandTransmission(commandId: String, recovery: Boolean) {
-        scope.launch {
-            try {
-                transmit(commandId, recovery)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                diagnostics.record(
-                    "command.transmission.failure",
-                    mapOf(
-                        "action" to (outbox.operation(commandId)?.wireName ?: "unknown"),
-                        "stage" to if (recovery) "recovery" else "initial",
-                        "error" to diagnosticErrorName(error),
-                    ),
-                )
+        synchronized(commandTransmissionJobs) {
+            if (commandTransmissionJobs[commandId]?.isActive == true) return
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    transmit(commandId, recovery)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    diagnostics.record(
+                        "command.transmission.failure",
+                        mapOf(
+                            "action" to (outbox.operation(commandId)?.wireName ?: "unknown"),
+                            "stage" to if (recovery) "recovery" else "initial",
+                            "error" to diagnosticErrorName(error),
+                        ),
+                    )
+                } finally {
+                    val currentJob = coroutineContext[Job]
+                    if (currentJob != null) commandTransmissionJobs.remove(commandId, currentJob)
+                }
             }
+            commandTransmissionJobs[commandId] = job
+            job.start()
         }
+    }
+
+    private fun cancelCommandTransmission(commandId: String) {
+        commandTransmissionJobs.remove(commandId)?.cancel()
+    }
+
+    private fun cancelAllCommandTransmissions() {
+        commandTransmissionJobs.values.forEach(Job::cancel)
+        commandTransmissionJobs.clear()
     }
 
     /**
@@ -1120,13 +1148,22 @@ class NativeClientRuntime(
     private fun signedCommandContent(transmission: CommandTransmission): JsonObject {
         val activeTrust = trust ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
         val state = gatewayState ?: throw IllegalStateException("Gateway state is not synchronized yet.")
-        val revisionEpoch = state.string("revision_epoch")
-            ?: throw IllegalStateException("Gateway revision epoch is unavailable.")
+        val revisionEpoch = transmission.revisionEpoch
+            ?: throw IllegalStateException("Command revision epoch is unavailable.")
+        val revisionEpochGeneration = transmission.revisionEpochGeneration
+            ?: throw IllegalStateException("Command revision epoch generation is unavailable.")
+        require(state.string("revision_epoch") == revisionEpoch) {
+            "Command belongs to a retired Gateway revision epoch."
+        }
+        require(state.long("revision_epoch_generation") == revisionEpochGeneration) {
+            "Command belongs to a retired Gateway revision epoch generation."
+        }
         val operation = transmission.payload.string("operation")
             ?: throw IllegalArgumentException("Command operation is invalid.")
         // These fields define the durable command fingerprint and must never
-        // change across recovery attempts. The outbox assigns issuedAt once,
-        // before the first send can leave the device.
+        // change across recovery attempts inside one Gateway epoch. An epoch
+        // migration first retires the old command id and creates a fresh
+        // durable authentication lease.
         val commandIssuedAt = transmission.issuedAt
         val command = buildJsonObject {
             put("kind", "codever.command")
@@ -1748,14 +1785,88 @@ class NativeClientRuntime(
         if (extension.toString().toByteArray(Charsets.UTF_8).size > MAX_BRIDGE_EVENT_PAYLOAD_BYTES) return
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
         val revisionEpoch = extension.string("revision_epoch") ?: return
+        val revisionEpochGeneration = extension.long("revision_epoch_generation")
+            ?.takeIf { it > 0 } ?: return
         if (revisionEpoch.isBlank()) return
-        val changed = gatewayState != extension
-        gatewayState = extension
-        if (authoritative) {
-            outbox.updateKnownSequence(authoritativeDeviceSequence(extension))
+        val previousState = gatewayState
+        val previousRevisionEpoch = previousState?.string("revision_epoch")
+        val previousRevisionEpochGeneration = previousState?.long("revision_epoch_generation")
+        if (previousRevisionEpoch != null && previousRevisionEpochGeneration != null) {
+            if (revisionEpochGeneration < previousRevisionEpochGeneration) return
+            require(
+                revisionEpochGeneration != previousRevisionEpochGeneration ||
+                    revisionEpoch == previousRevisionEpoch,
+            ) { "Gateway revision epoch changed without advancing its generation." }
+            require(
+                revisionEpochGeneration == previousRevisionEpochGeneration ||
+                    revisionEpoch != previousRevisionEpoch,
+            ) { "Gateway revision epoch generation advanced without changing its epoch." }
         }
-        outbox.updateKnownRevision(revision)
+        val scopeAdvanced = previousRevisionEpochGeneration != null &&
+            revisionEpochGeneration > previousRevisionEpochGeneration
+        if (scopeAdvanced && !authoritative) {
+            // A live Room State event proves that the previous command scope
+            // is retired, but it is not a publication barrier for the paged
+            // session directory. Stop accepting commands until one complete
+            // authoritative batch binds the durable outbox to this epoch.
+            gatewayStateSynchronized = false
+            diagnostics.record(
+                "gateway.command_scope.invalidated",
+                mapOf("generation" to revisionEpochGeneration.toString()),
+            )
+        }
+        var commandScopeStage = "outbox"
+        val reconciliation = try {
+            if (authoritative) {
+                commandScopeStage = "device_sequence"
+                val acknowledgedSequence = authoritativeDeviceSequence(extension)
+                commandScopeStage = "outbox"
+                outbox.reconcileGatewayScope(
+                    revisionEpoch = revisionEpoch,
+                    revisionEpochGeneration = revisionEpochGeneration,
+                    acknowledgedSequence = acknowledgedSequence,
+                    revision = revision,
+                )
+            } else {
+                outbox.updateKnownRevision(
+                    revisionEpoch,
+                    revisionEpochGeneration,
+                    revision,
+                )
+                null
+            }
+        } catch (error: Exception) {
+            if (authoritative) gatewayStateSynchronized = false
+            if (authoritative) {
+                diagnostics.record(
+                    "command.scope.reconcile_rejected",
+                    mapOf(
+                        "stage" to commandScopeStage,
+                        "code" to commandScopeErrorCode(error),
+                    ),
+                )
+            }
+            throw error
+        }
+        val changed = previousState != extension
+        gatewayState = extension
         if (authoritative) gatewayStateSynchronized = true
+        reconciliation?.migratedCommands?.forEach { migration ->
+            ackTimeouts.remove(migration.previousCommandId)?.cancel()
+            cancelCommandTransmission(migration.previousCommandId)
+            cancelScheduledCommandRecovery(migration.previousCommandId)
+            outbox.get(migration.currentCommandId)?.let(::publishCommand)
+            launchCommandTransmission(migration.currentCommandId, recovery = false)
+        }
+        if (reconciliation?.epochChanged == true) {
+            diagnostics.record(
+                "command.scope.reconciled",
+                mapOf(
+                    "generation" to revisionEpochGeneration.toString(),
+                    "migrated" to reconciliation.migratedCommands.size.toString(),
+                ),
+            )
+        }
         val convergenceRevision = gatewayConvergenceMinimumRevision
         if (convergenceRevision != null && revision >= convergenceRevision) {
             cancelGatewayConvergenceFallback()
@@ -1779,6 +1890,9 @@ class NativeClientRuntime(
         diagnostics.record(
             if (changed) "gateway.room_state.accepted" else "gateway.room_state.duplicate",
         )
+        if (scopeAdvanced && !authoritative) {
+            startAuthoritativeStateRefresh(recoverTransport = false)
+        }
         resumePendingSafeRevisionConflict()
         schedulePendingCommandRecoveries(immediate = true)
         refreshSnapshot(publishLifecycle = true)
@@ -1798,6 +1912,21 @@ class NativeClientRuntime(
         }
         return matches.single().long("sequence")?.takeIf { it >= 0 }
             ?: throw IllegalArgumentException("Gateway command sequence is invalid.")
+    }
+
+    private fun commandScopeErrorCode(error: Throwable): String = when {
+        error.message == "Gateway state does not contain exactly one command sequence for this device." ->
+            "device_sequence_cardinality"
+        error.message == "Gateway command sequence is invalid." -> "device_sequence_invalid"
+        error.message == "Gateway revision epoch changed without advancing its generation." ->
+            "epoch_without_generation"
+        error.message == "Gateway revision epoch generation advanced without changing its epoch." ->
+            "generation_without_epoch"
+        error.message == "More than one unacknowledged command cannot cross a Gateway revision epoch." ->
+            "multiple_pending_commands"
+        error.message?.startsWith("Command outbox") == true -> "outbox_validation"
+        error.message?.startsWith("Command revision epoch") == true -> "command_epoch_validation"
+        else -> "invalid_state"
     }
 
     private fun acceptCommandAck(extension: JsonObject) {

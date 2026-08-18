@@ -215,7 +215,7 @@ class DurableCommandOutboxTest {
     @Test
     fun `revision discard advances the durable base and allows immediate replacement`() {
         val fixture = fixture()
-        assertTrue(fixture.outbox.updateKnownRevision(212))
+        fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 212)
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "discard"))
         assertEquals(212L, fixture.outbox.claimForTransmission(receipt.commandId)?.baseRevision)
         fixture.outbox.recordRevisionConflict(receipt.commandId, receipt.sequence, 348)
@@ -232,6 +232,161 @@ class DurableCommandOutboxTest {
         val next = restored.enqueue(UUID.randomUUID().toString(), payload("prompt", "replacement"))
         assertEquals(receipt.sequence, next.sequence)
         assertEquals(348L, restored.claimForTransmission(next.commandId)?.baseRevision)
+    }
+
+    @Test
+    fun `authenticated higher revision epoch resets an idle command cursor`() {
+        val fixture = fixture()
+        fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
+        val first = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "first"))
+        fixture.outbox.claimForTransmission(first.commandId)
+        assertTrue(fixture.outbox.recordAcknowledgement(first.commandId, 1, 1))
+        assertTrue(
+            fixture.outbox.recordCompletion(
+                CommandCompletion(first.commandId, 1, 1, CommandOutcome.SUCCEEDED),
+            ),
+        )
+
+        val reconciliation = fixture.outbox.reconcileGatewayScope("epoch-2", 2, 0, 0)
+        val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "next"))
+        val transmission = fixture.outbox.claimForTransmission(next.commandId)!!
+
+        assertTrue(reconciliation.epochChanged)
+        assertTrue(reconciliation.migratedCommands.isEmpty())
+        assertEquals(1, transmission.sequence)
+        assertEquals("epoch-2", transmission.revisionEpoch)
+        assertEquals(2L, transmission.revisionEpochGeneration)
+    }
+
+    @Test
+    fun `unacknowledged command receives a fresh identity and signature lease in a higher epoch`() {
+        val fixture = fixture()
+        fixture.outbox.reconcileGatewayScope("epoch-1", 1, 7, 19)
+        val original = fixture.outbox.enqueue(
+            UUID.randomUUID().toString(),
+            payload("prompt", "survive rotation"),
+        )
+        val originalTransmission = fixture.outbox.claimForTransmission(original.commandId)!!
+
+        val reconciliation = fixture.outbox.reconcileGatewayScope("epoch-2", 2, 0, 3)
+        val migration = reconciliation.migratedCommands.single()
+        val migrated = fixture.outbox.get(migration.currentCommandId)!!
+        val migratedTransmission = fixture.outbox.claimForTransmission(migrated.commandId)!!
+
+        assertEquals(original.commandId, migration.previousCommandId)
+        assertEquals(original.operationId, migrated.operationId)
+        assertEquals(original.idempotencyKey, migrated.idempotencyKey)
+        assertEquals(CommandState.QUEUED, migrated.state)
+        assertEquals(1, migrated.sequence)
+        assertEquals(3, migratedTransmission.baseRevision)
+        assertEquals("epoch-2", migratedTransmission.revisionEpoch)
+        assertEquals(2L, migratedTransmission.revisionEpochGeneration)
+        assertNotEquals(originalTransmission.commandId, migratedTransmission.commandId)
+        assertNotEquals(originalTransmission.nonce, migratedTransmission.nonce)
+        assertFalse(
+            fixture.outbox.recordCompletion(
+                CommandCompletion(
+                    original.commandId,
+                    original.sequence,
+                    20,
+                    CommandOutcome.SUCCEEDED,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `legacy unscoped accepted command binds in place instead of executing twice`() {
+        val fixture = fixture()
+        val original = fixture.outbox.enqueue(
+            UUID.randomUUID().toString(),
+            payload("prompt", "already accepted"),
+        )
+        val originalTransmission = fixture.outbox.claimForTransmission(original.commandId)!!
+
+        val reconciliation = fixture.outbox.reconcileGatewayScope(
+            revisionEpoch = "epoch-current",
+            revisionEpochGeneration = 4,
+            acknowledgedSequence = original.sequence,
+            revision = 9,
+        )
+        val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
+        val recovery = restored.claimRecovery(original.commandId)!!
+
+        assertTrue(reconciliation.epochChanged)
+        assertTrue(reconciliation.migratedCommands.isEmpty())
+        assertEquals(original.commandId, recovery.commandId)
+        assertEquals(originalTransmission.nonce, recovery.nonce)
+        assertEquals("epoch-current", recovery.revisionEpoch)
+        assertEquals(4L, recovery.revisionEpochGeneration)
+    }
+
+    @Test
+    fun `legacy unscoped pending command receives a fresh current epoch identity`() {
+        val fixture = fixture()
+        val original = fixture.outbox.enqueue(
+            UUID.randomUUID().toString(),
+            payload("prompt", "not accepted"),
+        )
+        fixture.outbox.claimForTransmission(original.commandId)
+
+        val reconciliation = fixture.outbox.reconcileGatewayScope(
+            revisionEpoch = "epoch-current",
+            revisionEpochGeneration = 4,
+            acknowledgedSequence = 0,
+            revision = 3,
+        )
+        val migration = reconciliation.migratedCommands.single()
+        val migrated = fixture.outbox.claimForTransmission(migration.currentCommandId)!!
+
+        assertEquals(original.commandId, migration.previousCommandId)
+        assertNotEquals(original.commandId, migrated.commandId)
+        assertEquals(1L, migrated.sequence)
+        assertEquals(3L, migrated.baseRevision)
+        assertEquals("epoch-current", migrated.revisionEpoch)
+        assertEquals(4L, migrated.revisionEpochGeneration)
+    }
+
+    @Test
+    fun `completion from a retired accepted epoch does not advance the current cursor`() {
+        val fixture = fixture()
+        fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
+        val accepted = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "old"))
+        fixture.outbox.claimForTransmission(accepted.commandId)
+        assertTrue(fixture.outbox.recordAcknowledgement(accepted.commandId, 1, 1))
+
+        fixture.outbox.reconcileGatewayScope("epoch-2", 2, 0, 0)
+        assertTrue(
+            fixture.outbox.recordCompletion(
+                CommandCompletion(accepted.commandId, 1, 1, CommandOutcome.SUCCEEDED),
+            ),
+        )
+        val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "new"))
+        val transmission = fixture.outbox.claimForTransmission(next.commandId)!!
+
+        assertEquals(1, transmission.sequence)
+        assertEquals("epoch-2", transmission.revisionEpoch)
+    }
+
+    @Test
+    fun `stale or conflicting authenticated epoch state cannot replace the current scope`() {
+        val fixture = fixture()
+        fixture.outbox.reconcileGatewayScope("epoch-2", 2, 4, 8)
+
+        val stale = fixture.outbox.reconcileGatewayScope("epoch-1", 1, 99, 99)
+        assertFalse(stale.epochChanged)
+        assertThrows(IllegalArgumentException::class.java) {
+            fixture.outbox.reconcileGatewayScope("different-epoch", 2, 0, 0)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            fixture.outbox.reconcileGatewayScope("epoch-2", 3, 0, 0)
+        }
+
+        val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "still current"))
+        val transmission = fixture.outbox.claimForTransmission(next.commandId)!!
+        assertEquals(5, transmission.sequence)
+        assertEquals("epoch-2", transmission.revisionEpoch)
+        assertEquals(2L, transmission.revisionEpochGeneration)
     }
 
     @Test

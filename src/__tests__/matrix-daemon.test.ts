@@ -987,6 +987,109 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
+    it('republishes an unchanged session directory inside a rotated replay epoch', async () => {
+        const fixture = await securityFixture()
+        const client = new FakeMatrixGatewayClient()
+        const createRunner = () => new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+        const gatewayStateKey = JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ])
+
+        const firstRunner = createRunner()
+        await firstRunner.start()
+        const firstGatewayRequest = client.state.get(gatewayStateKey)!
+        const firstGateway = await openNativeState(
+            firstGatewayRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+        ) as {
+            revision_epoch: string
+            revision_epoch_generation: number
+            session_directory: {
+                generation: number
+                slot: number
+                state_key_prefix: string
+                digest: string
+            }
+        }
+        const firstDirectoryRequest = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+            `${firstGateway.session_directory.state_key_prefix}.`
+                + `${firstGateway.session_directory.slot}.0`,
+        ]))!
+        const firstStateKey = await openNativeStateKey(
+            firstGatewayRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+        )
+        await expect(openNativeState(
+            firstDirectoryRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+            firstStateKey,
+        )).resolves.toMatchObject({
+            revision_epoch: firstGateway.revision_epoch,
+            revision_epoch_generation: 1,
+            directory_digest: firstGateway.session_directory.digest,
+        })
+        await firstRunner.stop()
+
+        await writeFile(
+            fixture.config.replayLedgerPath,
+            `${JSON.stringify({
+                version: 2,
+                kind: 'generation',
+                generation: 'replay-generation-2',
+            })}\n`,
+            'utf8',
+        )
+
+        const secondRunner = createRunner()
+        await secondRunner.start()
+        const secondGatewayRequest = client.state.get(gatewayStateKey)!
+        const secondGateway = await openNativeState(
+            secondGatewayRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+        ) as typeof firstGateway
+        expect(secondGateway.revision_epoch_generation).toBe(2)
+        expect(secondGateway.revision_epoch).not.toBe(firstGateway.revision_epoch)
+        expect(secondGateway.session_directory.digest).toBe(firstGateway.session_directory.digest)
+        expect(secondGateway.session_directory.generation)
+            .toBeGreaterThan(firstGateway.session_directory.generation)
+
+        const secondDirectoryRequest = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+            `${secondGateway.session_directory.state_key_prefix}.`
+                + `${secondGateway.session_directory.slot}.0`,
+        ]))!
+        const secondStateKey = await openNativeStateKey(
+            secondGatewayRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+        )
+        await expect(openNativeState(
+            secondDirectoryRequest,
+            fixture.keys,
+            fixture.gatewayKeys,
+            secondStateKey,
+        )).resolves.toMatchObject({
+            revision_epoch: secondGateway.revision_epoch,
+            revision_epoch_generation: 2,
+            directory_generation: secondGateway.session_directory.generation,
+            directory_digest: secondGateway.session_directory.digest,
+        })
+        await secondRunner.stop()
+    })
+
     it('refreshes signed Gateway liveness without advancing semantic state', async () => {
         const fixture = await securityFixture()
         const gatewayKeys = await generateDeviceKeyPair()

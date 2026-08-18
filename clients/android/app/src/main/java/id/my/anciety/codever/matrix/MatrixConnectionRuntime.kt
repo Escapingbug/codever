@@ -69,12 +69,6 @@ class MatrixConnectionRuntime(
         events -> for (event in events) onDecryptedEvent(event)
     },
 ) {
-    private data class ApplicationControlSendContext(
-        val session: StoredMatrixSession,
-        val generation: Long,
-        val ready: CompletableDeferred<Unit>,
-    )
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val networkTransitionMutex = Mutex()
@@ -209,29 +203,21 @@ class MatrixConnectionRuntime(
     }.await()
 
     suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): Unit = scope.async {
-        val context = mutex.withLock {
+        val session = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
-            if (driver == null) {
-                throw IllegalStateException("The native Matrix connection is not ready.")
-            }
-            ApplicationControlSendContext(
-                session = secrets?.session
-                    ?: throw IllegalStateException("The native Matrix session is unavailable."),
-                generation = driverGeneration,
-                ready = applicationControlReady,
-            )
+            secrets?.session
+                ?: throw IllegalStateException("The native Matrix session is unavailable.")
         }
+        // Application-control commands are signed by Codever and sent through
+        // an independent Matrix HTTP client. Do not couple this durable outbound
+        // lane to the inbound SDK sync driver's current generation: a stalled
+        // /sync may restart that driver while the homeserver's send endpoint is
+        // still healthy. New commands are already gated on an authenticated,
+        // synchronized Gateway state by NativeClientRuntime; persisted recovery
+        // commands must remain able to retry during an inbound-sync restart.
         withTimeout(SEND_OPERATION_TIMEOUT_MS) {
-            context.ready.await()
-            mutex.withLock {
-                check(
-                    driver != null &&
-                        driverGeneration == context.generation &&
-                        applicationControlReady === context.ready,
-                ) { "The native Matrix connection changed before the control request was sent." }
-            }
-            applicationControlClient.send(context.session, contentJson, transactionId)
+            applicationControlClient.send(session, contentJson, transactionId)
             Unit
         }
     }.await()

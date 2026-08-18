@@ -411,11 +411,15 @@ export class MatrixGatewayRunner {
         const digest = createHash('sha256')
             .update(canonicalJson(sessions))
             .digest('base64url')
-        const current = this.secureContent.latestNativeRoomState(runtime.config.roomId)
+        const currentGateway = this.secureContent.latestNativeRoomState(runtime.config.roomId)
             .filter(state => state.kind === 'gateway_state')
             .sort((left, right) => right.state_version - left.state_version)[0]
-            ?.session_directory
-        if (current?.digest === digest) return current
+        const current = currentGateway?.session_directory
+        if (
+            current?.digest === digest
+            && currentGateway?.revision_epoch === revision.revision_epoch
+            && currentGateway.revision_epoch_generation === revision.revision_epoch_generation
+        ) return current
 
         const generation = Math.max(stateVersion, (current?.generation ?? -1) + 1)
         const slot = generation % 3

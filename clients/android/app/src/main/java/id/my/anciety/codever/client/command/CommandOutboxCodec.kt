@@ -23,7 +23,10 @@ internal data class DecodedCommandOutbox(
 
 internal object CommandOutboxCodec {
     private const val LEGACY_SCHEMA_VERSION = 1
-    private const val SCHEMA_VERSION = 3
+    private const val AUTHENTICATION_SCHEMA_VERSION = 3
+    private const val RETIRED_COMMAND_IDS_SCHEMA_VERSION = 3
+    private const val EPOCH_SCOPE_SCHEMA_VERSION = 4
+    private const val SCHEMA_VERSION = EPOCH_SCOPE_SCHEMA_VERSION
     private const val MAX_PLAINTEXT_BYTES = 3 * 1024 * 1024
     private const val MAX_COMMANDS = 128
     private const val MAX_TOMBSTONES = 4_096
@@ -35,6 +38,8 @@ internal object CommandOutboxCodec {
             put("schemaVersion", SCHEMA_VERSION)
             put("lastAcknowledgedSequence", value.lastAcknowledgedSequence)
             put("lastRevision", value.lastRevision)
+            putNullableString("revisionEpoch", value.revisionEpoch)
+            putNullableLong("revisionEpochGeneration", value.revisionEpochGeneration)
             put("commands", buildJsonArray { value.commands.forEach { add(encodeCommand(it)) } })
             put("released", buildJsonArray { value.released.forEach { add(encodeTombstone(it)) } })
         }.toString().toByteArray(Charsets.UTF_8)
@@ -47,6 +52,7 @@ internal object CommandOutboxCodec {
     internal fun decodeForStorage(bytes: ByteArray): DecodedCommandOutbox {
         require(bytes.size <= MAX_PLAINTEXT_BYTES) { "Command outbox is too large." }
         val root = json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
+        val schemaVersion = root.requiredLong("schemaVersion")
         root.requireExactKeys(
             setOf(
                 "schemaVersion",
@@ -54,9 +60,12 @@ internal object CommandOutboxCodec {
                 "lastRevision",
                 "commands",
                 "released",
-            ),
+            ) + if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION.toLong()) {
+                setOf("revisionEpoch", "revisionEpochGeneration")
+            } else {
+                emptySet()
+            },
         )
-        val schemaVersion = root.requiredLong("schemaVersion")
         require(schemaVersion in LEGACY_SCHEMA_VERSION.toLong()..SCHEMA_VERSION.toLong()) {
             "Command outbox schema is unsupported."
         }
@@ -69,10 +78,23 @@ internal object CommandOutboxCodec {
         val snapshot = CommandOutboxSnapshot(
             lastAcknowledgedSequence = root.requiredLong("lastAcknowledgedSequence"),
             lastRevision = root.requiredLong("lastRevision"),
+            revisionEpoch = if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION.toLong()) {
+                root.optionalString("revisionEpoch")
+            } else {
+                null
+            },
+            revisionEpochGeneration = if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION.toLong()) {
+                root.optionalLong("revisionEpochGeneration")
+            } else {
+                null
+            },
             commands = commands,
             released = released,
         )
-        validateSnapshot(snapshot, requireSubmittedAuthentication = schemaVersion == SCHEMA_VERSION.toLong())
+        validateSnapshot(
+            snapshot,
+            requireSubmittedAuthentication = schemaVersion >= AUTHENTICATION_SCHEMA_VERSION.toLong(),
+        )
         val decoded = migrateLegacySnapshot(snapshot, schemaVersion.toInt())
         validateSnapshot(decoded.snapshot, requireSubmittedAuthentication = true)
         return decoded
@@ -92,6 +114,8 @@ internal object CommandOutboxCodec {
         putNullableString("sessionId", value.sessionId)
         put("sequence", value.sequence)
         put("baseRevision", value.baseRevision)
+        putNullableString("revisionEpoch", value.revisionEpoch)
+        putNullableLong("revisionEpochGeneration", value.revisionEpochGeneration)
         putNullableLong("authenticationIssuedAt", value.authenticationIssuedAt)
         putNullableString("authenticationNonce", value.authenticationNonce)
         putNullableLong("revision", value.revision)
@@ -123,6 +147,10 @@ internal object CommandOutboxCodec {
             setOf("authenticationIssuedAt", "authenticationNonce")
         } else {
             emptySet()
+        } + if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION) {
+            setOf("revisionEpoch", "revisionEpochGeneration")
+        } else {
+            emptySet()
         }
         value.requireExactKeys(
             keys,
@@ -139,6 +167,16 @@ internal object CommandOutboxCodec {
             sessionId = value.optionalString("sessionId"),
             sequence = value.requiredLong("sequence"),
             baseRevision = value.requiredLong("baseRevision"),
+            revisionEpoch = if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION) {
+                value.optionalString("revisionEpoch")
+            } else {
+                null
+            },
+            revisionEpochGeneration = if (schemaVersion >= EPOCH_SCOPE_SCHEMA_VERSION) {
+                value.optionalLong("revisionEpochGeneration")
+            } else {
+                null
+            },
             authenticationIssuedAt = if (schemaVersion >= 2) {
                 value.optionalLong("authenticationIssuedAt")
             } else {
@@ -211,12 +249,16 @@ internal object CommandOutboxCodec {
     private fun decodeTombstone(value: JsonObject, schemaVersion: Int): ReleasedCommandTombstone {
         value.requireExactKeys(
             setOf("operationId", "commandId", "idempotencyKey", "requestFingerprint", "releasedAt") +
-                if (schemaVersion >= SCHEMA_VERSION) setOf("retiredCommandIds") else emptySet(),
+                if (schemaVersion >= RETIRED_COMMAND_IDS_SCHEMA_VERSION) {
+                    setOf("retiredCommandIds")
+                } else {
+                    emptySet()
+                },
         )
         return ReleasedCommandTombstone(
             operationId = value.requiredString("operationId"),
             commandId = value.requiredString("commandId"),
-            retiredCommandIds = if (schemaVersion >= SCHEMA_VERSION) {
+            retiredCommandIds = if (schemaVersion >= RETIRED_COMMAND_IDS_SCHEMA_VERSION) {
                 value.requiredArray("retiredCommandIds").map { it.requiredStringValue() }
             } else {
                 emptyList()
@@ -233,6 +275,13 @@ internal object CommandOutboxCodec {
     ) {
         requireNonnegativeJsonInteger(value.lastAcknowledgedSequence, "Last acknowledged sequence")
         requireNonnegativeJsonInteger(value.lastRevision, "Last revision")
+        require((value.revisionEpoch == null) == (value.revisionEpochGeneration == null)) {
+            "Command outbox revision epoch metadata is incomplete."
+        }
+        value.revisionEpoch?.let { requireOpaqueId(it, "revisionEpoch") }
+        value.revisionEpochGeneration?.let {
+            requirePositiveJsonInteger(it, "Revision epoch generation")
+        }
         require(value.commands.size <= MAX_COMMANDS && value.released.size <= MAX_TOMBSTONES) {
             "Command outbox capacity is exceeded."
         }
@@ -276,7 +325,11 @@ internal object CommandOutboxCodec {
             requireFingerprint(it.requestFingerprint)
             requireNonnegativeJsonInteger(it.releasedAt, "Released command timestamp")
         }
-        val unacknowledged = value.commands.filter { it.sequence > value.lastAcknowledgedSequence }
+        val unacknowledged = value.commands.filter {
+            it.revisionEpoch == value.revisionEpoch &&
+                it.revisionEpochGeneration == value.revisionEpochGeneration &&
+                it.sequence > value.lastAcknowledgedSequence
+        }
         require(unacknowledged.map { it.sequence }.distinct().size <= 1) {
             "Command outbox contains more than one unacknowledged sequence."
         }
@@ -296,6 +349,13 @@ internal object CommandOutboxCodec {
         require(value.updatedAt >= value.submittedAt) { "Command timestamps are invalid." }
         requirePositiveJsonInteger(value.sequence, "Command sequence")
         requireNonnegativeJsonInteger(value.baseRevision, "Command base revision")
+        require((value.revisionEpoch == null) == (value.revisionEpochGeneration == null)) {
+            "Command revision epoch metadata is incomplete."
+        }
+        value.revisionEpoch?.let { requireOpaqueId(it, "revisionEpoch") }
+        value.revisionEpochGeneration?.let {
+            requirePositiveJsonInteger(it, "Command revision epoch generation")
+        }
         value.authenticationIssuedAt?.let {
             requireNonnegativeJsonInteger(it, "Command authentication timestamp")
         }

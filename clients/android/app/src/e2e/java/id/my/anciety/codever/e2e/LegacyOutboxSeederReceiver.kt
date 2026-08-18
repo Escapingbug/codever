@@ -63,8 +63,8 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         } finally {
             plaintext.fill(0)
         }
-        check(current.getValue("schemaVersion").jsonPrimitive.long == 3L) {
-            "The fixture requires a current schema-3 outbox."
+        check(current.getValue("schemaVersion").jsonPrimitive.long == 4L) {
+            "The fixture requires a current schema-4 outbox."
         }
         val currentCommands = current.getValue("commands").jsonArray
         val terminalStates = setOf("succeeded", "failed", "cancelled")
@@ -81,12 +81,17 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         val released = current.getValue("released").jsonArray.map { element ->
             JsonObject(element.jsonObject.filterKeys { key -> key != "retiredCommandIds" })
         }
+        val legacyCommands = currentCommands.map { element ->
+            JsonObject(element.jsonObject.filterKeys { key ->
+                key != "revisionEpoch" && key != "revisionEpochGeneration"
+            })
+        }
         val legacy = buildJsonObject {
             put("schemaVersion", 2)
             put("lastAcknowledgedSequence", sequence - 1L)
             put("lastRevision", current.getValue("lastRevision"))
             put("commands", buildJsonArray {
-                currentCommands.forEach(::add)
+                legacyCommands.forEach(::add)
                 add(buildJsonObject {
                     put("operationId", operationId)
                     put("commandId", commandId)
