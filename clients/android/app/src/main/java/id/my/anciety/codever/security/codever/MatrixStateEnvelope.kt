@@ -100,6 +100,7 @@ object MatrixStateEnvelopeCodec {
     private val STATE_EVENT_TYPES = setOf(
         "io.codever.gateway.current.v2",
         "io.codever.session.current.v2",
+        "io.codever.session.directory.v2",
     )
 }
 

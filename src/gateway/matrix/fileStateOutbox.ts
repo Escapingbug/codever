@@ -43,6 +43,7 @@ interface DecodedStateOutboxEntry {
      * replaced by the authoritative state published during Gateway startup.
      */
     legacyGatewayStateWithoutCommandSequences: boolean
+    legacyGatewayStateWithoutDirectory: boolean
 }
 
 export class FileMatrixStateOutbox {
@@ -84,7 +85,10 @@ export class FileMatrixStateOutbox {
             if (entry.kind === 'pending') {
                 const { version: _version, kind: _kind, ...delivery } = entry
                 this.deliveries.set(entry.deliveryId, delivery)
-                if (decoded.legacyGatewayStateWithoutCommandSequences) {
+                if (
+                    decoded.legacyGatewayStateWithoutCommandSequences
+                    || decoded.legacyGatewayStateWithoutDirectory
+                ) {
                     legacyGatewayDeliveries.add(entry.deliveryId)
                 }
                 if (!this.terminal.has(entry.deliveryId)) {
@@ -358,16 +362,34 @@ function validateEntry(value: unknown): DecodedStateOutboxEntry {
         const legacyGatewayStateWithoutCommandSequences =
             content?.kind === 'gateway_state'
             && !Object.prototype.hasOwnProperty.call(content, 'command_sequences')
+        const legacyGatewayStateWithoutDirectory =
+            content?.kind === 'gateway_state'
+            && !Object.prototype.hasOwnProperty.call(content, 'session_directory')
+        const migratedContent = content?.kind === 'gateway_state'
+            ? {
+                ...content,
+                ...(legacyGatewayStateWithoutCommandSequences ? { command_sequences: [] } : {}),
+                ...(legacyGatewayStateWithoutDirectory
+                    ? {
+                        session_directory: {
+                            generation: 0,
+                            state_version: 0,
+                            slot: 0,
+                            page_count: 0,
+                            state_key_prefix: 'legacy-rebuild-required',
+                            digest: createHash('sha256').update('[]').digest('base64url'),
+                        },
+                    }
+                    : {}),
+            }
+            : entry.content
         return {
             entry: {
                 ...entry,
-                content: matrixStateContentSchema.parse(
-                    legacyGatewayStateWithoutCommandSequences
-                        ? { ...content, command_sequences: [] }
-                        : entry.content,
-                ),
+                content: matrixStateContentSchema.parse(migratedContent),
             } as unknown as StatePendingEntry,
             legacyGatewayStateWithoutCommandSequences,
+            legacyGatewayStateWithoutDirectory,
         }
     }
     if (entry.kind === 'delivered') {
@@ -379,6 +401,7 @@ function validateEntry(value: unknown): DecodedStateOutboxEntry {
         return {
             entry: entry as unknown as StateDeliveredEntry,
             legacyGatewayStateWithoutCommandSequences: false,
+            legacyGatewayStateWithoutDirectory: false,
         }
     }
     if (entry.kind === 'superseded') {
@@ -388,6 +411,7 @@ function validateEntry(value: unknown): DecodedStateOutboxEntry {
         return {
             entry: entry as unknown as StateSupersededEntry,
             legacyGatewayStateWithoutCommandSequences: false,
+            legacyGatewayStateWithoutDirectory: false,
         }
     }
     throw new TypeError('unknown record kind')

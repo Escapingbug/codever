@@ -683,11 +683,20 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
     /const initialTimeline = [^;]*getLiveTimeline\(\)\.getEvents\(\)/,
     "startup must not queue room history ahead of live conversation events",
   );
-  assert.match(matrix, /await client\.roomState\(config\.roomId\)/);
+  assert.doesNotMatch(
+    matrix,
+    /await client\.roomState\(config\.roomId\)/,
+    "authoritative recovery must not depend on an unpaginated whole-room state response",
+  );
   assert.match(
     matrix,
-    /const decodedState: MatrixStateContent\[\] = \[gatewayContent\];[\s\S]*for \(const event of sessionEvents\)[\s\S]*nativeProjection\.applyRoomStateBatch\(decodedState\)[\s\S]*authoritativeStateInitialized = true;[\s\S]*await onGatewayState\(snapshot\)/,
-    "a complete Matrix Room State response must reach the UI atomically",
+    /client\.getStateEvent\([\s\S]*CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE[\s\S]*CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE[\s\S]*matrixDirectoryStateKey\(descriptor, pageIndex\)/,
+    "Gateway state and its bounded directory pages must be directly addressable",
+  );
+  assert.match(
+    matrix,
+    /sameMatrixDirectory\(before, after\)[\s\S]*validateMatrixDirectory\(after, pages\)[\s\S]*nativeProjection\.applyRoomStateBatch\(decodedState\)[\s\S]*authoritativeStateInitialized = true;[\s\S]*await onGatewayState\(snapshot\)/,
+    "one stable and complete Matrix directory generation must reach the UI atomically",
   );
   assert.doesNotMatch(
     matrix,

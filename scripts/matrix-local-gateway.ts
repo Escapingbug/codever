@@ -556,6 +556,19 @@ function providerInputText(input: Parameters<AgentProvider['startQuery']>[0]): s
 }
 
 async function deterministicE2eResponse(input: AgentQueryInput): Promise<string> {
+    const prompt = providerInputText(input)
+    const largeResponse = prompt.match(/CODEVER_E2E_LARGE_RESPONSE:([A-Z0-9-]+)/u)?.[1]
+    if (largeResponse) {
+        const lines = Array.from({ length: 640 }, (_, index) =>
+            `large-output-${largeResponse}-${index.toString().padStart(4, '0')}-` +
+            '持久化分页恢复必须完整且可重复验证',
+        )
+        return [
+            `CODEVER-E2E-LARGE-BEGIN-${largeResponse}`,
+            ...lines,
+            `CODEVER-E2E-LARGE-END-${largeResponse}`,
+        ].join('\n')
+    }
     if (typeof input === 'string') return 'Codever deterministic E2E response'
     const attachmentMarkerPattern = /CODEVER_E2E_ATTACHMENT_MARKER:([A-Z0-9-]+)/u
     const fileReferencePattern = /^- ([^:\n]+): (.+) \(([^,\n]+), (\d+) bytes\)$/gmu

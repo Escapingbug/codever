@@ -40,11 +40,13 @@ import id.my.anciety.codever.client.events.compactSnapshotCommands
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
+import id.my.anciety.codever.matrix.CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
 import id.my.anciety.codever.matrix.CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
 import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRuntimePhase
+import id.my.anciety.codever.matrix.MatrixSessionDirectoryLocator
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
@@ -617,6 +619,7 @@ class NativeClientRuntime(
         }
         val public = mutex.withLock {
             check(pendingPairing === pending) { "The pairing request is no longer active." }
+            val synchronizedBeforeTrustCommit = gatewayStateSynchronized
             PairingSecurity.verifyResponse(
                 signedResponse,
                 pending.offer,
@@ -628,7 +631,17 @@ class NativeClientRuntime(
             trustStore.save(nextTrust)
             trust = nextTrust
             trustStorageBlocked = false
-            gatewayStateSynchronized = false
+            gatewayStateSynchronized = MatrixSessionRepairPolicy.retainSynchronizedGatewayState(
+                repairingSession = pending.repairingSession,
+                synchronizedBeforeTrustCommit = synchronizedBeforeTrustCommit,
+            )
+            diagnostics.record(
+                "pairing.transaction.trust_committed",
+                mapOf(
+                    "repair" to pending.repairingSession.toString(),
+                    "state_synchronized" to gatewayStateSynchronized.toString(),
+                ),
+            )
             pendingPairing = null
             runCatching { pairingStore.clear() }
                 .onFailure { error ->
@@ -912,6 +925,15 @@ class NativeClientRuntime(
         }
     }
 
+    override suspend fun onAuthoritativeGatewayState(
+        event: MatrixDecryptedEvent,
+    ): MatrixSessionDirectoryLocator = mutex.withLock {
+        val plaintext = decodeMatrixRoomStateEvent(event)
+            ?: error("The current Matrix Gateway state is unavailable.")
+        require(plaintext.string("kind") == "gateway_state")
+        matrixSessionDirectoryLocator(plaintext)
+    }
+
     override suspend fun onAuthoritativeRoomState(events: List<MatrixDecryptedEvent>) {
         mutex.withLock {
             try {
@@ -919,11 +941,12 @@ class NativeClientRuntime(
                 for (event in events) {
                     decodeMatrixRoomStateEvent(event)?.let(decoded::add)
                 }
-                val snapshot = nativeProjection.applyRoomStateBatch(decoded)
-                decoded.forEach(::acceptCanonicalCommandCompletion)
+                val materialized = materializeMatrixSessionDirectory(decoded)
+                val snapshot = nativeProjection.applyRoomStateBatch(materialized)
+                materialized.forEach(::acceptCanonicalCommandCompletion)
                 if (
                     snapshot != null &&
-                    authoritativeRoomStateReady(decoded.mapNotNull { it.string("kind") })
+                    authoritativeRoomStateReady(materialized.mapNotNull { it.string("kind") })
                 ) {
                     acceptGatewayState(snapshot, authoritative = true)
                 }
@@ -1253,7 +1276,8 @@ class NativeClientRuntime(
         val eventType = root.string("type") ?: return
         if (
             eventType == CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE ||
-            eventType == CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+            eventType == CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE ||
+            eventType == CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
         ) {
             val plaintext = decodeMatrixRoomState(event, root, content, eventType) ?: return
             acceptCanonicalCommandCompletion(plaintext)
@@ -1456,7 +1480,8 @@ class NativeClientRuntime(
         val eventType = root.string("type") ?: return null
         if (
             eventType != CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-            eventType != CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+            eventType != CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE &&
+            eventType != CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
         ) return null
         return decodeMatrixRoomState(event, root, content, eventType)
     }
@@ -1538,6 +1563,10 @@ class NativeClientRuntime(
             "session_state" -> require(
                 eventType == CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE &&
                     plaintext.string("session_id") == stateKey,
+            )
+            "session_directory" -> require(
+                eventType == CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE &&
+                    matrixDirectoryStateKey(plaintext) == stateKey,
             )
             else -> error("Unsupported Codever Matrix Room State payload.")
         }
@@ -2212,6 +2241,13 @@ class NativeClientRuntime(
             ?: pending.request?.let(::pairingRecoveryExpiresAt)
             ?: pending.offer.offer.expiresAt
 
+    /**
+     * Matrix restoration and bridge startup run on different dispatchers. Keep
+     * snapshot replacement and lifecycle publication in one critical section
+     * so an older RESTORING observation cannot be emitted after a newer
+     * WAITING_FOR_SESSION/repair observation.
+     */
+    @Synchronized
     private fun refreshSnapshot(publishLifecycle: Boolean) {
         val next = refreshedSnapshot()
         eventHub.updateSnapshot(next)
@@ -2465,6 +2501,110 @@ class NativeClientRuntime(
     private fun JsonObject.int(key: String): Int? = get(key)?.jsonPrimitive?.intOrNull
     private fun JsonObject.objectValue(key: String): JsonObject = get(key) as? JsonObject
         ?: throw IllegalArgumentException("$key must be an object.")
+
+    private fun matrixSessionDirectoryLocator(gateway: JsonObject): MatrixSessionDirectoryLocator {
+        val value = gateway.objectValue("session_directory")
+        require(
+            value.keys == setOf(
+                "generation", "state_version", "slot", "page_count",
+                "state_key_prefix", "digest",
+            ),
+        )
+        val prefix = value.string("state_key_prefix")
+            ?.takeIf { it.isNotBlank() && it.length <= 128 }
+            ?: error("Matrix session directory prefix is invalid.")
+        val digest = value.string("digest")
+            ?.takeIf { runCatching { Base64Url.decode(it).size == 32 }.getOrDefault(false) }
+            ?: error("Matrix session directory digest is invalid.")
+        return MatrixSessionDirectoryLocator(
+            generation = value.long("generation")?.also { require(it >= 0) }
+                ?: error("Matrix session directory generation is invalid."),
+            stateVersion = value.long("state_version")?.also { require(it >= 0) }
+                ?: error("Matrix session directory state version is invalid."),
+            slot = value.int("slot")?.also { require(it in 0..2) }
+                ?: error("Matrix session directory slot is invalid."),
+            pageCount = value.int("page_count")?.also { require(it in 0..100_000) }
+                ?: error("Matrix session directory page count is invalid."),
+            stateKeyPrefix = prefix,
+            digest = digest,
+        )
+    }
+
+    private fun matrixDirectoryStateKey(page: JsonObject): String {
+        val prefix = page.string("state_key_prefix")
+            ?.takeIf { it.isNotBlank() && it.length <= 128 }
+            ?: error("Matrix session directory prefix is invalid.")
+        val slot = page.int("directory_slot")?.also { require(it in 0..2) }
+            ?: error("Matrix session directory slot is invalid.")
+        val index = page.int("page_index")?.also { require(it in 0 until 100_000) }
+            ?: error("Matrix session directory page index is invalid.")
+        return "$prefix.$slot.$index"
+    }
+
+    private fun materializeMatrixSessionDirectory(decoded: List<JsonObject>): List<JsonObject> {
+        val gateways = decoded.filter { it.string("kind") == "gateway_state" }
+        require(gateways.size == 1) { "A Matrix directory snapshot requires one Gateway state." }
+        require(decoded.all { it.string("kind") in setOf("gateway_state", "session_directory") })
+        val gateway = gateways.single()
+        val locator = matrixSessionDirectoryLocator(gateway)
+        val pages = decoded.filter { it.string("kind") == "session_directory" }
+            .sortedBy { it.int("page_index") }
+        require(pages.size == locator.pageCount) { "Matrix session directory is incomplete." }
+        val sessionIds = mutableSetOf<String>()
+        val sessions = mutableListOf<Pair<JsonObject, JsonObject>>()
+        pages.forEachIndexed { pageIndex, page ->
+            require(page.string("gateway_id") == gateway.string("gateway_id"))
+            require(page.string("conversation_id") == gateway.string("conversation_id"))
+            require(page.string("revision_epoch") == gateway.string("revision_epoch"))
+            require(page.long("revision_epoch_generation") == gateway.long("revision_epoch_generation"))
+            require(page.long("state_version") == locator.stateVersion)
+            require(page.long("directory_generation") == locator.generation)
+            require(page.int("directory_slot") == locator.slot)
+            require(page.string("directory_digest") == locator.digest)
+            require(page.string("state_key_prefix") == locator.stateKeyPrefix)
+            require(page.int("page_index") == pageIndex)
+            require(page.int("page_count") == locator.pageCount)
+            val pageSessions = page["sessions"] as? JsonArray
+                ?: error("Matrix session directory page has no sessions.")
+            require(pageSessions.size <= 32)
+            for (element in pageSessions) {
+                val session = element as? JsonObject
+                    ?: error("Matrix session directory entry is not an object.")
+                val sessionId = session.string("session_id")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: error("Matrix session directory entry has no ID.")
+                require(sessionIds.add(sessionId)) {
+                    "Matrix session directory repeats session $sessionId."
+                }
+                sessions += page to session
+            }
+        }
+        val digest = CodeverCrypto.sha256Base64Url(
+            CanonicalJson.bytes(JsonArray(sessions.map { it.second })),
+        )
+        require(digest == locator.digest) { "Matrix session directory digest is invalid." }
+        val entities = sessions.map { (page, session) ->
+            buildJsonObject {
+                put("version", 2)
+                put("kind", "session_state")
+                put("gateway_id", page.getValue("gateway_id"))
+                put("conversation_id", page.getValue("conversation_id"))
+                put("revision", page.getValue("revision"))
+                put("revision_epoch", page.getValue("revision_epoch"))
+                put("revision_epoch_generation", page.getValue("revision_epoch_generation"))
+                put("state_version", page.getValue("state_version"))
+                put("session_id", session.getValue("session_id"))
+                put("state", if (session["archived"]?.jsonPrimitive?.content == "true") {
+                    "archived"
+                } else {
+                    "active"
+                })
+                put("session", session)
+                put("updated_at", page.getValue("updated_at"))
+            }
+        }
+        return listOf(gateway) + entities
+    }
 
     private companion object {
         const val BRIDGE_REPLAY_EVENT_LIMIT = 100

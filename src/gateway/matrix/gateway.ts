@@ -5,11 +5,15 @@ import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     capabilityRenewalRequestSchema,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+    canonicalJson,
     type CodeverCommand,
     type CapabilityRenewalRequest,
     type JsonValue,
     type MatrixGatewayCapabilities,
+    type MatrixRoomSession,
+    type MatrixSessionDirectoryDescriptor,
     type MatrixSessionState,
     type SessionExtensionBinding,
     type SessionExtensionSummary,
@@ -236,27 +240,40 @@ export class MatrixGatewayRunner {
             const changedStates = desiredStates.filter(state =>
                 !sameSessionEntity(state, published.get(state.session_id))
             )
-            const gatewayState = await this.gatewayRoomState(
+            const directory = await this.publishNativeSessionDirectory(
                 runtime,
                 snapshot,
                 stateVersion,
                 revision,
                 updatedAt,
             )
-            await this.secureContent.setNativeRoomStateBatch(
-                runtime.config,
-                [
-                    ...changedStates.map(content => ({
+            const gatewayState = await this.gatewayRoomState(
+                runtime,
+                snapshot,
+                stateVersion,
+                revision,
+                updatedAt,
+                directory,
+            )
+            if (changedStates.length > 0) {
+                await this.secureContent.setNativeRoomStateBatch(
+                    runtime.config,
+                    changedStates.map(content => ({
                         eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
                         stateKey: content.session_id,
                         content,
                     })),
-                    {
-                        eventType: CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
-                        stateKey: this.config.gatewayId,
-                        content: gatewayState,
-                    },
-                ],
+                    this.client,
+                )
+            }
+            // Directory pages are published first and individual entity
+            // updates second. The Gateway entity is the commit marker that
+            // makes the new immutable directory generation discoverable.
+            await this.secureContent.setNativeRoomState(
+                runtime.config,
+                CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+                this.config.gatewayId,
+                gatewayState,
                 this.client,
             )
         })))
@@ -303,6 +320,13 @@ export class MatrixGatewayRunner {
         revision: NativeRevision,
         updatedAt: number,
     ): Promise<void> {
+        const directory = await this.publishNativeSessionDirectory(
+            runtime,
+            snapshot,
+            stateVersion,
+            revision,
+            updatedAt,
+        )
         await this.secureContent.setNativeRoomState(
             runtime.config,
             CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
@@ -313,6 +337,7 @@ export class MatrixGatewayRunner {
                 stateVersion,
                 revision,
                 updatedAt,
+                directory,
             ),
             this.client,
         )
@@ -324,6 +349,7 @@ export class MatrixGatewayRunner {
         stateVersion: number,
         revision: NativeRevision,
         updatedAt: number,
+        sessionDirectory: MatrixSessionDirectoryDescriptor,
     ) {
         const activeDevices = await this.activeTrustedDevicesForRoom(runtime)
         const commandSequences = await Promise.all(activeDevices.map(async device => ({
@@ -360,8 +386,80 @@ export class MatrixGatewayRunner {
                 permission_mode: runtime.workspace.permissionMode,
             },
             capabilities: nativeRoomStateCapabilities(snapshot.capabilities),
+            session_directory: sessionDirectory,
             updated_at: updatedAt,
         }
+    }
+
+    private async publishNativeSessionDirectory(
+        runtime: RoomRuntime,
+        snapshot: GatewayStateSnapshot,
+        stateVersion: number,
+        revision: NativeRevision,
+        updatedAt: number,
+    ): Promise<MatrixSessionDirectoryDescriptor> {
+        const sessions = snapshot.sessions
+            .map(session => nativeSessionState(
+                this.config.gatewayId,
+                runtime,
+                session,
+                stateVersion,
+                revision,
+                updatedAt,
+            ).session!)
+            .sort((left, right) => left.session_id.localeCompare(right.session_id))
+        const digest = createHash('sha256')
+            .update(canonicalJson(sessions))
+            .digest('base64url')
+        const current = this.secureContent.latestNativeRoomState(runtime.config.roomId)
+            .filter(state => state.kind === 'gateway_state')
+            .sort((left, right) => right.state_version - left.state_version)[0]
+            ?.session_directory
+        if (current?.digest === digest) return current
+
+        const generation = Math.max(stateVersion, (current?.generation ?? -1) + 1)
+        const slot = generation % 3
+        const stateKeyPrefix = matrixDirectoryStateKeyPrefix(this.config.gatewayId)
+        const pageSessions = packNativeSessionDirectoryPages(sessions, {
+            gatewayId: this.config.gatewayId,
+            conversationId: runtime.config.conversationId,
+            revision,
+            stateVersion,
+            generation,
+            slot,
+            digest,
+            stateKeyPrefix,
+            updatedAt,
+        })
+        const descriptor: MatrixSessionDirectoryDescriptor = {
+            generation,
+            state_version: stateVersion,
+            slot,
+            page_count: pageSessions.length,
+            state_key_prefix: stateKeyPrefix,
+            digest,
+        }
+        if (pageSessions.length > 0) {
+            await this.secureContent.setNativeRoomStateBatch(
+                runtime.config,
+                pageSessions.map((sessionsOnPage, pageIndex) => ({
+                    eventType: CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+                    stateKey: matrixDirectoryStateKey(descriptor, pageIndex),
+                    content: nativeSessionDirectoryPage(
+                        this.config.gatewayId,
+                        runtime,
+                        sessionsOnPage,
+                        descriptor,
+                        pageIndex,
+                        stateVersion,
+                        revision,
+                        updatedAt,
+                    ),
+                })),
+                this.client,
+            )
+        }
+        return descriptor
     }
 
     private async gatewayStateSnapshot(runtime: RoomRuntime): Promise<GatewayStateSnapshot> {
@@ -1650,11 +1748,32 @@ export class MatrixGatewayRunner {
                 updated_at: updatedAt,
                 ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
             }
+        const directory = await this.publishNativeSessionDirectory(
+            runtime,
+            snapshot,
+            stateVersion,
+            revision,
+            updatedAt,
+        )
         await this.secureContent.setNativeRoomState(
             runtime.config,
             CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
             sessionId,
             content,
+            this.client,
+        )
+        await this.secureContent.setNativeRoomState(
+            runtime.config,
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            this.config.gatewayId,
+            await this.gatewayRoomState(
+                runtime,
+                snapshot,
+                stateVersion,
+                revision,
+                updatedAt,
+                directory,
+            ),
             this.client,
         )
     }
@@ -1986,6 +2105,114 @@ function nativeSessionState(
         updated_at: updatedAt,
         ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
     }
+}
+
+const MATRIX_DIRECTORY_PAGE_MAX_PLAINTEXT_BYTES = 20 * 1024
+const MATRIX_DIRECTORY_PAGE_MAX_SESSIONS = 32
+
+type NativeDirectoryPageContext = {
+    gatewayId: string
+    conversationId: string
+    revision: NativeRevision
+    stateVersion: number
+    generation: number
+    slot: number
+    digest: string
+    stateKeyPrefix: string
+    updatedAt: number
+}
+
+function packNativeSessionDirectoryPages(
+    sessions: readonly MatrixRoomSession[],
+    context: NativeDirectoryPageContext,
+): MatrixRoomSession[][] {
+    const pages: MatrixRoomSession[][] = []
+    for (const session of sessions) {
+        const current = pages.at(-1) ?? []
+        const candidate = [...current, session]
+        if (
+            candidate.length <= MATRIX_DIRECTORY_PAGE_MAX_SESSIONS
+            && nativeDirectoryPageBytes(candidate, context) <=
+                MATRIX_DIRECTORY_PAGE_MAX_PLAINTEXT_BYTES
+        ) {
+            if (current.length === 0) pages.push(candidate)
+            else pages[pages.length - 1] = candidate
+            continue
+        }
+        if (
+            nativeDirectoryPageBytes([session], context) >
+            MATRIX_DIRECTORY_PAGE_MAX_PLAINTEXT_BYTES
+        ) {
+            throw new Error(
+                `Session ${session.session_id} is too large for one bounded Matrix directory page`,
+            )
+        }
+        pages.push([session])
+    }
+    return pages
+}
+
+function nativeDirectoryPageBytes(
+    sessions: readonly MatrixRoomSession[],
+    context: NativeDirectoryPageContext,
+): number {
+    return Buffer.byteLength(canonicalJson({
+        version: 2,
+        kind: 'session_directory',
+        gateway_id: context.gatewayId,
+        conversation_id: context.conversationId,
+        ...context.revision,
+        state_version: context.stateVersion,
+        directory_generation: context.generation,
+        directory_slot: context.slot,
+        directory_digest: context.digest,
+        state_key_prefix: context.stateKeyPrefix,
+        // Use the schema maxima while packing so digit growth cannot push a
+        // page over the encrypted event limit later.
+        page_index: 99_999,
+        page_count: 100_000,
+        sessions,
+        updated_at: context.updatedAt,
+    }), 'utf8')
+}
+
+function nativeSessionDirectoryPage(
+    gatewayId: string,
+    runtime: RoomRuntime,
+    sessions: readonly MatrixRoomSession[],
+    descriptor: MatrixSessionDirectoryDescriptor,
+    pageIndex: number,
+    stateVersion: number,
+    revision: NativeRevision,
+    updatedAt: number,
+) {
+    return {
+        version: 2 as const,
+        kind: 'session_directory' as const,
+        gateway_id: gatewayId,
+        conversation_id: runtime.config.conversationId,
+        ...revision,
+        state_version: stateVersion,
+        directory_generation: descriptor.generation,
+        directory_slot: descriptor.slot,
+        directory_digest: descriptor.digest,
+        state_key_prefix: descriptor.state_key_prefix,
+        page_index: pageIndex,
+        page_count: descriptor.page_count,
+        sessions: [...sessions],
+        updated_at: updatedAt,
+    }
+}
+
+function matrixDirectoryStateKeyPrefix(gatewayId: string): string {
+    return `codever.${createHash('sha256').update(gatewayId).digest('hex').slice(0, 24)}`
+}
+
+function matrixDirectoryStateKey(
+    descriptor: MatrixSessionDirectoryDescriptor,
+    pageIndex: number,
+): string {
+    return `${descriptor.state_key_prefix}.${descriptor.slot}.${pageIndex}`
 }
 
 function sameSessionEntity(

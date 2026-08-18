@@ -149,7 +149,10 @@ export class DeliveryOutbox {
 
         return this.enqueueReliable(lane, record, async () => {
             try {
-                await this.withRateLimitRetry(() => this.config.channelPort.edit!(messageId, message))
+                await this.withRateLimitRetry(() => this.config.channelPort.edit!(messageId, message, {
+                    terminal: options.terminal === true,
+                    progressive: false,
+                }))
                 record.status = 'edited'
             } catch (error) {
                 if (this.deferTimedOutDelivery(record, error, 'edited')) return
@@ -196,7 +199,10 @@ export class DeliveryOutbox {
             record.messageId = messageId
             const edit = this.config.channelPort.edit
             try {
-                await this.withRateLimitRetry(() => edit(messageId, message))
+                await this.withRateLimitRetry(() => edit(messageId, message, {
+                    terminal: options.terminal === true,
+                    progressive: false,
+                }))
                 record.status = 'edited'
             } catch (error) {
                 if (this.deferTimedOutDelivery(record, error, 'edited')) return
@@ -360,7 +366,10 @@ export class DeliveryOutbox {
     private async performProgressiveEdit(task: ProgressiveEditTask): Promise<void> {
         let requeued = false
         try {
-            await withTimeout(this.config.channelPort.edit!(task.messageId, task.message), this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS)
+            await withTimeout(this.config.channelPort.edit!(task.messageId, task.message, {
+                terminal: task.record.terminal === true,
+                progressive: true,
+            }), this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS)
             task.record.status = 'edited'
         } catch (error) {
             if (this.deferTimedOutDelivery(task.record, error, 'edited')) return

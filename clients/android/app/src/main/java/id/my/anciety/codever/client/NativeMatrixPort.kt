@@ -6,6 +6,7 @@ import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixConnectionRuntime
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
+import id.my.anciety.codever.matrix.MatrixSessionDirectoryLocator
 import id.my.anciety.codever.matrix.MatrixThreadHistoryBatch
 import id.my.anciety.codever.matrix.MatrixRuntimeStatus
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
@@ -20,6 +21,11 @@ interface NativeMatrixObserver {
     fun onTransportReady(identity: MatrixTransportIdentity)
     fun onConvergenceRequired(reason: String)
     suspend fun onDecryptedEvent(event: MatrixDecryptedEvent)
+    suspend fun onAuthoritativeGatewayState(
+        event: MatrixDecryptedEvent,
+    ): MatrixSessionDirectoryLocator {
+        throw UnsupportedOperationException("Matrix session-directory decoding is unavailable.")
+    }
     suspend fun onAuthoritativeRoomState(events: List<MatrixDecryptedEvent>) {
         for (event in events) onDecryptedEvent(event)
     }
@@ -65,6 +71,10 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         onTransportReady = { identity -> observer?.onTransportReady(identity) },
         onConvergenceRequired = { reason -> observer?.onConvergenceRequired(reason) },
         onDecryptedEvent = { event -> observer?.onDecryptedEvent(event) },
+        onAuthoritativeGatewayState = { event ->
+            observer?.onAuthoritativeGatewayState(event)
+                ?: throw IllegalStateException("The native Matrix observer is unavailable.")
+        },
         onAuthoritativeRoomState = { events -> observer?.onAuthoritativeRoomState(events) },
     )
 

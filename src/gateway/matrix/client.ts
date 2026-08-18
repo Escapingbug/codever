@@ -13,6 +13,7 @@ import type { RoomMessageEventContent } from 'matrix-js-sdk/lib/@types/events.js
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     canonicalJson,
 } from '@codever/protocol'
@@ -524,6 +525,7 @@ function assertSecureApplicationStateContent(request: MatrixApplicationStateEven
     const signedEnvelope = asRecord(stateEnvelope?.envelope)
     const expectsKeyRing = request.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
     const isSessionState = request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+        || request.eventType === CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
     if (
         content.version !== 2
         || content.kind !== 'state_envelope'

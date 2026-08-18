@@ -132,14 +132,22 @@ snapshot before the transport attempt. Retry and restart recovery preserve the
 same Matrix transaction ID. Targeted command acknowledgements/results continue
 to use single-recipient envelopes because they are executable, device-bound
 control traffic. Conversation history and session state do not: version-2
-clients recover current inventory from authenticated Room State and transcripts
-from signed session-thread relations. The pre-release
-Gateway state/history RPC handlers and schemas have been removed.
+clients recover current inventory from authenticated, directly addressed
+`io.codever.session.directory.v2` Room State pages and transcripts from signed
+session-thread relations. Gateway state names the committed directory
+generation and digest; clients read Gateway state before and after the bounded
+pages and apply the snapshot only when both descriptors match. No client scans
+the entire room state or timeline to discover sessions. The pre-release Gateway
+state/history RPC handlers and schemas have been removed.
 
 Sessions are Matrix threads. Stable application `logical_event_id` values
 decouple message/edit identity from Matrix event IDs, while retained timeline
 epochs let a late-joining authorized device recover history directly from
-Matrix. See `docs/matrix-native-conversation-protocol.md`.
+Matrix. Large visible output is split into deterministic 8 KiB UTF-8 timeline
+parts, and Android stores limited-`/sync` gaps in an encrypted cursor journal
+before advancing live sync. Gap recovery uses standard bounded `/messages`
+pagination and resumes after process death without blocking new live events.
+See `docs/matrix-native-conversation-protocol.md`.
 
 ## 4. Main Components
 
@@ -346,6 +354,13 @@ src/
 ## 6. Persistence Notes
 
 Topic-level state is the only active session persistence model. Group state stores shared channel settings such as cwd, model, provider, permission mode, verbosity, and timeout defaults.
+
+Matrix Gateway security stores use atomic replacement plus a cross-process lock
+whose owner records both PID and OS process-start identity. A clean exit removes
+only its own token. After an unclean exit, a replacement process reclaims the
+lock only when that exact owner no longer exists; elapsed wall-clock time never
+steals a live process's security lock. Android persists its Matrix `/sync`
+cursor and limited-gap journal under the account-scoped encrypted store.
 
 ## 7. Current Ownership
 

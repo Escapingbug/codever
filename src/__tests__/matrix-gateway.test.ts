@@ -92,6 +92,60 @@ describe('MatrixPort', () => {
         expect(transport.delivered).toHaveLength(1)
     })
 
+    it('chunks a large UTF-8 message into bounded, ordered Matrix events', async () => {
+        const transport = new InMemoryMatrixTransport()
+        const port = createPort(transport)
+        const text = `${'你'.repeat(4_000)}${'x'.repeat(9_000)}`
+
+        const result = await port.send({
+            text,
+            format: 'markdown',
+            replyMarkup: { idempotencyKey: 'large-agent-message' },
+        })
+
+        expect(result.messageId).toBe('$memory-1')
+        expect(transport.delivered.length).toBeGreaterThan(1)
+        const bodies = transport.delivered.map(delivery => String(delivery.content.body))
+        expect(bodies.join('')).toBe(text)
+        for (const [index, delivery] of transport.delivered.entries()) {
+            expect(new TextEncoder().encode(String(delivery.content.body)).byteLength)
+                .toBeLessThanOrEqual(8 * 1024)
+            expect(delivery.content[CODEVER_MATRIX_EXTENSION]).toMatchObject({
+                message_id: 'large-agent-message',
+                part_index: index,
+                part_count: transport.delivered.length,
+                operation_id: `large-agent-message.part.${index}`,
+            })
+        }
+        expect(new Set(transport.attempts.map(attempt => attempt.transactionId)).size)
+            .toBe(transport.attempts.length)
+    })
+
+    it('defers oversized progressive edits and publishes only the terminal chunks', async () => {
+        const transport = new InMemoryMatrixTransport()
+        const port = createPort(transport)
+        const message = {
+            text: 'tool-output\n'.repeat(2_000),
+            format: 'plain' as const,
+            replyMarkup: { idempotencyKey: 'large-tool-result' },
+        }
+
+        await port.edit('$tool', message, { progressive: true, terminal: false })
+        expect(transport.delivered).toHaveLength(0)
+
+        await port.edit('$tool', message, { progressive: true, terminal: true })
+
+        expect(transport.delivered.length).toBeGreaterThan(1)
+        const replacement = transport.delivered[0].content['m.new_content'] as Record<string, unknown>
+        const continuationBodies = transport.delivered.slice(1)
+            .map(delivery => String(delivery.content.body))
+        expect(String(replacement.body) + continuationBodies.join('')).toBe(message.text)
+        expect(transport.delivered[0].content['m.relates_to']).toEqual({
+            rel_type: 'm.replace',
+            event_id: '$tool',
+        })
+    })
+
     it('uploads agent files as application-encrypted structured attachments', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-matrix-port-media-'))
         temporaryDirectories.push(directory)

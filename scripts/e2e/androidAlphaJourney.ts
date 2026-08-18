@@ -50,9 +50,11 @@ type MatrixSyncGate = {
     injectNullOptionalSections(): number
     waitForNullOptionalInjection(after: number): Promise<void>
     waitForInjectedCursorAdvance(after: number): Promise<void>
-    injectOversizedApplicationBacklog(): number
-    waitForOversizedApplicationBacklog(after: number): Promise<void>
-    waitForFreshCursorAfterOversizedBacklog(after: number): Promise<void>
+    injectLimitedApplicationGap(): number
+    waitForLimitedApplicationGap(after: number): Promise<void>
+    holdNextGapBackfill(): number
+    waitForGapBackfillInterception(after: number): Promise<void>
+    releaseGapBackfill(): void
     hold(): number
     waitForInterception(after?: number, description?: string): Promise<void>
     release(): void
@@ -557,6 +559,10 @@ export async function runAndroidAlphaJourney(
     const recoveryPrompt = `Android reconnect prompt ${options.runId}`
     const postCommitRecoveryPrompt = `Android post-commit recovery prompt ${options.runId}`
     const browserRevisionAdvancePrompt = `Browser revision advance ${options.runId}`
+    const browserGapPrompt = `Browser gap recovery ${options.runId}`
+    const largeResponsePrompt = `CODEVER_E2E_LARGE_RESPONSE:${options.runId}`
+    const largeResponseBegin = `CODEVER-E2E-LARGE-BEGIN-${options.runId}`
+    const largeResponseEnd = `CODEVER-E2E-LARGE-END-${options.runId}`
     const stalePromptToLinearize = `Android stale prompt to linearize ${options.runId}`
     const privacyProjectName = `Codever Alpha Privacy ${options.runId}`
     const migrationProjectName = `Codever Alpha Upgrade ${options.runId}`
@@ -934,6 +940,44 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
+        process.stdout.write('  [A5o/12] Restoring one chunked large Agent response after process death…\n')
+        await sendBrowserPrompt(options.browserPage, largeResponsePrompt)
+        await waitFor(
+            async () => {
+                const text = await options.browserPage.locator('.chat-feed').innerText()
+                return text.includes(largeResponseBegin) && text.includes(largeResponseEnd)
+            },
+            { description: 'complete large Agent response in browser', timeoutMs: CONNECT_TIMEOUT_MS },
+        )
+        await android.waitFor(
+            'complete large Agent response on Android',
+            state => state.bodyText.includes(largeResponseBegin) &&
+                state.bodyText.includes(largeResponseEnd) &&
+                countText(state.bodyText, largeResponseEnd) === 1,
+            CONNECT_TIMEOUT_MS,
+        )
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        await android.waitFor(
+            'chunked large Agent history after Android process restart',
+            state => state.connection.endsWith('Connected') &&
+                state.bodyText.includes(largeResponseBegin) &&
+                state.bodyText.includes(largeResponseEnd) &&
+                countText(state.bodyText, largeResponseEnd) === 1,
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(providerDigestCount(options.gatewayOutput(), largeResponsePrompt), 1)
+
         process.stdout.write('  [A5p/12] Injecting nullable Matrix sync sections and proving cursor progress…\n')
         const rawArgumentFailures = await diagnosticCount(
             serial,
@@ -956,27 +1000,64 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
-        process.stdout.write('  [A5q/12] Recovering a persisted cursor from an oversized Matrix backlog…\n')
-        const oversizedCursorResets = await diagnosticCount(
+        process.stdout.write('  [A5q/12] Closing a limited-sync gap without discarding its cursor…\n')
+        const gapPersistedBefore = await diagnosticCount(
             serial,
-            'matrix.application_control.cursor_reset reason=response_too_large',
+            'matrix.application_control.gap_persisted',
         )
-        const oversizedBaseline = syncGate.injectOversizedApplicationBacklog()
-        await syncGate.waitForOversizedApplicationBacklog(oversizedBaseline)
-        await syncGate.waitForFreshCursorAfterOversizedBacklog(oversizedBaseline)
+        const gapClosedBefore = await diagnosticCount(
+            serial,
+            'matrix.application_control.gap_closed',
+        )
+        const gapRequestBaseline = syncGate.holdNextGapBackfill()
+        const gapBaseline = syncGate.injectLimitedApplicationGap()
+        await sendBrowserPrompt(options.browserPage, browserGapPrompt)
+        await syncGate.waitForLimitedApplicationGap(gapBaseline)
         await waitFor(
             async () => await diagnosticCount(
                 serial,
-                'matrix.application_control.cursor_reset reason=response_too_large',
-            ) > oversizedCursorResets,
+                'matrix.application_control.gap_persisted',
+            ) > gapPersistedBefore,
             {
-                description: 'oversized Matrix backlog cursor reset diagnostic',
+                description: 'durable Matrix gap persistence before process death',
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )
+        await syncGate.waitForGapBackfillInterception(gapRequestBaseline)
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        syncGate.releaseGapBackfill()
+        await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
+        // The held response may have reached the kernel after force-stop but before
+        // the old process could durably commit it. A Matrix homeserver keeps the
+        // underlying room history readable, so require the restarted process to
+        // request the same persisted gap again instead of accepting that first
+        // best-effort delivery as recovery evidence.
+        await syncGate.waitForGapBackfillInterception(gapRequestBaseline + 1)
+        await waitFor(
+            async () => await diagnosticCount(
+                serial,
+                'matrix.application_control.gap_closed',
+            ) > gapClosedBefore,
+            {
+                description: 'Matrix gap closure after Android process restart',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitForBrowserText(options.browserPage, browserGapPrompt)
         await android.waitFor(
-            'connected Android after oversized Matrix backlog recovery',
-            state => state.connection.endsWith('Connected'),
+            'exactly-once Android message recovered from the Matrix gap',
+            state => state.connection.endsWith('Connected') &&
+                state.userMessages.filter(message => message === browserGapPrompt).length === 1,
             CONNECT_TIMEOUT_MS,
         )
 
@@ -1339,8 +1420,9 @@ export async function runAndroidAlphaJourney(
                 'notification-deep-link-recovery',
                 'foreground-notification-suppression',
                 'running-native-sync-survives-repeated-os-network-flaps',
+                'chunked-large-agent-output-survives-process-death',
                 'nullable-matrix-sync-sections-advance-native-cursor',
-                'oversized-matrix-backlog-resets-stale-cursor-and-reconnects',
+                'limited-matrix-sync-gap-backfilled-exactly-once',
                 'android-privacy-sanitize-review-deny-restore-restart',
                 'pre-delivery-matrix-recovery-exactly-once',
                 'post-commit-delete-result-loss-recovery-exactly-once',
@@ -1382,6 +1464,7 @@ export async function runAndroidAlphaJourney(
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.pwaPort}`)
         await adbMaybe(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         syncGate?.release()
+        syncGate?.releaseGapBackfill()
         await syncGate?.close().catch(() => undefined)
     }
 }
@@ -1414,30 +1497,46 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
     let completedNullOptionalInjections = 0
     let injectedCursorAdvances = 0
     let injectedNextBatch: string | undefined
-    let requestedOversizedBacklogs = 0
-    let completedOversizedBacklogs = 0
-    let freshCursorsAfterOversizedBacklog = 0
-    let awaitingFreshCursor = false
+    let requestedLimitedGaps = 0
+    let completedLimitedGaps = 0
+    let interceptedGapBackfills = 0
+    let pendingGap: { from: string; to: string; events: JsonRecord[] } | undefined
     const observedPutPaths: string[] = []
     const seenCommandIds = new Set<string>()
     const seenCommandTransactions = new Set<string>()
     let cycle = heldSyncCycle()
+    let gapCycle = releasedSyncCycle()
     const server = createHttpServer((incoming, outgoing) => {
         const requestPath = incoming.url ?? '/'
+        if (pendingGap && matrixGapRequestMatches(requestPath, pendingGap)) {
+            const requestedGap = pendingGap
+            const blockedCycle = gapCycle
+            interceptedGapBackfills += 1
+            incoming.resume()
+            void (async () => {
+                if (blockedCycle.held) await blockedCycle.wait
+                if (outgoing.destroyed || pendingGap !== requestedGap) return
+                const body = Buffer.from(JSON.stringify({
+                    start: requestedGap.from,
+                    end: requestedGap.to,
+                    chunk: requestedGap.events,
+                }), 'utf8')
+                outgoing.writeHead(200, {
+                    'content-type': 'application/json',
+                    'content-length': String(body.byteLength),
+                })
+                outgoing.end(body)
+            })().catch(error => {
+                if (!outgoing.destroyed) outgoing.destroy(error)
+            })
+            return
+        }
         if (
             injectedNextBatch &&
             applicationControlSince(requestPath) === injectedNextBatch
         ) {
             injectedCursorAdvances += 1
             injectedNextBatch = undefined
-        }
-        if (
-            awaitingFreshCursor &&
-            applicationControlRoomId(requestPath) &&
-            applicationControlSince(requestPath) === undefined
-        ) {
-            awaitingFreshCursor = false
-            freshCursorsAfterOversizedBacklog += 1
         }
         if (incoming.method === 'PUT') observedPutPaths.push(requestPath)
         const upstreamPath = rewriteRepeatedCommandTransaction(
@@ -1493,21 +1592,27 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
                     return
                 }
                 if (
-                    requestedOversizedBacklogs > completedOversizedBacklogs &&
+                    requestedLimitedGaps > completedLimitedGaps &&
                     applicationControlSince(requestPath)
                 ) {
-                    response.resume()
-                    completedOversizedBacklogs += 1
-                    awaitingFreshCursor = true
-                    const body = oversizedMatrixSyncResponse()
+                    const mutation = await limitedMatrixSyncResponse(
+                        response,
+                        applicationControlRoomId(requestPath)!,
+                        applicationControlSince(requestPath)!,
+                        completedLimitedGaps + 1,
+                    )
                     const headers = { ...response.headers }
                     delete headers['content-length']
                     delete headers['content-encoding']
                     delete headers['transfer-encoding']
                     headers['content-type'] = 'application/json'
-                    headers['content-length'] = String(body.byteLength)
+                    headers['content-length'] = String(mutation.body.byteLength)
                     outgoing.writeHead(200, headers)
-                    outgoing.end(body)
+                    outgoing.end(mutation.body)
+                    if (mutation.gap) {
+                        completedLimitedGaps += 1
+                        pendingGap = mutation.gap
+                    }
                     return
                 }
                 outgoing.writeHead(response.statusCode ?? 502, response.statusMessage, response.headers)
@@ -1558,24 +1663,33 @@ async function createMatrixSyncGate(targetPort: number): Promise<MatrixSyncGate>
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         ),
-        injectOversizedApplicationBacklog: () => {
-            requestedOversizedBacklogs += 1
-            return completedOversizedBacklogs
+        injectLimitedApplicationGap: () => {
+            requestedLimitedGaps += 1
+            return completedLimitedGaps
         },
-        waitForOversizedApplicationBacklog: after => waitFor(
-            () => completedOversizedBacklogs > after,
+        waitForLimitedApplicationGap: after => waitFor(
+            () => completedLimitedGaps > after,
             {
-                description: 'the oversized Matrix application backlog injection',
+                description: 'a limited Matrix application sync with an omitted event',
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         ),
-        waitForFreshCursorAfterOversizedBacklog: after => waitFor(
-            () => freshCursorsAfterOversizedBacklog > after,
+        holdNextGapBackfill: () => {
+            gapCycle = heldSyncCycle()
+            return interceptedGapBackfills
+        },
+        waitForGapBackfillInterception: after => waitFor(
+            () => interceptedGapBackfills > after,
             {
-                description: 'the native Matrix receiver to replace its stale cursor',
+                description: 'the persisted Matrix gap backfill request',
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         ),
+        releaseGapBackfill: () => {
+            if (!gapCycle.held) return
+            gapCycle.held = false
+            gapCycle.release()
+        },
         hold: () => {
             if (!cycle.held) cycle = heldSyncCycle()
             return intercepted
@@ -1674,14 +1788,54 @@ async function nullOptionalMatrixSyncResponse(
     }
 }
 
-function oversizedMatrixSyncResponse(): Buffer {
-    const responseLimit = 2 * 1024 * 1024
-    const padding = 'x'.repeat(responseLimit + 64 * 1024)
-    return Buffer.from(JSON.stringify({
-        next_batch: 's-oversized-backlog',
-        rooms: { join: {} },
-        padding,
-    }), 'utf8')
+async function limitedMatrixSyncResponse(
+    response: AsyncIterable<Uint8Array | string>,
+    roomId: string,
+    from: string,
+    sequence: number,
+): Promise<{
+    body: Buffer
+    gap?: { from: string; to: string; events: JsonRecord[] }
+}> {
+    const chunks: Buffer[] = []
+    for await (const chunk of response) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    const root = JSON.parse(Buffer.concat(chunks).toString('utf8')) as JsonRecord
+    const rooms = root.rooms as JsonRecord | undefined
+    const joined = rooms?.join as JsonRecord | undefined
+    const currentRoom = joined?.[roomId] as JsonRecord | undefined
+    const timeline = currentRoom?.timeline as JsonRecord | undefined
+    const events = Array.isArray(timeline?.events)
+        ? timeline.events.filter((event): event is JsonRecord =>
+            Boolean(event && typeof event === 'object' && !Array.isArray(event)))
+        : []
+    if (events.length === 0) {
+        return { body: Buffer.from(JSON.stringify(root), 'utf8') }
+    }
+    const to = `codever-e2e-gap-${sequence}`
+    timeline!.limited = true
+    timeline!.prev_batch = to
+    timeline!.events = []
+    return {
+        body: Buffer.from(JSON.stringify(root), 'utf8'),
+        gap: { from, to, events },
+    }
+}
+
+function matrixGapRequestMatches(
+    path: string,
+    gap: { from: string; to: string },
+): boolean {
+    try {
+        const url = new URL(path, 'http://matrix-e2e.invalid')
+        return /\/_matrix\/client\/v3\/rooms\/[^/]+\/messages$/u.test(url.pathname) &&
+            url.searchParams.get('dir') === 'f' &&
+            url.searchParams.get('from') === gap.from &&
+            url.searchParams.get('to') === gap.to
+    } catch {
+        return false
+    }
 }
 
 function heldSyncCycle(): { held: boolean; wait: Promise<void>; release(): void } {
@@ -1690,6 +1844,10 @@ function heldSyncCycle(): { held: boolean; wait: Promise<void>; release(): void 
         release = resolve
     })
     return { held: true, wait, release }
+}
+
+function releasedSyncCycle(): { held: boolean; wait: Promise<void>; release(): void } {
+    return { held: false, wait: Promise.resolve(), release: () => undefined }
 }
 
 function isMatrixSyncRequest(path: string): boolean {
@@ -2030,15 +2188,27 @@ async function tapTaskNotification(serial: string): Promise<void> {
 async function tapNativePairingConfirmation(serial: string, runId: string): Promise<void> {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS
     const path = '/sdcard/codever-alpha-pairing.xml'
+    const confirmedBefore = await diagnosticCount(
+        serial,
+        'activity.pairing_completion.confirmed',
+    )
     // The emulator may have received a foreground intent while native Matrix
-    // completed its first sync. Bring the owning Activity back before locating
-    // the platform confirmation dialog.
-    await adb(serial, 'shell', 'am', 'start', '-n', MAIN_ACTIVITY)
-    await delay(250)
+    // completed its first sync, or another local acceptance task may briefly
+    // foreground a different app. A coordinate injection is not evidence that
+    // Android delivered the click, so reacquire the Activity and require the
+    // native confirmation diagnostic before returning.
     while (Date.now() < deadline) {
+        await adb(serial, 'shell', 'am', 'start', '-n', MAIN_ACTIVITY)
+        await delay(250)
         await adbMaybe(serial, 'shell', 'uiautomator', 'dump', path)
         const xml = await adbMaybe(serial, 'shell', 'cat', path)
         if (!xml.includes(`Pair with Codever E2E Gateway ${runId}?`)) {
+            if (
+                await diagnosticCount(
+                    serial,
+                    'activity.pairing_completion.confirmed',
+                ) > confirmedBefore
+            ) return
             await delay(200)
             continue
         }
@@ -2054,9 +2224,15 @@ async function tapNativePairingConfirmation(serial: string, runId: string): Prom
             String(Math.floor((left + right) / 2)),
             String(Math.floor((top + bottom) / 2)),
         )
-        return
+        await delay(500)
+        if (
+            await diagnosticCount(
+                serial,
+                'activity.pairing_completion.confirmed',
+            ) > confirmedBefore
+        ) return
     }
-    throw new Error('Timed out waiting for the native Android pairing confirmation.')
+    throw new Error('Timed out completing the native Android pairing confirmation.')
 }
 
 async function diagnosticCount(serial: string, marker: string): Promise<number> {

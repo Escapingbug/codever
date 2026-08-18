@@ -46,6 +46,7 @@ class MatrixNativeProjectionTest {
         val before = projection.snapshot()
         assertThrows(IllegalArgumentException::class.java) {
             projection.applyRoomStateBatch(listOf(
+                gatewayState(5),
                 tombstone("session-1", 4),
                 JsonObject(sessionState("broken", 5) + mapOf(
                     "state" to JsonPrimitive("invalid"),
@@ -67,6 +68,32 @@ class MatrixNativeProjectionTest {
             "After",
             projection.snapshot()!!.sessions().single()
                 .getValue("title").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `directory replacement removes missing entries but preserves newer live state`() {
+        val projection = MatrixNativeProjection()
+        projection.applyRoomStateBatch(listOf(
+            gatewayState(2),
+            sessionState("kept", 2),
+            sessionState("removed", 2),
+        ))
+        projection.applyRoomState(sessionState("arrived-live", 4))
+        val committed = JsonObject(gatewayState(5) + mapOf(
+            "session_directory" to buildJsonObject {
+                put("generation", 5); put("state_version", 3); put("slot", 2)
+                put("page_count", 1); put("state_key_prefix", "codever.directory")
+                put("digest", "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o")
+            },
+        ))
+        val snapshot = projection.applyRoomStateBatch(listOf(
+            committed,
+            sessionState("kept", 3),
+        ))!!
+        assertEquals(
+            setOf("arrived-live", "kept"),
+            snapshot.sessions().map { it.getValue("id").jsonPrimitive.content }.toSet(),
         )
     }
 
@@ -154,6 +181,14 @@ class MatrixNativeProjectionTest {
             put("provider", "codex"); put("permission_mode", "default")
         })
         put("capabilities", capabilities())
+        put("session_directory", buildJsonObject {
+            put("generation", version)
+            put("state_version", version)
+            put("slot", version % 3)
+            put("page_count", 0)
+            put("state_key_prefix", "codever.directory")
+            put("digest", "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o")
+        })
         put("updated_at", version)
     }
 

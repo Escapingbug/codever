@@ -83,6 +83,7 @@ describe('Matrix native conversation protocol', () => {
         can_delete_session: true,
         session_extensions: [],
       },
+      session_directory: directory(3),
       updated_at: 20,
     })
     expect(state.workspace.project.id).toBe('project-1')
@@ -105,6 +106,7 @@ describe('Matrix native conversation protocol', () => {
         provider: 'codex',
         permission_mode: 'default',
       },
+      session_directory: directory(3),
       updated_at: 20,
     }
     expect(matrixGatewayStateSchema.safeParse({
@@ -249,3 +251,14 @@ describe('Matrix native conversation protocol', () => {
     }).success).toBe(false)
   })
 })
+
+function directory(stateVersion: number) {
+  return {
+    generation: stateVersion,
+    state_version: stateVersion,
+    slot: stateVersion % 3,
+    page_count: 0,
+    state_key_prefix: 'codever.directory',
+    digest: 'RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o',
+  }
+}

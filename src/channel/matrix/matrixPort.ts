@@ -12,6 +12,7 @@ import type {
     ChannelMessage,
     ChannelPort,
     ChannelSendResult,
+    ChannelEditContext,
     DecisionRequest,
     DecisionResponse,
     SessionStatus,
@@ -78,55 +79,106 @@ export class MatrixPort implements ChannelPort {
         const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const attachments = await this.uploadAttachments(operationId, message.attachments)
-        const content = this.withThreadRelation(buildMessageContent(message, {
-            kind: 'message',
-            operation_id: operationId,
-            ...this.sessionMetadata(),
-            format: message.format,
-            ...(attachments.length ? { attachments } : {}),
-            ...(presentation === undefined ? {} : { ui: presentation }),
-        }))
-        const transactionId = this.transactionId('send', operationId)
-        const result = await this.options.transport.sendEncryptedRoomEvent({
-            roomId: this.options.roomId,
-            eventType: 'm.room.message',
-            content,
-            transactionId,
-        })
-        return { messageId: result.eventId }
+        const parts = splitMatrixMessage(message)
+        let firstEventId: string | undefined
+        for (const [index, part] of parts.entries()) {
+            const content = this.withThreadRelation(buildMessageContent(part, {
+                kind: 'message',
+                operation_id: partOperationId(operationId, index, parts.length),
+                ...this.sessionMetadata(),
+                format: part.format,
+                ...(parts.length > 1 ? {
+                    message_id: operationId,
+                    part_index: index,
+                    part_count: parts.length,
+                } : {}),
+                ...(index === 0 && attachments.length ? { attachments } : {}),
+                ...(index === 0 && parts.length === 1 && presentation !== undefined
+                    ? { ui: presentation }
+                    : {}),
+            }))
+            const result = await this.options.transport.sendEncryptedRoomEvent({
+                roomId: this.options.roomId,
+                eventType: 'm.room.message',
+                content,
+                transactionId: this.transactionId(
+                    'send',
+                    parts.length === 1 ? operationId : `${operationId}:part:${index}`,
+                ),
+            })
+            firstEventId ??= result.eventId
+        }
+        return { messageId: firstEventId }
     }
 
-    async edit(messageId: string | number, message: ChannelMessage): Promise<void> {
+    async edit(
+        messageId: string | number,
+        message: ChannelMessage,
+        context: ChannelEditContext = {},
+    ): Promise<void> {
         const targetEventId = String(messageId)
         const messageOptions = readMatrixMessageOptions(message.replyMarkup)
         const presentation = message.presentation ?? messageOptions.ui
         const operationId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
         const attachments = await this.uploadAttachments(operationId, message.attachments)
-        const replacement = buildMessageContent(message, {
-            kind: 'message',
-            operation_id: operationId,
-            ...this.sessionMetadata(),
-            format: message.format,
-            replaces_event_id: targetEventId,
-            ...(attachments.length ? { attachments } : {}),
-            ...(presentation === undefined ? {} : { ui: presentation }),
-        })
-        const content: MatrixRoomMessageContent = {
-            ...replacement,
-            body: `* ${replacement.body}`,
-            'm.new_content': replacement,
-            'm.relates_to': {
-                rel_type: 'm.replace',
-                event_id: targetEventId,
-            },
+        const parts = splitMatrixMessage(message)
+        if (parts.length > 1 && context.progressive && !context.terminal) {
+            // The final value is guaranteed to follow in the coalesced lane.
+            // Sending continuation events for every intermediate tool update
+            // would permanently duplicate large output in the transcript.
+            return
         }
-
-        await this.options.transport.sendEncryptedRoomEvent({
-            roomId: this.options.roomId,
-            eventType: 'm.room.message',
-            content,
-            transactionId: this.transactionId('edit', `${targetEventId}:${operationId}`),
-        })
+        for (const [index, part] of parts.entries()) {
+            const extension = {
+                kind: 'message',
+                operation_id: partOperationId(operationId, index, parts.length),
+                ...this.sessionMetadata(),
+                format: part.format,
+                ...(parts.length > 1 ? {
+                    message_id: operationId,
+                    part_index: index,
+                    part_count: parts.length,
+                } : {}),
+                ...(index === 0 ? { replaces_event_id: targetEventId } : {}),
+                ...(index === 0 && attachments.length ? { attachments } : {}),
+                ...(index === 0 && parts.length === 1 && presentation !== undefined
+                    ? { ui: presentation }
+                    : {}),
+            }
+            if (index === 0) {
+                const replacement = buildMessageContent(part, extension)
+                const content: MatrixRoomMessageContent = {
+                    ...replacement,
+                    body: `* ${replacement.body}`,
+                    'm.new_content': replacement,
+                    'm.relates_to': {
+                        rel_type: 'm.replace',
+                        event_id: targetEventId,
+                    },
+                }
+                await this.options.transport.sendEncryptedRoomEvent({
+                    roomId: this.options.roomId,
+                    eventType: 'm.room.message',
+                    content,
+                    transactionId: this.transactionId(
+                        'edit',
+                        parts.length === 1
+                            ? `${targetEventId}:${operationId}`
+                            : `${targetEventId}:${operationId}:part:0`,
+                    ),
+                })
+            } else {
+                await this.options.transport.sendEncryptedRoomEvent({
+                    roomId: this.options.roomId,
+                    eventType: 'm.room.message',
+                    content: this.withThreadRelation(buildMessageContent(part, extension)),
+                    transactionId: this.transactionId(
+                        'edit-part',
+                        `${targetEventId}:${operationId}:part:${index}`,
+                    ),
+                })
+            }
+        }
     }
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
@@ -336,6 +388,43 @@ export class MatrixPort implements ChannelPort {
         return upload
     }
 }
+
+function splitMatrixMessage(message: ChannelMessage): ChannelMessage[] {
+    const normalized = message.format === 'html'
+        ? htmlToPlainText(message.text)
+        : message.text
+    if (new TextEncoder().encode(normalized).byteLength <= MATRIX_MESSAGE_PART_BYTES) {
+        return [message]
+    }
+    const chunks: string[] = []
+    let current = ''
+    let currentBytes = 0
+    for (const character of normalized) {
+        const bytes = new TextEncoder().encode(character).byteLength
+        if (currentBytes > 0 && currentBytes + bytes > MATRIX_MESSAGE_PART_BYTES) {
+            chunks.push(current)
+            current = ''
+            currentBytes = 0
+        }
+        current += character
+        currentBytes += bytes
+    }
+    if (current || chunks.length === 0) chunks.push(current)
+    return chunks.map((text, index) => ({
+        text,
+        format: message.format === 'html' ? 'plain' : message.format,
+        ...(index === 0 && message.attachments ? { attachments: message.attachments } : {}),
+    }))
+}
+
+function partOperationId(operationId: string, index: number, count: number): string {
+    return count === 1 ? operationId : `${operationId}.part.${index}`
+}
+
+// The timeline envelope and addressed key-ring grant add substantial framing.
+// Eight KiB of UTF-8 body keeps every physical event comfortably inside the
+// Gateway's 40 KiB pre-encryption Matrix budget.
+const MATRIX_MESSAGE_PART_BYTES = 8 * 1024
 
 function matrixSessionStatus(
     state: SessionStatus['state'],

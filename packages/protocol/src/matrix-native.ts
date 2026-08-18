@@ -9,6 +9,8 @@ export const CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE =
   'io.codever.gateway.current.v2' as const
 export const CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE =
   'io.codever.session.current.v2' as const
+export const CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE =
+  'io.codever.session.directory.v2' as const
 export const CODEVER_MATRIX_STATE_CONTENT_TYPE =
   'io.codever.matrix-state-content.v2' as const
 
@@ -323,7 +325,7 @@ export const matrixSessionLifecycleSchema = z
 
 export type MatrixSessionLifecycle = z.infer<typeof matrixSessionLifecycleSchema>
 
-const matrixRoomSessionSchema = z
+export const matrixRoomSessionSchema = z
   .object({
     session_id: opaqueId,
     thread_root_event_id: z.string().min(1).max(512).optional(),
@@ -347,6 +349,23 @@ const matrixRoomSessionSchema = z
     ).max(128),
   })
   .strict()
+
+export type MatrixRoomSession = z.infer<typeof matrixRoomSessionSchema>
+
+export const matrixSessionDirectoryDescriptorSchema = z
+  .object({
+    generation: z.number().int().nonnegative(),
+    state_version: z.number().int().nonnegative(),
+    slot: z.number().int().min(0).max(2),
+    page_count: z.number().int().nonnegative().max(100_000),
+    state_key_prefix: z.string().min(1).max(128),
+    digest: keyId,
+  })
+  .strict()
+
+export type MatrixSessionDirectoryDescriptor = z.infer<
+  typeof matrixSessionDirectoryDescriptorSchema
+>
 
 export const matrixGatewayStateSchema = z
   .object({
@@ -385,6 +404,7 @@ export const matrixGatewayStateSchema = z
       })
       .strict(),
     capabilities: matrixGatewayCapabilitiesSchema,
+    session_directory: matrixSessionDirectoryDescriptorSchema,
     updated_at: timestamp,
   })
   .strict()
@@ -437,6 +457,46 @@ export type MatrixSessionState = z.infer<
   typeof matrixSessionStateSchema
 >
 
+export const matrixSessionDirectoryPageSchema = z
+  .object({
+    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    kind: z.literal('session_directory'),
+    gateway_id: opaqueId,
+    conversation_id: opaqueId,
+    ...revisionFields,
+    state_version: z.number().int().nonnegative(),
+    directory_generation: z.number().int().nonnegative(),
+    directory_slot: z.number().int().min(0).max(2),
+    directory_digest: keyId,
+    state_key_prefix: z.string().min(1).max(128),
+    page_index: z.number().int().nonnegative().max(99_999),
+    page_count: z.number().int().positive().max(100_000),
+    sessions: z.array(matrixRoomSessionSchema).max(32),
+    updated_at: timestamp,
+  })
+  .strict()
+  .superRefine((page, context) => {
+    if (page.page_index >= page.page_count) {
+      context.addIssue({
+        code: 'custom',
+        path: ['page_index'],
+        message: 'Directory page index must be smaller than page count',
+      })
+    }
+    const sessionIds = page.sessions.map(session => session.session_id)
+    if (new Set(sessionIds).size !== sessionIds.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['sessions'],
+        message: 'Directory page session IDs must be unique',
+      })
+    }
+  })
+
+export type MatrixSessionDirectoryPage = z.infer<
+  typeof matrixSessionDirectoryPageSchema
+>
+
 export const matrixStateEnvelopeHeaderSchema = z
   .object({
     kind: z.literal('codever.matrix-state-envelope'),
@@ -448,6 +508,7 @@ export const matrixStateEnvelopeHeaderSchema = z
     eventType: z.enum([
       CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
       CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+      CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
     ]),
     stateKey: opaqueId,
     epochId: opaqueId,
@@ -475,6 +536,7 @@ export type SignedMatrixStateEnvelope = z.infer<
 export const matrixStateContentSchema = z.discriminatedUnion('kind', [
   matrixGatewayStateSchema,
   matrixSessionStateSchema,
+  matrixSessionDirectoryPageSchema,
 ])
 
 export type MatrixStateContent = z.infer<typeof matrixStateContentSchema>

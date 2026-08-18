@@ -91,6 +91,13 @@ export interface ChannelSendResult {
     messageId?: string | number
 }
 
+export interface ChannelEditContext {
+    /** Final coalesced value; ports may defer oversized intermediate edits. */
+    terminal?: boolean
+    /** This edit is part of a coalesced progressive update stream. */
+    progressive?: boolean
+}
+
 /**
  * The channel accepted the message into a durable delivery queue, but no
  * remote recipient has confirmed it yet. Callers must not resend solely
@@ -119,7 +126,11 @@ export interface ChannelPort {
     send(message: ChannelMessage): Promise<ChannelSendResult>
 
     /** Edit an existing message (for progressive tool call display) */
-    edit?(messageId: string | number, message: ChannelMessage): Promise<void>
+    edit?(
+        messageId: string | number,
+        message: ChannelMessage,
+        context?: ChannelEditContext,
+    ): Promise<void>
 
     /** Request a user decision (permission, question) */
     requestDecision(request: DecisionRequest): Promise<DecisionResponse>

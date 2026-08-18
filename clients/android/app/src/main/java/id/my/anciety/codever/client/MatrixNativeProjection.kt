@@ -36,26 +36,41 @@ class MatrixNativeProjection {
         when (value.text("kind")) {
             "gateway_state" -> applyGateway(value)
             "session_state" -> applySession(value)
+            "session_directory" -> return snapshot()
             else -> error("Unsupported Codever Matrix Room State kind.")
         }
         return snapshot()
     }
 
-    /**
-     * Applies one complete Matrix `/state` response behind a single publication
-     * barrier. If any entity is invalid, the projection rolls back completely;
-     * callers can therefore never observe a Gateway-only or partially populated
-     * session inventory while reconnecting.
-     */
+    /** Replaces one materialized directory behind a single publication barrier. */
     @Synchronized
     fun applyRoomStateBatch(values: List<JsonObject>): JsonObject? {
+        val gateways = values.filter { it.text("kind") == "gateway_state" }
+        require(gateways.size == 1 && values.none { it.text("kind") == "session_directory" })
+        val nextGateway = gateways.single()
+        val watermark = (nextGateway["session_directory"] as? JsonObject)
+            ?.number("state_version") ?: error("Matrix Gateway directory watermark is missing.")
         val previousGateway = gateway
         val previousSessions = sessionStates.toMap()
         val previousPending = pendingSessionStates.toMap()
         val previousOverrides = statusOverrides.toMap()
         val previousRevision = latestRevision
         return try {
-            values.forEach { value ->
+            val newer = (sessionStates.values + pendingSessionStates.values)
+                .filter { value ->
+                    value.number("revision_epoch_generation") ==
+                        nextGateway.number("revision_epoch_generation") &&
+                        value.text("revision_epoch") == nextGateway.text("revision_epoch") &&
+                        (value.number("state_version") ?: -1) > watermark
+                }
+                .sortedWith(::compareEntityState)
+            gateway = null
+            sessionStates.clear()
+            pendingSessionStates.clear()
+            statusOverrides.clear()
+            latestRevision = null
+            (listOf(nextGateway) + values.filter { it.text("kind") == "session_state" } + newer)
+                .forEach { value ->
                 require(value.number("version") == 2L)
                 when (value.text("kind")) {
                     "gateway_state" -> applyGateway(value)
@@ -247,6 +262,7 @@ class MatrixNativeProjection {
                 "version", "kind", "gateway_id", "conversation_id", "revision",
                 "revision_epoch", "revision_epoch_generation", "state_version",
                 "active_device_count", "command_sequences", "workspace", "capabilities", "updated_at",
+                "session_directory",
             ),
             "Matrix Gateway state",
         )
@@ -262,6 +278,17 @@ class MatrixNativeProjection {
         value.requiredTimestamp("updated_at", "Matrix Gateway state")
         validateWorkspace(value.requiredObject("workspace", "Matrix Gateway state"))
         validateCapabilities(value.requiredObject("capabilities", "Matrix Gateway state"))
+        val directory = value.requiredObject("session_directory", "Matrix Gateway state")
+        directory.requireExactKeys(
+            setOf("generation", "state_version", "slot", "page_count", "state_key_prefix", "digest"),
+            "Matrix session directory",
+        )
+        require(directory.requiredLong("generation", "Matrix session directory") >= 0)
+        require(directory.requiredLong("state_version", "Matrix session directory") >= 0)
+        require(directory.requiredLong("slot", "Matrix session directory") in 0..2)
+        require(directory.requiredLong("page_count", "Matrix session directory") in 0..100_000)
+        directory.requiredString("state_key_prefix", 128, "Matrix session directory")
+        directory.requiredBase64Url("digest", 43, "Matrix session directory")
         nativeRevision(value)
     }
 
@@ -573,6 +600,13 @@ private fun JsonObject.requireExactKeys(
 
 private fun JsonObject.requiredOpaqueId(key: String, label: String): String =
     requiredString(key, 256, label)
+
+private fun JsonObject.requiredBase64Url(key: String, length: Int, label: String): String =
+    requiredString(key, length, label).also {
+        require(it.length == length && it.matches(Regex("^[A-Za-z0-9_-]+$"))) {
+            "$label field $key must be base64url."
+        }
+    }
 
 private fun JsonObject.optionalOpaqueId(key: String, label: String): String? =
     optionalString(key, 256, label)

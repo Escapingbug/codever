@@ -182,7 +182,7 @@ class MatrixApplicationControlClientTest {
         val responseBody = """
             {
               "next_batch":"s-next",
-              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"events":[
+              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"prev_batch":"s-gap-start","events":[
                 {
                   "type":"io.codever.secure_control.v1",
                   "event_id":"${'$'}control-response",
@@ -226,6 +226,7 @@ class MatrixApplicationControlClientTest {
         assertEquals("@gateway:example.org", batch.events.first().sender)
         assertEquals(1234L, batch.events.first().timestamp)
         assertTrue(batch.limited)
+        assertEquals("s-gap-start", batch.prevBatch)
         assertTrue(endpoint.rawQuery.contains("since=s-current"))
         assertTrue(endpoint.rawQuery.contains("filter="))
         val encodedFilter = endpoint.rawQuery
@@ -251,20 +252,25 @@ class MatrixApplicationControlClientTest {
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
+        assertTrue(
+            filter.getValue("room").jsonObject
+                .getValue("state").jsonObject
+                .getValue("types").jsonArray.isEmpty(),
+        )
         assertTrue(responseBody.all { it == 0.toByte() })
     }
 
     @Test
-    fun `oversized persisted cursor response resets to a fresh bounded baseline`() {
+    fun `cursor failures never discard an unproven offline boundary`() {
         assertEquals(
-            "response_too_large",
+            null,
             applicationControlCursorResetReason(
                 MatrixApplicationControlResponseTooLargeException(2 * 1024 * 1024),
                 "s-stale",
             ),
         )
         assertEquals(
-            "server_rejected",
+            "server_rejected_after_authoritative_rebuild",
             applicationControlCursorResetReason(
                 MatrixApplicationControlSyncException(400, null),
                 "s-invalid",
@@ -277,6 +283,81 @@ class MatrixApplicationControlClientTest {
                 since = null,
             ),
         )
+    }
+
+    @Test
+    fun `limited incremental sync without prev batch is rejected before cursor commit`() = runBlocking {
+        val responseBody = """
+            {
+              "next_batch":"s-next",
+              "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"events":[]}}}}
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationControlSyncClient(
+            MatrixApplicationControlSyncTransport { _, _ ->
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val error = runCatching {
+            client.sync(storedSession(), since = "s-current")
+        }.exceptionOrNull()
+
+        assertTrue(error is MatrixApplicationControlPayloadException)
+        assertTrue(error?.message?.contains("gap boundary") == true)
+        assertTrue(responseBody.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `gap page uses sync boundaries and returns a resumable cursor`() = runBlocking {
+        lateinit var endpoint: URI
+        val responseBody = """
+            {
+              "start":"s-before",
+              "end":"s-page-2",
+              "chunk":[
+                {
+                  "type":"m.room.message",
+                  "event_id":"${'$'}gap-event",
+                  "sender":"@gateway:example.org",
+                  "origin_server_ts":1235,
+                  "content":${timelineContent()}
+                },
+                {
+                  "type":"m.room.message",
+                  "event_id":"${'$'}untrusted-gap-event",
+                  "sender":"@attacker:example.org",
+                  "origin_server_ts":1236,
+                  "content":${timelineContent()}
+                }
+              ]
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationTimelineClient(
+            MatrixApplicationControlSyncTransport { target, _ ->
+                endpoint = target
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val page = client.page(storedSession(), "s-before", "s-gap-end")
+
+        assertEquals(listOf("\$gap-event"), page.events.map { it.eventId })
+        assertEquals("s-page-2", page.nextFrom)
+        assertEquals(2, page.candidateEventCount)
+        assertEquals(
+            "/_matrix/client/v3/rooms/%21room%3Aexample.org/messages",
+            endpoint.rawPath,
+        )
+        val query = endpoint.rawQuery.split("&").associate { part ->
+            val (key, value) = part.split("=", limit = 2)
+            key to URLDecoder.decode(value, Charsets.UTF_8.name())
+        }
+        assertEquals("f", query["dir"])
+        assertEquals("s-before", query["from"])
+        assertEquals("s-gap-end", query["to"])
+        assertEquals("32", query["limit"])
+        assertTrue(responseBody.all { it == 0.toByte() })
     }
 
     @Test
@@ -313,83 +394,76 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `current Room State is fetched without a sync cursor and Gateway key state is ordered first`() =
+    fun `current Room State fetches only the committed directly addressed directory pages`() =
         runBlocking {
-            lateinit var endpoint: URI
-            val responseBody = """
-                [
-                  {
-                    "type":"io.codever.session.current.v2",
-                    "state_key":"session-1",
-                    "event_id":"${'$'}session-state",
-                    "sender":"@gateway:example.org",
-                    "origin_server_ts":1235,
-                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
-                  },
-                  {
-                    "type":"io.codever.gateway.current.v2",
-                    "state_key":"gateway-1",
-                    "event_id":"${'$'}gateway-state",
-                    "sender":"@gateway:example.org",
-                    "origin_server_ts":1234,
-                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
-                  },
-                  {
-                    "type":"io.codever.gateway.current.v2",
-                    "state_key":"gateway-1",
-                    "event_id":"${'$'}attacker-state",
-                    "sender":"@attacker:example.org",
-                    "origin_server_ts":1236,
-                    "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
-                  }
-                ]
-            """.trimIndent().toByteArray()
+            val endpoints = mutableListOf<URI>()
+            val responseBodies = mutableListOf<ByteArray>()
             val client = MatrixApplicationRoomStateClient(
                 MatrixApplicationControlSyncTransport { target, _ ->
-                    endpoint = target
-                    MatrixHttpResponse(200, responseBody)
+                    endpoints += target
+                    val body = if (target.rawPath.endsWith("/state/io.codever.gateway.current.v2/gateway-1")) {
+                        """{"version":2,"kind":"state_envelope","state_envelope":{}}"""
+                    } else {
+                        """{"version":2,"kind":"state_envelope","state_envelope":{}}"""
+                    }.toByteArray()
+                    responseBodies += body
+                    MatrixHttpResponse(200, body)
                 },
             )
 
-            val batch = client.current(storedSession())
+            val gateway = client.currentGateway(storedSession())
+            val batch = client.currentDirectory(
+                storedSession(),
+                MatrixSessionDirectoryLocator(
+                    generation = 7,
+                    stateVersion = 9,
+                    slot = 1,
+                    pageCount = 2,
+                    stateKeyPrefix = "codever.directory",
+                    digest = "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
+                ),
+            )
 
+            assertTrue(gateway.eventId.startsWith("\$codever-current-"))
+            assertEquals(2, batch.events.size)
+            assertEquals(2, batch.candidateEventCount)
             assertEquals(
-                listOf("\$gateway-state", "\$session-state"),
-                batch.events.map { it.eventId },
+                "https://matrix.example.org/_matrix/client/v3/rooms/%21room%3Aexample.org/state/" +
+                    "io.codever.gateway.current.v2/gateway-1",
+                endpoints.first().toASCIIString(),
             )
-            assertEquals(3, batch.candidateEventCount)
             assertEquals(
-                "https://matrix.example.org/_matrix/client/v3/rooms/%21room%3Aexample.org/state",
-                endpoint.toASCIIString(),
+                "/_matrix/client/v3/rooms/%21room%3Aexample.org/state/" +
+                    "io.codever.session.directory.v2/codever.directory.1.1",
+                endpoints.last().rawPath,
             )
-            assertTrue(responseBody.all { it == 0.toByte() })
+            assertTrue(responseBodies.all { body -> body.all { it == 0.toByte() } })
         }
 
     @Test
-    fun `current Room State rejects a malformed entity from the bound Gateway`() = runBlocking {
-        val responseBody = """
-            [
-              {
-                "type":"io.codever.session.current.v2",
-                "state_key":"session-1",
-                "event_id":"${'$'}session-state",
-                "sender":"@gateway:example.org",
-                "origin_server_ts":1235,
-                "content":{"version":2,"kind":"state_envelope"}
-              }
-            ]
-        """.trimIndent().toByteArray()
+    fun `current Room State rejects a malformed directly addressed directory page`() = runBlocking {
+        val responseBodies = mutableListOf<ByteArray>()
         val client = MatrixApplicationRoomStateClient(
-            MatrixApplicationControlSyncTransport { _, _ ->
-                MatrixHttpResponse(200, responseBody)
+            MatrixApplicationControlSyncTransport { target, _ ->
+                val body = """{"version":2,"kind":"state_envelope"}""".toByteArray()
+                responseBodies += body
+                MatrixHttpResponse(200, body)
             },
         )
 
-        val error = runCatching { client.current(storedSession()) }.exceptionOrNull()
+        val error = runCatching {
+            client.currentDirectory(
+                storedSession(),
+                MatrixSessionDirectoryLocator(
+                    1, 1, 0, 1, "codever.directory",
+                    "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
+                ),
+            )
+        }.exceptionOrNull()
 
         assertTrue(error is MatrixApplicationControlPayloadException)
         assertTrue(error?.message?.contains("invalid envelope shape") == true)
-        assertTrue(responseBody.all { it == 0.toByte() })
+        assertTrue(responseBodies.all { body -> body.all { it == 0.toByte() } })
     }
 
     @Test
@@ -446,7 +520,7 @@ class MatrixApplicationControlClientTest {
             assertFalse(query.containsKey("rel_type"))
             assertEquals("b", query["dir"])
             assertEquals("true", query["recurse"])
-            assertEquals("37", query["limit"])
+            assertEquals("32", query["limit"])
             assertEquals("relations/current", query["from"])
             assertTrue(responseBody.all { it == 0.toByte() })
         }

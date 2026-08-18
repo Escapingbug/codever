@@ -14,6 +14,17 @@ import id.my.anciety.codever.security.codever.SignedPairingOffer
  * invitation from the already pinned Gateway route can authorize that change.
  */
 internal object MatrixSessionRepairPolicy {
+    /**
+     * A repair keeps the pinned Gateway identity and can reuse Room State that
+     * this newly bootstrapped Matrix connection already authenticated with that
+     * identity. A first-time pairing has no such trust boundary and must wait
+     * for a post-pairing authoritative refresh.
+     */
+    fun retainSynchronizedGatewayState(
+        repairingSession: Boolean,
+        synchronizedBeforeTrustCommit: Boolean,
+    ): Boolean = repairingSession && synchronizedBeforeTrustCommit
+
     fun required(trust: GatewayTrust?, session: PublicMatrixSession?): Boolean {
         return requiredForTransport(trust?.certificate?.deviceTransport, session)
     }

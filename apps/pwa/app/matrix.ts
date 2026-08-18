@@ -1,6 +1,7 @@
 import {
   CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
   CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+  CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
   CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
   capabilityRenewalOfferSchema,
   capabilityRenewalRequestSchema,
@@ -21,6 +22,7 @@ import {
   type JsonValue,
   type MatrixNativeContent,
   type MatrixGatewayState,
+  type MatrixSessionDirectoryPage,
   type MatrixStateContent,
   type SignedCommand,
 } from "@codever/protocol";
@@ -822,6 +824,7 @@ export async function connectMatrix(
     publish = true,
     recoverCommands = true,
   ): Promise<void> => {
+    if (content.kind === "session_directory") return;
     if (content.kind === "session_state" && content.session?.thread_root_event_id) {
       sessionRootEventIds.set(
         content.session_id,
@@ -845,7 +848,8 @@ export async function connectMatrix(
     const eventType = event.getType();
     if (
       eventType !== CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-      eventType !== CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+      eventType !== CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE &&
+      eventType !== CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
     ) return null;
     const stateKey = event.getStateKey();
     const sender = event.getSender();
@@ -911,7 +915,9 @@ export async function connectMatrix(
     });
     if (
       (plaintext.kind === "gateway_state" && stateKey !== plaintext.gateway_id) ||
-      (plaintext.kind === "session_state" && stateKey !== plaintext.session_id)
+      (plaintext.kind === "session_state" && stateKey !== plaintext.session_id) ||
+      (plaintext.kind === "session_directory" &&
+        stateKey !== matrixDirectoryStateKey(plaintext, plaintext.page_index))
     ) {
       throw new Error("Codever Room State entity binding does not match its state key.");
     }
@@ -932,42 +938,79 @@ export async function connectMatrix(
     return operation;
   };
   const loadAuthoritativeRoomState = async (): Promise<void> => {
-    // The SDK restores room.currentState from its persisted /sync token before
-    // it performs a network sync. Treating that cache as authoritative makes a
-    // reload temporarily show an old inventory. Fetch the server's current
-    // Room State directly so startup, foreground recovery, and reconnect all
-    // cross a real current-state barrier.
-    const currentState = await client.roomState(config.roomId);
-    const codeverState = currentState
-      .filter((event) =>
-        event.type === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE ||
-        event.type === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
-      )
-      .map((event) => new sdk.MatrixEvent(event));
-    const gatewayEvent = codeverState.find((event) =>
-      event.getType() === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-      event.getStateKey() === config.gatewayId,
-    );
-    const sessionEvents = codeverState.filter((event) =>
-      event.getType() === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
-    );
-    if (!gatewayEvent) {
-      throw new Error("The Gateway has not published current Matrix Room State.");
-    }
-    const operation = roomStateChain.then(async () => {
-      // Gateway state establishes the revision epoch. Apply every session
-      // entity inside the same projection transaction, then publish exactly
-      // one complete inventory to the UI. A Matrix /state response is a
-      // snapshot, not a sequence of user-visible incremental states.
-      const gatewayContent = await decodeRoomStateEvent(gatewayEvent);
-      if (!gatewayContent || gatewayContent.kind !== "gateway_state") {
+    const gatewaySender = activeTrust?.gatewayTransport.userId ?? config.gatewayMatrixUserId;
+    const stateEvent = async (eventType: string, stateKey: string): Promise<MatrixEvent> => {
+      const content = await client.getStateEvent(config.roomId, eventType, stateKey);
+      return new sdk.MatrixEvent({
+        type: eventType,
+        state_key: stateKey,
+        event_id: `$codever-current-state-${encodeURIComponent(eventType)}-${encodeURIComponent(stateKey)}`,
+        room_id: config.roomId,
+        sender: gatewaySender,
+        origin_server_ts: 0,
+        content,
+      });
+    };
+    let gatewayContent: MatrixGatewayState | null = null;
+    let directoryPages: MatrixSessionDirectoryPage[] = [];
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const before = await decodeRoomStateEvent(await stateEvent(
+        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+        config.gatewayId,
+      ));
+      if (!before || before.kind !== "gateway_state") {
         throw new Error("The Gateway Room State is unavailable.");
       }
-      const decodedState: MatrixStateContent[] = [gatewayContent];
-      for (const event of sessionEvents) {
-        const content = await decodeRoomStateEvent(event);
-        if (content) decodedState.push(content);
+      const descriptor = before.session_directory;
+      const pages: MatrixSessionDirectoryPage[] = [];
+      for (let pageIndex = 0; pageIndex < descriptor.page_count; pageIndex += 1) {
+        const decoded = await decodeRoomStateEvent(await stateEvent(
+          CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+          matrixDirectoryStateKey(descriptor, pageIndex),
+        ));
+        if (!decoded || decoded.kind !== "session_directory") {
+          throw new Error(`Matrix session directory page ${pageIndex} is unavailable.`);
+        }
+        pages.push(decoded);
       }
+      const after = await decodeRoomStateEvent(await stateEvent(
+        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+        config.gatewayId,
+      ));
+      if (!after || after.kind !== "gateway_state") {
+        throw new Error("The Gateway Room State is unavailable.");
+      }
+      if (!sameMatrixDirectory(before, after)) continue;
+      validateMatrixDirectory(after, pages);
+      gatewayContent = after;
+      directoryPages = pages;
+      break;
+    }
+    if (!gatewayContent) {
+      throw new Error("The Matrix session directory changed continuously while reconnecting.");
+    }
+    const directorySessions = directoryPages.flatMap((page) => page.sessions);
+    if ((await sha256(canonicalJson(directorySessions))) !== gatewayContent.session_directory.digest) {
+      throw new Error("The Matrix session directory digest does not match its Gateway commit.");
+    }
+    const sessionContents = directoryPages.flatMap((page) =>
+      page.sessions.map((session) => matrixStateContentSchema.parse({
+        version: 2,
+        kind: "session_state",
+        gateway_id: page.gateway_id,
+        conversation_id: page.conversation_id,
+        revision: page.revision,
+        revision_epoch: page.revision_epoch,
+        revision_epoch_generation: page.revision_epoch_generation,
+        state_version: page.state_version,
+        session_id: session.session_id,
+        state: session.archived ? "archived" : "active",
+        session,
+        updated_at: page.updated_at,
+      })),
+    );
+    const operation = roomStateChain.then(async () => {
+      const decodedState: MatrixStateContent[] = [gatewayContent!, ...sessionContents];
       const snapshot = await nativeProjection.applyRoomStateBatch(decodedState);
       if (!snapshot) throw new Error("The Gateway Room State is unavailable.");
       for (const content of decodedState) {
@@ -982,7 +1025,7 @@ export async function connectMatrix(
       authoritativeStateInitialized = true;
       await onGatewayState(snapshot);
       const trust = activeTrust;
-      if (trust) scheduleCommandRecoveryAtState(gatewayContent, trust);
+      if (trust) scheduleCommandRecoveryAtState(gatewayContent!, trust);
     });
     roomStateChain = operation.catch(() => undefined);
     await operation;
@@ -1061,7 +1104,10 @@ export async function connectMatrix(
   };
   const onTimelineReset = (room: Room | undefined): void => {
     if (!room || room.roomId !== config.roomId) return;
-    // A limited sync is recovered from Matrix's own thread/timeline APIs.
+    // Inventory is reconstructed from paginated state history, while selected
+    // conversation text is reconstructed through the per-thread history API.
+    // The live SDK timeline is only a wake-up stream and is never the sole
+    // source of durable application truth.
     recoverGatewayStateSnapshot();
   };
   const onRoomState = (event: MatrixEvent): void => {
@@ -2158,7 +2204,10 @@ export async function connectMatrix(
       null,
       {
         dir: sdk.Direction.Backward,
-        limit,
+        // Gateway events are individually capped at 40 KiB. Keep each
+        // relations response under the same 2 MiB safety budget used by the
+        // native client, then loop tokens to satisfy larger UI page requests.
+        limit: Math.min(limit, 32),
         recurse: true,
         ...(from ? { from } : {}),
       },
@@ -3779,6 +3828,61 @@ function timelineKeyScope(
     config.roomId,
     identity.keyId,
   ]);
+}
+
+function matrixDirectoryStateKey(
+  value: {
+    state_key_prefix: string;
+    slot?: number;
+    directory_slot?: number;
+  },
+  pageIndex: number,
+): string {
+  const slot = value.slot ?? value.directory_slot;
+  if (slot === undefined) throw new Error("Matrix directory slot is unavailable.");
+  return `${value.state_key_prefix}.${slot}.${pageIndex}`;
+}
+
+function sameMatrixDirectory(left: MatrixGatewayState, right: MatrixGatewayState): boolean {
+  return left.gateway_id === right.gateway_id &&
+    left.conversation_id === right.conversation_id &&
+    left.revision_epoch_generation === right.revision_epoch_generation &&
+    left.revision_epoch === right.revision_epoch &&
+    canonicalJson(left.session_directory) === canonicalJson(right.session_directory);
+}
+
+function validateMatrixDirectory(
+  gateway: MatrixGatewayState,
+  pages: readonly MatrixSessionDirectoryPage[],
+): void {
+  const descriptor = gateway.session_directory;
+  if (pages.length !== descriptor.page_count) {
+    throw new Error("The Matrix session directory page count is incomplete.");
+  }
+  const sessionIds = new Set<string>();
+  pages.forEach((page, pageIndex) => {
+    if (
+      page.gateway_id !== gateway.gateway_id ||
+      page.conversation_id !== gateway.conversation_id ||
+      page.revision_epoch_generation !== gateway.revision_epoch_generation ||
+      page.revision_epoch !== gateway.revision_epoch ||
+      page.state_version !== descriptor.state_version ||
+      page.directory_generation !== descriptor.generation ||
+      page.directory_slot !== descriptor.slot ||
+      page.directory_digest !== descriptor.digest ||
+      page.state_key_prefix !== descriptor.state_key_prefix ||
+      page.page_index !== pageIndex ||
+      page.page_count !== descriptor.page_count
+    ) {
+      throw new Error(`Matrix session directory page ${pageIndex} does not match its Gateway commit.`);
+    }
+    for (const session of page.sessions) {
+      if (sessionIds.has(session.session_id)) {
+        throw new Error(`Matrix session directory repeats session ${session.session_id}.`);
+      }
+      sessionIds.add(session.session_id);
+    }
+  });
 }
 
 async function saveTimelineKeyRing(

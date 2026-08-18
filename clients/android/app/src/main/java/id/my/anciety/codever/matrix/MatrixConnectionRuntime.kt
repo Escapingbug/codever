@@ -38,6 +38,8 @@ class MatrixConnectionRuntime(
         MatrixApplicationControlClient(),
     private val applicationControlSyncClient: MatrixApplicationControlSyncClient =
         MatrixApplicationControlSyncClient(),
+    private val applicationTimelineClient: MatrixApplicationTimelineClient =
+        MatrixApplicationTimelineClient(),
     private val applicationRoomStateClient: MatrixApplicationRoomStateClient =
         MatrixApplicationRoomStateClient(),
     private val threadHistoryClient: MatrixThreadHistoryClient = MatrixThreadHistoryClient(),
@@ -59,6 +61,10 @@ class MatrixConnectionRuntime(
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onConvergenceRequired: (String) -> Unit = {},
     private val onDecryptedEvent: suspend (MatrixDecryptedEvent) -> Unit = {},
+    private val onAuthoritativeGatewayState:
+        suspend (MatrixDecryptedEvent) -> MatrixSessionDirectoryLocator = {
+            error("A Matrix session-directory decoder is required.")
+        },
     private val onAuthoritativeRoomState: suspend (List<MatrixDecryptedEvent>) -> Unit = {
         events -> for (event in events) onDecryptedEvent(event)
     },
@@ -72,6 +78,7 @@ class MatrixConnectionRuntime(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val networkTransitionMutex = Mutex()
+    private val applicationControlGapStoreMutex = Mutex()
     private val networkTransitionGeneration = AtomicLong(0)
     private val started = AtomicBoolean(false)
     private var networkAvailable = networkMonitor.isAvailable()
@@ -85,6 +92,7 @@ class MatrixConnectionRuntime(
     private var retryJob: Job? = null
     private var watchdogJob: Job? = null
     private var applicationControlReceiverJob: Job? = null
+    private var applicationControlGapJob: Job? = null
     private var applicationControlReady = CompletableDeferred<Unit>()
     @Volatile
     private var applicationControlReceiverReady = false
@@ -351,12 +359,8 @@ class MatrixConnectionRuntime(
     suspend fun refreshApplicationRoomState() {
         val session = secrets?.session
             ?: throw MatrixOfflineException("The Matrix session is unavailable.")
-        val state = applicationRoomStateClient.current(session)
-        diagnostics.record(
-            "matrix.application_state.refreshed",
-            mapOf("accepted" to state.events.size.toString()),
-        )
-        onAuthoritativeRoomState(state.events)
+        val accepted = loadAuthoritativeRoomState(session)
+        diagnostics.record("matrix.application_state.refreshed", mapOf("accepted" to accepted.toString()))
     }
 
     suspend fun loadThreadHistory(
@@ -556,6 +560,10 @@ class MatrixConnectionRuntime(
         files = currentFiles
         secrets = loaded
         applicationControlSince = currentFiles.applicationControlCursor.load()
+        // Validate the encrypted recovery queue before any receiver coroutine
+        // can fail out-of-band. Corruption must become a visible blocked state,
+        // never an unexplained permanent "Syncing conversations" screen.
+        currentFiles.applicationControlGaps.load()
         diagnostics.record("matrix.session.restore", mapOf("stage" to "restored"))
     }
 
@@ -695,22 +703,34 @@ class MatrixConnectionRuntime(
             var consecutiveFailures = 0
             while (isActive) {
                 try {
-                    val currentState = applicationRoomStateClient.current(session)
+                    val accepted = loadAuthoritativeRoomState(session)
                     diagnostics.record(
                         "matrix.application_state.current_received",
                         mapOf(
-                            "candidates" to currentState.candidateEventCount.toString(),
-                            "accepted" to currentState.events.size.toString(),
+                            "candidates" to accepted.toString(),
+                            "accepted" to accepted.toString(),
                         ),
                     )
-                    // Current Room State is a projection baseline, not an
-                    // append-only journal replay. Always reprocess it after a
-                    // native reconnect, even when its event IDs are unchanged.
-                    onAuthoritativeRoomState(currentState.events)
                     break
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    val cursorRebuildReason = applicationControlCursorResetReason(error, since)
+                    if (cursorRebuildReason != null) {
+                        applicationControlGapStoreMutex.withLock {
+                            currentFiles.applicationControlCursor.clear()
+                            currentFiles.applicationControlGaps.clear()
+                            since = null
+                            applicationControlSince = null
+                        }
+                        diagnostics.record(
+                            "matrix.application_control.cursor_rebuilt",
+                            mapOf("reason" to cursorRebuildReason),
+                        )
+                        onConvergenceRequired("application_control_cursor_rebuilt")
+                        consecutiveFailures = 0
+                        continue
+                    }
                     if (error is MatrixApplicationControlPayloadException) {
                         diagnostics.record(
                             "matrix.application_state.current_rejected",
@@ -758,6 +778,11 @@ class MatrixConnectionRuntime(
                 }
             }
             consecutiveFailures = 0
+            startApplicationControlGapRecovery(
+                session = session,
+                currentFiles = currentFiles,
+                generation = generation,
+            )
             while (isActive) {
                 val batch = try {
                     // A persisted cursor makes this a live sync, but readiness must not
@@ -771,19 +796,6 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    val cursorResetReason = applicationControlCursorResetReason(error, since)
-                    if (cursorResetReason != null) {
-                        currentFiles.applicationControlCursor.clear()
-                        since = null
-                        applicationControlSince = null
-                        diagnostics.record(
-                            "matrix.application_control.cursor_reset",
-                            mapOf("reason" to cursorResetReason),
-                        )
-                        onConvergenceRequired("application_control_cursor_reset")
-                        consecutiveFailures = 0
-                        continue
-                    }
                     if (error is MatrixApplicationControlPayloadException) {
                         diagnostics.record(
                             "matrix.application_control.receiver_rejected",
@@ -830,7 +842,11 @@ class MatrixConnectionRuntime(
                             "matrix.application_control.receiver_rejected",
                             mapOf(
                                 "error" to error.javaClass.simpleName,
-                                "reason" to "baseline_response_too_large",
+                                "reason" to if (since == null) {
+                                    "baseline_response_too_large"
+                                } else {
+                                    "incremental_response_too_large"
+                                },
                             ),
                         )
                         ready.completeExceptionally(error)
@@ -839,7 +855,11 @@ class MatrixConnectionRuntime(
                                 if (driverGeneration == generation) {
                                     accept(
                                         MatrixRuntimeEvent.Failed(
-                                            "matrix_application_control_baseline_too_large",
+                                            if (since == null) {
+                                                "matrix_application_control_baseline_too_large"
+                                            } else {
+                                                "matrix_application_control_incremental_too_large"
+                                            },
                                             blocked = true,
                                         ),
                                     )
@@ -868,6 +888,21 @@ class MatrixConnectionRuntime(
                 if (!started.get() || driverGeneration != generation) return@launch
                 consecutiveFailures = 0
                 val establishingCursor = since == null
+                if (batch.limited && since != null) {
+                    val boundary = checkNotNull(batch.prevBatch) {
+                        "Limited Matrix control sync has no previous-batch boundary."
+                    }
+                    enqueueApplicationControlGap(
+                        currentFiles.applicationControlGaps,
+                        MatrixSyncGap(from = since, to = boundary),
+                    )
+                    diagnostics.record("matrix.application_control.gap_persisted")
+                    startApplicationControlGapRecovery(
+                        session = session,
+                        currentFiles = currentFiles,
+                        generation = generation,
+                    )
+                }
                 if (batch.events.isNotEmpty()) {
                     diagnostics.record(
                         if (establishingCursor) {
@@ -908,12 +943,117 @@ class MatrixConnectionRuntime(
         }
     }
 
+    private suspend fun loadAuthoritativeRoomState(session: StoredMatrixSession): Int {
+        repeat(MAX_DIRECTORY_STABILITY_ATTEMPTS) {
+            val beforeGateway = applicationRoomStateClient.currentGateway(session)
+            val before = onAuthoritativeGatewayState(beforeGateway)
+            val directory = applicationRoomStateClient.currentDirectory(session, before)
+            val afterGateway = applicationRoomStateClient.currentGateway(session)
+            val after = onAuthoritativeGatewayState(afterGateway)
+            if (before != after) return@repeat
+            onAuthoritativeRoomState(listOf(afterGateway) + directory.events)
+            return directory.events.size + 1
+        }
+        throw MatrixApplicationControlPayloadException(
+            "The Matrix session directory changed continuously while reconnecting.",
+        )
+    }
+
     private fun stopApplicationControlReceiverLocked() {
         applicationControlReceiverReady = false
         applicationControlReceiverJob?.cancel()
         applicationControlReceiverJob = null
+        applicationControlGapJob?.cancel()
+        applicationControlGapJob = null
         applicationControlReady.cancel()
         applicationControlReady = CompletableDeferred()
+    }
+
+    private fun startApplicationControlGapRecovery(
+        session: StoredMatrixSession,
+        currentFiles: MatrixAccountFiles,
+        generation: Long,
+    ) {
+        if (applicationControlGapJob?.isActive == true) return
+        if (currentFiles.applicationControlGaps.load().isEmpty()) return
+        applicationControlGapJob = scope.launch {
+            var consecutiveFailures = 0
+            while (isActive && started.get() && driverGeneration == generation) {
+                val gap = currentFiles.applicationControlGaps.load().firstOrNull() ?: break
+                try {
+                    val page = applicationTimelineClient.page(
+                        session = session,
+                        from = gap.cursor,
+                        to = gap.to,
+                    )
+                    diagnostics.record(
+                        "matrix.application_control.gap_page_received",
+                        mapOf(
+                            "candidates" to page.candidateEventCount.toString(),
+                            "accepted" to page.events.size.toString(),
+                        ),
+                    )
+                    for (event in page.events) {
+                        onDecryptedEvent(event)
+                        diagnostics.record(
+                            "matrix.application_control.gap_event_committed",
+                            mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
+                        )
+                    }
+                    applicationControlGapStoreMutex.withLock {
+                        val queue = currentFiles.applicationControlGaps.load()
+                        val currentIndex = queue.indexOfFirst {
+                            it.from == gap.from && it.to == gap.to
+                        }
+                        if (currentIndex >= 0) {
+                            val next = queue.toMutableList()
+                            if (page.nextFrom == null) {
+                                next.removeAt(currentIndex)
+                                diagnostics.record("matrix.application_control.gap_closed")
+                            } else {
+                                next[currentIndex] = gap.copy(cursor = page.nextFrom)
+                                diagnostics.record("matrix.application_control.gap_cursor_committed")
+                            }
+                            currentFiles.applicationControlGaps.save(next)
+                        }
+                    }
+                    consecutiveFailures = 0
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    consecutiveFailures += 1
+                    diagnostics.record(
+                        "matrix.application_control.gap_retry",
+                        errorAttributes(error),
+                    )
+                    delay(
+                        (error as? MatrixApplicationControlSyncException)?.retryAfterMs
+                            ?: APPLICATION_CONTROL_RETRY_BASE_MS *
+                                consecutiveFailures.coerceAtMost(
+                                    APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER,
+                                ),
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun enqueueApplicationControlGap(
+        store: MatrixSyncGapStore,
+        gap: MatrixSyncGap,
+    ) {
+        while (true) {
+            val committed = applicationControlGapStoreMutex.withLock {
+                val current = store.load()
+                if (current.any { it.from == gap.from && it.to == gap.to }) return@withLock true
+                if (current.size >= MAX_APPLICATION_CONTROL_GAPS) return@withLock false
+                store.save(current + gap)
+                true
+            }
+            if (committed) return
+            diagnostics.record("matrix.application_control.gap_backpressure")
+            delay(250)
+        }
     }
 
     private fun scheduleRetryLocked() {
@@ -957,9 +1097,16 @@ class MatrixConnectionRuntime(
         }
     }
 
-    private fun errorAttributes(error: Throwable): Map<String, String> = mapOf(
-        "error" to error.javaClass.simpleName.replace(Regex("[^A-Za-z0-9._:+/-]"), "_").take(160),
-    )
+    private fun errorAttributes(error: Throwable): Map<String, String> = buildMap {
+        put(
+            "error",
+            error.javaClass.simpleName.replace(Regex("[^A-Za-z0-9._:+/-]"), "_").take(160),
+        )
+        if (error is MatrixApplicationControlSyncException) {
+            put("status", error.status.toString())
+            error.retryAfterMs?.let { put("retry_after_ms", it.toString()) }
+        }
+    }
 
     private fun StoredMatrixSession.toPublic() = PublicMatrixSession(
         homeserver = homeserverUrl,
@@ -969,6 +1116,8 @@ class MatrixConnectionRuntime(
     )
 
     private companion object {
+        const val MAX_APPLICATION_CONTROL_GAPS = 64
+        const val MAX_DIRECTORY_STABILITY_ATTEMPTS = 8
         const val WATCHDOG_INTERVAL_MS = 5_000L
         const val DRIVER_START_TIMEOUT_MS = 30_000L
         const val DRIVER_STOP_TIMEOUT_MS = 10_000L

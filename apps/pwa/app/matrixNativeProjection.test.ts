@@ -45,6 +45,7 @@ describe("MatrixNativeProjection Room State", () => {
 
     const before = projection.snapshot();
     await expect(projection.applyRoomStateBatch([
+      gatewayState(5),
       tombstone("s1", 4),
       { ...sessionState("broken", 5), state: "invalid" },
     ])).rejects.toThrow();
@@ -62,6 +63,28 @@ describe("MatrixNativeProjection Room State", () => {
     await projection.applyRoomState(before);
     const state = await projection.applyRoomState(after);
     expect(state?.sessions).toMatchObject([{ title: "After", status: "running" }]);
+  });
+
+  it("replaces missing directory entries but preserves newer live state", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomStateBatch([
+      gatewayState(2),
+      sessionState("kept", 2),
+      sessionState("removed", 2),
+    ]);
+    await projection.applyRoomState(sessionState("arrived-live", 4));
+    const committed = {
+      ...gatewayState(5),
+      session_directory: { ...gatewayState(5).session_directory, state_version: 3 },
+    };
+    const snapshot = await projection.applyRoomStateBatch([
+      committed,
+      sessionState("kept", 3),
+    ]);
+    expect(snapshot?.sessions.map((session) => session.id).sort()).toEqual([
+      "arrived-live",
+      "kept",
+    ]);
   });
 
   it("updates one session without waiting for an unrelated global commit", async () => {
@@ -196,6 +219,14 @@ function gatewayState(stateVersion = 1) {
       can_archive_session: true,
       can_delete_session: true,
       session_extensions: [],
+    },
+    session_directory: {
+      generation: stateVersion,
+      state_version: stateVersion,
+      slot: stateVersion % 3,
+      page_count: 0,
+      state_key_prefix: "codever.directory",
+      digest: "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
     },
     updated_at: 1,
   } as const;

@@ -28,6 +28,8 @@ internal const val CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE =
     "io.codever.gateway.current.v2"
 internal const val CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE =
     "io.codever.session.current.v2"
+internal const val CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE =
+    "io.codever.session.directory.v2"
 
 internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
@@ -35,7 +37,8 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
     val content = root["content"] as? JsonObject ?: return@runCatching false
     when (eventType) {
         CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
-        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE ->
+        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+        CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE ->
             root["state_key"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true &&
                 content["version"]?.jsonPrimitive?.intOrNull == 2 &&
                 content["kind"]?.jsonPrimitive?.contentOrNull == "state_envelope" &&
@@ -83,6 +86,8 @@ internal fun codeverApplicationEventKind(rawJson: String): String = runCatching 
     when (root["type"]?.jsonPrimitive?.contentOrNull) {
         CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE -> return@runCatching "gateway_room_state"
         CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE -> return@runCatching "session_room_state"
+        CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE ->
+            return@runCatching "session_directory_room_state"
     }
     val extension = root["content"]
         ?.jsonObject
@@ -210,14 +215,30 @@ class RestrictedHttpsMatrixApplicationControlSyncTransport(
 
 data class MatrixApplicationControlSyncBatch(
     val nextBatch: String,
+    val prevBatch: String?,
     val events: List<MatrixDecryptedEvent>,
     val candidateEventCount: Int,
     val limited: Boolean,
 )
 
+data class MatrixApplicationTimelinePage(
+    val events: List<MatrixDecryptedEvent>,
+    val nextFrom: String?,
+    val candidateEventCount: Int,
+)
+
 data class MatrixApplicationRoomStateBatch(
     val events: List<MatrixDecryptedEvent>,
     val candidateEventCount: Int,
+)
+
+data class MatrixSessionDirectoryLocator(
+    val generation: Long,
+    val stateVersion: Long,
+    val slot: Int,
+    val pageCount: Int,
+    val stateKeyPrefix: String,
+    val digest: String,
 )
 
 data class MatrixThreadHistoryBatch(
@@ -238,6 +259,85 @@ class MatrixApplicationControlResponseTooLargeException(
     "Matrix control sync response exceeded the $maximumBytes-byte safety limit.",
 )
 
+/** Pages exactly one omitted `/sync` range using Matrix's gap-closing contract. */
+class MatrixApplicationTimelineClient(
+    private val transport: MatrixApplicationControlSyncTransport =
+        RestrictedHttpsMatrixApplicationControlSyncTransport(),
+) {
+    suspend fun page(
+        session: StoredMatrixSession,
+        from: String,
+        to: String,
+        limit: Int = 32,
+    ): MatrixApplicationTimelinePage {
+        require(from.isNotBlank() && from.length <= 4_096)
+        require(to.isNotBlank() && to.length <= 4_096)
+        require(from != to)
+        require(limit in 1..32)
+        val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
+        val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
+        val filter = buildJsonObject {
+            put("senders", buildJsonArray {
+                add(JsonPrimitive(session.roomBinding.gatewayUserId))
+            })
+            put("types", buildJsonArray {
+                add(JsonPrimitive(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE))
+                add(JsonPrimitive("m.room.message"))
+                add(JsonPrimitive(CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE))
+                add(JsonPrimitive(CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE))
+            })
+        }.toString()
+        val endpoint = URI(
+            "$homeserver/_matrix/client/v3/rooms/${encode(roomId)}/messages?" +
+                listOf(
+                    "dir=f",
+                    "from=${encode(from)}",
+                    "to=${encode(to)}",
+                    "limit=$limit",
+                    "filter=${encode(filter)}",
+                ).joinToString("&"),
+        )
+        val response = transport.getJson(endpoint, session.accessToken)
+        return try {
+            if (response.status !in 200..299) {
+                throw MatrixApplicationControlSyncException(
+                    response.status,
+                    parseMatrixRetryAfterMs(response.body),
+                )
+            }
+            val root = runCatching {
+                Json.parseToJsonElement(response.body.toString(Charsets.UTF_8)) as? JsonObject
+            }.getOrNull() ?: throw MatrixApplicationControlPayloadException(
+                "Matrix gap page response is not an object.",
+            )
+            val candidates = root["chunk"].let { it as? JsonArray }.orEmpty()
+            val events = candidates.mapNotNull { element ->
+                val event = element as? JsonObject ?: return@mapNotNull null
+                if (
+                    event["sender"]?.jsonPrimitive?.contentOrNull !=
+                    session.roomBinding.gatewayUserId ||
+                    !isCodeverApplicationControlEvent(event.toString())
+                ) return@mapNotNull null
+                matrixApplicationEvent(roomId, event)
+            }
+            val end = root["end"]
+                .let { it as? JsonPrimitive }
+                ?.contentOrNull
+                ?.takeIf { it.isNotBlank() && it.length <= 4_096 }
+            MatrixApplicationTimelinePage(
+                events = events,
+                nextFrom = end?.takeUnless { it == from || it == to || candidates.isEmpty() },
+                candidateEventCount = candidates.size,
+            )
+        } finally {
+            response.body.fill(0)
+        }
+    }
+
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+}
+
 class MatrixApplicationControlPayloadException(message: String) :
     IllegalStateException(message)
 
@@ -246,10 +346,15 @@ internal fun applicationControlCursorResetReason(
     since: String?,
 ): String? {
     if (since == null) return null
-    return when {
-        error is MatrixApplicationControlResponseTooLargeException -> "response_too_large"
-        error is MatrixApplicationControlSyncException && error.status == 400 -> "server_rejected"
-        else -> null
+    // An invalid server token can only be replaced after the receiver has
+    // crossed the authoritative state barrier. Session inventory is rebuilt
+    // from bounded state-history pages, transcripts from thread relations,
+    // and pending commands from their durable idempotent outbox. An oversized
+    // response proves none of those things and must retain its cursor.
+    return if (error is MatrixApplicationControlSyncException && error.status == 400) {
+        "server_rejected_after_authoritative_rebuild"
+    } else {
+        null
     }
 }
 
@@ -258,11 +363,49 @@ class MatrixApplicationRoomStateClient(
     private val transport: MatrixApplicationControlSyncTransport =
         RestrictedHttpsMatrixApplicationControlSyncTransport(),
 ) {
-    suspend fun current(session: StoredMatrixSession): MatrixApplicationRoomStateBatch {
+    suspend fun currentGateway(session: StoredMatrixSession): MatrixDecryptedEvent {
         val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
         val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
+        return currentStateEvent(
+            session,
+            homeserver,
+            roomId,
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            session.roomBinding.gatewayId,
+        )
+    }
+
+    suspend fun currentDirectory(
+        session: StoredMatrixSession,
+        locator: MatrixSessionDirectoryLocator,
+    ): MatrixApplicationRoomStateBatch {
+        require(locator.pageCount in 0..MAX_DIRECTORY_PAGES)
+        val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
+        val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
+        val events = (0 until locator.pageCount).map { pageIndex ->
+            currentStateEvent(
+                session,
+                homeserver,
+                roomId,
+                CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+                "${locator.stateKeyPrefix}.${locator.slot}.$pageIndex",
+            )
+        }
+        return MatrixApplicationRoomStateBatch(events, events.size)
+    }
+
+    private suspend fun currentStateEvent(
+        session: StoredMatrixSession,
+        homeserver: String,
+        roomId: String,
+        eventType: String,
+        stateKey: String,
+    ): MatrixDecryptedEvent {
         val response = transport.getJson(
-            URI("$homeserver/_matrix/client/v3/rooms/${encode(roomId)}/state"),
+            URI(
+                "$homeserver/_matrix/client/v3/rooms/${encode(roomId)}/state/" +
+                    "${encode(eventType)}/${encode(stateKey)}",
+            ),
             session.accessToken,
         )
         return try {
@@ -272,44 +415,30 @@ class MatrixApplicationRoomStateClient(
                     parseMatrixRetryAfterMs(response.body),
                 )
             }
-            val candidates = runCatching {
+            val content = runCatching {
                 Json.parseToJsonElement(
                     response.body.toString(Charsets.UTF_8),
-                ) as? JsonArray
+                ) as? JsonObject
             }.getOrNull() ?: throw MatrixApplicationControlPayloadException(
-                "Current Codever Matrix Room State is not an array.",
+                "Current Codever Gateway state is not an object.",
             )
-            val events = candidates
-                .mapNotNull { it as? JsonObject }
-                .filter { event ->
-                    (event["sender"] as? JsonPrimitive)?.contentOrNull ==
-                        session.roomBinding.gatewayUserId &&
-                        (event["type"] as? JsonPrimitive)?.contentOrNull in setOf(
-                            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
-                            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
-                        )
-                }
-                .onEach { event ->
-                    if (!isCodeverApplicationControlEvent(event.toString())) {
-                        throw MatrixApplicationControlPayloadException(
-                            "Current Codever Matrix Room State has an invalid envelope shape.",
-                        )
-                    }
-                }
-                .sortedBy { event ->
-                    when ((event["type"] as? JsonPrimitive)?.contentOrNull) {
-                        CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE -> 0
-                        CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE -> 1
-                        else -> 2
-                    }
-                }
-                .map { event ->
-                    matrixApplicationEvent(roomId, event)
-                        ?: throw MatrixApplicationControlPayloadException(
-                            "Current Codever Matrix Room State has incomplete event metadata.",
-                        )
-                }
-            MatrixApplicationRoomStateBatch(events, candidates.size)
+            val event = buildJsonObject {
+                put("type", eventType)
+                put("state_key", stateKey)
+                put("event_id", "\$codever-current-${eventType.hashCode()}-${stateKey.hashCode()}")
+                put("sender", session.roomBinding.gatewayUserId)
+                put("origin_server_ts", 0)
+                put("content", content)
+            }
+            if (!isCodeverApplicationControlEvent(event.toString())) {
+                throw MatrixApplicationControlPayloadException(
+                    "Current Codever Room State has an invalid envelope shape.",
+                )
+            }
+            matrixApplicationEvent(roomId, event)
+                ?: throw MatrixApplicationControlPayloadException(
+                    "Current Codever Room State is incomplete.",
+                )
         } finally {
             response.body.fill(0)
         }
@@ -317,6 +446,10 @@ class MatrixApplicationRoomStateClient(
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+    private companion object {
+        const val MAX_DIRECTORY_PAGES = 100_000
+    }
 }
 
 /** Pages one session thread without scanning or materializing the room timeline. */
@@ -333,11 +466,12 @@ class MatrixThreadHistoryClient(
         require(threadRootEventId.isNotBlank() && threadRootEventId.length <= 512)
         require(from == null || (from.isNotBlank() && from.length <= 4_096))
         require(limit in 1..100)
+        val boundedLimit = minOf(limit, MAX_RELATION_PAGE_EVENTS)
         val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
         val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
         val query = buildList {
             add("dir=b")
-            add("limit=$limit")
+            add("limit=$boundedLimit")
             add("recurse=true")
             if (from != null) add("from=${encode(from)}")
         }.joinToString("&")
@@ -384,6 +518,10 @@ class MatrixThreadHistoryClient(
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+    private companion object {
+        const val MAX_RELATION_PAGE_EVENTS = 32
+    }
 }
 
 /**
@@ -411,13 +549,11 @@ class MatrixApplicationControlSyncClient(
             put("room", buildJsonObject {
                 put("rooms", buildJsonArray { add(JsonPrimitive(roomId)) })
                 put("state", buildJsonObject {
-                    put("senders", buildJsonArray {
-                        add(JsonPrimitive(session.roomBinding.gatewayUserId))
-                    })
-                    put("types", buildJsonArray {
-                        add(JsonPrimitive(CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE))
-                        add(JsonPrimitive(CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE))
-                    })
+                    // Current Codever entity state is fetched through its
+                    // authoritative state path. Excluding the state delta here
+                    // keeps an incremental sync page byte-bounded even when a
+                    // long offline interval changed thousands of sessions.
+                    put("types", JsonArray(emptyList()))
                 })
                 put("ephemeral", buildJsonObject { put("types", JsonArray(emptyList())) })
                 put("account_data", buildJsonObject { put("types", JsonArray(emptyList())) })
@@ -489,6 +625,16 @@ class MatrixApplicationControlSyncClient(
                 .let { it as? JsonPrimitive }
                 ?.booleanOrNull
                 ?: false
+            val prevBatch = timeline
+                ?.get("prev_batch")
+                .let { it as? JsonPrimitive }
+                ?.contentOrNull
+                ?.takeIf { it.isNotBlank() && it.length <= 4_096 }
+            if (limited && since != null && prevBatch == null) {
+                throw MatrixApplicationControlPayloadException(
+                    "Limited Matrix control sync has no gap boundary.",
+                )
+            }
             val stateEvents = joinedRoom
                 ?.get("state")
                 .let { it as? JsonObject }
@@ -519,6 +665,7 @@ class MatrixApplicationControlSyncClient(
                 }
             MatrixApplicationControlSyncBatch(
                 nextBatch = nextBatch,
+                prevBatch = prevBatch,
                 events = events,
                 candidateEventCount = candidateEvents.size,
                 limited = limited,

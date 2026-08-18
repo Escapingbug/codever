@@ -12,6 +12,7 @@ import {
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     capabilityRenewalRequestSchema,
     type CodeverCommand,
@@ -326,7 +327,16 @@ describe('MatrixGatewayRunner', () => {
 
         expect(client.sent).toHaveLength(1)
         expect(client.sent[0]?.transactionId).toBe('codever.session.root.app-session-1')
-        expect(client.state.size).toBe(2)
+        expect(client.state.size).toBe(3)
+        expect([...client.state.keys()].some(key =>
+            key.includes(CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE)
+        )).toBe(true)
+        const publishedStateTypes = [...client.state.values()].map(value => value.eventType)
+        expect(publishedStateTypes).toEqual([
+            CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+        ])
         expect(client.state.has(JSON.stringify([
             '!room:example.org',
             CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
@@ -1837,6 +1847,29 @@ describe('MatrixJsSdkGatewayClient', () => {
             expect.objectContaining({ kind: 'state_envelope' }),
             expect.any(Object),
         )
+        await client.setApplicationRoomState({
+            roomId: '!room:example.org',
+            eventType: CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+            stateKey: 'codever.directory.1.0',
+            content: {
+                version: 2,
+                kind: 'state_envelope',
+                state_envelope: {
+                    envelope: {
+                        eventType: CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
+                        stateKey: 'codever.directory.1.0',
+                    },
+                    signature: {},
+                },
+            },
+        })
+        expect(sdk.http.authedRequest).toHaveBeenCalledWith(
+            'PUT',
+            '/rooms/!room%3Aexample.org/state/io.codever.session.directory.v2/codever.directory.1.0',
+            undefined,
+            expect.objectContaining({ kind: 'state_envelope' }),
+            expect.any(Object),
+        )
         await expect(client.setApplicationRoomState({
             roomId: '!room:example.org',
             eventType: CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
@@ -1854,7 +1887,7 @@ describe('MatrixJsSdkGatewayClient', () => {
             },
         })).rejects.toThrow('must contain a Codever state envelope')
         expect(sdk.sendMessage).toHaveBeenCalledTimes(1)
-        expect(sdk.http.authedRequest).toHaveBeenCalledTimes(3)
+        expect(sdk.http.authedRequest).toHaveBeenCalledTimes(4)
         await client.stop()
         expect(sdk.stopClient).toHaveBeenCalledOnce()
     })

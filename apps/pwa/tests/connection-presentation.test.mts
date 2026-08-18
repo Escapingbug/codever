@@ -55,6 +55,16 @@ test("an unrecoverably large Matrix baseline is visible instead of syncing forev
   );
 });
 
+test("an oversized incremental response retains the last verified cursor", () => {
+  const presentation = deriveConnectionPresentation(
+    "error",
+    "matrix_application_control_incremental_too_large",
+  );
+  assert.equal(presentation.state, "blocked");
+  assert.equal(presentation.title, "Conversation sync needs attention");
+  assert.match(presentation.detail, /last verified position was retained/i);
+});
+
 test("missing native session with retained trust is presented as a repairable state", () => {
   const presentation = deriveConnectionPresentation(
     "error",

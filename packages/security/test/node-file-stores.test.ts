@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -58,6 +60,31 @@ describe('FileReplayStore', () => {
     await expect(
       store.claimAll([{ key: 'nonce', expiresAt: 2_000 }], 1_000),
     ).rejects.toThrow('remove this lock directory manually')
+  })
+
+  it('recovers a lock left by an exited process without operator cleanup', async () => {
+    const path = join(await temporaryDirectory(), 'replay.json')
+    const lockPath = `${path}.lock`
+    const owner = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const fs=require('node:fs');const p=process.argv[1];` +
+          `fs.mkdirSync(p);fs.writeFileSync(p+'/owner.json',JSON.stringify({` +
+          `version:1,pid:process.pid,acquiredAt:Date.now(),token:'crashed-owner-token'` +
+          `}));process.stdout.write('locked');setInterval(()=>{},1000);`,
+        lockPath,
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    )
+    await once(owner.stdout, 'data')
+    owner.kill('SIGKILL')
+    await once(owner, 'exit')
+
+    await expect(
+      new FileReplayStore(path, { lockTimeoutMs: 2_000, retryDelayMs: 2 })
+        .claimAll([{ key: 'after-crash', expiresAt: 2_000 }], 1_000),
+    ).resolves.toBe(true)
   })
 })
 

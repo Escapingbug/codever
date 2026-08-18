@@ -57,6 +57,7 @@ export class MatrixNativeProjection {
       }
       return this.snapshot();
     }
+    if (state.kind === "session_directory") return this.snapshot();
     if (this.belongsToCurrentGateway(state)) {
       this.commitSessionState(state);
     } else {
@@ -68,21 +69,42 @@ export class MatrixNativeProjection {
     return this.snapshot();
   }
 
-  /**
-   * Applies one complete Matrix `/state` response behind a single publication
-   * barrier. Invalid input rolls the projection back to its exact prior state.
-   */
+  /** Replaces the materialized directory behind one publication barrier. */
   async applyRoomStateBatch(
     inputs: readonly unknown[],
   ): Promise<GatewayStateSnapshot | null> {
     const states = inputs.map((input) => matrixStateContentSchema.parse(input));
+    const gateways = states.filter(
+      (state): state is MatrixGatewayState => state.kind === "gateway_state",
+    );
+    if (gateways.length !== 1 || states.some((state) => state.kind === "session_directory")) {
+      throw new Error("A Matrix directory snapshot requires one Gateway and session entities only.");
+    }
+    const nextGateway = gateways[0]!;
+    const watermark = nextGateway.session_directory.state_version;
     const previousGateway = this.gateway;
     const previousSessionStates = new Map(this.sessionStates);
     const previousPendingSessionStates = new Map(this.pendingSessionStates);
     const previousStatusOverrides = new Map(this.statusOverrides);
     const previousLatestRevision = this.latestRevision;
     try {
-      for (const state of states) await this.applyRoomState(state);
+      const newerSessionStates = [...this.sessionStates.values(), ...this.pendingSessionStates.values()]
+        .filter((state) =>
+          state.revision_epoch_generation === nextGateway.revision_epoch_generation &&
+          state.revision_epoch === nextGateway.revision_epoch &&
+          state.state_version > watermark,
+        )
+        .sort(compareEntityState);
+      this.gateway = null;
+      this.sessionStates.clear();
+      this.pendingSessionStates.clear();
+      this.statusOverrides.clear();
+      this.latestRevision = null;
+      await this.applyRoomState(nextGateway);
+      for (const state of states) {
+        if (state.kind === "session_state") await this.applyRoomState(state);
+      }
+      for (const state of newerSessionStates) await this.applyRoomState(state);
       return this.snapshot();
     } catch (error) {
       this.gateway = previousGateway;

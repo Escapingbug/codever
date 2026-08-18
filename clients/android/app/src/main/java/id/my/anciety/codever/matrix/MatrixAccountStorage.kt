@@ -8,6 +8,7 @@ data class MatrixAccountFiles(
     val accountScope: String,
     val sessionStore: MatrixSessionStore,
     val applicationControlCursor: MatrixSyncCursorStore,
+    val applicationControlGaps: MatrixSyncGapStore,
     val sdkDataPath: String,
     val sdkCachePath: String,
 )
@@ -36,6 +37,7 @@ class MatrixAccountStorage(
         require(ACCOUNT_SCOPE.matches(files.accountScope)) { "Matrix account scope is invalid." }
         files.sessionStore.clear()
         files.applicationControlCursor.clear()
+        files.applicationControlGaps.clear()
         MatrixAccountWiper.deleteSdkAccountRoot(sdkRoot, files.accountScope)
         sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
     }
@@ -44,6 +46,7 @@ class MatrixAccountStorage(
     fun prepareForBootstrap(files: MatrixAccountFiles) {
         require(ACCOUNT_SCOPE.matches(files.accountScope)) { "Matrix account scope is invalid." }
         files.applicationControlCursor.clear()
+        files.applicationControlGaps.clear()
         MatrixAccountWiper.deleteSdkAccountRoot(sdkRoot, files.accountScope)
         sdkRoot.listFiles()?.takeIf { it.isEmpty() }?.let { sdkRoot.delete() }
     }
@@ -63,6 +66,11 @@ class MatrixAccountStorage(
             ),
             applicationControlCursor = EncryptedMatrixSyncCursorStore(
                 File(root, "control-sync-$accountScope.enc"),
+                cipher,
+                accountScope,
+            ),
+            applicationControlGaps = EncryptedMatrixSyncGapStore(
+                File(root, "control-sync-gaps-$accountScope.enc"),
                 cipher,
                 accountScope,
             ),

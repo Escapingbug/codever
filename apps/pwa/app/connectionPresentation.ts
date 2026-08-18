@@ -132,6 +132,11 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     detail:
       "The Matrix server returned more current state than this client can safely process. Export diagnostics for support.",
   },
+  matrix_application_control_incremental_too_large: {
+    title: "Conversation sync needs attention",
+    detail:
+      "The Matrix server returned an invalid oversized update. Your last verified position was retained; restart Codever or export diagnostics if this continues.",
+  },
 };
 
 const DEFAULT_COPY: Record<MatrixConnectionStatus, DetailCopy> = {

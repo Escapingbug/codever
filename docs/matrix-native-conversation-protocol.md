@@ -11,8 +11,9 @@ compatibility path in the native data plane.
 
 | Codever concept | Matrix concept | Authority |
 | --- | --- | --- |
-| Gateway workspace and capabilities | `io.codever.gateway.current.v2` Room State | one state key per Gateway |
-| Current/archived/deleted session | `io.codever.session.current.v2` Room State | one state key per session; delete is a tombstone |
+| Gateway workspace, capabilities, and directory commit | `io.codever.gateway.current.v2` Room State | one state key per Gateway |
+| Bounded current session directory | `io.codever.session.directory.v2` Room State | directly addressed immutable pages in three rotating slots |
+| Live session entity and delete audit | `io.codever.session.current.v2` Room State | one state key per session; delete is a tombstone |
 | Session identity | `m.thread` root | immutable `session_root` event ID |
 | User/agent/tool output | thread reply | Matrix event ID plus signed logical ID |
 | Session/revision audit | room or thread timeline event | append-only history |
@@ -23,20 +24,34 @@ identities. Each session state and root carries its signed project ID, name,
 and path. A future Space topology may split projects into rooms without
 changing the state or thread semantics.
 
-## Current state and independent convergence
+## Current state and bounded convergence
 
-The Gateway publishes a replace-in-place session state entity for every live
-or archived session and retains a deleted tombstone for every removed session.
-Gateway state independently contains:
+The Gateway publishes a replace-in-place session entity for low-latency live
+updates and retains a deleted tombstone for audit. Cold-start inventory does
+not enumerate all Room State and does not replay every historical session
+tombstone. Instead, the Gateway publishes the complete current/archived
+directory as bounded, directly addressable pages. Gateway state contains:
 
 - the revision epoch and current conversation revision;
 - a monotonically increasing `state_version`;
+- a directory descriptor containing generation, rotating slot, page count,
+  state-key prefix, and canonical digest;
 - workspace defaults, capabilities, and active-device count.
 
-Gateway and session state keys converge independently, exactly like other
-Matrix room-state entities. A new or replaced session becomes visible when its
-authenticated entity arrives; it never waits for an application-level global
-snapshot, count, digest, or checkpoint. Events from a retired revision epoch
+Each page contains at most 32 sessions and at most 20 KiB of plaintext. The
+Gateway writes every page for a new generation first, writes changed individual
+session entities second, and replaces Gateway state last. That last event is
+the commit marker that makes the page generation discoverable. Clients fetch
+the exact Gateway state key, fetch the exact page keys named by its descriptor,
+and fetch Gateway state again. They commit the directory only when both
+descriptors match and every page binding, index, count, and digest validates.
+Three rotating slots prevent an older reader from accepting pages overwritten
+by a newer generation.
+
+This is a bounded Matrix-state snapshot, not an application RPC checkpoint:
+the client can address every object through standard Room State GETs, and no
+request event is sent to the Gateway. Live session state keys still converge
+independently between directory commits. Events from a retired revision epoch
 are ignored, and each state key is monotonic within the current epoch. State
 replacement uses a durable latest-write-wins outbox; a crash or rate limit
 retries the same stable Matrix state tuple.
@@ -64,28 +79,43 @@ Connected clients follow this algorithm:
    approval. The response is a durable proof with the same lifetime as its certificate; the Gateway
    redelivers it only while that exact certificate remains active, so
    revocation cannot be bypassed by replaying an interrupted request.
-2. Fetch current Room State directly, independent of any persisted `/sync`
-   cursor. The Gateway state is processed first to obtain the addressed key
-   ring, followed by per-session entities.
-3. Validate envelope bindings and signatures. One complete `/state` read is
-   committed atomically to the local projection. Gateway metadata makes the
-   connection writable; later per-session replacement events converge
-   independently within that authenticated Gateway epoch.
+2. Fetch the exact Gateway Room State key directly, independent of any
+   persisted `/sync` cursor. Use its directory descriptor to fetch only the
+   exact bounded page keys; never issue a room-wide `/state` request.
+3. Fetch Gateway state again, validate the stable descriptor plus every
+   envelope binding, page index/count, unique session ID, and canonical digest,
+   then atomically replace the local directory projection. Gateway metadata
+   makes the connection writable; later per-session replacement events
+   converge independently within that authenticated Gateway epoch.
 4. Use incremental `/sync` state updates for live replacement events. On a
-   reconnect, foreground return, or limited sync, fetch current Room State
-   again; do not scan timeline history to reconstruct the directory.
+   reconnect or foreground return, re-run the exact-key directory read; do not
+   scan timeline history to reconstruct the directory. When `/sync` marks a
+   timeline as `limited`, persist `(old_since, prev_batch, cursor)` before
+   advancing the live token. Recover that gap with standard forward
+   `/messages?from=<cursor>&to=<prev_batch>` pages, commit every page cursor,
+   deduplicate by authenticated event identity, and remove the gap only after
+   the boundary closes. Live sync continues while the durable gap journal
+   drains, and process death resumes the same journal.
 5. Load a selected session's transcript from local encrypted storage and its
    Matrix thread relations. Paginate older relations only when the user asks.
 6. Offline, show the last verified local projection and transcript as a cache,
    but execute no command until current Room State has been authenticated.
 
-Android establishes its dedicated live `/sync` cursor with timeline limit zero;
-it does not turn initial sync into a room-history fetch. Each later batch is
-cryptographically validated and durably applied before the `/sync` token is
-saved, so a process exit causes safe Matrix redelivery instead of a lost local
+Android establishes its dedicated live `/sync` cursor with a bounded timeline
+limit; it does not turn initial sync into an unbounded room-history fetch. Each
+later batch is cryptographically validated and durably applied before the
+`/sync` token is saved. A limited batch first persists its missing interval, so
+a process exit causes safe `/sync` or `/messages` redelivery instead of a lost
 transition. The native SDK Timeline is a short-lived trust-bootstrap channel
 only: it opens for the explicit Megolm pairing request/response and closes when
 that exchange settles. It is not part of the connected conversation data path.
+
+Conversation output is also physically bounded. UTF-8 bodies larger than 8 KiB
+are emitted as deterministic ordered continuation events with one logical
+message ID and part metadata. Progressive edits defer oversized intermediate
+values; the terminal edit replaces the first part and emits each continuation
+once. A client that was offline or killed restores the same parts from the
+session thread rather than depending on one oversized Matrix response.
 
 A local browser/APK cache is never connected-state authority. A cached
 projection cannot make the UI report Connected and cannot release an outbound
@@ -143,8 +173,9 @@ Steady-state traffic follows visible business semantics:
 - one user command and its targeted acknowledgement/result;
 - one collaboration/thread event for the user prompt;
 - agent messages or edits that are actually visible;
-- one session Room State replacement plus one small Gateway metadata update when the
-  durable session summary changes;
+- one session Room State replacement for a live entity update; when the durable
+  directory changes, bounded directory pages are written before one small
+  Gateway commit update;
 - no Gateway state/history RPC on connect, focus, scrollback, or reconnect;
 - no full-timeline backfill merely because a key or current state changed.
 
@@ -156,8 +187,8 @@ timing, so raising Matrix rate limits is not a correctness requirement.
 
 - Removed `gateway_checkpoint`, `gateway_state_request`, and `history_request`
   kinds are neither emitted nor parsed.
-- Every supported PWA and APK build uses current Room State for the session
-  directory and Matrix relations for history.
+- Every supported PWA and APK build uses exact-key Gateway/directory Room State
+  reads for the current session inventory and Matrix relations for history.
 - Existing pre-release clients must be replaced; there is no negotiated
   downgrade.
 - Missing application timeline, control, or Room State transport support is a
@@ -165,4 +196,5 @@ timing, so raising Matrix rate limits is not a correctness requirement.
 - Existing sessions receive one idempotent `session_root`, whose Matrix event
   ID is persisted before threaded output is published.
 - Archive and delete never redact Matrix history; deletion removes the session
-  from the current projection through an authenticated state tombstone.
+  from the committed directory while retaining an authenticated state
+  tombstone for audit and live convergence.

@@ -32,6 +32,13 @@ class MatrixSessionRepairPolicyTest {
         assertTrue(MatrixSessionRepairPolicy.requiredForTransport(expected, session("NEW_DEVICE")))
     }
 
+    @Test
+    fun `same Gateway repair retains state authenticated by the replacement Matrix login`() {
+        assertTrue(MatrixSessionRepairPolicy.retainSynchronizedGatewayState(true, true))
+        assertFalse(MatrixSessionRepairPolicy.retainSynchronizedGatewayState(true, false))
+        assertFalse(MatrixSessionRepairPolicy.retainSynchronizedGatewayState(false, true))
+    }
+
     private fun session(deviceId: String) = PublicMatrixSession(
         homeserver = "https://matrix.example/",
         userId = "@phone:example",
