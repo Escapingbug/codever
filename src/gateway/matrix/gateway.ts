@@ -61,6 +61,8 @@ import { materializePromptInput } from './media'
 import { SessionExtensionRegistry } from '@/runtime/sessionExtensions'
 
 type WorkspaceState = PersistedRoomRuntimeState['workspace']
+const CANONICAL_COMMAND_ACK_DELAY_MS = 2_000
+const ROOM_SNAPSHOT_DEBOUNCE_MS = 10_000
 
 interface AppSessionRuntime {
     record: AppSessionRecord
@@ -100,6 +102,7 @@ interface CommandExecutionResult {
     sessionId: string | null
     result?: JsonValue
     nativeRevisionPublished?: boolean
+    canonicalCompletionPublished?: boolean
 }
 
 interface NativeRevision {
@@ -159,6 +162,8 @@ export class MatrixGatewayRunner {
     private readonly dirtySessionStates = new Map<string, Set<string>>()
     private readonly sessionStateCommandSources = new Map<string, Map<string, string>>()
     private readonly sessionStatePublishTasks = new Map<string, Promise<void>>()
+    private readonly roomSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    private readonly lastGatewayStatePublishedAt = new Map<string, number>()
     private startupFailure: Error | null = null
     private stopPromise: Promise<void> | null = null
     private gatewayHeartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -276,6 +281,7 @@ export class MatrixGatewayRunner {
                 gatewayState,
                 this.client,
             )
+            this.lastGatewayStatePublishedAt.set(runtime.config.roomId, this.now())
         })))
     }
 
@@ -341,6 +347,7 @@ export class MatrixGatewayRunner {
             ),
             this.client,
         )
+        this.lastGatewayStatePublishedAt.set(runtime.config.roomId, this.now())
     }
 
     private async gatewayRoomState(
@@ -738,6 +745,8 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
+        let commandCompletion: Promise<void> | undefined
+        let terminalDeliveryAcknowledges = false
         if (authorized.terminal) {
             // Pre-release ledgers may still contain an already accepted
             // terminal result. Preserve duplicate recovery compatibility,
@@ -753,6 +762,8 @@ export class MatrixGatewayRunner {
                 )
             }).finally(() => this.executionTasks.delete(task))
             this.executionTasks.add(task)
+            commandCompletion = task
+            terminalDeliveryAcknowledges = true
         } else if (!authorized.duplicate) {
             let collaborationDelivery: Promise<unknown> | undefined
             if (authorized.command.payload.operation === 'prompt') {
@@ -790,7 +801,7 @@ export class MatrixGatewayRunner {
                     this.log(`[matrix-gateway] collaboration broadcast failed: ${formatError(error)}`)
                 })
             }
-            this.scheduleExecution(
+            commandCompletion = this.scheduleExecution(
                 event,
                 runtime,
                 authorized.command,
@@ -803,12 +814,14 @@ export class MatrixGatewayRunner {
                 const task = this.deliverCommandResult(runtime, authorized.command, terminal)
                     .finally(() => this.executionTasks.delete(task))
                 this.executionTasks.add(task)
+                commandCompletion = task
+                terminalDeliveryAcknowledges = true
             } else if (authorized.command.payload.operation === 'device.invite') {
                 // Invitation creation is keyed by commandId in the durable
                 // pairing registry. It is therefore safe to resume the only
                 // side effect whose result may have been interrupted between
                 // offer creation and command-result journaling.
-                this.scheduleExecution(
+                commandCompletion = this.scheduleExecution(
                     event,
                     runtime,
                     authorized.command,
@@ -830,22 +843,43 @@ export class MatrixGatewayRunner {
                 })
             }
         }
-        // Matrix delivery is deliberately off the authorization lane. A
-        // stalled homeserver must not delay execution, cancel, or decisions.
-        void this.secureContent.sendCommandAccepted(
-            runtime.config,
-            authorized.command.deviceId,
-            authorized.command.commandId,
-            authorized.command.sequence,
-            authorized.revision,
-            runtime.revisionEpoch,
-            this.client,
-        ).catch(error => {
-            this.log(
-                `[matrix-gateway] command acknowledgement ${authorized.command.commandId} failed: `
-                + formatError(error),
-            )
-        })
+        if (!terminalDeliveryAcknowledges) {
+            const sendAcknowledgement = (): void => {
+                // Matrix delivery is deliberately off the authorization lane.
+                // A stalled homeserver must not delay execution, cancel, or
+                // decisions.
+                void this.secureContent.sendCommandAccepted(
+                    runtime.config,
+                    authorized.command.deviceId,
+                    authorized.command.commandId,
+                    authorized.command.sequence,
+                    authorized.revision,
+                    runtime.revisionEpoch,
+                    this.client,
+                ).catch(error => {
+                    this.log(
+                        `[matrix-gateway] command acknowledgement ${authorized.command.commandId} failed: `
+                        + formatError(error),
+                    )
+                })
+            }
+            if (
+                commandCompletion
+                && usesCanonicalSessionCompletion(authorized.command.payload.operation)
+            ) {
+                // Fast desired-state mutations complete through their signed
+                // session entity. Only spend a separate Matrix event when the
+                // local operation is genuinely long-running.
+                const timer = setTimeout(sendAcknowledgement, CANONICAL_COMMAND_ACK_DELAY_MS)
+                timer.unref?.()
+                void commandCompletion.then(
+                    () => clearTimeout(timer),
+                    () => clearTimeout(timer),
+                )
+            } else {
+                sendAcknowledgement()
+            }
+        }
     }
 
     private async handleCapabilityRenewalRequest(
@@ -895,7 +929,7 @@ export class MatrixGatewayRunner {
         command: CodeverCommand,
         revision: number,
         beforeExecute?: Promise<unknown>,
-    ): void {
+    ): Promise<void> {
         // Authorization and acknowledgement remain strictly ordered on
         // eventChain, while the session runtime owns execution ordering. A
         // prompt's background task waits for its collaboration event's first
@@ -947,18 +981,21 @@ export class MatrixGatewayRunner {
                     + formatError(persistenceError),
                 )
             }
-            try {
-                await this.deliverCommandResult(runtime, command, terminal)
-            } catch (deliveryError) {
-                this.log(
-                    `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
-                )
+            if (!(outcome === 'succeeded' && executionResult.canonicalCompletionPublished)) {
+                try {
+                    await this.deliverCommandResult(runtime, command, terminal)
+                } catch (deliveryError) {
+                    this.log(
+                        `[matrix-gateway] ${outcome} result delivery failed: ${formatError(deliveryError)}`,
+                    )
+                }
             }
         })()
             .finally(() => {
                 this.executionTasks.delete(task)
             })
         this.executionTasks.add(task)
+        return task
     }
 
     private async deliverCommandResult(
@@ -1076,19 +1113,6 @@ export class MatrixGatewayRunner {
                 runtime.appSessions.set(record.id, appSession)
                 try {
                     await this.persistRuntime(runtime)
-                    if (this.secureContent) {
-                        await this.ensureSessionRoot(
-                            runtime,
-                            record,
-                            appSession.port,
-                            command.commandId,
-                        )
-                        this.scheduleNativeSessionState(
-                            runtime,
-                            record.id,
-                            command.commandId,
-                        )
-                    }
                 } catch (error) {
                     runtime.appSessions.delete(record.id)
                     await this.persistRuntime(runtime).catch(rollbackError => {
@@ -1106,7 +1130,18 @@ export class MatrixGatewayRunner {
                     })
                     throw error
                 }
-                return { sessionId: record.id }
+                // An empty session has no Matrix thread yet. Publish its
+                // authoritative entity now and create the immutable thread
+                // root lazily when the first prompt is sent.
+                const canonicalCompletionPublished = await this.publishCanonicalSessionState(
+                    runtime,
+                    record.id,
+                    command.commandId,
+                )
+                return {
+                    sessionId: record.id,
+                    canonicalCompletionPublished,
+                }
             }
             case 'session.archive': {
                 const { sessionId } = command.payload
@@ -1335,9 +1370,12 @@ export class MatrixGatewayRunner {
             )
             throw error
         }
-        this.scheduleSessionLifecycle(runtime, appSession.record, 'archived', sourceCommandId)
-        this.scheduleNativeSessionState(runtime, appSession.record.id, sourceCommandId)
-        return { sessionId: appSession.record.id }
+        const canonicalCompletionPublished = await this.publishCanonicalSessionState(
+            runtime,
+            appSession.record.id,
+            sourceCommandId,
+        )
+        return { sessionId: appSession.record.id, canonicalCompletionPublished }
     }
 
     private async restoreAppSession(
@@ -1371,9 +1409,12 @@ export class MatrixGatewayRunner {
             })
             throw error
         }
-        this.scheduleSessionLifecycle(runtime, record, 'idle', sourceCommandId)
-        this.scheduleNativeSessionState(runtime, record.id, sourceCommandId)
-        return { sessionId: record.id }
+        const canonicalCompletionPublished = await this.publishCanonicalSessionState(
+            runtime,
+            record.id,
+            sourceCommandId,
+        )
+        return { sessionId: record.id, canonicalCompletionPublished }
     }
 
     private async deleteAppSession(
@@ -1418,9 +1459,38 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
-        this.scheduleSessionLifecycle(runtime, record, 'deleted', sourceCommandId)
-        this.scheduleNativeSessionState(runtime, record.id, sourceCommandId)
-        return { sessionId: record.id, nativeRevisionPublished: true }
+        const canonicalCompletionPublished = await this.publishCanonicalSessionState(
+            runtime,
+            record.id,
+            sourceCommandId,
+        )
+        return {
+            sessionId: record.id,
+            nativeRevisionPublished: canonicalCompletionPublished,
+            canonicalCompletionPublished,
+        }
+    }
+
+    private async publishCanonicalSessionState(
+        runtime: RoomRuntime,
+        sessionId: string,
+        sourceCommandId: string,
+    ): Promise<boolean> {
+        try {
+            await this.serializeRoomState(runtime, () =>
+                this.publishNativeSessionStateEntity(runtime, sessionId, sourceCommandId)
+            )
+            return true
+        } catch (error) {
+            // The runtime mutation is already durable. Fall back to the
+            // per-device command result while the state outbox retries the
+            // authoritative entity in the background.
+            this.log(
+                `[matrix-gateway] canonical session state ${sessionId} delivery failed: `
+                + formatError(error),
+            )
+            return false
+        }
     }
 
     private async createAppSessionRecord(
@@ -1574,53 +1644,6 @@ export class MatrixGatewayRunner {
         this.client, threadRootEventId)
     }
 
-    private async sendSessionLifecycle(
-        runtime: RoomRuntime,
-        record: AppSessionRecord,
-        state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
-        sourceCommandId?: string,
-    ): Promise<void> {
-        const threadRootEventId = await this.ensureSessionRoot(
-            runtime,
-            record,
-            runtime.appSessions.get(record.id)?.port,
-        )
-        const revision = await this.nativeRevision(runtime)
-        await this.secureContent.sendNativeContent(runtime.config, {
-            version: 2,
-            kind: 'session_lifecycle',
-            ...revision,
-            session_id: record.id,
-            state,
-            updated_at: record.updatedAt,
-            ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
-        }, `codever.session.lifecycle.${record.id}.${state}.${sourceCommandId ?? record.updatedAt}`,
-        this.client, threadRootEventId)
-    }
-
-    /**
-     * Runtime state is already durable before this is called. Keep the Matrix
-     * lifecycle publication in the runner's shutdown/retry set, but do not
-     * hold command-result delivery behind a homeserver round trip. This lets
-     * the client release its one-command durable outbox before the user starts
-     * the next desired-state action.
-     */
-    private scheduleSessionLifecycle(
-        runtime: RoomRuntime,
-        record: AppSessionRecord,
-        state: 'idle' | 'running' | 'stopping' | 'failed' | 'archived' | 'deleted',
-        sourceCommandId: string,
-    ): void {
-        const task = this.sendSessionLifecycle(runtime, record, state, sourceCommandId)
-            .catch(error => {
-                this.log(
-                    `[matrix-gateway] ${state} lifecycle delivery failed: ${formatError(error)}`,
-                )
-            })
-            .finally(() => this.executionTasks.delete(task))
-        this.executionTasks.add(task)
-    }
-
     private async nativeRevision(runtime: RoomRuntime): Promise<{
         revision: number
         revision_epoch: string
@@ -1702,7 +1725,7 @@ export class MatrixGatewayRunner {
                     .get(runtime.config.roomId)?.get(sessionId)
                 this.sessionStateCommandSources.get(runtime.config.roomId)?.delete(sessionId)
                 await this.serializeRoomState(runtime, () =>
-                    this.publishNativeSessionState(runtime, sessionId, commandSource)
+                    this.publishNativeSessionStateEntity(runtime, sessionId, commandSource)
                 )
             }
         })()
@@ -1720,7 +1743,7 @@ export class MatrixGatewayRunner {
         this.executionTasks.add(task)
     }
 
-    private async publishNativeSessionState(
+    private async publishNativeSessionStateEntity(
         runtime: RoomRuntime,
         sessionId: string,
         sourceCommandId?: string,
@@ -1752,34 +1775,50 @@ export class MatrixGatewayRunner {
                 updated_at: updatedAt,
                 ...(sourceCommandId ? { source_command_id: sourceCommandId } : {}),
             }
-        const directory = await this.publishNativeSessionDirectory(
-            runtime,
-            snapshot,
-            stateVersion,
-            revision,
-            updatedAt,
-        )
-        await this.secureContent.setNativeRoomState(
-            runtime.config,
-            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
-            sessionId,
-            content,
-            this.client,
-        )
-        await this.secureContent.setNativeRoomState(
-            runtime.config,
-            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
-            this.config.gatewayId,
-            await this.gatewayRoomState(
-                runtime,
-                snapshot,
-                stateVersion,
-                revision,
-                updatedAt,
-                directory,
-            ),
-            this.client,
-        )
+        try {
+            await this.secureContent.setNativeRoomState(
+                runtime.config,
+                CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+                sessionId,
+                content,
+                this.client,
+            )
+        } finally {
+            // The entity event is the realtime and command-completion path.
+            // Rebuild the immutable cold-start directory once for the whole
+            // burst instead of multiplying every mutation into three state
+            // writes.
+            this.scheduleRoomSnapshot(runtime)
+        }
+    }
+
+    private scheduleRoomSnapshot(runtime: RoomRuntime): void {
+        if (this.state === 'stopping' || this.state === 'stopped') return
+        const existing = this.roomSnapshotTimers.get(runtime.config.roomId)
+        if (existing) clearTimeout(existing)
+        const timer = setTimeout(() => {
+            this.roomSnapshotTimers.delete(runtime.config.roomId)
+            const task = this.serializeRoomState(runtime, async () => {
+                const stateVersion = await this.advanceStateVersion(runtime)
+                const snapshot = await this.gatewayStateSnapshot(runtime)
+                await this.publishGatewayState(
+                    runtime,
+                    snapshot,
+                    stateVersion,
+                    await this.nativeRevision(runtime),
+                    this.now(),
+                )
+            })
+                .catch(error => {
+                    this.log(
+                        `[matrix-gateway] coalesced Room State snapshot failed: ${formatError(error)}`,
+                    )
+                })
+                .finally(() => this.executionTasks.delete(task))
+            this.executionTasks.add(task)
+        }, ROOM_SNAPSHOT_DEBOUNCE_MS)
+        timer.unref?.()
+        this.roomSnapshotTimers.set(runtime.config.roomId, timer)
     }
 
     private async persistRuntime(runtime: RoomRuntime): Promise<void> {
@@ -1934,6 +1973,9 @@ export class MatrixGatewayRunner {
         this.dirtySessionStates.clear()
         this.sessionStateCommandSources.clear()
         this.sessionStatePublishTasks.clear()
+        for (const timer of this.roomSnapshotTimers.values()) clearTimeout(timer)
+        this.roomSnapshotTimers.clear()
+        this.lastGatewayStatePublishedAt.clear()
         await this.client.stop().catch(error => this.log(`[matrix-gateway] client stop failed: ${formatError(error)}`))
     }
 
@@ -1945,6 +1987,9 @@ export class MatrixGatewayRunner {
             const task = Promise.all([...this.rooms.values()].map(runtime =>
                 this.serializeRoomState(runtime, async () => {
                     if (await this.secureContent.activeDeviceCountForRoom(runtime.config) === 0) return
+                    const lastPublishedAt = this.lastGatewayStatePublishedAt
+                        .get(runtime.config.roomId) ?? 0
+                    if (this.now() - lastPublishedAt < intervalMs) return
                     const snapshot = await this.gatewayStateSnapshot(runtime)
                     await this.publishGatewayState(
                         runtime,
@@ -2348,6 +2393,15 @@ function needsStandaloneRevisionEvent(
     return operation === 'cancel'
         || operation === 'decision'
         || operation === 'device.invite'
+}
+
+function usesCanonicalSessionCompletion(
+    operation: CodeverCommand['payload']['operation'],
+): boolean {
+    return operation === 'session.create'
+        || operation === 'session.archive'
+        || operation === 'session.restore'
+        || operation === 'session.delete'
 }
 
 function roomConfigForSession(

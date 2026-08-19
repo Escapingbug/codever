@@ -124,6 +124,7 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
     private syncToken: string | null = null
     private lastSyncProgressAt = 0
     private cryptoChain: Promise<void> = Promise.resolve()
+    private roomSendChain: Promise<void> = Promise.resolve()
 
     constructor(
         private readonly connection: MatrixGatewayConnectionConfig,
@@ -302,12 +303,14 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
         request: MatrixApplicationStateEventRequest,
     ): Promise<MatrixSendEventResult> {
         assertSecureApplicationStateContent(request)
-        const response = await this.matrixRequest<{ event_id: string }>(
-            'PUT',
-            matrixStatePath(request.roomId, request.eventType, request.stateKey),
-            { body: request.content },
-        )
-        return { eventId: requireEventId(response) }
+        return this.withRoomSendLock(async () => {
+            const response = await this.matrixRequest<{ event_id: string }>(
+                'PUT',
+                matrixStatePath(request.roomId, request.eventType, request.stateKey),
+                { body: request.content, retryRateLimit: true },
+            )
+            return { eventId: requireEventId(response) }
+        })
     }
 
     async prepareRoomThread(roomId: string, rootEventId: string): Promise<void> {
@@ -680,12 +683,14 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
         transactionId: string
         content: Record<string, unknown>
     }): Promise<MatrixSendEventResult> {
-        const response = await this.matrixRequest<{ event_id: string }>(
-            'PUT',
-            `/_matrix/client/v3/rooms/${encodeURIComponent(request.roomId)}/send/${encodeURIComponent(request.eventType)}/${encodeURIComponent(request.transactionId)}`,
-            { body: request.content },
-        )
-        return { eventId: requireEventId(response) }
+        return this.withRoomSendLock(async () => {
+            const response = await this.matrixRequest<{ event_id: string }>(
+                'PUT',
+                `/_matrix/client/v3/rooms/${encodeURIComponent(request.roomId)}/send/${encodeURIComponent(request.eventType)}/${encodeURIComponent(request.transactionId)}`,
+                { body: request.content, retryRateLimit: true },
+            )
+            return { eventId: requireEventId(response) }
+        })
     }
 
     private async matrixRequest<T = Record<string, unknown>>(
@@ -742,6 +747,18 @@ export class MatrixNodeSdkGatewayClient implements MatrixGatewayClient {
     private withCryptoLock<T>(operation: (machine: OlmMachineType) => Promise<T>): Promise<T> {
         const run = this.cryptoChain.then(() => operation(this.requireMachine()))
         this.cryptoChain = run.then(() => undefined, () => undefined)
+        return run
+    }
+
+    /**
+     * Synapse applies rc_message to the sending account rather than to an
+     * individual room or event type. Keep every room timeline/state write on
+     * one lane so a 429 retry owns the account-wide retry_after window instead
+     * of waking several independent retries into the same empty token bucket.
+     */
+    private withRoomSendLock<T>(operation: () => Promise<T>): Promise<T> {
+        const run = this.roomSendChain.then(operation)
+        this.roomSendChain = run.then(() => undefined, () => undefined)
         return run
     }
 

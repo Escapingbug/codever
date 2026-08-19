@@ -2,6 +2,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE } from '@codever/protocol'
 import {
     MatrixNodeSdkGatewayClient,
     loadOrCreateMatrixCryptoPassphrase,
@@ -129,6 +130,67 @@ describe('MatrixNodeSdkGatewayClient', () => {
         expect(syncRequests).toBeGreaterThanOrEqual(2)
         expect(client.getOwnDeviceKeys()).toEqual(keys)
         await client.stop()
+    })
+
+    it('serializes account-wide room writes through one 429 retry window', async () => {
+        let calls = 0
+        let active = 0
+        let maxActive = 0
+        const fetchMock = vi.fn(async () => {
+            const call = ++calls
+            active += 1
+            maxActive = Math.max(maxActive, active)
+            await Promise.resolve()
+            active -= 1
+            if (call === 1) {
+                return new Response(JSON.stringify({
+                    errcode: 'M_LIMIT_EXCEEDED',
+                    retry_after_ms: 1,
+                }), {
+                    status: 429,
+                    headers: { 'content-type': 'application/json' },
+                })
+            }
+            return new Response(JSON.stringify({ event_id: `$event-${call}` }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            })
+        }) as unknown as typeof fetch
+        const logs: string[] = []
+        const client = new MatrixNodeSdkGatewayClient(
+            {
+                baseUrl: 'https://matrix.example.test',
+                accessToken: 'token',
+                userId: '@gateway:example.test',
+                deviceId: 'STABLE_DEVICE',
+            },
+            1_000,
+            message => logs.push(message),
+            fetchMock,
+        )
+        const state = (stateKey: string) => client.setApplicationRoomState({
+            roomId: '!room:example.test',
+            eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            stateKey,
+            content: {
+                version: 2,
+                kind: 'state_envelope',
+                state_envelope: {
+                    envelope: {
+                        eventType: CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+                        stateKey,
+                    },
+                    signature: {},
+                },
+            },
+        })
+
+        await expect(Promise.all([state('session-1'), state('session-2')]))
+            .resolves.toHaveLength(2)
+
+        expect(calls).toBe(3)
+        expect(maxActive).toBe(1)
+        expect(logs).toContain('[matrix-node] rate limited; retrying in 250ms')
     })
 })
 

@@ -707,6 +707,7 @@ describe('MatrixGatewayRunner', () => {
 
         await expect(execute(command('session.archive', 1))).resolves.toEqual({
             sessionId: 'app-session-1',
+            canonicalCompletionPublished: true,
         })
         expect(runtime.appSessions.size).toBe(0)
         expect(runtime.archivedSessions.get('app-session-1')).toMatchObject({
@@ -721,6 +722,7 @@ describe('MatrixGatewayRunner', () => {
 
         await expect(execute(command('session.restore', 3))).resolves.toEqual({
             sessionId: 'app-session-1',
+            canonicalCompletionPublished: true,
         })
         expect(runtime.archivedSessions.size).toBe(0)
         expect(runtime.appSessions.get('app-session-1')?.record.archivedAt).toBeNull()
@@ -733,6 +735,7 @@ describe('MatrixGatewayRunner', () => {
         await expect(execute(command('session.delete', 5))).resolves.toEqual({
             sessionId: 'app-session-1',
             nativeRevisionPublished: true,
+            canonicalCompletionPublished: true,
         })
         expect(runtime.appSessions.size).toBe(0)
         expect(runtime.archivedSessions.size).toBe(0)
@@ -749,7 +752,7 @@ describe('MatrixGatewayRunner', () => {
             .toEqual([])
     })
 
-    it('does not hold a durable lifecycle command result behind Matrix publication', async () => {
+    it('uses one authoritative session entity as the lifecycle command completion', async () => {
         const fixture = await securityFixture()
         const session = fakeTopicSession([])
         const runtime = directRoomRuntime(fixture.config.rooms[0]!, session)
@@ -760,12 +763,12 @@ describe('MatrixGatewayRunner', () => {
             now: () => fixture.now,
         })
         await initializeDirectRuntime(runner, fixture.config)
-        let finishLifecycle!: (value: MatrixSendEventResult) => void
-        const lifecycleDelivery = new Promise<MatrixSendEventResult>(resolve => {
-            finishLifecycle = resolve
+        let finishState!: (value: MatrixSendEventResult) => void
+        const stateDelivery = new Promise<MatrixSendEventResult>(resolve => {
+            finishState = resolve
         })
-        const sendNativeContent = vi.fn((..._arguments: unknown[]) => lifecycleDelivery)
-        Reflect.set(runner, 'secureContent', { sendNativeContent })
+        const setNativeRoomState = vi.fn((..._arguments: unknown[]) => stateDelivery)
+        Reflect.set(runner, 'secureContent', { setNativeRoomState })
 
         const execution = (runner as unknown as {
             execute(
@@ -790,28 +793,81 @@ describe('MatrixGatewayRunner', () => {
             payload: { operation: 'session.archive', sessionId: 'app-session-1' },
         })
 
-        let timeout: ReturnType<typeof setTimeout> | undefined
-        const result = await Promise.race([
-            execution,
-            new Promise<never>((_, reject) => {
-                timeout = setTimeout(
-                    () => reject(new Error('Lifecycle command result waited for Matrix publication.')),
-                    250,
-                )
+        await vi.waitFor(() => expect(setNativeRoomState).toHaveBeenCalledOnce())
+        let settled = false
+        void execution.then(() => { settled = true })
+        await new Promise(resolve => setTimeout(resolve, 25))
+        expect(settled).toBe(false)
+        expect(setNativeRoomState.mock.calls[0]?.slice(1, 4)).toEqual([
+            CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+            'app-session-1',
+            expect.objectContaining({
+                kind: 'session_state',
+                state: 'archived',
+                source_command_id: 'archive-with-slow-matrix',
             }),
-        ]).finally(() => clearTimeout(timeout))
-        expect(result).toEqual({ sessionId: 'app-session-1' })
-        await vi.waitFor(() => expect(sendNativeContent).toHaveBeenCalledOnce())
-        expect(sendNativeContent.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
-            kind: 'session_lifecycle',
-            state: 'archived',
-            source_command_id: 'archive-with-slow-matrix',
-        }))
-        finishLifecycle({ eventId: '$lifecycle' })
-        await vi.waitFor(() => {
-            const tasks = Reflect.get(runner, 'executionTasks') as Set<Promise<void>>
-            expect(tasks.size).toBe(0)
+        ])
+        finishState({ eventId: '$state' })
+        await expect(execution).resolves.toEqual({
+            sessionId: 'app-session-1',
+            canonicalCompletionPublished: true,
         })
+    })
+
+    it('coalesces rapid lifecycle mutations within the default Matrix burst budget', async () => {
+        const fixture = await securityFixture()
+        fixture.config.gatewayHeartbeatIntervalMs = 60_000
+        fixture.config.trustedDevices[0]!.allowedOperations = [
+            ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
+            'session.archive',
+            'session.restore',
+            'session.delete',
+        ]
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+        await runner.start()
+        client.sent.length = 0
+        client.stateSent.length = 0
+
+        const operations = [
+            'session.archive',
+            'session.restore',
+            'session.delete',
+        ] as const
+        for (const [index, operation] of operations.entries()) {
+            const signed = await signedSessionMutation(
+                fixture.keys,
+                fixture.now,
+                operation,
+                index + 1,
+            )
+            client.emit(await incomingSecureSigned(
+                signed,
+                fixture.keys,
+                fixture.gatewayKeys,
+                fixture.now,
+                `budget-${operation}`,
+            ))
+            await vi.waitFor(() => expect(client.stateSent.filter(request =>
+                request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+            )).toHaveLength(index + 1))
+        }
+
+        // The entity PUT is both realtime state and the sender's authenticated
+        // completion. No ACK, command_result, or duplicate lifecycle timeline
+        // event is needed for these fast successful mutations.
+        expect(client.sent).toEqual([])
+        expect(client.stateSent.filter(request =>
+            request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+        )).toHaveLength(3)
+        expect(client.stateSent).toHaveLength(3)
+        expect((Reflect.get(runner, 'roomSnapshotTimers') as Map<string, unknown>).size).toBe(1)
+
+        await runner.stop()
     })
 
     it('routes two concurrently running prompts to independent app session runtimes', async () => {
@@ -1300,6 +1356,18 @@ describe('MatrixGatewayRunner', () => {
             providerFactory: () => fakeProvider([]),
         })
         await runner.start()
+        client.sent.length = 0
+        client.stateSent.length = 0
+        const gatewayState = client.state.get(JSON.stringify([
+            '!room:example.org',
+            CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
+            'gateway-1',
+        ]))!
+        const timelineKey = await openNativeStateKey(
+            gatewayState,
+            fixture.keys,
+            gatewayKeys,
+        )
         const runtime = (Reflect.get(runner, 'rooms') as Map<string, {
             capabilityProvider: AgentProvider | null
         }>).get('!room:example.org')!
@@ -1322,42 +1390,25 @@ describe('MatrixGatewayRunner', () => {
             'expired-session-create',
         ))
 
-        await vi.waitFor(() => expect(client.sent.some(request =>
-            request.transactionId.includes(
-                `codever.command.result.${expired.command.commandId}`,
-            )
+        await vi.waitFor(() => expect(client.stateSent.some(request =>
+            request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
         )).toBe(true))
-        const resultRequest = client.sent.find(request =>
-            request.transactionId.includes(
-                `codever.command.result.${expired.command.commandId}`,
-            ),
+        const sessionState = client.stateSent.find(request =>
+            request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
         )!
-        const resultExtension = resultRequest.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
-        const openedResult = await openSecureEnvelope(resultExtension.secure_envelope, {
-            recipientPrivateKey: fixture.keys.privateKey,
-            senderPublicKey: gatewayKeys.publicKey,
-            expected: {
-                gatewayId: fixture.config.gatewayId,
-                conversationId: fixture.config.rooms[0]!.conversationId,
-                direction: 'gateway_to_device',
-                senderDeviceId: fixture.config.gatewayId,
-                recipientDeviceId: 'pwa-device-1',
-                senderKeyId: gatewayKeys.keyId,
-                recipientKeyId: fixture.keys.keyId,
-            },
-            replayStore: new InMemoryReplayStore(),
-            now: Date.now(),
-        })
-        expect(openedResult.plaintext).toMatchObject({
-            [CODEVER_MATRIX_EXTENSION]: {
-                kind: 'command_result',
-                command_id: expired.command.commandId,
-                sequence: 1,
-                revision: 1,
-                outcome: 'succeeded',
+        await expect(openNativeState(sessionState, fixture.keys, gatewayKeys, timelineKey))
+            .resolves.toMatchObject({
+                kind: 'session_state',
+                state: 'active',
+                source_command_id: expired.command.commandId,
                 session_id: expect.any(String),
-            },
-        })
+            })
+        expect(client.sent.some(request =>
+            request.transactionId.startsWith('codever.session.root.')
+        )).toBe(false)
+        expect(client.sent.some(request =>
+            request.transactionId.includes(`codever.command.result.${expired.command.commandId}`)
+        )).toBe(false)
 
         await runner.stop()
     })
@@ -2072,6 +2123,7 @@ describe('Matrix gateway configuration', () => {
 class FakeMatrixGatewayClient implements MatrixGatewayClient {
     readonly lifecycle: string[] = []
     readonly sent: MatrixSendEventRequest[] = []
+    readonly stateSent: MatrixApplicationStateEventRequest[] = []
     readonly state = new Map<string, MatrixApplicationStateEventRequest & { eventId: string }>()
     readonly encryptedRooms = new Set(['!room:example.org'])
     onStartEvent?: MatrixIncomingEvent
@@ -2130,6 +2182,7 @@ class FakeMatrixGatewayClient implements MatrixGatewayClient {
         request: MatrixApplicationStateEventRequest,
     ): Promise<MatrixSendEventResult> {
         const eventId = `$state-${++this.nextEventId}`
+        this.stateSent.push(structuredClone(request))
         this.state.set(
             JSON.stringify([request.roomId, request.eventType, request.stateKey]),
             { ...structuredClone(request), eventId },
@@ -2330,6 +2383,32 @@ async function signedSessionCreate(
     return signCommand(command, keys.privateKey, keys.keyId)
 }
 
+async function signedSessionMutation(
+    keys: Awaited<ReturnType<typeof generateDeviceKeyPair>>,
+    now: number,
+    operation: 'session.archive' | 'session.restore' | 'session.delete',
+    sequence: number,
+): Promise<SignedCommand> {
+    const command: CodeverCommand = {
+        kind: 'codever.command',
+        version: 1,
+        commandId: `${operation}-${sequence}-${Math.random()}`,
+        gatewayId: 'gateway-1',
+        deviceId: 'pwa-device-1',
+        sequenceEpoch: 'certificate-pwa-1',
+        conversationId: 'conversation-1',
+        revisionEpoch: REVISION_EPOCH,
+        sequence,
+        baseRevision: sequence - 1,
+        operation,
+        issuedAt: now,
+        expiresAt: now + 60_000,
+        nonce: `0123456789abcdef-${operation}-${sequence}-${Math.random()}`,
+        payload: { operation, sessionId: 'app-session-1' },
+    }
+    return signCommand(command, keys.privateKey, keys.keyId)
+}
+
 function incomingSigned(signedCommand: SignedCommand, suffix = 'event'): MatrixIncomingEvent {
     return {
         roomId: '!room:example.org',
@@ -2432,6 +2511,7 @@ function directRoomRuntime(
     const record = {
         id: 'app-session-1',
         title: 'Existing session',
+        createdAt: 1,
         updatedAt: 1,
         projectId: project.id,
         projectName: project.name,
@@ -2442,6 +2522,7 @@ function directRoomRuntime(
         permissionMode: 'default',
         providerSessionId: null,
         archivedAt: null,
+        extensions: [],
     }
     return {
         config,
