@@ -709,7 +709,11 @@ describe('multi-device Matrix collaboration', () => {
             gatewayDeviceId: 'gateway-1',
             gatewayKeyPair: await exportDeviceKeyPair(gateway),
             envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
-            deliveryAttemptTimeoutMs: 20,
+            // Give timeline encryption enough time to reach the deliberately
+            // blocked durable write before the caller watchdog installs its
+            // confirmation waiter. The watchdog then establishes the exact
+            // persisted-before-waiter race this test is intended to cover.
+            deliveryAttemptTimeoutMs: 500,
         }
         const room = {
             roomId: '!room:localhost',
