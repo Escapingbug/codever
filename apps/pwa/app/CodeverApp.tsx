@@ -993,7 +993,6 @@ export function CodeverApp() {
     const recovery = readPendingSessionCreateRecovery(window.localStorage);
     if (!recovery) return;
     pendingSessionCreateRecoveryRef.current = recovery;
-    pwaReloadBlockedRef.current = true;
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
@@ -1917,7 +1916,6 @@ export function CodeverApp() {
     pendingSessionCreateRecoveryRef.current = recovery;
     setPendingSessionCreate(input);
     setNewSessionBusy(true);
-    setSessionCreateReloadBlocked(true);
     try {
       writePendingSessionCreateRecovery(window.localStorage, recovery);
     } catch (error) {
@@ -1927,6 +1925,12 @@ export function CodeverApp() {
         "warning",
         `This session will keep retrying while this page remains open, but its recovery state could not be saved: ${formatUiError(error)}`,
       );
+    } finally {
+      // The native/Web command and its stable command ID are durable now.
+      // Reloading can safely hand reconciliation to a newer application build;
+      // retaining the pre-durability guard here would let an old marker block
+      // the very upgrade which knows how to repair it.
+      setSessionCreateReloadBlocked(false);
     }
     return recovery;
   }
@@ -2105,7 +2109,10 @@ export function CodeverApp() {
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
     setNewSessionBusy(Boolean(sessionCreateRecovery));
-    setSessionCreateReloadBlocked(Boolean(sessionCreateRecovery));
+    // A persisted recovery is safe across reloads. Only the short interval
+    // before rememberPendingSessionCreate() records a command may defer an
+    // application update.
+    setSessionCreateReloadBlocked(false);
     knownGatewaySessionIdsRef.current.clear();
     knownGatewaySessionUpdatedAtRef.current.clear();
     recentHistoryReconciliationRef.current.clear();
@@ -2476,7 +2483,7 @@ export function CodeverApp() {
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(queuedSessionCreate?.input ?? null);
     setNewSessionBusy(Boolean(queuedSessionCreate));
-    setSessionCreateReloadBlocked(Boolean(queuedSessionCreate));
+    setSessionCreateReloadBlocked(false);
     if (sessionCreateRecoveryTimerRef.current !== null) {
       window.clearTimeout(sessionCreateRecoveryTimerRef.current);
       sessionCreateRecoveryTimerRef.current = null;
@@ -3081,8 +3088,21 @@ export function CodeverApp() {
     } finally {
       // Receiving an acknowledgement is not enough for session.create: the
       // terminal sessionId must survive reloads until this UI has consumed it.
-      await connection.releaseCommand(commandId);
       forgetPendingSessionCreate(commandId);
+      try {
+        await connection.releaseCommand(commandId);
+      } catch (error) {
+        // The command is already terminal and its sessionId has been consumed.
+        // A best-effort outbox cleanup must not resurrect the user-facing
+        // "Creating session" state. Both transports can discard an old
+        // terminal entry during their next command reconciliation.
+        showUiNotice(
+          "session:create-release",
+          "session",
+          "warning",
+          `Session creation finished, but its completed local command could not be cleaned up yet: ${formatUiError(error)}`,
+        );
+      }
     }
     if (sessionToReveal) {
       clearPendingSessionCreateUi();

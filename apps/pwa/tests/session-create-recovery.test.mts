@@ -9,6 +9,7 @@ import {
   writePendingSessionCreateRecovery,
   type PendingSessionCreateRecovery,
 } from "../app/sessionCreateRecovery.ts";
+import { CommandRecoveryNotFoundError } from "../app/matrix.ts";
 
 test("does not leave a pending selection when the session root arrives first", () => {
   assert.deepEqual(
@@ -141,4 +142,11 @@ test("stops restoring a local create marker when the native command no longer ex
     false,
   );
   assert.equal(isMissingSessionCreateRecoveryCommand(new Error("missing")), false);
+});
+
+test("stops restoring an old browser marker when its durable command no longer exists", () => {
+  const error = new CommandRecoveryNotFoundError("old-command");
+
+  assert.equal(error.errorCode, "OPERATION_NOT_FOUND");
+  assert.equal(isMissingSessionCreateRecoveryCommand(error), true);
 });

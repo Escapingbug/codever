@@ -90,6 +90,11 @@ test("ships a complete installable offline shell", async () => {
     source,
     /registerPwaUpdates\(setPwaUpdateState, \{[\s\S]*canReload:/,
   );
+  assert.doesNotMatch(
+    source,
+    /pendingSessionCreateRecoveryRef\.current = recovery;\s*pwaReloadBlockedRef\.current = true;/,
+    "a persisted pre-upgrade session marker must not prevent the repair build from loading",
+  );
   assert.match(
     source,
     /if \(isNativeManagedMatrixConfig\(stored\)\)[\s\S]*connectCodeverClient\(stored, true, true\)/,
@@ -119,6 +124,11 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(styles, /\.session-create-spinner\s*\{/);
   assert.match(source, /rememberPendingSessionCreate\(input, sent\.commandId\)/);
+  assert.match(
+    source,
+    /writePendingSessionCreateRecovery\(window\.localStorage, recovery\);[\s\S]*?setSessionCreateReloadBlocked\(false\)/,
+    "a durable create command must release any deferred PWA upgrade",
+  );
   assert.match(
     source,
     /const optimisticHistoryPersisted = submissionHistoryScope[\s\S]*?await optimisticHistoryPersisted;[\s\S]*?result = await sendRealCommand/,

@@ -285,6 +285,24 @@ export class CommandRevisionConflictError extends Error {
 }
 
 /**
+ * The UI may retain a command identity across a page or APK upgrade. Expose a
+ * transport-neutral error code when that exact durable command no longer
+ * exists so startup reconciliation can retire the old UI marker instead of
+ * retrying it forever.
+ */
+export class CommandRecoveryNotFoundError extends Error {
+  readonly errorCode = "OPERATION_NOT_FOUND";
+
+  constructor(
+    readonly commandId: string,
+    message = `The durable command ${commandId} is no longer available for recovery.`,
+  ) {
+    super(message);
+    this.name = "CommandRecoveryNotFoundError";
+  }
+}
+
+/**
  * Historical envelopes are authenticated and decrypted for display only. They
  * deliberately do not consume or mutate the execution replay ledger; the
  * history decoder below never dispatches control callbacks.
@@ -2093,9 +2111,7 @@ export async function connectMatrix(
       commandId,
     );
     if (!recovered) {
-      throw new Error(
-        `The durable command ${commandId} is no longer available for recovery.`,
-      );
+      throw new CommandRecoveryNotFoundError(commandId);
     }
     outboundCommandMetadata.set(recovered.reservation.commandId, {
       reservation: recovered.reservation,
@@ -4799,14 +4815,16 @@ async function retryPendingCommand(
   const pending = state.pending;
   if (!pending) {
     if (expectedCommandId) {
-      throw new Error(
+      throw new CommandRecoveryNotFoundError(
+        expectedCommandId,
         `The durable command ${expectedCommandId} is no longer pending.`,
       );
     }
     return null;
   }
   if (expectedCommandId && pending.commandId !== expectedCommandId) {
-    throw new Error(
+    throw new CommandRecoveryNotFoundError(
+      expectedCommandId,
       `Refusing to recover command ${expectedCommandId}; command ${pending.commandId} is pending instead.`,
     );
   }

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import {
     chromium,
     type Browser,
+    type Frame,
     type Locator,
     type Page,
     type Route,
@@ -612,6 +613,106 @@ try {
                 ),
                 0,
                 'Reloading the empty PWA must not send session.create',
+            )
+        },
+    )
+
+    process.stdout.write('[7b/8] Upgrading over a stale pre-upgrade session-creation marker…\n')
+    await recordRegression(
+        regressionFailures,
+        'a newer PWA loads and retires an old creating-session marker without creating a duplicate',
+        async () => {
+            const acceptedCreatesBefore = await acceptedCommandCount(
+                gatewayDataDirectory,
+                'session.create',
+            )
+            const currentBuild = await firstPage!.evaluate(async () => {
+                const response = await fetch('/api/version', { cache: 'no-store' })
+                if (!response.ok) throw new Error(`version HTTP ${response.status}`)
+                const body = await response.json() as { buildVersion?: unknown }
+                if (typeof body.buildVersion !== 'string') {
+                    throw new Error('version response has no buildVersion')
+                }
+                return body.buildVersion
+            })
+            const staleCommandId = `pre-upgrade-create-${runId}`
+            const markerSeeded = await firstPage!.evaluate(({ commandId, cwd }) => {
+                const config = JSON.parse(
+                    localStorage.getItem('codever.matrix.connection.v1') || 'null',
+                ) as { gatewayId?: unknown; conversationId?: unknown } | null
+                if (
+                    typeof config?.gatewayId !== 'string'
+                    || typeof config.conversationId !== 'string'
+                ) return false
+                localStorage.setItem('codever:pending-session-create:v1', JSON.stringify({
+                    version: 1,
+                    commandId,
+                    gatewayId: config.gatewayId,
+                    conversationId: config.conversationId,
+                    createdAt: Date.now(),
+                    input: {
+                        cwd,
+                        projectName: `Old creating marker ${commandId}`,
+                        extensions: [],
+                    },
+                }))
+                return true
+            }, { commandId: staleCommandId, cwd: repositoryRoot })
+            assert.equal(markerSeeded, true, 'Could not seed the pre-upgrade create marker')
+
+            let versionChecks = 0
+            let mainFrameNavigations = 0
+            const onNavigation = (frame: Frame) => {
+                if (frame === firstPage!.mainFrame()) mainFrameNavigations += 1
+            }
+            const versionRoute = async (route: Route) => {
+                versionChecks += 1
+                await route.fulfill({
+                    status: 200,
+                    contentType: 'application/json',
+                    body: JSON.stringify({
+                        buildVersion: versionChecks === 1
+                            ? `upgrade-${runId}`
+                            : currentBuild,
+                    }),
+                })
+            }
+            firstPage!.on('framenavigated', onNavigation)
+            await firstPage!.route('**/api/version?**', versionRoute)
+            try {
+                await firstPage!.reload({ waitUntil: 'domcontentloaded' })
+                await waitFor(async () => {
+                    try {
+                        const state = await firstPage!.evaluate(() => ({
+                            marker: localStorage.getItem('codever:pending-session-create:v1'),
+                            pending: Boolean(document.querySelector('.session-create-pending')),
+                            connection: document
+                                .querySelector('button[aria-label^="Open connection settings,"]')
+                                ?.getAttribute('aria-label') ?? null,
+                        }))
+                        return versionChecks >= 2
+                            && mainFrameNavigations >= 2
+                            && state.marker === null
+                            && !state.pending
+                            && state.connection?.endsWith('Connected') === true
+                    } catch {
+                        return false
+                    }
+                }, {
+                    description: 'repair build to replace the old PWA and retire its stale create marker',
+                    timeoutMs: STARTUP_TIMEOUT_MS,
+                    failFast: () => assertNoPageErrors(firstPage!),
+                })
+            } finally {
+                firstPage!.off('framenavigated', onNavigation)
+                await firstPage!.unroute('**/api/version?**', versionRoute)
+            }
+
+            await assertEmptySessionState(firstPage!)
+            assert.equal(
+                await acceptedCommandCount(gatewayDataDirectory, 'session.create'),
+                acceptedCreatesBefore,
+                'Retiring an old create marker submitted another session.create command',
             )
         },
     )
