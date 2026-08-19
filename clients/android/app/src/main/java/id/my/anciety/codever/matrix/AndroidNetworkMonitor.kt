@@ -22,8 +22,14 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
     override fun isAvailable(): Boolean {
         val active = manager.activeNetwork ?: return false
         val capabilities = manager.getNetworkCapabilities(active) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        // VALIDATED means Android's public-internet probe succeeded; it does
+        // not mean the configured Matrix homeserver is reachable. Enterprise
+        // networks, VPNs, captive portals, and LAN-hosted homeservers can all
+        // lack VALIDATED while Matrix itself is available. Let the SDK's real
+        // request and retry path decide endpoint reachability.
+        return hasUsableMatrixNetwork(
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+        )
     }
 
     @Synchronized
@@ -60,3 +66,6 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
         target?.invoke(available)
     }
 }
+
+internal fun hasUsableMatrixNetwork(hasInternetCapability: Boolean): Boolean =
+    hasInternetCapability

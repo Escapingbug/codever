@@ -33,10 +33,10 @@ sealed interface MatrixRuntimeEvent {
 
     /**
      * A connectivity callback does not imply that Matrix stopped syncing.
-     * Android may briefly revoke NET_CAPABILITY_VALIDATED while the SDK's
-     * existing sync service remains healthy, so recovery must preserve that
-     * observed runtime fact instead of waiting for a callback that may never
-     * be emitted again.
+     * Android connectivity callbacks can fluctuate while the SDK's existing
+     * sync service remains healthy, so recovery must preserve that observed
+     * runtime fact instead of waiting for a callback that may never be emitted
+     * again.
      */
     data class NetworkAvailable(val syncRunning: Boolean) : MatrixRuntimeEvent
 
