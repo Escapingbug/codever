@@ -1,10 +1,10 @@
 import {
   mkdir,
+  link,
   open,
   readFile,
   rename,
   rm,
-  rmdir,
   stat,
   unlink,
   writeFile,
@@ -103,8 +103,12 @@ function processExists(pid: number): boolean {
 
 async function readLockOwner(lockPath: string): Promise<LockOwner | null> {
   try {
+    const lockStat = await stat(lockPath)
+    const ownerPath = lockStat.isDirectory()
+      ? `${lockPath}/owner.json`
+      : lockPath
     const candidate = JSON.parse(
-      await readFile(`${lockPath}/owner.json`, 'utf8'),
+      await readFile(ownerPath, 'utf8'),
     ) as Partial<LockOwner>
     if (
       candidate.version !== 1 ||
@@ -152,19 +156,32 @@ class CrossProcessFileLock {
       token: randomUUID(),
       ...(marker ? { processMarker: marker } : {}),
     }
+    const candidatePath = `${this.lockPath}.candidate.${process.pid}.${owner.token}`
+    await writeFile(
+      candidatePath,
+      JSON.stringify(owner),
+      { encoding: 'utf8', flag: 'wx', mode: this.fileMode },
+    )
 
-    for (;;) {
-      try {
-        await mkdir(this.lockPath, { mode: this.directoryMode })
+    try {
+      for (;;) {
         try {
-          await writeFile(
-            `${this.lockPath}/owner.json`,
-            JSON.stringify(owner),
-            { encoding: 'utf8', flag: 'wx', mode: this.fileMode },
-          )
+          // Publishing a hard link is atomic: the visible lock contains the
+          // complete owner record, or it does not exist. A process killed
+          // before this point can only leave a uniquely-named candidate,
+          // which never blocks a later Gateway.
+          await link(candidatePath, this.lockPath)
         } catch (error) {
-          await rmdir(this.lockPath).catch(() => undefined)
-          throw error
+          if (!isAlreadyExists(error)) throw error
+          if (await this.reclaimExitedOwner()) continue
+          if (Date.now() >= deadline) {
+            throw new Error(
+              `Timed out acquiring security store lock ${this.lockPath}. ` +
+                'If no gateway process is running, remove this lock path manually.',
+            )
+          }
+          await delay(this.retryDelayMs)
+          continue
         }
 
         let released = false
@@ -173,24 +190,15 @@ class CrossProcessFileLock {
           released = true
           const currentOwner = await readLockOwner(this.lockPath)
           if (currentOwner?.token !== owner.token) return
-          await unlink(`${this.lockPath}/owner.json`).catch((error: unknown) => {
-            if (!isNotFound(error)) throw error
-          })
-          await rmdir(this.lockPath).catch((error: unknown) => {
+          await unlink(this.lockPath).catch((error: unknown) => {
             if (!isNotFound(error)) throw error
           })
         }
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error
-        if (await this.reclaimExitedOwner()) continue
-        if (Date.now() >= deadline) {
-          throw new Error(
-            `Timed out acquiring security store lock ${this.lockPath}. ` +
-              'If no gateway process is running, remove this lock directory manually.',
-          )
-        }
-        await delay(this.retryDelayMs)
       }
+    } finally {
+      await unlink(candidatePath).catch((error: unknown) => {
+        if (!isNotFound(error)) throw error
+      })
     }
   }
 
@@ -234,9 +242,11 @@ async function readJsonCandidate<T>(path: string): Promise<{ found: boolean; val
 /**
  * JSON transaction file with a cross-process lock.
  *
- * Lock directories carry a PID plus an OS process-start marker. An unclean
- * exit is recovered only when that exact owner no longer exists; elapsed wall
- * clock time is never used to steal a live process's lock.
+ * Locks carry a PID plus an OS process-start marker. The complete owner record
+ * is atomically published as a hard link, so a crash cannot leave an
+ * ownerless visible lock. An unclean exit is recovered only when that exact
+ * owner no longer exists; elapsed wall clock time is never used to steal a
+ * live process's lock.
  */
 export class AtomicJsonFile<TState> {
   private readonly lock: CrossProcessFileLock

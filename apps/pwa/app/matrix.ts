@@ -927,10 +927,26 @@ export async function connectMatrix(
   const processRoomStateEvent = async (event: MatrixEvent): Promise<void> => {
     const content = await decodeRoomStateEvent(event);
     if (!content) return;
+    const directoryChanged = authoritativeStateInitialized &&
+      content.kind === "gateway_state" &&
+      nativeProjection.requiresAuthoritativeDirectoryRefresh(content);
+    const commandScopeChanged = directoryChanged &&
+      content.kind === "gateway_state" &&
+      nativeProjection.requiresCommandScopeRefresh(content);
     // Live state received during startup is authenticated and retained, but it
     // must not expose a partial inventory before the complete /state snapshot
-    // has crossed its atomic publication barrier.
-    await onRoomStateContent(content, authoritativeStateInitialized);
+    // has crossed its atomic publication barrier. A new directory commit is
+    // likewise withheld until all of its immutable pages have been loaded.
+    await onRoomStateContent(
+      content,
+      authoritativeStateInitialized && !directoryChanged,
+    );
+    if (directoryChanged) {
+      window.queueMicrotask(() => recoverGatewayStateSnapshot({
+        force: true,
+        blocking: commandScopeChanged,
+      }));
+    }
   };
   const enqueueRoomStateEvent = (event: MatrixEvent): Promise<void> => {
     const operation = roomStateChain.then(() => processRoomStateEvent(event));
@@ -1083,20 +1099,22 @@ export async function connectMatrix(
   };
   let gatewayStateRecovery: Promise<void> | null = null;
   let lastGatewayStateRecoveryAt = 0;
-  const recoverGatewayStateSnapshot = (): void => {
+  const recoverGatewayStateSnapshot = (
+    options: { force?: boolean; blocking?: boolean } = {},
+  ): void => {
     if (
       stopped ||
       !connectionReady ||
       !activeTrust ||
       document.visibilityState !== "visible" ||
       gatewayStateRecovery ||
-      Date.now() - lastGatewayStateRecoveryAt < 2_000
+      (!options.force && Date.now() - lastGatewayStateRecoveryAt < 2_000)
     ) {
       return;
     }
     lastGatewayStateRecoveryAt = Date.now();
-    handlers.onConvergenceRequired?.();
-    gatewayStateRecovery = loadAuthoritativeRoomState()
+    if (options.blocking !== false) handlers.onConvergenceRequired?.();
+    gatewayStateRecovery = waitForAuthoritativeRoomState(undefined, 30_000)
       .catch(reportInboundError)
       .finally(() => {
         gatewayStateRecovery = null;

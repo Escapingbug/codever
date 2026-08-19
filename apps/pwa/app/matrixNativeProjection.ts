@@ -32,6 +32,35 @@ export class MatrixNativeProjection {
   }>();
   private latestRevision: NativeRevision | null = null;
 
+  /**
+   * A Gateway entity is the commit marker for an immutable session-directory
+   * generation. Live entity events can keep the current view fresh, but once
+   * this pointer changes the complete directory must be materialized again so
+   * a client restarted inside the coalescing window cannot retain an older
+   * inventory entry.
+   */
+  requiresAuthoritativeDirectoryRefresh(state: MatrixGatewayState): boolean {
+    const current = this.gateway;
+    if (!current) return false;
+    return current.gateway_id !== state.gateway_id ||
+      current.conversation_id !== state.conversation_id ||
+      current.revision_epoch_generation !== state.revision_epoch_generation ||
+      current.revision_epoch !== state.revision_epoch ||
+      current.session_directory.generation !== state.session_directory.generation ||
+      current.session_directory.state_version !== state.session_directory.state_version ||
+      current.session_directory.slot !== state.session_directory.slot ||
+      current.session_directory.page_count !== state.session_directory.page_count ||
+      current.session_directory.state_key_prefix !== state.session_directory.state_key_prefix ||
+      current.session_directory.digest !== state.session_directory.digest;
+  }
+
+  requiresCommandScopeRefresh(state: MatrixGatewayState): boolean {
+    const current = this.gateway;
+    return current !== null &&
+      (current.revision_epoch_generation !== state.revision_epoch_generation ||
+        current.revision_epoch !== state.revision_epoch);
+  }
+
   async applyRoomState(input: unknown): Promise<GatewayStateSnapshot | null> {
     const state = matrixStateContentSchema.parse(input);
     if (state.kind === "gateway_state") {
@@ -83,6 +112,11 @@ export class MatrixNativeProjection {
     const nextGateway = gateways[0]!;
     const watermark = nextGateway.session_directory.state_version;
     const previousGateway = this.gateway;
+    if (previousGateway && gatewayCommitIsNewer(previousGateway, nextGateway)) {
+      throw new Error(
+        "The Matrix session directory advanced while an older snapshot was loading.",
+      );
+    }
     const previousSessionStates = new Map(this.sessionStates);
     const previousPendingSessionStates = new Map(this.pendingSessionStates);
     const previousStatusOverrides = new Map(this.statusOverrides);
@@ -270,6 +304,19 @@ export class MatrixNativeProjection {
     }
     if (event.revision >= current.revision) this.latestRevision = revisionOf(event);
   }
+}
+
+function gatewayCommitIsNewer(
+  current: MatrixGatewayState,
+  candidate: MatrixGatewayState,
+): boolean {
+  if (current.revision_epoch_generation !== candidate.revision_epoch_generation) {
+    return current.revision_epoch_generation > candidate.revision_epoch_generation;
+  }
+  if (current.revision_epoch !== candidate.revision_epoch) {
+    throw new Error("Matrix Gateway state disagrees on the revision epoch.");
+  }
+  return current.state_version > candidate.state_version;
 }
 
 function sessionSummary(

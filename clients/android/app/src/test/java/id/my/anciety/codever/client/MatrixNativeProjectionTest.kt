@@ -98,6 +98,46 @@ class MatrixNativeProjectionTest {
     }
 
     @Test
+    fun `Gateway directory commit requires a new authoritative batch`() {
+        val projection = MatrixNativeProjection()
+        val current = gatewayState(2)
+        projection.applyRoomStateBatch(listOf(current, sessionState("removed", 2)))
+        assertEquals(false, projection.requiresAuthoritativeDirectoryRefresh(
+            JsonObject(current + mapOf("updated_at" to JsonPrimitive(42))),
+        ))
+        val committed = JsonObject(gatewayState(5) + mapOf(
+            "session_directory" to buildJsonObject {
+                put("generation", 5); put("state_version", 5); put("slot", 2)
+                put("page_count", 0); put("state_key_prefix", "codever.directory")
+                put("digest", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            },
+        ))
+        assertEquals(true, projection.requiresAuthoritativeDirectoryRefresh(committed))
+        assertEquals(false, projection.requiresCommandScopeRefresh(committed))
+        projection.applyRoomStateBatch(listOf(committed))
+        assertEquals(0, projection.snapshot()!!.sessions().size)
+    }
+
+    @Test
+    fun `older directory fetch cannot overwrite a newer live commit`() {
+        val projection = MatrixNativeProjection()
+        projection.applyRoomStateBatch(listOf(
+            gatewayState(2),
+            sessionState("removed", 2),
+        ))
+        projection.applyRoomState(gatewayState(5))
+        assertThrows(IllegalArgumentException::class.java) {
+            projection.applyRoomStateBatch(listOf(
+                gatewayState(3),
+                sessionState("removed", 3),
+            ))
+        }
+        assertEquals(false, projection.requiresAuthoritativeDirectoryRefresh(gatewayState(5)))
+        projection.applyRoomStateBatch(listOf(gatewayState(5)))
+        assertEquals(0, projection.snapshot()!!.sessions().size)
+    }
+
+    @Test
     fun `timeline history advances revision but never creates inventory`() {
         val projection = MatrixNativeProjection()
         projection.applyRoomState(gatewayState(1))

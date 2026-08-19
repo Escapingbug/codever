@@ -59,10 +59,28 @@ describe('FileReplayStore', () => {
     const store = new FileReplayStore(path, { lockTimeoutMs: 20, retryDelayMs: 2 })
     await expect(
       store.claimAll([{ key: 'nonce', expiresAt: 2_000 }], 1_000),
-    ).rejects.toThrow('remove this lock directory manually')
+    ).rejects.toThrow('remove this lock path manually')
   })
 
-  it('recovers a lock left by an exited process without operator cleanup', async () => {
+  it('ignores a candidate left by a process killed before atomic publication', async () => {
+    const path = join(await temporaryDirectory(), 'replay.json')
+    await writeFile(
+      `${path}.lock.candidate.12345.crashed-owner-token`,
+      JSON.stringify({
+        version: 1,
+        pid: 12345,
+        acquiredAt: Date.now(),
+        token: 'crashed-owner-token',
+      }),
+      'utf8',
+    )
+    await expect(
+      new FileReplayStore(path, { lockTimeoutMs: 2_000, retryDelayMs: 2 })
+        .claimAll([{ key: 'after-candidate-crash', expiresAt: 2_000 }], 1_000),
+    ).resolves.toBe(true)
+  })
+
+  it('recovers an atomically published lock left by an exited process', async () => {
     const path = join(await temporaryDirectory(), 'replay.json')
     const lockPath = `${path}.lock`
     const owner = spawn(
@@ -70,7 +88,7 @@ describe('FileReplayStore', () => {
       [
         '-e',
         `const fs=require('node:fs');const p=process.argv[1];` +
-          `fs.mkdirSync(p);fs.writeFileSync(p+'/owner.json',JSON.stringify({` +
+          `fs.writeFileSync(p,JSON.stringify({` +
           `version:1,pid:process.pid,acquiredAt:Date.now(),token:'crashed-owner-token'` +
           `}));process.stdout.write('locked');setInterval(()=>{},1000);`,
         lockPath,

@@ -1240,6 +1240,7 @@ class NativeClientRuntime(
     private fun startAuthoritativeStateRefresh(
         recoverTransport: Boolean,
         invalidateCurrentState: Boolean = false,
+        requireRefreshCompletion: Boolean = false,
     ) {
         if (invalidateCurrentState) {
             gatewayStateSynchronized = false
@@ -1262,10 +1263,12 @@ class NativeClientRuntime(
             do {
                 if (trust == null) break
                 var attempted = false
+                var refreshed = false
                 if (matrix.status.phase == MatrixRuntimePhase.SYNCING) {
                     attempted = true
                     runCatching { matrix.refreshApplicationRoomState() }
                         .onSuccess {
+                            refreshed = true
                             diagnostics.record("matrix.application_state.refresh_completed")
                         }
                         .onFailure { error ->
@@ -1275,7 +1278,10 @@ class NativeClientRuntime(
                             )
                         }
                 }
-                if (gatewayStateSynchronized || trust == null) break
+                if (
+                    (gatewayStateSynchronized && (!requireRefreshCompletion || refreshed)) ||
+                    trust == null
+                ) break
                 val delayMs = authoritativeStateRefreshDelayMs(completedAttempts)
                 diagnostics.record(
                     "matrix.application_state.refresh_retry_scheduled",
@@ -1317,8 +1323,26 @@ class NativeClientRuntime(
             eventType == CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
         ) {
             val plaintext = decodeMatrixRoomState(event, root, content, eventType) ?: return
+            val directoryChanged = plaintext.string("kind") == "gateway_state" &&
+                nativeProjection.requiresAuthoritativeDirectoryRefresh(plaintext)
+            val commandScopeChanged = directoryChanged &&
+                nativeProjection.requiresCommandScopeRefresh(plaintext)
             acceptCanonicalCommandCompletion(plaintext)
-            nativeProjection.applyRoomState(plaintext)?.let { acceptGatewayState(it) }
+            val projected = nativeProjection.applyRoomState(plaintext)
+            if (directoryChanged) {
+                diagnostics.record("matrix.application_state.directory_changed")
+                // The Gateway entity only commits the immutable directory
+                // generation. Do not republish the prior materialization under
+                // its new pointer; reload every page before commands are
+                // considered synchronized again.
+                startAuthoritativeStateRefresh(
+                    recoverTransport = false,
+                    invalidateCurrentState = commandScopeChanged,
+                    requireRefreshCompletion = true,
+                )
+            } else {
+                projected?.let { acceptGatewayState(it) }
+            }
             return
         }
         val extension = content["io.codever"] as? JsonObject ?: return

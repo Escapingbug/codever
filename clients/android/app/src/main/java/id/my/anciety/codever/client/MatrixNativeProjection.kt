@@ -30,6 +30,26 @@ class MatrixNativeProjection {
     private val statusOverrides = linkedMapOf<String, JsonObject>()
     private var latestRevision: NativeRevision? = null
 
+    /** True when a live Gateway entity commits a different immutable directory. */
+    @Synchronized
+    fun requiresAuthoritativeDirectoryRefresh(value: JsonObject): Boolean {
+        val current = gateway ?: return false
+        return current.text("gateway_id") != value.text("gateway_id") ||
+            current.text("conversation_id") != value.text("conversation_id") ||
+            current.number("revision_epoch_generation") !=
+                value.number("revision_epoch_generation") ||
+            current.text("revision_epoch") != value.text("revision_epoch") ||
+            current["session_directory"] != value["session_directory"]
+    }
+
+    @Synchronized
+    fun requiresCommandScopeRefresh(value: JsonObject): Boolean {
+        val current = gateway ?: return false
+        return current.number("revision_epoch_generation") !=
+            value.number("revision_epoch_generation") ||
+            current.text("revision_epoch") != value.text("revision_epoch")
+    }
+
     @Synchronized
     fun applyRoomState(value: JsonObject): JsonObject? {
         require(value.number("version") == 2L)
@@ -51,6 +71,9 @@ class MatrixNativeProjection {
         val watermark = (nextGateway["session_directory"] as? JsonObject)
             ?.number("state_version") ?: error("Matrix Gateway directory watermark is missing.")
         val previousGateway = gateway
+        require(previousGateway == null || !gatewayCommitIsNewer(previousGateway, nextGateway)) {
+            "The Matrix session directory advanced while an older snapshot was loading."
+        }
         val previousSessions = sessionStates.toMap()
         val previousPending = pendingSessionStates.toMap()
         val previousOverrides = statusOverrides.toMap()
@@ -186,6 +209,18 @@ class MatrixNativeProjection {
         val current = gateway ?: return false
         return value.number("revision_epoch_generation") == current.number("revision_epoch_generation") &&
             value.text("revision_epoch") == current.text("revision_epoch")
+    }
+
+    private fun gatewayCommitIsNewer(current: JsonObject, candidate: JsonObject): Boolean {
+        val currentGeneration = current.number("revision_epoch_generation")!!
+        val candidateGeneration = candidate.number("revision_epoch_generation")!!
+        if (currentGeneration != candidateGeneration) {
+            return currentGeneration > candidateGeneration
+        }
+        require(current.text("revision_epoch") == candidate.text("revision_epoch")) {
+            "Matrix Gateway state disagrees on the revision epoch."
+        }
+        return current.number("state_version")!! > candidate.number("state_version")!!
     }
 
     @Synchronized

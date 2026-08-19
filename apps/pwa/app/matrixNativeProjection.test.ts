@@ -87,6 +87,44 @@ describe("MatrixNativeProjection Room State", () => {
     ]);
   });
 
+  it("requires a new authoritative batch when the Gateway directory commit changes", async () => {
+    const projection = new MatrixNativeProjection();
+    const current = gatewayState(2);
+    await projection.applyRoomStateBatch([current, sessionState("removed", 2)]);
+    expect(projection.requiresAuthoritativeDirectoryRefresh({
+      ...current,
+      updated_at: 42,
+    })).toBe(false);
+    const committed = {
+      ...gatewayState(5),
+      session_directory: {
+        ...gatewayState(5).session_directory,
+        state_version: 5,
+        digest: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      },
+    };
+    expect(projection.requiresAuthoritativeDirectoryRefresh(committed)).toBe(true);
+    expect(projection.requiresCommandScopeRefresh(committed)).toBe(false);
+    await projection.applyRoomStateBatch([committed]);
+    expect(projection.snapshot()?.sessions).toEqual([]);
+  });
+
+  it("does not let an older directory fetch overwrite a newer live commit", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomStateBatch([
+      gatewayState(2),
+      sessionState("removed", 2),
+    ]);
+    await projection.applyRoomState(gatewayState(5));
+    await expect(projection.applyRoomStateBatch([
+      gatewayState(3),
+      sessionState("removed", 3),
+    ])).rejects.toThrow("advanced while an older snapshot was loading");
+    expect(projection.requiresAuthoritativeDirectoryRefresh(gatewayState(5))).toBe(false);
+    await projection.applyRoomStateBatch([gatewayState(5)]);
+    expect(projection.snapshot()?.sessions).toEqual([]);
+  });
+
   it("updates one session without waiting for an unrelated global commit", async () => {
     const projection = new MatrixNativeProjection();
     const before = sessionState("s1", 2, { title: "Before" });
