@@ -62,7 +62,11 @@ import { SessionExtensionRegistry } from '@/runtime/sessionExtensions'
 
 type WorkspaceState = PersistedRoomRuntimeState['workspace']
 const CANONICAL_COMMAND_ACK_DELAY_MS = 2_000
-const ROOM_SNAPSHOT_DEBOUNCE_MS = 10_000
+// Entity state is the realtime path, while the immutable directory is the
+// reconnect/cold-start barrier. Keep a short burst window so rapid lifecycle
+// changes share one directory publication without leaving other devices on a
+// stale inventory for ten seconds after create/delete.
+const ROOM_SNAPSHOT_DEBOUNCE_MS = 1_000
 
 interface AppSessionRuntime {
     record: AppSessionRecord
@@ -426,6 +430,14 @@ export class MatrixGatewayRunner {
             current?.digest === digest
             && currentGateway?.revision_epoch === revision.revision_epoch
             && currentGateway.revision_epoch_generation === revision.revision_epoch_generation
+            // Equal inventory is not sufficient to reuse an older directory
+            // watermark. A session can be created and deleted between two
+            // snapshots, returning to the same digest while some clients have
+            // observed only the transient active entity. Advancing the
+            // descriptor lets the final snapshot prune every entity through
+            // this state version. Heartbeats pass the existing state version
+            // and still reuse the descriptor without extra directory writes.
+            && current.state_version >= stateVersion
         ) return current
 
         const generation = Math.max(stateVersion, (current?.generation ?? -1) + 1)
@@ -745,6 +757,11 @@ export class MatrixGatewayRunner {
             }
             throw error
         }
+        this.log(
+            `[matrix-gateway] command ${authorized.command.commandId} `
+            + `${authorized.command.payload.operation} authorized at revision ${authorized.revision}`
+            + (authorized.duplicate ? ' (duplicate)' : ''),
+        )
         let commandCompletion: Promise<void> | undefined
         let terminalDeliveryAcknowledges = false
         if (authorized.terminal) {
@@ -845,6 +862,9 @@ export class MatrixGatewayRunner {
         }
         if (!terminalDeliveryAcknowledges) {
             const sendAcknowledgement = (): void => {
+                this.log(
+                    `[matrix-gateway] command ${authorized.command.commandId} acknowledgement sending`,
+                )
                 // Matrix delivery is deliberately off the authorization lane.
                 // A stalled homeserver must not delay execution, cancel, or
                 // decisions.
@@ -936,6 +956,9 @@ export class MatrixGatewayRunner {
         // fan-out attempt so remote devices see the user intent before Agent
         // status. The event chain itself stays free for cancel and decisions.
         const task = (async () => {
+            this.log(
+                `[matrix-gateway] command ${command.commandId} ${command.payload.operation} execution started`,
+            )
             let outcome: 'succeeded' | 'failed' = 'succeeded'
             let executionError: unknown
             let executionResult: CommandExecutionResult = {
@@ -990,6 +1013,10 @@ export class MatrixGatewayRunner {
                     )
                 }
             }
+            this.log(
+                `[matrix-gateway] command ${command.commandId} ${command.payload.operation} `
+                + `execution ${outcome}`,
+            )
         })()
             .finally(() => {
                 this.executionTasks.delete(task)
@@ -1477,8 +1504,16 @@ export class MatrixGatewayRunner {
         sourceCommandId: string,
     ): Promise<boolean> {
         try {
+            this.log(
+                `[matrix-gateway] canonical session state ${sessionId} for command `
+                + `${sourceCommandId} publishing`,
+            )
             await this.serializeRoomState(runtime, () =>
                 this.publishNativeSessionStateEntity(runtime, sessionId, sourceCommandId)
+            )
+            this.log(
+                `[matrix-gateway] canonical session state ${sessionId} for command `
+                + `${sourceCommandId} published`,
             )
             return true
         } catch (error) {

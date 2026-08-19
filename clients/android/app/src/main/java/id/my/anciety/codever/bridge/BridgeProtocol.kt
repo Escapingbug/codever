@@ -15,6 +15,7 @@ import id.my.anciety.codever.client.command.CommandBusyException
 import id.my.anciety.codever.client.command.CommandReceipt
 import id.my.anciety.codever.client.command.CommandState
 import id.my.anciety.codever.client.command.RevisionConflictAction
+import id.my.anciety.codever.client.command.UnknownCommandException
 import id.my.anciety.codever.client.events.ClientEvent
 import id.my.anciety.codever.client.events.ClientEventListener
 import id.my.anciety.codever.client.events.ClientSnapshot
@@ -792,6 +793,8 @@ class BridgeDispatcher(
             },
         )
     } catch (error: UnknownSubscriptionException) {
+        BridgeProtocol.failure(request.id, BridgeError.OPERATION_NOT_FOUND, error.message.orEmpty())
+    } catch (error: UnknownCommandException) {
         BridgeProtocol.failure(request.id, BridgeError.OPERATION_NOT_FOUND, error.message.orEmpty())
     } catch (error: InvalidSubscriptionCursorException) {
         BridgeProtocol.failure(request.id, BridgeError.CURSOR_EXPIRED, error.message.orEmpty(), true)

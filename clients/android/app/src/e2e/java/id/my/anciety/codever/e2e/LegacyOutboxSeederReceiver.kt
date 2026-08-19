@@ -7,6 +7,7 @@ import android.content.Intent
 import android.util.AtomicFile
 import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.client.NativeRuntimeFiles
+import id.my.anciety.codever.client.command.DurableCommandOutbox
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import id.my.anciety.codever.security.SecretEnvelope
 import id.my.anciety.codever.security.codever.AndroidKeystoreP256Identity
@@ -24,7 +25,7 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 
 /**
- * Creates the exact encrypted schema-2 residue left by the pre-schema-3 APK.
+ * Seeds encrypted outbox states that cannot be created deterministically from UI automation.
  *
  * This receiver only exists in the separately signed `.e2e` package. Keeping
  * the fixture on-device exercises the production Android Keystore key,
@@ -45,6 +46,26 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         val atomicFile = AtomicFile(commandsFile)
         check(atomicFile.baseFile.exists()) { "The current encrypted outbox is missing." }
         val cipher = AndroidKeystoreSecretCipher()
+        if (intent.getStringExtra(EXTRA_MODE) == MODE_CURRENT_QUEUED) {
+            val cwd = requireNotNull(intent.getStringExtra(EXTRA_CWD)) {
+                "The queued outbox fixture requires a cwd."
+            }
+            val projectName = requireNotNull(intent.getStringExtra(EXTRA_PROJECT_NAME)) {
+                "The queued outbox fixture requires a project name."
+            }
+            val outbox = DurableCommandOutbox.encrypted(commandsFile, cipher, deviceId)
+            val receipt = outbox.enqueue(
+                UUID.nameUUIDFromBytes("queued:$runId".toByteArray()).toString(),
+                buildJsonObject {
+                    put("operation", "session.create")
+                    put("cwd", cwd)
+                    put("projectName", projectName)
+                },
+            )
+            resultCode = Activity.RESULT_OK
+            resultData = receipt.commandId
+            return
+        }
         val associatedData = "codever.command.outbox.v1\u0000$deviceId".toByteArray(Charsets.UTF_8)
         val encrypted = atomicFile.readFully()
         val envelope = try {
@@ -147,5 +168,9 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
 
     private companion object {
         const val EXTRA_RUN_ID = "run_id"
+        const val EXTRA_MODE = "mode"
+        const val EXTRA_CWD = "cwd"
+        const val EXTRA_PROJECT_NAME = "project_name"
+        const val MODE_CURRENT_QUEUED = "current_queued"
     }
 }

@@ -145,6 +145,17 @@ describe("MatrixNativeProjection Room State", () => {
     await projection.applyRoomState(deleted);
     await projection.applyRoomState(sessionState("s1", 3, { title: "Stale" }));
     expect(projection.snapshot()?.sessions).toEqual([]);
+    expect(projection.sessionLifecycleState("s1")).toBe("deleted");
+  });
+
+  it("exposes the lifecycle value that actually won projection ordering", async () => {
+    const projection = new MatrixNativeProjection();
+    await projection.applyRoomState(gatewayState(2));
+    await projection.applyRoomState(sessionState("s1", 5));
+    await projection.applyRoomState(tombstone("s1", 4));
+
+    expect(projection.sessionLifecycleState("s1")).toBe("active");
+    expect(projection.snapshot()?.sessions).toHaveLength(1);
   });
 
   it("does not let timeline roots create inventory entities", async () => {

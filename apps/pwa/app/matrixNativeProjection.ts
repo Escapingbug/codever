@@ -165,6 +165,12 @@ export class MatrixNativeProjection {
     return this.snapshot();
   }
 
+  /** The lifecycle value that actually won projection ordering for one entity. */
+  sessionLifecycleState(sessionId: string): MatrixSessionState["state"] | null {
+    const state = this.sessionStates.get(sessionId);
+    return state && this.belongsToCurrentGateway(state) ? state.state : null;
+  }
+
   applySessionStatus(input: Record<string, unknown>): GatewayStateSnapshot | null {
     if (
       input.kind !== "status" ||

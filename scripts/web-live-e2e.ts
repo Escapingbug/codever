@@ -183,7 +183,13 @@ try {
     )
     const legacyBaseline = await activeSessionCount(firstPage)
     await createSession(firstPage, legacyCapabilityProjectName, repositoryRoot)
-    await deleteSelectedSession(firstPage, legacyCapabilityProjectName)
+    await deleteSelectedSession(firstPage, legacyCapabilityProjectName, {
+        // This one-time upgrade must mint and consume a new pairing
+        // certificate before the lifecycle command can be signed. Keep the
+        // ordinary 1.5 s deletion feedback requirement, but do not apply the
+        // 15 s steady-state command budget to the full renewal handshake.
+        convergenceTimeoutMs: 45_000,
+    })
     assert.equal(
         await activeSessionCount(firstPage),
         legacyBaseline,
@@ -1265,8 +1271,12 @@ async function settleOrDeleteProject(page: Page, projectName: string): Promise<v
 async function deleteSelectedSession(
     page: Page,
     projectName: string,
-    options: { observeUnexpectedSelection?: boolean } = {},
+    options: {
+        observeUnexpectedSelection?: boolean
+        convergenceTimeoutMs?: number
+    } = {},
 ): Promise<void> {
+    const convergenceTimeoutMs = options.convergenceTimeoutMs ?? CONVERGENCE_TIMEOUT_MS
     const details = page.getByRole('button', { name: 'Conversation details' })
     if (await details.getAttribute('aria-expanded') !== 'true') await details.click()
     await page.getByRole('button').filter({
@@ -1290,7 +1300,7 @@ async function deleteSelectedSession(
             description: `immediate deletion feedback for ${projectName}`,
             timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
         })
-        await waitForProjectAbsent(page, projectName)
+        await waitForProjectAbsent(page, projectName, convergenceTimeoutMs)
     } finally {
         if (options.observeUnexpectedSelection) {
             unexpectedSelection = await stopPostDeletionSelectionObservation(page)
@@ -1302,8 +1312,8 @@ async function deleteSelectedSession(
         'A session became selected again after the last-session deletion was confirmed',
     )
     assert.ok(
-        Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
-        `Session deletion exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
+        Date.now() - startedAt <= convergenceTimeoutMs,
+        `Session deletion exceeded ${convergenceTimeoutMs} ms`,
     )
 }
 
@@ -1425,12 +1435,16 @@ async function waitForProject(page: Page, projectName: string): Promise<void> {
     await assertNoBlockingAlert(page)
 }
 
-async function waitForProjectAbsent(page: Page, projectName: string): Promise<void> {
+async function waitForProjectAbsent(
+    page: Page,
+    projectName: string,
+    timeoutMs = CONVERGENCE_TIMEOUT_MS,
+): Promise<void> {
     await waitFor(
         async () => !await projectSessionExists(page, projectName),
         {
             description: `absence of ${projectName}`,
-            timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            timeoutMs,
             failFast: () => assertNoPageErrors(page),
         },
     )

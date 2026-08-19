@@ -192,7 +192,8 @@ export async function runPrivacyBusinessJourney(
         approvedSanitized,
     )
     await approvedDecision.getByRole('button', { name: 'Send to Agent', exact: true }).click()
-    await waitForProviderInvocation(
+    await waitForProviderInvocationAfterDecision(
+        options.firstPage,
         options.gatewayOutput,
         approvedSanitized,
         beforeApproved + 1,
@@ -268,7 +269,8 @@ export async function runPrivacyBusinessJourney(
         recoverySanitized,
     )
     await recoveryDecision.getByRole('button', { name: 'Send to Agent', exact: true }).click()
-    await waitForProviderInvocation(
+    await waitForProviderInvocationAfterDecision(
+        options.firstPage,
         options.gatewayOutput,
         recoverySanitized,
         beforeRecovery + 1,
@@ -450,6 +452,38 @@ async function waitForProviderInvocation(
         providerInvocationCount(gatewayOutput()),
         expectedCount,
         'The privacy journey produced an unexpected number of Agent invocations',
+    )
+}
+
+async function waitForProviderInvocationAfterDecision(
+    page: Page,
+    gatewayOutput: () => string,
+    expectedInput: string,
+    expectedCount: number,
+): Promise<void> {
+    const digest = sha256(expectedInput)
+    const marker = `${PROVIDER_INVOCATION_PREFIX}${digest}`
+    const review = page.getByRole('button', { name: 'Review complete · send', exact: true })
+    let reviewedLatestRevision = false
+    await waitFor(async () => {
+        if (gatewayOutput().includes(marker)) return true
+        if (
+            !reviewedLatestRevision
+            && await review.isVisible()
+            && await review.isEnabled()
+        ) {
+            reviewedLatestRevision = true
+            await review.click()
+        }
+        return false
+    }, {
+        description: `Agent provider invocation ${digest} after any required revision review`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+    assert.equal(
+        providerInvocationCount(gatewayOutput()),
+        expectedCount,
+        'The privacy decision produced an unexpected number of Agent invocations',
     )
 }
 

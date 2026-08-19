@@ -163,6 +163,20 @@ class MatrixNativeProjectionTest {
     }
 
     @Test
+    fun `fresh authenticated session state also refreshes public Gateway liveness`() {
+        val projection = MatrixNativeProjection()
+        projection.applyRoomState(gatewayState(1))
+        val freshSession = JsonObject(sessionState("session-1", 2) + mapOf(
+            "updated_at" to JsonPrimitive(42),
+        ))
+
+        val snapshot = projection.applyRoomState(freshSession)!!
+
+        assertEquals("42", snapshot.getValue("updated_at").jsonPrimitive.content)
+        assertEquals("2", snapshot.getValue("revision").jsonPrimitive.content)
+    }
+
+    @Test
     fun `tombstone prevents stale state from resurrecting a deleted session`() {
         val projection = MatrixNativeProjection()
         val current = sessionState("session-1", 2)
@@ -172,6 +186,18 @@ class MatrixNativeProjectionTest {
         projection.applyRoomState(deleted)
         projection.applyRoomState(sessionState("session-1", 3, "Stale"))
         assertEquals(0, projection.snapshot()!!.sessions().size)
+        assertEquals("deleted", projection.sessionLifecycleState("session-1"))
+    }
+
+    @Test
+    fun `older tombstone cannot complete while newer active entity remains projected`() {
+        val projection = MatrixNativeProjection()
+        projection.applyRoomState(gatewayState(2))
+        projection.applyRoomState(sessionState("session-1", 5))
+        projection.applyRoomState(tombstone("session-1", 4))
+
+        assertEquals("active", projection.sessionLifecycleState("session-1"))
+        assertEquals(1, projection.snapshot()!!.sessions().size)
     }
 
     @Test

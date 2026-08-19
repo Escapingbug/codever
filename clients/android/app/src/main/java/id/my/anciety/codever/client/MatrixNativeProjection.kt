@@ -29,6 +29,7 @@ class MatrixNativeProjection {
     private val pendingSessionStates = linkedMapOf<String, JsonObject>()
     private val statusOverrides = linkedMapOf<String, JsonObject>()
     private var latestRevision: NativeRevision? = null
+    private var latestAuthenticatedUpdatedAt: Long? = null
 
     /** True when a live Gateway entity commits a different immutable directory. */
     @Synchronized
@@ -78,6 +79,7 @@ class MatrixNativeProjection {
         val previousPending = pendingSessionStates.toMap()
         val previousOverrides = statusOverrides.toMap()
         val previousRevision = latestRevision
+        val previousAuthenticatedUpdatedAt = latestAuthenticatedUpdatedAt
         return try {
             val newer = (sessionStates.values + pendingSessionStates.values)
                 .filter { value ->
@@ -92,6 +94,7 @@ class MatrixNativeProjection {
             pendingSessionStates.clear()
             statusOverrides.clear()
             latestRevision = null
+            latestAuthenticatedUpdatedAt = null
             (listOf(nextGateway) + values.filter { it.text("kind") == "session_state" } + newer)
                 .forEach { value ->
                 require(value.number("version") == 2L)
@@ -111,6 +114,7 @@ class MatrixNativeProjection {
             statusOverrides.clear()
             statusOverrides.putAll(previousOverrides)
             latestRevision = previousRevision
+            latestAuthenticatedUpdatedAt = previousAuthenticatedUpdatedAt
             throw error
         }
     }
@@ -162,6 +166,7 @@ class MatrixNativeProjection {
             } else {
                 sessionStates.clear()
                 statusOverrides.clear()
+                latestAuthenticatedUpdatedAt = null
                 pendingSessionStates.entries.removeAll { (_, state) ->
                     state.number("revision_epoch_generation") != generation ||
                         state.text("revision_epoch") != value.text("revision_epoch")
@@ -170,6 +175,7 @@ class MatrixNativeProjection {
         }
         gateway = value
         observeRevision(value)
+        observeAuthenticatedUpdatedAt(value)
         commitPending()
     }
 
@@ -202,6 +208,7 @@ class MatrixNativeProjection {
             sessionStates[sessionId] = value
             statusOverrides.remove(sessionId)
             observeRevision(value)
+            observeAuthenticatedUpdatedAt(value)
         }
     }
 
@@ -246,7 +253,13 @@ class MatrixNativeProjection {
             put("revision_epoch_generation", revision.generation)
             put("state_version", currentGateway.number("state_version")!!)
             put("active_device_count", currentGateway.number("active_device_count")!!)
-            put("updated_at", currentGateway.number("updated_at")!!)
+            put(
+                "updated_at",
+                maxOf(
+                    currentGateway.number("updated_at")!!,
+                    latestAuthenticatedUpdatedAt ?: 0,
+                ),
+            )
             put("command_sequences", currentGateway.getValue("command_sequences"))
             put("current_session_id", kotlinx.serialization.json.JsonNull)
             put("sessions", JsonArray(sessions))
@@ -270,6 +283,12 @@ class MatrixNativeProjection {
         ?.get("session")
         ?.let { it as? JsonObject }
         ?.text("thread_root_event_id")
+
+    /** The lifecycle value that actually won projection ordering for one entity. */
+    @Synchronized
+    fun sessionLifecycleState(sessionId: String): String? = sessionStates[sessionId]
+        ?.takeIf(::belongsToCurrentGateway)
+        ?.text("state")
 
     @Synchronized
     private fun publicSession(value: JsonObject): JsonObject {
@@ -576,6 +595,11 @@ class MatrixNativeProjection {
             "Matrix events disagree on the Gateway revision epoch."
         }
         if (next.revision >= current.revision) latestRevision = next
+    }
+
+    private fun observeAuthenticatedUpdatedAt(value: JsonObject) {
+        val updatedAt = value.number("updated_at") ?: return
+        latestAuthenticatedUpdatedAt = maxOf(latestAuthenticatedUpdatedAt ?: 0, updatedAt)
     }
 
     private fun compareEntityState(left: JsonObject, right: JsonObject): Int {

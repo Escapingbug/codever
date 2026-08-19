@@ -1013,7 +1013,15 @@ describe('MatrixGatewayRunner', () => {
             CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
             'gateway-1',
         ]))!
-        const opened = await openNativeState(firstGatewayState, fixture.keys, gatewayKeys)
+        const opened = await openNativeState(firstGatewayState, fixture.keys, gatewayKeys) as {
+            state_version: number
+            revision: number
+            session_directory: {
+                generation: number
+                state_version: number
+                digest: string
+            }
+        }
         expect(opened).toMatchObject({
             kind: 'gateway_state',
             revision: 0,
@@ -1038,8 +1046,16 @@ describe('MatrixGatewayRunner', () => {
             'gateway-1',
         ]))!
         expect(secondGatewayState.eventId).not.toBe(firstGatewayState.eventId)
-        await expect(openNativeState(secondGatewayState, fixture.keys, gatewayKeys))
-            .resolves.toMatchObject({ state_version: 2 })
+        const second = await openNativeState(
+            secondGatewayState,
+            fixture.keys,
+            gatewayKeys,
+        ) as typeof opened
+        expect(second).toMatchObject({ state_version: 2 })
+        expect(second.session_directory.digest).toBe(opened.session_directory.digest)
+        expect(second.session_directory.state_version).toBe(2)
+        expect(second.session_directory.generation)
+            .toBeGreaterThan(opened.session_directory.generation)
         await runner.stop()
     })
 

@@ -207,6 +207,8 @@ class CommandIdempotencyConflictException(message: String) : IllegalArgumentExce
 
 class ReleasedCommandException(message: String) : IllegalStateException(message)
 
+class UnknownCommandException(message: String) : IllegalArgumentException(message)
+
 class CommandRevisionConflictException(
     val commandId: String,
     val expectedRevision: Long,

@@ -254,6 +254,7 @@ export class AtomicJsonFile<TState> {
   private readonly previousPath: string
   private readonly fileMode: number
   private readonly directoryMode: number
+  private transactionTail: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly path: string,
@@ -270,14 +271,24 @@ export class AtomicJsonFile<TState> {
     createDefault: () => TState,
     operation: (state: TState) => { result: TResult; changed: boolean },
   ): Promise<TResult> {
-    const release = await this.lock.acquire()
+    const previous = this.transactionTail
+    let releaseLocal!: () => void
+    this.transactionTail = new Promise<void>((resolve) => {
+      releaseLocal = resolve
+    })
+    await previous
     try {
-      const state = await this.read(createDefault)
-      const { result, changed } = operation(state)
-      if (changed) await this.write(state)
-      return result
+      const release = await this.lock.acquire()
+      try {
+        const state = await this.read(createDefault)
+        const { result, changed } = operation(state)
+        if (changed) await this.write(state)
+        return result
+      } finally {
+        await release()
+      }
     } finally {
-      await release()
+      releaseLocal()
     }
   }
 

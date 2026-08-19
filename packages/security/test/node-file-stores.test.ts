@@ -26,6 +26,22 @@ afterEach(async () => {
 })
 
 describe('FileReplayStore', () => {
+  it('serializes concurrent transactions from one store before taking the process lock', async () => {
+    const path = join(await temporaryDirectory(), 'replay.json')
+    const store = new FileReplayStore(path, { lockTimeoutMs: 1, retryDelayMs: 1 })
+    const claims = Array.from({ length: 64 }, (_, index) => ({
+      key: `local-${index}`,
+      expiresAt: 2_000,
+    }))
+
+    await expect(Promise.all(
+      claims.map(claim => store.claimAll([claim], 1_000)),
+    )).resolves.toEqual(claims.map(() => true))
+    await expect(
+      new FileReplayStore(path).claimAll(claims, 1_000),
+    ).resolves.toBe(false)
+  })
+
   it('atomically allows one claim across independent store instances', async () => {
     const path = join(await temporaryDirectory(), 'replay.json')
     const first = new FileReplayStore(path)

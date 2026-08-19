@@ -47,7 +47,7 @@ class GatewayStateSyncPolicyTest {
 
     @Test
     fun `canonical Matrix state only completes its matching session command`() {
-        assertEquals(true, canonicalStateCompletesCommand(
+        assertEquals(false, canonicalStateCompletesCommand(
             CommandOperation.SESSION_CREATE,
             "session_root",
             null,
@@ -57,22 +57,22 @@ class GatewayStateSyncPolicyTest {
             "session_state",
             "active",
         ))
-        assertEquals(true, canonicalStateCompletesCommand(
+        assertEquals(false, canonicalStateCompletesCommand(
             CommandOperation.SESSION_SETTINGS,
             "session_update",
             null,
         ))
-        assertEquals(true, canonicalStateCompletesCommand(
+        assertEquals(false, canonicalStateCompletesCommand(
             CommandOperation.SESSION_ARCHIVE,
             "session_lifecycle",
             "archived",
         ))
-        assertEquals(true, canonicalStateCompletesCommand(
+        assertEquals(false, canonicalStateCompletesCommand(
             CommandOperation.SESSION_RESTORE,
             "session_lifecycle",
             "idle",
         ))
-        assertEquals(true, canonicalStateCompletesCommand(
+        assertEquals(false, canonicalStateCompletesCommand(
             CommandOperation.SESSION_DELETE,
             "session_lifecycle",
             "deleted",
@@ -96,6 +96,16 @@ class GatewayStateSyncPolicyTest {
             CommandOperation.SESSION_RESTORE,
             "gateway_revision",
             null,
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_ARCHIVE,
+            "session_state",
+            "archived",
+        ))
+        assertEquals(true, canonicalStateCompletesCommand(
+            CommandOperation.SESSION_RESTORE,
+            "session_state",
+            "active",
         ))
     }
 
@@ -180,6 +190,17 @@ class GatewayStateSyncPolicyTest {
         )
 
         assertEquals(listOf("earlier", "later"), recoverableCommandIds(commands))
+    }
+
+    @Test
+    fun `queued commands whose send job never started are resumed in sequence order`() {
+        val commands = listOf(
+            command("later", 4, CommandState.QUEUED),
+            command("ignored", 2, CommandState.RECOVERY_REQUIRED),
+            command("earlier", 3, CommandState.QUEUED),
+        )
+
+        assertEquals(listOf("earlier", "later"), queuedCommandIds(commands))
     }
 
     @Test

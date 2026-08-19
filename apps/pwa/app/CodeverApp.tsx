@@ -66,6 +66,7 @@ import {
 import {
   clearPendingSessionCreateRecovery,
   completedSessionCreateTarget,
+  isMissingSessionCreateRecoveryCommand,
   readPendingSessionCreateRecovery,
   sessionCreateRecoveryMatches,
   writePendingSessionCreateRecovery,
@@ -1996,11 +1997,22 @@ export function CodeverApp() {
           (await connection.recoverCommand(recovery.commandId));
         recoverUiNotice("session:create");
         await settleSessionCreate(connection, sent);
-      } catch {
+      } catch (error) {
         if (
           pendingSessionCreateRecoveryRef.current?.commandId !==
           recovery.commandId
         ) {
+          return;
+        }
+        if (isMissingSessionCreateRecoveryCommand(error)) {
+          forgetPendingSessionCreate(recovery.commandId);
+          clearPendingSessionCreateUi();
+          showUiNotice(
+            "session:create",
+            "session",
+            "warning",
+            "The unfinished local session creation was cleared because this device no longer has its command. You can create the session again.",
+          );
           return;
         }
         showUiNotice(

@@ -377,21 +377,39 @@ class AndroidWebView {
     }
 
     async sendPrompt(prompt: string): Promise<void> {
-        const result = await this.evaluate<{ filled: boolean; sent: boolean; disabled: boolean }>(`(() => {
+        const focused = await this.evaluate<boolean>(`(() => {
             const textarea = Array.from(document.querySelectorAll('textarea'))
                 .find(item => item.getAttribute('aria-label')?.startsWith('Message ') && item.getClientRects().length > 0);
-            if (!textarea || textarea.disabled) return { filled: false, sent: false, disabled: Boolean(textarea?.disabled) };
-            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-            if (!setter) return { filled: false, sent: false, disabled: false };
-            setter.call(textarea, ${json(prompt)});
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            if (!textarea || textarea.disabled) return false;
+            textarea.focus();
+            textarea.setSelectionRange(0, textarea.value.length);
+            return true;
+        })()`)
+        assert.equal(focused, true, 'Could not focus the visible Android composer')
+
+        // Use Chromium's input pipeline instead of mutating textarea.value.
+        // This follows the same beforeinput/input path as a real soft keyboard
+        // and therefore cannot leave the DOM value ahead of React's draft.
+        await this.call('Input.insertText', { text: prompt })
+
+        await waitFor(async () => this.evaluate<boolean>(`(() => {
+            const textarea = Array.from(document.querySelectorAll('textarea'))
+                .find(item => item.getAttribute('aria-label')?.startsWith('Message ') && item.getClientRects().length > 0);
             const send = Array.from(document.querySelectorAll('button'))
                 .find(button => /^(Send|Queue) message$/u.test(button.getAttribute('aria-label') || '') && button.getClientRects().length > 0);
-            if (!send || send.disabled) return { filled: true, sent: false, disabled: Boolean(send?.disabled) };
+            return Boolean(textarea && textarea.value === ${json(prompt)} && send && !send.disabled);
+        })()`), {
+            description: 'the Android composer to commit its draft and enable send',
+            timeoutMs: 5_000,
+        })
+        const sent = await this.evaluate<boolean>(`(() => {
+            const send = Array.from(document.querySelectorAll('button'))
+                .find(button => /^(Send|Queue) message$/u.test(button.getAttribute('aria-label') || '') && button.getClientRects().length > 0);
+            if (!send || send.disabled) return false;
             send.click();
-            return { filled: true, sent: true, disabled: false };
+            return true;
         })()`)
-        assert.deepEqual(result, { filled: true, sent: true, disabled: false })
+        assert.equal(sent, true, 'Could not click the enabled Android send button')
     }
 
     async waitForPromptReview(): Promise<void> {
@@ -588,6 +606,9 @@ export async function runAndroidAlphaJourney(
     const largeResponseEnd = `CODEVER-E2E-LARGE-END-${options.runId}`
     const stalePromptToLinearize = `Android stale prompt to linearize ${options.runId}`
     const privacyProjectName = `Codever Alpha Privacy ${options.runId}`
+    // Keep this shell-injected fixture value token-safe. The behavior under
+    // test is durable command recovery, not adb shell argument quoting.
+    const queuedRestartProjectName = `CodeverAlphaQueuedRestart-${options.runId}`
     const migrationProjectName = `Codever Alpha Upgrade ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
     const apkPath = join(
@@ -606,6 +627,7 @@ export async function runAndroidAlphaJourney(
     let sessionCreated = false
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
+    let queuedRestartSessionCreated = false
     let migrationSessionCreated = false
     let deviceIdleForced = false
     let deliveredDuringForcedIdle: boolean | undefined
@@ -988,7 +1010,20 @@ export async function runAndroidAlphaJourney(
             serial,
             'service.ui_foreground running=false',
         )
-        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        // Disconnect the UI driver before leaving Codever. Every WebView read
+        // deliberately foregrounds the Activity so that ordinary UI checks do
+        // not silently inspect a suspended page; leaving that driver attached
+        // here can race the background transition and reopen MainActivity.
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        // Starting a second real Activity is deterministic on headless and
+        // freshly rebooted emulators, where HOME can briefly resolve through
+        // FallbackHome or a launcher that is not ready yet.
+        await adb(serial, 'shell', 'am', 'start', '-a', 'android.settings.SETTINGS')
         await waitFor(
             async () => await diagnosticCount(
                 serial,
@@ -996,15 +1031,12 @@ export async function runAndroidAlphaJourney(
             ) > backgroundLifecycleBefore,
             {
                 description: 'Android Activity to leave the foreground before native-only receipt',
-                timeoutMs: UI_FEEDBACK_TIMEOUT_MS,
+                // Activity stop is asynchronous and may follow the system's
+                // resumed-Activity switch by several seconds on an emulator.
+                // Keep the fast UI budget for visible button feedback only.
+                timeoutMs: RETURN_TIMEOUT_MS,
             },
         )
-        android.close()
-        android = undefined
-        if (forwardedDevtoolsPort) {
-            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
-            forwardedDevtoolsPort = undefined
-        }
         await assertPackageActivityBackground(serial)
         const backgroundEventBefore = await diagnosticCount(
             serial,
@@ -1662,6 +1694,14 @@ export async function runAndroidAlphaJourney(
         await waitForBrowserText(options.browserPage, options.providerResponse)
         assert.equal(await browserTextCount(options.browserPage, postCommitRecoveryPrompt), 1)
         assert.equal(await browserTextCount(options.browserPage, options.providerResponse), 1)
+        await android.waitFor(
+            'post-commit prompt completion before the stale-revision fault',
+            state =>
+                state.userMessages.filter(message => message === postCommitRecoveryPrompt).length === 1 &&
+                countText(state.bodyText, options.providerResponse) === 1 &&
+                !state.bodyText.includes('Agent is working'),
+            CONNECT_TIMEOUT_MS,
+        )
 
         process.stdout.write('  [A9/12] Linearizing a stale cross-device Android prompt without user review…\n')
         const staleSyncBaseline = syncGate.hold()
@@ -1724,7 +1764,83 @@ export async function runAndroidAlphaJourney(
             CONNECT_TIMEOUT_MS,
         )
 
-        process.stdout.write('  [A11/12] Cover-installing over an encrypted legacy submitted command…\n')
+        process.stdout.write('  [A11a/12] Cover-installing after a command commit but before its send job starts…\n')
+        const missingMarkerCommandId = `missing-cover-install-${options.runId}`
+        const markerSeeded = await android.evaluate<boolean>(`(() => {
+            const config = JSON.parse(localStorage.getItem('codever.matrix.connection.v1') || 'null');
+            if (!config?.gatewayId || !config?.conversationId) return false;
+            localStorage.setItem('codever:pending-session-create:v1', JSON.stringify({
+                version: 1,
+                commandId: ${json(missingMarkerCommandId)},
+                gatewayId: config.gatewayId,
+                conversationId: config.conversationId,
+                createdAt: Date.now(),
+                input: {
+                    cwd: ${json(options.repositoryRoot)},
+                    projectName: ${json(queuedRestartProjectName)},
+                    extensions: [],
+                },
+            }));
+            return true;
+        })()`)
+        assert.equal(markerSeeded, true, 'Could not seed the stale WebView session-create marker.')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        const queuedCommandId = await seedCurrentQueuedCommand(
+            serial,
+            options.runId,
+            options.repositoryRoot,
+            queuedRestartProjectName,
+        )
+        await adb(serial, 'install', '-r', '-t', apkPath)
+        await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'queued Android session creation after cover install',
+            state => state.connection.endsWith('Connected')
+                && state.projectNames.includes(queuedRestartProjectName)
+                && !state.sessionCreatePending,
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(
+            await android.evaluate<string | null>(
+                "localStorage.getItem('codever:pending-session-create:v1')",
+            ),
+            null,
+            'The missing native command left a permanent WebView session-create marker.',
+        )
+        queuedRestartSessionCreated = true
+        await waitForBrowserProject(options.browserPage, queuedRestartProjectName)
+        assert.equal(
+            syncGate.observedCommandIds().filter(commandId => commandId === queuedCommandId).length,
+            1,
+            'The queued command was not transmitted exactly once after cover install.',
+        )
+        // A cover install preserves the previously selected conversation even
+        // when the recovered create appears in the list. Select the recovered
+        // entity explicitly so this assertion deletes the session created by
+        // `queuedCommandId`, rather than whichever conversation was active
+        // before Android was stopped.
+        await android.openProject(queuedRestartProjectName)
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, queuedRestartProjectName)
+        await android.waitFor(
+            'queued restart session deletion',
+            state => !state.projectNames.includes(queuedRestartProjectName)
+                && !state.archivedProjects.includes(queuedRestartProjectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        queuedRestartSessionCreated = false
+
+        process.stdout.write('  [A11b/12] Cover-installing over an encrypted legacy submitted command…\n')
         const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
         const migrationCountBefore = await diagnosticCount(serial, migrationDiagnostic)
         android.close()
@@ -1895,6 +2011,7 @@ export async function runAndroidAlphaJourney(
                 'cross-device-stale-prompt-linearized-exactly-once',
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
+                'queued-command-cover-install-resumption-exactly-once',
                 'legacy-encrypted-outbox-cover-install-migration',
                 'ambiguous-legacy-command-quarantine-no-replay',
                 'post-migration-command-lane-recovery',
@@ -1922,6 +2039,9 @@ export async function runAndroidAlphaJourney(
         }
         if (privacySessionCreated) {
             await cleanupBrowserProject(options.browserPage, privacyProjectName).catch(() => undefined)
+        }
+        if (queuedRestartSessionCreated) {
+            await cleanupBrowserProject(options.browserPage, queuedRestartProjectName).catch(() => undefined)
         }
         if (migrationSessionCreated) {
             await cleanupBrowserProject(options.browserPage, migrationProjectName).catch(() => undefined)
@@ -2838,6 +2958,45 @@ async function seedLegacySubmittedCommand(serial: string, runId: string): Promis
     return commandId
 }
 
+async function seedCurrentQueuedCommand(
+    serial: string,
+    runId: string,
+    cwd: string,
+    projectName: string,
+): Promise<string> {
+    const output = await adb(
+        serial,
+        'shell',
+        'am',
+        'broadcast',
+        '-f',
+        '0x20', // Intent.FLAG_INCLUDE_STOPPED_PACKAGES
+        '-n',
+        LEGACY_OUTBOX_SEEDER,
+        '--es',
+        'run_id',
+        runId,
+        '--es',
+        'mode',
+        'current_queued',
+        '--es',
+        'cwd',
+        cwd,
+        '--es',
+        'project_name',
+        projectName,
+    )
+    const result = output.match(/Broadcast completed: result=(-?\d+), data="([^"]+)"/u)
+    assert.equal(
+        result?.[1],
+        '-1',
+        `The E2E APK could not seed its current queued command: ${output}`,
+    )
+    const commandId = result?.[2]
+    assert.ok(commandId, `The E2E APK did not return its queued command id: ${output}`)
+    return commandId
+}
+
 async function removePersistedMatrixSession(serial: string): Promise<void> {
     const output = await adb(
         serial,
@@ -3020,7 +3179,10 @@ async function waitForNewPackageProcess(serial: string, previousPid: string): Pr
 async function assertPackageActivityBackground(serial: string): Promise<void> {
     const output = await adb(serial, 'shell', 'dumpsys', 'activity', 'activities')
     const resumed = resumedActivityLine(output)
-    assert.ok(resumed, 'Android did not report a resumed Activity')
+    // A freshly rebooted or still-locked emulator may have no resumed
+    // Activity at all. That is still a valid background-only state; the
+    // invariant is that Codever itself was not brought to the foreground.
+    if (!resumed) return
     assert.ok(
         !resumed.includes(PACKAGE_NAME),
         `Codever Activity unexpectedly entered the foreground: ${resumed.trim()}`,

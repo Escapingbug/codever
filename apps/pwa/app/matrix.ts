@@ -715,7 +715,7 @@ export async function connectMatrix(
     });
   };
   const acceptCanonicalNativeCommandResult = async (
-    content: MatrixNativeContent | MatrixStateContent,
+    content: MatrixStateContent,
   ): Promise<void> => {
     const sourceCommandId = "source_command_id" in content
       ? content.source_command_id
@@ -725,7 +725,14 @@ export async function connectMatrix(
     const metadata = outboundCommandMetadata.get(sourceCommandId);
     if (!trust || !metadata) return;
     if (metadata.reservation.revisionEpoch !== content.revision_epoch) return;
-    const sessionId = canonicalSessionCommandResult(metadata.payload, content);
+    const projectedLifecycleState = content.kind === "session_state"
+      ? nativeProjection.sessionLifecycleState(content.session_id)
+      : null;
+    const sessionId = canonicalSessionCommandResult(
+      metadata.payload,
+      content,
+      projectedLifecycleState,
+    );
     if (!sessionId) return;
     const completion: CommandResultState = {
       commandId: sourceCommandId,
@@ -808,9 +815,6 @@ export async function connectMatrix(
       sessionRootEventIds.set(content.session_id, eventId);
     }
     const state = nativeProjection.applyTimeline(content);
-    // The durable command must be terminal before its visible inventory
-    // change is published. A tab can be closed immediately after rendering.
-    await acceptCanonicalNativeCommandResult(content);
     if (state) await onGatewayState(state);
   };
   const onNativeSessionStatus = async (
@@ -831,11 +835,11 @@ export async function connectMatrix(
         content.session.thread_root_event_id,
       );
     }
-    // Room State is sufficient proof for desired-state commands. This keeps
-    // command completion independent from thread-history loading and makes a
-    // freshly created/deleted entity self-describing after reload.
-    await acceptCanonicalNativeCommandResult(content);
     const state = await nativeProjection.applyRoomState(content);
+    // Apply first, persist the terminal command second, and only then publish
+    // the inventory. This keeps visible state behind the durable completion
+    // barrier while refusing stale entity events that lost projection order.
+    await acceptCanonicalNativeCommandResult(content);
     if (publish && state) await onGatewayState(state);
     if (recoverCommands && content.kind === "gateway_state") {
       const trust = activeTrust;
@@ -1098,16 +1102,28 @@ export async function connectMatrix(
     waiter.resolve(offer);
   };
   let gatewayStateRecovery: Promise<void> | null = null;
+  let gatewayStateRecoveryPending = false;
+  let gatewayStateRecoveryPendingBlocking = false;
   let lastGatewayStateRecoveryAt = 0;
   const recoverGatewayStateSnapshot = (
     options: { force?: boolean; blocking?: boolean } = {},
   ): void => {
+    const queueLatestRecovery = () => {
+      gatewayStateRecoveryPending = true;
+      gatewayStateRecoveryPendingBlocking ||= options.blocking !== false;
+    };
     if (
       stopped ||
       !connectionReady ||
-      !activeTrust ||
-      document.visibilityState !== "visible" ||
-      gatewayStateRecovery ||
+      !activeTrust
+    ) {
+      return;
+    }
+    if (document.visibilityState !== "visible" || gatewayStateRecovery) {
+      if (options.force) queueLatestRecovery();
+      return;
+    }
+    if (
       (!options.force && Date.now() - lastGatewayStateRecoveryAt < 2_000)
     ) {
       return;
@@ -1118,6 +1134,18 @@ export async function connectMatrix(
       .catch(reportInboundError)
       .finally(() => {
         gatewayStateRecovery = null;
+        if (!gatewayStateRecoveryPending) return;
+        const blocking = gatewayStateRecoveryPendingBlocking;
+        gatewayStateRecoveryPending = false;
+        gatewayStateRecoveryPendingBlocking = false;
+        // Directory commits are latest-wins. If create and delete snapshots
+        // arrive while one materialization is in flight, never drop the later
+        // commit: load the newest immutable descriptor immediately after the
+        // current read releases the serialization barrier.
+        window.queueMicrotask(() => recoverGatewayStateSnapshot({
+          force: true,
+          blocking,
+        }));
       });
   };
   const onTimelineReset = (room: Room | undefined): void => {

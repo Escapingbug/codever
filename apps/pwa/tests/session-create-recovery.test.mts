@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   clearPendingSessionCreateRecovery,
   completedSessionCreateTarget,
+  isMissingSessionCreateRecoveryCommand,
   readPendingSessionCreateRecovery,
   sessionCreateRecoveryMatches,
   writePendingSessionCreateRecovery,
@@ -128,4 +129,16 @@ test("treats unavailable browser storage as no recoverable command", () => {
     () => writePendingSessionCreateRecovery(unavailable, recovery),
     /storage unavailable/,
   );
+});
+
+test("stops restoring a local create marker when the native command no longer exists", () => {
+  assert.equal(
+    isMissingSessionCreateRecoveryCommand({ errorCode: "OPERATION_NOT_FOUND" }),
+    true,
+  );
+  assert.equal(
+    isMissingSessionCreateRecoveryCommand({ errorCode: "OFFLINE" }),
+    false,
+  );
+  assert.equal(isMissingSessionCreateRecoveryCommand(new Error("missing")), false);
 });

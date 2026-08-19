@@ -88,6 +88,15 @@ export function sessionCreateRecoveryMatches(
   );
 }
 
+export function isMissingSessionCreateRecoveryCommand(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "errorCode" in error &&
+      (error as { errorCode?: unknown }).errorCode === "OPERATION_NOT_FOUND",
+  );
+}
+
 function parsePendingSessionCreateRecovery(
   value: unknown,
 ): PendingSessionCreateRecovery | null {

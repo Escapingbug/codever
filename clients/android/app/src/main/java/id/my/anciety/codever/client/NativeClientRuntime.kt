@@ -13,6 +13,7 @@ import id.my.anciety.codever.client.command.CommandView as DurableView
 import id.my.anciety.codever.client.command.DurableCommandOutbox
 import id.my.anciety.codever.client.command.PublicCommandError as DurableError
 import id.my.anciety.codever.client.command.RevisionConflictAction
+import id.my.anciety.codever.client.command.UnknownCommandException
 import id.my.anciety.codever.client.events.ClientEventHub
 import id.my.anciety.codever.client.events.ClientEventListener
 import id.my.anciety.codever.client.events.ClientEventType
@@ -323,7 +324,24 @@ class NativeClientRuntime(
                 }
 
                 val threadRoot = nativeProjection.threadRootEventId(sessionId)
-                    ?: throw IllegalArgumentException("The session has no Matrix thread root.")
+                if (threadRoot == null) {
+                    // A newly-created session has no Matrix thread until its
+                    // first prompt. Match the browser client: this is a valid
+                    // empty history, not a restoration failure.
+                    initializedHistoryRelations += sessionId
+                    historyRelationTokens.remove(sessionId)
+                    local = eventHub.historyPage(
+                        sessionId,
+                        before,
+                        limit,
+                        externalHasMore = false,
+                    )
+                    diagnostics.record(
+                        "history.page.completed",
+                        mapOf("received" to "0"),
+                    )
+                    return@withLock local
+                }
                 var from = if (needsOlderPage) historyRelationTokens[sessionId] else null
                 var imported = 0
                 val visitedTokens = mutableSetOf<String?>()
@@ -733,16 +751,20 @@ class NativeClientRuntime(
     )
 
     suspend fun recoverCommand(commandId: String): DurableReceipt {
-        val current = outbox.get(commandId) ?: throw IllegalArgumentException("Command was not found.")
-        if (current.state == DurableState.RECOVERY_REQUIRED) {
-            cancelScheduledCommandRecovery(commandId, resetAttempts = false)
-            launchCommandTransmission(commandId, recovery = true)
+        val current = outbox.get(commandId) ?: throw UnknownCommandException("Command was not found.")
+        when (current.state) {
+            DurableState.QUEUED -> launchCommandTransmission(commandId, recovery = false)
+            DurableState.RECOVERY_REQUIRED -> {
+                cancelScheduledCommandRecovery(commandId, resetAttempts = false)
+                launchCommandTransmission(commandId, recovery = true)
+            }
+            else -> Unit
         }
         return publicReceipt(outbox.get(commandId) ?: current)
     }
 
     fun command(commandId: String): CommandView = outbox.get(commandId)?.let(::publicCommand)
-        ?: throw IllegalArgumentException("Command was not found.")
+        ?: throw UnknownCommandException("Command was not found.")
 
     suspend fun issueMatrixLoginToken(
         invitationId: String,
@@ -1040,9 +1062,19 @@ class NativeClientRuntime(
                 "codever.command.${transmission.commandId}.${randomNonce()}",
             )
         } catch (error: Exception) {
-            mutex.withLock {
+            val remainsCurrent = mutex.withLock {
+                val current = outbox.get(commandId)
+                if (current == null || current.state.isTerminal) return@withLock false
                 outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
                 scheduleCommandRecovery(commandId)
+                true
+            }
+            if (!remainsCurrent) {
+                diagnostics.record(
+                    "command.transmission.superseded",
+                    mapOf("action" to (transmission.payload.string("operation") ?: "unknown")),
+                )
+                return
             }
             throw error
         }
@@ -1069,7 +1101,11 @@ class NativeClientRuntime(
     }
 
     private fun schedulePendingCommandRecoveries(immediate: Boolean) {
-        recoverableCommandIds(outbox.list()).forEach { commandId ->
+        val commands = outbox.list()
+        queuedCommandIds(commands).forEach { commandId ->
+            launchCommandTransmission(commandId, recovery = false)
+        }
+        recoverableCommandIds(commands).forEach { commandId ->
             scheduleCommandRecovery(commandId, immediate)
         }
     }
@@ -1327,8 +1363,8 @@ class NativeClientRuntime(
                 nativeProjection.requiresAuthoritativeDirectoryRefresh(plaintext)
             val commandScopeChanged = directoryChanged &&
                 nativeProjection.requiresCommandScopeRefresh(plaintext)
-            acceptCanonicalCommandCompletion(plaintext)
             val projected = nativeProjection.applyRoomState(plaintext)
+            acceptCanonicalCommandCompletion(plaintext)
             if (directoryChanged) {
                 diagnostics.record("matrix.application_state.directory_changed")
                 // The Gateway entity only commits the immutable directory
@@ -1742,10 +1778,6 @@ class NativeClientRuntime(
             "timeline_key_ring_grant" -> acceptTimelineKeyRing(extension)
             "session_root", "session_update", "session_lifecycle", "gateway_revision" -> {
                 val projectedState = nativeProjection.applyTimeline(extension)
-                // Persist the command's terminal state before publishing the
-                // corresponding inventory change. A process may be stopped as
-                // soon as the UI observes that change.
-                acceptCanonicalCommandCompletion(extension)
                 projectedState?.let { acceptGatewayState(it) }
             }
             "command_ack" -> acceptCommandAck(extension)
@@ -2043,6 +2075,11 @@ class NativeClientRuntime(
         val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
         val eventSessionId = extension.string("session_id") ?: return
         if (command.sessionId != null && command.sessionId != eventSessionId) return
+        // A timeline lifecycle record is an audit event, not inventory
+        // authority. Even for Room State, only complete after that exact
+        // entity value won projection ordering; an older tombstone must not
+        // report success while a newer active entity is still visible.
+        if (nativeProjection.sessionLifecycleState(eventSessionId) != state) return
         recordCommandCompletion(
             DurableCompletion(
                 commandId = commandId,
@@ -2075,6 +2112,12 @@ class NativeClientRuntime(
             ),
         )
         if (!recorded) return
+        // Matrix can deliver the authenticated result through /sync before
+        // the SDK call which sent that same event has returned. Once the
+        // command is terminal, its transmission lease has no remaining work;
+        // cancelling it prevents the late sender from observing a rotated
+        // Gateway scope and reporting a spurious transmission failure.
+        cancelCommandTransmission(completion.commandId)
         ackTimeouts.remove(completion.commandId)?.cancel()
         cancelScheduledCommandRecovery(completion.commandId)
         operationId?.let(automaticRevisionRetryAttempts::remove)
@@ -2796,18 +2839,15 @@ internal fun canonicalStateCompletesCommand(
     lifecycleState: String?,
 ): Boolean = when (operation) {
     CommandOperation.SESSION_CREATE ->
-        eventKind == "session_root" ||
-            (eventKind == "session_state" && lifecycleState == "active")
+        eventKind == "session_state" && lifecycleState == "active"
     CommandOperation.SESSION_SETTINGS ->
-        eventKind == "session_update" ||
-            (eventKind == "session_state" && lifecycleState in setOf("active", "archived"))
+        eventKind == "session_state" && lifecycleState in setOf("active", "archived")
     CommandOperation.SESSION_ARCHIVE ->
-        eventKind in setOf("session_lifecycle", "session_state") && lifecycleState == "archived"
+        eventKind == "session_state" && lifecycleState == "archived"
     CommandOperation.SESSION_RESTORE ->
-        (eventKind == "session_lifecycle" && lifecycleState == "idle") ||
-            (eventKind == "session_state" && lifecycleState == "active")
+        eventKind == "session_state" && lifecycleState == "active"
     CommandOperation.SESSION_DELETE ->
-        eventKind in setOf("session_lifecycle", "session_state") && lifecycleState == "deleted"
+        eventKind == "session_state" && lifecycleState == "deleted"
     else -> false
 }
 
@@ -2864,6 +2904,14 @@ internal fun recoverableCommandIds(commands: List<DurableView>): List<String> =
     commands
         .asSequence()
         .filter { it.state == DurableState.RECOVERY_REQUIRED }
+        .sortedBy(DurableView::sequence)
+        .map(DurableView::commandId)
+        .toList()
+
+internal fun queuedCommandIds(commands: List<DurableView>): List<String> =
+    commands
+        .asSequence()
+        .filter { it.state == DurableState.QUEUED }
         .sortedBy(DurableView::sequence)
         .map(DurableView::commandId)
         .toList()
