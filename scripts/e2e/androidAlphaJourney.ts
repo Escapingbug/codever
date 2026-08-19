@@ -1533,6 +1533,14 @@ export async function runAndroidAlphaJourney(
         )
         const deleteSyncBaseline = syncGate.hold()
         await android.deleteSelected()
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await assertPackageActivityBackground(serial)
         await waitForBrowserProjectAbsent(options.browserPage, projectName)
         await syncGate.waitForInterception(
             deleteSyncBaseline,
@@ -1574,6 +1582,11 @@ export async function runAndroidAlphaJourney(
                 + `Observed PUT paths: ${JSON.stringify(syncGate.observedPutPaths())}`,
         )
         syncGate.release()
+        await ensurePackageActivityForeground(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+            serial,
+            options.pwaUrl,
+        ))
         await android.waitFor(
             'post-commit Android deletion result after its forced retry',
             state =>
