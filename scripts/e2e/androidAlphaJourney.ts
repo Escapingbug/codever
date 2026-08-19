@@ -616,9 +616,9 @@ export async function runAndroidAlphaJourney(
         await adb(serial, 'install', '-r', '-t', apkPath)
         await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
         await adb(serial, 'shell', 'pm', 'grant', PACKAGE_NAME, 'android.permission.POST_NOTIFICATIONS')
-        await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
         syncGate = await createMatrixSyncGate(options.matrixPort)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
 
         process.stdout.write('  [A2/12] Creating a real one-time invitation and pairing the fresh APK…\n')
         const invitation = await createBrowserDeviceInvitation(
@@ -1128,8 +1128,6 @@ export async function runAndroidAlphaJourney(
             'matrix.application_control.receiver_ready',
         )
         await rebootEmulator(serial)
-        await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
         await waitFor(
             async () => await diagnosticCount(serial, 'service.created') > bootServiceBefore,
             {
@@ -1137,6 +1135,13 @@ export async function runAndroidAlphaJourney(
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )
+        // Android can report boot completion before adbd has a usable reverse
+        // path, and delivery of BOOT_COMPLETED to this package may be delayed
+        // by other receivers. Reinstall and probe both routes after our
+        // foreground service exists so the background-sync assertion tests
+        // Codever rather than an unavailable E2E tunnel.
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
         await waitFor(
             async () => await diagnosticCount(
                 serial,
@@ -1502,7 +1507,7 @@ export async function runAndroidAlphaJourney(
         await adb(serial, 'reverse', '--remove', `tcp:${options.matrixPort}`)
         await android.sendPrompt(recoveryPrompt)
         await delay(1_500)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
         await waitForBrowserText(options.browserPage, recoveryPrompt)
         await waitForProviderResponseCount(options.browserPage, recoveryResponseBefore + 1)
         await android.waitFor(
@@ -1723,8 +1728,8 @@ export async function runAndroidAlphaJourney(
         // update. A fresh uninstall/install cannot exercise this regression.
         await adb(serial, 'install', '-r', '-t', apkPath)
         await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
-        await adb(serial, 'reverse', `tcp:${options.pwaPort}`, `tcp:${options.pwaPort}`)
-        await adb(serial, 'reverse', `tcp:${options.matrixPort}`, `tcp:${syncGate.port}`)
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
         await startMainActivity(serial)
         ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
         await android.waitFor(
@@ -3094,6 +3099,40 @@ async function adb(serial: string, ...args: string[]): Promise<string> {
         maxBuffer: 16 * 1024 * 1024,
     })
     return result.stdout.trim()
+}
+
+async function restoreAndroidReverse(
+    serial: string,
+    devicePort: number,
+    hostPort: number,
+): Promise<void> {
+    assert.ok(Number.isSafeInteger(devicePort) && devicePort > 0)
+    assert.ok(Number.isSafeInteger(hostPort) && hostPort > 0)
+    await adbMaybe(serial, 'reverse', '--remove', `tcp:${devicePort}`)
+    await adb(serial, 'reverse', `tcp:${devicePort}`, `tcp:${hostPort}`)
+    await waitFor(
+        async () => {
+            try {
+                await adb(
+                    serial,
+                    'shell',
+                    'nc',
+                    '-z',
+                    '-w',
+                    '2',
+                    '127.0.0.1',
+                    String(devicePort),
+                )
+                return true
+            } catch {
+                return false
+            }
+        },
+        {
+            description: `Android reverse tcp:${devicePort} -> tcp:${hostPort}`,
+            timeoutMs: CONNECT_TIMEOUT_MS,
+        },
+    )
 }
 
 async function adbMaybe(serial: string, ...args: string[]): Promise<string> {
