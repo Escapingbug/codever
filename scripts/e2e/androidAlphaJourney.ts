@@ -3025,6 +3025,7 @@ async function ensurePackageActivityForeground(serial: string): Promise<void> {
 async function startMainActivity(serial: string): Promise<void> {
     let lastError: unknown
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await waitForAndroidActivityManager(serial)
         try {
             await adb(serial, 'shell', 'am', 'start', '-W', '-n', MAIN_ACTIVITY)
             return
@@ -3037,6 +3038,22 @@ async function startMainActivity(serial: string): Promise<void> {
         }
     }
     throw lastError
+}
+
+async function waitForAndroidActivityManager(serial: string): Promise<void> {
+    await waitFor(
+        async () => {
+            const [bootCompleted, activityService] = await Promise.all([
+                adbMaybe(serial, 'shell', 'getprop', 'sys.boot_completed'),
+                adbMaybe(serial, 'shell', 'service', 'check', 'activity'),
+            ])
+            return bootCompleted === '1' && activityService.includes('found')
+        },
+        {
+            description: 'Android activity manager after APK installation or system restart',
+            timeoutMs: CONNECT_TIMEOUT_MS,
+        },
+    )
 }
 
 function resumedActivityLine(output: string): string | undefined {

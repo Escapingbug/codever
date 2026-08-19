@@ -592,7 +592,7 @@ describe('multi-device Matrix collaboration', () => {
         restarted.stopRetries()
     })
 
-    it('keeps a hung transport promise in flight so watchdog retries cannot duplicate it', async () => {
+    it('releases a hung timeline attempt and retries it with the same Matrix transaction', async () => {
         const directory = await temporaryDirectory()
         const gateway = await generateDeviceKeyPair()
         const device = await generateDeviceKeyPair()
@@ -617,15 +617,12 @@ describe('multi-device Matrix collaboration', () => {
         )
         await layer.initialize(now)
         const attemptedTransactions: string[] = []
-        let releaseHung!: () => void
-        const hung = new Promise<void>(resolve => {
-            releaseHung = resolve
-        })
+        const hung = new Promise<void>(() => undefined)
         const originalTransport = applicationTransport({
             async sendEncryptedRoomEvent(request) {
                 attemptedTransactions.push(request.transactionId)
-                await hung
-                return { eventId: '$hung-late-confirmation' }
+                if (attemptedTransactions.length === 1) await hung
+                return { eventId: '$recovered-after-hung-attempt' }
             },
         })
         let queued!: ChannelDeliveryQueuedError
@@ -644,26 +641,61 @@ describe('multi-device Matrix collaboration', () => {
             expect(error).toBeInstanceOf(ChannelDeliveryQueuedError)
             queued = error as ChannelDeliveryQueuedError
         }
-        layer.stopRetries()
-
-        let recoveryTransportCalls = 0
-        const recovery = layer.retryPendingForRoom(room, applicationTransport({
-            async sendEncryptedRoomEvent(request) {
-                recoveryTransportCalls += 1
-                attemptedTransactions.push(request.transactionId)
-                return { eventId: '$must-not-duplicate' }
-            },
-        }))
-        await vi.waitFor(() => expect(attemptedTransactions).toHaveLength(1))
-        expect(recoveryTransportCalls).toBe(0)
-
-        releaseHung()
-        await recovery
+        await vi.waitFor(() => expect(attemptedTransactions).toHaveLength(2))
 
         await expect(queued.confirmation).resolves.toEqual({
-            messageId: '$hung-late-confirmation',
+            messageId: '$recovered-after-hung-attempt',
         })
-        expect(attemptedTransactions).toHaveLength(1)
+        expect(new Set(attemptedTransactions)).toHaveLength(1)
+        layer.stopRetries()
+    })
+
+    it('releases a hung control attempt so terminal command results can recover', async () => {
+        const directory = await temporaryDirectory()
+        const gateway = await generateDeviceKeyPair()
+        const device = await generateDeviceKeyPair()
+        const policy = trusted('device-a', 'Alice phone', device.publicJwk, 'MATRIX_A')
+        const security = {
+            gatewayDeviceId: 'gateway-1',
+            gatewayKeyPair: await exportDeviceKeyPair(gateway),
+            envelopeReplayLedgerPath: join(directory, 'envelopes.json'),
+            deliveryAttemptTimeoutMs: 20,
+        }
+        const room = {
+            roomId: '!room:localhost',
+            conversationId: 'conversation-1',
+            cwd: 'C:\\repo',
+            providerName: 'test',
+        }
+        const layer = new GatewaySecureContentLayer(
+            'gateway-1',
+            security,
+            [policy],
+            async () => [policy],
+        )
+        await layer.initialize(now)
+        const attemptedTransactions: string[] = []
+        const hung = new Promise<void>(() => undefined)
+        const transport = applicationTransport({
+            async sendEncryptedRoomEvent(request) {
+                attemptedTransactions.push(request.transactionId)
+                if (attemptedTransactions.length === 1) await hung
+                return { eventId: '$recovered-command-result' }
+            },
+        })
+
+        await expect(layer.sendCommandResult(
+            room,
+            policy.deviceId,
+            'hung-command',
+            1,
+            1,
+            'runtime-epoch-1',
+            'succeeded',
+            transport,
+        )).rejects.toThrow('timed out')
+
+        await vi.waitFor(() => expect(attemptedTransactions).toHaveLength(2))
         expect(new Set(attemptedTransactions)).toHaveLength(1)
         layer.stopRetries()
     })
@@ -1440,6 +1472,13 @@ describe('multi-device Matrix collaboration', () => {
 
         await vi.waitFor(() => expect(attempts).toHaveLength(2))
         expect(attempts[0]!.transactionId).toBe(attempts[1]!.transactionId)
+        await vi.waitFor(async () => {
+            const ledger = await readFile(
+                `${security.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
+                'utf8',
+            )
+            expect(ledger).toContain('$recovered-after-backoff')
+        })
         restarted.stopRetries()
     })
 

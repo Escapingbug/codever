@@ -136,7 +136,7 @@ export class GatewaySecureContentLayer {
     private readonly stateRetryAttempts = new Map<string, number>()
     private readonly stateRoomChains = new Map<string, Promise<unknown>>()
     private readonly inFlightDeliveries = new Map<string, Promise<MatrixSendEventResult>>()
-    private readonly sendScheduler = new MatrixSendScheduler()
+    private readonly sendScheduler: MatrixSendScheduler
     private readonly deliveryConfirmations = new Map<string, {
         promise: Promise<ChannelSendResult>
         resolve: (result: ChannelSendResult) => void
@@ -150,6 +150,9 @@ export class GatewaySecureContentLayer {
         private readonly trustedDevices: readonly MatrixGatewayTrustedDevice[],
         private readonly getTrustedDevices?: TrustedDeviceProvider,
     ) {
+        this.sendScheduler = new MatrixSendScheduler(
+            config.deliveryAttemptTimeoutMs ?? DEFAULT_DELIVERY_ATTEMPT_TIMEOUT_MS,
+        )
         this.replayStore = new FileReplayStore(config.envelopeReplayLedgerPath)
         this.deliveryOutbox = new FileMatrixDeliveryOutbox(
             `${config.envelopeReplayLedgerPath}.delivery-outbox.jsonl`,
@@ -1783,6 +1786,8 @@ class MatrixSendScheduler {
     private readonly activeBulkKeys = new Set<string>()
     private drainScheduled = false
 
+    constructor(private readonly attemptTimeoutMs: number) {}
+
     schedule(
         priority: MatrixDeliveryPriority,
         run: () => Promise<MatrixSendEventResult>,
@@ -1881,8 +1886,15 @@ class MatrixSendScheduler {
             if (task.priority === 'recovery') this.activeRecovery += 1
             if (task.serializationKey) this.activeBulkKeys.add(task.serializationKey)
         }
-        void Promise.resolve()
-            .then(task.run)
+        // The Matrix SDK does not expose cancellation for an individual send.
+        // Treat the timeout as a lease on this scheduler lane: the durable
+        // outbox and stable transaction ID make a later retry idempotent, while
+        // releasing the lane prevents one lost HTTP response from deadlocking
+        // every subsequent timeline or control delivery.
+        void withDeliveryAttemptTimeout(
+            Promise.resolve().then(task.run),
+            this.attemptTimeoutMs,
+        )
             .then(task.resolve, task.reject)
             .finally(() => {
                 if (lane === 'control') this.activeControl -= 1
