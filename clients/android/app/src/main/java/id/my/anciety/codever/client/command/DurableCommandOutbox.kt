@@ -161,6 +161,28 @@ class DurableCommandOutbox internal constructor(
         return next.toTransmission(recovery = true)
     }
 
+    /**
+     * Replays an already acknowledged command only to recover its terminal
+     * result. The accepted/running state is deliberately preserved: this is a
+     * read-through probe against the Gateway's durable replay ledger, not a
+     * second logical execution or a new command sequence.
+     */
+    @Synchronized
+    fun claimCompletionRecovery(commandId: String): CommandTransmission? {
+        val command = findCurrent(commandId) ?: return null
+        if (command.state != CommandState.ACCEPTED && command.state != CommandState.RUNNING) {
+            return null
+        }
+        return command.copy(
+            authenticationIssuedAt = requireNotNull(command.authenticationIssuedAt) {
+                "Accepted command authentication time is missing."
+            },
+            authenticationNonce = requireNotNull(command.authenticationNonce) {
+                "Accepted command nonce is missing."
+            },
+        ).toTransmission(recovery = true)
+    }
+
     @Synchronized
     fun markAcknowledgementTimedOut(commandId: String): CommandView? {
         val command = findCurrent(commandId) ?: return null

@@ -161,6 +161,7 @@ export class MatrixGatewayRunner {
     private startupEvents: MatrixIncomingEvent[] = []
     private eventChain: Promise<void> = Promise.resolve()
     private readonly executionTasks = new Set<Promise<void>>()
+    private readonly activeCommandExecutions = new Map<string, Promise<void>>()
     private readonly sessionMutationChains = new Map<string, Promise<void>>()
     private readonly roomStateChains = new Map<string, Promise<void>>()
     private readonly dirtySessionStates = new Map<string, Set<string>>()
@@ -833,6 +834,14 @@ export class MatrixGatewayRunner {
                 this.executionTasks.add(task)
                 commandCompletion = task
                 terminalDeliveryAcknowledges = true
+            } else if (this.activeCommandExecutions.has(authorized.command.commandId)) {
+                // An exact retry can race a still-running execution in the
+                // same Gateway process. Let the original task own its one
+                // terminal result; never manufacture an orphan result while
+                // the command is genuinely active.
+                commandCompletion = this.activeCommandExecutions.get(
+                    authorized.command.commandId,
+                )
             } else if (authorized.command.payload.operation === 'device.invite') {
                 // Invitation creation is keyed by commandId in the durable
                 // pairing registry. It is therefore safe to resume the only
@@ -845,19 +854,26 @@ export class MatrixGatewayRunner {
                     authorized.revision,
                 )
             } else {
-                // A retried signed command is never executed twice, but it is
-                // an explicit recovery opportunity for missing recipient
-                // copies already staged in the delivery WAL.
-                void this.secureContent.retryPendingForRoom(
-                    runtime.config,
-                    this.client,
-                    authorized.command.commandId,
+                // The durable acceptance survived a Gateway restart but no
+                // terminal result did. Re-executing an arbitrary command
+                // would risk repeating its side effect; leaving it accepted
+                // forever blocks the device's single command lane. Resolve it
+                // once as an explicit non-retryable failure. Canonical Matrix
+                // state/history remains authoritative for any side effect
+                // that committed before the crash.
+                const task = this.terminalizeOrphanedCommand(
+                    runtime,
+                    authorized.command,
+                    authorized.revision,
                 ).catch(error => {
                     this.log(
-                        `[matrix-gateway] command ${authorized.command.commandId} delivery recovery failed: `
+                        `[matrix-gateway] command ${authorized.command.commandId} orphan recovery failed: `
                         + formatError(error),
                     )
-                })
+                }).finally(() => this.executionTasks.delete(task))
+                this.executionTasks.add(task)
+                commandCompletion = task
+                terminalDeliveryAcknowledges = true
             }
         }
         if (!terminalDeliveryAcknowledges) {
@@ -1020,9 +1036,45 @@ export class MatrixGatewayRunner {
         })()
             .finally(() => {
                 this.executionTasks.delete(task)
+                if (this.activeCommandExecutions.get(command.commandId) === task) {
+                    this.activeCommandExecutions.delete(command.commandId)
+                }
             })
         this.executionTasks.add(task)
+        this.activeCommandExecutions.set(command.commandId, task)
         return task
+    }
+
+    private async terminalizeOrphanedCommand(
+        runtime: RoomRuntime,
+        command: CodeverCommand,
+        revision: number,
+    ): Promise<void> {
+        const recoveredSession = command.payload.operation === 'session.create'
+            ? [...runtime.appSessions.values(), ...runtime.archivedSessions.values()]
+                .map(value => 'record' in value ? value.record : value)
+                .find(record => record.sourceCommandId === command.commandId)
+            : undefined
+        const terminal: DurableCommandResult = recoveredSession
+            ? {
+                revision,
+                outcome: 'succeeded',
+                sessionId: recoveredSession.id,
+            }
+            : {
+                revision,
+                outcome: 'failed',
+                sessionId: commandSessionId(command),
+                error: 'The Gateway accepted this command before its previous process stopped, '
+                    + 'but no durable completion was recorded. It was not executed again. '
+                    + 'Review the synchronized conversation state, then retry the action if needed.',
+            }
+        await this.replayStore.recordCommandResult(command, terminal)
+        this.scheduleGatewayRevision(runtime, command.commandId)
+        await this.deliverCommandResult(runtime, command, terminal)
+        this.log(
+            `[matrix-gateway] command ${command.commandId} recovered as an orphaned acceptance`,
+        )
     }
 
     private async deliverCommandResult(
@@ -1135,6 +1187,7 @@ export class MatrixGatewayRunner {
                 const record = await this.createAppSessionRecord(
                     runtime,
                     command.payload,
+                    command.commandId,
                 )
                 const appSession = this.createAppSessionRuntime(runtime, record)
                 runtime.appSessions.set(record.id, appSession)
@@ -1531,6 +1584,7 @@ export class MatrixGatewayRunner {
     private async createAppSessionRecord(
         runtime: RoomRuntime,
         settings: WorkspaceSettingsInput,
+        sourceCommandId: string,
     ): Promise<AppSessionRecord> {
         const workspace = await resolveWorkspaceSettings(
             runtime.workspace,
@@ -1540,6 +1594,7 @@ export class MatrixGatewayRunner {
         const createdAt = this.now()
         return {
             id: randomUUID(),
+            sourceCommandId,
             title: 'New session',
             createdAt,
             updatedAt: createdAt,
@@ -2003,6 +2058,7 @@ export class MatrixGatewayRunner {
             `[matrix-gateway] Room State outbox compaction failed: ${formatError(error)}`,
         ))
         this.executionTasks.clear()
+        this.activeCommandExecutions.clear()
         this.sessionMutationChains.clear()
         this.roomStateChains.clear()
         this.dirtySessionStates.clear()

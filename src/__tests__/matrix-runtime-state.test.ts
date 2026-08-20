@@ -64,6 +64,7 @@ describe('FileGatewayRuntimeStateStore', () => {
                 ...initial,
                 appSessions: [{
                     id: 'app-session-1',
+                    sourceCommandId: 'create-command-1',
                     title: 'Persisted session',
                     createdAt: 1,
                     updatedAt: 1,
@@ -123,6 +124,7 @@ describe('FileGatewayRuntimeStateStore', () => {
             currentSessionId: 'app-session-1',
             appSessions: [{
                 id: 'app-session-1',
+                sourceCommandId: 'create-command-1',
                 title: 'Survives ledger recovery',
                 createdAt: 1,
                 updatedAt: 1,
@@ -174,7 +176,7 @@ describe('FileGatewayRuntimeStateStore', () => {
         })
     })
 
-    it('migrates every historically valid schema-1 runtime field and commits schema 2', async () => {
+    it('migrates every historically valid schema-1 runtime field through every adjacent schema', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-v1-'))
         temporaryDirectories.push(directory)
         const path = join(directory, 'runtime-state.json')
@@ -221,6 +223,7 @@ describe('FileGatewayRuntimeStateStore', () => {
             deletedSessionIds: [],
             appSessions: [{
                 id: 'legacy-session',
+                sourceCommandId: null,
                 title: 'Old session',
                 createdAt: 1,
                 matrixThreadRootEventId: null,
@@ -233,7 +236,7 @@ describe('FileGatewayRuntimeStateStore', () => {
             }],
         })
         expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
-            version: 2,
+            version: 3,
             rooms: { [room.roomId]: { deletedSessionIds: [] } },
         })
     })

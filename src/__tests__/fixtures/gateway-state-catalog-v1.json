@@ -1,5 +1,5 @@
 [
-  { "id": "gateway-runtime-state", "stateClass": "durable-command", "schemaVersion": 2 },
+  { "id": "gateway-runtime-state", "stateClass": "durable-command", "schemaVersion": 3 },
   { "id": "command-replay-ledger", "stateClass": "security-critical", "schemaVersion": 2 },
   { "id": "timeline-key-ring", "stateClass": "security-critical", "schemaVersion": 1 },
   { "id": "matrix-login", "stateClass": "security-critical", "schemaVersion": 1 },

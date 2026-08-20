@@ -49,6 +49,7 @@ import {
 } from '@/channel/matrix'
 import {
     FileCommandReplayStore,
+    FileGatewayRuntimeStateStore,
     createGatewayMatrixScheduler,
     gatewayProjectIdentity,
     MatrixGatewayRunner,
@@ -867,6 +868,147 @@ describe('MatrixGatewayRunner', () => {
         expect(client.stateSent).toHaveLength(3)
         expect((Reflect.get(runner, 'roomSnapshotTimers') as Map<string, unknown>).size).toBe(1)
 
+        await runner.stop()
+    })
+
+    it('terminalizes an accepted pre-restart session create without executing it twice', async () => {
+        const fixture = await securityFixture()
+        fixture.config.trustedDevices[0]!.allowedOperations = [
+            ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
+            'session.create',
+        ]
+        const signed = await signedSessionCreate(fixture.keys, fixture.now, 1, 0)
+        const accepted = new FileCommandReplayStore(fixture.config.replayLedgerPath)
+        await accepted.initialize(fixture.now)
+        await expect(accepted.claimCommandInOrder(signed.command, fixture.now)).resolves.toEqual({
+            status: 'accepted',
+            revision: 1,
+        })
+
+        const client = new FakeMatrixGatewayClient()
+        const rejected: unknown[] = []
+        const logs: string[] = []
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession([]),
+            onRejected: (_event, error) => rejected.push(error),
+            onLog: message => logs.push(message),
+        })
+        await runner.start()
+        client.sent.length = 0
+
+        client.emit(await incomingSecureSigned(
+            signed,
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'accepted-create-recovery',
+        ))
+
+        const expectedTransactionId =
+            `codever.command.result.${signed.command.commandId}.failed`
+        await vi.waitFor(() => expect({
+            matched: client.sent.some(request =>
+                request.transactionId.startsWith(`${expectedTransactionId}.`)
+            ),
+            transactions: client.sent.map(request => request.transactionId),
+            rejected: rejected.map(error => String(error)),
+            logs,
+        }).toMatchObject({
+            matched: true,
+            rejected: [],
+        }))
+        const result = client.sent.find(request =>
+            request.transactionId.startsWith(`${expectedTransactionId}.`)
+        )!
+        const extension = result.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const opened = await openSecureEnvelope(extension.secure_envelope, {
+            recipientPrivateKey: fixture.keys.privateKey,
+            senderPublicKey: fixture.gatewayKeys.publicKey,
+            expected: {
+                gatewayId: fixture.config.gatewayId,
+                conversationId: fixture.config.rooms[0]!.conversationId,
+                direction: 'gateway_to_device',
+                senderDeviceId: fixture.config.gatewayId,
+                recipientDeviceId: 'pwa-device-1',
+                senderKeyId: fixture.gatewayKeys.keyId,
+                recipientKeyId: fixture.keys.keyId,
+            },
+            replayStore: new InMemoryReplayStore(),
+            now: Date.now(),
+        })
+        expect(opened.plaintext).toMatchObject({
+            [CODEVER_MATRIX_EXTENSION]: {
+                kind: 'command_result',
+                command_id: signed.command.commandId,
+                outcome: 'failed',
+                error: expect.stringContaining('was not executed again'),
+            },
+        })
+        expect((Reflect.get(runner, 'rooms') as Map<string, {
+            appSessions: Map<string, unknown>
+        }>).get('!room:example.org')!.appSessions.size).toBe(1)
+
+        const ledger = await readFile(fixture.config.replayLedgerPath, 'utf8')
+        expect(ledger.match(/"kind":"command_result"/gu)).toHaveLength(1)
+        await runner.stop()
+    })
+
+    it('recovers a persisted session create as success after its terminal ledger write was interrupted', async () => {
+        const fixture = await securityFixture()
+        fixture.config.trustedDevices[0]!.allowedOperations = [
+            ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
+            'session.create',
+        ]
+        const signed = await signedSessionCreate(fixture.keys, fixture.now, 1, 0)
+        const accepted = new FileCommandReplayStore(fixture.config.replayLedgerPath)
+        await accepted.initialize(fixture.now)
+        await accepted.claimCommandInOrder(signed.command, fixture.now)
+
+        const runtimeStore = new FileGatewayRuntimeStateStore(
+            `${fixture.config.replayLedgerPath}.runtime-state.json`,
+        )
+        await runtimeStore.initialize(
+            fixture.config.rooms,
+            accepted.getGeneration(),
+        )
+        const persisted = runtimeStore.getRoom(fixture.config.rooms[0]!.roomId)
+        persisted.appSessions[0]!.sourceCommandId = signed.command.commandId
+        await runtimeStore.saveRoom(fixture.config.rooms[0]!.roomId, persisted)
+
+        const client = new FakeMatrixGatewayClient()
+        const runner = new MatrixGatewayRunner(fixture.config, {
+            client,
+            now: () => fixture.now,
+            sessionFactory: () => fakeTopicSession([]),
+        })
+        await runner.start()
+        client.sent.length = 0
+        client.emit(await incomingSecureSigned(
+            signed,
+            fixture.keys,
+            fixture.gatewayKeys,
+            fixture.now,
+            'persisted-create-recovery',
+        ))
+
+        const expectedPrefix =
+            `codever.command.result.${signed.command.commandId}.succeeded.`
+        await vi.waitFor(() => expect(client.sent.some(request =>
+            request.transactionId.startsWith(expectedPrefix)
+        )).toBe(true))
+        expect((Reflect.get(runner, 'rooms') as Map<string, {
+            appSessions: Map<string, unknown>
+        }>).get('!room:example.org')!.appSessions.size).toBe(1)
+
+        const restartedLedger = new FileCommandReplayStore(fixture.config.replayLedgerPath)
+        await restartedLedger.initialize(fixture.now)
+        await expect(restartedLedger.getCommandResult(signed.command)).resolves.toMatchObject({
+            revision: 1,
+            outcome: 'succeeded',
+            sessionId: 'app-session-1',
+        })
         await runner.stop()
     })
 

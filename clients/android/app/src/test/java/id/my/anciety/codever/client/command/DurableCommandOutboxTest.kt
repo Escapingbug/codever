@@ -149,6 +149,26 @@ class DurableCommandOutboxTest {
     }
 
     @Test
+    fun `accepted command can probe its terminal result with the exact authenticated identity`() {
+        val fixture = fixture()
+        val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.create"))
+        val original = fixture.outbox.claimForTransmission(receipt.commandId)!!
+        assertTrue(fixture.outbox.recordAcknowledgement(receipt.commandId, receipt.sequence, 3))
+
+        val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
+        val probe = restored.claimCompletionRecovery(receipt.commandId)!!
+
+        assertEquals(original.commandId, probe.commandId)
+        assertEquals(original.operationId, probe.operationId)
+        assertEquals(original.sequence, probe.sequence)
+        assertEquals(original.baseRevision, probe.baseRevision)
+        assertEquals(original.issuedAt, probe.issuedAt)
+        assertEquals(original.nonce, probe.nonce)
+        assertTrue(probe.recovery)
+        assertEquals(CommandState.ACCEPTED, restored.get(receipt.commandId)?.state)
+    }
+
+    @Test
     fun `release removes completion but tombstone prevents replay after process restart`() {
         val fixture = fixture()
         val key = UUID.randomUUID().toString()

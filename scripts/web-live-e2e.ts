@@ -31,6 +31,7 @@ const ALPHA_ENABLE_ENV = 'CODEVER_ALPHA_LIVE_E2E'
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const STARTUP_TIMEOUT_MS = 90_000
+const PWA_BUILD_TIMEOUT_MS = 180_000
 const TIMELINE_NOISE_EVENT_COUNT = 240
 const PROVIDER_RESPONSE = 'Codever deterministic E2E response'
 
@@ -43,6 +44,8 @@ type ManagedProcess = {
 }
 
 const alphaEnabled = process.env[ALPHA_ENABLE_ENV] === '1'
+const acceptedCreateRecoveryOnly =
+    process.env.CODEVER_ALPHA_ACCEPTED_CREATE_RECOVERY_ONLY === '1'
 if (process.env[ENABLE_ENV] !== '1' && !alphaEnabled) {
     throw new Error(
         `Live Web E2E starts a disposable Synapse fixture and mutates Gateway state. Set ${ENABLE_ENV}=1 or ${ALPHA_ENABLE_ENV}=1 to run it.`,
@@ -123,7 +126,7 @@ try {
                 VITE_CODEVER_GATEWAY_HEARTBEAT_STALE_MS: '12000',
             },
         },
-        STARTUP_TIMEOUT_MS,
+        PWA_BUILD_TIMEOUT_MS,
     )
     pwaProcess = managedProcess(
         join(repositoryRoot, 'apps', 'pwa', 'node_modules', '.bin', 'wrangler'),
@@ -248,14 +251,18 @@ try {
         decodePairingLink(firstPairingLink).offer.gatewayTransport,
         'Gateway restart changed the Matrix device or encryption identity',
     )
-    await settleSessionCreateAcrossGatewayRotation(
-        firstPage,
-        rotationProjectName,
-        baselineBeforeRotationCreate,
-        gatewayProcess,
-        gatewayDataDirectory,
-        gatewayRecoveryStartedAt,
-    )
+    if (acceptedCreateRecoveryOnly) {
+        await waitForProject(firstPage, rotationProjectName)
+    } else {
+        await settleSessionCreateAcrossGatewayRotation(
+            firstPage,
+            rotationProjectName,
+            baselineBeforeRotationCreate,
+            gatewayProcess,
+            gatewayDataDirectory,
+            gatewayRecoveryStartedAt,
+        )
+    }
     const sessionCountAfterRotationCreate = await activeSessionCount(firstPage)
     assert.equal(sessionCountAfterRotationCreate, baselineBeforeRotationCreate + 1)
     process.stdout.write('[4r/8] PASS — the same encrypted Gateway device migrated its legacy state outbox, recovered active work, and accepted queued creation.\n')
@@ -336,30 +343,34 @@ try {
     )
     await openSession(secondPage, secondSessionId)
     await waitForHistoryIdle(secondPage, CONVERGENCE_TIMEOUT_MS)
-    process.stdout.write('[5c/8] Sending in the new session and reloading its originating browser…\n')
-    await recordRegression(
-        regressionFailures,
-        'new-session message survives an originating-browser reload and reaches another device',
-        async () => {
-            await sendPrompt(secondPage!, newSessionPrompt)
-            await waitForText(secondPage!, newSessionPrompt)
-            await reloadAndWaitForConnected(secondPage!)
-            await waitForProject(secondPage!, secondProjectName)
-            await openSession(secondPage!, secondSessionId)
-            let immediateRestoreFailure: unknown
-            try {
-                await waitForText(secondPage!, newSessionPrompt, UI_FEEDBACK_TIMEOUT_MS)
-            } catch (error) {
-                immediateRestoreFailure = error
-            }
-            await waitForTextAtStage(secondPage!, newSessionPrompt, 'originating browser user prompt after reload')
-            await waitForTextAtStage(secondPage!, PROVIDER_RESPONSE, 'originating browser Agent response after reload')
-            await openSession(firstPage!, secondSessionId)
-            await waitForTextAtStage(firstPage!, newSessionPrompt, 'other browser user prompt')
-            await waitForTextAtStage(firstPage!, PROVIDER_RESPONSE, 'other browser Agent response')
-            if (immediateRestoreFailure) throw immediateRestoreFailure
-        },
-    )
+    if (acceptedCreateRecoveryOnly) {
+        process.stdout.write('[5c/8] Skipping unrelated browser-reload regression in focused Android recovery acceptance.\n')
+    } else {
+        process.stdout.write('[5c/8] Sending in the new session and reloading its originating browser…\n')
+        await recordRegression(
+            regressionFailures,
+            'new-session message survives an originating-browser reload and reaches another device',
+            async () => {
+                await sendPrompt(secondPage!, newSessionPrompt)
+                await waitForText(secondPage!, newSessionPrompt)
+                await reloadAndWaitForConnected(secondPage!)
+                await waitForProject(secondPage!, secondProjectName)
+                await openSession(secondPage!, secondSessionId)
+                let immediateRestoreFailure: unknown
+                try {
+                    await waitForText(secondPage!, newSessionPrompt, UI_FEEDBACK_TIMEOUT_MS)
+                } catch (error) {
+                    immediateRestoreFailure = error
+                }
+                await waitForTextAtStage(secondPage!, newSessionPrompt, 'originating browser user prompt after reload')
+                await waitForTextAtStage(secondPage!, PROVIDER_RESPONSE, 'originating browser Agent response after reload')
+                await openSession(firstPage!, secondSessionId)
+                await waitForTextAtStage(firstPage!, newSessionPrompt, 'other browser user prompt')
+                await waitForTextAtStage(firstPage!, PROVIDER_RESPONSE, 'other browser Agent response')
+                if (immediateRestoreFailure) throw immediateRestoreFailure
+            },
+        )
+    }
     await openProjectSession(secondPage, projectName)
     await openProjectSession(firstPage, projectName)
 

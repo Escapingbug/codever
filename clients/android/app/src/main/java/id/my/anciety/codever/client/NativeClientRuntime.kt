@@ -812,11 +812,31 @@ class NativeClientRuntime(
     suspend fun recoverCommand(commandId: String): DurableReceipt {
         val current = outbox.resolveCurrent(commandId)
             ?: throw UnknownCommandException("Command was not found.")
+        diagnostics.record(
+            "command.recovery.requested",
+            mapOf(
+                "action" to (outbox.operation(current.commandId)?.wireName ?: "unknown"),
+                "stage" to current.state.wireName,
+            ),
+        )
         when (current.state) {
             DurableState.QUEUED -> launchCommandTransmission(current.commandId, recovery = false)
             DurableState.RECOVERY_REQUIRED -> {
                 cancelScheduledCommandRecovery(current.commandId, resetAttempts = false)
                 launchCommandTransmission(current.commandId, recovery = true)
+            }
+            DurableState.ACCEPTED, DurableState.RUNNING -> {
+                // An acknowledgement proves only that the Gateway durably
+                // claimed the command. If the Gateway or WebView stopped
+                // before the terminal event arrived, replay the exact signed
+                // identity so the Gateway can return its durable result (or
+                // safely terminalize a pre-result crash) without re-executing
+                // the logical action.
+                launchCommandTransmission(
+                    current.commandId,
+                    recovery = true,
+                    completionProbe = true,
+                )
             }
             else -> Unit
         }
@@ -1065,12 +1085,16 @@ class NativeClientRuntime(
         }
     }
 
-    private fun launchCommandTransmission(commandId: String, recovery: Boolean) {
+    private fun launchCommandTransmission(
+        commandId: String,
+        recovery: Boolean,
+        completionProbe: Boolean = false,
+    ) {
         synchronized(commandTransmissionJobs) {
             if (commandTransmissionJobs[commandId]?.isActive == true) return
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 try {
-                    transmit(commandId, recovery)
+                    transmit(commandId, recovery, completionProbe)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
@@ -1078,7 +1102,11 @@ class NativeClientRuntime(
                         "command.transmission.failure",
                         mapOf(
                             "action" to (outbox.operation(commandId)?.wireName ?: "unknown"),
-                            "stage" to if (recovery) "recovery" else "initial",
+                            "stage" to when {
+                                completionProbe -> "completion_probe"
+                                recovery -> "recovery"
+                                else -> "initial"
+                            },
                             "error" to diagnosticErrorName(error),
                         ),
                     )
@@ -1106,12 +1134,16 @@ class NativeClientRuntime(
      * only commit durable command state synchronously; delivery continues in a
      * background task so a slow Matrix send cannot starve local recovery RPCs.
      */
-    private suspend fun transmit(commandId: String, recovery: Boolean) {
+    private suspend fun transmit(
+        commandId: String,
+        recovery: Boolean,
+        completionProbe: Boolean = false,
+    ) {
         val transmission = mutex.withLock {
-            val claimed = if (recovery) {
-                outbox.claimRecovery(commandId)
-            } else {
-                outbox.claimForTransmission(commandId)
+            val claimed = when {
+                completionProbe -> outbox.claimCompletionRecovery(commandId)
+                recovery -> outbox.claimRecovery(commandId)
+                else -> outbox.claimForTransmission(commandId)
             } ?: return@withLock null
             publishCommand(outbox.get(commandId) ?: return@withLock null)
             claimed
@@ -1125,6 +1157,7 @@ class NativeClientRuntime(
             val remainsCurrent = mutex.withLock {
                 val current = outbox.get(commandId)
                 if (current == null || current.state.isTerminal) return@withLock false
+                if (completionProbe) return@withLock true
                 outbox.markAcknowledgementTimedOut(commandId)?.let(::publishCommand)
                 scheduleCommandRecovery(commandId)
                 true
@@ -1138,6 +1171,7 @@ class NativeClientRuntime(
             }
             throw error
         }
+        if (completionProbe) return
         mutex.withLock {
             if (outbox.get(commandId)?.state == DurableState.TRANSMITTING) {
                 ackTimeouts.remove(commandId)?.cancel()

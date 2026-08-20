@@ -83,6 +83,9 @@ type AndroidPageState = {
     dialogs: string[]
     alerts: string[]
     userMessages: string[]
+    composerDraft: string
+    composerReason: string
+    composerSendDisabled: boolean
     bodyText: string
 }
 
@@ -392,6 +395,28 @@ class AndroidWebView {
         // and therefore cannot leave the DOM value ahead of React's draft.
         await this.call('Input.insertText', { text: prompt })
 
+        // A DevTools attachment can be recreated while the WebView process
+        // stays alive. Some Chromium builds then update the textarea's DOM
+        // value through Input.insertText without delivering the corresponding
+        // controlled-input change to React. Re-enter the exact value through
+        // the native setter when that split is observed; this is equivalent to
+        // the WebView's IME input event and prevents an E2E transport artifact
+        // from being mistaken for a disabled application composer.
+        await delay(100)
+        await this.evaluate(`(() => {
+            const textarea = Array.from(document.querySelectorAll('textarea'))
+                .find(item => item.getAttribute('aria-label')?.startsWith('Message ') && item.getClientRects().length > 0);
+            const send = Array.from(document.querySelectorAll('button'))
+                .find(button => /^(Send|Queue) message$/u.test(button.getAttribute('aria-label') || '') && button.getClientRects().length > 0);
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (!textarea || !send || !send.disabled || textarea.value !== ${json(prompt)} || !setter) return false;
+            setter.call(textarea, '');
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            setter.call(textarea, ${json(prompt)});
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            return true;
+        })()`)
+
         await waitFor(async () => this.evaluate<boolean>(`(() => {
             const textarea = Array.from(document.querySelectorAll('textarea'))
                 .find(item => item.getAttribute('aria-label')?.startsWith('Message ') && item.getClientRects().length > 0);
@@ -609,6 +634,7 @@ export async function runAndroidAlphaJourney(
     // Keep this shell-injected fixture value token-safe. The behavior under
     // test is durable command recovery, not adb shell argument quoting.
     const queuedRestartProjectName = `CodeverAlphaQueuedRestart-${options.runId}`
+    const acceptedRestartProjectName = `CodeverAlphaAcceptedRestart-${options.runId}`
     const terminalRestartProjectName = `CodeverAlphaTerminalRestart-${options.runId}`
     const migrationProjectName = `Codever Alpha Upgrade ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
@@ -629,10 +655,114 @@ export async function runAndroidAlphaJourney(
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
     let queuedRestartSessionCreated = false
+    let acceptedRestartSessionCreated = false
     let terminalRestartSessionCreated = false
     let migrationSessionCreated = false
     let deviceIdleForced = false
     let deliveredDuringForcedIdle: boolean | undefined
+    const verifyAcceptedCreateCoverInstall = async (): Promise<void> => {
+        assert.ok(android, 'The accepted-command recovery requires an attached Android WebView')
+        assert.ok(syncGate, 'The accepted-command recovery requires the Matrix sync gate')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        const acceptedCommandId = await seedCurrentAcceptedCommand(
+            serial,
+            `${options.runId}-accepted`,
+            options.repositoryRoot,
+            acceptedRestartProjectName,
+        )
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'connected Android before accepted-command cover install',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+        const acceptedMarkerSeeded = await android.evaluate<boolean>(`(() => {
+            const config = JSON.parse(localStorage.getItem('codever.matrix.connection.v1') || 'null');
+            if (!config?.gatewayId || !config?.conversationId) return false;
+            localStorage.setItem('codever:pending-session-create:v1', JSON.stringify({
+                version: 1,
+                commandId: ${json(acceptedCommandId)},
+                gatewayId: config.gatewayId,
+                conversationId: config.conversationId,
+                createdAt: Date.now(),
+                input: {
+                    cwd: ${json(options.repositoryRoot)},
+                    projectName: ${json(acceptedRestartProjectName)},
+                    extensions: [],
+                },
+            }));
+            return true;
+        })()`)
+        assert.equal(
+            acceptedMarkerSeeded,
+            true,
+            'Could not seed the accepted WebView session-create marker.',
+        )
+        // localStorage is synchronous from the page's perspective, but the
+        // WebView LevelDB commit reaches disk asynchronously. Give the real
+        // storage engine a flush window, then re-read the exact marker before
+        // killing the process so this remains an APK-upgrade test rather than
+        // an accidental process-kill data-loss test.
+        await delay(1_000)
+        assert.equal(
+            await android.evaluate<string | null>(
+                "localStorage.getItem('codever:pending-session-create:v1')",
+            ) !== null,
+            true,
+            'The accepted WebView session-create marker did not persist before cover install.',
+        )
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await adb(serial, 'install', '-r', '-t', apkPath)
+        await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'accepted Android session creation recovery after cover install',
+            state => state.connection.endsWith('Connected')
+                && state.projectNames.includes(acceptedRestartProjectName)
+                && !state.sessionCreatePending,
+            CONNECT_TIMEOUT_MS,
+        )
+        acceptedRestartSessionCreated = true
+        assert.equal(
+            await android.evaluate<string | null>(
+                "localStorage.getItem('codever:pending-session-create:v1')",
+            ),
+            null,
+            'An acknowledged command left a permanent WebView session-create marker.',
+        )
+        assert.equal(
+            syncGate.observedCommandIds().filter(commandId => commandId === acceptedCommandId).length,
+            1,
+            'The acknowledged command completion probe was not transmitted exactly once.',
+        )
+        await waitForBrowserProject(options.browserPage, acceptedRestartProjectName)
+        await android.openProject(acceptedRestartProjectName)
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, acceptedRestartProjectName)
+        await android.waitFor(
+            'accepted restart session deletion',
+            state => !state.projectNames.includes(acceptedRestartProjectName)
+                && !state.archivedProjects.includes(acceptedRestartProjectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        acceptedRestartSessionCreated = false
+    }
     try {
         process.stdout.write('  [A1/12] Building and installing a fresh isolated Android E2E package…\n')
         await buildE2eApk(options.repositoryRoot, options.pwaUrl)
@@ -761,6 +891,13 @@ export async function runAndroidAlphaJourney(
         sessionCreated = true
         await waitForBrowserProject(options.browserPage, projectName)
         await openBrowserProject(options.browserPage, projectName)
+
+        if (process.env.CODEVER_ALPHA_ACCEPTED_CREATE_RECOVERY_ONLY === '1') {
+            process.stdout.write('  [A11b/12] Cover-installing over an acknowledged create with no terminal result…\n')
+            await verifyAcceptedCreateCoverInstall()
+            process.stdout.write('  [A11b/12] PASS — the acknowledged create converged after cover install without duplication.\n')
+            return
+        }
 
         process.stdout.write('  [A4/12] Completing an Android task in the background and opening its notification…\n')
         const postedBefore = await diagnosticCount(serial, 'notification.task_posted')
@@ -1212,11 +1349,9 @@ export async function runAndroidAlphaJourney(
         await assertPackageActivityBackground(serial)
 
         await startMainActivity(serial)
-        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebViewUntilState(
             serial,
             options.pwaUrl,
-        ))
-        await android.waitFor(
             'durable native history accumulated while its Activity was absent',
             state =>
                 state.connection.endsWith('Connected') &&
@@ -1225,7 +1360,7 @@ export async function runAndroidAlphaJourney(
                 state.bodyText.includes(dozeRecoveryPrompt) &&
                 state.bodyText.includes(bootRecoveryPrompt),
             CONNECT_TIMEOUT_MS,
-        )
+        ))
 
         // Separate a pure transport-loss assertion from the preceding
         // cross-device revision race. Foregrounding explicitly requests an
@@ -1842,7 +1977,10 @@ export async function runAndroidAlphaJourney(
         )
         queuedRestartSessionCreated = false
 
-        process.stdout.write('  [A11b/12] Recovering a create that completed before the replacement WebView attached…\n')
+        process.stdout.write('  [A11b/12] Cover-installing over an acknowledged create with no terminal result…\n')
+        await verifyAcceptedCreateCoverInstall()
+
+        process.stdout.write('  [A11c/12] Recovering a create that completed before the replacement WebView attached…\n')
         android.close()
         android = undefined
         if (forwardedDevtoolsPort) {
@@ -1953,7 +2091,7 @@ export async function runAndroidAlphaJourney(
         )
         terminalRestartSessionCreated = false
 
-        process.stdout.write('  [A11c/12] Cover-installing over an encrypted legacy submitted command…\n')
+        process.stdout.write('  [A11d/12] Cover-installing over an encrypted legacy submitted command…\n')
         const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
         const coordinatedMigrationDiagnostic =
             'state.upgrade.store_migrated kind=command-outbox schema=2-3'
@@ -2139,6 +2277,7 @@ export async function runAndroidAlphaJourney(
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
                 'queued-command-cover-install-resumption-exactly-once',
+                'accepted-command-cover-install-terminal-probe-exactly-once',
                 'terminal-session-create-cover-install-reconciled-from-durable-status',
                 'legacy-encrypted-outbox-cover-install-migration',
                 'ambiguous-legacy-command-quarantine-no-replay',
@@ -2170,6 +2309,9 @@ export async function runAndroidAlphaJourney(
         }
         if (queuedRestartSessionCreated) {
             await cleanupBrowserProject(options.browserPage, queuedRestartProjectName).catch(() => undefined)
+        }
+        if (acceptedRestartSessionCreated) {
+            await cleanupBrowserProject(options.browserPage, acceptedRestartProjectName).catch(() => undefined)
         }
         if (terminalRestartSessionCreated) {
             await cleanupBrowserProject(options.browserPage, terminalRestartProjectName).catch(() => undefined)
@@ -2692,6 +2834,11 @@ const ANDROID_PAGE_STATE = `(() => {
         alerts: Array.from(document.querySelectorAll('[role="alert"]')).map(element => normalized(element.textContent)),
         userMessages: Array.from(document.querySelectorAll('.chat-feed .user-bubble > p'))
             .map(element => normalized(element.textContent)),
+        composerDraft: Array.from(document.querySelectorAll('textarea'))
+            .find(item => item.getAttribute('aria-label')?.startsWith('Message ') && item.getClientRects().length > 0)?.value || '',
+        composerReason: normalized(document.querySelector('#composer-status')?.textContent),
+        composerSendDisabled: Boolean(Array.from(document.querySelectorAll('button'))
+            .find(button => /^(Send|Queue) message$/u.test(button.getAttribute('aria-label') || '') && button.getClientRects().length > 0)?.disabled),
         bodyText: normalized(document.body?.innerText),
     };
 })()`
@@ -2949,6 +3096,35 @@ async function attachWebView(
     throw new Error(`Timed out attaching to the Alpha WebView: ${lastError}`)
 }
 
+async function attachWebViewUntilState(
+    serial: string,
+    pwaUrl: string,
+    description: string,
+    predicate: (state: AndroidPageState) => boolean,
+    timeoutMs: number,
+): Promise<{ page: AndroidWebView; port: string }> {
+    const deadline = Date.now() + timeoutMs
+    let lastError: unknown
+    for (let attempt = 1; attempt <= 3 && Date.now() < deadline; attempt += 1) {
+        const attached = await attachWebView(serial, pwaUrl)
+        try {
+            await attached.page.waitFor(
+                description,
+                predicate,
+                Math.max(1, deadline - Date.now()),
+            )
+            return attached
+        } catch (error) {
+            lastError = error
+            if (!formatError(error).includes('Android WebView debugger closed')) throw error
+            attached.page.close()
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${attached.port}`)
+            await delay(250 * attempt)
+        }
+    }
+    throw lastError ?? new Error(`Timed out waiting for ${description}`)
+}
+
 async function assertForegroundNotification(serial: string): Promise<void> {
     const keys = await notificationKeys(serial)
     assert.ok(
@@ -3125,6 +3301,45 @@ async function seedCurrentQueuedCommand(
     )
     const commandId = result?.[2]
     assert.ok(commandId, `The E2E APK did not return its queued command id: ${output}`)
+    return commandId
+}
+
+async function seedCurrentAcceptedCommand(
+    serial: string,
+    runId: string,
+    cwd: string,
+    projectName: string,
+): Promise<string> {
+    const output = await adb(
+        serial,
+        'shell',
+        'am',
+        'broadcast',
+        '-f',
+        '0x20',
+        '-n',
+        LEGACY_OUTBOX_SEEDER,
+        '--es',
+        'run_id',
+        runId,
+        '--es',
+        'mode',
+        'current_accepted',
+        '--es',
+        'cwd',
+        cwd,
+        '--es',
+        'project_name',
+        projectName,
+    )
+    const result = output.match(/Broadcast completed: result=(-?\d+), data="([^"]+)"/u)
+    assert.equal(
+        result?.[1],
+        '-1',
+        `The E2E APK could not seed its accepted command: ${output}`,
+    )
+    const commandId = result?.[2]
+    assert.ok(commandId, `The E2E APK did not return its accepted command id: ${output}`)
     return commandId
 }
 

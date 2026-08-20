@@ -49,7 +49,8 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         val atomicFile = AtomicFile(commandsFile)
         check(atomicFile.baseFile.exists()) { "The current encrypted outbox is missing." }
         val cipher = AndroidKeystoreSecretCipher()
-        if (intent.getStringExtra(EXTRA_MODE) == MODE_CURRENT_QUEUED) {
+        val mode = intent.getStringExtra(EXTRA_MODE)
+        if (mode == MODE_CURRENT_QUEUED || mode == MODE_CURRENT_ACCEPTED) {
             val cwd = requireNotNull(intent.getStringExtra(EXTRA_CWD)) {
                 "The queued outbox fixture requires a cwd."
             }
@@ -65,6 +66,12 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
                     put("projectName", projectName)
                 },
             )
+            if (mode == MODE_CURRENT_ACCEPTED) {
+                checkNotNull(outbox.claimForTransmission(receipt.commandId))
+                check(outbox.recordAcknowledgement(receipt.commandId, receipt.sequence, 0L)) {
+                    "The accepted fixture could not persist its acknowledgement."
+                }
+            }
             resultCode = Activity.RESULT_OK
             resultData = receipt.commandId
             return
@@ -206,5 +213,6 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         const val EXTRA_CWD = "cwd"
         const val EXTRA_PROJECT_NAME = "project_name"
         const val MODE_CURRENT_QUEUED = "current_queued"
+        const val MODE_CURRENT_ACCEPTED = "current_accepted"
     }
 }

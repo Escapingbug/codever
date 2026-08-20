@@ -12,6 +12,8 @@ import { gatewayProjectIdentity } from './project'
 
 export interface PersistedAppSession {
     id: string
+    /** Stable identity of the command that first created this session. */
+    sourceCommandId: string | null
     title: string
     createdAt: number
     updatedAt: number
@@ -48,19 +50,20 @@ export interface PersistedRoomRuntimeState {
 }
 
 interface RuntimeStateFile {
-    version: 2
+    version: 3
     rooms: Record<string, PersistedRoomRuntimeState>
 }
 
-export const GATEWAY_RUNTIME_STATE_SCHEMA_VERSION = 2
+export const GATEWAY_RUNTIME_STATE_SCHEMA_VERSION = 3
 export const GATEWAY_RUNTIME_STATE_MIGRATIONS: Readonly<
     Record<number, ((value: VersionedState) => VersionedState) | undefined>
 > = Object.freeze({
     1: migrateRuntimeStateV1,
+    2: migrateRuntimeStateV2,
 })
 
 export class FileGatewayRuntimeStateStore {
-    private state: RuntimeStateFile = { version: 2, rooms: {} }
+    private state: RuntimeStateFile = { version: 3, rooms: {} }
     private chain: Promise<unknown> = Promise.resolve()
     private initialized = false
     private migrationPending = false
@@ -173,9 +176,9 @@ export class FileGatewayRuntimeStateStore {
 
 /**
  * Schema 1 existed across several pre-release builds. Normalize every field
- * those builds could omit before the strict schema-2 validator runs. The
- * resulting file is committed atomically during initialize(), before the
- * Gateway starts serving commands.
+ * those builds could omit before the remaining adjacent migrations and the
+ * current strict validator run. The resulting file is committed atomically
+ * during initialize(), before the Gateway starts serving commands.
  */
 function migrateRuntimeStateV1(value: VersionedState): VersionedState {
     const rooms = asRecord(value.rooms)
@@ -271,6 +274,35 @@ function migrateRuntimeStateV1(value: VersionedState): VersionedState {
     }
 }
 
+/**
+ * Schema 3 links newly created sessions to their durable creation command.
+ * Existing sessions remain unbound: guessing from a project name or timestamp
+ * could incorrectly turn a different accepted command into a success.
+ */
+function migrateRuntimeStateV2(value: VersionedState): VersionedState {
+    const rooms = asRecord(value.rooms)
+    if (!rooms) throw new Error('Invalid Gateway runtime state rooms')
+    return {
+        version: 3,
+        rooms: Object.fromEntries(Object.entries(rooms).map(([roomId, roomValue]) => {
+            const room = asRecord(roomValue)
+            if (!room || !Array.isArray(room.appSessions)) {
+                throw new Error(`Invalid Gateway runtime state for room ${roomId}`)
+            }
+            return [roomId, {
+                ...room,
+                appSessions: room.appSessions.map((entry, index) => {
+                    const session = asRecord(entry)
+                    if (!session) {
+                        throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
+                    }
+                    return { ...session, sourceCommandId: null }
+                }),
+            }]
+        })),
+    }
+}
+
 function defaultRoomState(
     room: MatrixGatewayRoomConfig,
     replayGeneration: string,
@@ -300,7 +332,7 @@ function defaultRoomState(
 
 function validateStateFile(value: unknown): RuntimeStateFile {
     const record = asRecord(value)
-    if (record?.version !== 2) throw new Error('Invalid Gateway runtime state version')
+    if (record?.version !== 3) throw new Error('Invalid Gateway runtime state version')
     const rooms = asRecord(record.rooms)
     if (!rooms) throw new Error('Invalid Gateway runtime state rooms')
     const parsed: Record<string, PersistedRoomRuntimeState> = {}
@@ -377,7 +409,7 @@ function validateStateFile(value: unknown): RuntimeStateFile {
             },
         }
     }
-    return { version: 2, rooms: parsed }
+    return { version: 3, rooms: parsed }
 }
 
 function validateAppSession(
@@ -390,6 +422,9 @@ function validateAppSession(
         !session
         || typeof session.id !== 'string'
         || !session.id
+        || !(session.sourceCommandId === null || (
+            typeof session.sourceCommandId === 'string' && session.sourceCommandId.length > 0
+        ))
         || typeof session.title !== 'string'
         || !Number.isSafeInteger(session.createdAt)
         || (session.createdAt as number) < 0
@@ -426,6 +461,7 @@ function validateAppSession(
     }
     return {
         id: session.id,
+        sourceCommandId: session.sourceCommandId as string | null,
         title: session.title,
         createdAt: session.createdAt as number,
         updatedAt: session.updatedAt as number,
