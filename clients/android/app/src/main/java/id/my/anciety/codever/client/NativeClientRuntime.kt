@@ -810,19 +810,20 @@ class NativeClientRuntime(
     )
 
     suspend fun recoverCommand(commandId: String): DurableReceipt {
-        val current = outbox.get(commandId) ?: throw UnknownCommandException("Command was not found.")
+        val current = outbox.resolveCurrent(commandId)
+            ?: throw UnknownCommandException("Command was not found.")
         when (current.state) {
-            DurableState.QUEUED -> launchCommandTransmission(commandId, recovery = false)
+            DurableState.QUEUED -> launchCommandTransmission(current.commandId, recovery = false)
             DurableState.RECOVERY_REQUIRED -> {
-                cancelScheduledCommandRecovery(commandId, resetAttempts = false)
-                launchCommandTransmission(commandId, recovery = true)
+                cancelScheduledCommandRecovery(current.commandId, resetAttempts = false)
+                launchCommandTransmission(current.commandId, recovery = true)
             }
             else -> Unit
         }
-        return publicReceipt(outbox.get(commandId) ?: current)
+        return publicReceipt(outbox.get(current.commandId) ?: current)
     }
 
-    fun command(commandId: String): CommandView = outbox.get(commandId)?.let(::publicCommand)
+    fun command(commandId: String): CommandView = outbox.resolveCurrent(commandId)?.let(::publicCommand)
         ?: throw UnknownCommandException("Command was not found.")
 
     suspend fun issueMatrixLoginToken(

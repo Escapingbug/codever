@@ -332,6 +332,56 @@ test("waits for transient outbox recovery with one idempotency key", async () =>
   client.dispose();
 });
 
+test("hydrates a completed recovered command when its terminal event preceded the WebView", async () => {
+  const completion = {
+    commandId: "command-completed-before-webview",
+    sequence: 7,
+    revision: 19,
+    outcome: "succeeded" as const,
+    sessionId: "session-created-before-webview",
+  };
+  const port = new RuntimePort((request) => {
+    if (request.method === "codever.command.recover") {
+      return {
+        operationId: "operation-completed-before-webview",
+        commandId: completion.commandId,
+        idempotencyKey: "00000000-0000-4000-8000-000000000007",
+        state: "succeeded",
+        submittedAt: 1,
+        updatedAt: 3,
+        sequence: completion.sequence,
+        revision: completion.revision,
+      };
+    }
+    if (request.method === "codever.command.get") {
+      return {
+        operationId: "operation-completed-before-webview",
+        commandId: completion.commandId,
+        idempotencyKey: "00000000-0000-4000-8000-000000000007",
+        state: "succeeded",
+        submittedAt: 1,
+        updatedAt: 3,
+        sequence: completion.sequence,
+        revision: completion.revision,
+        completion,
+      };
+    }
+    return responseFor(request);
+  });
+  const client = await createTestClient(port);
+
+  const recovered = await client.recoverCommand(completion.commandId);
+
+  assert.deepEqual(await recovered.completion, completion);
+  assert.deepEqual(
+    port.requests
+      .filter((request) => request.method.startsWith("codever.command."))
+      .map((request) => request.method),
+    ["codever.command.recover", "codever.command.get"],
+  );
+  client.dispose();
+});
+
 test("detaching the WebView waiter does not cancel a native-confirmed pairing", async () => {
   const port = new RuntimePort((request) => {
     if (request.method === "codever.pairing.inspect") {

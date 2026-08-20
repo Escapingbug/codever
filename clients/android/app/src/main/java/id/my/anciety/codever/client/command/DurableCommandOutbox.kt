@@ -525,6 +525,20 @@ class DurableCommandOutbox internal constructor(
     @Synchronized
     fun get(commandId: String): CommandView? = findCurrent(commandId)?.toView()
 
+    /**
+     * Resolves the current durable command from either its active identity or
+     * any identity retired during a Gateway revision-epoch migration. The
+     * operation remains idempotent across that re-key, and callers recovering
+     * a persisted UI marker must be rebound to the current command instead of
+     * mistaking the retired ID for a command that never existed.
+     */
+    @Synchronized
+    fun resolveCurrent(commandId: String): CommandView? = snapshot.commands
+        .firstOrNull { command ->
+            command.commandId == commandId || commandId in command.retiredCommandIds
+        }
+        ?.toView()
+
     @Synchronized
     fun operation(commandId: String): CommandOperation? =
         findCurrent(commandId)?.payload?.let(CommandPayloadValidator::validate)?.operation

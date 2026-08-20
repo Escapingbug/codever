@@ -5,6 +5,7 @@ import {
   completedSessionCreateTarget,
   isMissingSessionCreateRecoveryCommand,
   readPendingSessionCreateRecovery,
+  rebindPendingSessionCreateRecovery,
   sessionCreateRecoveryMatches,
   writePendingSessionCreateRecovery,
   type PendingSessionCreateRecovery,
@@ -100,6 +101,31 @@ test("only the matching command may clear a newer recovery record", () => {
     true,
   );
   assert.equal(readPendingSessionCreateRecovery(storage), null);
+});
+
+test("rebinds a recovery marker to the current command after an epoch migration", () => {
+  const storage = new MemoryStorage();
+  writePendingSessionCreateRecovery(storage, recovery);
+
+  assert.equal(
+    rebindPendingSessionCreateRecovery(
+      storage,
+      "older-command",
+      "current-command",
+    ),
+    null,
+  );
+  const rebound = rebindPendingSessionCreateRecovery(
+    storage,
+    recovery.commandId,
+    "current-command",
+  );
+
+  assert.deepEqual(rebound, {
+    ...recovery,
+    commandId: "current-command",
+  });
+  assert.deepEqual(readPendingSessionCreateRecovery(storage), rebound);
 });
 
 test("rejects malformed recovery records instead of replaying them", () => {

@@ -609,6 +609,7 @@ export async function runAndroidAlphaJourney(
     // Keep this shell-injected fixture value token-safe. The behavior under
     // test is durable command recovery, not adb shell argument quoting.
     const queuedRestartProjectName = `CodeverAlphaQueuedRestart-${options.runId}`
+    const terminalRestartProjectName = `CodeverAlphaTerminalRestart-${options.runId}`
     const migrationProjectName = `Codever Alpha Upgrade ${options.runId}`
     const privacyContextId = `android-private-${options.runId}`
     const apkPath = join(
@@ -628,6 +629,7 @@ export async function runAndroidAlphaJourney(
     let syncGate: MatrixSyncGate | undefined
     let privacySessionCreated = false
     let queuedRestartSessionCreated = false
+    let terminalRestartSessionCreated = false
     let migrationSessionCreated = false
     let deviceIdleForced = false
     let deliveredDuringForcedIdle: boolean | undefined
@@ -1840,7 +1842,118 @@ export async function runAndroidAlphaJourney(
         )
         queuedRestartSessionCreated = false
 
-        process.stdout.write('  [A11b/12] Cover-installing over an encrypted legacy submitted command…\n')
+        process.stdout.write('  [A11b/12] Recovering a create that completed before the replacement WebView attached…\n')
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        const backgroundServiceCreatedBefore = await diagnosticCount(serial, 'service.created')
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        const completedCommandId = await seedCurrentQueuedCommand(
+            serial,
+            `${options.runId}-terminal`,
+            options.repositoryRoot,
+            terminalRestartProjectName,
+        )
+        // Android 12+ intentionally forbids a stopped background receiver from
+        // starting a foreground service. Launch the Activity from adb (the
+        // same user-visible boundary as tapping the launcher), wait until it
+        // has started the durable service, then send it to the background.
+        // No DevTools/WebView client is attached while the real command runs.
+        await startMainActivity(serial)
+        await waitFor(
+            async () => await diagnosticCount(serial, 'service.created') > backgroundServiceCreatedBefore,
+            {
+                description: 'foreground service for the terminal command fixture',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        await assertPackageActivityBackground(serial)
+        await waitForBrowserProject(options.browserPage, terminalRestartProjectName)
+        terminalRestartSessionCreated = true
+        const completedTransmissionCount = syncGate.observedCommandIds()
+            .filter(commandId => commandId === completedCommandId).length
+        assert.equal(
+            completedTransmissionCount,
+            1,
+            'The background command did not complete exactly once before a WebView attached.',
+        )
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'connected Android before completed-command cover install',
+            state => state.connection.endsWith('Connected'),
+            CONNECT_TIMEOUT_MS,
+        )
+        const completedMarkerSeeded = await android.evaluate<boolean>(`(() => {
+            const config = JSON.parse(localStorage.getItem('codever.matrix.connection.v1') || 'null');
+            if (!config?.gatewayId || !config?.conversationId) return false;
+            localStorage.setItem('codever:pending-session-create:v1', JSON.stringify({
+                version: 1,
+                commandId: ${json(completedCommandId)},
+                gatewayId: config.gatewayId,
+                conversationId: config.conversationId,
+                createdAt: Date.now(),
+                input: {
+                    cwd: ${json(options.repositoryRoot)},
+                    projectName: ${json(terminalRestartProjectName)},
+                    extensions: [],
+                },
+            }));
+            return true;
+        })()`)
+        assert.equal(
+            completedMarkerSeeded,
+            true,
+            'Could not seed the completed WebView session-create marker.',
+        )
+        android.close()
+        android = undefined
+        if (forwardedDevtoolsPort) {
+            await adbMaybe(serial, 'forward', '--remove', `tcp:${forwardedDevtoolsPort}`)
+            forwardedDevtoolsPort = undefined
+        }
+        await adb(serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await adb(serial, 'install', '-r', '-t', apkPath)
+        await adb(serial, 'shell', 'cmd', 'package', 'compile', '-m', 'speed', '-f', PACKAGE_NAME)
+        await restoreAndroidReverse(serial, options.pwaPort, options.pwaPort)
+        await restoreAndroidReverse(serial, options.matrixPort, syncGate.port)
+        await startMainActivity(serial)
+        ;({ page: android, port: forwardedDevtoolsPort } = await attachWebView(serial, options.pwaUrl))
+        await android.waitFor(
+            'terminal Android session creation recovery after cover install',
+            state => state.connection.endsWith('Connected')
+                && state.projectNames.includes(terminalRestartProjectName)
+                && !state.sessionCreatePending,
+            CONNECT_TIMEOUT_MS,
+        )
+        assert.equal(
+            await android.evaluate<string | null>(
+                "localStorage.getItem('codever:pending-session-create:v1')",
+            ),
+            null,
+            'A terminal native command left a permanent WebView session-create marker.',
+        )
+        assert.equal(
+            syncGate.observedCommandIds().filter(commandId => commandId === completedCommandId).length,
+            completedTransmissionCount,
+            'A terminal command was retransmitted after the replacement WebView attached.',
+        )
+        await android.openProject(terminalRestartProjectName)
+        await android.deleteSelected()
+        await waitForBrowserProjectAbsent(options.browserPage, terminalRestartProjectName)
+        await android.waitFor(
+            'terminal restart session deletion',
+            state => !state.projectNames.includes(terminalRestartProjectName)
+                && !state.archivedProjects.includes(terminalRestartProjectName),
+            CONNECT_TIMEOUT_MS,
+        )
+        terminalRestartSessionCreated = false
+
+        process.stdout.write('  [A11c/12] Cover-installing over an encrypted legacy submitted command…\n')
         const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
         const coordinatedMigrationDiagnostic =
             'state.upgrade.store_migrated kind=command-outbox schema=2-3'
@@ -2026,6 +2139,7 @@ export async function runAndroidAlphaJourney(
                 'cross-device-archive-restore-delete',
                 'android-process-restart',
                 'queued-command-cover-install-resumption-exactly-once',
+                'terminal-session-create-cover-install-reconciled-from-durable-status',
                 'legacy-encrypted-outbox-cover-install-migration',
                 'ambiguous-legacy-command-quarantine-no-replay',
                 'post-migration-command-lane-recovery',
@@ -2056,6 +2170,9 @@ export async function runAndroidAlphaJourney(
         }
         if (queuedRestartSessionCreated) {
             await cleanupBrowserProject(options.browserPage, queuedRestartProjectName).catch(() => undefined)
+        }
+        if (terminalRestartSessionCreated) {
+            await cleanupBrowserProject(options.browserPage, terminalRestartProjectName).catch(() => undefined)
         }
         if (migrationSessionCreated) {
             await cleanupBrowserProject(options.browserPage, migrationProjectName).catch(() => undefined)

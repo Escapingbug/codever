@@ -341,6 +341,10 @@ class DurableCommandOutboxTest {
 
         assertEquals(original.commandId, migration.previousCommandId)
         assertNotEquals(original.commandId, migrated.commandId)
+        assertEquals(
+            migration.currentCommandId,
+            fixture.outbox.resolveCurrent(original.commandId)?.commandId,
+        )
         assertEquals(1L, migrated.sequence)
         assertEquals(3L, migrated.baseRevision)
         assertEquals("epoch-current", migrated.revisionEpoch)

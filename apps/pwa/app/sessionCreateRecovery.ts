@@ -79,6 +79,24 @@ export function clearPendingSessionCreateRecovery(
   return true;
 }
 
+/**
+ * Rebinds one persisted logical create operation after the native outbox has
+ * assigned it a fresh command ID for a new Gateway revision epoch. The compare
+ * against the expected ID prevents a late recovery from overwriting a newer
+ * create marker.
+ */
+export function rebindPendingSessionCreateRecovery(
+  storage: SessionCreateRecoveryStorage,
+  expectedCommandId: string,
+  currentCommandId: string,
+): PendingSessionCreateRecovery | null {
+  const recovery = readPendingSessionCreateRecovery(storage);
+  if (!recovery || recovery.commandId !== expectedCommandId) return null;
+  const rebound = { ...recovery, commandId: currentCommandId };
+  writePendingSessionCreateRecovery(storage, rebound);
+  return rebound;
+}
+
 export function sessionCreateRecoveryMatches(
   recovery: PendingSessionCreateRecovery,
   binding: { gatewayId: string; conversationId: string },

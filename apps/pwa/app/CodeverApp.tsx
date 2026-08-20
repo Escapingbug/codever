@@ -78,6 +78,7 @@ import {
   completedSessionCreateTarget,
   isMissingSessionCreateRecoveryCommand,
   readPendingSessionCreateRecovery,
+  rebindPendingSessionCreateRecovery,
   sessionCreateRecoveryMatches,
   writePendingSessionCreateRecovery,
   type PendingSessionCreateRecovery,
@@ -99,6 +100,7 @@ import {
   isTransientAgentLifecycleEvent,
   mergeChatMessage,
   mergeChatMessages,
+  withoutReconciledOptimisticCopies,
   type ChatMessage,
   type OptimisticMessageReference,
 } from "./chatMessages";
@@ -1767,7 +1769,13 @@ function CodeverAppRuntime() {
         liveMessagesBySessionRef.current.get(sessionId) ?? [];
       historyCursorRef.current = cached.cursor;
       setMessages((current) =>
-        mergeChatMessages(current, [...liveMessages, ...cachedMessages]),
+        mergeChatMessages(
+          current,
+          withoutReconciledOptimisticCopies(
+            [...liveMessages, ...cachedMessages],
+            reconciledOptimisticMessageIdsRef.current,
+          ),
+        ),
       );
       setHistoryHasMore(cached.hasMore || Boolean(connection));
 
@@ -1864,7 +1872,13 @@ function CodeverAppRuntime() {
         prepareHistoryPrepend(feedRef.current, prependScrollRef);
         historyCursorRef.current = cached.cursor;
         setMessages((current) =>
-          mergeChatMessages(current, olderMessages),
+          mergeChatMessages(
+            current,
+            withoutReconciledOptimisticCopies(
+              olderMessages,
+              reconciledOptimisticMessageIdsRef.current,
+            ),
+          ),
         );
         // Consume at most one local page per pull. Once the local cache ends,
         // advance Matrix by one page in parallel so a later pull does not need
@@ -2133,21 +2147,45 @@ function CodeverAppRuntime() {
       connection,
     };
     void (async () => {
+      let activeCommandId = recovery.commandId;
       try {
         const sent =
           acknowledgedCommand ??
           (await connection.recoverCommand(recovery.commandId));
+        if (sent.commandId !== activeCommandId) {
+          const rebound = rebindPendingSessionCreateRecovery(
+            window.localStorage,
+            activeCommandId,
+            sent.commandId,
+          );
+          if (!rebound) {
+            if (
+              pendingSessionCreateRecoveryRef.current?.commandId ===
+              activeCommandId
+            ) {
+              pendingSessionCreateRecoveryRef.current = null;
+              clearPendingSessionCreateUi();
+            }
+            return;
+          }
+          activeCommandId = rebound.commandId;
+          pendingSessionCreateRecoveryRef.current = rebound;
+          sessionCreateRecoveryInFlightRef.current = {
+            commandId: activeCommandId,
+            connection,
+          };
+        }
         recoverUiNotice("session:create");
         await settleSessionCreate(connection, sent);
       } catch (error) {
         if (
           pendingSessionCreateRecoveryRef.current?.commandId !==
-          recovery.commandId
+          activeCommandId
         ) {
           return;
         }
         if (isMissingSessionCreateRecoveryCommand(error)) {
-          forgetPendingSessionCreate(recovery.commandId);
+          forgetPendingSessionCreate(activeCommandId);
           clearPendingSessionCreateUi();
           showUiNotice(
             "session:create",
@@ -2172,14 +2210,14 @@ function CodeverAppRuntime() {
       } finally {
         if (
           sessionCreateRecoveryInFlightRef.current?.commandId ===
-          recovery.commandId
+          activeCommandId
         ) {
           sessionCreateRecoveryInFlightRef.current = null;
         }
         const currentConnection = codeverClientRef.current;
         if (
           pendingSessionCreateRecoveryRef.current?.commandId ===
-            recovery.commandId &&
+            activeCommandId &&
           currentConnection &&
           currentConnection !== connection &&
           connectionStatusRef.current === "connected"
@@ -4306,7 +4344,7 @@ function CodeverAppRuntime() {
       };
       setPendingFiles([]);
       const wasAlreadyReconciled =
-        reconciledOptimisticMessageIdsRef.current.delete(optimisticId);
+        reconciledOptimisticMessageIdsRef.current.has(optimisticId);
       if (
         !wasAlreadyReconciled &&
         selectedSessionIdRef.current === sessionId
