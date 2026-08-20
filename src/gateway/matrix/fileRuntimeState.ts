@@ -2,8 +2,10 @@ import { mkdir, open, readFile, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
+    migrateVersionedState,
     sessionExtensionBindingSchema,
     type SessionExtensionBinding,
+    type VersionedState,
 } from '@codever/protocol'
 import type { MatrixGatewayRoomConfig } from './config'
 import { gatewayProjectIdentity } from './project'
@@ -50,10 +52,18 @@ interface RuntimeStateFile {
     rooms: Record<string, PersistedRoomRuntimeState>
 }
 
+export const GATEWAY_RUNTIME_STATE_SCHEMA_VERSION = 2
+export const GATEWAY_RUNTIME_STATE_MIGRATIONS: Readonly<
+    Record<number, ((value: VersionedState) => VersionedState) | undefined>
+> = Object.freeze({
+    1: migrateRuntimeStateV1,
+})
+
 export class FileGatewayRuntimeStateStore {
     private state: RuntimeStateFile = { version: 2, rooms: {} }
     private chain: Promise<unknown> = Promise.resolve()
     private initialized = false
+    private migrationPending = false
 
     constructor(private readonly path: string) {}
 
@@ -64,7 +74,7 @@ export class FileGatewayRuntimeStateStore {
         return this.serial(async () => {
             if (!replayGeneration) throw new Error('Replay ledger generation is required')
             if (!this.initialized) await this.load()
-            let changed = false
+            let changed = this.migrationPending
             for (const room of rooms) {
                 const current = this.state.rooms[room.roomId]
                 if (!current) {
@@ -81,6 +91,7 @@ export class FileGatewayRuntimeStateStore {
             }
             if (changed) {
                 await this.writeAtomic()
+                this.migrationPending = false
             }
         })
     }
@@ -132,7 +143,14 @@ export class FileGatewayRuntimeStateStore {
     private async load(): Promise<void> {
         try {
             const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
-            this.state = validateStateFile(parsed)
+            const migrated = migrateVersionedState({
+                label: 'Gateway runtime state',
+                value: requireVersionedRecord(parsed),
+                currentVersion: GATEWAY_RUNTIME_STATE_SCHEMA_VERSION,
+                migrations: GATEWAY_RUNTIME_STATE_MIGRATIONS,
+            })
+            this.migrationPending = migrated.migratedFrom !== null
+            this.state = validateStateFile(migrated.value)
         } catch (error) {
             if (!isMissingFile(error)) throw error
         }
@@ -150,6 +168,106 @@ export class FileGatewayRuntimeStateStore {
             await handle.close()
         }
         await rename(temporaryPath, this.path)
+    }
+}
+
+/**
+ * Schema 1 existed across several pre-release builds. Normalize every field
+ * those builds could omit before the strict schema-2 validator runs. The
+ * resulting file is committed atomically during initialize(), before the
+ * Gateway starts serving commands.
+ */
+function migrateRuntimeStateV1(value: VersionedState): VersionedState {
+    const rooms = asRecord(value.rooms)
+    if (!rooms) throw new Error('Invalid Gateway runtime state rooms')
+    return {
+        version: 2,
+        rooms: Object.fromEntries(Object.entries(rooms).map(([roomId, roomValue]) => {
+            const room = asRecord(roomValue)
+            const workspace = asRecord(room?.workspace)
+            if (!room || !workspace || typeof workspace.cwd !== 'string') {
+                throw new Error(`Invalid Gateway runtime state for room ${roomId}`)
+            }
+            const workspaceProject = gatewayProjectIdentity(
+                workspace.cwd,
+                typeof workspace.projectName === 'string' ? workspace.projectName : undefined,
+            )
+            const reasoningEffort = typeof workspace.reasoningEffort === 'string'
+                ? workspace.reasoningEffort
+                : null
+            const permissionMode = typeof workspace.permissionMode === 'string'
+                ? workspace.permissionMode
+                : 'default'
+            if (!Array.isArray(room.appSessions)) {
+                throw new Error(`Invalid Gateway runtime state for room ${roomId}`)
+            }
+            const appSessions = room.appSessions.map((entry, index) => {
+                const session = asRecord(entry)
+                if (
+                    !session
+                    || typeof session.id !== 'string'
+                    || !session.id
+                    || typeof session.title !== 'string'
+                    || !Number.isSafeInteger(session.updatedAt)
+                    || typeof session.provider !== 'string'
+                ) {
+                    throw new Error(`Invalid Gateway app session ${index} for room ${roomId}`)
+                }
+                const project = typeof session.cwd === 'string'
+                    ? gatewayProjectIdentity(
+                        session.cwd,
+                        typeof session.projectName === 'string' ? session.projectName : undefined,
+                    )
+                    : workspaceProject
+                return {
+                    ...session,
+                    createdAt: Number.isSafeInteger(session.createdAt)
+                        ? session.createdAt
+                        : session.updatedAt,
+                    matrixThreadRootEventId: typeof session.matrixThreadRootEventId === 'string'
+                        ? session.matrixThreadRootEventId
+                        : null,
+                    projectId: project.id,
+                    projectName: project.name,
+                    cwd: project.cwd,
+                    model: typeof session.model === 'string' ? session.model : null,
+                    reasoningEffort: typeof session.reasoningEffort === 'string'
+                        ? session.reasoningEffort
+                        : reasoningEffort,
+                    permissionMode: typeof session.permissionMode === 'string'
+                        ? session.permissionMode
+                        : permissionMode,
+                    providerSessionId: typeof session.providerSessionId === 'string'
+                        ? session.providerSessionId
+                        : null,
+                    archivedAt: Number.isSafeInteger(session.archivedAt)
+                        ? session.archivedAt
+                        : null,
+                    extensions: Array.isArray(session.extensions) ? session.extensions : [],
+                }
+            })
+            return [roomId, {
+                ...room,
+                revisionEpochGeneration: Number.isSafeInteger(room.revisionEpochGeneration)
+                    ? room.revisionEpochGeneration
+                    : 1,
+                replayGeneration: typeof room.replayGeneration === 'string'
+                    && room.replayGeneration
+                    ? room.replayGeneration
+                    : 'migration:missing-replay-generation',
+                appSessions,
+                deletedSessionIds: [],
+                workspace: {
+                    ...workspace,
+                    projectId: workspaceProject.id,
+                    projectName: workspaceProject.name,
+                    cwd: workspaceProject.cwd,
+                    model: typeof workspace.model === 'string' ? workspace.model : null,
+                    reasoningEffort,
+                    permissionMode,
+                },
+            }]
+        })),
     }
 }
 
@@ -352,6 +470,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null
+}
+
+function requireVersionedRecord(value: unknown): VersionedState {
+    const record = asRecord(value)
+    if (!record || !Number.isSafeInteger(record.version)) {
+        throw new Error('Invalid Gateway runtime state version')
+    }
+    return record as VersionedState
 }
 
 function isMissingFile(error: unknown): boolean {

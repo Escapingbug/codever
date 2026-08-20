@@ -1,6 +1,7 @@
 import type { NewSessionInput } from "./NewSessionDialog";
 
-const PENDING_SESSION_CREATE_KEY = "codever:pending-session-create:v1";
+export const PENDING_SESSION_CREATE_STORAGE_KEY =
+  "codever:pending-session-create:v1";
 
 type SessionCreateRecoveryStorage = Pick<
   Storage,
@@ -51,7 +52,7 @@ export function readPendingSessionCreateRecovery(
 ): PendingSessionCreateRecovery | null {
   if (!storage) return null;
   try {
-    const encoded = storage.getItem(PENDING_SESSION_CREATE_KEY);
+    const encoded = storage.getItem(PENDING_SESSION_CREATE_STORAGE_KEY);
     if (!encoded) return null;
     return parsePendingSessionCreateRecovery(JSON.parse(encoded));
   } catch {
@@ -63,7 +64,7 @@ export function writePendingSessionCreateRecovery(
   storage: SessionCreateRecoveryStorage,
   recovery: PendingSessionCreateRecovery,
 ): void {
-  storage.setItem(PENDING_SESSION_CREATE_KEY, JSON.stringify(recovery));
+  storage.setItem(PENDING_SESSION_CREATE_STORAGE_KEY, JSON.stringify(recovery));
 }
 
 export function clearPendingSessionCreateRecovery(
@@ -74,7 +75,7 @@ export function clearPendingSessionCreateRecovery(
     const current = readPendingSessionCreateRecovery(storage);
     if (current?.commandId !== expectedCommandId) return false;
   }
-  storage.removeItem(PENDING_SESSION_CREATE_KEY);
+  storage.removeItem(PENDING_SESSION_CREATE_STORAGE_KEY);
   return true;
 }
 

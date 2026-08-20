@@ -1842,7 +1842,13 @@ export async function runAndroidAlphaJourney(
 
         process.stdout.write('  [A11b/12] Cover-installing over an encrypted legacy submitted command…\n')
         const migrationDiagnostic = 'command.outbox.migrated quarantined=1 schema=2'
+        const coordinatedMigrationDiagnostic =
+            'state.upgrade.store_migrated kind=command-outbox schema=2-3'
         const migrationCountBefore = await diagnosticCount(serial, migrationDiagnostic)
+        const coordinatedMigrationCountBefore = await diagnosticCount(
+            serial,
+            coordinatedMigrationDiagnostic,
+        )
         android.close()
         android = undefined
         if (forwardedDevtoolsPort) {
@@ -1870,6 +1876,14 @@ export async function runAndroidAlphaJourney(
             async () => await diagnosticCount(serial, migrationDiagnostic) === migrationCountBefore + 1,
             {
                 description: 'one atomic schema-2 command outbox migration',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitFor(
+            async () => await diagnosticCount(serial, coordinatedMigrationDiagnostic)
+                === coordinatedMigrationCountBefore + 1,
+            {
+                description: 'one coordinated previous-release store migration',
                 timeoutMs: CONNECT_TIMEOUT_MS,
             },
         )

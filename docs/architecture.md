@@ -362,6 +362,12 @@ lock only when that exact owner no longer exists; elapsed wall-clock time never
 steals a live process's security lock. Android persists its Matrix `/sync`
 cursor and limited-gap journal under the account-scoped encrypted store.
 
+PWA, APK, Matrix-account, and Gateway schema changes use classified, adjacent,
+crash-resumable migrations before their runtime is unlocked. Security and
+command state is preserved on an unsupported upgrade; projections and UI
+preferences may be rebuilt. The catalogs and mandatory release validation are
+defined in [`state-upgrades.md`](./state-upgrades.md).
+
 ## 7. Current Ownership
 
 The current ownership chain is:

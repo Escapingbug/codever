@@ -656,6 +656,22 @@ try {
                         extensions: [],
                     },
                 }))
+                for (const key of [
+                    'codever.state-manifest.v1',
+                    'codever.indexeddb-state-manifest.v1',
+                ]) {
+                    const manifest = JSON.parse(localStorage.getItem(key) || 'null') as
+                        | Record<string, unknown>
+                        | null
+                    if (!manifest) return false
+                    localStorage.setItem(key, JSON.stringify({
+                        ...manifest,
+                        phase: 'running',
+                        appBuild: `pre-upgrade-${commandId}`,
+                        completedAt: null,
+                        activeMigration: null,
+                    }))
+                }
                 return true
             }, { commandId: staleCommandId, cwd: repositoryRoot })
             assert.equal(markerSeeded, true, 'Could not seed the pre-upgrade create marker')
@@ -685,6 +701,12 @@ try {
                     try {
                         const state = await firstPage!.evaluate(() => ({
                             marker: localStorage.getItem('codever:pending-session-create:v1'),
+                            localUpgrade: JSON.parse(
+                                localStorage.getItem('codever.state-manifest.v1') || 'null',
+                            ) as { phase?: unknown; appBuild?: unknown } | null,
+                            indexedDbUpgrade: JSON.parse(
+                                localStorage.getItem('codever.indexeddb-state-manifest.v1') || 'null',
+                            ) as { phase?: unknown; appBuild?: unknown } | null,
                             pending: Boolean(document.querySelector('.session-create-pending')),
                             connection: document
                                 .querySelector('button[aria-label^="Open connection settings,"]')
@@ -693,6 +715,10 @@ try {
                         return versionChecks >= 2
                             && mainFrameNavigations >= 2
                             && state.marker === null
+                            && state.localUpgrade?.phase === 'complete'
+                            && state.localUpgrade.appBuild === currentBuild
+                            && state.indexedDbUpgrade?.phase === 'complete'
+                            && state.indexedDbUpgrade.appBuild === currentBuild
                             && !state.pending
                             && state.connection?.endsWith('Connected') === true
                     } catch {

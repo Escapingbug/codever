@@ -34,8 +34,25 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
     val replay = File(root, "replay.enc")
     val timelineKeys = File(root, "matrix-timeline-keys.enc")
     val pairing = File(root, "pairing-transaction.enc")
+    val stateManifest = File(root, "state-manifest.json")
     val transfers = File(root, "transfers").apply {
         check(isDirectory || mkdirs()) { "Native transfer storage could not be created." }
+    }
+
+    fun validateTransferScratch() {
+        check(transfers.isDirectory) { "Native transfer scratch is not a directory." }
+        check(transfers.listFiles().orEmpty().all(File::isFile)) {
+            "Native transfer scratch contains an unsupported entry."
+        }
+    }
+
+    fun clearTransferScratch() {
+        transfers.listFiles().orEmpty().forEach { entry ->
+            check(entry.deleteRecursively()) { "Native transfer scratch could not be cleared." }
+        }
+        check(transfers.isDirectory || transfers.mkdirs()) {
+            "Native transfer scratch could not be recreated."
+        }
     }
 
     fun clearAccountState() {
@@ -46,10 +63,11 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
             replay,
             timelineKeys,
             pairing,
+            stateManifest,
         ).forEach { file ->
             AtomicFile(file).delete()
         }
-        transfers.listFiles().orEmpty().forEach(File::delete)
+        clearTransferScratch()
     }
 }
 
@@ -231,6 +249,11 @@ class AtomicEncryptedTimelineKeyStore(
         atomic.delete()
     }
 
+    @Synchronized
+    fun validateStoredState() {
+        grant?.let(::validate)
+    }
+
     private fun load(): JsonObject? {
         if (!atomic.baseFile.exists()) return null
         val encrypted = atomic.readFully()
@@ -312,6 +335,11 @@ class AtomicEncryptedReplayStore(
 
     @Synchronized
     fun clear() = atomic.delete()
+
+    @Synchronized
+    fun validateStoredState() {
+        load()
+    }
 
     private fun load(): Map<String, Long> {
         if (!atomic.baseFile.exists()) return emptyMap()

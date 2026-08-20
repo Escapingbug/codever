@@ -1,0 +1,21 @@
+{
+  "localStorageManifestVersion": 1,
+  "indexedDbManifestVersion": 1,
+  "localStorage": [
+    { "id": "matrix-connection", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "gateway-trust", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "pending-pairing", "stateClass": "durable-command", "schemaVersion": 1 },
+    { "id": "pending-session-create-projection", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "native-event-cursor", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "selected-session", "stateClass": "ephemeral-ui", "schemaVersion": 1 },
+    { "id": "project-disclosure", "stateClass": "ephemeral-ui", "schemaVersion": 1 },
+    { "id": "session-read-markers", "stateClass": "ephemeral-ui", "schemaVersion": 1 }
+  ],
+  "indexedDb": [
+    { "id": "matrix-identity-and-command-sequences", "stateClass": "security-critical", "schemaVersion": 3 },
+    { "id": "replay-protection", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "matrix-crypto-store", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "conversation-history-projection", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "matrix-sync-projection", "stateClass": "rebuildable-projection", "schemaVersion": 1 }
+  ]
+}

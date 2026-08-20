@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "native": [
+    { "id": "gateway-trust", "stateClass": "security-critical", "schemaVersion": 2 },
+    { "id": "replay-ledger", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "timeline-key-ring", "stateClass": "security-critical", "schemaVersion": 2 },
+    { "id": "command-outbox", "stateClass": "durable-command", "schemaVersion": 4 },
+    { "id": "pairing-transaction", "stateClass": "durable-command", "schemaVersion": 1 },
+    { "id": "client-event-projection", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "attachment-transfer-scratch", "stateClass": "rebuildable-projection", "schemaVersion": 1 }
+  ],
+  "matrix": [
+    { "id": "matrix-session", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "matrix-sync-cursor", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "matrix-sync-gaps", "stateClass": "rebuildable-projection", "schemaVersion": 1 },
+    { "id": "matrix-sdk-crypto-store", "stateClass": "security-critical", "schemaVersion": 1 },
+    { "id": "matrix-sdk-cache", "stateClass": "rebuildable-projection", "schemaVersion": 1 }
+  ]
+}

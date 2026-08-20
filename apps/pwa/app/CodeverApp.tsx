@@ -64,6 +64,16 @@ import {
   type PwaUpdateState,
 } from "./pwaUpdate";
 import {
+  PwaStateUpgradeBlockedError,
+  resetBlockedPwaConnection,
+  runPwaStateUpgrade,
+} from "./stateUpgrade";
+import {
+  PwaIndexedDbUpgradeBlockedError,
+  resetBlockedPwaIndexedDb,
+  runPwaIndexedDbUpgrade,
+} from "./indexedDbUpgrade";
+import {
   clearPendingSessionCreateRecovery,
   completedSessionCreateTarget,
   isMissingSessionCreateRecoveryCommand,
@@ -434,7 +444,135 @@ function UiNoticeList({
   );
 }
 
+type PwaUpgradeGateState =
+  | { phase: "preparing" }
+  | { phase: "ready" }
+  | {
+      phase: "blocked";
+      scope: "local-storage" | "indexed-db";
+      error: PwaStateUpgradeBlockedError | PwaIndexedDbUpgradeBlockedError;
+    };
+
+/**
+ * Mounting the business UI is the upgrade commit boundary. No trust, command,
+ * Matrix, native bridge, or cached UI reader runs before this gate succeeds.
+ */
 export function CodeverApp() {
+  const [upgrade, setUpgrade] = useState<PwaUpgradeGateState>({
+    phase: "preparing",
+  });
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        runPwaStateUpgrade(window.localStorage);
+      } catch (error) {
+        if (!active) return;
+        setUpgrade({
+          phase: "blocked",
+          scope: "local-storage",
+          error: error instanceof PwaStateUpgradeBlockedError
+            ? error
+            : new PwaStateUpgradeBlockedError(
+                "Codever could not prepare this browser's saved state.",
+                [],
+                { cause: error },
+              ),
+        });
+        return;
+      }
+      try {
+        await runPwaIndexedDbUpgrade(window.localStorage, window.indexedDB);
+        if (active) setUpgrade({ phase: "ready" });
+      } catch (error) {
+        if (!active) return;
+        setUpgrade({
+          phase: "blocked",
+          scope: "indexed-db",
+          error: error instanceof PwaIndexedDbUpgradeBlockedError
+            ? error
+            : new PwaIndexedDbUpgradeBlockedError(
+                "Codever could not prepare this browser's databases.",
+                [],
+                { cause: error },
+              ),
+        });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (upgrade.phase === "preparing") {
+    return (
+      <main className="upgrade-gate" aria-busy="true">
+        <section className="upgrade-gate-card" role="status">
+          <span className="session-status-dot is-running" aria-hidden="true" />
+          <div>
+            <h1>Preparing this version…</h1>
+            <p>Checking saved connection and recovery state before Codever starts.</p>
+          </div>
+        </section>
+      </main>
+    );
+  }
+  if (upgrade.phase === "blocked") {
+    const canReset = upgrade.error.blockedKeys.length > 0;
+    return (
+      <main className="upgrade-gate">
+        <section className="upgrade-gate-card" role="alert">
+          <div>
+            <p className="eyebrow">Local state needs repair</p>
+            <h1>This version did not start</h1>
+            <p>{upgrade.error.message}</p>
+            <p>
+              Codever preserved identity and trust data instead of deleting it during
+              an uncertain upgrade.
+            </p>
+            <div className="upgrade-gate-actions">
+              <button type="button" onClick={() => window.location.reload()}>
+                Try again
+              </button>
+              {canReset ? (
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => {
+                    if (!window.confirm(
+                      "Reset this browser connection? Other devices and Gateway history are not deleted, but this browser must be invited again.",
+                    )) return;
+                    void (async () => {
+                      if (upgrade.scope === "indexed-db") {
+                        await resetBlockedPwaIndexedDb(
+                          window.localStorage,
+                          window.indexedDB,
+                          upgrade.error.blockedKeys,
+                        );
+                      } else {
+                        resetBlockedPwaConnection(
+                          window.localStorage,
+                          upgrade.error.blockedKeys,
+                        );
+                      }
+                      window.location.reload();
+                    })();
+                  }}
+                >
+                  Reset this browser connection
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+  return <CodeverAppRuntime />;
+}
+
+function CodeverAppRuntime() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);

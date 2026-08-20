@@ -1,6 +1,7 @@
 package id.my.anciety.codever.client
 
 import android.content.Context
+import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.client.command.CommandCompletion as DurableCompletion
 import id.my.anciety.codever.client.command.CommandAuthorizationPolicy
 import id.my.anciety.codever.client.command.CommandPayloadValidator
@@ -27,6 +28,7 @@ import id.my.anciety.codever.client.events.CommandOutcome
 import id.my.anciety.codever.client.events.CommandState
 import id.my.anciety.codever.client.events.CommandView
 import id.my.anciety.codever.client.events.EncryptedAtomicClientEventPersistence
+import id.my.anciety.codever.client.events.ClientEventStateCodec
 import id.my.anciety.codever.client.events.ForegroundServiceState
 import id.my.anciety.codever.client.events.HistoryPage
 import id.my.anciety.codever.client.events.LifecyclePhase
@@ -168,7 +170,33 @@ class NativeClientRuntime(
     private val historyMutex = Mutex()
     private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
-    private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId)
+    private val stateUpgrade = NativeStateUpgradeCoordinator(
+        files.stateManifest,
+        diagnostics,
+        now,
+    ).begin(BuildConfig.NATIVE_BUILD_ID)
+    private val eventPersistence = EncryptedAtomicClientEventPersistence(
+        files.events,
+        cipher,
+        deviceId,
+    ).also { persistence ->
+        stateUpgrade.recoverRebuildable(
+            "client-event-projection",
+            validate = {
+                persistence.load()?.let { bytes ->
+                    try {
+                        ClientEventStateCodec.decode(bytes)
+                    } finally {
+                        bytes.fill(0)
+                    }
+                }
+            },
+            reset = persistence::clear,
+        )
+    }
+    private val replayStore = AtomicEncryptedReplayStore(files.replay, cipher, deviceId).also {
+        stateUpgrade.recoverPreserved("replay-ledger", validate = it::validateStoredState)
+    }
     private val pairingStore = AtomicEncryptedPairingTransactionStore(
         files.pairing,
         cipher,
@@ -178,7 +206,9 @@ class NativeClientRuntime(
         files.timelineKeys,
         cipher,
         deviceId,
-    )
+    ).also {
+        stateUpgrade.recoverPreserved("timeline-key-ring", validate = it::validateStoredState)
+    }
     private val trustStore = EncryptedGatewayTrustStore(
         AtomicEncryptedTrustBlobStore(files.trust),
         cipher,
@@ -192,8 +222,23 @@ class NativeClientRuntime(
                 "quarantined" to migration.quarantinedCommandCount.toString(),
             ),
         )
+    }.also {
+        // The owning codec performs and atomically rewrites supported legacy
+        // schemas during construction. Replaying these coordinator steps is
+        // harmless because opening the current codec is idempotent.
+        stateUpgrade.recoverPreserved(
+            "command-outbox",
+            migrate = { _, _ -> it.list() },
+            validate = { it.list() },
+        )
     }
-    private val transfers = AttachmentTransferManager(files.transfers, matrix, cipher, now)
+    private val transfers = AttachmentTransferManager(files.transfers, matrix, cipher, now).also {
+        stateUpgrade.recoverRebuildable(
+            "attachment-transfer-scratch",
+            validate = files::validateTransferScratch,
+            reset = files::clearTransferScratch,
+        )
+    }
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
     private val commandTransmissionJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
@@ -243,7 +288,7 @@ class NativeClientRuntime(
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
 
     private val eventHub = ClientEventHub(
-        EncryptedAtomicClientEventPersistence(files.events, cipher, deviceId),
+        eventPersistence,
         initialSnapshot(),
         // Matrix and the per-session history cache remain authoritative. This
         // window only bridges short WebView detach/reattach gaps.
@@ -251,6 +296,20 @@ class NativeClientRuntime(
     )
 
     init {
+        if (restoredTrust.isFailure) {
+            stateUpgrade.blockPreserved("gateway-trust")
+        } else {
+            stateUpgrade.recoverPreserved("gateway-trust", validate = { restoredTrust.getOrThrow() })
+        }
+        if (restoredPairing.isFailure) {
+            stateUpgrade.blockPreserved("pairing-transaction")
+        } else {
+            stateUpgrade.recoverPreserved(
+                "pairing-transaction",
+                validate = { restoredPairing.getOrThrow() },
+            )
+        }
+        stateUpgrade.complete()
         gatewayState = eventHub.snapshot().gatewayState
         if (gatewayState != null) {
             diagnostics.record("gateway.state.cache.restored")

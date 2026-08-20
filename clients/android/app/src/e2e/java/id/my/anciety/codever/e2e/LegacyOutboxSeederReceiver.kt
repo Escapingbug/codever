@@ -7,6 +7,8 @@ import android.content.Intent
 import android.util.AtomicFile
 import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.client.NativeRuntimeFiles
+import id.my.anciety.codever.client.NativeStateManifestCodec
+import id.my.anciety.codever.client.NativeUpgradePhase
 import id.my.anciety.codever.client.command.DurableCommandOutbox
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
 import id.my.anciety.codever.security.SecretEnvelope
@@ -42,7 +44,8 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
             require(it.length in 1..256 && !it.any(Char::isISOControl))
         }
         val deviceId = AndroidKeystoreP256Identity().publicIdentity.keyId
-        val commandsFile = NativeRuntimeFiles(context, deviceId).commands
+        val runtimeFiles = NativeRuntimeFiles(context, deviceId)
+        val commandsFile = runtimeFiles.commands
         val atomicFile = AtomicFile(commandsFile)
         check(atomicFile.baseFile.exists()) { "The current encrypted outbox is missing." }
         val cipher = AndroidKeystoreSecretCipher()
@@ -158,6 +161,7 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
         } finally {
             replacement.fill(0)
         }
+        downgradeUpgradeManifest(runtimeFiles.stateManifest)
         resultCode = Activity.RESULT_OK
         resultData = commandId
     }
@@ -165,6 +169,36 @@ class LegacyOutboxSeederReceiver : BroadcastReceiver() {
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
+
+    /** Simulates the exact per-store version recorded by the previous APK. */
+    private fun downgradeUpgradeManifest(file: java.io.File) {
+        val atomic = AtomicFile(file)
+        check(atomic.baseFile.exists()) { "The current native upgrade manifest is missing." }
+        val current = NativeStateManifestCodec.decode(atomic.readFully())
+        val previous = current.copy(
+            phase = NativeUpgradePhase.COMPLETE,
+            runtimeBuild = "previous-e2e-fixture",
+            completedAt = System.currentTimeMillis(),
+            stores = current.stores.map { store ->
+                if (store.id == "command-outbox") store.copy(schemaVersion = 2) else store
+            },
+            activeMigration = null,
+            invalidated = emptyList(),
+            blocked = emptyList(),
+        )
+        val bytes = NativeStateManifestCodec.encode(previous)
+        val output = atomic.startWrite()
+        try {
+            output.write(bytes)
+            output.fd.sync()
+            atomic.finishWrite(output)
+        } catch (error: Exception) {
+            atomic.failWrite(output)
+            throw error
+        } finally {
+            bytes.fill(0)
+        }
+    }
 
     private companion object {
         const val EXTRA_RUN_ID = "run_id"

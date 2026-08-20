@@ -1,6 +1,6 @@
 import type { ReplayClaim, ReplayStore } from "@codever/security";
 
-const DATABASE_NAME = "codever-pwa-security";
+export const REPLAY_DATABASE_NAME = "codever-pwa-security";
 const STORE_NAME = "replay-claims";
 
 type StoredClaim = ReplayClaim & { key: string };
@@ -88,7 +88,7 @@ export class IndexedDbReplayStore implements ReplayStore {
 
 function openReplayDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, 1);
+    const request = indexedDB.open(REPLAY_DATABASE_NAME, 1);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(STORE_NAME)) {
         request.result.createObjectStore(STORE_NAME, { keyPath: "key" });
@@ -100,4 +100,15 @@ function openReplayDatabase(): Promise<IDBDatabase> {
         request.error ?? new Error("Could not open the replay protection store."),
       );
   });
+}
+
+export async function ensureReplayDatabase(): Promise<void> {
+  const database = await openReplayDatabase();
+  try {
+    if (!database.objectStoreNames.contains(STORE_NAME)) {
+      throw new Error("The replay database is missing its claim store.");
+    }
+  } finally {
+    database.close();
+  }
 }

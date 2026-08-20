@@ -75,6 +75,43 @@ select:focus-visible {
   box-shadow: var(--shadow);
 }
 
+.upgrade-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--color-surface, #f6f7f8);
+}
+
+.upgrade-gate-card {
+  width: min(560px, 100%);
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 24px;
+  border: 1px solid var(--color-border, #d8dcdf);
+  border-radius: 18px;
+  background: var(--color-panel, #fff);
+  box-shadow: 0 14px 40px rgb(26 35 40 / 8%);
+}
+
+.upgrade-gate-card h1 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+}
+
+.upgrade-gate-card p {
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+
+.upgrade-gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 .rail {
   position: relative;
   z-index: 3;

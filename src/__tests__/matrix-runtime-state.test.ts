@@ -6,6 +6,8 @@ import type { CodeverCommand } from '@codever/protocol'
 import {
     FileCommandReplayStore,
     FileGatewayRuntimeStateStore,
+    GATEWAY_RUNTIME_STATE_MIGRATIONS,
+    GATEWAY_RUNTIME_STATE_SCHEMA_VERSION,
     gatewayProjectIdentity,
 } from '@/gateway/matrix'
 
@@ -20,6 +22,11 @@ afterEach(async () => {
 })
 
 describe('FileGatewayRuntimeStateStore', () => {
+    it('registers every adjacent migration required by a future runtime release', () => {
+        for (let version = 1; version < GATEWAY_RUNTIME_STATE_SCHEMA_VERSION; version += 1) {
+            expect(GATEWAY_RUNTIME_STATE_MIGRATIONS[version]).toBeTypeOf('function')
+        }
+    })
     it('allows duplicate project names while keeping cwd-scoped identities distinct', () => {
         const first = gatewayProjectIdentity('/work/client/app', 'Client')
         const second = gatewayProjectIdentity('/archive/client/app', 'Client')
@@ -167,7 +174,7 @@ describe('FileGatewayRuntimeStateStore', () => {
         })
     })
 
-    it('rejects the removed pre-release runtime-state schema', async () => {
+    it('migrates every historically valid schema-1 runtime field and commits schema 2', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-v1-'))
         temporaryDirectories.push(directory)
         const path = join(directory, 'runtime-state.json')
@@ -204,8 +211,42 @@ describe('FileGatewayRuntimeStateStore', () => {
         })}\n`, 'utf8')
 
         const store = new FileGatewayRuntimeStateStore(path)
-        await expect(store.initialize([room], 'ledger-generation-1'))
-            .rejects.toThrow('Invalid Gateway runtime state version')
+        await store.initialize([room], 'ledger-generation-1')
+        expect(store.getRoom(room.roomId)).toMatchObject({
+            revisionEpoch: 'old-runtime-epoch',
+            revisionEpochGeneration: 1,
+            replayGeneration: 'ledger-generation-1',
+            stateVersion: 7,
+            currentSessionId: 'legacy-session',
+            deletedSessionIds: [],
+            appSessions: [{
+                id: 'legacy-session',
+                title: 'Old session',
+                createdAt: 1,
+                matrixThreadRootEventId: null,
+                projectName: 'repo',
+                cwd: 'C:\\repo',
+                reasoningEffort: null,
+                permissionMode: 'default',
+                archivedAt: null,
+                extensions: [],
+            }],
+        })
+        expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+            version: 2,
+            rooms: { [room.roomId]: { deletedSessionIds: [] } },
+        })
+    })
+
+    it('fails closed instead of downgrading a future runtime schema', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'codever-runtime-future-'))
+        temporaryDirectories.push(directory)
+        const path = join(directory, 'runtime-state.json')
+        await writeFile(path, '{"version":99,"rooms":{}}\n', 'utf8')
+        const store = new FileGatewayRuntimeStateStore(path)
+        await expect(store.initialize([], 'ledger-generation-1')).rejects.toThrow(
+            'uses schema 99',
+        )
     })
 
     it('recovers a fully written final replay record even if the trailing newline is lost', async () => {

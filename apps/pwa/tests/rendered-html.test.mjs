@@ -43,17 +43,16 @@ async function fetchBuiltRoute(pathname) {
   );
 }
 
-test("server-renders the Codever agent workspace", async () => {
+test("server-renders the migration-safe Codever boot shell", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<title>Your agents, anywhere · Codever<\/title>/i);
-  assert.match(html, /Connect a computer/);
-  assert.match(html, /Scan or paste a one-time code/);
-  assert.match(html, /Protected connection/);
-  assert.match(html, /Connect a computer to start/);
+  assert.match(html, /Preparing this version/);
+  assert.match(html, /Checking saved connection and recovery state before Codever starts/);
+  assert.doesNotMatch(html, /Connect a computer/);
   assert.doesNotMatch(html, /Matrix|P-256|Gateway/);
   assert.doesNotMatch(html, />Demo</);
   assert.doesNotMatch(html, /Connection mode/);
@@ -451,7 +450,7 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /useIndexedDB: true/);
   assert.match(matrix, /cryptoDatabasePrefix:/);
-  assert.match(matrix, /indexedDB\.open\(DEVICE_DATABASE/);
+  assert.match(matrix, /indexedDB\.open\(MATRIX_IDENTITY_DATABASE_NAME/);
   assert.match(matrix, /signCommand\(command, identity\.privateKey/);
   assert.match(matrix, /deviceId: identity\.keyId/);
   assert.match(matrix, /kind: "signed_command"/);

@@ -37,7 +37,7 @@ export type MessageHistoryPage = {
   hasMore: boolean;
 };
 
-const DATABASE_NAME = "codever-pwa-message-history";
+export const MESSAGE_HISTORY_DATABASE_NAME = "codever-pwa-message-history";
 const DATABASE_VERSION = 1;
 const MESSAGE_STORE = "messages";
 const BY_SESSION_INDEX = "by-session";
@@ -385,7 +385,7 @@ function enqueueHistoryWrite(operation: () => Promise<void>): Promise<void> {
 
 function openHistoryDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const request = indexedDB.open(MESSAGE_HISTORY_DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
       const store = database.objectStoreNames.contains(MESSAGE_STORE)
@@ -409,4 +409,23 @@ function openHistoryDatabase(): Promise<IDBDatabase> {
           new Error("Could not open the conversation history database."),
       );
   });
+}
+
+export async function ensureMessageHistoryDatabase(): Promise<void> {
+  const database = await openHistoryDatabase();
+  try {
+    if (!database.objectStoreNames.contains(MESSAGE_STORE)) {
+      throw new Error("The conversation history database is missing its message store.");
+    }
+    const transaction = database.transaction(MESSAGE_STORE, "readonly");
+    const store = transaction.objectStore(MESSAGE_STORE);
+    if (
+      !store.indexNames.contains(BY_SESSION_INDEX) ||
+      !store.indexNames.contains(BY_SCOPE_INDEX)
+    ) {
+      throw new Error("The conversation history database is missing required indexes.");
+    }
+  } finally {
+    database.close();
+  }
 }

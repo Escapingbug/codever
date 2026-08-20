@@ -1,0 +1,10 @@
+[
+  { "id": "gateway-runtime-state", "stateClass": "durable-command", "schemaVersion": 2 },
+  { "id": "command-replay-ledger", "stateClass": "security-critical", "schemaVersion": 2 },
+  { "id": "timeline-key-ring", "stateClass": "security-critical", "schemaVersion": 1 },
+  { "id": "matrix-login", "stateClass": "security-critical", "schemaVersion": 1 },
+  { "id": "matrix-sdk-crypto-store", "stateClass": "security-critical", "schemaVersion": 1 },
+  { "id": "matrix-state-outbox-wal", "stateClass": "durable-command", "schemaVersion": 1 },
+  { "id": "matrix-delivery-outbox-wal", "stateClass": "durable-command", "schemaVersion": 2 },
+  { "id": "matrix-sync-cursor", "stateClass": "rebuildable-projection", "schemaVersion": 1 }
+]

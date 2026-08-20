@@ -131,7 +131,7 @@ export {
 } from "./gatewayState";
 
 export const MATRIX_CONFIG_STORAGE_KEY = "codever.matrix.connection.v1";
-const DEVICE_DATABASE = "codever-pwa-identity";
+export const MATRIX_IDENTITY_DATABASE_NAME = "codever-pwa-identity";
 const DEVICE_STORE = "keys";
 const DEVICE_KEY = "p256-v1";
 const COMMAND_SEQUENCE_STORE = "command-sequences";
@@ -3861,7 +3861,7 @@ function waitForInitialSync(
 
 function openIdentityDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DEVICE_DATABASE, 3);
+    const request = indexedDB.open(MATRIX_IDENTITY_DATABASE_NAME, 3);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(DEVICE_STORE)) {
         request.result.createObjectStore(DEVICE_STORE);
@@ -3877,6 +3877,19 @@ function openIdentityDatabase(): Promise<IDBDatabase> {
     request.onerror = () =>
       reject(request.error ?? new Error("Could not open the device key store."));
   });
+}
+
+export async function ensureMatrixIdentityDatabase(): Promise<void> {
+  const database = await openIdentityDatabase();
+  try {
+    for (const store of [DEVICE_STORE, COMMAND_SEQUENCE_STORE, TIMELINE_KEY_STORE]) {
+      if (!database.objectStoreNames.contains(store)) {
+        throw new Error(`The Matrix identity database is missing ${store}.`);
+      }
+    }
+  } finally {
+    database.close();
+  }
 }
 
 function timelineKeyScope(

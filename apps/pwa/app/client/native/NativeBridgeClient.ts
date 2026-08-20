@@ -35,6 +35,7 @@ import type {
 } from "../CodeverClient";
 import { CommandReviewRequiredError } from "../CodeverClient";
 import { NativeRpcBridge } from "./NativeRpcBridge";
+import { NATIVE_CURSOR_STORAGE_PREFIX } from "./storageKeys";
 
 export const REQUIRED_NATIVE_CAPABILITIES = [
   "client.lifecycle",
@@ -54,8 +55,6 @@ export const OPTIONAL_NATIVE_CAPABILITIES = ["matrix.login-token"] as const;
 const DEFAULT_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_BLOCKED_COMMAND_RETRY_WINDOW_MS = 2 * 60_000;
-const NATIVE_CURSOR_PREFIX = "codever.native.cursor.v1";
-
 type Acknowledgement = {
   commandId: string;
   sequence: number;
@@ -91,11 +90,11 @@ export type NativeCursorStore = {
 const defaultCursorStore: NativeCursorStore = {
   load(deviceId) {
     if (typeof localStorage === "undefined") return undefined;
-    return localStorage.getItem(`${NATIVE_CURSOR_PREFIX}.${deviceId}`) ?? undefined;
+    return localStorage.getItem(`${NATIVE_CURSOR_STORAGE_PREFIX}.${deviceId}`) ?? undefined;
   },
   save(deviceId, cursor) {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(`${NATIVE_CURSOR_PREFIX}.${deviceId}`, cursor);
+    localStorage.setItem(`${NATIVE_CURSOR_STORAGE_PREFIX}.${deviceId}`, cursor);
   },
 };
 
