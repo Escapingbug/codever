@@ -131,14 +131,18 @@ export function mergeChatMessage(
     return mergeLogicalCopies(current, exactIndex, message);
   }
 
-  const commandIndex = message.commandId
-    ? current.findIndex((entry) => entry.commandId === message.commandId)
+  // A v3 command id is a causal link, not a message identity. The user's
+  // prompt and every Agent event produced by that turn intentionally share
+  // the same command id. Only use it to reconcile the optimistic user bubble
+  // with the canonical Matrix user event.
+  const commandIndex = message.kind === "user" && message.commandId
+    ? current.findIndex(
+        (entry) =>
+          entry.kind === "user" && entry.commandId === message.commandId,
+      )
     : -1;
   if (commandIndex >= 0) {
     const existing = current[commandIndex];
-    if (existing.kind !== "user" || message.kind !== "user") {
-      return [...current];
-    }
     const existingIsCanonical = Boolean(existing.eventId);
     const incomingIsCanonical = Boolean(message.eventId);
     if (existingIsCanonical && !incomingIsCanonical) return [...current];

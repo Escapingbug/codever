@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import type {
   JsonValue,
   SessionExtensionBinding,
@@ -8,12 +8,9 @@ import type {
 } from "@codever/protocol";
 import { useDialogFocus } from "./dialogFocus";
 import {
-  gatewayProjectKey,
   type GatewayModelCapability,
-  type GatewaySessionSummary,
   type GatewayWorkspaceState,
 } from "./gatewayState";
-import { canonicalGatewayProjects } from "./projectCatalog";
 
 type NewSessionInput = {
   cwd: string;
@@ -26,17 +23,13 @@ type NewSessionInput = {
 type Props = {
   open: boolean;
   busy: boolean;
-  gatewayId: string;
   gatewayName: string;
   workspace: GatewayWorkspaceState;
-  sessions: GatewaySessionSummary[];
   models: GatewayModelCapability[];
   extensions: SessionExtensionDescriptor[];
   onClose(): void;
   onCreate(input: NewSessionInput): void;
 };
-
-const NEW_PROJECT = "__new_project__";
 
 export function NewSessionDialog(props: Props) {
   if (!props.open) return null;
@@ -46,33 +39,13 @@ export function NewSessionDialog(props: Props) {
 function NewSessionDialogContent({
   open,
   busy,
-  gatewayId,
   gatewayName,
   workspace,
-  sessions,
   models,
   extensions,
   onClose,
   onCreate,
 }: Props) {
-  const projects = useMemo(() => {
-    return canonicalGatewayProjects(workspace, sessions).map((project) => {
-      const key = gatewayProjectKey(gatewayId, project.projectId);
-      return {
-        id: project.projectId,
-        name: project.projectName,
-        cwd: project.cwd,
-        key,
-      };
-    });
-  }, [gatewayId, sessions, workspace]);
-  const currentProjectKey = gatewayProjectKey(
-    gatewayId,
-    workspace.projectId,
-  );
-  const [projectSelection, setProjectSelection] = useState(currentProjectKey);
-  const [projectName, setProjectName] = useState(workspace.projectName);
-  const [cwd, setCwd] = useState(workspace.cwd);
   const [model, setModel] = useState(workspace.model ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(
     workspace.reasoningEffort ??
@@ -98,7 +71,7 @@ function NewSessionDialogContent({
     ),
   );
   const dialogRef = useRef<HTMLElement>(null);
-  const projectSelectRef = useRef<HTMLSelectElement>(null);
+  const modelSelectRef = useRef<HTMLSelectElement>(null);
 
   const requestClose = () => {
     if (!busy) onClose();
@@ -106,7 +79,7 @@ function NewSessionDialogContent({
   useDialogFocus({
     open,
     containerRef: dialogRef,
-    initialFocusRef: projectSelectRef,
+    initialFocusRef: modelSelectRef,
     escapeDisabled: busy,
     onEscape: requestClose,
   });
@@ -124,19 +97,6 @@ function NewSessionDialogContent({
   });
 
   if (!open) return null;
-  const chooseProject = (next: string) => {
-    setProjectSelection(next);
-    if (next === NEW_PROJECT) {
-      setProjectName("");
-      setCwd("");
-      return;
-    }
-    const project = projects.find((entry) => entry.key === next);
-    if (!project) return;
-    setProjectName(project.name);
-    setCwd(project.cwd);
-  };
-
   const chooseModel = (next: string) => {
     setModel(next);
     const capability = models.find((entry) => entry.id === next);
@@ -148,12 +108,10 @@ function NewSessionDialogContent({
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const normalizedName = projectName.trim();
-    const normalizedCwd = cwd.trim();
-    if (!normalizedName || !normalizedCwd || busy) return;
+    if (busy) return;
     onCreate({
-      cwd: normalizedCwd,
-      projectName: normalizedName,
+      cwd: workspace.cwd,
+      projectName: workspace.projectName,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(extensions.some((extension) => enabledExtensions[extension.id])
@@ -202,55 +160,26 @@ function NewSessionDialogContent({
         </header>
 
         <form onSubmit={submit}>
-          <label>
-            <span>Project</span>
-            <select
-              ref={projectSelectRef}
-              value={projectSelection}
-              onChange={(event) => chooseProject(event.target.value)}
-              disabled={busy}
-            >
-              {projects.map((project) => (
-                <option key={project.key} value={project.key}>
-                  {project.name} — {project.cwd}
-                </option>
-              ))}
-              <option value={NEW_PROJECT}>New project…</option>
-            </select>
-          </label>
-
           <div className="new-session-grid">
             <label>
-              <span>Project name</span>
-              <input
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
-                placeholder="My project"
-                disabled={busy || projectSelection !== NEW_PROJECT}
-                autoComplete="off"
-              />
+              <span>Project</span>
+              <input value={workspace.projectName} disabled readOnly />
             </label>
             <label>
               <span>Working directory</span>
-              <input
-                value={cwd}
-                onChange={(event) => setCwd(event.target.value)}
-                placeholder="/Users/me/Documents/project"
-                disabled={busy || projectSelection !== NEW_PROJECT}
-                autoComplete="off"
-                spellCheck={false}
-              />
+              <input value={workspace.cwd} disabled readOnly />
             </label>
           </div>
           <small className="project-identity-note">
-            Project names may repeat. Codever distinguishes them by computer
-            and working directory.
+            This Matrix room is the durable home for this project. Switch
+            project rooms before creating a session for another directory.
           </small>
 
           <div className="new-session-grid two-columns">
             <label>
               <span>Model</span>
               <select
+                ref={modelSelectRef}
                 value={model}
                 onChange={(event) => chooseModel(event.target.value)}
                 disabled={busy || models.length === 0}
@@ -383,8 +312,6 @@ function NewSessionDialogContent({
               className="primary-button"
               disabled={
                 busy ||
-                !projectName.trim() ||
-                !cwd.trim() ||
                 !extensionConfigValid
               }
             >

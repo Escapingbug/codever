@@ -4,7 +4,6 @@ import {
     MAX_CODEVER_ATTACHMENT_BYTES,
     MAX_CODEVER_PROMPT_ATTACHMENT_BYTES,
     type CodeverAttachment,
-    type CommandPayload,
 } from '@codever/protocol'
 import { decryptMedia, sha256 } from '@codever/security'
 import type { MatrixTransport } from '@/channel/matrix'
@@ -12,10 +11,13 @@ import type { RichUserInput, RichUserInputPart } from '@/runtime/semantic'
 
 const MAX_ENCRYPTED_ATTACHMENT_BYTES = MAX_CODEVER_ATTACHMENT_BYTES + 16
 
-type PromptPayload = Extract<CommandPayload, { operation: 'prompt' }>
+interface PromptPayload {
+    text: string
+    attachments?: CodeverAttachment[]
+}
 
-export async function materializePromptInput(
-    payload: PromptPayload,
+export async function materializePromptInput<TPayload extends PromptPayload>(
+    payload: TPayload,
     transport: MatrixTransport,
     cacheRoot: string,
 ): Promise<RichUserInput> {

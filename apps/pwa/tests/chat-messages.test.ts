@@ -344,6 +344,35 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
   assert.equal(messages[0].optimistic, false);
 });
 
+test("a v3 Agent response is not merged into its causal user command", () => {
+  const messages = mergeChatMessages([], [
+    {
+      id: "$user",
+      eventId: "$user",
+      kind: "user",
+      text: "Implement the change",
+      timestamp: 1_000,
+      commandId: "command-1",
+    },
+    {
+      id: "$agent",
+      eventId: "$agent",
+      kind: "agent",
+      text: "Implemented the change",
+      timestamp: 1_100,
+      commandId: "command-1",
+    },
+  ]);
+
+  assert.deepEqual(
+    messages.map((message) => [message.kind, message.text]),
+    [
+      ["user", "Implement the change"],
+      ["agent", "Implemented the change"],
+    ],
+  );
+});
+
 test("a transient lifecycle edit removes the transcript event it replaces", () => {
   const startup = {
     id: "$startup",

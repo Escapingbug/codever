@@ -19,7 +19,8 @@ fun interface CommandIdFactory {
 }
 
 /**
- * Durable, single-writer command lifecycle.
+ * Durable command lifecycle. Commands are independent protocol-v3 objects;
+ * unrelated sessions never share a global acknowledgement lane.
  *
  * A transmission lease never allocates a replacement command. If delivery is
  * uncertain, the exact same command id and sequence move to recovery_required
@@ -82,19 +83,6 @@ class DurableCommandOutbox internal constructor(
                 "Command ${released.commandId} was already completed and released; it will not be executed again.",
             )
         }
-        val blocking = snapshot.commands.firstOrNull {
-            it.belongsTo(snapshot) &&
-                it.sequence > snapshot.lastAcknowledgedSequence &&
-                !it.state.isTerminal
-        }
-        if (blocking != null) {
-            throw CommandBusyException(
-                blockingCommandId = blocking.commandId,
-                blockingState = blocking.state,
-                blockingOperation = CommandPayloadValidator.validate(blocking.payload).operation,
-                expectedRevision = blocking.expectedRevision,
-            )
-        }
         require(snapshot.commands.size < MAX_ACTIVE_COMMANDS) {
             "Release completed commands before adding another command."
         }
@@ -110,7 +98,15 @@ class DurableCommandOutbox internal constructor(
             submittedAt = now,
             updatedAt = now,
             sessionId = effectiveSessionId,
-            sequence = Math.addExact(snapshot.lastAcknowledgedSequence, 1L),
+            // Retained only as a bridge compatibility field. It is allocated
+            // locally and is not part of v3 authorization or serialization.
+            sequence = Math.addExact(
+                maxOf(
+                    snapshot.lastAcknowledgedSequence,
+                    snapshot.commands.maxOfOrNull(PersistedCommand::sequence) ?: 0L,
+                ),
+                1L,
+            ),
             baseRevision = snapshot.lastRevision,
             revisionEpoch = snapshot.revisionEpoch,
             revisionEpochGeneration = snapshot.revisionEpochGeneration,

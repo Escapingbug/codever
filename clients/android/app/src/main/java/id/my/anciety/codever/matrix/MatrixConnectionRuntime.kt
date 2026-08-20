@@ -41,8 +41,10 @@ class MatrixConnectionRuntime(
         MatrixApplicationControlSyncClient(),
     private val applicationTimelineClient: MatrixApplicationTimelineClient =
         MatrixApplicationTimelineClient(),
-    private val applicationRoomStateClient: MatrixApplicationRoomStateClient =
-        MatrixApplicationRoomStateClient(),
+    private val threadDirectoryClient: MatrixThreadDirectoryClient =
+        MatrixThreadDirectoryClient(),
+    private val applicationEventClient: MatrixApplicationEventClient =
+        MatrixApplicationEventClient(),
     private val threadHistoryClient: MatrixThreadHistoryClient = MatrixThreadHistoryClient(),
     private val networkMonitor: NetworkMonitor = AndroidNetworkMonitor(context),
     private val accountStorage: MatrixAccountStorage = MatrixAccountStorage(
@@ -63,18 +65,12 @@ class MatrixConnectionRuntime(
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onConvergenceRequired: (String) -> Unit = {},
     private val onDecryptedEvent: suspend (MatrixDecryptedEvent) -> Unit = {},
-    private val onAuthoritativeGatewayState:
-        suspend (MatrixDecryptedEvent) -> MatrixSessionDirectoryLocator = {
-            error("A Matrix session-directory decoder is required.")
-        },
-    private val onAuthoritativeRoomState: suspend (List<MatrixDecryptedEvent>) -> Unit = {
-        events -> for (event in events) onDecryptedEvent(event)
-    },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val networkTransitionMutex = Mutex()
     private val applicationControlGapStoreMutex = Mutex()
+    private val threadDirectoryMutex = Mutex()
     private val networkTransitionGeneration = AtomicLong(0)
     private val started = AtomicBoolean(false)
     private var networkAvailable = networkMonitor.isAvailable()
@@ -254,7 +250,7 @@ class MatrixConnectionRuntime(
         }
     }.await()
 
-    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): Unit = scope.async {
+    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): String = scope.async {
         val session = mutex.withLock {
             check(started.get()) { "The native Matrix runtime is stopped." }
             if (!networkAvailable) throw MatrixOfflineException()
@@ -270,7 +266,6 @@ class MatrixConnectionRuntime(
         // commands must remain able to retry during an inbound-sync restart.
         withTimeout(SEND_OPERATION_TIMEOUT_MS) {
             applicationControlClient.send(session, contentJson, transactionId)
-            Unit
         }
     }.await()
 
@@ -394,11 +389,38 @@ class MatrixConnectionRuntime(
 
     fun publicSession(): PublicMatrixSession? = secrets?.session?.toPublic()
 
-    suspend fun refreshApplicationRoomState() {
+    suspend fun refreshApplicationProjection() {
         val session = secrets?.session
             ?: throw MatrixOfflineException("The Matrix session is unavailable.")
-        val accepted = loadAuthoritativeRoomState(session)
-        diagnostics.record("matrix.application_state.refreshed", mapOf("accepted" to accepted.toString()))
+        val accepted = refreshApplicationProjectionBaseline(session)
+        val threads = refreshThreadDirectory(session)
+        diagnostics.record(
+            "matrix.application_state.refreshed",
+            mapOf(
+                "accepted" to accepted.toString(),
+                "threads" to threads.toString(),
+            ),
+        )
+    }
+
+    suspend fun refreshThreadDirectory(): Int {
+        val session = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            secrets?.session ?: throw MatrixOfflineException("The Matrix session is unavailable.")
+        }
+        return refreshThreadDirectory(session)
+    }
+
+    suspend fun fetchApplicationEvent(eventId: String): MatrixDecryptedEvent {
+        val session = mutex.withLock {
+            check(started.get()) { "The native Matrix runtime is stopped." }
+            if (!networkAvailable) throw MatrixOfflineException()
+            secrets?.session ?: throw MatrixOfflineException("The Matrix session is unavailable.")
+        }
+        return withTimeout(HISTORY_OPERATION_TIMEOUT_MS) {
+            applicationEventClient.event(session, eventId)
+        }
     }
 
     suspend fun loadThreadHistory(
@@ -743,13 +765,15 @@ class MatrixConnectionRuntime(
             var consecutiveFailures = 0
             while (isActive) {
                 try {
-                    val accepted = loadAuthoritativeRoomState(session)
+                    val accepted = refreshApplicationProjectionBaseline(session)
+                    val threads = refreshThreadDirectory(session)
                     applicationControlLastProgressAt = elapsedRealtime()
                     diagnostics.record(
                         "matrix.application_state.current_received",
                         mapOf(
                             "candidates" to accepted.toString(),
                             "accepted" to accepted.toString(),
+                            "threads" to threads.toString(),
                         ),
                     )
                     break
@@ -1011,21 +1035,61 @@ class MatrixConnectionRuntime(
         }
     }
 
-    private suspend fun loadAuthoritativeRoomState(session: StoredMatrixSession): Int {
-        repeat(MAX_DIRECTORY_STABILITY_ATTEMPTS) {
-            val beforeGateway = applicationRoomStateClient.currentGateway(session)
-            val before = onAuthoritativeGatewayState(beforeGateway)
-            val directory = applicationRoomStateClient.currentDirectory(session, before)
-            val afterGateway = applicationRoomStateClient.currentGateway(session)
-            val after = onAuthoritativeGatewayState(afterGateway)
-            if (before != after) return@repeat
-            onAuthoritativeRoomState(listOf(afterGateway) + directory.events)
-            return directory.events.size + 1
-        }
-        throw MatrixApplicationControlPayloadException(
-            "The Matrix session directory changed continuously while reconnecting.",
+    private suspend fun refreshApplicationProjectionBaseline(session: StoredMatrixSession): Int {
+        // A cursor-independent baseline recovers current v3 key/discovery
+        // state plus the latest bounded timeline window. It does not publish a
+        // synthetic checkpoint and never advances the durable live cursor.
+        val batch = applicationControlSyncClient.sync(session, since = null, longPoll = false)
+        val processed = processMatrixApplicationEventBatch(
+            events = batch.events,
+            onEvent = onDecryptedEvent,
+            onQuarantined = { event, error ->
+                diagnostics.record(
+                    "matrix.v3_baseline.event_quarantined",
+                    mapOf(
+                        "kind" to codeverApplicationEventKind(event.rawJson),
+                        "error" to error.javaClass.simpleName.take(160),
+                    ),
+                )
+            },
         )
+        if (processed.quarantined > 0) onConvergenceRequired("v3_baseline_event_quarantined")
+        return processed.committed
     }
+
+    private suspend fun refreshThreadDirectory(session: StoredMatrixSession): Int =
+        threadDirectoryMutex.withLock {
+            withTimeout(THREAD_DIRECTORY_OPERATION_TIMEOUT_MS) {
+                var from: String? = null
+                val seenTokens = mutableSetOf<String>()
+                var accepted = 0
+                repeat(MAX_THREAD_DIRECTORY_PAGES) {
+                    val page = threadDirectoryClient.page(session, from)
+                    val processed = processMatrixApplicationEventBatch(
+                        events = page.latestEvents,
+                        onEvent = onDecryptedEvent,
+                        onQuarantined = { event, error ->
+                            diagnostics.record(
+                                "matrix.thread_directory.event_quarantined",
+                                mapOf(
+                                    "kind" to codeverApplicationEventKind(event.rawJson),
+                                    "error" to error.javaClass.simpleName.take(160),
+                                ),
+                            )
+                        },
+                    )
+                    accepted += processed.committed
+                    val next = page.nextBatch ?: return@withTimeout accepted
+                    require(seenTokens.add(next)) {
+                        "The Matrix thread directory repeated a pagination token."
+                    }
+                    from = next
+                }
+                throw MatrixApplicationControlPayloadException(
+                    "The Matrix thread directory exceeded the session safety limit.",
+                )
+            }
+        }
 
     private fun stopApplicationControlReceiverLocked() {
         applicationControlReceiverReady = false
@@ -1234,11 +1298,13 @@ class MatrixConnectionRuntime(
         const val PROFILE_OPERATION_TIMEOUT_MS = 45_000L
         const val LOGIN_TOKEN_OPERATION_TIMEOUT_MS = 45_000L
         const val HISTORY_OPERATION_TIMEOUT_MS = 45_000L
+        const val THREAD_DIRECTORY_OPERATION_TIMEOUT_MS = 120_000L
         const val MEDIA_OPERATION_TIMEOUT_MS = 120_000L
         const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
         const val APPLICATION_CONTROL_RETRY_BASE_MS = 1_000L
         const val APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER = 15
         const val APPLICATION_CONTROL_STALE_TIMEOUT_MS = 90_000L
+        const val MAX_THREAD_DIRECTORY_PAGES = 1_000
     }
 }
 

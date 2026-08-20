@@ -73,24 +73,19 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `ack timeout never allocates a replacement command or permits a second sequence`() {
+    fun `ack timeout retains identity while an unrelated command can proceed`() {
         val fixture = fixture()
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "one"))
         val transmission = fixture.outbox.claimForTransmission(receipt.commandId)!!
 
         val timedOut = fixture.outbox.markAcknowledgementTimedOut(receipt.commandId)!!
         assertEquals(CommandState.RECOVERY_REQUIRED, timedOut.state)
-        val busy = assertThrows(CommandBusyException::class.java) {
-            fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "two"))
-        }
-        assertEquals(receipt.commandId, busy.blockingCommandId)
-        assertEquals(CommandState.RECOVERY_REQUIRED, busy.blockingState)
-        assertEquals(CommandOperation.PROMPT, busy.blockingOperation)
-        assertNull(busy.expectedRevision)
-        assertEquals(
-            "Codever is restoring the previous queued action.",
-            busy.message,
+        val independent = fixture.outbox.enqueue(
+            UUID.randomUUID().toString(),
+            payload("prompt", "two"),
         )
+        assertNotEquals(receipt.commandId, independent.commandId)
+        assertEquals(receipt.sequence + 1, independent.sequence)
 
         val recovered = fixture.outbox.claimRecovery(receipt.commandId)!!
         assertEquals(transmission.commandId, recovered.commandId)
@@ -212,28 +207,20 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `revision conflict reports review metadata instead of temporary recovery`() {
+    fun `legacy revision review never blocks an independent v3 command`() {
         val fixture = fixture()
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.delete"))
         fixture.outbox.claimForTransmission(receipt.commandId)
         fixture.outbox.recordRevisionConflict(receipt.commandId, receipt.sequence, 9)
 
-        val busy = assertThrows(CommandBusyException::class.java) {
-            fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.create"))
-        }
+        val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.create"))
 
-        assertEquals(receipt.commandId, busy.blockingCommandId)
-        assertEquals(CommandState.NEEDS_REVIEW, busy.blockingState)
-        assertEquals(CommandOperation.SESSION_DELETE, busy.blockingOperation)
-        assertEquals(9L, busy.expectedRevision)
-        assertEquals(
-            "The previous Codever action needs review before another action can start.",
-            busy.message,
-        )
+        assertEquals(CommandState.NEEDS_REVIEW, fixture.outbox.get(receipt.commandId)?.state)
+        assertEquals(receipt.sequence + 1, next.sequence)
     }
 
     @Test
-    fun `revision discard advances the durable base and allows immediate replacement`() {
+    fun `legacy revision discard preserves a monotonic local compatibility sequence`() {
         val fixture = fixture()
         fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 212)
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "discard"))
@@ -250,12 +237,12 @@ class DurableCommandOutboxTest {
         // the same stale base and immediately returns to needs_review.
         val restored = DurableCommandOutbox(fixture.store, fixture.clock, fixture.ids)
         val next = restored.enqueue(UUID.randomUUID().toString(), payload("prompt", "replacement"))
-        assertEquals(receipt.sequence, next.sequence)
+        assertEquals(receipt.sequence + 1, next.sequence)
         assertEquals(348L, restored.claimForTransmission(next.commandId)?.baseRevision)
     }
 
     @Test
-    fun `authenticated higher revision epoch resets an idle command cursor`() {
+    fun `legacy epoch rotation does not reuse a v3 local command identity`() {
         val fixture = fixture()
         fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
         val first = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "first"))
@@ -273,7 +260,7 @@ class DurableCommandOutboxTest {
 
         assertTrue(reconciliation.epochChanged)
         assertTrue(reconciliation.migratedCommands.isEmpty())
-        assertEquals(1, transmission.sequence)
+        assertEquals(first.sequence + 1, transmission.sequence)
         assertEquals("epoch-2", transmission.revisionEpoch)
         assertEquals(2L, transmission.revisionEpochGeneration)
     }
@@ -372,7 +359,7 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `completion from a retired accepted epoch does not advance the current cursor`() {
+    fun `completion from a retired accepted epoch cannot cause v3 identity reuse`() {
         val fixture = fixture()
         fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
         val accepted = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "old"))
@@ -388,7 +375,7 @@ class DurableCommandOutboxTest {
         val next = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "new"))
         val transmission = fixture.outbox.claimForTransmission(next.commandId)!!
 
-        assertEquals(1, transmission.sequence)
+        assertEquals(accepted.sequence + 1, transmission.sequence)
         assertEquals("epoch-2", transmission.revisionEpoch)
     }
 

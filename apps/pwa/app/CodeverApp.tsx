@@ -629,7 +629,6 @@ function CodeverAppRuntime() {
   );
   const [gatewayState, setGatewayState] =
     useState<GatewayStateSnapshot | null>(null);
-  const [gatewayLivenessNow, setGatewayLivenessNow] = useState(() => Date.now());
   const [, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
@@ -903,7 +902,6 @@ function CodeverAppRuntime() {
     matrixStatus: connectionStatus,
     trusted: trustedGateway !== null,
     gatewayUpdatedAt: gatewayState?.updatedAt,
-    now: gatewayLivenessNow,
   });
   const gatewayAvailable = gatewayLiveness.available;
   const displayedConnectionStatus = gatewayLiveness.state === "offline"
@@ -913,10 +911,6 @@ function CodeverAppRuntime() {
     ? deriveConnectionPresentation("offline", "matrix_gateway_offline")
     : matrixConnectionPresentation;
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setGatewayLivenessNow(Date.now()), 10_000);
-    return () => window.clearInterval(timer);
-  }, []);
   const matrixSessionRepairRequired =
     connectionDetail === "matrix_session_repair_required";
 
@@ -3621,8 +3615,6 @@ function CodeverAppRuntime() {
       connection = codeverClientRef.current;
       const sent = await sendRealCommand({
         operation: "session.create",
-        cwd: input.cwd,
-        projectName: input.projectName,
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
@@ -5754,10 +5746,8 @@ function CodeverAppRuntime() {
         <NewSessionDialog
           open={newSessionOpen}
           busy={newSessionBusy}
-          gatewayId={matrixConfig.gatewayId}
           gatewayName={trustedGateway?.gatewayName || "Gateway"}
           workspace={gatewayState.workspace}
-          sessions={visibleGatewaySessions}
           models={gatewayState.capabilities.models}
           extensions={gatewayState.capabilities.sessionExtensions}
           onClose={() => {

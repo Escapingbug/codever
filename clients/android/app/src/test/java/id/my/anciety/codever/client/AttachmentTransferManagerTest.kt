@@ -113,8 +113,11 @@ class AttachmentTransferManagerTest {
             from: String?,
             limit: Int,
         ) = throw UnsupportedOperationException()
-        override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) = Unit
-        override suspend fun refreshApplicationRoomState() = Unit
+        override suspend fun sendApplicationControlEvent(
+            contentJson: String,
+            transactionId: String,
+        ): String = "\$test-event"
+        override suspend fun refreshApplicationProjection() = Unit
         override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String {
             if (failUpload) throw IllegalStateException("upload unavailable")
             media = bytes.copyOf()

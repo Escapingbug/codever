@@ -30,8 +30,9 @@ Gateway command processing starts, the owning runtime performs:
 3. For each store, write the active `N -> N+1` step, run its idempotent
    migration, validate the result, and atomically checkpoint the new version.
 4. Reset only incompatible rebuildable/ephemeral state.
-5. Reconcile durable commands with authoritative Gateway state and reconstruct
-   projections from Matrix.
+5. Reconcile durable commands with the authenticated v3 event chain and
+   reconstruct projections from the signed current pointer, Matrix threads,
+   and thread relations.
 6. Write `complete` and unlock the runtime.
 
 If the process stops after a store write but before its checkpoint, the active
@@ -54,22 +55,25 @@ number:
 - Android native manifest and each encrypted store;
 - Android Matrix-account manifest and each account store;
 - Gateway runtime/outbox/replay file schemas;
-- Matrix application protocol (`MATRIX_NATIVE_PROTOCOL_VERSION`);
+- Matrix application protocol (`CODEVER_MATRIX_PROTOCOL_VERSION`);
 - Web/native bridge protocol (`NATIVE_BRIDGE_PROTOCOL_VERSION`).
 
 A build ID is diagnostic metadata. Store versions decide migration; protocol
 versions decide whether two concurrently running components can communicate.
-Native bridge versions are negotiated. Matrix application events fail closed
-when their authenticated version is unsupported; a storage migration must not
-silently reinterpret a different wire protocol.
+Native bridge versions are negotiated. Matrix v3 application events fail
+closed when their authenticated version is unsupported; a storage migration
+must not silently reinterpret a different wire protocol or reconnect a v2 data
+plane. Pairing is independently versioned because it establishes the trust and
+key material needed before application events can be opened.
 
 ## Release rule
 
 For every release that changes persistent state:
 
 1. Increase only the affected store version.
-2. Register and test every adjacent migration from the previous released
-   version. Skipping directly from `N` to `N+2` is invalid.
+2. Register and test every adjacent migration from every supported released
+   version. A device may jump from `N` to `N+3`; startup must run the complete
+   `N -> N+1 -> N+2 -> N+3` chain without requiring intermediate APK installs.
 3. Keep the previous release fixture. Do not rewrite it to resemble the new
    schema.
 4. Prove: normal upgrade, process death during every new step, restart/resume,

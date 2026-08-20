@@ -1,168 +1,110 @@
 # Real Matrix testing
 
-The rewrite has one automated Alpha path plus an optional manual development
-path. Both exercise pairing, application encryption, secure command
-acknowledgement, Room State, thread history, and a configured provider. There
-is no insecure legacy transport test mode.
+Protocol v3 has one release-blocking Alpha journey and a smaller browser-only
+diagnostic journey. Both use a disposable real Synapse server and the actual
+built PWA/Gateway. Unit tests or mocked Matrix transports are not release
+acceptance.
 
 ## Prerequisites
 
-- Docker Desktop is running.
-- Node.js 22 or newer is installed.
-- Workspace dependencies have been installed with `pnpm install`.
-- For the manual agent test, the selected provider CLI is installed and signed
-  in. The local Gateway defaults to the built-in `codex` provider.
+- Docker is running.
+- Node.js 22 or newer and workspace dependencies are installed.
+- Chromium/Chrome is available to Playwright.
+- An Android emulator or physical device is visible to `adb`.
 
-The local environment uses the official Synapse container, binds it only to
-`localhost:8008` and stores disposable data under the ignored
-`dev/matrix/data` directory. Its deliberately relaxed login rate limit is not
-safe for a public server.
+The fixture binds Synapse to a random localhost port and writes all accounts,
+keys, Gateway state, browser state, screenshots, and APK artifacts to isolated
+temporary/test directories. It never uses the deployed Gateway or the user's
+normal APK application ID.
 
-## Automated Alpha acceptance
+## Release-blocking Alpha acceptance
 
-From the repository root:
+Set the exact Android serial, then run:
 
-```powershell
-$env:CODEVER_ALPHA_LIVE_E2E = '1'
-$env:CODEVER_ANDROID_SERIAL = 'emulator-5554'
-pnpm test:e2e:alpha-live
+```bash
+CODEVER_ANDROID_SERIAL=emulator-5554 pnpm test:e2e:alpha-live
 ```
 
-A passing run ends with:
+`test:e2e:alpha-live` requires Android. It fails immediately if the serial is
+missing, so a browser-only run cannot be mistaken for complete acceptance.
+
+The journey proves, through real UI and Matrix traffic:
+
+1. A cache-cold browser pairs and sees the room-bound project identity.
+2. It creates a session, sends a prompt, receives Agent output, and creates a
+   second session while the first Agent turn is still running.
+3. A second independent browser pairs and restores inventory and transcript
+   without a manual refresh or application checkpoint.
+4. The isolated Android APK installs, pairs, restores existing history, and
+   creates a session that appears in the browser.
+5. Android sends a prompt, the Activity moves to the background, the foreground
+   service receives the terminal Agent result, and a task notification appears.
+6. Android is force-stopped and restarted, then restores its durable projection
+   and history without resending the command.
+7. Android deletes a session and the browser converges.
+8. A deliberately malformed v3 event is quarantined without blocking the next
+   valid event.
+9. Browser reload/history recovery and concurrent deletion converge on both
+   browser devices.
+
+A successful Android sub-journey ends with:
 
 ```text
-[8/8] PASS — real browser, Synapse, Gateway, E2EE, history, and deletion converged.
+PASS — Android v3 paired, restored, ran in background, notified, restarted, and deleted.
 ```
 
-That run exercises:
+The complete run ends with:
 
-1. Separate browser, APK, and Gateway Matrix devices.
-2. Pairing certificates and application-layer encrypted control events.
-3. Current Room State, per-session threads, history, and offline cache recovery.
-4. Exactly-once command recovery, concurrent mutations, notifications, and
-   browser/APK convergence.
-5. A browser deletion submitted while Gateway `/sync` is stalled beyond the
-   watchdog boundary, including in-place sync restart, active Agent
-   preservation, and exactly-once recovery.
-
-## Manual PWA-to-agent test
-
-Start the local PWA in one terminal:
-
-```powershell
-cd apps\pwa
-npm run dev
+```text
+PASS — Matrix v3 paired, created, ran concurrently, synchronized, restored, quarantined poison, and deleted.
 ```
 
-Open the localhost URL printed by the development server. Codever opens
-directly in the real secure workspace; there is no demo-mode switch. On a new
-browser device the **Add a Gateway** dialog opens automatically.
+Artifacts for a failed run are retained under `artifacts/e2e/matrix-v3-*`.
 
-Start the real local Gateway from the repository root in another terminal:
+## Browser-only diagnostic journey
 
-```powershell
-npm run dev:matrix-gateway
+When no Android target is available, the browser/Synapse/Gateway portion can be
+run explicitly:
+
+```bash
+CODEVER_MATRIX_V3_LIVE_E2E=1 pnpm test:e2e:matrix-v3-live
 ```
 
-On first launch the Gateway displays a terminal QR code, invitation code, and
-pasteable fallback link. In the browser, use the automatically opened
-**Add a Gateway** dialog to scan the QR code or paste the link. The PWA shows
-the Gateway name and the same invitation code; no Matrix fingerprints or JSON
-files are exposed.
+This command is useful during browser or Gateway development, but it is not the
+Alpha release gate.
 
-For this disposable local fixture only, expand **Matrix connection** and copy
-one value from `dev/matrix/local-test.json`:
+## Manual local development
 
-| PWA field | Local test value |
-| --- | --- |
-| Access token | `tester.accessToken` |
+Start the PWA and local Gateway in separate terminals:
 
-The PWA asks the QR-provided homeserver who the token belongs to and fills the
-Matrix account and device automatically. Changing the invitation to a
-different homeserver clears the saved token before any request is made.
-
-The QR invitation supplies the homeserver, encrypted room and complete signed
-Gateway route. Confirm **Trust Codever local Gateway and pair** once. The PWA
-pins the offered Matrix device, sends an encrypted hidden-challenge-bound
-request, verifies the signed response and certificate, and stores the
-persistent Gateway application key. The Gateway stores the trusted PWA device
-and starts the configured provider without a restart.
-
-Send a prompt in the chat. It should appear in the Gateway terminal's provider
-session, and the encrypted response should appear in the PWA.
-
-### Add a second collaborating device
-
-Keep the first PWA paired. Restart the local Gateway with an explicit local
-enrollment window:
-
-```powershell
-$env:CODEVER_PAIR_NEW_DEVICE = '1'
-npm run dev:matrix-gateway
+```bash
+cd apps/pwa && pnpm dev
 ```
 
-The persistent Gateway identity signs its new Matrix transport device and
-prints an **Add another Codever device** QR/link. Open the PWA in another
-browser profile, device, or origin so it receives an independent application
-key, then pair with a fresh Matrix device access token.
-
-Both PWAs should show two active devices. A prompt from either PWA appears in
-the other with its originating device name and Gateway revision. Agent replies,
-streaming edits and permission requests are independently encrypted to both
-devices. Concurrent prompts are accepted in Gateway order even if one device
-is briefly behind. A stale state-dependent mutation produces a visible review
-card and is discarded or re-signed only after the user reviews the latest
-state and confirms it.
-
-Use the pairing CLI `list` and `revoke --device DEVICE_ID` commands from
-[pairing-gateway.md](pairing-gateway.md) to revoke one device. The remaining
-PWA continues receiving replies; the revoked device receives no future
-application-layer copies and cannot execute new commands.
-
-To select another built-in or configured provider:
-
-```powershell
-$env:CODEVER_PROVIDER = 'opencode'
-$env:CODEVER_CWD = 'C:\path\to\your\project'
-npm run dev:matrix-gateway
+```bash
+pnpm dev:matrix-gateway
 ```
 
-Stop the Gateway and PWA with Ctrl+C. Stop Synapse when finished:
+The Gateway prints a QR code, invitation code, and pasteable fallback link.
+Use **Add a Gateway** in a fresh browser profile, confirm the matching
+invitation code, and complete the Matrix login offered by the invitation. One
+Matrix room is one project; new sessions appear as threads in that project.
 
-```powershell
-.\scripts\matrix-local.ps1 stop
-```
+Manual checks are useful for visual quality and provider-specific behavior,
+but do not replace the isolated Alpha journey. Never point the disposable test
+scripts at the production room or production Gateway data directory.
 
-## Current test boundary
+## Acceptance boundaries
 
-- Browser crypto and the Matrix `/sync` token are persisted in
-  device-scoped IndexedDB databases. The PWA flushes the local store after initial
-  sync and on explicit disconnect so a later reconnect can consume device-list
-  changes that happened while it was offline.
-- Keep only one Codever tab open for a given Matrix device. The PWA enforces
-  this with a full-lifetime Web Lock and rejects a second tab before either
-  instance can share the Rust crypto database.
-- If a previously signed Gateway Matrix device is not visible to the Matrix
-  crypto store, the PWA fails closed instead of trusting room state. This can
-  occur after browser storage eviction; sign in as a new Matrix device and pair it again.
-- The localhost Gateway intentionally uses an in-memory Matrix crypto store and
-  a fresh Matrix device on every start. This is allowed only by the explicit
-  local-test flag. The fresh device is signed by the persistent Gateway P-256
-  application key. The live encrypted rotation is the fast path; a root-signed
-  current-transport snapshot in the Gateway's extended Matrix profile lets an
-  offline PWA catch up without another user pairing action or room state power.
-- The local Gateway's application delivery outbox is durable. Restart and
-  short Matrix outages should recover only missing recipient copies, using
-  their original stable transactions and certificate generation.
-- An already paired PWA follows that signed rotation. A pairing request that
-  has not yet received its first certificate cannot survive this local
-  Gateway's fresh Matrix-device restart; rescan the new QR. Paired-device
-  recovery requires a homeserver with the Matrix `m.profile_fields` capability.
-- The Gateway application identity, trusted devices, one-time offer replay
-  ledger and current rotation head are persisted independently of Matrix.
-  The local fixture stores them in ignored `dev/matrix/gateway-data`.
-- Per-recipient live-edit event mappings are currently process-local. After a
-  restart, an edit for an older message is delivered as a new independently
-  encrypted message rather than referencing another device's Matrix event ID.
-- The hosted PWA requires an HTTPS Matrix homeserver. Browsers will block its
-  connection to this HTTP localhost fixture as mixed content.
+- One Codever tab owns one Matrix crypto store. A full-lifetime Web Lock rejects
+  another tab before the two can share a Rust crypto database.
+- Android uses the isolated `id.my.anciety.codever.e2e` application ID and
+  `app-e2e.apk`; acceptance must not overwrite the user's installed data.
+- Raw Matrix events are durable before projection, and a `/sync` token is saved
+  only after accepted events have been handled.
+- Thread enumeration and history are fully paginated. A bounded initial sync is
+  not evidence that all sessions or history were restored.
+- The foreground Android service, not the WebView, owns background sync and
+  notifications.
+- Only protocol-v3 application data is accepted. Pairing and signed Gateway
+  transport rotation are separate control-plane operations.

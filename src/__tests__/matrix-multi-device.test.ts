@@ -1483,6 +1483,10 @@ describe('multi-device Matrix collaboration', () => {
             )
             expect(ledger).toContain('$recovered-after-backoff')
         })
+        // The delivered WAL record is written before the coalesced recovery
+        // promise finishes its compaction pass. Join that promise before the
+        // test removes its directory, otherwise cleanup can race the writer.
+        await restarted.retryPendingForRoom(room, recoveringTransport)
         restarted.stopRetries()
     })
 

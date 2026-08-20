@@ -2620,7 +2620,7 @@ export async function connectMatrix(
   };
 }
 
-function createMatrixPairingTransport(
+export function createMatrixPairingTransport(
   client: MatrixClient,
   timelineEvent: string,
   noticeType: MsgType.Notice,
@@ -2791,7 +2791,7 @@ function waitForPairingResponse(
   return { promise, cancel };
 }
 
-async function verifyAndPinGatewayDevice(
+export async function verifyAndPinGatewayDevice(
   client: MatrixClient,
   gateway: MatrixTransportBinding,
 ): Promise<void> {
@@ -2825,7 +2825,7 @@ async function verifyAndPinGatewayDevice(
   await cryptoApi.setDeviceVerified(gateway.userId, gateway.deviceId, true);
 }
 
-async function waitForOwnMatrixDeviceKeys(
+export async function waitForOwnMatrixDeviceKeys(
   config: MatrixConnectionConfig,
   expected: { ed25519: string; curve25519: string },
   timeoutMs: number,
@@ -2892,7 +2892,7 @@ async function waitForOwnMatrixDeviceKeys(
   );
 }
 
-function withMatrixTimeout<T>(
+export function withMatrixTimeout<T>(
   operation: Promise<T>,
   timeoutMs: number,
   message: string,
@@ -3736,7 +3736,7 @@ async function acceptGatewayDeviceRotation(
   });
 }
 
-async function recoverGatewayTransportSnapshot(
+export async function recoverGatewayTransportSnapshot(
   client: MatrixClient,
   config: MatrixConnectionConfig,
   trust: TrustedGateway,
@@ -3801,7 +3801,7 @@ function assertMatrixEventMatchesTransport(
   }
 }
 
-function gatewayPin(config: MatrixConnectionConfig): {
+export function gatewayPin(config: MatrixConnectionConfig): {
   homeserver: string;
   roomId: string;
   userId: string;
@@ -3831,7 +3831,7 @@ function gatewayPin(config: MatrixConnectionConfig): {
   };
 }
 
-function waitForInitialSync(
+export function waitForInitialSync(
   client: MatrixClient,
   syncEvent: string,
   timeoutMs = 30_000,

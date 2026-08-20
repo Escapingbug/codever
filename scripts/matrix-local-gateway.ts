@@ -21,7 +21,7 @@ import {
     startGatewayAdminServer,
 } from '../src/gateway/admin/index.js'
 import {
-    MatrixGatewayRunner,
+    V3MatrixGatewayRunner,
     MatrixNodeSdkGatewayClient,
     loadOrCreateMatrixCryptoPassphrase,
     loadOrLoginMatrixGateway,
@@ -217,7 +217,7 @@ if (active.length === 0) {
 }
 
 const trustedDevices = active.map(trustedDeviceFromRecord)
-let runner: MatrixGatewayRunner | null = null
+let runner: V3MatrixGatewayRunner | null = null
 const stopPairingRecovery = listenForMatrixPairingRequests({
     client,
     service: pairingService,
@@ -270,7 +270,7 @@ const config: MatrixGatewayConfig = {
         30_000,
     ),
 }
-runner = new MatrixGatewayRunner(config, {
+runner = new V3MatrixGatewayRunner(config, {
     client,
     sessionExtensionRegistry,
     ...(deterministicE2eProvider

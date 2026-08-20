@@ -49,6 +49,11 @@ internal val NATIVE_STATE_CATALOG = listOf(
     NativeStateCatalogEntry("replay-ledger", NativePersistedStateClass.SECURITY_CRITICAL, 1),
     NativeStateCatalogEntry("timeline-key-ring", NativePersistedStateClass.SECURITY_CRITICAL, 2),
     NativeStateCatalogEntry(
+        "matrix-v3-project-keys",
+        NativePersistedStateClass.SECURITY_CRITICAL,
+        1,
+    ),
+    NativeStateCatalogEntry(
         "command-outbox",
         NativePersistedStateClass.DURABLE_COMMAND,
         4,
@@ -56,12 +61,27 @@ internal val NATIVE_STATE_CATALOG = listOf(
     ),
     NativeStateCatalogEntry("pairing-transaction", NativePersistedStateClass.DURABLE_COMMAND, 1),
     NativeStateCatalogEntry(
+        "matrix-v3-raw-inbox",
+        NativePersistedStateClass.DURABLE_COMMAND,
+        1,
+    ),
+    NativeStateCatalogEntry(
+        "matrix-v3-command-content",
+        NativePersistedStateClass.DURABLE_COMMAND,
+        1,
+    ),
+    NativeStateCatalogEntry(
         "client-event-projection",
         NativePersistedStateClass.REBUILDABLE_PROJECTION,
         1,
     ),
     NativeStateCatalogEntry(
         "attachment-transfer-scratch",
+        NativePersistedStateClass.REBUILDABLE_PROJECTION,
+        1,
+    ),
+    NativeStateCatalogEntry(
+        "matrix-v3-projection",
         NativePersistedStateClass.REBUILDABLE_PROJECTION,
         1,
     ),

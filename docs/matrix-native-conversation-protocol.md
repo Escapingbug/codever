@@ -1,200 +1,150 @@
 # Matrix-native conversation protocol
 
-Status: protocol version 2, pre-release hard cutover
+Status: protocol version 3, pre-release hard cutover
 
-Codever uses Matrix as a durable conversation system, not as an RPC queue. The
-homeserver remains untrusted for business plaintext and execution authority.
-There is no checkpoint, state-request, history-request, or version-1
-compatibility path in the native data plane.
+Codever uses Matrix as a durable encrypted conversation log. Matrix is not an
+RPC queue and a client cache is never authoritative. The homeserver is trusted
+for availability and ordering only; Codever signatures establish authorship
+and application encryption hides business content from the homeserver.
+
+Version 3 replaces the pre-release v1/v2 application data plane. There is no
+wire downgrade, checkpoint RPC, state-request RPC, history-request RPC, or v2
+timeline fallback. The pairing handshake has its own version and remains only
+as the control plane that establishes device trust and distributes v3 keys.
 
 ## Native object mapping
 
 | Codever concept | Matrix concept | Authority |
 | --- | --- | --- |
-| Gateway workspace, capabilities, and directory commit | `io.codever.gateway.current.v2` Room State | one state key per Gateway |
-| Bounded current session directory | `io.codever.session.directory.v2` Room State | directly addressed immutable pages in three rotating slots |
-| Live session entity and delete audit | `io.codever.session.current.v2` Room State | one state key per session; delete is a tombstone |
-| Session identity | `m.thread` root | immutable `session_root` event ID |
-| User/agent/tool output | thread reply | Matrix event ID plus signed logical ID |
-| Session/revision audit | room or thread timeline event | append-only history |
-| Older conversation history | Matrix relations/backward pagination | the homeserver timeline |
+| Workspace | a set of encrypted project rooms | local Gateway configuration plus signed room membership |
+| Project | one encrypted Matrix room | `project_id` permanently bound to the room |
+| Session | one Matrix thread | immutable root event and signed lifecycle events |
+| User prompt or mutation | ordinary `m.room.message` command event | device signature, certificate, stable `command_id` |
+| Agent/tool/status output | ordinary `m.room.message` thread event | Gateway signature and stable logical `event_id` |
+| Current project projection | ordinary signed snapshot event | `io.codever.project.current.v3` points to its physical event ID |
+| Project key grant | directly addressed Room State | `io.codever.project.key_grant.v3` keyed by device ID |
+| Transcript and audit | thread timeline and relations | append-only signed events |
 
-One configured encrypted room may currently contain several project
-identities. Each session state and root carries its signed project ID, name,
-and path. A future Space topology may split projects into rooms without
-changing the state or thread semantics.
+One room represents exactly one project. Project identity therefore does not
+need to be repeated as visual grouping metadata in every session row, and a
+session cannot silently move between projects. Matrix Spaces may organize
+rooms later without changing the room/thread protocol.
 
-## Current state and bounded convergence
+## Unified event chain
 
-The Gateway publishes a replace-in-place session entity for low-latency live
-updates and retains a deleted tombstone for audit. Cold-start inventory does
-not enumerate all Room State and does not replay every historical session
-tombstone. Instead, the Gateway publishes the complete current/archived
-directory as bounded, directly addressable pages. Gateway state contains:
+All business commands and Gateway outputs are normal timeline events. Their
+outer `io.codever` object contains protocol version 3, the logical event ID,
+project binding, key epoch, nonce, and application ciphertext. The decrypted
+payload is either a device-signed command or a Gateway-signed event.
 
-- the revision epoch and current conversation revision;
-- a monotonically increasing `state_version`;
-- a directory descriptor containing generation, rotating slot, page count,
-  state-key prefix, and canonical digest;
-- workspace defaults, capabilities, and active-device count.
+Every signature binds the workspace, project, room, certificate generation,
+logical ID, operation/kind, timestamp, and payload. A Matrix physical event ID
+is delivery metadata, not business identity. Moving ciphertext to another
+room, changing a relation, changing a command, or substituting a logical ID
+fails verification.
 
-Each page contains at most 32 sessions and at most 20 KiB of plaintext. The
-Gateway writes every page for a new generation first, writes changed individual
-session entities second, and replaces Gateway state last. That last event is
-the commit marker that makes the page generation discoverable. Clients fetch
-the exact Gateway state key, fetch the exact page keys named by its descriptor,
-and fetch Gateway state again. They commit the directory only when both
-descriptors match and every page binding, index, count, and digest validates.
-Three rotating slots prevent an older reader from accepting pages overwritten
-by a newer generation.
+`causationCommandId` records why a Gateway event exists. It is not the event's
+identity: a prompt, acknowledgement, Agent response, tool result, and terminal
+result may all causally refer to one command while retaining distinct logical
+event IDs. Clients only reconcile the optimistic user prompt with its canonical
+user event; they never merge an Agent response into that prompt.
 
-This is a bounded Matrix-state snapshot, not an application RPC checkpoint:
-the client can address every object through standard Room State GETs, and no
-request event is sent to the Gateway. Live session state keys still converge
-independently between directory commits. Events from a retired revision epoch
-are ignored, and each state key is monotonic within the current epoch. State
-replacement uses a durable latest-write-wins outbox; a crash or rate limit
-retries the same stable Matrix state tuple.
+## Commands and exactly-once execution
 
-Timeline events cannot create, resurrect, archive, or delete sessions. They
-provide immutable roots, visible conversation output, audit history, command
-completion evidence, and low-latency revision progress. Commands without a
-session mutation emit `gateway_revision`; the corresponding revision is also
-replaced in Gateway Room State, so an offline client does not need timeline
-replay to become current.
+Before sending, a client writes the exact signed and encrypted Matrix content
+to its durable outbox. Retry reuses both `command_id` and Matrix transaction ID.
+Once Matrix acknowledges the event, the client stops retransmitting it and
+waits for the signed Gateway chain to reach acknowledgement and terminal state.
 
-## Client recovery
+The Gateway commits each accepted `command_id` to a durable command journal
+before execution. Re-delivery returns the recorded state and never runs the
+operation twice. Independent append operations such as prompts are serialized
+by the Gateway; state-dependent mutations carry explicit preconditions and
+produce a reviewable conflict instead of hidden client-side retry.
 
-Connected clients follow this algorithm:
+Session creation, prompt, cancel, archive, restore, and delete use this same
+path. A create command produces an immutable thread root. Delete produces a
+signed lifecycle tombstone; it does not redact Matrix history.
 
-1. Start Matrix sync and authenticate the pinned Gateway application key and
-   current Matrix transport binding. For a new device, the Gateway first
-   publishes immutable thread roots and complete current Room State addressed
-   to that device, and only then sends the signed pairing response. That
-   response is the commit marker. Before its first send, the client encrypts
-   the exact signed request in durable local storage. Before exposing success,
-   it also verifies and durably encrypts the response beside that request.
-   Android's service resumes that same transaction across WebView detach and
-   process death without another scan, identity, native confirmation, or
-   approval. The response is a durable proof with the same lifetime as its certificate; the Gateway
-   redelivers it only while that exact certificate remains active, so
-   revocation cannot be bypassed by replaying an interrupted request.
-2. Fetch the exact Gateway Room State key directly, independent of any
-   persisted `/sync` cursor. Use its directory descriptor to fetch only the
-   exact bounded page keys; never issue a room-wide `/state` request.
-3. Fetch Gateway state again, validate the stable descriptor plus every
-   envelope binding, page index/count, unique session ID, and canonical digest,
-   then atomically replace the local directory projection. Gateway metadata
-   makes the connection writable; later per-session replacement events
-   converge independently within that authenticated Gateway epoch.
-4. Use incremental `/sync` state updates for live replacement events. On a
-   reconnect or foreground return, re-run the exact-key directory read; do not
-   scan timeline history to reconstruct the directory. When `/sync` marks a
-   timeline as `limited`, persist `(old_since, prev_batch, cursor)` before
-   advancing the live token. Recover that gap with standard forward
-   `/messages?from=<cursor>&to=<prev_batch>` pages, commit every page cursor,
-   deduplicate by authenticated event identity, and remove the gap only after
-   the boundary closes. Live sync continues while the durable gap journal
-   drains, and process death resumes the same journal.
-5. Load a selected session's transcript from local encrypted storage and its
-   Matrix thread relations. Paginate older relations only when the user asks.
-6. Offline, show the last verified local projection and transcript as a cache,
-   but execute no command until current Room State has been authenticated.
+## Current state and recovery
 
-Android establishes its dedicated live `/sync` cursor with a bounded timeline
-limit; it does not turn initial sync into an unbounded room-history fetch. Each
-later batch is cryptographically validated and durably applied before the
-`/sync` token is saved. A limited batch first persists its missing interval, so
-a process exit causes safe `/sync` or `/messages` redelivery instead of a lost
-transition. The native SDK Timeline is a short-lived trust-bootstrap channel
-only: it opens for the explicit Megolm pairing request/response and closes when
-that exchange settles. It is not part of the connected conversation data path.
+Current state is an optimization over the event log, not a second authority.
+After a projection change, the Gateway emits an ordinary signed project
+snapshot and updates `io.codever.project.current.v3` to that event. A cold
+client reads the pointer, fetches and verifies the referenced event, then
+enumerates Matrix threads with complete pagination. It loads a selected
+transcript through standard thread relations.
 
-Conversation output is also physically bounded. UTF-8 bodies larger than 8 KiB
-are emitted as deterministic ordered continuation events with one logical
-message ID and part metadata. Progressive edits defer oversized intermediate
-values; the terminal edit replaces the first part and emits each continuation
-once. A client that was offline or killed restores the same parts from the
-session thread rather than depending on one oversized Matrix response.
+Clients persist raw Matrix events before projection. Projection success marks
+an inbox record complete. A malformed event is quarantined individually; it
+cannot block later valid events. Events that are valid but await a dependency,
+such as a project key grant, are retried in multi-pass order so a later grant
+can unlock an earlier event without deadlocking the inbox.
 
-A local browser/APK cache is never connected-state authority. A cached
-projection cannot make the UI report Connected and cannot release an outbound
-command by itself.
+The `/sync` token records availability progress only. It is not an application
+checkpoint. If `/sync` is limited or a client was offline for a long time, the
+client rebuilds from the current pointer, the fully paginated thread directory,
+and thread relations. Process death resumes the durable inbox/outbox and never
+manufactures a replacement command.
 
-Gateway workspace, project, capability, and session fields use one strict
-version-2 schema on Gateway, browser, and APK. Missing fields, duplicate
-capability IDs, unknown fields, or type mismatches reject the complete Room
-State refresh instead of producing different projections on different clients.
+Offline clients show their last verified encrypted local projection and
+history. They do not report Connected or release new commands until the Matrix
+transport and authenticated v3 projection are writable.
 
-## Application encryption
+Android owns this process in its foreground connection service. The service
+keeps `/sync`, raw-inbox persistence, projection, outbox reconciliation, and
+task notifications running while the WebView is detached or the screen is
+off. Opening the Activity reads the service-owned projection; it does not start
+a separate catch-up protocol.
 
-Matrix E2EE protects transport, while Codever application encryption prevents
-a malicious or compromised homeserver from reading Codever content.
+## Encryption and device lifecycle
 
-Each room has a durable AES-256-GCM key ring. Timeline and Room State envelopes
-are Gateway-signed and bind Gateway, conversation, room, epoch, and their
-logical Matrix location. A state envelope additionally binds event type,
-state key, and state version. Moving ciphertext between rooms or state keys
-fails authentication.
+Matrix E2EE protects the Matrix transport. Codever additionally encrypts v3
+project payloads with a durable AES-256-GCM project key ring. The Gateway sends
+one pairwise encrypted `io.codever.project.key_grant.v3` state event for each
+trusted device. A client ignores grants addressed to other devices; they are
+normal room state, not poison input.
 
-The Gateway state event carries the pairwise encrypted key-ring bundle
-addressed to active Codever devices. Per-session Room State reuses that epoch
-key and does not repeat the device bundle. This keeps state replacement small
-and makes device count affect bytes in one Gateway state event rather than every
-session entity. Timeline events that must be independently readable retain
-their own addressed key-ring bundle.
+Adding a device grants the retained project epochs needed for authorized
+history. Revocation rotates the active epoch. A removed device may retain data
+it legitimately decrypted earlier but cannot decrypt later events. Pairing
+responses/rejections and signed Gateway Matrix-device rotation remain
+pairwise control messages; they do not carry application session state.
 
-Adding a device grants retained epochs. Removing or revoking a device rotates
-the active epoch. Removed devices retain plaintext they legitimately saw
-before revocation but cannot decrypt later epochs. Matrix event content is
-bounded below the homeserver event limit; exhausting the retained epoch budget
-is an explicit room-migration condition, never silent history loss.
+Large attachments are encrypted before Matrix media upload and referenced by
+signed metadata. Large visible text is split into deterministic bounded parts
+with one logical message identity so recovery never depends on an oversized
+single response.
 
-Commands, acknowledgements, results, conflicts, and invitation control remain
-pairwise signed/encrypted because they are device-specific and executable.
-The certificate carries the complete current command grant set; neither the
-Gateway nor a native client adds local compatibility permissions. Command
-authorization requires that certificate, Matrix transport binding, sequence
-epoch, and replay-ledger validation. Conversation revision is a
-compare-and-swap precondition for state-dependent mutations; stale append-only
-prompts can be linearized when intervening revisions are also prompts.
+## Rate and delivery budget
 
-The connected data plane has no Megolm fallback. Timeline envelopes are sent
-as direct standard `m.room.message` events, while commands and their targeted
-responses use `io.codever.secure_control.v1`. A client rejects the same
-application envelope if it arrives through an old encrypted-room-message
-route. Megolm remains limited to the explicit pre-trust pairing exchange and
-Gateway transport rotation.
+Traffic scales with visible business activity:
 
-## Delivery and rate budget
+- one Matrix command event per user action;
+- one acknowledgement and one terminal event per command;
+- Agent/tool events or edits that are actually visible;
+- one snapshot event plus one pointer replacement when the current projection
+  materially changes;
+- one pairwise key-grant state event only when a device or key epoch changes.
 
-Steady-state traffic follows visible business semantics:
-
-- one user command and its targeted acknowledgement/result;
-- one collaboration/thread event for the user prompt;
-- agent messages or edits that are actually visible;
-- one session Room State replacement for a live entity update; when the durable
-  directory changes, bounded directory pages are written before one small
-  Gateway commit update;
-- no Gateway state/history RPC on connect, focus, scrollback, or reconnect;
-- no full-timeline backfill merely because a key or current state changed.
-
-Status replacement is latest-write-wins and bounded independently from the
-command authorization lane. Both delivery outboxes honor homeserver retry
-timing, so raising Matrix rate limits is not a correctness requirement.
+There is no per-device fan-out for ordinary conversation output, heartbeat
+state, focus refresh, reconnect RPC, session-directory page rewrite, or manual
+checkpoint publication. Gateway and client outboxes honor Matrix `retry_after`
+and stable transaction IDs, so homeserver rate limits affect latency rather
+than correctness.
 
 ## Cutover invariants
 
-- Removed `gateway_checkpoint`, `gateway_state_request`, and `history_request`
-  kinds are neither emitted nor parsed.
-- Every supported PWA and APK build uses exact-key Gateway/directory Room State
-  reads for the current session inventory and Matrix relations for history.
-- Existing pre-release clients must be replaced; there is no negotiated
-  downgrade.
-- Missing application timeline, control, or Room State transport support is a
-  hard error; the Gateway never silently falls back to an older data path.
-- Existing sessions receive one idempotent `session_root`, whose Matrix event
-  ID is persisted before threaded output is published.
-- Archive and delete never redact Matrix history; deletion removes the session
-  from the committed directory while retaining an authenticated state
-  tombstone for audit and live convergence.
+- Production Gateway entry points instantiate only `V3MatrixGatewayRunner`.
+- PWA production connection uses only `connectMatrixV3`.
+- Android business projection accepts only version-3 project events. It does
+  not parse v2 Room State, `secure_envelope`, `secure_envelope_bundle`, or
+  `timeline_envelope` as application data.
+- No production composition root imports, emits, parses, or negotiates a v1/v2
+  application data event.
+- Unsupported authenticated versions fail closed; they are never reinterpreted
+  through another codec.
+- Full Alpha acceptance requires disposable Synapse, two browser devices, a
+  real installed Android target, Gateway restart-safe stores, background Agent
+  completion and notification, reload/history restore, poison quarantine,
+  cross-device convergence, and concurrent deletion.

@@ -18,23 +18,6 @@ import org.junit.Test
 
 class GatewayStateSyncPolicyTest {
     @Test
-    fun `only a complete authoritative batch with one Gateway entity unlocks commands`() {
-        assertEquals(true, authoritativeRoomStateReady(listOf("gateway_state")))
-        assertEquals(
-            true,
-            authoritativeRoomStateReady(
-                listOf("gateway_state", "session_state", "session_state"),
-            ),
-        )
-        assertEquals(false, authoritativeRoomStateReady(emptyList()))
-        assertEquals(false, authoritativeRoomStateReady(listOf("session_state")))
-        assertEquals(
-            false,
-            authoritativeRoomStateReady(listOf("gateway_state", "gateway_state")),
-        )
-    }
-
-    @Test
     fun `canonical Matrix revision suppresses command completion fallback`() {
         assertEquals(true, requiresGatewayConvergence(null, 4))
         assertEquals(true, requiresGatewayConvergence(3, 4))
@@ -43,70 +26,6 @@ class GatewayStateSyncPolicyTest {
         assertThrows(IllegalArgumentException::class.java) {
             requiresGatewayConvergence(0, -1)
         }
-    }
-
-    @Test
-    fun `canonical Matrix state only completes its matching session command`() {
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_CREATE,
-            "session_root",
-            null,
-        ))
-        assertEquals(true, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_CREATE,
-            "session_state",
-            "active",
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_SETTINGS,
-            "session_update",
-            null,
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_ARCHIVE,
-            "session_lifecycle",
-            "archived",
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_RESTORE,
-            "session_lifecycle",
-            "idle",
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_DELETE,
-            "session_lifecycle",
-            "deleted",
-        ))
-        assertEquals(true, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_DELETE,
-            "session_state",
-            "deleted",
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.PROMPT,
-            "session_update",
-            null,
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_DELETE,
-            "session_lifecycle",
-            "archived",
-        ))
-        assertEquals(false, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_RESTORE,
-            "gateway_revision",
-            null,
-        ))
-        assertEquals(true, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_ARCHIVE,
-            "session_state",
-            "archived",
-        ))
-        assertEquals(true, canonicalStateCompletesCommand(
-            CommandOperation.SESSION_RESTORE,
-            "session_state",
-            "active",
-        ))
     }
 
     @Test

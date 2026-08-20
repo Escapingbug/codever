@@ -1,6 +1,7 @@
 import type {
     MatrixDownloadMediaRequest,
     MatrixApplicationStateEventRequest,
+    MatrixApplicationTimelineEventRequest,
     MatrixSendEventRequest,
     MatrixSendEventResult,
     MatrixTransport,
@@ -32,6 +33,12 @@ export class InMemoryMatrixTransport implements MatrixTransport {
         this.transactionResults.set(transactionKey, result)
         this.delivered.push({ ...structuredClone(request), eventId: result.eventId })
         return result
+    }
+
+    async sendApplicationTimelineEvent(
+        request: MatrixApplicationTimelineEventRequest,
+    ): Promise<MatrixSendEventResult> {
+        return this.sendEncryptedRoomEvent(request)
     }
 
     async setTyping(roomId: string, typing: boolean, timeoutMs?: number): Promise<void> {

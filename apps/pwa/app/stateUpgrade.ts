@@ -1,5 +1,5 @@
 import {
-  MATRIX_NATIVE_PROTOCOL_VERSION,
+  CODEVER_MATRIX_PROTOCOL_VERSION,
   migrateVersionedState,
   type PersistedStateClass,
   type StateMigration,
@@ -277,7 +277,7 @@ export function runPwaStateUpgrade(
     version: 1,
     phase: "running",
     appBuild: CODEVER_BUILD_VERSION,
-    matrixProtocol: MATRIX_NATIVE_PROTOCOL_VERSION,
+    matrixProtocol: CODEVER_MATRIX_PROTOCOL_VERSION,
     nativeBridgeProtocol: NATIVE_BRIDGE_PROTOCOL_VERSION,
     startedAt: previous?.phase === "running" ? previous.startedAt : now,
     completedAt: null,

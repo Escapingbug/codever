@@ -30,9 +30,14 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
     }
     val events = File(root, "events.enc")
     val commands = File(root, "commands.enc")
+    val matrixV3Commands = File(root, "matrix-v3-commands.enc")
+    val matrixV3CommandContent = File(root, "matrix-v3-command-content.enc")
     val trust = File(root, "gateway-trust.enc")
     val replay = File(root, "replay.enc")
     val timelineKeys = File(root, "matrix-timeline-keys.enc")
+    val matrixV3ProjectKeys = File(root, "matrix-v3-project-keys.enc")
+    val matrixV3Inbox = File(root, "matrix-v3-inbox.enc")
+    val matrixV3Projection = File(root, "matrix-v3-projection.enc")
     val pairing = File(root, "pairing-transaction.enc")
     val stateManifest = File(root, "state-manifest.json")
     val transfers = File(root, "transfers").apply {
@@ -59,9 +64,14 @@ class NativeRuntimeFiles(context: Context, deviceScope: String) {
         listOf(
             events,
             commands,
+            matrixV3Commands,
+            matrixV3CommandContent,
             trust,
             replay,
             timelineKeys,
+            matrixV3ProjectKeys,
+            matrixV3Inbox,
+            matrixV3Projection,
             pairing,
             stateManifest,
         ).forEach { file ->

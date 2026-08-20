@@ -1,19 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  GATEWAY_HEARTBEAT_STALE_MS,
-  deriveGatewayLiveness,
-} from "../app/gatewayLiveness.ts";
+import { deriveGatewayLiveness } from "../app/gatewayLiveness.ts";
 
 const now = 1_000_000;
 
-test("distinguishes a live Gateway from a stale Room State while Matrix remains connected", () => {
+test("keeps the durable Matrix journal writable regardless of snapshot age", () => {
   assert.deepEqual(
     deriveGatewayLiveness({
       matrixStatus: "connected",
       trusted: true,
-      gatewayUpdatedAt: now - GATEWAY_HEARTBEAT_STALE_MS + 1,
-      now,
+      gatewayUpdatedAt: now,
     }),
     { state: "online", available: true },
   );
@@ -21,10 +17,9 @@ test("distinguishes a live Gateway from a stale Room State while Matrix remains 
     deriveGatewayLiveness({
       matrixStatus: "connected",
       trusted: true,
-      gatewayUpdatedAt: now - GATEWAY_HEARTBEAT_STALE_MS,
-      now,
+      gatewayUpdatedAt: 0,
     }),
-    { state: "offline", available: false },
+    { state: "online", available: true },
   );
 });
 
@@ -34,7 +29,6 @@ test("does not call an untrusted or still-syncing device Gateway-offline", () =>
       matrixStatus: "connected",
       trusted: false,
       gatewayUpdatedAt: undefined,
-      now,
     }),
     { state: "unavailable", available: false },
   );
@@ -43,7 +37,6 @@ test("does not call an untrusted or still-syncing device Gateway-offline", () =>
       matrixStatus: "connecting",
       trusted: true,
       gatewayUpdatedAt: now,
-      now,
     }),
     { state: "matrix", available: false },
   );

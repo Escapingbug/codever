@@ -15,7 +15,7 @@ import org.matrix.rustcomponents.sdk.SlidingSyncVersion
 
 class MatrixApplicationControlClientTest {
     @Test
-    fun `sends only a secure envelope with a stable transaction id and wipes buffers`() =
+    fun `sends only a v3 project envelope as a room message with a stable transaction id`() =
         runBlocking {
             lateinit var endpoint: URI
             lateinit var requestReference: ByteArray
@@ -42,15 +42,15 @@ class MatrixApplicationControlClientTest {
             assertEquals("secret-access-token", receivedToken)
             assertEquals(
                 "https://matrix.example.org/_matrix/client/v3/rooms/" +
-                    "%21room%3Aexample.org/send/io.codever.secure_control.v1/" +
+                    "%21room%3Aexample.org/send/m.room.message/" +
                     "codever.command.ack%2Fcommand-1",
                 endpoint.toASCIIString(),
             )
             assertEquals(
-                "secure_envelope",
+                3,
                 Json.parseToJsonElement(requestCopy.toString(Charsets.UTF_8))
                     .jsonObject.getValue("io.codever").jsonObject
-                    .getValue("kind").jsonPrimitive.content,
+                    .getValue("version").jsonPrimitive.content.toInt(),
             )
             assertTrue(requestReference.all { it == 0.toByte() })
             assertTrue(responseBody.all { it == 0.toByte() })
@@ -79,22 +79,15 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `recognizes only application encrypted control and timeline events`() {
+    fun `recognizes only v3 project state and encrypted room messages`() {
         val event = """
             {
-              "type":"io.codever.secure_control.v1",
+              "type":"m.room.message",
               "content":${secureContent()}
             }
         """.trimIndent()
 
         assertTrue(isCodeverApplicationControlEvent(event))
-        assertTrue(isCodeverApplicationControlEvent(event.replace(
-            "\"kind\":\"secure_envelope\"",
-            "\"kind\":\"secure_envelope_bundle\"",
-        ).replace(
-            "\"secure_envelope\":",
-            "\"secure_envelope_bundle\":",
-        )))
         assertTrue(isCodeverApplicationControlEvent("""
             {
               "type":"m.room.message",
@@ -102,7 +95,7 @@ class MatrixApplicationControlClientTest {
             }
         """.trimIndent()))
         assertFalse(isCodeverApplicationControlEvent(secureContent()))
-        assertFalse(isCodeverApplicationControlEvent("""
+        assertTrue(isCodeverApplicationControlEvent("""
             {
               "type":"m.room.message",
               "content":${secureContent()}
@@ -159,11 +152,11 @@ class MatrixApplicationControlClientTest {
     @Test
     fun `diagnostics expose only the bounded application event kind`() {
         assertEquals(
-            "timeline_envelope",
+            "v3_project_envelope",
             codeverApplicationEventKind("""
                 {
                   "type":"m.room.message",
-                  "content":${timelineContent()}
+                  "content":${secureContent()}
                 }
             """.trimIndent()),
         )
@@ -177,6 +170,47 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
+    fun `thread directory pages latest gateway events for complete session discovery`() =
+        runBlocking {
+            lateinit var endpoint: URI
+            val response = """
+                {
+                  "chunk":[{
+                    "event_id":"${'$'}root-1",
+                    "sender":"@device:example.org",
+                    "unsigned":{"m.relations":{"m.thread":{"latest_event":{
+                      "event_id":"${'$'}latest-1",
+                      "type":"m.room.message",
+                      "sender":"@gateway:example.org",
+                      "origin_server_ts":9,
+                      "content":${secureContent()}
+                    }}}}
+                  }],
+                  "next_batch":"thread-page-2"
+                }
+            """.trimIndent().toByteArray()
+            val client = MatrixThreadDirectoryClient(
+                MatrixApplicationControlSyncTransport { target, _ ->
+                    endpoint = target
+                    MatrixHttpResponse(200, response)
+                },
+            )
+
+            val page = client.page(storedSession(), "thread-page-1")
+
+            assertEquals(1, page.candidateThreadCount)
+            assertEquals("thread-page-2", page.nextBatch)
+            assertEquals(listOf("\$latest-1"), page.latestEvents.map { it.eventId })
+            assertTrue(
+                endpoint.toASCIIString().contains(
+                    "/_matrix/client/v1/rooms/%21room%3Aexample.org/threads?",
+                ),
+            )
+            assertTrue(endpoint.toASCIIString().contains("include=all"))
+            assertTrue(endpoint.toASCIIString().contains("from=thread-page-1"))
+        }
+
+    @Test
     fun `sync receives raw application control events for the bound room`() = runBlocking {
         lateinit var endpoint: URI
         val responseBody = """
@@ -184,7 +218,7 @@ class MatrixApplicationControlClientTest {
               "next_batch":"s-next",
               "rooms":{"join":{"!room:example.org":{"timeline":{"limited":true,"prev_batch":"s-gap-start","events":[
                 {
-                  "type":"io.codever.secure_control.v1",
+                  "type":"m.room.message",
                   "event_id":"${'$'}control-response",
                   "sender":"@gateway:example.org",
                   "origin_server_ts":1234,
@@ -198,12 +232,12 @@ class MatrixApplicationControlClientTest {
                   "content":${timelineContent()}
                 },
                 {
-                  "type":"io.codever.session.current.v2",
-                  "state_key":"session-live",
-                  "event_id":"${'$'}live-session-state",
+                  "type":"io.codever.project.key_grant.v3",
+                  "state_key":"device-key-1",
+                  "event_id":"${'$'}project-key-grant",
                   "sender":"@gateway:example.org",
                   "origin_server_ts":1236,
-                  "content":{"version":2,"kind":"state_envelope","state_envelope":{}}
+                  "content":{"version":3,"kind":"project.key_grant","sealedGrant":{}}
                 }
               ]}}}}
             }
@@ -220,7 +254,7 @@ class MatrixApplicationControlClientTest {
 
         assertEquals("s-next", batch.nextBatch)
         assertEquals(
-            listOf("\$control-response", "\$timeline-response", "\$live-session-state"),
+            listOf("\$control-response", "\$timeline-response", "\$project-key-grant"),
             batch.events.map { it.eventId },
         )
         assertEquals("@gateway:example.org", batch.events.first().sender)
@@ -244,18 +278,18 @@ class MatrixApplicationControlClientTest {
         )
         assertEquals(
             setOf(
-                "io.codever.secure_control.v1",
                 "m.room.message",
-                "io.codever.gateway.current.v2",
-                "io.codever.session.current.v2",
+                "io.codever.project.key_grant.v3",
+                "io.codever.project.current.v3",
             ),
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
-        assertTrue(
+        assertEquals(
+            setOf("io.codever.project.key_grant.v3", "io.codever.project.current.v3"),
             filter.getValue("room").jsonObject
                 .getValue("state").jsonObject
-                .getValue("types").jsonArray.isEmpty(),
+                .getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertTrue(responseBody.all { it == 0.toByte() })
     }
@@ -390,80 +424,37 @@ class MatrixApplicationControlClientTest {
             URLDecoder.decode(encodedFilter, Charsets.UTF_8.name()),
         ).jsonObject.getValue("room").jsonObject
             .getValue("timeline").jsonObject
-        assertEquals(0, timeline.getValue("limit").jsonPrimitive.content.toInt())
+        assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
     }
 
     @Test
-    fun `current Room State fetches only the committed directly addressed directory pages`() =
-        runBlocking {
-            val endpoints = mutableListOf<URI>()
-            val responseBodies = mutableListOf<ByteArray>()
-            val client = MatrixApplicationRoomStateClient(
-                MatrixApplicationControlSyncTransport { target, _ ->
-                    endpoints += target
-                    val body = if (target.rawPath.endsWith("/state/io.codever.gateway.current.v2/gateway-1")) {
-                        """{"version":2,"kind":"state_envelope","state_envelope":{}}"""
-                    } else {
-                        """{"version":2,"kind":"state_envelope","state_envelope":{}}"""
-                    }.toByteArray()
-                    responseBodies += body
-                    MatrixHttpResponse(200, body)
-                },
-            )
-
-            val gateway = client.currentGateway(storedSession())
-            val batch = client.currentDirectory(
-                storedSession(),
-                MatrixSessionDirectoryLocator(
-                    generation = 7,
-                    stateVersion = 9,
-                    slot = 1,
-                    pageCount = 2,
-                    stateKeyPrefix = "codever.directory",
-                    digest = "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-                ),
-            )
-
-            assertTrue(gateway.eventId.startsWith("\$codever-current-"))
-            assertEquals(2, batch.events.size)
-            assertEquals(2, batch.candidateEventCount)
-            assertEquals(
-                "https://matrix.example.org/_matrix/client/v3/rooms/%21room%3Aexample.org/state/" +
-                    "io.codever.gateway.current.v2/gateway-1",
-                endpoints.first().toASCIIString(),
-            )
-            assertEquals(
-                "/_matrix/client/v3/rooms/%21room%3Aexample.org/state/" +
-                    "io.codever.session.directory.v2/codever.directory.1.1",
-                endpoints.last().rawPath,
-            )
-            assertTrue(responseBodies.all { body -> body.all { it == 0.toByte() } })
-        }
-
-    @Test
-    fun `current Room State rejects a malformed directly addressed directory page`() = runBlocking {
-        val responseBodies = mutableListOf<ByteArray>()
-        val client = MatrixApplicationRoomStateClient(
-            MatrixApplicationControlSyncTransport { target, _ ->
-                val body = """{"version":2,"kind":"state_envelope"}""".toByteArray()
-                responseBodies += body
-                MatrixHttpResponse(200, body)
+    fun `project pointer fetches one exact trusted v3 event without scanning history`() = runBlocking {
+        lateinit var endpoint: URI
+        val responseBody = """
+            {
+              "type":"m.room.message",
+              "event_id":"${'$'}snapshot-event",
+              "sender":"@gateway:example.org",
+              "origin_server_ts":1234,
+              "content":${secureContent()}
+            }
+        """.trimIndent().toByteArray()
+        val client = MatrixApplicationEventClient(
+            MatrixApplicationControlSyncTransport { target, token ->
+                endpoint = target
+                assertEquals("secret-access-token", token)
+                MatrixHttpResponse(200, responseBody)
             },
         )
 
-        val error = runCatching {
-            client.currentDirectory(
-                storedSession(),
-                MatrixSessionDirectoryLocator(
-                    1, 1, 0, 1, "codever.directory",
-                    "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
-                ),
-            )
-        }.exceptionOrNull()
+        val event = client.event(storedSession(), "${'$'}snapshot-event")
 
-        assertTrue(error is MatrixApplicationControlPayloadException)
-        assertTrue(error?.message?.contains("invalid envelope shape") == true)
-        assertTrue(responseBodies.all { body -> body.all { it == 0.toByte() } })
+        assertEquals("${'$'}snapshot-event", event.eventId)
+        assertEquals(
+            "/_matrix/client/v3/rooms/%21room%3Aexample.org/event/%24snapshot-event",
+            endpoint.rawPath,
+        )
+        assertTrue(responseBody.all { it == 0.toByte() })
     }
 
     @Test
@@ -638,11 +629,16 @@ class MatrixApplicationControlClientTest {
     private fun secureContent() = """
         {
           "msgtype":"m.notice",
-          "body":"Encrypted Codever message",
+          "body":"Encrypted Codever command",
           "io.codever":{
-            "version":1,
-            "kind":"secure_envelope",
-            "secure_envelope":{"envelope":{},"signature":{}}
+            "version":3,
+            "envelope":{
+              "version":3,
+              "projectId":"project-1",
+              "keyId":"key-1",
+              "nonce":"AAAAAAAAAAAAAAAA",
+              "ciphertext":"AA"
+            }
           }
         }
     """.trimIndent()
@@ -652,10 +648,14 @@ class MatrixApplicationControlClientTest {
           "msgtype":"m.notice",
           "body":"Encrypted Codever timeline event",
           "io.codever":{
-            "version":2,
-            "kind":"timeline_envelope",
-            "timeline_envelope":{"envelope":{},"signature":{}},
-            "timeline_key_ring_bundle":{"bundle":{},"signature":{}}
+            "version":3,
+            "envelope":{
+              "version":3,
+              "projectId":"project-1",
+              "keyId":"key-1",
+              "nonce":"AAAAAAAAAAAAAAAA",
+              "ciphertext":"AQ"
+            }
           }
         }
     """.trimIndent()

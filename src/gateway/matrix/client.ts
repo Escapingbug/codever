@@ -15,6 +15,11 @@ import {
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE,
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
+    CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
+    CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+    codeverV3CurrentPointerSchema,
+    codeverV3ProjectKeyGrantStateSchema,
+    codeverV3TimelineContentSchema,
     canonicalJson,
 } from '@codever/protocol'
 import { toArrayBuffer } from '@codever/security'
@@ -493,6 +498,10 @@ export class MatrixJsSdkGatewayClient implements MatrixGatewayClient {
 
 function assertSecureApplicationTimelineContent(content: Record<string, unknown>): void {
     const extension = asRecord(content['io.codever'])
+    if (extension?.version === 3) {
+        codeverV3TimelineContentSchema.parse(content)
+        return
+    }
     if (
         extension?.version !== 2
         || extension.kind !== 'timeline_envelope'
@@ -521,6 +530,14 @@ function assertSecureApplicationControlContent(content: Record<string, unknown>)
 
 function assertSecureApplicationStateContent(request: MatrixApplicationStateEventRequest): void {
     const content = request.content
+    if (request.eventType === CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE) {
+        codeverV3ProjectKeyGrantStateSchema.parse(content)
+        return
+    }
+    if (request.eventType === CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE) {
+        codeverV3CurrentPointerSchema.parse(content)
+        return
+    }
     const stateEnvelope = asRecord(content.state_envelope)
     const signedEnvelope = asRecord(stateEnvelope?.envelope)
     const expectsKeyRing = request.eventType === CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE

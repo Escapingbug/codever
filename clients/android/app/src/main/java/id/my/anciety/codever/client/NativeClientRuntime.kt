@@ -42,14 +42,10 @@ import id.my.anciety.codever.client.events.ToolGroupPresentation
 import id.my.anciety.codever.client.events.compactSnapshotCommands
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.matrix.MatrixBootstrap
-import id.my.anciety.codever.matrix.CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE
-import id.my.anciety.codever.matrix.CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
-import id.my.anciety.codever.matrix.CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
 import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
 import id.my.anciety.codever.matrix.MatrixRuntimePhase
-import id.my.anciety.codever.matrix.MatrixSessionDirectoryLocator
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
@@ -64,27 +60,16 @@ import id.my.anciety.codever.security.codever.EncryptedGatewayTrustStore
 import id.my.anciety.codever.security.codever.GatewayTrust
 import id.my.anciety.codever.security.codever.GatewayTransportCodec
 import id.my.anciety.codever.security.codever.MatrixTransportBinding
-import id.my.anciety.codever.security.codever.MatrixTimelineBindings
-import id.my.anciety.codever.security.codever.MatrixTimelineEnvelopeCodec
-import id.my.anciety.codever.security.codever.MatrixTimelineEnvelopes
-import id.my.anciety.codever.security.codever.MatrixStateBindings
-import id.my.anciety.codever.security.codever.MatrixStateEnvelopeCodec
-import id.my.anciety.codever.security.codever.MatrixStateEnvelopes
+import id.my.anciety.codever.security.codever.CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE
+import id.my.anciety.codever.security.codever.MatrixV3Protocol
 import id.my.anciety.codever.security.codever.PairingCodec
 import id.my.anciety.codever.security.codever.PairingRequest
 import id.my.anciety.codever.security.codever.PairingSecurity
-import id.my.anciety.codever.security.codever.SecureEnvelopeBindings
-import id.my.anciety.codever.security.codever.SecureEnvelopeBundleBindings
-import id.my.anciety.codever.security.codever.SecureEnvelopeBundleCodec
-import id.my.anciety.codever.security.codever.SecureEnvelopeBundles
-import id.my.anciety.codever.security.codever.SecureEnvelopeCodec
-import id.my.anciety.codever.security.codever.SecureEnvelopeDirection
-import id.my.anciety.codever.security.codever.SecureEnvelopes
-import id.my.anciety.codever.security.codever.ReplayStore
 import id.my.anciety.codever.security.codever.SignedPairingOffer
 import id.my.anciety.codever.security.codever.SignedPairingRequest
 import id.my.anciety.codever.security.codever.SignedPairingResponse
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -104,11 +89,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -131,6 +113,7 @@ class NativePairingRejectedException(
     val retryable: Boolean = true,
 ) : IllegalStateException(message)
 class NativeTrustRequiredException(message: String) : IllegalStateException(message)
+private class MatrixV3EventDeferredException(message: String) : IllegalStateException(message)
 
 /**
  * Service-owned Codever domain runtime. Matrix tokens, application private
@@ -213,12 +196,47 @@ class NativeClientRuntime(
     ).also {
         stateUpgrade.recoverPreserved("timeline-key-ring", validate = it::validateStoredState)
     }
+    private val matrixV3ProjectKeys = AtomicEncryptedMatrixV3ProjectKeyStore(
+        files.matrixV3ProjectKeys,
+        cipher,
+        deviceId,
+    ).also {
+        stateUpgrade.recoverPreserved("matrix-v3-project-keys", validate = it::validateStoredState)
+    }
+    private val matrixV3Inbox = AtomicEncryptedMatrixV3InboxStore(
+        files.matrixV3Inbox,
+        cipher,
+        deviceId,
+    ).also {
+        stateUpgrade.recoverPreserved("matrix-v3-raw-inbox", validate = it::validateStoredState)
+    }
+    private val matrixV3ProjectionStore = AtomicEncryptedMatrixV3ProjectionStore(
+        files.matrixV3Projection,
+        cipher,
+        deviceId,
+    ).also {
+        stateUpgrade.recoverRebuildable(
+            "matrix-v3-projection",
+            validate = it::validateStoredState,
+            reset = it::clear,
+        )
+    }
+    private val matrixV3CommandContent = AtomicEncryptedMatrixV3CommandContentStore(
+        files.matrixV3CommandContent,
+        cipher,
+        deviceId,
+    ).also {
+        stateUpgrade.recoverPreserved(
+            "matrix-v3-command-content",
+            validate = it::validateStoredState,
+        )
+    }
     private val trustStore = EncryptedGatewayTrustStore(
         AtomicEncryptedTrustBlobStore(files.trust),
         cipher,
         now,
     )
-    private val outbox = DurableCommandOutbox.encrypted(files.commands, cipher, deviceId) { migration ->
+    private val outbox = DurableCommandOutbox.encrypted(files.matrixV3Commands, cipher, deviceId) { migration ->
         diagnostics.record(
             "command.outbox.migrated",
             mapOf(
@@ -249,7 +267,6 @@ class NativeClientRuntime(
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
-    private val nativeProjection = MatrixNativeProjection()
     private val restoredTrust = runCatching { trustStore.load() }
     private val restoredPairing: Result<PersistedPairingTransaction?> = runCatching {
         pairingStore.load()?.let(::validateRestoredPairingTransaction)?.let transaction@{ transaction ->
@@ -290,6 +307,11 @@ class NativeClientRuntime(
     private val initializedHistoryRelations = mutableSetOf<String>()
     private val historyRelationTokens = mutableMapOf<String, String>()
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
+    private val matrixV3Projection = MatrixV3NativeProjection(
+        gatewayId = { trust?.gatewayId ?: "gateway" },
+        activeDeviceCount = { trust?.response?.response?.activeDeviceCount ?: 1 },
+        initialState = matrixV3ProjectionStore.load(),
+    )
 
     private val eventHub = ClientEventHub(
         eventPersistence,
@@ -314,7 +336,7 @@ class NativeClientRuntime(
             )
         }
         stateUpgrade.complete()
-        gatewayState = eventHub.snapshot().gatewayState
+        gatewayState = matrixV3Projection.snapshot() ?: eventHub.snapshot().gatewayState
         if (gatewayState != null) {
             diagnostics.record("gateway.state.cache.restored")
         }
@@ -386,7 +408,7 @@ class NativeClientRuntime(
                     return@withLock local
                 }
 
-                val threadRoot = nativeProjection.threadRootEventId(sessionId)
+                val threadRoot = matrixV3Projection.threadRootEventId(sessionId)
                 if (threadRoot == null) {
                     // A newly-created session has no Matrix thread until its
                     // first prompt. Match the browser client: this is a valid
@@ -738,6 +760,7 @@ class NativeClientRuntime(
                 }
             pairingStorageBlocked = false
             replayPreTrustEvents()
+            replayMatrixV3InboxLocked()
             val public = publicTrust() as PublicTrustState.Trusted
             val nextSnapshot = refreshedSnapshot()
             eventHub.publish(ClientEventType.TRUST_CHANGED, PublicClientJson.encodeTrust(public), nextSnapshot)
@@ -747,12 +770,9 @@ class NativeClientRuntime(
         // a key bundle addressed to this device before acknowledging a new
         // pairing, but Matrix delivery and a retry of an already accepted
         // request may still race. Keep the service-owned connection converging
-        // until one complete authenticated /state batch is committed; never
+        // until one complete authenticated v3 projection is committed; never
         // make the WebView stay foreground merely to wait for that round trip.
-        startAuthoritativeStateRefresh(
-            recoverTransport = false,
-            invalidateCurrentState = false,
-        )
+        startMatrixV3ProjectionRefresh(recoverTransport = false)
         return mutex.withLock { public to snapshot() }
     }
 
@@ -874,6 +894,7 @@ class NativeClientRuntime(
         cancelScheduledCommandRecovery(commandId)
         outbox.get(commandId)?.operationId?.let(automaticRevisionRetryAttempts::remove)
         val released = outbox.release(commandId)
+        if (released) matrixV3CommandContent.remove(commandId)
         if (released) refreshSnapshot(publishLifecycle = false)
         return released
     }
@@ -929,6 +950,11 @@ class NativeClientRuntime(
             trustStore.clear()
             replayStore.clear()
             timelineKeys.clear()
+            matrixV3ProjectKeys.clear()
+            matrixV3Inbox.clear()
+            matrixV3Projection.clear()
+            matrixV3ProjectionStore.clear()
+            matrixV3CommandContent.clear()
             pairingStore.clear()
             outbox.clear()
             transfers.clear()
@@ -974,16 +1000,31 @@ class NativeClientRuntime(
 
     override fun onTransportReady(identity: MatrixTransportIdentity) {
         transportIdentity = identity
-        // Cached state is available for offline reading only. The transport is
-        // writable only after a fresh complete Matrix Room State batch has
-        // authenticated the current Gateway entity for this connection.
-        gatewayStateSynchronized = false
+        gatewayStateSynchronized = trust != null &&
+            matrixV3ProjectKeys.value() != null &&
+            matrixV3Projection.snapshot() != null
         refreshSnapshot(publishLifecycle = true)
         if (trust != null) {
-            startAuthoritativeStateRefresh(
-                recoverTransport = true,
-                invalidateCurrentState = false,
-            )
+            scope.launch {
+                runCatching { matrix.refreshThreadDirectory() }
+                    .onFailure { error ->
+                        diagnostics.record(
+                            "matrix.thread_directory.refresh_failure",
+                            mapOf("error" to diagnosticErrorName(error)),
+                        )
+                    }
+                mutex.withLock {
+                    runCatching { recoverGatewayTransportSnapshotLocked() }
+                        .onFailure { error ->
+                            diagnostics.record(
+                                "gateway.transport.recovery.failure",
+                                mapOf("error" to diagnosticErrorName(error)),
+                            )
+                        }
+                    replayMatrixV3InboxLocked()
+                    matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+                }
+            }
         } else if (
             pendingPairing?.repairingSession == true &&
             !pairingStorageBlocked &&
@@ -1007,13 +1048,21 @@ class NativeClientRuntime(
             mapOf("reason" to diagnosticReason),
         )
         if (trust == null || authoritativeStateRefreshJob?.isActive == true) return
-        startAuthoritativeStateRefresh(recoverTransport = false)
+        startMatrixV3ProjectionRefresh(recoverTransport = false)
     }
 
     override suspend fun onDecryptedEvent(event: MatrixDecryptedEvent) {
         mutex.withLock {
+            val isV3 = isMatrixV3RawEvent(event.rawJson)
+            if (isV3) matrixV3Inbox.put(event)
             try {
                 processMatrixEvent(event)
+                if (isV3) matrixV3Inbox.projected(event.eventId)
+            } catch (error: MatrixV3EventDeferredException) {
+                diagnostics.record(
+                    "matrix.v3_event.deferred",
+                    mapOf("reason" to diagnosticErrorName(error)),
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1028,63 +1077,15 @@ class NativeClientRuntime(
                         },
                     ),
                 )
+                if (isV3) {
+                    matrixV3Inbox.quarantine(event.eventId, error)
+                    publishStatus(lifecycle().phase, "matrix_v3_event_quarantined")
+                    return@withLock
+                }
                 if (error !is CodeverSecurityException) {
                     publishStatus(lifecycle().phase, "native_event_rejected")
                     throw error
                 }
-            }
-        }
-    }
-
-    override suspend fun onAuthoritativeGatewayState(
-        event: MatrixDecryptedEvent,
-    ): MatrixSessionDirectoryLocator = mutex.withLock {
-        val plaintext = decodeMatrixRoomStateEvent(event)
-            ?: error("The current Matrix Gateway state is unavailable.")
-        require(plaintext.string("kind") == "gateway_state")
-        matrixSessionDirectoryLocator(plaintext)
-    }
-
-    override suspend fun onAuthoritativeRoomState(events: List<MatrixDecryptedEvent>) {
-        mutex.withLock {
-            var stage = "decode"
-            try {
-                val decoded = mutableListOf<JsonObject>()
-                for (event in events) {
-                    decodeMatrixRoomStateEvent(event)?.let(decoded::add)
-                }
-                stage = "materialize"
-                val materialized = materializeMatrixSessionDirectory(decoded)
-                stage = "project"
-                val snapshot = nativeProjection.applyRoomStateBatch(materialized)
-                stage = "completion"
-                materialized.forEach(::acceptCanonicalCommandCompletion)
-                if (
-                    snapshot != null &&
-                    authoritativeRoomStateReady(materialized.mapNotNull { it.string("kind") })
-                ) {
-                    stage = "gateway"
-                    acceptGatewayState(snapshot, authoritative = true)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                diagnostics.record(
-                    "matrix.native_state_batch.rejected",
-                    mapOf(
-                        "error" to diagnosticErrorName(error),
-                        "stage" to stage,
-                        "code" to if (error is CodeverSecurityException) {
-                            error.code.name
-                        } else {
-                            "NONE"
-                        },
-                    ),
-                )
-                if (error !is CodeverSecurityException) {
-                    publishStatus(lifecycle().phase, "native_state_batch_rejected")
-                }
-                throw error
             }
         }
     }
@@ -1153,10 +1154,14 @@ class NativeClientRuntime(
             claimed
         } ?: return
         try {
-            sendTrustedControlMessage(
-                signedCommandContent(transmission).toString(),
-                "codever.command.${transmission.commandId}.${randomNonce()}",
+            val content = signedCommandContent(transmission)
+            val matrixEventId = sendTrustedControlMessage(
+                content.toString(),
+                "codever.v3.command.${transmission.commandId}",
             )
+            mutex.withLock {
+                applyOwnMatrixV3Command(content, matrixEventId, transmission.issuedAt)
+            }
         } catch (error: Exception) {
             val remainsCurrent = mutex.withLock {
                 val current = outbox.get(commandId)
@@ -1280,106 +1285,154 @@ class NativeClientRuntime(
     }
 
     private fun signedCommandContent(transmission: CommandTransmission): JsonObject {
+        matrixV3CommandContent.get(transmission.commandId)?.let { return it }
         val activeTrust = trust ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
-        val state = gatewayState ?: throw IllegalStateException("Gateway state is not synchronized yet.")
-        val revisionEpoch = transmission.revisionEpoch
-            ?: throw IllegalStateException("Command revision epoch is unavailable.")
-        val revisionEpochGeneration = transmission.revisionEpochGeneration
-            ?: throw IllegalStateException("Command revision epoch generation is unavailable.")
-        require(state.string("revision_epoch") == revisionEpoch) {
-            "Command belongs to a retired Gateway revision epoch."
-        }
-        require(state.long("revision_epoch_generation") == revisionEpochGeneration) {
-            "Command belongs to a retired Gateway revision epoch generation."
-        }
-        val operation = transmission.payload.string("operation")
+        val roomId = matrix.publicSession()?.roomBinding?.roomId
+            ?: throw IllegalStateException("Matrix room binding is unavailable.")
+        val keys = matrixV3ProjectKeys.value()
+            ?: throw IllegalStateException("The protocol-v3 project key grant is unavailable.")
+        val raw = transmission.payload
+        val operation = raw.string("operation")
             ?: throw IllegalArgumentException("Command operation is invalid.")
-        // These fields define the durable command fingerprint and must never
-        // change across recovery attempts inside one Gateway epoch. An epoch
-        // migration first retires the old command id and creates a fresh
-        // durable authentication lease.
-        val commandIssuedAt = transmission.issuedAt
+        val sessionId = raw.string("sessionId")
+        val v3Operation: String
+        val v3Payload: JsonObject
+        val v3SessionId: String?
+        when (operation) {
+            "session.create" -> {
+                v3Operation = "session.create"
+                v3SessionId = transmission.commandId
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    raw.string("provider")?.let { put("provider", it) }
+                    raw.string("model")?.let { put("model", it) }
+                    raw.string("reasoningEffort")?.let { put("reasoningEffort", it) }
+                    raw.string("permissionMode")?.let { put("permissionMode", it) }
+                    raw["extensions"]?.let { put("extensions", it) }
+                }
+            }
+            "prompt" -> {
+                v3Operation = "prompt.submit"
+                v3SessionId = sessionId ?: throw IllegalArgumentException("Prompt session is missing.")
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("text", raw.string("text") ?: "")
+                    raw["attachments"]?.let { put("attachments", it) }
+                }
+            }
+            "cancel" -> {
+                v3Operation = "turn.cancel"
+                v3SessionId = sessionId ?: throw IllegalArgumentException("Cancel session is missing.")
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put(
+                        "turnId",
+                        raw.string("targetCommandId")
+                            ?: throw IllegalArgumentException("The active turn ID is required to cancel."),
+                    )
+                }
+            }
+            "decision" -> {
+                v3Operation = "decision.answer"
+                v3SessionId = sessionId ?: throw IllegalArgumentException("Decision session is missing.")
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("requestId", raw.string("requestId")!!)
+                    put("decision", raw.string("decision")!!)
+                }
+            }
+            "session.settings" -> {
+                v3Operation = "session.update"
+                v3SessionId = sessionId ?: throw IllegalArgumentException("Settings session is missing.")
+                val patch = buildJsonObject {
+                    raw.string("provider")?.let { put("provider", it) }
+                    raw.string("model")?.let { put("model", it) }
+                    raw.string("reasoningEffort")?.let { put("reasoningEffort", it) }
+                    raw.string("permissionMode")?.let { put("permissionMode", it) }
+                }
+                require(patch.isNotEmpty()) {
+                    "Project directory changes belong to a Matrix project room in protocol v3."
+                }
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("patch", patch)
+                }
+            }
+            "session.archive", "session.restore", "session.delete" -> {
+                v3Operation = "session.set_lifecycle"
+                v3SessionId = sessionId ?: throw IllegalArgumentException("Session lifecycle target is missing.")
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("state", when (operation) {
+                        "session.archive" -> "archived"
+                        "session.restore" -> "active"
+                        else -> "deleted"
+                    })
+                }
+            }
+            "device.invite" -> {
+                v3Operation = "device.invitation.create"
+                v3SessionId = null
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    raw.long("lifetimeMs")?.let { put("lifetimeMs", it) }
+                }
+            }
+            else -> throw IllegalArgumentException("Unsupported protocol-v3 command operation.")
+        }
         val command = buildJsonObject {
             put("kind", "codever.command")
-            put("version", 1)
+            put("version", 3)
             put("commandId", transmission.commandId)
-            put("gatewayId", activeTrust.gatewayId)
+            put("workspaceId", activeTrust.gatewayId)
+            put("projectId", keys.projectId)
+            v3SessionId?.let { put("sessionId", it) }
             put("deviceId", deviceId)
-            put("sequenceEpoch", activeTrust.certificate.certificateId)
-            put("conversationId", matrix.publicSession()?.roomBinding?.conversationId
-                ?: throw IllegalStateException("Matrix room binding is unavailable."))
-            put("revisionEpoch", revisionEpoch)
-            put("sequence", transmission.sequence)
-            put("baseRevision", transmission.baseRevision)
-            put("operation", operation)
-            put("issuedAt", commandIssuedAt)
-            put("expiresAt", commandIssuedAt + COMMAND_LIFETIME_MS)
-            put("nonce", transmission.nonce)
-            put("payload", transmission.payload)
+            put("certificateId", activeTrust.certificate.certificateId)
+            put("createdAt", transmission.issuedAt)
+            put("operation", v3Operation)
+            put("payload", v3Payload)
         }
-        val signed = buildJsonObject {
-            put("command", command)
-            put("signature", buildJsonObject {
-                put("algorithm", "ES256")
-                put("keyId", deviceId)
-                put("value", Base64Url.encode(identity.sign(CanonicalJson.bytes(command))))
-            })
+        val nonce = MessageDigest.getInstance("SHA-256")
+            .digest("codever-v3-command-nonce\u0000${transmission.commandId}".toByteArray())
+            .copyOfRange(0, 12)
+        val activeKey = keys.activeKey()
+        val envelope = try {
+            MatrixV3Protocol.sealSignedCommand(
+                command,
+                identity,
+                roomId,
+                keys.projectId,
+                activeKey,
+                nonce,
+            )
+        } finally {
+            nonce.fill(0)
+            keys.wipe()
         }
+        val threadRoot = v3SessionId?.let(matrixV3Projection::threadRootEventId)
         val content = buildJsonObject {
-            put("msgtype", "m.text")
-            put("body", "Encrypted Codever command")
-            put("io.codever", buildJsonObject {
-                put("version", 1)
-                put("kind", "signed_command")
-                put("signed_command", signed)
-            })
-        }
-        val certificate = activeTrust.certificate
-        // Matrix redelivery is a new transport attempt around the exact same
-        // authenticated command. A fresh outer envelope lets the Gateway open
-        // the event and reach its durable command-result ledger even when the
-        // homeserver no longer remembers the original transaction ID.
-        val envelopeIssuedAt = now()
-        val envelope = SecureEnvelopes.sealSecureEnvelope(
-            bindings = SecureEnvelopeBindings(
-                gatewayId = activeTrust.gatewayId,
-                conversationId = certificate.deviceTransport.roomId.let {
-                    matrix.publicSession()?.roomBinding?.conversationId
-                        ?: throw IllegalStateException("Matrix room binding is unavailable.")
-                },
-                direction = SecureEnvelopeDirection.DEVICE_TO_GATEWAY,
-                senderDeviceId = certificate.deviceId,
-                recipientDeviceId = certificate.gatewayId,
-                senderKeyId = deviceId,
-                recipientKeyId = activeTrust.gatewayKey.keyId,
-            ),
-            plaintext = content,
-            senderIdentity = identity,
-            recipientPublicKey = activeTrust.gatewayKey,
-            envelopeId = "codever.${transmission.commandId}.${randomNonce()}",
-            now = envelopeIssuedAt,
-            lifetimeMs = COMMAND_LIFETIME_MS,
-        )
-        return buildJsonObject {
             put("msgtype", "m.notice")
-            put("body", "Encrypted Codever message")
+            put("body", "Encrypted Codever command")
+            if (threadRoot != null && v3Operation != "session.create") {
+                put("m.relates_to", buildJsonObject {
+                    put("rel_type", "m.thread")
+                    put("event_id", threadRoot)
+                    put("is_falling_back", true)
+                    put("m.in_reply_to", buildJsonObject { put("event_id", threadRoot) })
+                })
+            }
             put("io.codever", buildJsonObject {
-                put("version", 1)
-                put("kind", "secure_envelope")
-                put("secure_envelope", envelope.toJson())
+                put("version", 3)
+                put("envelope", envelope)
             })
         }
+        return matrixV3CommandContent.putIfAbsent(transmission.commandId, content)
     }
 
-    private fun startAuthoritativeStateRefresh(
+    private fun startMatrixV3ProjectionRefresh(
         recoverTransport: Boolean,
-        invalidateCurrentState: Boolean = false,
-        requireRefreshCompletion: Boolean = false,
     ) {
-        if (invalidateCurrentState) {
-            gatewayStateSynchronized = false
-            refreshSnapshot(publishLifecycle = true)
-        }
         authoritativeStateRefreshJob?.cancel()
         authoritativeStateRefreshJob = scope.launch {
             if (recoverTransport) {
@@ -1396,39 +1449,35 @@ class NativeClientRuntime(
             var completedAttempts = 0
             do {
                 if (trust == null) break
-                var attempted = false
                 var refreshed = false
-                if (matrix.status.phase == MatrixRuntimePhase.SYNCING) {
-                    attempted = true
-                    runCatching { matrix.refreshApplicationRoomState() }
-                        .onSuccess {
-                            refreshed = true
-                            diagnostics.record("matrix.application_state.refresh_completed")
-                        }
-                        .onFailure { error ->
-                            diagnostics.record(
-                                "matrix.application_state.refresh_failure",
-                                mapOf("error" to diagnosticErrorName(error)),
-                            )
-                        }
-                }
+                runCatching { matrix.refreshApplicationProjection() }
+                    .onSuccess {
+                        refreshed = true
+                        diagnostics.record("matrix.v3_projection.refresh_completed")
+                    }
+                    .onFailure { error ->
+                        diagnostics.record(
+                            "matrix.v3_projection.refresh_failure",
+                            mapOf("error" to diagnosticErrorName(error)),
+                        )
+                    }
                 if (
-                    (gatewayStateSynchronized && (!requireRefreshCompletion || refreshed)) ||
+                    (gatewayStateSynchronized && refreshed) ||
                     trust == null
                 ) break
                 val delayMs = authoritativeStateRefreshDelayMs(completedAttempts)
                 diagnostics.record(
-                    "matrix.application_state.refresh_retry_scheduled",
+                    "matrix.v3_projection.refresh_retry_scheduled",
                     mapOf(
                         "attempt" to completedAttempts.toString(),
-                        "transport_ready" to attempted.toString(),
+                        "transport_ready" to matrix.commandTransportReady.toString(),
                     ),
                 )
                 completedAttempts += 1
                 delay(delayMs)
             } while (isActive)
             if (gatewayStateSynchronized) {
-                diagnostics.record("matrix.application_state.converged")
+                diagnostics.record("matrix.v3_projection.converged")
             }
         }
     }
@@ -1441,9 +1490,10 @@ class NativeClientRuntime(
      * Codever. Sending it as an application control event avoids coupling
      * command and recovery traffic to Matrix Megolm device-key distribution.
      */
-    private suspend fun sendTrustedControlMessage(contentJson: String, transactionId: String) {
-        matrix.sendApplicationControlEvent(contentJson, transactionId)
+    private suspend fun sendTrustedControlMessage(contentJson: String, transactionId: String): String {
+        val eventId = matrix.sendApplicationControlEvent(contentJson, transactionId)
         diagnostics.record("matrix.application_control.sent")
+        return eventId
     }
 
     private suspend fun processMatrixEvent(event: MatrixDecryptedEvent) {
@@ -1451,34 +1501,7 @@ class NativeClientRuntime(
         val root = json.parseToJsonElement(event.rawJson).jsonObject
         val content = (root["content"] as? JsonObject) ?: return
         val eventType = root.string("type") ?: return
-        if (
-            eventType == CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE ||
-            eventType == CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE ||
-            eventType == CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
-        ) {
-            val plaintext = decodeMatrixRoomState(event, root, content, eventType) ?: return
-            val directoryChanged = plaintext.string("kind") == "gateway_state" &&
-                nativeProjection.requiresAuthoritativeDirectoryRefresh(plaintext)
-            val commandScopeChanged = directoryChanged &&
-                nativeProjection.requiresCommandScopeRefresh(plaintext)
-            val projected = nativeProjection.applyRoomState(plaintext)
-            acceptCanonicalCommandCompletion(plaintext)
-            if (directoryChanged) {
-                diagnostics.record("matrix.application_state.directory_changed")
-                // The Gateway entity only commits the immutable directory
-                // generation. Do not republish the prior materialization under
-                // its new pointer; reload every page before commands are
-                // considered synchronized again.
-                startAuthoritativeStateRefresh(
-                    recoverTransport = false,
-                    invalidateCurrentState = commandScopeChanged,
-                    requireRefreshCompletion = true,
-                )
-            } else {
-                projected?.let { acceptGatewayState(it) }
-            }
-            return
-        }
+        if (processMatrixV3Event(event, root, content, eventType)) return
         val extension = content["io.codever"] as? JsonObject ?: return
         val kind = extension.string("kind") ?: return
         if (kind == "pairing_response") {
@@ -1503,70 +1526,249 @@ class NativeClientRuntime(
             )
             return
         }
-        val activeTrust = trust ?: run {
-            val pending = pendingPairing
-            if (pending != null && event.sender == pending.offer.offer.gatewayTransport.userId) {
-                bufferPreTrustEvent(event)
-            }
-            return
-        }
+        if (trust == null) return
         if (kind == "gateway_device_rotation") {
             acceptGatewayDeviceRotation(event, extension)
-            return
         }
-        if (event.sender != activeTrust.transportTrust.currentTransport.userId) return
-        val plaintext = when (kind) {
-            "secure_envelope" -> {
-                val signed = SecureEnvelopeCodec.parse(
-                    extension.objectValue("secure_envelope").toString(),
-                )
-                if (signed.envelope.recipientDeviceId != deviceId) return
-                SecureEnvelopes.openSecureEnvelope(
-                    signed,
-                    identity,
-                    activeTrust.gatewayKey,
-                    incomingBindings(activeTrust),
-                    replayStore,
-                    now(),
-                ).plaintext
-            }
-            "secure_envelope_bundle" -> {
-                val signed = SecureEnvelopeBundleCodec.parse(
-                    extension.objectValue("secure_envelope_bundle").toString(),
-                )
-                if (signed.bundle.recipients.none {
-                        it.recipientDeviceId == deviceId && it.recipientKeyId == deviceId
+    }
+
+    private suspend fun processMatrixV3Event(
+        event: MatrixDecryptedEvent,
+        root: JsonObject,
+        content: JsonObject,
+        eventType: String,
+    ): Boolean {
+        if (
+            eventType != CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE &&
+            eventType != id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE &&
+            !(eventType == "m.room.message" &&
+                (content["io.codever"] as? JsonObject)?.long("version") == 3L)
+        ) return false
+        val activeTrust = trust ?: throw MatrixV3EventDeferredException("gateway_trust_pending")
+        if (event.sender != activeTrust.transportTrust.currentTransport.userId) {
+            // The application /sync lane accepts Gateway output only. A local
+            // command is projected optimistically at the durable send boundary.
+            return true
+        }
+        val roomId = matrix.publicSession()?.roomBinding?.roomId
+            ?: throw MatrixV3EventDeferredException("matrix_room_pending")
+        if (eventType == CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE) {
+            // Key grants are directly addressed Room State. Matrix sync sends
+            // every state key in the room, including grants for other paired
+            // devices; those are ordinary irrelevant state, not poison input.
+            if (content.string("deviceId") != identity.publicIdentity.keyId) return true
+            val grant = MatrixV3Protocol.openProjectKeyGrant(
+                state = content,
+                identity = identity,
+                gatewayKey = activeTrust.gatewayKey,
+                expectedWorkspaceId = activeTrust.gatewayId,
+                expectedRoomId = roomId,
+                expectedCertificateId = activeTrust.certificate.certificateId,
+            )
+            matrixV3ProjectKeys.save(grant)
+            grant.wipe()
+            diagnostics.record("matrix.v3_project_keys.accepted")
+            matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+            scope.launch {
+                runCatching { matrix.refreshThreadDirectory() }
+                    .onFailure { error ->
+                        diagnostics.record(
+                            "matrix.thread_directory.refresh_failure",
+                            mapOf("error" to diagnosticErrorName(error)),
+                        )
                     }
-                ) return
-                SecureEnvelopeBundles.open(
-                    signed,
-                    identity,
-                    activeTrust.gatewayKey,
-                    SecureEnvelopeBundleBindings(
-                        gatewayId = activeTrust.gatewayId,
-                        conversationId = conversationId(),
-                        direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
-                        senderDeviceId = activeTrust.certificate.gatewayId,
-                        senderKeyId = activeTrust.gatewayKey.keyId,
-                    ),
-                    deviceId,
-                    replayStore,
-                    now(),
-                ).plaintext
+                mutex.withLock { replayMatrixV3InboxLocked() }
             }
-            "timeline_envelope" -> {
-                openTimelineContent(
-                    event = event,
-                    matrixContent = content,
-                    extension = extension,
-                    activeTrust = activeTrust,
-                    keyGrantReplayStore = replayStore,
-                ) ?: return
-            }
-            else -> return
+            return true
         }
-        val decryptedContent = plaintext as? JsonObject ?: return
-        processAuthenticatedContent(event, decryptedContent)
+        if (eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE) {
+            val pointer = MatrixV3Protocol.verifyProjectPointer(
+                content,
+                activeTrust.gatewayKey,
+                activeTrust.gatewayId,
+                roomId,
+            )
+            val keys = matrixV3ProjectKeys.value()
+                ?: throw MatrixV3EventDeferredException("project_key_grant_pending")
+            try {
+                require(pointer.string("projectId") == keys.projectId) {
+                    "The Matrix v3 project pointer targets another project."
+                }
+            } finally {
+                keys.wipe()
+            }
+            val snapshotEvent = matrix.fetchApplicationEvent(
+                pointer.string("eventId")
+                    ?: throw IllegalArgumentException("The Matrix v3 pointer event ID is missing."),
+            )
+            val inserted = matrixV3Inbox.put(snapshotEvent)
+            if (inserted) {
+                try {
+                    processMatrixEvent(snapshotEvent)
+                    matrixV3Inbox.projected(snapshotEvent.eventId)
+                } catch (error: MatrixV3EventDeferredException) {
+                    throw error
+                } catch (error: Exception) {
+                    matrixV3Inbox.quarantine(snapshotEvent.eventId, error)
+                    throw error
+                }
+            }
+            return true
+        }
+        val keys = matrixV3ProjectKeys.value()
+            ?: throw MatrixV3EventDeferredException("project_key_grant_pending")
+        val extension = content["io.codever"] as? JsonObject
+            ?: throw IllegalArgumentException("The Matrix v3 extension is missing.")
+        val opened = try {
+            MatrixV3Protocol.openContent(extension, roomId, keys.projectId, keys)
+        } finally {
+            keys.wipe()
+        }
+        val kind = opened.plaintext.string("kind")
+        if (kind != "signed_event") return true
+        val signed = opened.plaintext.objectValue("value")
+        val protocolEvent = MatrixV3Protocol.verifyGatewayEvent(
+            signed,
+            activeTrust.gatewayKey,
+            activeTrust.gatewayId,
+            opened.projectId,
+        )
+        require(opened.logicalEventId == protocolEvent.string("eventId")) {
+            "The v3 event envelope logical ID is invalid."
+        }
+        val relation = content["m.relates_to"] as? JsonObject
+        val threadRootHint = relation
+            ?.takeIf { it.string("rel_type") == "m.thread" }
+            ?.string("event_id")
+        val result = matrixV3Projection.applyGatewayEvent(
+            protocolEvent,
+            event.eventId,
+            threadRootHint,
+        )
+        result.messages.forEach { message ->
+            val sessionId = message.sessionId ?: return@forEach
+            eventHub.upsertMessage(sessionId, message, refreshedSnapshot())
+        }
+        result.acknowledgedCommandId?.let { commandId ->
+            val command = outbox.get(commandId)
+            if (command != null && !command.state.isTerminal) {
+                if (outbox.recordAcknowledgement(commandId, command.sequence, 0)) {
+                    ackTimeouts.remove(commandId)?.cancel()
+                    cancelScheduledCommandRecovery(commandId)
+                    outbox.get(commandId)?.let(::publishCommand)
+                }
+            }
+        }
+        result.terminal?.let(::recordMatrixV3Terminal)
+        matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+        // Projection persistence follows ClientEventHub persistence. If the
+        // process stops between them, replay is harmless and history upsert
+        // IDs deduplicate; the inverse order could lose a public message.
+        matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+        return true
+    }
+
+    private suspend fun applyOwnMatrixV3Command(
+        content: JsonObject,
+        matrixEventId: String,
+        timestamp: Long,
+    ) {
+        val activeTrust = trust ?: return
+        val roomId = matrix.publicSession()?.roomBinding?.roomId ?: return
+        val keys = matrixV3ProjectKeys.value() ?: return
+        val opened = try {
+            MatrixV3Protocol.openContent(
+                content.objectValue("io.codever"),
+                roomId,
+                keys.projectId,
+                keys,
+            )
+        } finally {
+            keys.wipe()
+        }
+        if (opened.plaintext.string("kind") != "signed_command") return
+        val command = MatrixV3Protocol.verifyDeviceCommand(
+            opened.plaintext.objectValue("value"),
+            identity.publicIdentity,
+            activeTrust.gatewayId,
+            opened.projectId,
+            activeTrust.certificate.certificateId,
+        )
+        require(opened.logicalEventId == command.string("commandId")) {
+            "The v3 command envelope logical ID is invalid."
+        }
+        val result = matrixV3Projection.applyOwnCommand(command, matrixEventId, timestamp)
+        result.messages.forEach { message ->
+            val sessionId = message.sessionId ?: return@forEach
+            eventHub.upsertMessage(sessionId, message, refreshedSnapshot())
+        }
+        matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+        matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+    }
+
+    private fun recordMatrixV3Terminal(terminal: MatrixV3NativeTerminal) {
+        val current = outbox.get(terminal.commandId) ?: return
+        val outcome = when (terminal.outcome) {
+            "succeeded" -> DurableOutcome.SUCCEEDED
+            "cancelled" -> DurableOutcome.CANCELLED
+            else -> DurableOutcome.FAILED
+        }
+        recordCommandCompletion(
+            DurableCompletion(
+                commandId = terminal.commandId,
+                sequence = current.sequence,
+                revision = 0,
+                outcome = outcome,
+                sessionId = terminal.sessionId,
+                result = terminal.result,
+                error = terminal.errorMessage?.let {
+                    DurableError(
+                        terminal.errorCode ?: "gateway_failed",
+                        it.take(4_096),
+                        terminal.retryable,
+                    )
+                },
+            ),
+            diagnosticEvent = "command.v3_completion.received",
+            scheduleConvergenceFallback = false,
+        )
+    }
+
+    private fun acceptMatrixV3GatewayState(snapshot: JsonObject) {
+        if (snapshot.toString().toByteArray().size > MAX_BRIDGE_EVENT_PAYLOAD_BYTES) return
+        val changed = gatewayState != snapshot
+        gatewayState = snapshot
+        gatewayStateSynchronized = trust != null && matrixV3ProjectKeys.value() != null
+        if (changed) {
+            eventHub.publish(
+                ClientEventType.GATEWAY_STATE_CHANGED,
+                snapshot,
+                refreshedSnapshot(),
+            )
+        }
+        schedulePendingCommandRecoveries(immediate = true)
+        refreshSnapshot(publishLifecycle = true)
+    }
+
+    private suspend fun replayMatrixV3InboxLocked() {
+        drainMatrixV3Inbox(matrixV3Inbox) { record ->
+            try {
+                processMatrixEvent(record.event)
+                matrixV3Inbox.projected(record.event.eventId)
+                MatrixV3InboxProjectionStep.ADVANCED
+            } catch (_: MatrixV3EventDeferredException) {
+                MatrixV3InboxProjectionStep.DEFERRED
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                matrixV3Inbox.quarantine(record.event.eventId, error)
+                diagnostics.record(
+                    "matrix.v3_event.quarantined",
+                    mapOf("error" to diagnosticErrorName(error)),
+                )
+                MatrixV3InboxProjectionStep.ADVANCED
+            }
+        }
     }
 
     private suspend fun decodeHistoricalMessage(
@@ -1579,194 +1781,47 @@ class NativeClientRuntime(
         val eventType = root.string("type") ?: return null
         if (eventType != "m.room.message") return null
         val extension = content["io.codever"] as? JsonObject ?: return null
-        if (extension.string("kind") != "timeline_envelope") return null
-        val activeTrust = trust ?: return null
-        if (event.sender != activeTrust.transportTrust.currentTransport.userId) return null
-        val decryptedContent = openTimelineContent(
-            event = event,
-            matrixContent = content,
-            extension = extension,
-            activeTrust = activeTrust,
-            keyGrantReplayStore = ReplayStore { _, _ -> true },
-            expectedSessionId = expectedSessionId,
-        ) ?: return null
-        return parseMessage(event, decryptedContent, historical = true)
-            ?.takeIf { it.sessionId == expectedSessionId }
-    }
-
-    private fun openTimelineContent(
-        event: MatrixDecryptedEvent,
-        matrixContent: JsonObject,
-        extension: JsonObject,
-        activeTrust: GatewayTrust,
-        keyGrantReplayStore: ReplayStore,
-        expectedSessionId: String? = null,
-    ): JsonObject? {
-        val signed = MatrixTimelineEnvelopeCodec.parse(
-            extension.objectValue("timeline_envelope").toString(),
-        )
-        if (expectedSessionId != null && signed.envelope.sessionId != expectedSessionId) return null
-        var key = timelineKeys.key(signed.envelope.epochId)
-        if (key == null) {
-            val keyBundleValue = extension["timeline_key_ring_bundle"] as? JsonObject ?: return null
-            val keyBundle = SecureEnvelopeBundleCodec.parse(keyBundleValue.toString())
-            if (keyBundle.bundle.recipients.none {
-                    it.recipientDeviceId == deviceId && it.recipientKeyId == deviceId
-                }
-            ) return null
-            val grant = SecureEnvelopeBundles.open(
-                keyBundle,
-                identity,
-                activeTrust.gatewayKey,
-                SecureEnvelopeBundleBindings(
-                    gatewayId = activeTrust.gatewayId,
-                    conversationId = conversationId(),
-                    direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
-                    senderDeviceId = activeTrust.certificate.gatewayId,
-                    senderKeyId = activeTrust.gatewayKey.keyId,
-                ),
-                deviceId,
-                keyGrantReplayStore,
-                keyBundle.bundle.issuedAt,
-            ).plaintext as? JsonObject ?: return null
-            acceptTimelineKeyRingValue(grant)
-            key = timelineKeys.key(signed.envelope.epochId) ?: return null
-        }
-        val plaintext = try {
-            MatrixTimelineEnvelopes.open(
-                signed,
-                key,
-                activeTrust.gatewayKey,
-                MatrixTimelineBindings(
-                    gatewayId = activeTrust.gatewayId,
-                    conversationId = conversationId(),
-                    roomId = event.roomId,
-                    epochId = signed.envelope.epochId,
-                    sessionId = signed.envelope.sessionId,
-                    threadRootEventId = signed.envelope.threadRootEventId,
-                ),
-            )
-        } finally {
-            key.fill(0)
-        }
-        val decryptedContent = plaintext as? JsonObject ?: return null
-        require(
-            CanonicalJson.encode(matrixContent["m.relates_to"] ?: JsonNull) ==
-                CanonicalJson.encode(decryptedContent["m.relates_to"] ?: JsonNull),
-        ) { "The Matrix homeserver changed a signed timeline relation." }
-        val decryptedExtension = decryptedContent["io.codever"] as? JsonObject ?: return null
-        require(decryptedExtension.string("session_id") == signed.envelope.sessionId)
-        val relation = decryptedContent["m.relates_to"] as? JsonObject
-        val contentRoot = if (relation?.string("rel_type") == "m.thread") {
-            relation.string("event_id")
-        } else {
-            decryptedExtension.string("thread_root_event_id")
-        }
-        require(contentRoot == signed.envelope.threadRootEventId)
-        return decryptedContent
-    }
-
-    private suspend fun decodeMatrixRoomStateEvent(
-        event: MatrixDecryptedEvent,
-    ): JsonObject? {
-        if (event.roomId != matrix.publicSession()?.roomBinding?.roomId) return null
-        val root = json.parseToJsonElement(event.rawJson).jsonObject
-        val content = root["content"] as? JsonObject ?: return null
-        val eventType = root.string("type") ?: return null
-        if (
-            eventType != CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-            eventType != CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE &&
-            eventType != CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE
-        ) return null
-        return decodeMatrixRoomState(event, root, content, eventType)
-    }
-
-    private suspend fun decodeMatrixRoomState(
-        event: MatrixDecryptedEvent,
-        root: JsonObject,
-        content: JsonObject,
-        eventType: String,
-    ): JsonObject? {
-        val activeTrust = trust ?: run {
-            val pending = pendingPairing
-            if (pending != null && event.sender == pending.offer.offer.gatewayTransport.userId) {
-                bufferPreTrustEvent(event)
+        if (extension.long("version") == 3L) {
+            val activeTrust = trust ?: return null
+            if (event.sender != activeTrust.transportTrust.currentTransport.userId) return null
+            val keys = matrixV3ProjectKeys.value() ?: return null
+            val opened = try {
+                MatrixV3Protocol.openContent(extension, event.roomId, keys.projectId, keys)
+            } finally {
+                keys.wipe()
             }
-            return null
-        }
-        if (event.sender != activeTrust.transportTrust.currentTransport.userId) return null
-        val stateKey = root.string("state_key")?.takeIf { it.isNotBlank() } ?: return null
-        if (
-            eventType == CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-            stateKey != activeTrust.gatewayId
-        ) return null
-        require(content.long("version") == 2L && content.string("kind") == "state_envelope")
-        val signed = MatrixStateEnvelopeCodec.parse(
-            content.objectValue("state_envelope").toString(),
-        )
-        var key = timelineKeys.key(signed.envelope.epochId)
-        if (key == null) {
-            val keyBundleValue = content["timeline_key_ring_bundle"] as? JsonObject
-                ?: return null
-            val keyBundle = SecureEnvelopeBundleCodec.parse(keyBundleValue.toString())
-            if (keyBundle.bundle.recipients.none {
-                    it.recipientDeviceId == deviceId && it.recipientKeyId == deviceId
-                }
-            ) return null
-            val grant = SecureEnvelopeBundles.open(
-                keyBundle,
-                identity,
+            if (opened.plaintext.string("kind") != "signed_event") return null
+            val protocolEvent = MatrixV3Protocol.verifyGatewayEvent(
+                opened.plaintext.objectValue("value"),
                 activeTrust.gatewayKey,
-                SecureEnvelopeBundleBindings(
-                    gatewayId = activeTrust.gatewayId,
-                    conversationId = conversationId(),
-                    direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
-                    senderDeviceId = activeTrust.certificate.gatewayId,
-                    senderKeyId = activeTrust.gatewayKey.keyId,
-                ),
-                deviceId,
-                ReplayStore { _, _ -> true },
-                keyBundle.bundle.issuedAt,
-            ).plaintext as? JsonObject ?: return null
-            acceptTimelineKeyRingValue(grant)
-            key = timelineKeys.key(signed.envelope.epochId) ?: return null
+                activeTrust.gatewayId,
+                opened.projectId,
+            )
+            require(opened.logicalEventId == protocolEvent.string("eventId")) {
+                "The v3 historical event envelope logical ID is invalid."
+            }
+            if (protocolEvent.string("sessionId") != expectedSessionId) return null
+            val relation = content["m.relates_to"] as? JsonObject
+            val threadRootHint = relation
+                ?.takeIf { it.string("rel_type") == "m.thread" }
+                ?.string("event_id")
+            val projected = matrixV3Projection.applyGatewayEvent(
+                protocolEvent,
+                event.eventId,
+                threadRootHint,
+            )
+            projected.acknowledgedCommandId?.let { commandId ->
+                val command = outbox.get(commandId)
+                if (command != null) outbox.recordAcknowledgement(commandId, command.sequence, 0)
+            }
+            projected.terminal?.let(::recordMatrixV3Terminal)
+            matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+            matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+            return projected.messages.singleOrNull()?.copy(historical = true)
         }
-        val plaintext = try {
-            MatrixStateEnvelopes.open(
-                signed,
-                key,
-                activeTrust.gatewayKey,
-                MatrixStateBindings(
-                    gatewayId = activeTrust.gatewayId,
-                    conversationId = conversationId(),
-                    roomId = event.roomId,
-                    eventType = eventType,
-                    stateKey = stateKey,
-                    epochId = signed.envelope.epochId,
-                    stateVersion = signed.envelope.stateVersion,
-                ),
-            )
-        } finally {
-            key.fill(0)
-        }
-        require(plaintext.long("state_version") == signed.envelope.stateVersion)
-        when (plaintext.string("kind")) {
-            "gateway_state" -> require(
-                eventType == CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE &&
-                    plaintext.string("gateway_id") == stateKey,
-            )
-            "session_state" -> require(
-                eventType == CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE &&
-                    plaintext.string("session_id") == stateKey,
-            )
-            "session_directory" -> require(
-                eventType == CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE &&
-                    matrixDirectoryStateKey(plaintext) == stateKey,
-            )
-            else -> error("Unsupported Codever Matrix Room State payload.")
-        }
-        return plaintext
+        return null
     }
+
 
     private fun acceptPairingResponse(event: MatrixDecryptedEvent, extension: JsonObject) {
         val pending = pendingPairing ?: return
@@ -1867,329 +1922,6 @@ class NativeClientRuntime(
         )
     }
 
-    private suspend fun processAuthenticatedContent(
-        event: MatrixDecryptedEvent,
-        content: JsonObject,
-    ) {
-        val extension = content["io.codever"] as? JsonObject ?: return
-        when (extension.string("kind")) {
-            "timeline_key_ring_grant" -> acceptTimelineKeyRing(extension)
-            "session_root", "session_update", "session_lifecycle", "gateway_revision" -> {
-                val projectedState = nativeProjection.applyTimeline(extension)
-                projectedState?.let { acceptGatewayState(it) }
-            }
-            "command_ack" -> acceptCommandAck(extension)
-            "revision_conflict" -> acceptRevisionConflict(extension)
-            "command_result" -> acceptCommandResult(event, extension)
-            else -> {
-                if (extension.string("kind") == "status") {
-                    nativeProjection.applyStatus(extension)?.let { acceptGatewayState(it) }
-                }
-                if (extension.string("kind") == "collaboration_command") {
-                    acceptTimelineRevision(extension)
-                }
-                parseMessage(event, content)?.let { message ->
-                    val sessionId = message.sessionId ?: currentSessionId() ?: conversationId()
-                    eventHub.upsertMessage(sessionId, message.copy(sessionId = sessionId), refreshedSnapshot())
-                }
-            }
-        }
-    }
-
-    private suspend fun acceptTimelineRevision(extension: JsonObject) {
-        val state = gatewayState ?: return
-        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
-        val epoch = extension.string("revision_epoch") ?: return
-        val generation = extension.long("revision_epoch_generation")?.takeIf { it > 0 } ?: return
-        val currentEpoch = state.string("revision_epoch") ?: return
-        val currentGeneration = state.long("revision_epoch_generation") ?: return
-        if (generation < currentGeneration) return
-        if (generation > currentGeneration) {
-            diagnostics.record("gateway.revision.current_state_required")
-            return
-        }
-        require(epoch == currentEpoch) {
-            "Matrix timeline revision epoch does not match Gateway state."
-        }
-        if (revision < (state.long("revision") ?: 0)) return
-        acceptGatewayState(JsonObject(state + ("revision" to JsonPrimitive(revision))))
-    }
-
-    private fun acceptTimelineKeyRing(extension: JsonObject) {
-        val grant = extension["timeline_key_ring_grant"] as? JsonObject ?: return
-        acceptTimelineKeyRingValue(grant)
-    }
-
-    private fun acceptTimelineKeyRingValue(grant: JsonObject) {
-        val activeTrust = trust ?: return
-        require(grant.long("version") == 2L)
-        require(grant.string("kind") == "timeline_key_ring_grant")
-        require(grant.string("gateway_id") == activeTrust.gatewayId)
-        require(grant.string("conversation_id") == conversationId())
-        require(grant.string("room_id") == matrix.publicSession()?.roomBinding?.roomId)
-        val changed = timelineKeys.save(grant)
-        diagnostics.record("matrix.timeline_keys.accepted")
-        if (changed) diagnostics.record("matrix.timeline_keys.updated")
-    }
-
-    private suspend fun acceptGatewayState(
-        extension: JsonObject,
-        authoritative: Boolean = false,
-    ) {
-        if (extension.toString().toByteArray(Charsets.UTF_8).size > MAX_BRIDGE_EVENT_PAYLOAD_BYTES) return
-        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
-        val revisionEpoch = extension.string("revision_epoch") ?: return
-        val revisionEpochGeneration = extension.long("revision_epoch_generation")
-            ?.takeIf { it > 0 } ?: return
-        if (revisionEpoch.isBlank()) return
-        val previousState = gatewayState
-        val previousRevisionEpoch = previousState?.string("revision_epoch")
-        val previousRevisionEpochGeneration = previousState?.long("revision_epoch_generation")
-        if (previousRevisionEpoch != null && previousRevisionEpochGeneration != null) {
-            if (revisionEpochGeneration < previousRevisionEpochGeneration) return
-            require(
-                revisionEpochGeneration != previousRevisionEpochGeneration ||
-                    revisionEpoch == previousRevisionEpoch,
-            ) { "Gateway revision epoch changed without advancing its generation." }
-            require(
-                revisionEpochGeneration == previousRevisionEpochGeneration ||
-                    revisionEpoch != previousRevisionEpoch,
-            ) { "Gateway revision epoch generation advanced without changing its epoch." }
-        }
-        val scopeAdvanced = previousRevisionEpochGeneration != null &&
-            revisionEpochGeneration > previousRevisionEpochGeneration
-        if (scopeAdvanced && !authoritative) {
-            // A live Room State event proves that the previous command scope
-            // is retired, but it is not a publication barrier for the paged
-            // session directory. Stop accepting commands until one complete
-            // authoritative batch binds the durable outbox to this epoch.
-            gatewayStateSynchronized = false
-            diagnostics.record(
-                "gateway.command_scope.invalidated",
-                mapOf("generation" to revisionEpochGeneration.toString()),
-            )
-        }
-        var commandScopeStage = "outbox"
-        val reconciliation = try {
-            if (authoritative) {
-                commandScopeStage = "device_sequence"
-                val acknowledgedSequence = authoritativeDeviceSequence(extension)
-                commandScopeStage = "outbox"
-                outbox.reconcileGatewayScope(
-                    revisionEpoch = revisionEpoch,
-                    revisionEpochGeneration = revisionEpochGeneration,
-                    acknowledgedSequence = acknowledgedSequence,
-                    revision = revision,
-                )
-            } else {
-                outbox.updateKnownRevision(
-                    revisionEpoch,
-                    revisionEpochGeneration,
-                    revision,
-                )
-                null
-            }
-        } catch (error: Exception) {
-            if (authoritative) gatewayStateSynchronized = false
-            if (authoritative) {
-                diagnostics.record(
-                    "command.scope.reconcile_rejected",
-                    mapOf(
-                        "stage" to commandScopeStage,
-                        "code" to commandScopeErrorCode(error),
-                    ),
-                )
-            }
-            throw error
-        }
-        val changed = previousState != extension
-        gatewayState = extension
-        if (authoritative) gatewayStateSynchronized = true
-        reconciliation?.migratedCommands?.forEach { migration ->
-            ackTimeouts.remove(migration.previousCommandId)?.cancel()
-            cancelCommandTransmission(migration.previousCommandId)
-            cancelScheduledCommandRecovery(migration.previousCommandId)
-            outbox.get(migration.currentCommandId)?.let(::publishCommand)
-            launchCommandTransmission(migration.currentCommandId, recovery = false)
-        }
-        if (reconciliation?.epochChanged == true) {
-            diagnostics.record(
-                "command.scope.reconciled",
-                mapOf(
-                    "generation" to revisionEpochGeneration.toString(),
-                    "migrated" to reconciliation.migratedCommands.size.toString(),
-                ),
-            )
-        }
-        val convergenceRevision = gatewayConvergenceMinimumRevision
-        if (convergenceRevision != null && revision >= convergenceRevision) {
-            cancelGatewayConvergenceFallback()
-            diagnostics.record(
-                "gateway.state.timeline_converged",
-                mapOf("stage" to "native"),
-            )
-        }
-        if (changed) {
-            try {
-                eventHub.publish(
-                    ClientEventType.GATEWAY_STATE_CHANGED,
-                    extension,
-                    refreshedSnapshot(),
-                )
-            } catch (error: Exception) {
-                gatewayStateSynchronized = false
-                throw error
-            }
-        }
-        diagnostics.record(
-            if (changed) "gateway.room_state.accepted" else "gateway.room_state.duplicate",
-        )
-        if (scopeAdvanced && !authoritative) {
-            startAuthoritativeStateRefresh(recoverTransport = false)
-        }
-        resumePendingSafeRevisionConflict()
-        schedulePendingCommandRecoveries(immediate = true)
-        refreshSnapshot(publishLifecycle = true)
-    }
-
-    private fun authoritativeDeviceSequence(state: JsonObject): Long {
-        val sequenceEpoch = trust?.certificate?.certificateId
-            ?: throw NativeTrustRequiredException("Gateway trust is unavailable.")
-        val entries = state["command_sequences"] as? JsonArray
-            ?: throw IllegalArgumentException("Gateway command sequences are unavailable.")
-        val matches = entries.mapNotNull { it as? JsonObject }.filter { entry ->
-            entry.string("device_id") == deviceId &&
-                entry.string("sequence_epoch") == sequenceEpoch
-        }
-        require(matches.size == 1) {
-            "Gateway state does not contain exactly one command sequence for this device."
-        }
-        return matches.single().long("sequence")?.takeIf { it >= 0 }
-            ?: throw IllegalArgumentException("Gateway command sequence is invalid.")
-    }
-
-    private fun commandScopeErrorCode(error: Throwable): String = when {
-        error.message == "Gateway state does not contain exactly one command sequence for this device." ->
-            "device_sequence_cardinality"
-        error.message == "Gateway command sequence is invalid." -> "device_sequence_invalid"
-        error.message == "Gateway revision epoch changed without advancing its generation." ->
-            "epoch_without_generation"
-        error.message == "Gateway revision epoch generation advanced without changing its epoch." ->
-            "generation_without_epoch"
-        error.message == "More than one unacknowledged command cannot cross a Gateway revision epoch." ->
-            "multiple_pending_commands"
-        error.message?.startsWith("Command outbox") == true -> "outbox_validation"
-        error.message?.startsWith("Command revision epoch") == true -> "command_epoch_validation"
-        else -> "invalid_state"
-    }
-
-    private fun acceptCommandAck(extension: JsonObject) {
-        val commandId = extension.string("command_id") ?: return
-        val sequence = extension.long("sequence")?.takeIf { it > 0 } ?: return
-        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
-        val operationId = outbox.get(commandId)?.operationId
-        if (outbox.recordAcknowledgement(commandId, sequence, revision)) {
-            ackTimeouts.remove(commandId)?.cancel()
-            cancelScheduledCommandRecovery(commandId)
-            operationId?.let(automaticRevisionRetryAttempts::remove)
-            outbox.get(commandId)?.let(::publishCommand)
-        }
-    }
-
-    private suspend fun acceptRevisionConflict(extension: JsonObject) {
-        val commandId = extension.string("command_id") ?: return
-        val expected = extension.long("expected_revision")?.takeIf { it >= 0 } ?: return
-        val sequence = outbox.get(commandId)?.sequence ?: return
-        ackTimeouts.remove(commandId)?.cancel()
-        cancelScheduledCommandRecovery(commandId)
-        val conflicted = outbox.recordRevisionConflict(commandId, sequence, expected) ?: return
-        if (!retrySafeRevisionConflict(conflicted.commandId, "gateway")) {
-            publishCommand(conflicted)
-        }
-    }
-
-    private fun acceptCommandResult(event: MatrixDecryptedEvent, extension: JsonObject) {
-        val commandId = extension.string("command_id") ?: return
-        val sequence = extension.long("sequence")?.takeIf { it > 0 } ?: return
-        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
-        val outcome = when (extension.string("outcome")) {
-            "succeeded" -> DurableOutcome.SUCCEEDED
-            "failed" -> DurableOutcome.FAILED
-            "cancelled" -> DurableOutcome.CANCELLED
-            else -> return
-        }
-        val errorText = extension.string("error")
-        val completion = DurableCompletion(
-            commandId = commandId,
-            sequence = sequence,
-            revision = revision,
-            outcome = outcome,
-            sessionId = extension.string("session_id"),
-            result = extension["result"],
-            error = errorText?.let {
-                DurableError("gateway_failed", it.take(4_096), retryable = false)
-            },
-        )
-        recordCommandCompletion(
-            completion,
-            diagnosticEvent = "command.completion.received",
-            scheduleConvergenceFallback = true,
-        )
-        if (outcome == DurableOutcome.FAILED) {
-            val sessionId = extension.string("session_id") ?: currentSessionId() ?: conversationId()
-            eventHub.upsertMessage(
-                sessionId,
-                ClientMessage(
-                    eventId = event.eventId,
-                    sender = trust?.gatewayId ?: "gateway",
-                    timestamp = event.timestamp,
-                    encrypted = true,
-                    kind = ClientMessageKind.ERROR,
-                    format = ClientMessageFormat.PLAIN,
-                    text = errorText ?: "The Gateway could not complete the command.",
-                    sessionId = sessionId,
-                    commandId = commandId,
-                    revision = revision,
-                    semantic = extension,
-                ),
-                refreshedSnapshot(),
-            )
-        }
-    }
-
-    /**
-     * A signed Matrix-native state event is the authoritative result of a
-     * desired-state session command. Complete the matching durable command as
-     * soon as that state is visible instead of waiting for a later per-device
-     * command_result copy from the homeserver.
-     */
-    private fun acceptCanonicalCommandCompletion(extension: JsonObject) {
-        val commandId = extension.string("source_command_id") ?: return
-        val command = outbox.get(commandId) ?: return
-        val operation = outbox.operation(commandId) ?: return
-        val kind = extension.string("kind") ?: return
-        val state = extension.string("state")
-        if (!canonicalStateCompletesCommand(operation, kind, state)) return
-        val revision = extension.long("revision")?.takeIf { it >= 0 } ?: return
-        val eventSessionId = extension.string("session_id") ?: return
-        if (command.sessionId != null && command.sessionId != eventSessionId) return
-        // A timeline lifecycle record is an audit event, not inventory
-        // authority. Even for Room State, only complete after that exact
-        // entity value won projection ordering; an older tombstone must not
-        // report success while a newer active entity is still visible.
-        if (nativeProjection.sessionLifecycleState(eventSessionId) != state) return
-        recordCommandCompletion(
-            DurableCompletion(
-                commandId = commandId,
-                sequence = command.sequence,
-                revision = revision,
-                outcome = DurableOutcome.SUCCEEDED,
-                sessionId = eventSessionId,
-            ),
-            diagnosticEvent = "command.completion.inferred",
-            scheduleConvergenceFallback = false,
-        )
-    }
 
     private fun recordCommandCompletion(
         completion: DurableCompletion,
@@ -2238,120 +1970,6 @@ class NativeClientRuntime(
         }
     }
 
-    private suspend fun resumePendingSafeRevisionConflict() {
-        val pending = outbox.list()
-            .asSequence()
-            .filter { it.state == DurableState.NEEDS_REVIEW }
-            .sortedBy { it.sequence }
-            .firstOrNull { shouldAutomaticallyRetryRevisionConflict(outbox.operation(it.commandId)) }
-            ?: return
-        retrySafeRevisionConflict(pending.commandId, "startup")
-    }
-
-    private suspend fun retrySafeRevisionConflict(commandId: String, stage: String): Boolean {
-        val current = outbox.get(commandId) ?: return false
-        val operation = outbox.operation(commandId)
-        if (!shouldAutomaticallyRetryRevisionConflict(operation)) return false
-        val completedAttempts = automaticRevisionRetryAttempts[current.operationId] ?: 0
-        if (completedAttempts >= MAX_AUTOMATIC_REVISION_RETRIES) {
-            diagnostics.record(
-                "command.revision_retry.exhausted",
-                mapOf("action" to (operation?.wireName ?: "unknown")),
-            )
-            return false
-        }
-        automaticRevisionRetryAttempts[current.operationId] = completedAttempts + 1
-        val receipt = outbox.resolveRevisionConflict(commandId, RevisionConflictAction.RETRY)
-        val rebased = outbox.get(receipt.commandId) ?: error("Rebased command disappeared.")
-        diagnostics.record(
-            "command.revision_retry.automatic",
-            mapOf(
-                "action" to (operation?.wireName ?: "unknown"),
-                "stage" to stage,
-                "attempt" to (completedAttempts + 1).toString(),
-            ),
-        )
-        publishCommand(rebased)
-        launchCommandTransmission(rebased.commandId, recovery = false)
-        return true
-    }
-
-    private fun parseMessage(
-        event: MatrixDecryptedEvent,
-        content: JsonObject,
-        historical: Boolean = false,
-    ): ClientMessage? {
-        val replacement = content["m.new_content"] as? JsonObject
-        val effective = replacement ?: content
-        val extension = effective["io.codever"] as? JsonObject ?: return null
-        val kind = extension.string("kind") ?: return null
-        val logicalEventId = extension.string("logical_event_id") ?: event.eventId
-        val sessionId = extension.string("session_id")
-        val revision = extension.long("revision")
-        val base = ClientMessage(
-            eventId = logicalEventId,
-            sender = trust?.gatewayId ?: event.sender,
-            timestamp = event.timestamp,
-            encrypted = true,
-            kind = ClientMessageKind.NOTICE,
-            format = ClientMessageFormat.PLAIN,
-            sessionId = sessionId,
-            historical = historical.takeIf { it },
-            operationId = extension.string("operation_id"),
-            replacesEventId = extension.string("replaces_logical_event_id"),
-            revision = revision,
-            activeDeviceCount = extension.int("active_device_count"),
-            attachments = (extension["attachments"] as? JsonArray)?.mapNotNull { candidate ->
-                runCatching { PublicClientJson.decodeAttachment(candidate) }.getOrNull()
-            }?.takeIf(List<*>::isNotEmpty),
-            semantic = extension,
-        )
-        return when (kind) {
-            "collaboration_command" -> {
-                if (extension.string("operation") != "prompt") return null
-                base.copy(
-                    kind = ClientMessageKind.USER,
-                    text = extension.string("text") ?: "",
-                    commandId = extension.string("command_id"),
-                    originDeviceId = extension.string("origin_device_id"),
-                    originDeviceName = extension.string("origin_device_name"),
-                )
-            }
-            "message" -> {
-                val toolGroup = decodeMatrixToolGroup(extension)
-                if (extension["ui"] != null && toolGroup == null) return null
-                base.copy(
-                    kind = if (toolGroup == null) ClientMessageKind.AGENT else ClientMessageKind.TOOL,
-                    text = effective.string("body") ?: "",
-                    format = when (extension.string("format")) {
-                        "markdown" -> ClientMessageFormat.MARKDOWN
-                        "html" -> ClientMessageFormat.HTML
-                        else -> ClientMessageFormat.PLAIN
-                    },
-                    toolGroup = toolGroup,
-                )
-            }
-            "decision_request" -> base.copy(
-                kind = ClientMessageKind.PERMISSION,
-                text = extension.string("title") ?: effective.string("body") ?: "Permission required",
-                requestId = extension.string("decision_id"),
-            )
-            "status" -> base.copy(
-                text = effective.string("body") ?: "Gateway status updated.",
-            )
-            else -> null
-        }
-    }
-
-    private fun incomingBindings(activeTrust: GatewayTrust) = SecureEnvelopeBindings(
-        gatewayId = activeTrust.gatewayId,
-        conversationId = conversationId(),
-        direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
-        senderDeviceId = activeTrust.certificate.gatewayId,
-        recipientDeviceId = activeTrust.certificate.deviceId,
-        senderKeyId = activeTrust.gatewayKey.keyId,
-        recipientKeyId = deviceId,
-    )
 
     private fun pairingRequestContent(request: SignedPairingRequest): JsonObject = buildJsonObject {
         put("msgtype", "m.notice")
@@ -2694,7 +2312,7 @@ class NativeClientRuntime(
                     "gateway.state.fallback_requested",
                     mapOf("action" to operation.wireName),
                 )
-                startAuthoritativeStateRefresh(recoverTransport = false)
+                startMatrixV3ProjectionRefresh(recoverTransport = false)
             }
         }
     }
@@ -2796,109 +2414,6 @@ class NativeClientRuntime(
     private fun JsonObject.objectValue(key: String): JsonObject = get(key) as? JsonObject
         ?: throw IllegalArgumentException("$key must be an object.")
 
-    private fun matrixSessionDirectoryLocator(gateway: JsonObject): MatrixSessionDirectoryLocator {
-        val value = gateway.objectValue("session_directory")
-        require(
-            value.keys == setOf(
-                "generation", "state_version", "slot", "page_count",
-                "state_key_prefix", "digest",
-            ),
-        )
-        val prefix = value.string("state_key_prefix")
-            ?.takeIf { it.isNotBlank() && it.length <= 128 }
-            ?: error("Matrix session directory prefix is invalid.")
-        val digest = value.string("digest")
-            ?.takeIf { runCatching { Base64Url.decode(it).size == 32 }.getOrDefault(false) }
-            ?: error("Matrix session directory digest is invalid.")
-        return MatrixSessionDirectoryLocator(
-            generation = value.long("generation")?.also { require(it >= 0) }
-                ?: error("Matrix session directory generation is invalid."),
-            stateVersion = value.long("state_version")?.also { require(it >= 0) }
-                ?: error("Matrix session directory state version is invalid."),
-            slot = value.int("slot")?.also { require(it in 0..2) }
-                ?: error("Matrix session directory slot is invalid."),
-            pageCount = value.int("page_count")?.also { require(it in 0..100_000) }
-                ?: error("Matrix session directory page count is invalid."),
-            stateKeyPrefix = prefix,
-            digest = digest,
-        )
-    }
-
-    private fun matrixDirectoryStateKey(page: JsonObject): String {
-        val prefix = page.string("state_key_prefix")
-            ?.takeIf { it.isNotBlank() && it.length <= 128 }
-            ?: error("Matrix session directory prefix is invalid.")
-        val slot = page.int("directory_slot")?.also { require(it in 0..2) }
-            ?: error("Matrix session directory slot is invalid.")
-        val index = page.int("page_index")?.also { require(it in 0 until 100_000) }
-            ?: error("Matrix session directory page index is invalid.")
-        return "$prefix.$slot.$index"
-    }
-
-    private fun materializeMatrixSessionDirectory(decoded: List<JsonObject>): List<JsonObject> {
-        val gateways = decoded.filter { it.string("kind") == "gateway_state" }
-        require(gateways.size == 1) { "A Matrix directory snapshot requires one Gateway state." }
-        require(decoded.all { it.string("kind") in setOf("gateway_state", "session_directory") })
-        val gateway = gateways.single()
-        val locator = matrixSessionDirectoryLocator(gateway)
-        val pages = decoded.filter { it.string("kind") == "session_directory" }
-            .sortedBy { it.int("page_index") }
-        require(pages.size == locator.pageCount) { "Matrix session directory is incomplete." }
-        val sessionIds = mutableSetOf<String>()
-        val sessions = mutableListOf<Pair<JsonObject, JsonObject>>()
-        pages.forEachIndexed { pageIndex, page ->
-            require(page.string("gateway_id") == gateway.string("gateway_id"))
-            require(page.string("conversation_id") == gateway.string("conversation_id"))
-            require(page.string("revision_epoch") == gateway.string("revision_epoch"))
-            require(page.long("revision_epoch_generation") == gateway.long("revision_epoch_generation"))
-            require(page.long("state_version") == locator.stateVersion)
-            require(page.long("directory_generation") == locator.generation)
-            require(page.int("directory_slot") == locator.slot)
-            require(page.string("directory_digest") == locator.digest)
-            require(page.string("state_key_prefix") == locator.stateKeyPrefix)
-            require(page.int("page_index") == pageIndex)
-            require(page.int("page_count") == locator.pageCount)
-            val pageSessions = page["sessions"] as? JsonArray
-                ?: error("Matrix session directory page has no sessions.")
-            require(pageSessions.size <= 32)
-            for (element in pageSessions) {
-                val session = element as? JsonObject
-                    ?: error("Matrix session directory entry is not an object.")
-                val sessionId = session.string("session_id")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: error("Matrix session directory entry has no ID.")
-                require(sessionIds.add(sessionId)) {
-                    "Matrix session directory repeats session $sessionId."
-                }
-                sessions += page to session
-            }
-        }
-        val digest = CodeverCrypto.sha256Base64Url(
-            CanonicalJson.bytes(JsonArray(sessions.map { it.second })),
-        )
-        require(digest == locator.digest) { "Matrix session directory digest is invalid." }
-        val entities = sessions.map { (page, session) ->
-            buildJsonObject {
-                put("version", 2)
-                put("kind", "session_state")
-                put("gateway_id", page.getValue("gateway_id"))
-                put("conversation_id", page.getValue("conversation_id"))
-                put("revision", page.getValue("revision"))
-                put("revision_epoch", page.getValue("revision_epoch"))
-                put("revision_epoch_generation", page.getValue("revision_epoch_generation"))
-                put("state_version", page.getValue("state_version"))
-                put("session_id", session.getValue("session_id"))
-                put("state", if (session["archived"]?.jsonPrimitive?.content == "true") {
-                    "archived"
-                } else {
-                    "active"
-                })
-                put("session", session)
-                put("updated_at", page.getValue("updated_at"))
-            }
-        }
-        return listOf(gateway) + entities
-    }
 
     private companion object {
         const val BRIDGE_REPLAY_EVENT_LIMIT = 100
@@ -2920,6 +2435,23 @@ internal fun decodeMatrixToolGroup(extension: JsonObject): ToolGroupPresentation
     return runCatching { PublicClientJson.decodeToolGroup(ui) }.getOrNull()
 }
 
+private fun isMatrixV3RawEvent(rawJson: String): Boolean = runCatching {
+    val root = Json.parseToJsonElement(rawJson).jsonObject
+    when (root["type"]?.jsonPrimitive?.contentOrNull) {
+        CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE,
+        id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE,
+        -> true
+        "m.room.message" ->
+            (root["content"] as? JsonObject)
+                ?.get("io.codever")
+                ?.jsonObject
+                ?.get("version")
+                ?.jsonPrimitive
+                ?.longOrNull == 3L
+        else -> false
+    }
+}.getOrDefault(false)
+
 internal fun requiresGatewayConvergence(
     currentRevision: Long?,
     expectedRevision: Long,
@@ -2928,26 +2460,6 @@ internal fun requiresGatewayConvergence(
     return currentRevision == null || currentRevision < expectedRevision
 }
 
-internal fun authoritativeRoomStateReady(kinds: List<String>): Boolean =
-    kinds.count { it == "gateway_state" } == 1
-
-internal fun canonicalStateCompletesCommand(
-    operation: CommandOperation,
-    eventKind: String,
-    lifecycleState: String?,
-): Boolean = when (operation) {
-    CommandOperation.SESSION_CREATE ->
-        eventKind == "session_state" && lifecycleState == "active"
-    CommandOperation.SESSION_SETTINGS ->
-        eventKind == "session_state" && lifecycleState in setOf("active", "archived")
-    CommandOperation.SESSION_ARCHIVE ->
-        eventKind == "session_state" && lifecycleState == "archived"
-    CommandOperation.SESSION_RESTORE ->
-        eventKind == "session_state" && lifecycleState == "active"
-    CommandOperation.SESSION_DELETE ->
-        eventKind == "session_state" && lifecycleState == "deleted"
-    else -> false
-}
 
 internal fun shouldAutomaticallyRetryRevisionConflict(operation: CommandOperation?): Boolean =
     when (operation) {

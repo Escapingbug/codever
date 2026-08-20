@@ -30,6 +30,22 @@ class NativeStateUpgradeCoordinatorTest {
         assertReleasedCoverage(fixture.getValue("native").jsonArray, NATIVE_STATE_CATALOG)
         assertReleasedCoverage(fixture.getValue("matrix").jsonArray, MATRIX_STATE_CATALOG)
     }
+
+    @Test
+    fun `protocol v3 durable and rebuildable stores are all migration catalogued`() {
+        val expected = mapOf(
+            "matrix-v3-project-keys" to NativePersistedStateClass.SECURITY_CRITICAL,
+            "matrix-v3-raw-inbox" to NativePersistedStateClass.DURABLE_COMMAND,
+            "matrix-v3-command-content" to NativePersistedStateClass.DURABLE_COMMAND,
+            "matrix-v3-projection" to NativePersistedStateClass.REBUILDABLE_PROJECTION,
+        )
+
+        expected.forEach { (id, stateClass) ->
+            val entry = NATIVE_STATE_CATALOG.single { it.id == id }
+            assertEquals(stateClass, entry.stateClass)
+            assertEquals(1, entry.schemaVersion)
+        }
+    }
     @Test
     fun `future preserved state runs every adjacent migration and records actual version`() {
         val blobs = MemoryManifestBlobs()

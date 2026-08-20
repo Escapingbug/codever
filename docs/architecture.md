@@ -114,40 +114,36 @@ sign an invitation for a stale Matrix device. Long-lived Matrix access tokens
 remain server-side and may only be exchanged for short-lived one-time device
 login tokens.
 
-### 3.6 Matrix Multi-Recipient Delivery
+### 3.6 Matrix-native protocol v3
 
-The Matrix room timeline is a logical conversation log, not a per-device
-mailbox or RPC queue. Gateway broadcasts use one signed room-timeline
-ciphertext and carry a pairwise encrypted key-ring bundle in the same event.
-Adding a trusted device increases event size slightly but does not multiply
-Matrix sends or consume additional homeserver message-rate tokens.
+Matrix is the durable conversation log, not a per-device mailbox or RPC queue.
+One encrypted room is one project and every session is an `m.thread`. User
+commands and Gateway outputs are ordinary `m.room.message` events carrying a
+signed, application-encrypted v3 envelope. Stable logical IDs are independent
+from Matrix physical event IDs; `causationCommandId` links an output to a
+command without making the two messages the same entity.
 
-The recipient set is every non-expired, non-revoked device trusted for the
-room, not only devices with a recent browser heartbeat. This preserves Matrix
-store-and-forward for offline devices without increasing the event count;
-revocation removes a device from all newly created bundles immediately.
+The Gateway persists the exact outbound content and stable Matrix transaction
+ID before sending. It also journals every accepted command ID before execution,
+so Matrix retry, restart, and multi-device redelivery cannot execute a command
+twice. Ordinary conversation events are room broadcasts and do not multiply
+with device count. Only project key grants, pairing messages, and Gateway
+transport rotation are pairwise device control.
 
-`FileMatrixDeliveryOutbox` stores one durable bundle and its recipient identity
-snapshot before the transport attempt. Retry and restart recovery preserve the
-same Matrix transaction ID. Targeted command acknowledgements/results continue
-to use single-recipient envelopes because they are executable, device-bound
-control traffic. Conversation history and session state do not: version-2
-clients recover current inventory from authenticated, directly addressed
-`io.codever.session.directory.v2` Room State pages and transcripts from signed
-session-thread relations. Gateway state names the committed directory
-generation and digest; clients read Gateway state before and after the bounded
-pages and apply the snapshot only when both descriptors match. No client scans
-the entire room state or timeline to discover sessions. The pre-release Gateway
-state/history RPC handlers and schemas have been removed.
+Current project state is an ordinary signed snapshot event referenced by
+`io.codever.project.current.v3`. Clients rebuild by verifying that pointer,
+fully paginating Matrix threads, and loading selected thread relations. They
+persist raw events before projection, quarantine poison per event, and retry
+dependency-deferred records in multiple passes. The `/sync` token is only an
+availability cursor; it is never application authority or a manual checkpoint.
 
-Sessions are Matrix threads. Stable application `logical_event_id` values
-decouple message/edit identity from Matrix event IDs, while retained timeline
-epochs let a late-joining authorized device recover history directly from
-Matrix. Large visible output is split into deterministic 8 KiB UTF-8 timeline
-parts, and Android stores limited-`/sync` gaps in an encrypted cursor journal
-before advancing live sync. Gap recovery uses standard bounded `/messages`
-pagination and resumes after process death without blocking new live events.
-See `docs/matrix-native-conversation-protocol.md`.
+Android owns sync, inbox projection, command reconciliation, and notification
+inside its foreground connection service. The WebView is a replaceable UI and
+does not need to remain attached for Agent output to converge. Production
+Gateway, PWA, and APK entry points accept only the v3 application data plane;
+the independently versioned pairing and device-rotation control plane is the
+only pre-v3 mechanism retained. See
+`docs/matrix-native-conversation-protocol.md`.
 
 ## 4. Main Components
 

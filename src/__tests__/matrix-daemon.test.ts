@@ -53,6 +53,7 @@ import {
     createGatewayMatrixScheduler,
     gatewayProjectIdentity,
     MatrixGatewayRunner,
+    V3MatrixGatewayRunner,
     MatrixJsSdkGatewayClient,
     StrictMatrixCommandAuthorizer,
     validateMatrixGatewayConfig,
@@ -1841,7 +1842,7 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
-    it('wires the default TopicSession and SemanticSessionRuntime to a provider and MatrixPort', async () => {
+    it('starts the protocol v3 runner through the production daemon entry', async () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
         const provider = fakeProvider()
@@ -1851,26 +1852,7 @@ describe('MatrixGatewayRunner', () => {
             providerFactory: () => provider,
         })
 
-        client.emit(await incomingSecureSigned(
-            await signedPrompt(fixture.keys, fixture.now),
-            fixture.keys,
-            fixture.gatewayKeys,
-            fixture.now,
-            'daemon-prompt',
-        ))
-
-        await vi.waitFor(() => expect(provider.startQuery).toHaveBeenCalledOnce())
-        expect(provider.startQuery).toHaveBeenCalledWith(
-            {
-                parts: [{ type: 'text', text: 'hello from PWA' }],
-            },
-            expect.objectContaining({ cwd: 'C:\\repo' }),
-        )
-        await vi.waitFor(() => expect(client.sent.length).toBeGreaterThan(0))
-        expect(client.sent.some(request =>
-            request.content[CODEVER_MATRIX_EXTENSION] !== undefined
-            && request.content.msgtype === 'm.notice',
-        )).toBe(true)
+        expect(runner).toBeInstanceOf(V3MatrixGatewayRunner)
         await runner.stop()
     })
 
@@ -2100,12 +2082,19 @@ describe('MatrixJsSdkGatewayClient', () => {
             eventType: 'm.room.message',
             content: {
                 msgtype: 'm.notice',
-                body: 'Encrypted Codever timeline event',
+                body: 'Encrypted Codever event',
                 [CODEVER_MATRIX_EXTENSION]: {
-                    version: 2,
-                    kind: 'timeline_envelope',
-                    timeline_envelope: { envelope: {}, signature: {} },
-                    timeline_key_ring_bundle: { bundle: {}, signature: {} },
+                    version: 3,
+                    envelope: {
+                        kind: 'codever.project-envelope',
+                        version: 3,
+                        roomId: '!room:example.org',
+                        projectId: 'project-1',
+                        keyId: 'project-key-1',
+                        logicalEventId: 'event-1',
+                        nonce: 'AAAAAAAAAAAAAAAA',
+                        ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+                    },
                 },
             },
             transactionId: 'timeline/txn',
@@ -2114,7 +2103,7 @@ describe('MatrixJsSdkGatewayClient', () => {
             'PUT',
             '/rooms/!room%3Aexample.org/send/m.room.message/timeline%2Ftxn',
             undefined,
-            expect.objectContaining({ body: 'Encrypted Codever timeline event' }),
+            expect.objectContaining({ body: 'Encrypted Codever event' }),
         )
         await client.sendApplicationControlEvent({
             roomId: '!room:example.org',

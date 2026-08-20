@@ -6,7 +6,6 @@ import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixConnectionRuntime
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
-import id.my.anciety.codever.matrix.MatrixSessionDirectoryLocator
 import id.my.anciety.codever.matrix.MatrixThreadHistoryBatch
 import id.my.anciety.codever.matrix.MatrixRuntimeStatus
 import id.my.anciety.codever.matrix.MatrixTransportIdentity
@@ -21,14 +20,6 @@ interface NativeMatrixObserver {
     fun onTransportReady(identity: MatrixTransportIdentity)
     fun onConvergenceRequired(reason: String)
     suspend fun onDecryptedEvent(event: MatrixDecryptedEvent)
-    suspend fun onAuthoritativeGatewayState(
-        event: MatrixDecryptedEvent,
-    ): MatrixSessionDirectoryLocator {
-        throw UnsupportedOperationException("Matrix session-directory decoding is unavailable.")
-    }
-    suspend fun onAuthoritativeRoomState(events: List<MatrixDecryptedEvent>) {
-        for (event in events) onDecryptedEvent(event)
-    }
 }
 
 interface NativeMatrixPort {
@@ -47,8 +38,11 @@ interface NativeMatrixPort {
         from: String?,
         limit: Int,
     ): MatrixThreadHistoryBatch
-    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String)
-    suspend fun refreshApplicationRoomState()
+    suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): String
+    suspend fun fetchApplicationEvent(eventId: String): MatrixDecryptedEvent =
+        throw UnsupportedOperationException("Direct Matrix event recovery is unavailable.")
+    suspend fun refreshThreadDirectory(): Int = 0
+    suspend fun refreshApplicationProjection()
     suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String
     suspend fun downloadMedia(url: String): ByteArray
     suspend fun profileProperty(userId: String, key: String): JsonObject?
@@ -72,11 +66,6 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         onTransportReady = { identity -> observer?.onTransportReady(identity) },
         onConvergenceRequired = { reason -> observer?.onConvergenceRequired(reason) },
         onDecryptedEvent = { event -> observer?.onDecryptedEvent(event) },
-        onAuthoritativeGatewayState = { event ->
-            observer?.onAuthoritativeGatewayState(event)
-                ?: throw IllegalStateException("The native Matrix observer is unavailable.")
-        },
-        onAuthoritativeRoomState = { events -> observer?.onAuthoritativeRoomState(events) },
     )
 
     override val status: MatrixRuntimeStatus get() = runtime.status
@@ -100,9 +89,12 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
         from: String?,
         limit: Int,
     ): MatrixThreadHistoryBatch = runtime.loadThreadHistory(threadRootEventId, from, limit)
-    override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String) =
+    override suspend fun sendApplicationControlEvent(contentJson: String, transactionId: String): String =
         runtime.sendApplicationControlEvent(contentJson, transactionId)
-    override suspend fun refreshApplicationRoomState() = runtime.refreshApplicationRoomState()
+    override suspend fun fetchApplicationEvent(eventId: String): MatrixDecryptedEvent =
+        runtime.fetchApplicationEvent(eventId)
+    override suspend fun refreshThreadDirectory(): Int = runtime.refreshThreadDirectory()
+    override suspend fun refreshApplicationProjection() = runtime.refreshApplicationProjection()
     override suspend fun uploadMedia(mimeType: String, bytes: ByteArray): String =
         runtime.uploadMedia(mimeType, bytes)
     override suspend fun downloadMedia(url: String): ByteArray = runtime.downloadMedia(url)
