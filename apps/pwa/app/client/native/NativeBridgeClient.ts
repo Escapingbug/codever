@@ -210,6 +210,23 @@ export class NativeBridgeClient implements CodeverClient {
       idempotencyKey: crypto.randomUUID(),
       commandId,
     });
+    // A terminal command may have completed while the WebView was stopped or
+    // while an APK update replaced it. Its command.changed notification is not
+    // replayed forever, so the recovery receipt alone is insufficient: a
+    // receipt intentionally omits the persisted completion payload. Hydrate
+    // the current durable view before installing a new completion waiter.
+    //
+    // The native outbox may also re-key an unacknowledged command when the
+    // Gateway revision epoch changes. In that case `receipt.commandId` is the
+    // current identity, while `commandId` is a retired alias retained only for
+    // exact recovery.
+    if (receipt.commandId) {
+      const current = await this.bridge.request("codever.command.get", {
+        context: this.bridge.context(),
+        commandId: receipt.commandId,
+      });
+      this.#recordCommand(current);
+    }
     return this.#sendResult(receipt);
   }
 

@@ -64,6 +64,21 @@ export function findOptimisticMessageId(
     )?.id;
 }
 
+/**
+ * A cache read can start before an authoritative Matrix echo replaces an
+ * optimistic message and finish after that replacement. Keep the canonical
+ * copy (which has an event id), but never merge the stale cache-only copy back
+ * into the transcript once its optimistic identity has been reconciled.
+ */
+export function withoutReconciledOptimisticCopies(
+  messages: readonly ChatMessage[],
+  reconciledIds: ReadonlySet<string>,
+): ChatMessage[] {
+  return messages.filter(
+    (message) => !reconciledIds.has(message.id) || Boolean(message.eventId),
+  );
+}
+
 export function mergeChatMessages(
   current: readonly ChatMessage[],
   incoming: readonly ChatMessage[],

@@ -5,6 +5,7 @@ const {
   isAgentWorkMessage,
   mergeChatMessage,
   mergeChatMessages,
+  withoutReconciledOptimisticCopies,
 } = await import(new URL("../app/chatMessages.ts", import.meta.url).href);
 
 test("identifies agent work messages without guessing from their text", () => {
@@ -62,6 +63,27 @@ test("authoritative user echo repairs clock-skewed optimistic ordering", () => {
   assert.equal(repaired[0].eventId, canonicalUser.eventId);
   assert.equal(repaired[0].timestamp, canonicalUser.timestamp);
   assert.equal(repaired[0].optimistic, false);
+});
+
+test("a late cache page cannot resurrect a reconciled optimistic copy", () => {
+  const staleCached = {
+    id: "user-local",
+    kind: "user",
+    text: "Run the checks",
+    timestamp: 2_000,
+    optimistic: true,
+  };
+  const canonical = {
+    ...staleCached,
+    eventId: "$canonical-user",
+    optimistic: false,
+  };
+  const reconciled = new Set([staleCached.id]);
+
+  assert.deepEqual(
+    withoutReconciledOptimisticCopies([staleCached, canonical], reconciled),
+    [canonical],
+  );
 });
 
 test("a new revision epoch keeps a resumed prompt after old conversation history", () => {
