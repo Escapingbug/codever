@@ -36,6 +36,7 @@ interface NativeMatrixPort {
     val commandTransportReady: Boolean
     fun setObserver(observer: NativeMatrixObserver?)
     fun start()
+    fun onSystemWake(reason: String) = Unit
     fun publicSession(): PublicMatrixSession?
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession
     suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult
@@ -86,6 +87,7 @@ class MatrixNativePort(context: Context) : NativeMatrixPort {
     }
 
     override fun start() = runtime.start()
+    override fun onSystemWake(reason: String) = runtime.onSystemWake(reason)
     override fun publicSession(): PublicMatrixSession? = runtime.publicSession()
     override suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = runtime.bootstrap(input)
     override suspend fun issueLoginToken(password: String?): MatrixLoginTokenIssueResult =

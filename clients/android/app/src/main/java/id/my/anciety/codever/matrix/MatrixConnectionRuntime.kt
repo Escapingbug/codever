@@ -1,6 +1,7 @@
 package id.my.anciety.codever.matrix
 
 import android.content.Context
+import android.os.SystemClock
 import id.my.anciety.codever.BuildConfig
 import id.my.anciety.codever.diagnostics.DiagnosticRecorder
 import id.my.anciety.codever.security.AndroidKeystoreSecretCipher
@@ -57,6 +58,7 @@ class MatrixConnectionRuntime(
         firstSyncTimeoutMs = BuildConfig.MATRIX_FIRST_SYNC_TIMEOUT_MS,
     ),
     private val retryDelayMs: Long = 5_000,
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
     private val onPairingTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onTransportReady: (MatrixTransportIdentity) -> Unit = {},
     private val onConvergenceRequired: (String) -> Unit = {},
@@ -92,6 +94,8 @@ class MatrixConnectionRuntime(
     private var applicationControlReceiverReady = false
     @Volatile
     private var applicationControlSince: String? = null
+    @Volatile
+    private var applicationControlLastProgressAt = 0L
 
     val status: MatrixRuntimeStatus
         get() = stateMachine.status
@@ -123,6 +127,23 @@ class MatrixConnectionRuntime(
                 delay(WATCHDOG_INTERVAL_MS)
                 mutex.withLock {
                     val currentDriver = driver
+                    if (
+                        started.get() &&
+                        networkAvailable &&
+                        secrets != null &&
+                        applicationControlReceiverIsStale(
+                            lastProgressAt = applicationControlLastProgressAt,
+                            now = elapsedRealtime(),
+                            timeoutMs = APPLICATION_CONTROL_STALE_TIMEOUT_MS,
+                        )
+                    ) {
+                        diagnostics.record(
+                            "matrix.application_control.watchdog_stale",
+                            mapOf("stage" to if (applicationControlReceiverReady) "ready" else "starting"),
+                        )
+                        restartTransportLocked("matrix_application_control_stale")
+                        return@withLock
+                    }
                     val running = runCatching {
                         currentDriver?.isSyncRunning() == true
                     }.getOrDefault(false)
@@ -166,6 +187,37 @@ class MatrixConnectionRuntime(
             mapOf("available" to available.toString()),
         )
         onNetworkChanged(available)
+    }
+
+    fun onSystemWake(reason: String) {
+        val safeReason = reason
+            .replace(Regex("[^A-Za-z0-9._:+/-]"), "_")
+            .take(160)
+            .ifBlank { "unspecified" }
+        scope.launch {
+            val requestConvergence = mutex.withLock {
+                if (!started.get() || !networkAvailable || secrets == null) return@withLock false
+                val stale = applicationControlReceiverIsStale(
+                    lastProgressAt = applicationControlLastProgressAt,
+                    now = elapsedRealtime(),
+                    timeoutMs = APPLICATION_CONTROL_STALE_TIMEOUT_MS,
+                )
+                diagnostics.record(
+                    "matrix.system_wake",
+                    mapOf(
+                        "reason" to safeReason,
+                        "stage" to if (stale) "restart" else "converge",
+                    ),
+                )
+                if (stale) {
+                    restartTransportLocked("matrix_system_wake_recovery")
+                    false
+                } else {
+                    true
+                }
+            }
+            if (requestConvergence) onConvergenceRequired("system_wake_$safeReason")
+        }
     }
 
     suspend fun bootstrap(input: MatrixBootstrap): PublicMatrixSession = scope.async {
@@ -574,6 +626,7 @@ class MatrixConnectionRuntime(
             throw error
         }
         driver = nextDriver
+        applicationControlLastProgressAt = elapsedRealtime()
         liveness.connectionStarted()
         accept(MatrixRuntimeEvent.SessionReady(networkAvailable = true))
         try {
@@ -682,6 +735,7 @@ class MatrixConnectionRuntime(
     ) {
         if (applicationControlReceiverJob?.isActive == true) return
         applicationControlReceiverReady = false
+        applicationControlLastProgressAt = elapsedRealtime()
         val ready = applicationControlReady
         diagnostics.record("matrix.application_control.receiver_starting")
         applicationControlReceiverJob = scope.launch {
@@ -690,6 +744,7 @@ class MatrixConnectionRuntime(
             while (isActive) {
                 try {
                     val accepted = loadAuthoritativeRoomState(session)
+                    applicationControlLastProgressAt = elapsedRealtime()
                     diagnostics.record(
                         "matrix.application_state.current_received",
                         mapOf(
@@ -701,6 +756,7 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    applicationControlLastProgressAt = elapsedRealtime()
                     val cursorRebuildReason = applicationControlCursorResetReason(error, since)
                     if (cursorRebuildReason != null) {
                         applicationControlGapStoreMutex.withLock {
@@ -782,6 +838,7 @@ class MatrixConnectionRuntime(
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    applicationControlLastProgressAt = elapsedRealtime()
                     if (error is MatrixApplicationControlPayloadException) {
                         diagnostics.record(
                             "matrix.application_control.receiver_rejected",
@@ -871,6 +928,7 @@ class MatrixConnectionRuntime(
                     )
                     continue
                 }
+                applicationControlLastProgressAt = elapsedRealtime()
                 if (!started.get() || driverGeneration != generation) return@launch
                 consecutiveFailures = 0
                 val establishingCursor = since == null
@@ -902,20 +960,44 @@ class MatrixConnectionRuntime(
                         ),
                     )
                 }
-                for (event in batch.events) {
-                    onDecryptedEvent(event)
-                    diagnostics.record(
-                        "matrix.application_control.event_committed",
-                        mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
-                    )
-                }
+                val processed = processMatrixApplicationEventBatch(
+                    events = batch.events,
+                    onEvent = onDecryptedEvent,
+                    onCommitted = { event ->
+                        diagnostics.record(
+                            "matrix.application_control.event_committed",
+                            mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
+                        )
+                    },
+                    onQuarantined = { event, error ->
+                        diagnostics.record(
+                            "matrix.application_control.event_quarantined",
+                            mapOf(
+                                "kind" to codeverApplicationEventKind(event.rawJson),
+                                "error" to error.javaClass.simpleName.take(160),
+                                "fingerprint" to matrixApplicationEventFingerprint(event),
+                            ),
+                        )
+                    },
+                )
                 // Commit the Matrix cursor only after every accepted event has
-                // completed its authenticated local state/history transition.
-                // A process exit before this point makes Matrix redeliver the
-                // batch; projection and history stores deduplicate it.
+                // either completed its authenticated local transition or been
+                // identified as poison after an ordering retry. A process exit
+                // before this point makes Matrix redeliver the batch; projection and
+                // history stores deduplicate it.
                 since = batch.nextBatch
                 currentFiles.applicationControlCursor.save(since)
                 applicationControlSince = since
+                if (processed.quarantined > 0) {
+                    diagnostics.record(
+                        "matrix.application_control.batch_quarantined",
+                        mapOf(
+                            "accepted" to processed.committed.toString(),
+                            "quarantined" to processed.quarantined.toString(),
+                        ),
+                    )
+                    onConvergenceRequired("application_control_event_quarantined")
+                }
                 if (batch.limited) {
                     diagnostics.record("matrix.application_control.gap_detected")
                     onConvergenceRequired("application_control_limited")
@@ -947,6 +1029,7 @@ class MatrixConnectionRuntime(
 
     private fun stopApplicationControlReceiverLocked() {
         applicationControlReceiverReady = false
+        applicationControlLastProgressAt = 0L
         applicationControlReceiverJob?.cancel()
         applicationControlReceiverJob = null
         applicationControlGapJob?.cancel()
@@ -972,6 +1055,7 @@ class MatrixConnectionRuntime(
                         from = gap.cursor,
                         to = gap.to,
                     )
+                    applicationControlLastProgressAt = elapsedRealtime()
                     diagnostics.record(
                         "matrix.application_control.gap_page_received",
                         mapOf(
@@ -979,13 +1063,26 @@ class MatrixConnectionRuntime(
                             "accepted" to page.events.size.toString(),
                         ),
                     )
-                    for (event in page.events) {
-                        onDecryptedEvent(event)
-                        diagnostics.record(
-                            "matrix.application_control.gap_event_committed",
-                            mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
-                        )
-                    }
+                    val processed = processMatrixApplicationEventBatch(
+                        events = page.events,
+                        onEvent = onDecryptedEvent,
+                        onCommitted = { event ->
+                            diagnostics.record(
+                                "matrix.application_control.gap_event_committed",
+                                mapOf("kind" to codeverApplicationEventKind(event.rawJson)),
+                            )
+                        },
+                        onQuarantined = { event, error ->
+                            diagnostics.record(
+                                "matrix.application_control.gap_event_quarantined",
+                                mapOf(
+                                    "kind" to codeverApplicationEventKind(event.rawJson),
+                                    "error" to error.javaClass.simpleName.take(160),
+                                    "fingerprint" to matrixApplicationEventFingerprint(event),
+                                ),
+                            )
+                        },
+                    )
                     applicationControlGapStoreMutex.withLock {
                         val queue = currentFiles.applicationControlGaps.load()
                         val currentIndex = queue.indexOfFirst {
@@ -1003,10 +1100,21 @@ class MatrixConnectionRuntime(
                             currentFiles.applicationControlGaps.save(next)
                         }
                     }
+                    if (processed.quarantined > 0) {
+                        diagnostics.record(
+                            "matrix.application_control.gap_quarantined",
+                            mapOf(
+                                "accepted" to processed.committed.toString(),
+                                "quarantined" to processed.quarantined.toString(),
+                            ),
+                        )
+                        onConvergenceRequired("application_control_gap_event_quarantined")
+                    }
                     consecutiveFailures = 0
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    applicationControlLastProgressAt = elapsedRealtime()
                     consecutiveFailures += 1
                     diagnostics.record(
                         "matrix.application_control.gap_retry",
@@ -1053,6 +1161,20 @@ class MatrixConnectionRuntime(
                     runCatching { connectLocked() }
                 }
             }
+        }
+    }
+
+    private suspend fun restartTransportLocked(detailCode: String) {
+        accept(MatrixRuntimeEvent.Failed(detailCode, blocked = false))
+        retryJob?.cancel()
+        retryJob = null
+        val staleDriver = driver
+        stopApplicationControlReceiverLocked()
+        driver = null
+        driverGeneration += 1
+        if (staleDriver != null) stopDriver(staleDriver)
+        if (started.get() && networkAvailable && secrets != null) {
+            runCatching { connectLocked() }
         }
     }
 
@@ -1116,5 +1238,15 @@ class MatrixConnectionRuntime(
         const val LOGOUT_OPERATION_TIMEOUT_MS = 45_000L
         const val APPLICATION_CONTROL_RETRY_BASE_MS = 1_000L
         const val APPLICATION_CONTROL_MAX_RETRY_MULTIPLIER = 15
+        const val APPLICATION_CONTROL_STALE_TIMEOUT_MS = 90_000L
     }
+}
+
+internal fun applicationControlReceiverIsStale(
+    lastProgressAt: Long,
+    now: Long,
+    timeoutMs: Long,
+): Boolean {
+    if (lastProgressAt <= 0L) return false
+    return now - lastProgressAt >= timeoutMs
 }

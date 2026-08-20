@@ -150,6 +150,10 @@ class NativeClientRuntime(
         matrix.injectNetworkAvailabilityForE2e(available)
     }
 
+    fun onSystemWake(reason: String) {
+        matrix.onSystemWake(reason)
+    }
+
     private data class PendingPairing(
         val offer: SignedPairingOffer,
         var request: SignedPairingRequest? = null,

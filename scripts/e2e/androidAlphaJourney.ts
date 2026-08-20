@@ -1200,9 +1200,11 @@ export async function runAndroidAlphaJourney(
         )
         await assertPackageActivityBackground(serial)
         await assertForegroundNotification(serial)
+        await assertRuntimeWakeLock(serial)
 
         process.stdout.write('  [A5b/12] Recreating the killed sticky service without opening Android…\n')
         const serviceCreatedBefore = await diagnosticCount(serial, 'service.created')
+        const previousExitBefore = await diagnosticCount(serial, 'process.previous_exit')
         const receiverReadyBefore = await diagnosticCount(
             serial,
             'matrix.application_control.receiver_ready',
@@ -1219,6 +1221,13 @@ export async function runAndroidAlphaJourney(
             },
         )
         await waitFor(
+            async () => await diagnosticCount(serial, 'process.previous_exit') > previousExitBefore,
+            {
+                description: 'actionable prior Android process-exit diagnostics',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
+        await waitFor(
             async () => await diagnosticCount(
                 serial,
                 'matrix.application_control.receiver_ready',
@@ -1230,6 +1239,7 @@ export async function runAndroidAlphaJourney(
         )
         await assertPackageActivityBackground(serial)
         await assertForegroundNotification(serial)
+        await assertRuntimeWakeLock(serial)
         const stickyEventBefore = await diagnosticCount(
             serial,
             'matrix.application_control.event_committed',
@@ -1275,10 +1285,18 @@ export async function runAndroidAlphaJourney(
             serial,
             'matrix.application_control.event_committed',
         ) > dozeEventBefore
+        const systemWakeBefore = await diagnosticCount(serial, 'service.system_wake')
         await adb(serial, 'shell', 'dumpsys', 'deviceidle', 'unforce')
         await adb(serial, 'shell', 'dumpsys', 'battery', 'reset')
         await adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
         deviceIdleForced = false
+        await waitFor(
+            async () => await diagnosticCount(serial, 'service.system_wake') > systemWakeBefore,
+            {
+                description: 'native transport recovery signal after Android exits deep idle',
+                timeoutMs: CONNECT_TIMEOUT_MS,
+            },
+        )
         await waitFor(
             async () => await diagnosticCount(
                 serial,
@@ -1291,6 +1309,7 @@ export async function runAndroidAlphaJourney(
         )
         await assertPackageActivityBackground(serial)
         await assertForegroundNotification(serial)
+        await assertRuntimeWakeLock(serial)
 
         process.stdout.write('  [A5d/12] Rebooting Android and receiving work before its Activity opens…\n')
         const bootServiceBefore = await diagnosticCount(serial, 'service.created')
@@ -2260,7 +2279,10 @@ export async function runAndroidAlphaJourney(
                 'post-epoch-native-prompt-reaches-agent-exactly-once',
                 'native-receives-browser-work-without-activity',
                 'sticky-service-process-recreation-without-activity',
+                'sticky-service-process-exit-reason-diagnostics',
                 'deep-idle-catch-up-without-activity',
+                'persistent-native-runtime-wake-lock',
+                'system-wake-triggers-native-convergence',
                 'boot-restores-native-receiver-without-activity',
                 'notification-deep-link-recovery',
                 'foreground-notification-suppression',
@@ -3130,6 +3152,14 @@ async function assertForegroundNotification(serial: string): Promise<void> {
     assert.ok(
         keys.some(key => key.packageName === PACKAGE_NAME && key.id === FOREGROUND_NOTIFICATION_ID),
         'The persistent Android foreground-service notification is missing',
+    )
+}
+
+async function assertRuntimeWakeLock(serial: string): Promise<void> {
+    const output = await adb(serial, 'shell', 'dumpsys', 'power')
+    assert.ok(
+        output.includes(`${PACKAGE_NAME}:matrix-runtime`),
+        'The persistent native Matrix runtime wake lock is missing',
     )
 }
 

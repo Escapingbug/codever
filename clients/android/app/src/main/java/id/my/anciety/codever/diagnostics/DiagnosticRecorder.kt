@@ -22,7 +22,9 @@ internal object DiagnosticLine {
         "detail",
         "error",
         "events",
+        "fingerprint",
         "has_more",
+        "importance",
         "kind",
         "limit",
         "paged",
@@ -30,13 +32,17 @@ internal object DiagnosticLine {
         "reason",
         "received",
         "request",
+        "retry_after_ms",
         "running",
         "quarantined",
         "schema",
         "source",
         "stage",
+        "status",
         "transport_ready",
         "type",
+        "pss_kb",
+        "rss_kb",
     )
 
     fun encode(timestamp: String, event: String, attributes: Map<String, String>): String {

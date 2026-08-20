@@ -95,6 +95,25 @@ class DiagnosticLineTest {
     }
 
     @Test
+    fun `process exit diagnostics retain only bounded system metrics`() {
+        assertEquals(
+            "2026-08-04T12:00:00Z process.previous_exit " +
+                "importance=125 pss_kb=2048 reason=native_crash rss_kb=4096 status=11",
+            DiagnosticLine.encode(
+                "2026-08-04T12:00:00Z",
+                "process.previous_exit",
+                mapOf(
+                    "reason" to "native_crash",
+                    "status" to "11",
+                    "importance" to "125",
+                    "pss_kb" to "2048",
+                    "rss_kb" to "4096",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `diagnostic output rejects free form secrets and multiline content`() {
         listOf(
             mapOf("detail" to "Bearer secret-token"),

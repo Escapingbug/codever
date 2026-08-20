@@ -269,6 +269,59 @@ test("follows an automatically rebased session deletion by operation identity", 
   client.dispose();
 });
 
+test("follows a Gateway epoch re-key even when its command sequence restarts", async () => {
+  const port = new RuntimePort((request) => {
+    if (request.method !== "codever.command.send") return responseFor(request);
+    const params = request.params as BridgeMethodParams["codever.command.send"];
+    return {
+      operationId: "operation-epoch-rekey-1",
+      commandId: "command-retired-9",
+      idempotencyKey: params.idempotencyKey,
+      state: "transmitting",
+      submittedAt: 1,
+      updatedAt: 1,
+      sequence: 9,
+    };
+  });
+  const client = await createTestClient(port);
+  const pending = client.send({ operation: "prompt", sessionId: "session-1", text: "hello" });
+  await nextTurn();
+  deliverCommand(port, {
+    operationId: "operation-epoch-rekey-1",
+    commandId: "command-current-1",
+    idempotencyKey: "00000000-0000-4000-8000-000000000009",
+    state: "accepted",
+    submittedAt: 1,
+    updatedAt: 3,
+    sequence: 1,
+    revision: 2,
+  }, "cursor-epoch-rekey-ack");
+
+  const sent = await pending;
+  assert.equal(sent.commandId, "command-current-1");
+  assert.equal(sent.sequence, 1);
+  deliverCommand(port, {
+    operationId: "operation-epoch-rekey-1",
+    commandId: "command-current-1",
+    idempotencyKey: "00000000-0000-4000-8000-000000000009",
+    state: "succeeded",
+    submittedAt: 1,
+    updatedAt: 4,
+    sequence: 1,
+    revision: 2,
+    sessionId: "session-1",
+    completion: {
+      commandId: "command-current-1",
+      sequence: 1,
+      revision: 2,
+      outcome: "succeeded",
+      sessionId: "session-1",
+    },
+  }, "cursor-epoch-rekey-result");
+  assert.equal((await sent.completion).commandId, "command-current-1");
+  client.dispose();
+});
+
 test("waits for transient outbox recovery with one idempotency key", async () => {
   let attempts = 0;
   const port = new RuntimePort((request) => {

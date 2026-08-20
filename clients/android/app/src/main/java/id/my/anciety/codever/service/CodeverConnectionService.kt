@@ -1,16 +1,20 @@
 package id.my.anciety.codever.service
 
+import android.annotation.SuppressLint
 import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Binder
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -49,6 +53,31 @@ class CodeverConnectionService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var foregroundStarted = false
     @Volatile private var uiForeground = false
+    private var runtimeWakeLock: PowerManager.WakeLock? = null
+    private var powerReceiverRegistered = false
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val reason = when (intent?.action) {
+                Intent.ACTION_SCREEN_ON -> "screen_on"
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                    val power = getSystemService(PowerManager::class.java)
+                    if (power.isDeviceIdleMode) return
+                    "device_idle_exit"
+                }
+                else -> return
+            }
+            diagnostics.record("service.system_wake", mapOf("reason" to reason))
+            serviceScope.launch(Dispatchers.IO) {
+                runCatching { awaitClientRuntime().onSystemWake(reason) }
+                    .onFailure { error ->
+                        diagnostics.record(
+                            "service.system_wake_failed",
+                            mapOf("error" to error.javaClass.simpleName.take(160)),
+                        )
+                    }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -56,6 +85,7 @@ class CodeverConnectionService : Service() {
         diagnostics.record("service.created")
         preferences = ServicePreferenceStore(this)
         taskNotifier = AgentTaskNotifier(this)
+        registerPowerReceiver()
         createNotificationChannel()
         taskNotifier.createChannel()
         initializeClientRuntime()
@@ -104,6 +134,8 @@ class CodeverConnectionService : Service() {
 
     override fun onDestroy() {
         diagnostics.record("service.destroyed")
+        unregisterPowerReceiver()
+        releaseRuntimeWakeLock()
         foregroundStarted = false
         val runtime = clientRuntime
         serviceScope.cancel()
@@ -157,20 +189,80 @@ class CodeverConnectionService : Service() {
     }
 
     private fun enterForeground() {
-        if (foregroundStarted) return
-        diagnostics.record("service.foreground_started")
-        val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
-        } else {
-            0
+        if (!foregroundStarted) {
+            diagnostics.record("service.foreground_started")
+            val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                foregroundServiceType,
+            )
+            foregroundStarted = true
         }
-        ServiceCompat.startForeground(
+        acquireRuntimeWakeLock()
+    }
+
+    private fun registerPowerReceiver() {
+        if (powerReceiverRegistered) return
+        ContextCompat.registerReceiver(
             this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            foregroundServiceType,
+            powerReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        foregroundStarted = true
+        powerReceiverRegistered = true
+    }
+
+    private fun unregisterPowerReceiver() {
+        if (!powerReceiverRegistered) return
+        runCatching { unregisterReceiver(powerReceiver) }
+        powerReceiverRegistered = false
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireRuntimeWakeLock() {
+        if (runtimeWakeLock?.isHeld == true) return
+        runCatching {
+            val power = getSystemService(PowerManager::class.java)
+            power.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "$packageName:matrix-runtime",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+                runtimeWakeLock = this
+            }
+        }.onSuccess {
+            diagnostics.record("service.wake_lock_acquired")
+        }.onFailure { error ->
+            diagnostics.record(
+                "service.wake_lock_failed",
+                mapOf("error" to error.javaClass.simpleName.take(160)),
+            )
+        }
+    }
+
+    private fun releaseRuntimeWakeLock() {
+        val wakeLock = runtimeWakeLock ?: return
+        runtimeWakeLock = null
+        runCatching {
+            if (wakeLock.isHeld) wakeLock.release()
+        }.onSuccess {
+            diagnostics.record("service.wake_lock_released")
+        }.onFailure { error ->
+            diagnostics.record(
+                "service.wake_lock_release_failed",
+                mapOf("error" to error.javaClass.simpleName.take(160)),
+            )
+        }
     }
 
     private fun disconnectExplicitly() {
@@ -179,6 +271,7 @@ class CodeverConnectionService : Service() {
                 withContext(Dispatchers.IO) { awaitClientRuntime().disconnect(revoke = false) }
             } finally {
                 preferences.restoreEnabled = false
+                releaseRuntimeWakeLock()
                 ServiceCompat.stopForeground(
                     this@CodeverConnectionService,
                     ServiceCompat.STOP_FOREGROUND_REMOVE,
@@ -344,6 +437,7 @@ class CodeverConnectionService : Service() {
                 }
                 withContext(Dispatchers.Main.immediate) {
                     preferences.restoreEnabled = false
+                    releaseRuntimeWakeLock()
                     ServiceCompat.stopForeground(
                         this@CodeverConnectionService,
                         ServiceCompat.STOP_FOREGROUND_REMOVE,

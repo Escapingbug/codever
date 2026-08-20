@@ -697,13 +697,20 @@ export class NativeBridgeClient implements CodeverClient {
     const current = this.#acknowledgements.get(operationId);
     if (
       !current ||
+      current.commandId !== commandId ||
       sequence > current.sequence ||
       (sequence === current.sequence && revision > current.revision)
     ) {
       this.#acknowledgements.set(operationId, { commandId, sequence, revision });
     }
     const waiter = this.#acknowledgementWaiters.get(operationId);
-    if (waiter?.sequence !== sequence) return;
+    if (!waiter) return;
+    // A Gateway revision-epoch migration preserves the stable native
+    // operation while issuing a fresh command id and sequence. The receipt
+    // may already be in JavaScript when that migration happens, so match the
+    // replacement by operation id instead of waiting forever for the retired
+    // sequence. Events for one operation are delivered in native cursor order.
+    if (waiter.commandId === commandId && waiter.sequence !== sequence) return;
     this.#acknowledgementWaiters.delete(operationId);
     waiter.resolve({ commandId, sequence, revision });
   }
@@ -714,7 +721,10 @@ export class NativeBridgeClient implements CodeverClient {
     sequence: number,
   ): Promise<Acknowledgement> {
     const acknowledged = this.#acknowledgements.get(operationId);
-    if (acknowledged?.sequence === sequence) {
+    if (
+      acknowledged &&
+      (acknowledged.commandId !== commandId || acknowledged.sequence === sequence)
+    ) {
       return Promise.resolve(acknowledged);
     }
     return new Promise((resolve, reject) => {
