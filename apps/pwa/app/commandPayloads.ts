@@ -5,6 +5,11 @@ type PromptCommandPayload = Extract<
   { operation: "prompt" }
 >;
 
+type CancelCommandPayload = Extract<
+  CommandPayload,
+  { operation: "cancel" }
+>;
+
 export function createPromptCommandPayload(
   input: Omit<PromptCommandPayload, "operation">,
 ): PromptCommandPayload {
@@ -13,5 +18,16 @@ export function createPromptCommandPayload(
     operation: "prompt",
     ...prompt,
     ...(attachments === undefined ? {} : { attachments }),
+  };
+}
+
+export function createCancelCommandPayload(
+  sessionId: string,
+  targetCommandId: string,
+): CancelCommandPayload {
+  return {
+    operation: "cancel",
+    sessionId,
+    targetCommandId,
   };
 }

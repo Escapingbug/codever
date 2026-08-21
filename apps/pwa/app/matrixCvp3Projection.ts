@@ -22,6 +22,7 @@ export type V3ProjectedSession = Cvp3SessionProjection & {
   reasoningEffort?: string;
   permissionMode?: string;
   extensionBindings?: SessionExtensionBinding[];
+  activeTurnId?: string;
 };
 
 export type V3ProjectedMessage = {
@@ -78,7 +79,7 @@ export type V3WorkspaceProjection = {
 };
 
 export type MatrixCvp3ProjectionState = {
-  version: 3;
+  version: 4;
   workspace: V3WorkspaceProjection | null;
   project: V3ProjectProjection | null;
   sessions: V3ProjectedSession[];
@@ -115,7 +116,7 @@ export class MatrixCvp3Projection {
 
   durableState(): MatrixCvp3ProjectionState {
     return structuredClone({
-      version: 3,
+      version: 4,
       workspace: this.workspace,
       project: this.project,
       sessions: [...this.sessions.values()],
@@ -266,6 +267,7 @@ export class MatrixCvp3Projection {
         ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
         permissionMode: payload.permissionMode,
         extensionBindings: payload.extensionBindings ?? current?.extensionBindings ?? [],
+        ...(current?.activeTurnId ? { activeTurnId: current.activeTurnId } : {}),
       });
       if (payload.initialPrompt && payload.rootCommandId) {
         this.addUserPrompt(
@@ -277,6 +279,7 @@ export class MatrixCvp3Projection {
         );
       }
     }
+    this.observeActiveTurn(event);
     if (payload.type === "turn.queued" && event.sessionId) {
       this.addUserPrompt(
         payload.turnId,
@@ -284,6 +287,7 @@ export class MatrixCvp3Projection {
         physicalEventId,
         event.occurredAt,
         payload.text,
+        payload,
       );
     }
     if (payload.type === "assistant.message" && event.sessionId) {
@@ -436,6 +440,7 @@ export class MatrixCvp3Projection {
     physicalEventId: string,
     timestamp: number,
     body: string,
+    payload?: Cvp3Event["payload"],
   ): void {
     this.messages.set(`user:${commandId}`, {
       logicalId: `user:${commandId}`,
@@ -447,13 +452,53 @@ export class MatrixCvp3Projection {
       format: "markdown",
       version: 1,
       commandId,
+      ...(payload ? { payload } : {}),
     });
+  }
+
+  private observeActiveTurn(event: Cvp3Event): void {
+    const sessionId = event.sessionId;
+    if (!sessionId) return;
+    const current = this.sessions.get(sessionId);
+    if (!current) return;
+    const payload = event.payload;
+
+    if (payload.type === "turn.completed" || payload.type === "turn.failed") {
+      if (current.activeTurnId === payload.turnId) {
+        const completed = { ...current };
+        delete completed.activeTurnId;
+        this.sessions.set(sessionId, completed);
+      }
+      return;
+    }
+
+    if (!("projection" in payload) || payload.projection.stateVersion !== current.stateVersion) {
+      return;
+    }
+    if (!isActiveSessionActivity(current.activity)) return;
+
+    const turnId = payload.type === "turn.queued" || payload.type === "turn.started"
+      ? payload.turnId
+      : payload.type === "assistant.message"
+          || payload.type === "tool.activity"
+          || payload.type === "decision.requested"
+          || payload.type === "extension.interaction.requested"
+        ? event.causationCommandId
+        : undefined;
+    if (turnId && (!current.activeTurnId || current.activeTurnId === turnId)) {
+      this.sessions.set(sessionId, { ...current, activeTurnId: turnId });
+    }
   }
 }
 
 function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
   const value = record(input);
-  if (value?.version !== 1 && value?.version !== 2 && value?.version !== 3) {
+  if (
+    value?.version !== 1
+    && value?.version !== 2
+    && value?.version !== 3
+    && value?.version !== 4
+  ) {
     throw new Error("Unsupported CVP/3 projection version.");
   }
   const sessions = boundedArray(value.sessions, "sessions").map(sessionValue => {
@@ -468,6 +513,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
       || !["idle", "queued", "working", "attention", "failed"].includes(String(session.activity))
       || !integer(session.updatedAt)
       || !integer(session.stateVersion, 1)
+      || !(session.activeTurnId === undefined || text(session.activeTurnId))
     ) throw new Error("The CVP/3 session projection is invalid.");
     return {
       ...structuredClone(session),
@@ -491,7 +537,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     ) throw new Error("The CVP/3 message projection is invalid.");
     return structuredClone(message) as V3ProjectedMessage;
   });
-  const inboxFiles = value.version === 3
+  const inboxFiles = value.version === 3 || value.version === 4
     ? boundedArray(value.inboxFiles, "inbox files").map(fileValue => {
         const file = record(fileValue);
         if (
@@ -552,8 +598,24 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
   requireUnique(inboxFiles.map(file => file.fileId), "inbox file");
   requireUnique(completions.map(completion => completion.commandId), "completion");
   requireUnique(seenLogicalEvents, "logical event");
+  if (value.version < 4) {
+    for (const session of sessions) {
+      if (session.activeTurnId || !isActiveSessionActivity(session.activity)) continue;
+      const unresolved = messages
+        .filter(message =>
+          message.sessionId === session.sessionId
+          && message.sender === "user"
+          && message.commandId
+          && !completions.some(completion => completion.commandId === message.commandId)
+        )
+        .sort((left, right) =>
+          left.timestamp - right.timestamp || left.logicalId.localeCompare(right.logicalId)
+        )[0];
+      if (unresolved?.commandId) session.activeTurnId = unresolved.commandId;
+    }
+  }
   return {
-    version: 3,
+    version: 4,
     workspace,
     project,
     sessions,
@@ -562,6 +624,10 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     completions,
     seenLogicalEvents,
   };
+}
+
+function isActiveSessionActivity(activity: Cvp3SessionProjection["activity"]): boolean {
+  return activity === "queued" || activity === "working" || activity === "attention";
 }
 
 function validateWorkspaceProjection(input: unknown): V3WorkspaceProjection {

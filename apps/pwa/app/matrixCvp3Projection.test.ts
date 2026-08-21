@@ -13,6 +13,7 @@ describe("MatrixCvp3Projection", () => {
       stateVersion: 4,
       threadRootEventId: "$root-original",
     });
+    expect(projection.sessions.get("session-a")?.activeTurnId).toBeUndefined();
   });
 
   it("deduplicates command retries and retains history beyond an arbitrary sync window", () => {
@@ -43,6 +44,39 @@ describe("MatrixCvp3Projection", () => {
     expect(restored.visibleSessions()).toEqual(first.visibleSessions());
     expect(restored.sessionMessages("session-a")).toEqual(first.sessionMessages("session-a"));
     expect(restored.applyEvent(messageEvent(1), "$duplicate")).toBe(false);
+  });
+
+  it("tracks the active turn across durable restore and clears it on completion", () => {
+    const first = new MatrixCvp3Projection();
+    first.applyCommand(createCommand("a"), "$root-a");
+    first.applyEvent(turnQueuedEvent(), "$queued-a");
+    first.applyEvent(turnEvent("started", 3, "working"), "$started-a");
+
+    expect(first.sessions.get("session-a")?.activeTurnId).toBe("prompt-a");
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(first.durableState());
+    expect(restored.sessions.get("session-a")?.activeTurnId).toBe("prompt-a");
+
+    restored.applyEvent(turnEvent("completed", 4, "idle"), "$completed-a");
+    expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
+  });
+
+  it("repairs a version-three running projection from its unresolved prompt", () => {
+    const first = new MatrixCvp3Projection();
+    first.applyCommand(createCommand("a"), "$root-a");
+    first.applyEvent(turnQueuedEvent(), "$queued-a");
+    const legacy = first.durableState() as unknown as {
+      version: number;
+      sessions: Array<Record<string, unknown>>;
+    };
+    legacy.version = 3;
+    for (const session of legacy.sessions) delete session.activeTurnId;
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(legacy);
+
+    expect(restored.sessions.get("session-a")?.activeTurnId).toBe("prompt-a");
   });
 
   it("discovers a session from the latest event in a paged Matrix thread", () => {
@@ -285,6 +319,32 @@ function turnEvent(
       turnId: "prompt-a",
       outcome: "succeeded",
       projection: { title: "A", lifecycle: "active", activity, updatedAt: stateVersion, stateVersion },
+    },
+  };
+}
+
+function turnQueuedEvent(): Cvp3Event {
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: "turn-queued",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: "session-a",
+    occurredAt: 2,
+    causationCommandId: "prompt-a",
+    payload: {
+      type: "turn.queued",
+      turnId: "prompt-a",
+      originDeviceId: "device-1",
+      text: "hello",
+      projection: {
+        title: "A",
+        lifecycle: "active",
+        activity: "queued",
+        updatedAt: 2,
+        stateVersion: 2,
+      },
     },
   };
 }

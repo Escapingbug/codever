@@ -34,16 +34,16 @@ class NativeStateUpgradeCoordinatorTest {
     @Test
     fun `CVP3 durable and rebuildable stores are all migration catalogued`() {
         val expected = mapOf(
-            "matrix-v3-project-keys" to NativePersistedStateClass.SECURITY_CRITICAL,
-            "matrix-v3-raw-inbox" to NativePersistedStateClass.DURABLE_COMMAND,
-            "matrix-v3-command-content" to NativePersistedStateClass.DURABLE_COMMAND,
-            "matrix-v3-projection" to NativePersistedStateClass.REBUILDABLE_PROJECTION,
+            "matrix-v3-project-keys" to (NativePersistedStateClass.SECURITY_CRITICAL to 1),
+            "matrix-v3-raw-inbox" to (NativePersistedStateClass.DURABLE_COMMAND to 1),
+            "matrix-v3-command-content" to (NativePersistedStateClass.DURABLE_COMMAND to 1),
+            "matrix-v3-projection" to (NativePersistedStateClass.REBUILDABLE_PROJECTION to 2),
         )
 
-        expected.forEach { (id, stateClass) ->
+        expected.forEach { (id, expectedState) ->
             val entry = NATIVE_STATE_CATALOG.single { it.id == id }
-            assertEquals(stateClass, entry.stateClass)
-            assertEquals(1, entry.schemaVersion)
+            assertEquals(expectedState.first, entry.stateClass)
+            assertEquals(expectedState.second, entry.schemaVersion)
         }
     }
     @Test

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalJson, commandPayloadSchema } from "@codever/protocol";
-import { createPromptCommandPayload } from "../app/commandPayloads";
+import {
+  createCancelCommandPayload,
+  createPromptCommandPayload,
+} from "../app/commandPayloads";
 
 test("omits undefined attachments from plain-text prompt commands", () => {
   const payload = commandPayloadSchema.parse(
@@ -54,4 +57,16 @@ test("preserves the scratch scope on session creation", () => {
   });
   assert.equal(payload.operation, "session.create");
   assert.equal(payload.scope, "scratch");
+});
+
+test("targets the active CVP/3 turn when stopping a session", () => {
+  const payload = commandPayloadSchema.parse(
+    createCancelCommandPayload("session-1", "turn-1"),
+  );
+
+  assert.deepEqual(payload, {
+    operation: "cancel",
+    sessionId: "session-1",
+    targetCommandId: "turn-1",
+  });
 });

@@ -40,6 +40,7 @@ export type GatewaySessionSummary = {
   provider: string;
   model?: string;
   reasoningEffort?: string;
+  activeTurnId?: string;
   extensions: SessionExtensionSummary[];
 };
 
@@ -174,7 +175,7 @@ export function parseGatewayStateExtension(
     throw new Error("The authenticated Gateway state snapshot is malformed.");
   }
 
-  const parsedSessions = extension.sessions.map((value) => {
+  const parsedSessions: GatewaySessionSummary[] = extension.sessions.map((value) => {
     const session = asRecord(value);
     if (
       !session ||
@@ -217,6 +218,10 @@ export function parseGatewayStateExtension(
         (typeof session.reasoning_effort === "string" &&
           session.reasoning_effort.length > 0)
       ) ||
+      !(
+        session.active_turn_id === undefined ||
+        (typeof session.active_turn_id === "string" && session.active_turn_id.length > 0)
+      ) ||
       typeof session.cwd !== "string" ||
       session.cwd.length === 0 ||
       !Array.isArray(session.extensions) ||
@@ -252,6 +257,9 @@ export function parseGatewayStateExtension(
       ...(typeof session.model === "string" ? { model: session.model } : {}),
       ...(typeof session.reasoning_effort === "string"
         ? { reasoningEffort: session.reasoning_effort }
+        : {}),
+      ...(typeof session.active_turn_id === "string"
+        ? { activeTurnId: session.active_turn_id }
         : {}),
       projectId: session.project_id,
       projectName: session.project_name,
@@ -310,6 +318,7 @@ export function parseGatewayStateExtension(
       ...(session.reasoningEffort
         ? { reasoningEffort: session.reasoningEffort }
         : {}),
+      ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
       extensions: session.extensions,
     };
   });

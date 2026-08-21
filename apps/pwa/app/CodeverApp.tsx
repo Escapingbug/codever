@@ -120,7 +120,10 @@ import {
   shouldReconcileRecentHistory,
   shouldRecoverVisibleHistory,
 } from "./crossDeviceSync";
-import { createPromptCommandPayload } from "./commandPayloads";
+import {
+  createCancelCommandPayload,
+  createPromptCommandPayload,
+} from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import {
   connectionRepairReasonForDetail,
@@ -4512,13 +4515,14 @@ function CodeverAppRuntime() {
     window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
   }
 
-  async function stopStreaming() {
+  async function stopStreaming(sessionId: string, activeTurnId: string) {
     if (isStopping) return;
-    const sessionId = selectedSessionIdRef.current;
-    if (!sessionId) return;
+    if (selectedSessionIdRef.current !== sessionId) return;
     setSessionStopping(sessionId, true);
     setSessionAgentActivity(sessionId, STOPPING_AGENT_ACTIVITY);
-    const sent = await sendRealCommand({ operation: "cancel", sessionId });
+    const sent = await sendRealCommand(
+      createCancelCommandPayload(sessionId, activeTurnId),
+    );
     if (!sent || (await sent.completion).outcome !== "succeeded") {
       setSessionStopping(sessionId, false);
       setSessionAgentActivity(
@@ -5933,10 +5937,25 @@ function CodeverAppRuntime() {
                   <button
                     type="button"
                     className="send-button stop-button mount-feedback"
-                    onClick={() => void stopStreaming()}
-                    aria-label={isStopping ? "Stopping agent" : "Stop agent"}
+                    onClick={() => {
+                      if (selectedSessionId && selected?.activeTurnId) {
+                        void stopStreaming(selectedSessionId, selected.activeTurnId);
+                      }
+                    }}
+                    aria-label={
+                      isStopping
+                        ? "Stopping agent"
+                        : selected?.activeTurnId
+                          ? "Stop agent"
+                          : "Stop unavailable while the active task syncs"
+                    }
                     aria-busy={isStopping}
-                    disabled={isStopping}
+                    title={
+                      selected?.activeTurnId
+                        ? "Stop agent"
+                        : "Syncing the active task before it can be stopped"
+                    }
+                    disabled={isStopping || !selected?.activeTurnId}
                   >
                     {isStopping ? <span className="button-spinner" /> : "■"}
                   </button>

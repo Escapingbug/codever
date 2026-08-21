@@ -907,6 +907,7 @@ function gatewayState(
       provider: session.provider ?? project?.provider ?? "unknown",
       ...(session.model ? { model: session.model } : {}),
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
+      ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
       extensions: session.extensions ?? [],
     })),
     inboxFiles: inboxFiles.map(file => ({

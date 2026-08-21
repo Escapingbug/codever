@@ -155,6 +155,14 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /deriveComposerState/);
   assert.match(source, /composerState\.mode === "queue"/);
   assert.match(source, /aria-label="Stop agent"|"Stop agent"/);
+  assert.match(
+    source,
+    /createCancelCommandPayload\(sessionId, activeTurnId\)/,
+  );
+  assert.match(
+    source,
+    /disabled=\{isStopping \|\| !selected\?\.activeTurnId\}/,
+  );
   assert.match(source, /disabled=\{!composerState\.canSend\}/);
   assert.match(source, /aria-label="Agent options"/);
   assert.match(source, /aria-controls="composer-agent-options"/);

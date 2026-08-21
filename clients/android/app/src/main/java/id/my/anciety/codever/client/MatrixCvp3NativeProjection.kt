@@ -76,6 +76,7 @@ internal class MatrixCvp3NativeProjection(
         val permissionMode: String?,
         val extensions: JsonArray,
         val extensionRevision: Long,
+        val activeTurnId: String? = null,
     )
 
     private data class InboxFile(
@@ -252,6 +253,8 @@ internal class MatrixCvp3NativeProjection(
                 threadRootHint,
             )
         }
+
+        observeActiveTurn(type, sessionId, causation, payload)
 
         var messages = emptyList<ClientMessage>()
         when (type) {
@@ -451,7 +454,7 @@ internal class MatrixCvp3NativeProjection(
 
     @Synchronized
     fun durableState(): JsonObject = buildJsonObject {
-        put("schemaVersion", 3)
+        put("schemaVersion", 4)
         val activeCapabilities = workspaceCapabilities
         if (activeCapabilities == null) {
             put("workspaceCapabilities", JsonNull)
@@ -498,6 +501,7 @@ internal class MatrixCvp3NativeProjection(
                     session.permissionMode?.let { put("permissionMode", it) }
                     put("extensions", session.extensions)
                     put("extensionRevision", session.extensionRevision)
+                    session.activeTurnId?.let { put("activeTurnId", it) }
                 })
             }
         })
@@ -518,7 +522,7 @@ internal class MatrixCvp3NativeProjection(
 
     private fun restore(value: JsonObject) {
         val schemaVersion = value.requiredLong("schemaVersion")
-        require(schemaVersion == 1L || schemaVersion == 2L || schemaVersion == 3L)
+        require(schemaVersion in 1L..4L)
         workspaceCapabilities = if (schemaVersion == 1L) {
             null
         } else {
@@ -582,6 +586,11 @@ internal class MatrixCvp3NativeProjection(
                 extensionRevision = session.optionalLong("extensionRevision")
                     ?.takeIf { it > 0 }
                     ?: 1,
+                activeTurnId = if (schemaVersion >= 4L) {
+                    session.optionalString("activeTurnId", 256)
+                } else {
+                    null
+                },
             )
         }
         if (schemaVersion >= 3L) {
@@ -674,7 +683,38 @@ internal class MatrixCvp3NativeProjection(
             ?.takeIf { it > 0 }
             ?: sessions[sessionId]?.extensionRevision
             ?: 1,
+        activeTurnId = sessions[sessionId]?.activeTurnId,
     )
+
+    private fun observeActiveTurn(
+        type: String,
+        sessionId: String?,
+        causationCommandId: String?,
+        payload: JsonObject,
+    ) {
+        sessionId ?: return
+        val current = sessions[sessionId] ?: return
+        if (type == "turn.completed" || type == "turn.failed") {
+            val turnId = payload.requiredString("turnId", 256)
+            if (current.activeTurnId == turnId) {
+                sessions[sessionId] = current.copy(activeTurnId = null)
+            }
+            return
+        }
+
+        val eventProjection = payload["projection"] as? JsonObject ?: return
+        if (eventProjection.requiredPositiveLong("stateVersion") != current.stateVersion) return
+        if (current.activity !in setOf("queued", "working", "attention")) return
+        val turnId = when (type) {
+            "turn.queued", "turn.started" -> payload.requiredString("turnId", 256)
+            "assistant.message", "tool.activity", "decision.requested",
+            "extension.interaction.requested" -> causationCommandId
+            else -> null
+        }
+        if (turnId != null && (current.activeTurnId == null || current.activeTurnId == turnId)) {
+            sessions[sessionId] = current.copy(activeTurnId = turnId)
+        }
+    }
 
     private fun terminal(
         type: String,
@@ -766,6 +806,7 @@ internal class MatrixCvp3NativeProjection(
         put("provider", session.provider ?: project.provider)
         (session.model ?: project.model)?.let { put("model", it) }
         (session.reasoningEffort ?: project.reasoningEffort)?.let { put("reasoning_effort", it) }
+        session.activeTurnId?.let { put("active_turn_id", it) }
         put("extensions", session.extensions)
     }
 

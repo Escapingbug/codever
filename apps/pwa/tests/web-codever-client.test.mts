@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { CommandPayload } from "@codever/protocol";
 import type {
   MatrixConnection,
   MatrixConnectionConfig,
@@ -22,7 +23,10 @@ const config: MatrixConnectionConfig = {
   gatewayMatrixEd25519: "gateway-ed25519",
 };
 
-function fakeTransport(onStop: () => void): MatrixConnection {
+function fakeTransport(
+  onStop: () => void,
+  onSend: (payload: CommandPayload) => void = () => {},
+): MatrixConnection {
   const completion = {
     commandId: "command-1",
     sequence: 1,
@@ -53,7 +57,8 @@ function fakeTransport(onStop: () => void): MatrixConnection {
     async pair() {
       throw new Error("pair was not expected in this test");
     },
-    async send() {
+    async send(payload) {
+      onSend(payload);
       return sent;
     },
     async recoverCommand() {
@@ -85,7 +90,8 @@ function fakeTransport(onStop: () => void): MatrixConnection {
 }
 
 test("adapts the web Matrix transport without exposing its raw client", async () => {
-  const transport = fakeTransport(() => {});
+  const payloads: CommandPayload[] = [];
+  const transport = fakeTransport(() => {}, (payload) => payloads.push(payload));
   const client = new WebCodeverClient(transport, config);
 
   assert.equal(client.runtime, "web");
@@ -93,7 +99,16 @@ test("adapts the web Matrix transport without exposing its raw client", async ()
   assert.equal("client" in client, false);
   await client.ready;
 
-  const sent = await client.send({ operation: "cancel", sessionId: "s1" });
+  const sent = await client.send({
+    operation: "cancel",
+    sessionId: "s1",
+    targetCommandId: "turn-1",
+  });
+  assert.deepEqual(payloads, [{
+    operation: "cancel",
+    sessionId: "s1",
+    targetCommandId: "turn-1",
+  }]);
   assert.equal(sent.commandId, "command-1");
   assert.deepEqual(await client.observeCommandCompletion("command-1", 1_000), {
     commandId: "command-1",

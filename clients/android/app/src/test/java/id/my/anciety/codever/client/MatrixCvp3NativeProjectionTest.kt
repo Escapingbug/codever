@@ -110,6 +110,34 @@ class MatrixCvp3NativeProjectionTest {
     }
 
     @Test
+    fun `active turn id survives durable restore and clears on completion`() {
+        val original = projection()
+        original.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        original.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+        original.applyGatewayEvent(turn("started", 2, "working"), "\$started-a", "\$root-a")
+
+        val running = original.snapshot()!!.getValue("sessions").jsonArray.single().jsonObject
+        assertEquals("turn-1", running.getValue("active_turn_id").jsonPrimitive.content)
+
+        val restored = MatrixCvp3NativeProjection(
+            gatewayId = { "gateway-1" },
+            activeDeviceCount = { 2 },
+            initialState = original.durableState(),
+        )
+        val restoredSession = restored.snapshot()!!
+            .getValue("sessions").jsonArray.single().jsonObject
+        assertEquals("turn-1", restoredSession.getValue("active_turn_id").jsonPrimitive.content)
+
+        restored.applyGatewayEvent(turn("completed", 3, "idle"), "\$completed-a", "\$root-a")
+        val completed = restored.snapshot()!!.getValue("sessions").jsonArray.single().jsonObject
+        assertFalse("active_turn_id" in completed)
+    }
+
+    @Test
     fun `a thread directory latest event can discover a session without its ready event`() {
         val projection = projection()
         projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
@@ -375,6 +403,22 @@ class MatrixCvp3NativeProjectionTest {
             put("partIndex", 0)
             put("format", "markdown")
             put("body", body)
+        },
+    )
+
+    private fun turn(stage: String, stateVersion: Long, activity: String) = event(
+        eventId = "turn-$stage-$stateVersion",
+        projectId = "project-1",
+        sessionId = "session-a",
+        causationCommandId = "turn-1",
+        payload = buildJsonObject {
+            put("type", "turn.$stage")
+            put("turnId", "turn-1")
+            if (stage == "completed") put("outcome", "succeeded")
+            put(
+                "projection",
+                sessionProjection(stateVersion, "Session A", "active", activity, stateVersion * 100),
+            )
         },
     )
 

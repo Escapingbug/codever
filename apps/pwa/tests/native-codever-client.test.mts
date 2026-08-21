@@ -110,8 +110,23 @@ test("replays native state, sends a durable command, and acknowledges events", a
   assert.deepEqual(statuses, ["connected"]);
   assert.deepEqual(savedCursors, ["cursor-barrier-1"]);
 
-  const pendingSend = client.send({ operation: "cancel", sessionId: "s1" });
+  const pendingSend = client.send({
+    operation: "cancel",
+    sessionId: "s1",
+    targetCommandId: "turn-1",
+  });
   await new Promise((resolve) => setTimeout(resolve, 0));
+  const commandRequest = port.requests.find(
+    (request) => request.method === "codever.command.send",
+  );
+  assert.deepEqual(
+    (commandRequest?.params as BridgeMethodParams["codever.command.send"] | undefined)?.payload,
+    {
+      operation: "cancel",
+      sessionId: "s1",
+      targetCommandId: "turn-1",
+    },
+  );
   port.deliver({
     jsonrpc: "2.0",
     method: "codever.events.deliver",
