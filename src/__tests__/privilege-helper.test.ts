@@ -3,15 +3,20 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { generateTotp } from '@codever/security'
 import {
   PRIVILEGE_HELPER_PROTOCOL_VERSION,
   PrivilegeHelperClientError,
   UnixSocketPrivilegeExecutor,
   privilegeHelperInstallLayout,
+  privilegeTotpProvisioningUri,
   startPrivilegeHelperServer,
   type PrivilegeHelperServer,
   type PrivilegedExecutionRequest,
 } from '@/privilege'
+
+const TEST_NOW = 1_900_000_000_000
+const TEST_TOTP_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
 
 const directories: string[] = []
 const servers: PrivilegeHelperServer[] = []
@@ -37,6 +42,12 @@ describe.skipIf(process.platform === 'win32')('Privilege Helper', () => {
       socketPath: '/var/run/codever-privilege-helper-501.sock',
       credentialPath: '/Users/me/gateway/privilege-client.json',
     })
+    expect(privilegeTotpProvisioningUri(
+      TEST_TOTP_SECRET,
+      'codever-privilege-helper-1000.service',
+    )).toContain(
+      `secret=${TEST_TOTP_SECRET}&issuer=Codever&algorithm=SHA1&digits=6&period=30`,
+    )
   })
 
   it('authenticates its owner-only client, executes exact argv, and rejects replay', async () => {
@@ -44,12 +55,14 @@ describe.skipIf(process.platform === 'win32')('Privilege Helper', () => {
     await expect(fixture.client.status()).resolves.toEqual({
       version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
       state: 'ready',
+      totpRequired: true,
     })
 
     const request = executionRequest({
       executable: '/bin/echo',
       args: ['hello; this is not a shell'],
       cwd: fixture.directory,
+      totp: await fixture.totp(),
     })
     await expect(fixture.client.execute(request)).resolves.toMatchObject({
       requestId: request.requestId,
@@ -60,6 +73,63 @@ describe.skipIf(process.platform === 'win32')('Privilege Helper', () => {
     await expect(fixture.client.execute(request)).rejects.toMatchObject({
       status: 409,
       code: 'request_replayed',
+    } satisfies Partial<PrivilegeHelperClientError>)
+  })
+
+  it('requires a valid, previously unused TOTP code', async () => {
+    const fixture = await helperFixture(['/bin/echo'])
+    const invalid = executionRequest({
+      executable: '/bin/echo',
+      args: ['invalid'],
+      cwd: fixture.directory,
+      totp: '000000',
+    })
+    await expect(fixture.client.execute(invalid)).rejects.toMatchObject({
+      status: 401,
+      code: 'invalid_totp',
+    } satisfies Partial<PrivilegeHelperClientError>)
+
+    const valid = executionRequest({
+      executable: '/bin/echo',
+      args: ['valid'],
+      cwd: fixture.directory,
+      totp: await fixture.totp(),
+    })
+    await expect(fixture.client.execute(valid)).resolves.toMatchObject({
+      status: 'succeeded',
+    })
+    await expect(fixture.client.execute(executionRequest({
+      executable: '/bin/echo',
+      args: ['replayed-code'],
+      cwd: fixture.directory,
+      totp: valid.totp,
+    }))).rejects.toMatchObject({
+      status: 409,
+      code: 'totp_replayed',
+    } satisfies Partial<PrivilegeHelperClientError>)
+  })
+
+  it('rate-limits repeated invalid TOTP guesses', async () => {
+    const fixture = await helperFixture(['/bin/echo'])
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(fixture.client.execute(executionRequest({
+        executable: '/bin/echo',
+        args: [`invalid-${attempt}`],
+        cwd: fixture.directory,
+        totp: '000000',
+      }))).rejects.toMatchObject({
+        status: 401,
+        code: 'invalid_totp',
+      } satisfies Partial<PrivilegeHelperClientError>)
+    }
+    await expect(fixture.client.execute(executionRequest({
+      executable: '/bin/echo',
+      args: ['rate-limited'],
+      cwd: fixture.directory,
+      totp: await fixture.totp(),
+    }))).rejects.toMatchObject({
+      status: 429,
+      code: 'totp_rate_limited',
     } satisfies Partial<PrivilegeHelperClientError>)
   })
 
@@ -76,19 +146,21 @@ describe.skipIf(process.platform === 'win32')('Privilege Helper', () => {
       executable: '/bin/echo',
       args: [],
       cwd: fixture.directory,
-      requestedAt: Date.now() - 60_000,
-      expiresAt: Date.now() - 30_000,
+      totp: await fixture.totp(),
+      requestedAt: TEST_NOW - 60_000,
+      expiresAt: TEST_NOW - 30_000,
     })
     await expect(fixture.client.execute(expired)).rejects.toMatchObject({
       status: 409,
       code: 'request_expired',
     } satisfies Partial<PrivilegeHelperClientError>)
 
-    const futureRequestedAt = Date.now() + 60_000
+    const futureRequestedAt = TEST_NOW + 60_000
     const future = executionRequest({
       executable: '/bin/echo',
       args: [],
       cwd: fixture.directory,
+      totp: await fixture.totp(),
       requestedAt: futureRequestedAt,
       expiresAt: futureRequestedAt + 30_000,
     })
@@ -101,6 +173,7 @@ describe.skipIf(process.platform === 'win32')('Privilege Helper', () => {
       executable: '/bin/pwd',
       args: [],
       cwd: fixture.directory,
+      totp: await fixture.totp(),
     })
     await expect(fixture.client.execute(denied)).rejects.toMatchObject({
       status: 403,
@@ -113,6 +186,7 @@ async function helperFixture(allowedExecutables: string[]): Promise<{
   directory: string
   socketPath: string
   client: UnixSocketPrivilegeExecutor
+  totp(): Promise<string>
 }> {
   const directory = await mkdtemp(join(tmpdir(), 'codever-privilege-helper-'))
   directories.push(directory)
@@ -128,17 +202,26 @@ async function helperFixture(allowedExecutables: string[]): Promise<{
       allowedUid: process.getuid?.() ?? 0,
       allowedGid: process.getgid?.() ?? 0,
       replayDirectory: join(directory, 'replay'),
+      totp: {
+        secret: TEST_TOTP_SECRET,
+        algorithm: 'SHA-1',
+        digits: 6,
+        periodSeconds: 30,
+        allowedClockSkewSteps: 1,
+      },
       policy: {
         allowArbitraryRootExecutables: false,
         allowedExecutables,
       },
     },
+    now: () => TEST_NOW,
   })
   servers.push(server)
   return {
     directory,
     socketPath,
     client: new UnixSocketPrivilegeExecutor(credentialPath),
+    totp: () => generateTotp(TEST_TOTP_SECRET, { timeMs: TEST_NOW }),
   }
 }
 
@@ -156,14 +239,15 @@ async function writeCredential(
 }
 
 function executionRequest(
-  input: Pick<PrivilegedExecutionRequest, 'executable' | 'args' | 'cwd'>
+  input: Pick<PrivilegedExecutionRequest, 'executable' | 'args' | 'cwd' | 'totp'>
     & Partial<Pick<PrivilegedExecutionRequest, 'requestedAt' | 'expiresAt'>>,
 ): PrivilegedExecutionRequest {
-  const requestedAt = input.requestedAt ?? Date.now()
+  const requestedAt = input.requestedAt ?? TEST_NOW
   return {
     version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
     requestId: randomUUID(),
     sessionId: 'session-1',
+    totp: input.totp,
     executable: input.executable,
     args: input.args,
     reason: 'Integration test',

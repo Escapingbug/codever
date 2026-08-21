@@ -2828,6 +2828,13 @@ select:focus-visible {
   color: #697286;
 }
 
+.permission-actions .totp-setup-button {
+  flex-basis: 100%;
+  border: 1px dashed #cfc9ef;
+  background: #faf9ff;
+  color: #6657bb;
+}
+
 .decision-state {
   position: relative;
   margin-top: 11px;
@@ -4626,6 +4633,127 @@ select:focus-visible {
   opacity: 0.55;
 }
 
+.privilege-totp-dialog {
+  display: grid;
+  width: min(480px, 100%);
+  justify-items: center;
+  padding: 25px 25px 21px;
+  border: 1px solid #ded9f5;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 28px 90px rgb(26 31 52 / 28%);
+  text-align: center;
+  transform-origin: center;
+  animation: dialog-enter var(--motion-panel) var(--motion-ease-out);
+}
+
+.privilege-totp-symbol {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 12px;
+  place-items: center;
+  border-radius: 13px;
+  background: #efedff;
+  color: #6652d5;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.privilege-totp-dialog h2 {
+  margin: 5px 0 8px;
+  color: #292d3b;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+
+.privilege-totp-dialog > p {
+  max-width: 390px;
+  margin: 0;
+  color: #727a8c;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.privilege-totp-dialog form {
+  display: grid;
+  width: 100%;
+  gap: 12px;
+  margin-top: 18px;
+  text-align: left;
+}
+
+.privilege-totp-dialog label {
+  display: grid;
+  gap: 6px;
+  color: #596174;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.privilege-totp-dialog input {
+  width: 100%;
+  height: 43px;
+  border: 1px solid #dcdfea;
+  border-radius: 10px;
+  outline: 0;
+  padding: 0 12px;
+  color: #343b4c;
+  font-family: var(--font-geist-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.privilege-totp-dialog input:focus {
+  border-color: #9b8fe7;
+  box-shadow: 0 0 0 3px rgb(105 87 229 / 10%);
+}
+
+.privilege-totp-note,
+.privilege-totp-error {
+  padding: 9px 11px;
+  border-radius: 9px;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.privilege-totp-note {
+  border: 1px solid #e4e0f5;
+  background: #faf9ff;
+  color: #71699a;
+}
+
+.privilege-totp-error {
+  border: 1px solid #efd4d7;
+  background: #fff5f5;
+  color: #a34853;
+}
+
+.privilege-totp-dialog footer {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 9px;
+  margin-top: 4px;
+}
+
+.privilege-totp-dialog footer button {
+  min-height: 42px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.privilege-totp-dialog .secondary-button {
+  background: #f0f1f5;
+  color: #5e6678;
+}
+
+.privilege-totp-dialog footer button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .scanner-dialog {
   width: min(460px, 100%);
   overflow: hidden;
@@ -5783,7 +5911,8 @@ body {
     flex: 1;
   }
 
-  .session-delete-dialog {
+  .session-delete-dialog,
+  .privilege-totp-dialog {
     width: 100%;
     border-radius: 20px 20px 0 0;
     transform-origin: bottom center;

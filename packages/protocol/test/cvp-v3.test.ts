@@ -98,6 +98,32 @@ describe('Codever Protocol v3 (CVP/3)', () => {
     }).payload).toEqual({ operation: 'session.set_lifecycle', state: 'deleted' })
   })
 
+  it('carries a six-digit TOTP only on an approval response', () => {
+    const command = cvp3CommandSchema.parse({
+      kind: 'codever.command',
+      version: 3,
+      commandId: 'command-privilege-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      deviceId: 'device-1',
+      certificateId: 'certificate-1',
+      createdAt: 1,
+      operation: 'decision.answer',
+      payload: {
+        operation: 'decision.answer',
+        requestId: 'privilege-request-1',
+        decision: 'allow_once',
+        totp: '123456',
+      },
+    })
+    expect(command.payload).toMatchObject({ totp: '123456' })
+    expect(() => cvp3CommandSchema.parse({
+      ...command,
+      payload: { ...command.payload, totp: '12345' },
+    })).toThrow()
+  })
+
   it('models extension-owned views and project defaults without privacy-specific fields', () => {
     const command = cvp3CommandSchema.parse({
       kind: 'codever.command',

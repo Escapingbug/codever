@@ -128,8 +128,7 @@ installed on the Gateway host. The MCP subprocess calls the owner-only Gateway
 admin socket with its Codever session ID. The Gateway calls the active
 `TopicSession` directly, rather than entering the runtime mailbox behind the
 currently blocked provider turn. `SemanticSessionRuntime` accepts the request
-only while that turn is `querying` and owns its one-shot or ten-minute approval
-lease.
+only while that turn is `querying` and owns its one-shot, TOTP-backed approval.
 
 ```text
 Agent MCP subprocess
@@ -137,6 +136,7 @@ Agent MCP subprocess
   -> active TopicSession / SemanticSessionRuntime
   -> MatrixCvp3Port privilege decision
   -> PWA device with privilege.approve
+  -> WebAuthn device unlock + client-side TOTP
   -> UnixSocketPrivilegeExecutor
   -> root-owned Privilege Helper
 ```
@@ -146,7 +146,9 @@ not parse shell command strings: it executes one absolute executable with an
 argument vector and minimal environment. A root-owned policy constrains
 executable paths; request expiry, durable replay claims, timeouts, and bounded
 output are enforced again at the privilege boundary. The local Gateway account
-and Helper credential remain trusted. See `docs/privileged-execution.md`.
+and Helper credential do not contain the TOTP setup key; every execution also
+requires a fresh code that the Helper validates and claims once. See
+`docs/privileged-execution.md`.
 
 ### 3.7 Codever Protocol v3 (CVP/3) over Matrix
 

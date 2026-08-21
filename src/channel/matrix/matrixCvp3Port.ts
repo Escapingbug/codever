@@ -221,12 +221,21 @@ export class MatrixCvp3Port implements ChannelPort {
     return promise
   }
 
-  resolveDecision(requestId: string, value: string): ResolvedV3Decision | null {
+  resolveDecision(
+    requestId: string,
+    value: string,
+    totp?: string,
+  ): ResolvedV3Decision | null {
     const pending = this.pendingDecisions.get(requestId)
     if (!pending || !pending.allowedValues.has(value)) return null
+    if (
+      pending.decisionType === 'privilege'
+      && value !== pending.fallbackValue
+      && !/^\d{6}$/u.test(totp ?? '')
+    ) return null
     this.pendingDecisions.delete(requestId)
     if (pending.timeout) clearTimeout(pending.timeout)
-    pending.resolve({ value })
+    pending.resolve({ value, ...(totp ? { totp } : {}) })
     return {
       kind: pending.kind,
       ...(pending.decisionType ? { decisionType: pending.decisionType } : {}),

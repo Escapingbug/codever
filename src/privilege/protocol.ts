@@ -1,7 +1,6 @@
 import { z } from 'zod'
 
-export const PRIVILEGE_HELPER_PROTOCOL_VERSION = 1 as const
-export const PRIVILEGE_APPROVAL_LEASE_MS = 10 * 60_000
+export const PRIVILEGE_HELPER_PROTOCOL_VERSION = 2 as const
 export const PRIVILEGE_APPROVAL_TIMEOUT_MS = 5 * 60_000
 export const PRIVILEGE_REQUEST_LIFETIME_MS = 30_000
 export const MAX_PRIVILEGED_OUTPUT_BYTES = 512 * 1024
@@ -28,6 +27,7 @@ export type PrivilegedExecutionInput = z.infer<
 export const privilegedExecutionRequestSchema = privilegedExecutionInputSchema
   .extend({
     version: z.literal(PRIVILEGE_HELPER_PROTOCOL_VERSION),
+    totp: z.string().regex(/^\d{6}$/u),
     requestId: opaqueId,
     sessionId: opaqueId,
     cwd: absolutePath,
@@ -78,6 +78,7 @@ export const privilegeHelperStatusSchema = z
   .object({
     version: z.literal(PRIVILEGE_HELPER_PROTOCOL_VERSION),
     state: z.literal('ready'),
+    totpRequired: z.literal(true),
   })
   .strict()
 
@@ -103,6 +104,15 @@ export const privilegeHelperConfigSchema = z
     allowedUid: z.number().int().nonnegative(),
     allowedGid: z.number().int().nonnegative(),
     replayDirectory: absolutePath,
+    totp: z
+      .object({
+        secret: z.string().regex(/^[A-Z2-7]{32}$/u),
+        algorithm: z.literal('SHA-1'),
+        digits: z.literal(6),
+        periodSeconds: z.literal(30),
+        allowedClockSkewSteps: z.number().int().min(0).max(1),
+      })
+      .strict(),
     policy: z
       .object({
         allowArbitraryRootExecutables: z.boolean().default(false),

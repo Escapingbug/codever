@@ -156,8 +156,7 @@ describe('MatrixCvp3Port', () => {
       title: 'Allow remote administrator execution?',
       details: 'Command:\n/usr/bin/id -u',
       options: [
-        { label: 'Allow once', value: 'allow_once' },
-        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+        { label: 'Unlock and allow once', value: 'allow_once' },
         { label: 'Deny', value: 'deny' },
       ],
     })
@@ -176,8 +175,7 @@ describe('MatrixCvp3Port', () => {
       decisionType: 'privilege',
       details: 'Command:\n/usr/bin/id -u',
       options: [
-        { label: 'Allow once', value: 'allow_once' },
-        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+        { label: 'Unlock and allow once', value: 'allow_once' },
         { label: 'Deny', value: 'deny' },
       ],
     })
@@ -187,11 +185,12 @@ describe('MatrixCvp3Port', () => {
       : ''
     expect(port.decisionType(privilegeRequestId)).toBe('privilege')
     expect(port.resolveDecision(privilegeRequestId, 'allow')).toBeNull()
-    expect(port.resolveDecision(privilegeRequestId, 'allow_once')).toEqual({
+    expect(port.resolveDecision(privilegeRequestId, 'allow_once')).toBeNull()
+    expect(port.resolveDecision(privilegeRequestId, 'allow_once', '123456')).toEqual({
       kind: 'decision',
       decisionType: 'privilege',
     })
-    await expect(privilegeResponse).resolves.toEqual({ value: 'allow_once' })
+    await expect(privilegeResponse).resolves.toEqual({ value: 'allow_once', totp: '123456' })
 
     const expiredPrivilegeResponse = port.requestDecision({
       type: 'privilege',

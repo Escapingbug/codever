@@ -30,6 +30,7 @@ class CommandPayloadValidatorTest {
                 put("sessionId", "session-1")
                 put("requestId", "request-1")
                 put("decision", "allow_session")
+                put("totp", "123456")
             },
             buildJsonObject {
                 put("operation", "session.settings")
@@ -53,6 +54,10 @@ class CommandPayloadValidatorTest {
 
         assertEquals(CommandOperation.entries, payloads.map { CommandPayloadValidator.validate(it).operation })
         assertTrue(CommandPayloadValidator.validate(payloads[0]) is PromptCommandPayload)
+        assertEquals(
+            "123456",
+            (CommandPayloadValidator.validate(payloads[2]) as DecisionCommandPayload).totp,
+        )
         assertTrue(CommandPayloadValidator.validate(payloads[4]) is SessionCreateCommandPayload)
         assertTrue(CommandPayloadValidator.validate(payloads[5]) is SessionLifecycleCommandPayload)
     }
@@ -74,6 +79,13 @@ class CommandPayloadValidatorTest {
             put("sessionId", "session-1")
             put("requestId", 1)
             put("decision", "deny")
+        })
+        assertInvalid(buildJsonObject {
+            put("operation", "decision")
+            put("sessionId", "session-1")
+            put("requestId", "request-1")
+            put("decision", "allow_once")
+            put("totp", "12345")
         })
         assertInvalid(buildJsonObject {
             put("operation", "session.archive")

@@ -51,6 +51,13 @@ import {
 } from "./NewSessionDialog";
 import { SessionDeleteDialog } from "./SessionDeleteDialog";
 import { GatewayForgetDialog } from "./GatewayForgetDialog";
+import { PrivilegeTotpDialog } from "./PrivilegeTotpDialog";
+import {
+  enrollPrivilegeTotp,
+  forgetPrivilegeTotp,
+  hasPrivilegeTotp,
+  unlockPrivilegeTotp,
+} from "./privilegeTotp";
 import {
   gatewayProjectKey,
   type GatewaySessionSummary,
@@ -679,6 +686,14 @@ function CodeverAppRuntime() {
   const [decisionStates, setDecisionStates] = useState<
     Record<string, ExtensionViewDecisionState>
   >({});
+  const [privilegeTotpEnrollment, setPrivilegeTotpEnrollment] = useState<{
+    message: ChatMessage;
+    decision: string;
+  } | null>(null);
+  const [privilegeTotpBusy, setPrivilegeTotpBusy] = useState(false);
+  const [privilegeTotpError, setPrivilegeTotpError] = useState<string | null>(
+    null,
+  );
   const feedRef = useRef<HTMLDivElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const sessionSearchRef = useRef<HTMLInputElement>(null);
@@ -4506,6 +4521,54 @@ function CodeverAppRuntime() {
       );
       return;
     }
+    const privilegeRequest = message.raw?.decisionType === "privilege";
+    if (privilegeRequest && decision !== "deny") {
+      const gatewayId = matrixConfig.gatewayId.trim();
+      if (!gatewayId) {
+        showUiNotice(
+          "composer:permission",
+          "composer",
+          "error",
+          "This privilege request has no trusted Gateway identity.",
+        );
+        return;
+      }
+      if (!hasPrivilegeTotp(gatewayId)) {
+        setPrivilegeTotpError(null);
+        setPrivilegeTotpEnrollment({ message, decision });
+        return;
+      }
+      setDecisionStates((current) => ({
+        ...current,
+        [message.id]: "submitting",
+      }));
+      try {
+        const totp = await unlockPrivilegeTotp(gatewayId);
+        await submitPermissionDecision(message, decision, totp);
+      } catch (error) {
+        setDecisionStates((current) => ({
+          ...current,
+          [message.id]: "pending",
+        }));
+        showUiNotice(
+          "composer:permission",
+          "composer",
+          "error",
+          formatUiError(error),
+        );
+      }
+      return;
+    }
+    await submitPermissionDecision(message, decision);
+  }
+
+  async function submitPermissionDecision(
+    message: ChatMessage,
+    decision: string,
+    totp?: string,
+  ) {
+    const sessionId = message.sessionId ?? selectedSessionIdRef.current;
+    if (!message.requestId || !sessionId) return;
     setDecisionStates((current) => ({
       ...current,
       [message.id]: "submitting",
@@ -4515,6 +4578,7 @@ function CodeverAppRuntime() {
       sessionId,
       requestId: message.requestId,
       decision,
+      ...(totp ? { totp } : {}),
     });
     if (sent && (await sent.completion).outcome === "succeeded") {
       setDecisionStates((current) => ({
@@ -4526,6 +4590,27 @@ function CodeverAppRuntime() {
         ...current,
         [message.id]: "pending",
       }));
+    }
+  }
+
+  async function completePrivilegeTotpEnrollment(setupKey: string) {
+    const pending = privilegeTotpEnrollment;
+    const gatewayId = matrixConfig.gatewayId.trim();
+    if (!pending || !gatewayId) return;
+    setPrivilegeTotpBusy(true);
+    setPrivilegeTotpError(null);
+    try {
+      const totp = await enrollPrivilegeTotp(gatewayId, setupKey);
+      setPrivilegeTotpEnrollment(null);
+      await submitPermissionDecision(
+        pending.message,
+        pending.decision,
+        totp,
+      );
+    } catch (error) {
+      setPrivilegeTotpError(formatUiError(error));
+    } finally {
+      setPrivilegeTotpBusy(false);
     }
   }
 
@@ -5456,7 +5541,7 @@ function CodeverAppRuntime() {
                     </div>
                     <p>
                       {privilegeRequest
-                        ? "This exact command will run as root on your connected computer. Review every argument before approving."
+                        ? "This exact command will run as root. Approval unlocks the TOTP key on this device with your fingerprint, face, or device credential."
                         : "Your choice is protected and sent only to your connected computer."}
                     </p>
                     {permissionDetails && (
@@ -5468,7 +5553,9 @@ function CodeverAppRuntime() {
                       </div>
                     ) : permissionDecisionState === "submitting" ? (
                       <div className="decision-state submitting">
-                        Signing response…
+                        {privilegeRequest
+                          ? "Waiting for fingerprint or device unlock…"
+                          : "Signing response…"}
                       </div>
                     ) : permissionDecisionState === "pending" ? (
                       <div className="permission-actions">
@@ -5481,6 +5568,21 @@ function CodeverAppRuntime() {
                             {action.label}
                           </button>
                         ))}
+                        {privilegeRequest && (
+                          <button
+                            className="totp-setup-button"
+                            type="button"
+                            onClick={() => {
+                              setPrivilegeTotpError(null);
+                              setPrivilegeTotpEnrollment({
+                                message,
+                                decision: "allow_once",
+                              });
+                            }}
+                          >
+                            Set up or replace TOTP
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <div className={`decision-state ${permissionDecisionState}`}>
@@ -5981,9 +6083,28 @@ function CodeverAppRuntime() {
         busy={false}
         onClose={() => setForgetDialogOpen(false)}
         onConfirm={() => {
+          if (matrixConfig.gatewayId) {
+            forgetPrivilegeTotp(matrixConfig.gatewayId);
+          }
           setForgetDialogOpen(false);
           forgetMatrixConfig();
         }}
+      />
+
+      <PrivilegeTotpDialog
+        key={privilegeTotpEnrollment?.message.id ?? "privilege-totp-closed"}
+        open={privilegeTotpEnrollment !== null}
+        busy={privilegeTotpBusy}
+        error={privilegeTotpError}
+        gatewayName={trustedGateway?.gatewayName ?? "this computer"}
+        onClose={() => {
+          if (privilegeTotpBusy) return;
+          setPrivilegeTotpEnrollment(null);
+          setPrivilegeTotpError(null);
+        }}
+        onSubmit={(setupKey) =>
+          void completePrivilegeTotpEnrollment(setupKey)
+        }
       />
     </main>
   );

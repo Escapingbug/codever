@@ -402,8 +402,9 @@ async function handlePrivilegeCommand(
       [--allow-arbitrary-root-executables]
       [--target-uid UID --target-gid GID]
 
-The install command prompts for local administrator access once. Later root
-operations require a signed approval from a separately authorized PWA device.
+The install command prompts for local administrator access once and prints a
+TOTP setup key. Later root operations require fingerprint/device unlock and a
+fresh client-side TOTP from a separately authorized PWA device.
 Prefer an executable allowlist. The arbitrary-executable option grants the
 widest host policy and should only be used on a dedicated machine.
 `)
@@ -423,6 +424,7 @@ widest host policy and should only be used on a dedicated machine.
             return
         }
         console.log(`Privilege Helper: ${status.state}`)
+        console.log(`TOTP required: ${status.totpRequired ? 'yes' : 'no'}`)
         console.log(`Credential: ${credentialPath}`)
         return
     }
@@ -451,6 +453,10 @@ widest host policy and should only be used on a dedicated machine.
             ? 'Host policy: any safe root-owned executable'
             : `Host policy: ${result.allowedExecutables.join(', ')}`,
     )
+    console.log('Save this TOTP setup key in the privilege-approval PWA now.')
+    console.log(`TOTP setup key: ${result.totpSecret}`)
+    console.log(`TOTP provisioning URI: ${result.totpProvisioningUri}`)
+    console.log('The setup key is stored only in the root Helper configuration and is not recoverable from the Gateway credential.')
     console.log('Restart the Matrix Gateway so it discovers the Helper credential.')
     console.log(
         'Pair an approval device with: codever gateway invite --privilege-approval',

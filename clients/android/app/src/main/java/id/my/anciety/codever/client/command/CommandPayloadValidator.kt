@@ -76,8 +76,12 @@ data class DecisionCommandPayload(
     override val sessionId: String,
     val requestId: String,
     val decision: String,
+    val totp: String?,
 ) : ValidatedCommandPayload {
     override val operation = CommandOperation.DECISION
+
+    override fun toString(): String =
+        "DecisionCommandPayload(sessionId=$sessionId, requestId=$requestId, decision=$decision, totp=<redacted>)"
 }
 
 enum class CommandPermissionMode(val wireName: String) {
@@ -215,13 +219,19 @@ object CommandPayloadValidator {
     }
 
     private fun validateDecision(value: JsonObject): DecisionCommandPayload {
-        value.requireExactKeys(setOf("operation", "sessionId", "requestId", "decision"))
+        value.requireExactKeys(
+            required = setOf("operation", "sessionId", "requestId", "decision"),
+            optional = setOf("totp"),
+        )
         val decision = value.requiredString("decision", 32)
         require(ACTION_ID.matches(decision)) { "Command decision is invalid." }
+        val totp = value.optionalBoundedString("totp", 6)
+        require(totp == null || TOTP.matches(totp)) { "Command TOTP is invalid." }
         return DecisionCommandPayload(
             sessionId = value.requiredOpaqueId("sessionId"),
             requestId = value.requiredOpaqueId("requestId"),
             decision = decision,
+            totp = totp,
         )
     }
 
@@ -348,6 +358,7 @@ object CommandPayloadValidator {
 
     private val BASE64_URL = Regex("^[A-Za-z0-9_-]+$")
     private val ACTION_ID = Regex("^[a-z][a-z0-9._-]*$")
+    private val TOTP = Regex("^[0-9]{6}$")
 
     private fun isMxcUrl(value: String): Boolean {
         if (!value.startsWith("mxc://")) return false

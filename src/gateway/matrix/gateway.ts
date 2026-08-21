@@ -1159,7 +1159,11 @@ export class MatrixGatewayRunner {
                     command.payload.sessionId,
                 )
                 const value = command.payload.decision === 'deny' ? 'deny' : 'allow'
-                if (!appSession.port.resolveDecision(command.payload.requestId, value)) {
+                if (!appSession.port.resolveDecision(
+                    command.payload.requestId,
+                    value,
+                    command.payload.totp,
+                )) {
                     throw new Error(`Unknown or invalid decision request ${command.payload.requestId}`)
                 }
                 return { sessionId: appSession.record.id }

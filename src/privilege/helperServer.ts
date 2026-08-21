@@ -16,6 +16,7 @@ import {
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createConnection } from 'node:net'
 import { dirname, join } from 'node:path'
+import { generateTotpForCounter, totpCounter } from '@codever/security'
 import { ZodError } from 'zod'
 import {
   MAX_PRIVILEGED_OUTPUT_BYTES,
@@ -31,6 +32,8 @@ import {
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_REQUEST_CLOCK_SKEW_MS = 5_000
 const REPLAY_RETENTION_MS = 24 * 60 * 60_000
+const TOTP_FAILURE_WINDOW_MS = 30_000
+const MAX_TOTP_FAILURES_PER_WINDOW = 5
 
 class HelperHttpError extends Error {
   constructor(
@@ -40,6 +43,65 @@ class HelperHttpError extends Error {
   ) {
     super(message)
     this.name = 'HelperHttpError'
+  }
+}
+
+class TotpVerifier {
+  private failures: number[] = []
+  private chain: Promise<void> = Promise.resolve()
+
+  constructor(private readonly config: PrivilegeHelperConfig) {}
+
+  verify(code: string, currentTime: number): Promise<void> {
+    const run = this.chain.then(() => this.verifySerial(code, currentTime))
+    this.chain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private async verifySerial(code: string, currentTime: number): Promise<void> {
+    this.failures = this.failures.filter(
+      failure => failure + TOTP_FAILURE_WINDOW_MS > currentTime,
+    )
+    if (this.failures.length >= MAX_TOTP_FAILURES_PER_WINDOW) {
+      throw new HelperHttpError(
+        429,
+        'totp_rate_limited',
+        'Too many invalid TOTP attempts; wait before trying again',
+      )
+    }
+    const currentCounter = totpCounter(
+      currentTime,
+      this.config.totp.periodSeconds,
+    )
+    const offsets = [
+      0,
+      ...Array.from(
+        { length: this.config.totp.allowedClockSkewSteps },
+        (_, index) => -(index + 1),
+      ),
+      ...Array.from(
+        { length: this.config.totp.allowedClockSkewSteps },
+        (_, index) => index + 1,
+      ),
+    ]
+    const candidates = await Promise.all(offsets.map(async offset => ({
+      counter: currentCounter + offset,
+      code: await generateTotpForCounter(
+        this.config.totp.secret,
+        currentCounter + offset,
+        {
+          algorithm: this.config.totp.algorithm,
+          digits: this.config.totp.digits,
+        },
+      ),
+    })))
+    const matched = candidates.find(candidate => safeCodeEqual(candidate.code, code))
+    if (!matched) {
+      this.failures.push(currentTime)
+      throw new HelperHttpError(401, 'invalid_totp', 'TOTP approval code is invalid')
+    }
+    await claimTotpStep(this.config.replayDirectory, matched.counter, currentTime)
+    this.failures = []
   }
 }
 
@@ -63,6 +125,7 @@ export async function startPrivilegeHelperServer(
   await mkdir(config.replayDirectory, { recursive: true, mode: 0o700 })
   await chmod(config.replayDirectory, 0o700)
   await pruneReplayClaims(config.replayDirectory, now())
+  const totpVerifier = new TotpVerifier(config)
 
   const server = createServer(async (request, response) => {
     setResponseHeaders(response)
@@ -72,6 +135,7 @@ export async function startPrivilegeHelperServer(
         sendJson(response, 200, {
           version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
           state: 'ready',
+          totpRequired: true,
         })
         return
       }
@@ -93,7 +157,13 @@ export async function startPrivilegeHelperServer(
           'Privilege grant creation time is too far in the future',
         )
       }
-      const result = await executeOnce(config, execution, now, options.onLog)
+      const result = await executeOnce(
+        config,
+        execution,
+        totpVerifier,
+        now,
+        options.onLog,
+      )
       sendJson(response, 200, result)
     } catch (error) {
       const mapped = mapError(error)
@@ -136,16 +206,18 @@ export async function startPrivilegeHelperServer(
 async function executeOnce(
   config: PrivilegeHelperConfig,
   request: PrivilegedExecutionRequest,
+  totpVerifier: TotpVerifier,
   now: () => number,
   onLog?: (message: string) => void,
 ): Promise<PrivilegedExecutionResult> {
-  await claimRequest(config.replayDirectory, request)
   const executable = await validateExecutable(config, request.executable)
   const cwd = await realpath(request.cwd)
   const cwdStat = await stat(cwd)
   if (!cwdStat.isDirectory()) {
     throw new HelperHttpError(400, 'invalid_cwd', 'Privileged working directory is not a directory')
   }
+  await claimRequest(config.replayDirectory, request)
+  await totpVerifier.verify(request.totp, now())
   const startedAt = now()
   onLog?.(
     `[privilege-helper] execute request=${request.requestId} session=${request.sessionId} `
@@ -314,6 +386,38 @@ function authorize(request: IncomingMessage, tokenSha256: string): void {
   }
 }
 
+function safeCodeEqual(expected: string, actual: string): boolean {
+  const expectedBytes = Buffer.from(expected, 'ascii')
+  const actualBytes = Buffer.from(actual, 'ascii')
+  return expectedBytes.length === actualBytes.length
+    && timingSafeEqual(expectedBytes, actualBytes)
+}
+
+async function claimTotpStep(
+  replayDirectory: string,
+  counter: number,
+  claimedAt: number,
+): Promise<void> {
+  const path = join(replayDirectory, `totp-step-${counter}.claim`)
+  let handle
+  try {
+    handle = await open(path, 'wx', 0o600)
+    await handle.writeFile(JSON.stringify({ counter, claimedAt }))
+    await handle.sync()
+  } catch (error) {
+    if (isNodeError(error, 'EEXIST')) {
+      throw new HelperHttpError(
+        409,
+        'totp_replayed',
+        'This TOTP approval code was already used',
+      )
+    }
+    throw error
+  } finally {
+    await handle?.close()
+  }
+}
+
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
@@ -433,7 +537,13 @@ async function removeSocket(socketPath: string): Promise<void> {
 async function pruneReplayClaims(replayDirectory: string, now: number): Promise<void> {
   const entries = await readdir(replayDirectory, { withFileTypes: true })
   await Promise.all(entries.map(async entry => {
-    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) return
+    if (
+      !entry.isFile()
+      || !(
+        /^[a-f0-9]{64}\.json$/u.test(entry.name)
+        || /^totp-step-\d+\.claim$/u.test(entry.name)
+      )
+    ) return
     const path = join(replayDirectory, entry.name)
     const metadata = await lstat(path)
     if (metadata.mtimeMs + REPLAY_RETENTION_MS < now) await unlink(path)

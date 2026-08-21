@@ -233,6 +233,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       sessionId: opaqueId,
       requestId: opaqueId,
       decision: sessionExtensionActionIdSchema,
+      totp: z.string().regex(/^\d{6}$/u).optional(),
     })
     .strict(),
   z

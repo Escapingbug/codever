@@ -77,6 +77,8 @@ export interface DecisionRequest {
 
 export interface DecisionResponse {
     value: string
+    /** Short-lived proof supplied by an approving client for privilege decisions. */
+    totp?: string
 }
 
 export type AgentActivityPhase = 'starting' | 'working' | 'stopping' | 'idle' | 'failed'

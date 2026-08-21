@@ -261,11 +261,11 @@ export class MatrixPort implements ChannelPort {
         return promise
     }
 
-    resolveDecision(decisionId: string, value: string): boolean {
+    resolveDecision(decisionId: string, value: string, totp?: string): boolean {
         const pending = this.pendingDecisions.get(decisionId)
         if (!pending || !pending.allowedValues.has(value)) return false
         this.pendingDecisions.delete(decisionId)
-        pending.resolve({ value })
+        pending.resolve({ value, ...(totp ? { totp } : {}) })
         return true
     }
 

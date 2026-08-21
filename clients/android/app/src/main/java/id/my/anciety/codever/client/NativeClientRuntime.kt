@@ -1342,6 +1342,7 @@ class NativeClientRuntime(
                     put("operation", v3Operation)
                     put("requestId", raw.string("requestId")!!)
                     put("decision", raw.string("decision")!!)
+                    raw.string("totp")?.let { put("totp", it) }
                 }
             }
             "session.settings" -> {

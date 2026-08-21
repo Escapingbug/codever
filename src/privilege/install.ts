@@ -15,6 +15,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { encodeBase32 } from '@codever/security'
 import { UnixSocketPrivilegeExecutor } from './helperClient.js'
 import {
   PRIVILEGE_HELPER_PROTOCOL_VERSION,
@@ -53,6 +54,8 @@ export interface InstalledPrivilegeHelper {
   targetGid: number
   allowedExecutables: string[]
   allowArbitraryRootExecutables: boolean
+  totpSecret: string
+  totpProvisioningUri: string
 }
 
 export interface InstallPrivilegeHelperDependencies {
@@ -107,6 +110,7 @@ export async function installPrivilegeHelper(
   await atomicCopy(helperBundlePath, layout.helperPath, 0o755, 0, 0)
 
   const token = randomBytes(32).toString('base64url')
+  const totpSecret = encodeBase32(randomBytes(20))
   const config = privilegeHelperConfigSchema.parse({
     version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
     socketPath: layout.socketPath,
@@ -114,6 +118,13 @@ export async function installPrivilegeHelper(
     allowedUid: targetUid,
     allowedGid: targetGid,
     replayDirectory: layout.replayDirectory,
+    totp: {
+      secret: totpSecret,
+      algorithm: 'SHA-1',
+      digits: 6,
+      periodSeconds: 30,
+      allowedClockSkewSteps: 1,
+    },
     policy: {
       allowArbitraryRootExecutables,
       allowedExecutables,
@@ -153,7 +164,27 @@ export async function installPrivilegeHelper(
     targetGid,
     allowedExecutables,
     allowArbitraryRootExecutables,
+    totpSecret,
+    totpProvisioningUri: privilegeTotpProvisioningUri(
+      totpSecret,
+      layout.serviceName,
+    ),
   }
+}
+
+export function privilegeTotpProvisioningUri(
+  secret: string,
+  account: string,
+): string {
+  const label = encodeURIComponent(`Codever:${account}`)
+  const parameters = new URLSearchParams({
+    secret,
+    issuer: 'Codever',
+    algorithm: 'SHA1',
+    digits: '6',
+    period: '30',
+  })
+  return `otpauth://totp/${label}?${parameters.toString()}`
 }
 
 export function privilegeHelperInstallLayout(

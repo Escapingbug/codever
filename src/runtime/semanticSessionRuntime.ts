@@ -26,7 +26,6 @@ import {
     type SessionExtensionTurnContext,
 } from './sessionExtensions'
 import {
-    PRIVILEGE_APPROVAL_LEASE_MS,
     PRIVILEGE_APPROVAL_TIMEOUT_MS,
     PRIVILEGE_HELPER_PROTOCOL_VERSION,
     PRIVILEGE_REQUEST_LIFETIME_MS,
@@ -181,7 +180,6 @@ export class SemanticSessionRuntime {
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
     private readonly extensionHost: SessionExtensionHost
-    private privilegeLeaseExpiresAt = 0
     private privilegeChain: Promise<void> = Promise.resolve()
 
     constructor(private config: SemanticSessionRuntimeConfig) {
@@ -251,7 +249,6 @@ export class SemanticSessionRuntime {
 
     async destroy(reason: SessionExtensionLifecycleReason = 'shutdown'): Promise<void> {
         this.state = 'dead'
-        this.privilegeLeaseExpiresAt = 0
         this.abortController?.abort()
         if (this.currentHandle) {
             await waitForShutdownStep(
@@ -292,38 +289,36 @@ export class SemanticSessionRuntime {
             throw new Error('Privileged execution is accepted only during an active Agent turn')
         }
         const input = privilegedExecutionInputSchema.parse(rawInput)
-        const now = Date.now()
-        if (this.privilegeLeaseExpiresAt <= now) {
-            this.privilegeLeaseExpiresAt = 0
-            const command = formatPrivilegedCommand(input.executable, input.args)
-            const approvalExpiresAt = Date.now() + PRIVILEGE_APPROVAL_TIMEOUT_MS
-            const response = await withTimeoutFallback(
-                this.config.channelPort.requestDecision({
-                    type: 'privilege',
-                    title: 'Allow remote administrator execution?',
-                    details: [
-                        `Reason: ${input.reason}`,
-                        `Project: ${this.config.cwd}`,
-                        'Command:',
-                        command,
-                        '',
-                        'This command will run as root on the connected computer.',
-                    ].join('\n'),
-                    options: [
-                        { label: 'Allow once', value: 'allow_once' },
-                        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
-                        { label: 'Deny', value: 'deny' },
-                    ],
-                    expiresAt: approvalExpiresAt,
-                }),
-                PRIVILEGE_APPROVAL_TIMEOUT_MS,
-                { value: 'deny' },
+        const command = formatPrivilegedCommand(input.executable, input.args)
+        const approvalExpiresAt = Date.now() + PRIVILEGE_APPROVAL_TIMEOUT_MS
+        const response = await withTimeoutFallback(
+            this.config.channelPort.requestDecision({
+                type: 'privilege',
+                title: 'Unlock remote administrator execution?',
+                details: [
+                    `Reason: ${input.reason}`,
+                    `Project: ${this.config.cwd}`,
+                    'Command:',
+                    command,
+                    '',
+                    'Your approving device will require fingerprint, face, or device unlock and generate a one-time TOTP code.',
+                ].join('\n'),
+                options: [
+                    { label: 'Unlock and allow once', value: 'allow_once' },
+                    { label: 'Deny', value: 'deny' },
+                ],
+                expiresAt: approvalExpiresAt,
+            }),
+            PRIVILEGE_APPROVAL_TIMEOUT_MS,
+            { value: 'deny' },
+        )
+        if (response.value !== 'allow_once') {
+            throw new PrivilegeExecutionDeniedError()
+        }
+        if (!response.totp || !/^\d{6}$/u.test(response.totp)) {
+            throw new PrivilegeExecutionDeniedError(
+                'The approving device did not provide a valid TOTP code',
             )
-            if (response.value === 'allow_session_10m') {
-                this.privilegeLeaseExpiresAt = Date.now() + PRIVILEGE_APPROVAL_LEASE_MS
-            } else if (response.value !== 'allow_once') {
-                throw new PrivilegeExecutionDeniedError()
-            }
         }
         if (this.state !== 'querying') {
             throw new PrivilegeExecutionDeniedError(
@@ -333,6 +328,7 @@ export class SemanticSessionRuntime {
         const requestedAt = Date.now()
         return await this.config.privilegeExecutor.execute({
             ...input,
+            totp: response.totp,
             version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
             requestId: randomUUID(),
             sessionId: this.config.sessionId,

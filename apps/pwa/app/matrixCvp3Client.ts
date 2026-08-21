@@ -609,6 +609,7 @@ function toCvp3Command(
           operation: "decision.answer",
           requestId: payload.requestId,
           decision: payload.decision,
+          ...(payload.totp ? { totp: payload.totp } : {}),
         },
       };
     case "session.settings": {

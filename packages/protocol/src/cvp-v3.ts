@@ -114,6 +114,7 @@ const decisionAnswerPayloadSchema = z
     operation: z.literal('decision.answer'),
     requestId: opaqueId,
     decision: z.string().min(1).max(256),
+    totp: z.string().regex(/^\d{6}$/u).optional(),
   })
   .strict()
 const sessionUpdatePayloadSchema = z

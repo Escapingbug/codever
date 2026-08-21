@@ -645,6 +645,7 @@ export class MatrixCvp3GatewayRunner {
     const decision = runtime.port.resolveDecision(
       command.payload.requestId,
       command.payload.decision,
+      command.payload.totp,
     )
     if (!decision) {
       throw new Error(`Unknown or invalid decision request ${command.payload.requestId}`)

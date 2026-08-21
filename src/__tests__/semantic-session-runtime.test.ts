@@ -57,7 +57,7 @@ function delay(ms: number): Promise<void> {
 }
 
 describe('SemanticSessionRuntime', () => {
-    it('requires a privilege decision and reuses only an explicit ten-minute session lease', async () => {
+    it('requires a fresh TOTP-backed privilege decision for every execution', async () => {
         let release!: () => void
         const hold = new Promise<void>(resolve => {
             release = resolve
@@ -72,7 +72,7 @@ describe('SemanticSessionRuntime', () => {
                 interrupt: vi.fn(),
             })),
         }
-        const requestDecision = vi.fn(async () => ({ value: 'allow_session_10m' }))
+        const requestDecision = vi.fn(async () => ({ value: 'allow_once', totp: '123456' }))
         const channel = {
             ...createChannel([], []),
             requestDecision,
@@ -117,23 +117,23 @@ describe('SemanticSessionRuntime', () => {
             timeoutMs: 5_000,
         })
 
-        expect(requestDecision).toHaveBeenCalledOnce()
+        expect(requestDecision).toHaveBeenCalledTimes(2)
         expect(requestDecision).toHaveBeenCalledWith(expect.objectContaining({
             type: 'privilege',
             details: expect.stringContaining('/usr/bin/id -u'),
             options: expect.arrayContaining([
-                { label: 'Allow once', value: 'allow_once' },
-                { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+                { label: 'Unlock and allow once', value: 'allow_once' },
                 { label: 'Deny', value: 'deny' },
             ]),
         }))
         expect(execute).toHaveBeenCalledTimes(2)
         expect(execute.mock.calls[0]?.[0]).toMatchObject({
-            version: 1,
+            version: 2,
             sessionId: 'session-privileged',
             cwd: '/repo',
             executable: '/usr/bin/id',
             args: ['-u'],
+            totp: '123456',
         })
         expect(provider.startQuery).toHaveBeenCalledWith(
             'perform maintenance',
