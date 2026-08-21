@@ -502,6 +502,28 @@ export async function connectMatrixCvp3(
     return { messages, hasMore: Boolean(page.nextBatch) };
   };
 
+  const loadLocalHistory = async (sessionId: string): Promise<MatrixHistoryPage> => {
+    await ready;
+    const active = protocol;
+    if (!active) throw new Error("The CVP/3 project is not initialized.");
+    const delivered = deliveredHistory.get(sessionId) ?? new Set<string>();
+    deliveredHistory.set(sessionId, delivered);
+    const available = active.projection.sessionMessages(sessionId)
+      .filter(message =>
+        !delivered.has(message.logicalId) && !delivered.has(message.physicalEventId)
+      );
+    const messages = available.slice(-1_000)
+      .map(message => {
+        delivered.add(message.logicalId);
+        delivered.add(message.physicalEventId);
+        return toIncomingMessage(message);
+      });
+    return {
+      messages,
+      hasMore: available.length > messages.length,
+    };
+  };
+
   const uploadAttachment = async (file: File): Promise<CodeverAttachment> => {
     await ready;
     if (file.size > MAX_CODEVER_ATTACHMENT_BYTES) throw new Error("Attachment is too large.");
@@ -605,7 +627,7 @@ export async function connectMatrixCvp3(
       deliveredHistory.set(sessionId, delivered);
       for (const eventId of eventIds) delivered.add(eventId);
     },
-    loadRecentHistory: loadHistory,
+    loadLocalHistory,
     loadHistoryPage: loadHistory,
     async observeCommandCompletion(commandId, timeoutMs) {
       if (!protocol) throw new Error("The CVP/3 project is not initialized.");
@@ -646,13 +668,17 @@ async function sendMatrixCvp3ApplicationEvent(
   return response.event_id;
 }
 
-function toIncomingMessage(
+export function toIncomingMessage(
   message: import("./matrixCvp3Projection").V3ProjectedMessage,
   replacesEventId?: string,
 ): IncomingCodeverMessage {
   const payload = message.payload;
   return {
-    eventId: message.physicalEventId || message.logicalId,
+    // Logical CVP identity is the cross-client/UI identity. Matrix event IDs
+    // change whenever a streamed message version is emitted and are transport
+    // metadata only. The replacement alias migrates caches written by older
+    // browser builds that incorrectly keyed bubbles by physical event ID.
+    eventId: message.logicalId,
     sender: message.sender === "user" ? "device" : "gateway",
     timestamp: message.timestamp,
     encrypted: true,
@@ -671,7 +697,9 @@ function toIncomingMessage(
     ...(payload?.type === "decision.requested" || payload?.type === "extension.interaction.requested"
       ? { requestId: payload.requestId }
       : {}),
-    ...(replacesEventId ? { replacesEventId } : {}),
+    ...(replacesEventId || message.physicalEventId
+      ? { replacesEventId: replacesEventId || message.physicalEventId }
+      : {}),
     format: message.format,
     ...(payload?.type === "assistant.message" && payload.attachments
       ? { attachments: payload.attachments }

@@ -342,10 +342,7 @@ export type MatrixConnection = {
   confirmRevisionRetry(commandId: string): Promise<CommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
   markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
-  loadRecentHistory(
-    sessionId: string,
-    limit?: number,
-  ): Promise<MatrixHistoryPage>;
+  loadLocalHistory(sessionId: string): Promise<MatrixHistoryPage>;
   loadHistoryPage(sessionId: string, limit?: number): Promise<MatrixHistoryPage>;
   observeCommandCompletion(
     commandId: string,
@@ -2314,6 +2311,17 @@ export async function connectMatrix(
       (message) => !delivered.has(message.eventId),
     );
   };
+  const loadLocalHistory = async (
+    sessionId: string,
+  ): Promise<MatrixHistoryPage> => {
+    await startupReady;
+    if (stopped) throw new Error("Matrix connection is closed.");
+    const messages = takeHistory(sessionId, 1_000);
+    return {
+      messages: deduplicateIncomingMessages(messages).sort(compareIncomingMessages),
+      hasMore: hasPendingHistory(sessionId),
+    };
+  };
   const loadHistoryPage = async (
     sessionId: string,
     limit = 30,
@@ -2343,28 +2351,6 @@ export async function connectMatrix(
       messages: deduplicateIncomingMessages(messages).sort(compareIncomingMessages),
       hasMore:
         hasPendingHistory(sessionId) ||
-        Boolean(historyRelationTokens.get(sessionId)),
-    };
-  };
-  const loadRecentHistory = async (
-    sessionId: string,
-    limit = 30,
-  ): Promise<MatrixHistoryPage> => {
-    await startupReady;
-    if (stopped) throw new Error("Matrix connection is closed.");
-    const room = client.getRoom(config.roomId);
-    if (!room) throw new Error("The Matrix room is not available.");
-    const pageLimit = Math.max(1, Math.min(limit, 100));
-    if (initializedHistoryRelations.has(sessionId)) {
-      await fetchSessionRelations(room, sessionId, Math.max(30, pageLimit));
-    } else {
-      await initializeSessionRelations(room, sessionId, Math.max(30, pageLimit));
-    }
-    const local = (historyBySession.get(sessionId) ?? []).slice(-pageLimit);
-    return {
-      messages: deduplicateIncomingMessages(local).sort(compareIncomingMessages),
-      hasMore:
-        (historyBySession.get(sessionId)?.length ?? 0) > pageLimit ||
         Boolean(historyRelationTokens.get(sessionId)),
     };
   };
@@ -2561,12 +2547,7 @@ export async function connectMatrix(
       deliveredHistory.set(sessionId, delivered);
       for (const eventId of eventIds) delivered.add(eventId);
     },
-    loadRecentHistory(sessionId, limit) {
-      const pageLimit = Math.max(1, Math.min(limit ?? 30, 100));
-      return enqueueHistoryOperation(sessionId, pageLimit, () =>
-        loadRecentHistory(sessionId, pageLimit),
-      );
-    },
+    loadLocalHistory,
     loadHistoryPage(sessionId, limit) {
       const pageLimit = Math.max(1, Math.min(limit ?? 30, 100));
       return enqueueHistoryOperation(sessionId, pageLimit, () =>

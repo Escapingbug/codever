@@ -156,7 +156,9 @@ class NativeClientRuntime(
     val deviceId: String = identity.publicIdentity.keyId
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
-    private val historyMutex = Mutex()
+    // History pagination is an explicit, per-conversation user action. Never
+    // serialize unrelated sessions behind one slow Matrix relation page.
+    private val historyMutexes = ConcurrentHashMap<String, Mutex>()
     private val diagnostics = NativeDiagnosticLog.get(context)
     private val files = NativeRuntimeFiles(context, deviceId)
     private val stateUpgrade = NativeStateUpgradeCoordinator(
@@ -388,13 +390,23 @@ class NativeClientRuntime(
 
     fun unsubscribe(subscriptionId: String): Boolean = eventHub.unsubscribe(subscriptionId)
 
-    suspend fun historyPage(sessionId: String, before: String?, limit: Int): HistoryPage {
+    suspend fun historyPage(
+        sessionId: String,
+        before: String?,
+        limit: Int,
+        allowRemote: Boolean,
+    ): HistoryPage {
         return try {
-            historyMutex.withLock {
-                diagnostics.record("history.page.requested")
+            // The Web bridge gives history.page 60 seconds. Bound the complete
+            // native operation, including lock wait, pagination, verification,
+            // and persistence, so a timed-out RPC cannot continue occupying a
+            // hidden queue after the WebView has stopped waiting.
+            withTimeout(HISTORY_PAGE_TOTAL_TIMEOUT_MS) {
+                historyMutexes.computeIfAbsent(sessionId) { Mutex() }.withLock {
+                    diagnostics.record("history.page.requested")
                 val online = matrix.status.phase == MatrixRuntimePhase.SYNCING
                 val initialized = sessionId in initializedHistoryRelations
-                val externalHasMore = online && (
+                val externalHasMore = allowRemote && online && (
                     !initialized || historyRelationTokens.containsKey(sessionId)
                 )
                 var local = eventHub.historyPage(
@@ -403,9 +415,9 @@ class NativeClientRuntime(
                     limit,
                     externalHasMore = externalHasMore,
                 )
-                val needsRecentReconciliation = before == null
+                val needsInitialRemotePage = before == null
                 val needsOlderPage = before != null && local.messages.isEmpty() && externalHasMore
-                if (!online || (!needsRecentReconciliation && !needsOlderPage)) {
+                if (!allowRemote || !online || (!needsInitialRemotePage && !needsOlderPage)) {
                     diagnostics.record("history.page.local")
                     return@withLock local
                 }
@@ -472,6 +484,7 @@ class NativeClientRuntime(
                 throw IllegalStateException(
                     "Matrix thread history exceeded the bounded pagination window.",
                 )
+                }
             }
         } catch (error: TimeoutCancellationException) {
             diagnostics.record(
@@ -2441,6 +2454,7 @@ class NativeClientRuntime(
     private companion object {
         const val BRIDGE_REPLAY_EVENT_LIMIT = 100
         const val MAX_HISTORY_RELATION_PAGES_PER_REQUEST = 20
+        const val HISTORY_PAGE_TOTAL_TIMEOUT_MS = 50_000L
         const val MAX_PRE_TRUST_EVENTS = 256
         const val PAIRING_REQUEST_MS = 2 * 60_000L
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L

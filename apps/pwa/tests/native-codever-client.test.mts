@@ -78,7 +78,7 @@ test("replays native state, sends a durable command, and acknowledges events", a
     requiredCapabilities: [],
     optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
       name,
-      versions: [1],
+      versions: name === "history.page" ? [2, 1] : [1],
     })).concat(OPTIONAL_NATIVE_CAPABILITIES.map((name) => ({
       name,
       versions: [1],
@@ -545,7 +545,10 @@ async function createTestClient(
     optionalCapabilities: [
       ...REQUIRED_NATIVE_CAPABILITIES,
       ...OPTIONAL_NATIVE_CAPABILITIES,
-    ].map((name) => ({ name, versions: [1] })),
+    ].map((name) => ({
+      name,
+      versions: name === "history.page" ? [2, 1] : [1],
+    })),
   });
   const client = new NativeBridgeClient(bridge, hello, {
     onMessage() {},
@@ -633,7 +636,7 @@ function responseFor(request: Request): unknown {
 function helloResult(): HelloResult {
   const capabilities = Object.fromEntries(
     [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-      .map((name) => [name, { version: 1 }]),
+      .map((name) => [name, { version: name === "history.page" ? 2 : 1 }]),
   ) as Record<CapabilityName, { version: number }>;
   return {
     protocolVersion: 1,

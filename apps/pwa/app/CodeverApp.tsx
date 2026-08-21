@@ -109,10 +109,6 @@ import {
   type ChatMessage,
   type OptimisticMessageReference,
 } from "./chatMessages";
-import {
-  shouldReconcileRecentHistory,
-  shouldRecoverVisibleHistory,
-} from "./crossDeviceSync";
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import {
@@ -727,14 +723,7 @@ function CodeverAppRuntime() {
   const pendingOpenedSessionIdRef = useRef<string | null>(null);
   const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
   const knownGatewaySessionIdsRef = useRef(new Set<string>());
-  const knownGatewaySessionUpdatedAtRef = useRef(new Map<string, number>());
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
-  const recentHistoryReconciliationRef = useRef(
-    new Map<string, Promise<void>>(),
-  );
-  const reconcileRecentSessionHistoryCallbackRef = useRef<
-    (sessionId: string, connection: CodeverClient) => void
-  >(() => {});
   const historyScopeRef = useRef("");
   const historySessionIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
@@ -1106,11 +1095,6 @@ function CodeverAppRuntime() {
   }
 
   useEffect(() => {
-    reconcileRecentSessionHistoryCallbackRef.current =
-      reconcileRecentSessionHistory;
-  });
-
-  useEffect(() => {
     writeProjectDisclosureState(window.localStorage, collapsedProjects);
   }, [collapsedProjects]);
 
@@ -1140,36 +1124,6 @@ function CodeverAppRuntime() {
     });
     return () => {
       active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let lastRecoveryAt = 0;
-    const recoverVisibleHistory = () => {
-      if (document.visibilityState !== "visible") return;
-      const connection = codeverClientRef.current;
-      const sessionId = selectedSessionIdRef.current;
-      const now = Date.now();
-      if (!shouldRecoverVisibleHistory({
-        visible: document.visibilityState === "visible",
-        connected: connection !== null,
-        selectedSessionId: sessionId,
-        lastRecoveryAt,
-        now,
-      })) {
-        return;
-      }
-      lastRecoveryAt = now;
-      reconcileRecentSessionHistoryCallbackRef.current(sessionId!, connection!);
-    };
-    const onVisibilityChange = () => recoverVisibleHistory();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("focus", recoverVisibleHistory);
-    window.addEventListener("online", recoverVisibleHistory);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("focus", recoverVisibleHistory);
-      window.removeEventListener("online", recoverVisibleHistory);
     };
   }, []);
 
@@ -1652,71 +1606,6 @@ function CodeverAppRuntime() {
       });
   }
 
-  function reconcileRecentSessionHistory(
-    sessionId: string,
-    connection: CodeverClient,
-  ): void {
-    if (
-      historySessionIdRef.current !== sessionId ||
-      historyLoadingRef.current ||
-      recentHistoryReconciliationRef.current.has(sessionId)
-    ) {
-      return;
-    }
-    const scope = historyScopeRef.current;
-    if (!scope) return;
-    const generation = historyGenerationRef.current;
-    const operation = (async () => {
-      const remote = await connection.loadRecentHistory(sessionId);
-      const recovered = remote.messages.map((message) =>
-        chatMessageFromIncoming(
-          { ...incomingMessageFromClient(message), historical: true },
-          message.sessionId ?? sessionId,
-        ),
-      );
-      if (recovered.length > 0) {
-        await persistMessageHistoryPage(scope, sessionId, recovered);
-      }
-      if (
-        codeverClientRef.current !== connection ||
-        generation !== historyGenerationRef.current ||
-        historySessionIdRef.current !== sessionId
-      ) {
-        return;
-      }
-      if (recovered.length > 0) {
-        historyCursorRef.current = olderHistoryCursor(
-          historyCursorRef.current,
-          recovered,
-        );
-        setMessages((current) => mergeChatMessages(current, recovered));
-      }
-      setHistoryHasMore((current) => current || remote.hasMore);
-      setHistoryError(null);
-      setHistoryRetryMode(null);
-      recoverUiNotice("history:cross-device-sync");
-    })()
-      .catch((error) => {
-        if (
-          codeverClientRef.current === connection &&
-          historySessionIdRef.current === sessionId
-        ) {
-          showUiNotice(
-            "history:cross-device-sync",
-            "history",
-            "warning",
-            `Recent messages from another device could not be synchronized: ${formatUiError(error)}`,
-          );
-        }
-      })
-      .finally(() => {
-        if (recentHistoryReconciliationRef.current.get(sessionId) === operation) {
-          recentHistoryReconciliationRef.current.delete(sessionId);
-        }
-      });
-    recentHistoryReconciliationRef.current.set(sessionId, operation);
-  }
-
   async function restoreSessionHistory(
     sessionId: string,
     connection: CodeverClient | null = codeverClientRef.current,
@@ -1790,14 +1679,14 @@ function CodeverAppRuntime() {
           message.eventId ? [message.eventId] : [],
         ),
       );
-      // Even with a local first page, reconcile once against Matrix's recent
-      // timeline. Older PWA versions persisted local optimistic timestamps and
-      // discarded the authoritative user echo, so cache-only restoration can
-      // preserve the wrong user/agent order indefinitely.
-      const remote =
-        cachedMessages.length > 0
-          ? await connection.loadRecentHistory(sessionId)
-          : await connection.loadHistoryPage(sessionId);
+      // The live Matrix subscription is the only source of recent updates.
+      // A populated local cache must render immediately and must never turn
+      // focus, reload, or a Gateway-state timestamp into a remote history RPC.
+      // A cache-cold device performs one explicit initial thread-page load;
+      // older pages remain driven solely by user pagination below.
+      const remote = cachedMessages.length > 0
+        ? await connection.loadLocalHistory(sessionId)
+        : await connection.loadHistoryPage(sessionId);
       const remoteMessages = remote.messages.map((message) =>
         chatMessageFromIncoming(
           { ...incomingMessageFromClient(message), historical: true },
@@ -2294,8 +2183,6 @@ function CodeverAppRuntime() {
     // application update.
     setSessionCreateReloadBlocked(false);
     knownGatewaySessionIdsRef.current.clear();
-    knownGatewaySessionUpdatedAtRef.current.clear();
-    recentHistoryReconciliationRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setGatewayState(null);
     setGatewayRevision(null);
@@ -2405,13 +2292,6 @@ function CodeverAppRuntime() {
             );
           }
           if (state.gatewayState) {
-            const previousUpdatedAt = knownGatewaySessionUpdatedAtRef.current;
-            const nextUpdatedAt = new Map(
-              state.gatewayState.sessions.map((session) => [
-                session.id,
-                session.updatedAt,
-              ]),
-            );
             const nextSessionIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
@@ -2445,7 +2325,6 @@ function CodeverAppRuntime() {
               }
             }
             knownGatewaySessionIdsRef.current = nextSessionIds;
-            knownGatewaySessionUpdatedAtRef.current = nextUpdatedAt;
             setDeleteTarget((current) =>
               current
                 ? state.gatewayState!.sessions.find(
@@ -2552,32 +2431,6 @@ function CodeverAppRuntime() {
               shouldRevealNextSession,
               pendingCreated === nextSessionId,
             );
-            const previousSelectedUpdatedAt = nextSessionId
-              ? previousUpdatedAt.get(nextSessionId)
-              : undefined;
-            const nextSelectedUpdatedAt = nextSessionId
-              ? nextUpdatedAt.get(nextSessionId)
-              : undefined;
-            const activeConnection = codeverClientRef.current;
-            if (
-              nextSessionId &&
-              activeConnection &&
-              shouldReconcileRecentHistory({
-                selectedSessionId: nextSessionId,
-                previousUpdatedAt: previousSelectedUpdatedAt,
-                nextUpdatedAt: nextSelectedUpdatedAt,
-              })
-            ) {
-              reconcileRecentSessionHistory(nextSessionId, activeConnection);
-            }
-          }
-        },
-        onConvergenceRequired() {
-          if (!isCurrentStartup()) return;
-          const activeConnection = codeverClientRef.current;
-          const sessionId = selectedSessionIdRef.current;
-          if (activeConnection && sessionId) {
-            reconcileRecentSessionHistory(sessionId, activeConnection);
           }
         },
         onCommandReviewRequired(review) {
@@ -2669,8 +2522,6 @@ function CodeverAppRuntime() {
       sessionCreateRecoveryTimerRef.current = null;
     }
     knownGatewaySessionIdsRef.current.clear();
-    knownGatewaySessionUpdatedAtRef.current.clear();
-    recentHistoryReconciliationRef.current.clear();
     liveMessagesBySessionRef.current.clear();
     setRevisionConflict(null);
     setNativeCommandReview(null);

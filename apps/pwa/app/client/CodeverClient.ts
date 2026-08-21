@@ -103,10 +103,8 @@ export interface CodeverClient {
   confirmRevisionRetry(commandId: string): Promise<CodeverCommandSendResult>;
   discardRevisionConflict(commandId: string): Promise<void>;
   markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void;
-  loadRecentHistory(
-    sessionId: string,
-    limit?: number,
-  ): Promise<CodeverHistoryPage>;
+  /** Reads the runtime's durable local projection without Matrix I/O. */
+  loadLocalHistory(sessionId: string): Promise<CodeverHistoryPage>;
   loadHistoryPage(
     sessionId: string,
     limit?: number,

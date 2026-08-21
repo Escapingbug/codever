@@ -90,7 +90,10 @@ describe('native session lifecycle revision recovery', () => {
             optionalCapabilities: [
                 ...REQUIRED_NATIVE_CAPABILITIES,
                 ...OPTIONAL_NATIVE_CAPABILITIES,
-            ].map(name => ({ name, versions: [1] })),
+            ].map(name => ({
+                name,
+                versions: name === 'history.page' ? [2, 1] : [1],
+            })),
         })
         const reviews: Array<string | null> = []
         const client = new NativeBridgeClient(bridge, hello, {
@@ -541,7 +544,7 @@ function commandContext(deviceId: string) {
 function helloResult(): HelloResult {
     const capabilities = Object.fromEntries(
         [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-            .map(name => [name, { version: 1 }]),
+            .map(name => [name, { version: name === 'history.page' ? 2 : 1 }]),
     ) as Record<CapabilityName, { version: number }>
     return {
         protocolVersion: 1,

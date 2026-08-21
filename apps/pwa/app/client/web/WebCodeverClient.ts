@@ -125,11 +125,10 @@ export class WebCodeverClient implements CodeverClient {
     this.transport.markHistoryLoaded(sessionId, eventIds);
   }
 
-  async loadRecentHistory(
+  async loadLocalHistory(
     sessionId: string,
-    limit?: number,
   ): Promise<CodeverHistoryPage> {
-    const page = await this.transport.loadRecentHistory(sessionId, limit);
+    const page = await this.transport.loadLocalHistory(sessionId);
     return {
       messages: page.messages.map(messageFromWeb),
       hasMore: page.hasMore,

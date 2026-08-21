@@ -80,7 +80,8 @@ class BridgeProtocolTest {
                         [
                           {"name":"background.foreground-service","versions":[1]},
                           {"name":"trust.native","versions":[1]},
-                          {"name":"commands.durable","versions":[1]}
+                          {"name":"commands.durable","versions":[1]},
+                          {"name":"history.page","versions":[1,2]}
                         ]
                     """.trimIndent(),
                 ),
@@ -89,12 +90,22 @@ class BridgeProtocolTest {
         val capabilities = response.getValue("capabilities").jsonObject
 
         assertEquals(
-            setOf("background.foreground-service", "trust.native", "commands.durable"),
+            setOf(
+                "background.foreground-service",
+                "trust.native",
+                "commands.durable",
+                "history.page",
+            ),
             capabilities.keys,
         )
         assertEquals(
             1,
             capabilities.getValue("background.foreground-service").jsonObject
+                .getValue("version").jsonPrimitive.int,
+        )
+        assertEquals(
+            2,
+            capabilities.getValue("history.page").jsonObject
                 .getValue("version").jsonPrimitive.int,
         )
         assertFalse(response.toString().contains("matrix", ignoreCase = true))

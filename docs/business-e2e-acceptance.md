@@ -44,6 +44,10 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
 3. **History and restart**
    - Reloading the browser and force-stopping/restarting the APK restore the
      same session and complete history.
+   - A populated local conversation opens without any Matrix thread-relation
+     request. Focus, foreground, network recovery, and 150 consecutive remote
+     updates still use zero recent-history requests and arrive exactly once
+     through the incremental event stream.
    - Older history can be paged without Gateway history RPCs.
    - A cache-cold client restores history through the selected session's Matrix
      thread only; normal Android startup requests zero room-timeline items.
@@ -69,6 +73,9 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
      longer available, and the next create/delete must start immediately.
    - Matrix sync restart, delayed lifecycle delivery, and duplicate timeline
      events converge without stale sessions or review deadlocks.
+   - A limited Matrix `/sync` persists its gap before the live cursor advances,
+     closes the gap in the background after process restart, and never blocks
+     the WebView history bridge or duplicates projected messages.
    - When another device advances the Gateway with a prompt while Android is
      stale, Android's append-only prompt is linearly accepted at the next revision,
      reaches the Agent exactly once, and never shows revision review or a

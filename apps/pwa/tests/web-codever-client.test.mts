@@ -70,7 +70,7 @@ function fakeTransport(onStop: () => void): MatrixConnection {
     },
     async discardRevisionConflict() {},
     markHistoryLoaded() {},
-    async loadRecentHistory() {
+    async loadLocalHistory() {
       return { messages: [], hasMore: false };
     },
     async loadHistoryPage() {

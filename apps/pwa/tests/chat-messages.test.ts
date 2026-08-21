@@ -562,3 +562,39 @@ test("optimistic echo matching prefers command id and falls back to session text
     "second",
   );
 });
+
+test("migrates a legacy Matrix-event-keyed bubble to its stable CVP logical identity", () => {
+  const legacyCached = {
+    id: "$physical-v1",
+    eventId: "$physical-v1",
+    kind: "agent",
+    text: "Working",
+    timestamp: 1_000,
+    historical: true,
+  };
+  const canonical = {
+    id: "assistant:message-1:0",
+    eventId: "assistant:message-1:0",
+    replacesEventId: "$physical-v1",
+    kind: "agent",
+    text: "Done",
+    timestamp: 1_100,
+  };
+
+  const migrated = mergeChatMessage([legacyCached], canonical);
+
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].eventId, canonical.eventId);
+  assert.equal(migrated[0].text, "Done");
+  assert.ok(migrated[0].eventAliases?.includes("$physical-v1"));
+
+  const recoveredAgain = mergeChatMessage(migrated, {
+    ...canonical,
+    id: "$legacy-ui-id-that-survived-an-upgrade",
+    replacesEventId: "$physical-v2",
+    historical: true,
+  });
+
+  assert.equal(recoveredAgain.length, 1);
+  assert.equal(recoveredAgain[0].eventId, canonical.eventId);
+});

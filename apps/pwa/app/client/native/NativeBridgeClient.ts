@@ -52,6 +52,24 @@ export const REQUIRED_NATIVE_CAPABILITIES = [
 
 export const OPTIONAL_NATIVE_CAPABILITIES = ["matrix.login-token"] as const;
 
+export function nativeCapabilityVersions(
+  name: (typeof REQUIRED_NATIVE_CAPABILITIES)[number] |
+    (typeof OPTIONAL_NATIVE_CAPABILITIES)[number],
+): number[] {
+  // v2 separates local projection reads from explicit Matrix pagination.
+  // Request v1 as a negotiation fallback only so an older APK can return an
+  // actionable update requirement instead of failing the hello handshake.
+  return name === "history.page" ? [2, 1] : [1];
+}
+
+export function hasCurrentNativeCapability(
+  hello: HelloResult,
+  name: (typeof REQUIRED_NATIVE_CAPABILITIES)[number],
+): boolean {
+  return hello.capabilities[name]?.version ===
+    (name === "history.page" ? 2 : 1);
+}
+
 const DEFAULT_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_BLOCKED_COMMAND_RETRY_WINDOW_MS = 2 * 60_000;
@@ -114,6 +132,7 @@ export class NativeBridgeClient implements CodeverClient {
   readonly #acknowledgementWaiters = new Map<string, AcknowledgementWaiter>();
   readonly #completions = new Map<string, CommandCompletion>();
   readonly #completionWaiters = new Map<string, Set<CompletionWaiter>>();
+  readonly #loadedHistoryEventIds = new Map<string, Set<string>>();
 
   constructor(
     private readonly bridge: NativeRpcBridge,
@@ -364,23 +383,56 @@ export class NativeBridgeClient implements CodeverClient {
     }
   }
 
-  markHistoryLoaded(): void {
-    // The native journal owns delivery cursors. UI rendering has no transport side effect.
+  markHistoryLoaded(sessionId: string, eventIds: readonly string[]): void {
+    const loaded = this.#loadedHistoryEventIds.get(sessionId) ?? new Set<string>();
+    eventIds.forEach((eventId) => loaded.add(eventId));
+    this.#loadedHistoryEventIds.set(sessionId, loaded);
   }
 
-  async loadRecentHistory(
+  async loadLocalHistory(
     sessionId: string,
-    limit = 30,
   ): Promise<CodeverHistoryPage> {
     this.#historyBefore.delete(sessionId);
-    return this.#loadHistory(sessionId, limit, undefined);
+    const loaded = this.#loadedHistoryEventIds.get(sessionId) ?? new Set<string>();
+    const recovered = new Map<string, CodeverHistoryPage["messages"][number]>();
+    let hasMore = false;
+    for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+      const page = await this.#loadHistory(sessionId, 100, this.#historyBefore.get(sessionId), "local");
+      let reachedLoadedWindow = false;
+      for (const message of page.messages) {
+        if (loaded.has(message.eventId)) {
+          reachedLoadedWindow = true;
+          continue;
+        }
+        recovered.set(message.eventId, message);
+      }
+      hasMore = page.hasMore;
+      if (
+        reachedLoadedWindow ||
+        !page.hasMore ||
+        !this.#historyBefore.has(sessionId)
+      ) break;
+    }
+    return {
+      messages: [...recovered.values()].sort(
+        (left, right) =>
+          left.timestamp - right.timestamp ||
+          left.eventId.localeCompare(right.eventId),
+      ),
+      hasMore,
+    };
   }
 
   async loadHistoryPage(
     sessionId: string,
     limit = 30,
   ): Promise<CodeverHistoryPage> {
-    return this.#loadHistory(sessionId, limit, this.#historyBefore.get(sessionId));
+    return this.#loadHistory(
+      sessionId,
+      limit,
+      this.#historyBefore.get(sessionId),
+      "matrix",
+    );
   }
 
   async observeCommandCompletion(
@@ -805,6 +857,7 @@ export class NativeBridgeClient implements CodeverClient {
     sessionId: string,
     limit: number,
     before: string | undefined,
+    source: "local" | "matrix",
   ): Promise<CodeverHistoryPage> {
     await this.ready;
     const page = await this.bridge.request("codever.history.page", {
@@ -812,6 +865,7 @@ export class NativeBridgeClient implements CodeverClient {
       sessionId,
       ...(before === undefined ? {} : { before }),
       limit: Math.max(1, Math.min(limit, 100)),
+      source,
     });
     if (page.sessionId !== sessionId) {
       throw new BridgeProtocolError(
@@ -849,7 +903,7 @@ export async function bootstrapNativeSession(
 
 export function assertFullNativeCapabilities(hello: HelloResult): void {
   const missing = REQUIRED_NATIVE_CAPABILITIES.find(
-    (name) => hello.capabilities[name]?.version !== 1,
+    (name) => !hasCurrentNativeCapability(hello, name),
   );
   if (missing) {
     throw new BridgeProtocolError(

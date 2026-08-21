@@ -104,6 +104,13 @@ scripts at the production room or production Gateway data directory.
   only after accepted events have been handled.
 - Thread enumeration and history are fully paginated. A bounded initial sync is
   not evidence that all sessions or history were restored.
+- Repeated Gateway/session updates must converge through `/sync` without
+  issuing selected-thread relation requests. A cached reload, focus change,
+  foreground transition, and ordinary network recovery must also issue zero
+  recent-history requests.
+- A deliberately limited `/sync` must persist and close its gap in the
+  background while cached history remains readable; it must not make the
+  WebView wait for a history RPC.
 - The foreground Android service, not the WebView, owns background sync and
   notifications.
 - Only CVP/3 application data is accepted. Pairing and signed Gateway

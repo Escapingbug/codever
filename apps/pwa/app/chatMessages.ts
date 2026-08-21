@@ -122,7 +122,14 @@ export function mergeChatMessage(
     });
   }
 
-  const exactIndex = current.findIndex((entry) => entry.id === message.id);
+  const exactIndex = current.findIndex(
+    (entry) =>
+      entry.id === message.id ||
+      entry.eventId === message.eventId ||
+      Boolean(
+        message.eventId && entry.eventAliases?.includes(message.eventId),
+      ),
+  );
   const operationIndex = findOperationIndex(current, message);
   if (operationIndex >= 0) {
     return mergeLogicalCopies(current, operationIndex, message);
@@ -289,9 +296,11 @@ function mergeEventAliases(
   return uniqueStrings([
     existing.id,
     existing.eventId,
+    existing.replacesEventId,
     ...(existing.eventAliases ?? []),
     incoming.id,
     incoming.eventId,
+    incoming.replacesEventId,
     ...(incoming.eventAliases ?? []),
   ]);
 }
