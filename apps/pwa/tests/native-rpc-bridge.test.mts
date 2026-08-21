@@ -193,6 +193,6 @@ test("keeps native conflict decisions independent from slow Matrix command deliv
   assert.match(transmission, /val transmission = mutex\.withLock/);
   assert.match(
     transmission,
-    /}\s*\?: return\s*\n\s*try \{\s*\n\s*sendTrustedControlMessage/,
+    /}\s*\?: return\s*\n\s*try \{[\s\S]*?sendTrustedControlMessage/,
   );
 });

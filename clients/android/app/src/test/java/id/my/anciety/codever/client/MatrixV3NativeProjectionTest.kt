@@ -2,6 +2,7 @@ package id.my.anciety.codever.client
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -126,6 +127,33 @@ class MatrixV3NativeProjectionTest {
         )
     }
 
+    @Test
+    fun `workspace capability catalog survives stale events and durable restore`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(workspaceSnapshot(2, "gpt-5.6-sol"), "\$workspace-2", null)
+        projection.applyGatewayEvent(workspaceSnapshot(1, "stale-model"), "\$workspace-1", null)
+
+        val model = projection.snapshot()!!
+            .getValue("capabilities").jsonObject
+            .getValue("models").jsonArray.single().jsonObject
+            .getValue("id").jsonPrimitive.content
+        assertEquals("gpt-5.6-sol", model)
+
+        val restored = MatrixV3NativeProjection(
+            gatewayId = { "gateway-1" },
+            activeDeviceCount = { 2 },
+            initialState = projection.durableState(),
+        )
+        assertEquals(
+            "gpt-5.6-sol",
+            restored.snapshot()!!
+                .getValue("capabilities").jsonObject
+                .getValue("models").jsonArray.single().jsonObject
+                .getValue("id").jsonPrimitive.content,
+        )
+    }
+
     private fun projection() = MatrixV3NativeProjection(
         gatewayId = { "gateway-1" },
         activeDeviceCount = { 2 },
@@ -141,6 +169,38 @@ class MatrixV3NativeProjectionTest {
             put("cwd", "/workspace/project")
             put("provider", "codex")
             put("permissionMode", "default")
+        },
+    )
+
+    private fun workspaceSnapshot(snapshotVersion: Long, model: String) = event(
+        eventId = "workspace-snapshot-$snapshotVersion",
+        projectId = "project-1",
+        payload = buildJsonObject {
+            put("type", "workspace.snapshot")
+            put("protocolMin", 3)
+            put("protocolMax", 3)
+            put("gatewayKeyId", "gateway-key-1")
+            put("snapshotVersion", snapshotVersion)
+            put("capabilities", buildJsonObject {
+                put("models", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", model)
+                        put("name", model)
+                        put("default_reasoning_level", "high")
+                        put("supported_reasoning_levels", buildJsonArray {
+                            add(buildJsonObject { put("effort", "high") })
+                        })
+                    })
+                })
+                put("permission_modes", buildJsonArray {
+                    add(buildJsonObject { put("id", "default"); put("name", "Default") })
+                })
+                put("can_create_session", true)
+                put("can_select_session", false)
+                put("can_archive_session", true)
+                put("can_delete_session", true)
+                put("session_extensions", buildJsonArray {})
+            })
         },
     )
 

@@ -1,6 +1,7 @@
 import {
   CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
   CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+  CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
   MAX_CODEVER_ATTACHMENT_BYTES,
   attachmentSchema,
   codeverV3ProjectKeyGrantStateSchema,
@@ -51,7 +52,10 @@ import {
 } from "./pairing";
 import { parseToolGroupPresentation } from "./presentation";
 import type { CommandCompletion } from "./commandLifecycle";
-import type { GatewayStateSnapshot } from "./gatewayState";
+import {
+  parseGatewayCapabilities,
+  type GatewayStateSnapshot,
+} from "./gatewayState";
 
 const LOCAL_TIMEOUT_MS = 10_000;
 const INITIAL_SYNC_LIMIT = 32;
@@ -240,11 +244,37 @@ export async function connectMatrixV3(
       trust.gatewayKey.publicKey,
     );
     if (
-      pointer.workspaceId !== config.gatewayId
+      pointer.kind !== "project.current"
+      || pointer.workspaceId !== config.gatewayId
       || pointer.projectId !== projectId
       || pointer.roomId !== config.roomId
       || pointer.gatewayKeyId !== trust.gatewayKey.keyId
     ) throw new Error("The protocol-v3 project pointer is bound to another Gateway or room.");
+    const raw = await client.fetchRoomEvent(config.roomId, pointer.eventId);
+    await ingestEvent(new sdk.MatrixEvent(raw));
+    return true;
+  };
+
+  const recoverCurrentWorkspaceSnapshot = async (): Promise<boolean> => {
+    const activeRoom = room ?? client.getRoom(config.roomId);
+    if (!activeRoom || !trust || !protocol || !projectId) return false;
+    const state = activeRoom.currentState.getStateEvents(
+      CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
+      config.gatewayId,
+    );
+    const pointerEvent = Array.isArray(state) ? state[0] : state;
+    if (!pointerEvent) return false;
+    const pointer = await verifyCodeverV3Pointer(
+      pointerEvent.getContent(),
+      trust.gatewayKey.publicKey,
+    );
+    if (
+      pointer.kind !== "workspace.current"
+      || pointer.workspaceId !== config.gatewayId
+      || pointer.projectId !== projectId
+      || pointer.roomId !== config.roomId
+      || pointer.gatewayKeyId !== trust.gatewayKey.keyId
+    ) throw new Error("The protocol-v3 workspace pointer is bound to another Gateway or room.");
     const raw = await client.fetchRoomEvent(config.roomId, pointer.eventId);
     await ingestEvent(new sdk.MatrixEvent(raw));
     return true;
@@ -268,7 +298,10 @@ export async function connectMatrixV3(
   const onRoomState = (event: MatrixEvent) => {
     if (event.getType() === CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE) {
       void createProtocol(event.getContent())
-        .then(() => recoverCurrentProjectSnapshot())
+        .then(() => Promise.all([
+          recoverCurrentWorkspaceSnapshot(),
+          recoverCurrentProjectSnapshot(),
+        ]))
         .then(() => replayKnownTimeline())
         .catch(error => {
           handlers.onStatus("error", `The project key grant could not be opened: ${formatError(error)}`);
@@ -278,6 +311,12 @@ export async function connectMatrixV3(
     if (event.getType() === CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE) {
       void recoverCurrentProjectSnapshot().catch(error => {
         handlers.onStatus("error", `The current project snapshot could not be recovered: ${formatError(error)}`);
+      });
+      return;
+    }
+    if (event.getType() === CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE) {
+      void recoverCurrentWorkspaceSnapshot().catch(error => {
+        handlers.onStatus("error", `The current workspace capabilities could not be recovered: ${formatError(error)}`);
       });
     }
   };
@@ -360,7 +399,10 @@ export async function connectMatrixV3(
         if (!(await scanGrantState())) {
           throw new Error("The Gateway has not published this device’s protocol-v3 project key grant.");
         }
-        await recoverCurrentProjectSnapshot();
+        await Promise.all([
+          recoverCurrentWorkspaceSnapshot(),
+          recoverCurrentProjectSnapshot(),
+        ]);
         await replayKnownTimeline();
       }
       handlers.onStatus("connected");
@@ -412,7 +454,10 @@ export async function connectMatrixV3(
     trust = paired;
     handlers.onTrustUpdated?.(paired);
     await waitForGrant(signal);
-    await recoverCurrentProjectSnapshot();
+    await Promise.all([
+      recoverCurrentWorkspaceSnapshot(),
+      recoverCurrentProjectSnapshot(),
+    ]);
     await replayKnownTimeline();
     return paired;
   };
@@ -695,15 +740,17 @@ function gatewayState(
       ...(project?.reasoningEffort ? { reasoningEffort: project.reasoningEffort } : {}),
       permissionMode: project?.permissionMode ?? "default",
     },
-    capabilities: {
-      models: [],
-      permissionModes: [{ id: "default", name: "Default" }],
-      canCreateSession: true,
-      canSelectSession: false,
-      canArchiveSession: true,
-      canDeleteSession: true,
-      sessionExtensions: [],
-    },
+    capabilities: protocol.projection.workspace
+      ? parseGatewayCapabilities(protocol.projection.workspace.capabilities)
+      : {
+          models: [],
+          permissionModes: [{ id: "default", name: "Default" }],
+          canCreateSession: true,
+          canSelectSession: false,
+          canArchiveSession: true,
+          canDeleteSession: true,
+          sessionExtensions: [],
+        },
   };
 }
 

@@ -52,7 +52,56 @@ describe("MatrixV3Projection", () => {
       expect.objectContaining({ sessionId: "session-c", threadRootEventId: "$root-c" }),
     ]);
   });
+
+  it("persists the newest authenticated workspace capability catalog", () => {
+    const projection = new MatrixV3Projection();
+    projection.applyEvent(workspaceSnapshot(2, "gpt-5.6-sol"), "$workspace-2");
+    projection.applyEvent(workspaceSnapshot(1, "stale-model"), "$workspace-1");
+
+    expect(projection.workspace).toEqual(expect.objectContaining({
+      snapshotVersion: 2,
+      capabilities: expect.objectContaining({
+        models: [expect.objectContaining({ id: "gpt-5.6-sol" })],
+      }),
+    }));
+
+    const restored = new MatrixV3Projection();
+    restored.restore(projection.durableState());
+    expect(restored.workspace).toEqual(projection.workspace);
+  });
 });
+
+function workspaceSnapshot(snapshotVersion: number, model: string): CodeverV3Event {
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: `workspace-${snapshotVersion}`,
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    occurredAt: snapshotVersion,
+    payload: {
+      type: "workspace.snapshot",
+      protocolMin: 3,
+      protocolMax: 3,
+      gatewayKeyId: "gateway-key-1",
+      capabilities: {
+        models: [{
+          id: model,
+          name: model,
+          default_reasoning_level: "high",
+          supported_reasoning_levels: [{ effort: "high" }],
+        }],
+        permission_modes: [{ id: "default", name: "Default" }],
+        can_create_session: true,
+        can_select_session: false,
+        can_archive_session: true,
+        can_delete_session: true,
+        session_extensions: [],
+      },
+      snapshotVersion,
+    },
+  };
+}
 
 function createCommand(suffix: string): CodeverV3Command {
   return {

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { matrixGatewayCapabilitiesSchema } from './matrix-native.js'
 import { attachmentSchema, jsonValueSchema, signatureSchema } from './schema.js'
 
 /**
@@ -223,7 +224,7 @@ export const codeverV3EventPayloadSchema = z.discriminatedUnion('type', [
       protocolMin: z.number().int().positive(),
       protocolMax: z.number().int().positive(),
       gatewayKeyId: opaqueId,
-      capabilities: jsonValueSchema,
+      capabilities: matrixGatewayCapabilitiesSchema,
       snapshotVersion: z.number().int().positive(),
     })
     .strict(),

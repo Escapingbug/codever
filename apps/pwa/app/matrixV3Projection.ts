@@ -2,8 +2,12 @@ import type {
   CodeverV3Command,
   CodeverV3Event,
   CodeverV3SessionProjection,
+  MatrixGatewayCapabilities,
 } from "@codever/protocol";
-import { codeverV3EventSchema } from "@codever/protocol";
+import {
+  codeverV3EventSchema,
+  matrixGatewayCapabilitiesSchema,
+} from "@codever/protocol";
 
 export type V3ProjectedSession = CodeverV3SessionProjection & {
   sessionId: string;
@@ -48,8 +52,15 @@ export type V3ProjectProjection = {
   permissionMode: string;
 };
 
+export type V3WorkspaceProjection = {
+  snapshotVersion: number;
+  gatewayKeyId: string;
+  capabilities: MatrixGatewayCapabilities;
+};
+
 export type MatrixV3ProjectionState = {
-  version: 1;
+  version: 2;
+  workspace: V3WorkspaceProjection | null;
   project: V3ProjectProjection | null;
   sessions: V3ProjectedSession[];
   messages: V3ProjectedMessage[];
@@ -68,11 +79,13 @@ export class MatrixV3Projection {
   readonly messages = new Map<string, V3ProjectedMessage>();
   readonly completions = new Map<string, V3CommandCompletion>();
   readonly seenLogicalEvents = new Set<string>();
+  workspace: V3WorkspaceProjection | null = null;
   project: V3ProjectProjection | null = null;
 
   durableState(): MatrixV3ProjectionState {
     return structuredClone({
-      version: 1,
+      version: 2,
+      workspace: this.workspace,
       project: this.project,
       sessions: [...this.sessions.values()],
       messages: [...this.messages.values()],
@@ -83,6 +96,7 @@ export class MatrixV3Projection {
 
   restore(input: unknown): void {
     const state = validateProjectionState(input);
+    this.workspace = state.workspace;
     this.project = state.project;
     this.sessions.clear();
     this.messages.clear();
@@ -149,9 +163,25 @@ export class MatrixV3Projection {
     physicalEventId: string,
     threadRootHint?: string,
   ): boolean {
+    const payload = event.payload;
+    // The first deployed v3 client recorded unknown workspace snapshots as
+    // seen before it knew how to project them. Apply capability snapshots by
+    // their monotonic entity version even when that old cache contains the
+    // logical ID, so an app upgrade repairs itself without a cache reset.
+    if (payload.type === "workspace.snapshot") {
+      if (this.workspace && payload.snapshotVersion <= this.workspace.snapshotVersion) {
+        return false;
+      }
+      this.seenLogicalEvents.add(event.eventId);
+      this.workspace = {
+        snapshotVersion: payload.snapshotVersion,
+        gatewayKeyId: payload.gatewayKeyId,
+        capabilities: structuredClone(payload.capabilities),
+      };
+      return true;
+    }
     if (this.seenLogicalEvents.has(event.eventId)) return false;
     this.seenLogicalEvents.add(event.eventId);
-    const payload = event.payload;
     if (payload.type === "project.snapshot" && event.projectId) {
       if (!this.project || payload.snapshotVersion >= this.project.snapshotVersion) {
         this.project = {
@@ -331,7 +361,9 @@ export class MatrixV3Projection {
 
 function validateProjectionState(input: unknown): MatrixV3ProjectionState {
   const value = record(input);
-  if (value?.version !== 1) throw new Error("Unsupported Matrix v3 projection version.");
+  if (value?.version !== 1 && value?.version !== 2) {
+    throw new Error("Unsupported Matrix v3 projection version.");
+  }
   const sessions = boundedArray(value.sessions, "sessions").map(sessionValue => {
     const session = record(sessionValue);
     if (
@@ -381,11 +413,36 @@ function validateProjectionState(input: unknown): MatrixV3ProjectionState {
     });
   const projectValue = value.project;
   const project = projectValue === null ? null : validateProjectProjection(projectValue);
+  const workspace = value.version === 1 || value.workspace === null
+    ? null
+    : validateWorkspaceProjection(value.workspace);
   requireUnique(sessions.map(session => session.sessionId), "session");
   requireUnique(messages.map(message => message.logicalId), "message");
   requireUnique(completions.map(completion => completion.commandId), "completion");
   requireUnique(seenLogicalEvents, "logical event");
-  return { version: 1, project, sessions, messages, completions, seenLogicalEvents };
+  return {
+    version: 2,
+    workspace,
+    project,
+    sessions,
+    messages,
+    completions,
+    seenLogicalEvents,
+  };
+}
+
+function validateWorkspaceProjection(input: unknown): V3WorkspaceProjection {
+  const workspace = record(input);
+  if (
+    !workspace
+    || !integer(workspace.snapshotVersion, 1)
+    || !text(workspace.gatewayKeyId)
+  ) throw new Error("The Matrix v3 workspace projection is invalid.");
+  return {
+    snapshotVersion: workspace.snapshotVersion,
+    gatewayKeyId: workspace.gatewayKeyId,
+    capabilities: matrixGatewayCapabilitiesSchema.parse(workspace.capabilities),
+  };
 }
 
 function validateProjectProjection(input: unknown): V3ProjectProjection {

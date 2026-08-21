@@ -1541,6 +1541,7 @@ class NativeClientRuntime(
         if (
             eventType != CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE &&
             eventType != id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE &&
+            eventType != id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE &&
             !(eventType == "m.room.message" &&
                 (content["io.codever"] as? JsonObject)?.long("version") == 3L)
         ) return false
@@ -1581,13 +1582,27 @@ class NativeClientRuntime(
             }
             return true
         }
-        if (eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE) {
-            val pointer = MatrixV3Protocol.verifyProjectPointer(
-                content,
-                activeTrust.gatewayKey,
-                activeTrust.gatewayId,
-                roomId,
-            )
+        if (
+            eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ||
+            eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE
+        ) {
+            val pointer = if (
+                eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE
+            ) {
+                MatrixV3Protocol.verifyProjectPointer(
+                    content,
+                    activeTrust.gatewayKey,
+                    activeTrust.gatewayId,
+                    roomId,
+                )
+            } else {
+                MatrixV3Protocol.verifyWorkspacePointer(
+                    content,
+                    activeTrust.gatewayKey,
+                    activeTrust.gatewayId,
+                    roomId,
+                )
+            }
             val keys = matrixV3ProjectKeys.value()
                 ?: throw MatrixV3EventDeferredException("project_key_grant_pending")
             try {
@@ -1633,6 +1648,12 @@ class NativeClientRuntime(
             activeTrust.gatewayId,
             opened.projectId,
         )
+        val protocolPayload = protocolEvent.objectValue("payload")
+        if (protocolPayload.string("type") == "workspace.snapshot") {
+            require(protocolPayload.string("gatewayKeyId") == activeTrust.gatewayKey.keyId) {
+                "The Matrix v3 workspace snapshot names another Gateway key."
+            }
+        }
         require(opened.logicalEventId == protocolEvent.string("eventId")) {
             "The v3 event envelope logical ID is invalid."
         }
@@ -2440,6 +2461,7 @@ private fun isMatrixV3RawEvent(rawJson: String): Boolean = runCatching {
     when (root["type"]?.jsonPrimitive?.contentOrNull) {
         CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE,
         id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE,
+        id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE,
         -> true
         "m.room.message" ->
             (root["content"] as? JsonObject)

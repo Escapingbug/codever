@@ -51,6 +51,11 @@ internal class MatrixV3NativeProjection(
         val permissionMode: String,
     )
 
+    private data class WorkspaceCapabilities(
+        val snapshotVersion: Long,
+        val value: JsonObject,
+    )
+
     private data class Session(
         val id: String,
         val projectId: String,
@@ -67,6 +72,7 @@ internal class MatrixV3NativeProjection(
     )
 
     private var project: Project? = null
+    private var workspaceCapabilities: WorkspaceCapabilities? = null
     private val sessions = linkedMapOf<String, Session>()
     private val seenEvents = mutableSetOf<String>()
     private val seenCommands = mutableSetOf<String>()
@@ -146,13 +152,33 @@ internal class MatrixV3NativeProjection(
         threadRootHint: String?,
     ): MatrixV3NativeProjectionResult {
         val eventId = event.requiredString("eventId", 256)
-        if (!seenEvents.add(eventId)) return MatrixV3NativeProjectionResult()
         val occurredAt = event.requiredLong("occurredAt")
         val sessionId = event.optionalString("sessionId", 256)
         val projectId = event.optionalString("projectId", 256)
         val causation = event.optionalString("causationCommandId", 256)
         val payload = event.requiredObject("payload")
         val type = payload.requiredString("type", 128)
+
+        if (type == "workspace.snapshot") {
+            val version = payload.requiredPositiveLong("snapshotVersion")
+            val current = workspaceCapabilities
+            if (current != null && version <= current.snapshotVersion) {
+                return MatrixV3NativeProjectionResult()
+            }
+            val protocolMin = payload.requiredPositiveLong("protocolMin")
+            val protocolMax = payload.requiredPositiveLong("protocolMax")
+            require(protocolMin <= 3L && protocolMax >= 3L) {
+                "The Matrix workspace snapshot does not support protocol v3."
+            }
+            payload.requiredString("gatewayKeyId", 256)
+            val capabilities = payload.requiredObject("capabilities")
+            validateCapabilities(capabilities)
+            seenEvents.add(eventId)
+            workspaceCapabilities = WorkspaceCapabilities(version, capabilities)
+            return MatrixV3NativeProjectionResult(changed = true)
+        }
+
+        if (!seenEvents.add(eventId)) return MatrixV3NativeProjectionResult()
 
         if (type == "project.snapshot" && projectId != null) {
             val version = payload.requiredPositiveLong("snapshotVersion")
@@ -322,17 +348,7 @@ internal class MatrixV3NativeProjection(
                 activeProject.reasoningEffort?.let { put("reasoning_effort", it) }
                 put("permission_mode", activeProject.permissionMode)
             })
-            put("capabilities", buildJsonObject {
-                put("models", JsonArray(emptyList()))
-                put("permission_modes", buildJsonArray {
-                    add(buildJsonObject { put("id", "default"); put("name", "Default") })
-                })
-                put("can_create_session", true)
-                put("can_select_session", false)
-                put("can_archive_session", true)
-                put("can_delete_session", true)
-                put("session_extensions", JsonArray(emptyList()))
-            })
+            put("capabilities", workspaceCapabilities?.value ?: defaultCapabilities())
         }
     }
 
@@ -345,6 +361,7 @@ internal class MatrixV3NativeProjection(
     @Synchronized
     fun clear() {
         project = null
+        workspaceCapabilities = null
         sessions.clear()
         seenEvents.clear()
         seenCommands.clear()
@@ -352,7 +369,16 @@ internal class MatrixV3NativeProjection(
 
     @Synchronized
     fun durableState(): JsonObject = buildJsonObject {
-        put("schemaVersion", 1)
+        put("schemaVersion", 2)
+        val activeCapabilities = workspaceCapabilities
+        if (activeCapabilities == null) {
+            put("workspaceCapabilities", JsonNull)
+        } else {
+            put("workspaceCapabilities", buildJsonObject {
+                put("snapshotVersion", activeCapabilities.snapshotVersion)
+                put("value", activeCapabilities.value)
+            })
+        }
         val activeProject = project
         if (activeProject == null) {
             put("project", JsonNull)
@@ -391,7 +417,20 @@ internal class MatrixV3NativeProjection(
     }
 
     private fun restore(value: JsonObject) {
-        require(value.requiredLong("schemaVersion") == 1L)
+        val schemaVersion = value.requiredLong("schemaVersion")
+        require(schemaVersion == 1L || schemaVersion == 2L)
+        workspaceCapabilities = if (schemaVersion == 1L) {
+            null
+        } else {
+            (value["workspaceCapabilities"] as? JsonObject)?.let {
+                val capabilities = it.requiredObject("value")
+                validateCapabilities(capabilities)
+                WorkspaceCapabilities(
+                    snapshotVersion = it.requiredPositiveLong("snapshotVersion"),
+                    value = capabilities,
+                )
+            }
+        }
         val restoredProject = value["project"] as? JsonObject
         project = restoredProject?.let {
             Project(
@@ -581,6 +620,122 @@ internal class MatrixV3NativeProjection(
         put("extensions", JsonArray(emptyList()))
     }
 
+    private fun validateCapabilities(value: JsonObject) {
+        value.requireKeys(
+            setOf(
+                "models",
+                "permission_modes",
+                "can_create_session",
+                "can_select_session",
+                "can_archive_session",
+                "can_delete_session",
+                "session_extensions",
+            ),
+            emptySet(),
+            "Matrix v3 capabilities",
+        )
+        val models = value.requiredArray("models", 256)
+        models.forEach { item ->
+            val model = item as? JsonObject
+                ?: throw IllegalArgumentException("A Matrix v3 model capability must be an object.")
+            model.requireKeys(
+                setOf("id", "name"),
+                setOf("default_reasoning_level", "supported_reasoning_levels"),
+                "Matrix v3 model capability",
+            )
+            model.requiredString("id", 256)
+            model.requiredString("name", 256)
+            model.optionalString("default_reasoning_level", 64)
+            model.optionalArray("supported_reasoning_levels", 64).orEmpty().forEach { levelValue ->
+                val level = levelValue as? JsonObject
+                    ?: throw IllegalArgumentException("A Matrix v3 reasoning capability must be an object.")
+                level.requireKeys(
+                    setOf("effort"),
+                    setOf("description"),
+                    "Matrix v3 reasoning capability",
+                )
+                level.requiredString("effort", 64)
+                level.optionalString("description", 4_096)
+            }
+        }
+        requireUniqueIds(models, "Matrix v3 model capabilities")
+
+        val permissionModes = value.requiredArray("permission_modes", 128)
+        permissionModes.forEach { item ->
+            val mode = item as? JsonObject
+                ?: throw IllegalArgumentException("A Matrix v3 permission capability must be an object.")
+            mode.requireKeys(setOf("id", "name"), emptySet(), "Matrix v3 permission capability")
+            mode.requiredString("id", 256)
+            mode.requiredString("name", 256)
+        }
+        requireUniqueIds(permissionModes, "Matrix v3 permission capabilities")
+        value.requiredBoolean("can_create_session")
+        value.requiredBoolean("can_select_session")
+        value.requiredBoolean("can_archive_session")
+        value.requiredBoolean("can_delete_session")
+
+        val extensions = value.requiredArray("session_extensions", 128)
+        extensions.forEach { item ->
+            val extension = item as? JsonObject
+                ?: throw IllegalArgumentException("A Matrix v3 extension capability must be an object.")
+            extension.requireKeys(
+                setOf("id", "name", "description", "version", "settings"),
+                emptySet(),
+                "Matrix v3 extension capability",
+            )
+            extension.requiredString("id", 256)
+            extension.requiredString("name", 256)
+            extension.requiredString("description", 4_096)
+            extension.requiredString("version", 128)
+            val settings = extension.requiredArray("settings", 32)
+            settings.forEach { settingValue ->
+                val setting = settingValue as? JsonObject
+                    ?: throw IllegalArgumentException("A Matrix v3 extension setting must be an object.")
+                when (setting.requiredOneOf("type", setOf("text", "boolean"))) {
+                    "text" -> setting.requireKeys(
+                        setOf("id", "type", "label"),
+                        setOf("description", "required", "placeholder", "default_value"),
+                        "Matrix v3 text extension setting",
+                    )
+                    "boolean" -> setting.requireKeys(
+                        setOf("id", "type", "label"),
+                        setOf("description", "default_value"),
+                        "Matrix v3 boolean extension setting",
+                    )
+                }
+                setting.requiredString("id", 128)
+                setting.requiredString("label", 256)
+                setting.optionalString("description", 2_048)
+                setting.optionalString("placeholder", 512)
+                if (setting["required"] != null) setting.requiredBoolean("required")
+                val defaultValue = setting["default_value"]
+                if (defaultValue != null) {
+                    val primitive = defaultValue as? JsonPrimitive
+                        ?: throw IllegalArgumentException("A Matrix v3 extension default must be scalar.")
+                    if (setting.requiredString("type", 16) == "text") {
+                        require(primitive.isString && primitive.content.length <= 4_096)
+                    } else {
+                        require(!primitive.isString && primitive.content in setOf("true", "false"))
+                    }
+                }
+            }
+            requireUniqueIds(settings, "Matrix v3 extension settings")
+        }
+        requireUniqueIds(extensions, "Matrix v3 extension capabilities")
+    }
+
+    private fun defaultCapabilities(): JsonObject = buildJsonObject {
+        put("models", JsonArray(emptyList()))
+        put("permission_modes", buildJsonArray {
+            add(buildJsonObject { put("id", "default"); put("name", "Default") })
+        })
+        put("can_create_session", true)
+        put("can_select_session", false)
+        put("can_archive_session", true)
+        put("can_delete_session", true)
+        put("session_extensions", JsonArray(emptyList()))
+    }
+
     private fun titleFromPrompt(text: String): String {
         val title = text.replace(Regex("\\s+"), " ").trim()
         if (title.isEmpty()) return "New session"
@@ -626,3 +781,30 @@ private fun JsonObject.requiredBoolean(key: String): Boolean {
 
 private fun JsonObject.requiredOneOf(key: String, values: Set<String>): String =
     requiredString(key, 128).also { require(it in values) }
+
+private fun JsonObject.requiredArray(key: String, maximum: Int): JsonArray =
+    (get(key) as? JsonArray
+        ?: throw IllegalArgumentException("$key must be an array."))
+        .also { require(it.size <= maximum) }
+
+private fun JsonObject.optionalArray(key: String, maximum: Int): JsonArray? =
+    get(key)?.let {
+        (it as? JsonArray
+            ?: throw IllegalArgumentException("$key must be an array."))
+            .also { array -> require(array.size <= maximum) }
+    }
+
+private fun JsonObject.requireKeys(
+    required: Set<String>,
+    optional: Set<String>,
+    label: String,
+) {
+    require(keys.containsAll(required) && keys.all { it in required || it in optional }) {
+        "$label contains unexpected or missing fields."
+    }
+}
+
+private fun requireUniqueIds(values: JsonArray, label: String) {
+    val ids = values.map { (it as JsonObject).requiredString("id", 256) }
+    require(ids.toSet().size == ids.size) { "$label contain duplicate IDs." }
+}

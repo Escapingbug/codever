@@ -172,7 +172,7 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /gatewayProjectKey/);
   assert.match(source, /changeReasoningEffort/);
   assert.match(newSession, /Computer · Project/);
-  assert.match(newSession, /Project names may repeat/);
+  assert.match(newSession, /This Matrix room is the durable home for this project/);
   assert.match(newSession, /Reasoning effort/);
   assert.match(source, /stopStreaming/);
   assert.match(source, /onScroll=\{handleFeedScroll\}/);

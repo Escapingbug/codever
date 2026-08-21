@@ -16,6 +16,7 @@ import kotlinx.serialization.json.put
 
 const val CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE = "io.codever.project.key_grant.v3"
 const val CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE = "io.codever.project.current.v3"
+const val CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE = "io.codever.workspace.current.v3"
 
 data class MatrixV3ProjectKey(
     val keyId: String,
@@ -257,6 +258,26 @@ object MatrixV3Protocol {
         val document = signed.objectValue("document")
         verifySignature(signed.objectValue("signature"), gatewayKey, document)
         require(document.string("kind") == "project.current")
+        require(document.long("version") == 3L)
+        require(document.opaque("workspaceId") == workspaceId)
+        require(document.opaque("roomId", 512) == roomId)
+        document.opaque("projectId")
+        document.opaque("eventId", 512)
+        document.opaque("logicalEventId")
+        document.nonnegative("updatedAt")
+        return document
+    }
+
+    fun verifyWorkspacePointer(
+        signed: JsonObject,
+        gatewayKey: PairingPublicKey,
+        workspaceId: String,
+        roomId: String,
+    ): JsonObject {
+        signed.requireExactKeys(setOf("document", "signature"), "v3 workspace pointer")
+        val document = signed.objectValue("document")
+        verifySignature(signed.objectValue("signature"), gatewayKey, document)
+        require(document.string("kind") == "workspace.current")
         require(document.long("version") == 3L)
         require(document.opaque("workspaceId") == workspaceId)
         require(document.opaque("roomId", 512) == roomId)

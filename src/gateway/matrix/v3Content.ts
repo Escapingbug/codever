@@ -3,6 +3,7 @@ import {
   CODEVER_MATRIX_EXTENSION,
   CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
   CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+  CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
   codeverV3ContentEnvelopeSchema,
   codeverV3EventSchema,
   codeverV3ProjectKeyGrantStateSchema,
@@ -239,6 +240,40 @@ export class GatewayV3ContentLayer {
       roomId: room.roomId,
       eventType: CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE,
       stateKey: projectId,
+      content: pointer,
+      createdAt: Date.now(),
+    })
+    await this.outbox.stage(delivery)
+    return this.deliver(this.outbox.delivery(delivery.deliveryId) ?? delivery, transport)
+  }
+
+  async publishWorkspacePointer(
+    room: MatrixGatewayRoomConfig,
+    snapshotEvent: CodeverV3Event,
+    snapshotEventId: string,
+    transport: MatrixTransport,
+  ): Promise<MatrixSendEventResult> {
+    const projectId = this.projectId(room)
+    if (snapshotEvent.payload.type !== 'workspace.snapshot') {
+      throw new Error('Workspace pointer must reference a workspace snapshot')
+    }
+    const keys = this.requireGatewayKeys()
+    const pointer: CodeverV3CurrentPointer = await signCodeverV3Pointer({
+      kind: 'workspace.current',
+      version: 3,
+      workspaceId: this.workspaceId,
+      projectId,
+      roomId: room.roomId,
+      eventId: snapshotEventId,
+      logicalEventId: snapshotEvent.eventId,
+      snapshotVersion: snapshotEvent.payload.snapshotVersion,
+      gatewayKeyId: keys.keyId,
+      updatedAt: snapshotEvent.occurredAt,
+    }, keys.privateKey, keys.keyId)
+    const delivery = this.outbox.createState({
+      roomId: room.roomId,
+      eventType: CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
+      stateKey: this.workspaceId,
       content: pointer,
       createdAt: Date.now(),
     })

@@ -120,7 +120,7 @@ try {
     await assertProjectIdentity(first, repositoryRoot)
 
     process.stdout.write('[4/7] Creating a session and running a real Agent turn…\n')
-    const firstSession = await createSession(first)
+    const firstSession = await createSession(first, 'codever-e2e-model')
     const firstPrompt = `v3 first prompt ${runId}`
     await sendPrompt(first, firstPrompt)
     await waitForText(first, firstPrompt)
@@ -276,14 +276,23 @@ async function assertProjectIdentity(page: Page, cwd: string): Promise<void> {
     const cwdInput = dialog.locator('input').nth(1)
     assert.equal(await cwdInput.inputValue(), cwd)
     assert.equal(await cwdInput.isDisabled(), true)
+    const model = dialog.getByRole('combobox', { name: 'Model' })
+    assert.equal(await model.isEnabled(), true)
+    assert.equal(
+        await model.getByRole('option', { name: 'Codever E2E Model' }).count(),
+        1,
+    )
     await dialog.getByRole('button', { name: 'Cancel' }).click()
 }
 
-async function createSession(page: Page): Promise<string> {
+async function createSession(page: Page, model?: string): Promise<string> {
     const before = new Set(await sessionIds(page))
     await page.getByRole('button', { name: 'New conversation' }).click()
     const dialog = page.locator('.new-session-dialog')
     await dialog.waitFor({ state: 'visible' })
+    if (model) {
+        await dialog.getByRole('combobox', { name: 'Model' }).selectOption(model)
+    }
     await dialog.getByRole('button', { name: 'Create session', exact: true }).click()
     let created = ''
     await waitFor(async () => {

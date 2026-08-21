@@ -34,6 +34,8 @@ internal const val CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE =
     "io.codever.project.key_grant.v3"
 internal const val CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE =
     "io.codever.project.current.v3"
+internal const val CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE =
+    "io.codever.workspace.current.v3"
 
 internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
@@ -45,7 +47,8 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
                 content["version"]?.jsonPrimitive?.intOrNull == 3 &&
                 content["kind"]?.jsonPrimitive?.contentOrNull == "project.key_grant" &&
                 content["sealedGrant"] is JsonObject
-        CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ->
+        CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE,
+        CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE ->
             root["state_key"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true &&
                 content["document"] is JsonObject && content["signature"] is JsonObject
         "m.room.message" -> {
@@ -80,6 +83,8 @@ internal fun codeverApplicationEventKind(rawJson: String): String = runCatching 
             return@runCatching "v3_project_key_grant"
         CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ->
             return@runCatching "v3_project_pointer"
+        CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE ->
+            return@runCatching "v3_workspace_pointer"
     }
     val extension = root["content"]
         ?.jsonObject
@@ -287,6 +292,7 @@ class MatrixApplicationTimelineClient(
                 add(JsonPrimitive("m.room.message"))
                 add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
                 add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                add(JsonPrimitive(CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE))
             })
         }.toString()
         val endpoint = URI(
@@ -683,6 +689,7 @@ class MatrixApplicationControlSyncClient(
                     put("types", buildJsonArray {
                         add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
                         add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                        add(JsonPrimitive(CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE))
                     })
                 })
                 put("ephemeral", buildJsonObject { put("types", JsonArray(emptyList())) })
@@ -697,6 +704,7 @@ class MatrixApplicationControlSyncClient(
                         // timeline; accept only v3's bounded discovery state.
                         add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
                         add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                        add(JsonPrimitive(CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE))
                     })
                     put(
                         "limit",

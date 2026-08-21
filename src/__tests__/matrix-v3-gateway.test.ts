@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 import {
   CODEVER_MATRIX_EXTENSION,
   CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
+  CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
+  codeverV3CurrentPointerSchema,
   codeverV3ProjectKeyGrantStateSchema,
   type CodeverV3Command,
 } from '@codever/protocol'
@@ -30,6 +32,7 @@ import { V3MatrixGatewayRunner } from '@/gateway/matrix/v3Gateway'
 import { gatewayProjectIdentity } from '@/gateway/matrix/project'
 import { createTopicSessionRecord } from '@/bridge/topicSession'
 import type { TopicSession } from '@/bridge/channelPort'
+import { registerProvider } from '@/providers/registry'
 
 class TestMatrixClient extends InMemoryMatrixTransport implements MatrixGatewayClient {
   private readonly listeners = new Set<MatrixGatewayEventListener>()
@@ -149,6 +152,19 @@ describe('V3MatrixGatewayRunner', () => {
     const blocked = deferred<void>()
     const dispatched: Array<{ sessionId: string; text: string }> = []
     const rejected: unknown[] = []
+    registerProvider({
+      name: 'test',
+      startQuery() { throw new Error('The catalog provider must not execute a query') },
+      isReady: () => true,
+      getInitError: () => null,
+      getAvailableModels: () => [{
+        id: 'model-selectable',
+        name: 'Selectable model',
+        defaultReasoningLevel: 'high',
+        supportedReasoningLevels: [{ effort: 'high' }],
+      }],
+      getAvailablePermissionModes: () => ['default'],
+    })
     const runner = new V3MatrixGatewayRunner(config, {
       client,
       onRejected: (_event, error) => rejected.push(error),
@@ -204,6 +220,25 @@ describe('V3MatrixGatewayRunner', () => {
       senderPublicKey: gatewayKeys.publicKey,
     })
     const activeKey = keyGrant.keys.find(key => key.keyId === keyGrant.activeKeyId)!
+    const startupEvents = await events(client, activeKey.key, roomId, projectId)
+    expect(startupEvents).toContainEqual(expect.objectContaining({
+      payload: expect.objectContaining({
+        type: 'workspace.snapshot',
+        capabilities: expect.objectContaining({
+          models: [expect.objectContaining({ id: 'model-selectable' })],
+        }),
+      }),
+    }))
+    const workspacePointerState = [...client.state.values()].find(state =>
+      state.eventType === CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+    )
+    expect(codeverV3CurrentPointerSchema.parse(workspacePointerState?.content).document)
+      .toMatchObject({
+        kind: 'workspace.current',
+        workspaceId: 'workspace-1',
+        projectId,
+        roomId,
+      })
 
     const send = async (
       command: CodeverV3Command,

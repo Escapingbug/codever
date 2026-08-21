@@ -17,6 +17,7 @@ import {
     CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE,
     CODEVER_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
     CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+    CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
     codeverV3CurrentPointerSchema,
     codeverV3ProjectKeyGrantStateSchema,
     codeverV3TimelineContentSchema,
@@ -534,7 +535,10 @@ function assertSecureApplicationStateContent(request: MatrixApplicationStateEven
         codeverV3ProjectKeyGrantStateSchema.parse(content)
         return
     }
-    if (request.eventType === CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE) {
+    if (
+        request.eventType === CODEVER_MATRIX_PROJECT_POINTER_EVENT_TYPE
+        || request.eventType === CODEVER_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+    ) {
         codeverV3CurrentPointerSchema.parse(content)
         return
     }

@@ -356,6 +356,12 @@ export class MatrixV3ProtocolClient {
         projectId: this.config.projectId,
       },
     );
+    if (
+      event.payload.type === "workspace.snapshot"
+      && event.payload.gatewayKeyId !== this.trust.gatewayKey.keyId
+    ) {
+      throw new Error("The v3 workspace capability snapshot names another Gateway key.");
+    }
     if (opened.envelope.logicalEventId !== event.eventId) {
       throw new Error("The v3 event envelope logical ID is invalid.");
     }

@@ -281,12 +281,17 @@ class MatrixApplicationControlClientTest {
                 "m.room.message",
                 "io.codever.project.key_grant.v3",
                 "io.codever.project.current.v3",
+                "io.codever.workspace.current.v3",
             ),
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
         assertEquals(
-            setOf("io.codever.project.key_grant.v3", "io.codever.project.current.v3"),
+            setOf(
+                "io.codever.project.key_grant.v3",
+                "io.codever.project.current.v3",
+                "io.codever.workspace.current.v3",
+            ),
             filter.getValue("room").jsonObject
                 .getValue("state").jsonObject
                 .getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),

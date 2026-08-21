@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto'
 import {
   CODEVER_MATRIX_EXTENSION,
+  matrixGatewayCapabilitiesSchema,
   type CodeverV3Command,
   type CodeverV3Event,
   type CodeverV3EventPayload,
   type CodeverV3SessionProjection,
   type JsonValue,
+  type MatrixGatewayCapabilities,
 } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
 import { createProviderInstance, getProvider } from '@/providers/registry'
@@ -996,6 +998,7 @@ export class V3MatrixGatewayRunner {
     // provisionCurrentState() after the first certificate is committed, which
     // publishes the key grant and this snapshot in the correct order.
     if (!await this.content.hasActiveDevices(project.config.roomId)) return
+    await this.publishWorkspaceSnapshot(project)
     const occurredAt = Math.max(0, ...project.project.sessions.map(session => session.updatedAt))
     const event: CodeverV3Event = {
       kind: 'codever.event',
@@ -1019,6 +1022,108 @@ export class V3MatrixGatewayRunner {
     }
     const result = await this.content.sendEvent(project.config, event, this.client)
     await this.content.publishProjectPointer(project.config, event, result.eventId, this.client)
+  }
+
+  private async publishWorkspaceSnapshot(project: V3ProjectRuntime): Promise<void> {
+    const capabilities = this.discoverCapabilities(project)
+    if (JSON.stringify(project.project.capabilities) !== JSON.stringify(capabilities)) {
+      project.project.capabilities = capabilities
+      project.project.capabilitySnapshotVersion += 1
+      await this.persist(project)
+    }
+    if (project.project.capabilitySnapshotVersion < 1 || !project.project.capabilities) {
+      throw new Error(`Codever v3 capabilities are unavailable for ${project.project.projectId}`)
+    }
+    const occurredAt = this.now()
+    const event: CodeverV3Event = {
+      kind: 'codever.event',
+      version: 3,
+      eventId: logicalWorkspaceSnapshotEventId(
+        this.config.gatewayId,
+        project.project.projectId,
+        project.project.capabilitySnapshotVersion,
+      ),
+      workspaceId: this.config.gatewayId,
+      projectId: project.project.projectId,
+      occurredAt,
+      payload: {
+        type: 'workspace.snapshot',
+        protocolMin: 3,
+        protocolMax: 3,
+        gatewayKeyId: this.config.applicationSecurity.gatewayKeyPair.keyId,
+        capabilities: project.project.capabilities,
+        snapshotVersion: project.project.capabilitySnapshotVersion,
+      },
+    }
+    const result = await this.content.sendEvent(project.config, event, this.client)
+    await this.content.publishWorkspacePointer(
+      project.config,
+      event,
+      result.eventId,
+      this.client,
+    )
+  }
+
+  private discoverCapabilities(project: V3ProjectRuntime): MatrixGatewayCapabilities {
+    let models: MatrixGatewayCapabilities['models'] = []
+    try {
+      models = (getProvider(project.project.provider)?.getAvailableModels() ?? []).map(model => ({
+        id: model.id,
+        name: model.name,
+        ...(model.defaultReasoningLevel
+          ? { default_reasoning_level: model.defaultReasoningLevel }
+          : {}),
+        ...(model.supportedReasoningLevels
+          ? {
+              supported_reasoning_levels: model.supportedReasoningLevels.map(level => ({
+                effort: level.effort,
+                ...(level.description ? { description: level.description } : {}),
+              })),
+            }
+          : {}),
+      }))
+    } catch (error) {
+      this.log(
+        `[matrix-v3] model capability discovery failed for ${project.project.provider}: `
+        + formatError(error),
+      )
+      if (project.project.capabilities) return project.project.capabilities
+    }
+    return matrixGatewayCapabilitiesSchema.parse({
+      models,
+      permission_modes: [{ id: 'default', name: 'Default' }],
+      can_create_session: true,
+      can_select_session: false,
+      can_archive_session: true,
+      can_delete_session: true,
+      session_extensions: this.extensions.descriptors().map(extension => ({
+        id: extension.id,
+        name: extension.name,
+        description: extension.description,
+        version: extension.version,
+        settings: extension.settings.map(setting => setting.type === 'text'
+          ? {
+              id: setting.id,
+              type: setting.type,
+              label: setting.label,
+              ...(setting.description ? { description: setting.description } : {}),
+              ...(setting.required ? { required: true } : {}),
+              ...(setting.placeholder ? { placeholder: setting.placeholder } : {}),
+              ...(setting.defaultValue === undefined
+                ? {}
+                : { default_value: setting.defaultValue }),
+            }
+          : {
+              id: setting.id,
+              type: setting.type,
+              label: setting.label,
+              ...(setting.description ? { description: setting.description } : {}),
+              ...(setting.defaultValue === undefined
+                ? {}
+                : { default_value: setting.defaultValue }),
+            }),
+      })),
+    })
   }
 
   private async prepareSessionThreads(project: V3ProjectRuntime): Promise<void> {
@@ -1144,6 +1249,16 @@ function logicalEventId(command: CodeverV3Command, stage: string): string {
 function logicalSnapshotEventId(project: PersistedV3Project): string {
   return createHash('sha256')
     .update(`codever-v3-project-snapshot\0${project.projectId}\0${project.snapshotVersion}`)
+    .digest('base64url')
+}
+
+function logicalWorkspaceSnapshotEventId(
+  workspaceId: string,
+  projectId: string,
+  snapshotVersion: number,
+): string {
+  return createHash('sha256')
+    .update(`codever-v3-workspace-snapshot\0${workspaceId}\0${projectId}\0${snapshotVersion}`)
     .digest('base64url')
 }
 

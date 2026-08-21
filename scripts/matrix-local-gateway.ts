@@ -28,6 +28,7 @@ import {
     type MatrixGatewayConfig,
 } from '../src/gateway/matrix/index.js'
 import { registerConfiguredProviders } from '../src/providers/configured.js'
+import { registerProvider } from '../src/providers/registry.js'
 import type {
     AgentProvider,
     AgentQueryHandle,
@@ -62,6 +63,13 @@ const providerName = deterministicE2eProvider
     : process.env.CODEVER_PROVIDER
         ?? registered.defaultProvider
         ?? 'codex'
+if (deterministicE2eProvider) {
+    registerProvider(
+        e2eProvider(providerName),
+        () => e2eProvider(providerName),
+        { type: 'codex' },
+    )
+}
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
 const sessionExtensionRegistry = createSessionExtensionRegistryFromEnvironment()
 const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
@@ -544,7 +552,15 @@ function e2eProvider(name: string): AgentProvider {
         },
         isReady: () => true,
         getInitError: () => null,
-        getAvailableModels: () => [],
+        getAvailableModels: () => [{
+            id: 'codever-e2e-model',
+            name: 'Codever E2E Model',
+            defaultReasoningLevel: 'high',
+            supportedReasoningLevels: [
+                { effort: 'medium', description: 'Deterministic medium reasoning' },
+                { effort: 'high', description: 'Deterministic high reasoning' },
+            ],
+        }],
         getAvailablePermissionModes: () => ['default'],
     }
 }

@@ -1,8 +1,9 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FileV3RuntimeStateStore } from '@/gateway/matrix/fileV3RuntimeState'
+import { gatewayProjectIdentity } from '@/gateway/matrix/project'
 
 describe('FileV3RuntimeStateStore', () => {
   it('persists project/session state without revision epochs or a current-session pointer', async () => {
@@ -45,5 +46,37 @@ describe('FileV3RuntimeStateStore', () => {
     expect(project).not.toHaveProperty('revisionEpoch')
     expect(project).not.toHaveProperty('currentSessionId')
   })
-})
 
+  it('migrates the first v3 runtime state so capability publication can converge after an upgrade', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'codever-v3-runtime-upgrade-')), 'runtime.json')
+    const room = {
+      roomId: '!project:example.org',
+      conversationId: 'legacy-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }
+    await writeFile(path, JSON.stringify({
+      version: 3,
+      workspaceId: 'workspace-1',
+      projects: {
+        [room.roomId]: {
+          roomId: room.roomId,
+          projectId: gatewayProjectIdentity('/repo').id,
+          name: 'repo',
+          cwd: '/repo',
+          provider: 'test',
+          model: null,
+          reasoningEffort: null,
+          permissionMode: 'default',
+          snapshotVersion: 1,
+          sessions: [],
+        },
+      },
+    }), 'utf8')
+    const store = new FileV3RuntimeStateStore(path, 'workspace-1')
+    await store.initialize([room])
+    const project = await store.project(room.roomId)
+    expect(project.capabilitySnapshotVersion).toBe(0)
+    expect(project.capabilities).toBeNull()
+  })
+})

@@ -1,5 +1,9 @@
 import { AtomicJsonFile } from '@codever/security/node'
-import type { SessionExtensionBinding } from '@codever/protocol'
+import {
+  matrixGatewayCapabilitiesSchema,
+  type MatrixGatewayCapabilities,
+  type SessionExtensionBinding,
+} from '@codever/protocol'
 import type { MatrixGatewayRoomConfig } from './config'
 import { gatewayProjectIdentity } from './project'
 
@@ -32,6 +36,8 @@ export interface PersistedV3Project {
   reasoningEffort: string | null
   permissionMode: string
   snapshotVersion: number
+  capabilitySnapshotVersion: number
+  capabilities: MatrixGatewayCapabilities | null
   sessions: PersistedV3Session[]
 }
 
@@ -59,13 +65,30 @@ export class FileV3RuntimeStateStore {
     await this.file.transaction(
       () => defaultState(this.workspaceId),
       state => {
-        validateState(state, this.workspaceId)
+        validateStateHeader(state, this.workspaceId)
         let changed = false
-        for (const room of rooms) {
-          if (state.projects[room.roomId]) continue
-          state.projects[room.roomId] = defaultProject(room)
-          changed = true
+        // The first v3 release omitted these fields. Migrate every retained
+        // project, not only currently configured rooms, so skipped-version
+        // upgrades cannot preserve an empty capability cache indefinitely.
+        for (const existing of Object.values(state.projects)) {
+          if (!Number.isSafeInteger(existing.capabilitySnapshotVersion)) {
+            existing.capabilitySnapshotVersion = 0
+            changed = true
+          }
+          if (existing.capabilities === undefined) {
+            existing.capabilities = null
+            changed = true
+          }
         }
+        for (const room of rooms) {
+          const existing = state.projects[room.roomId]
+          if (!existing) {
+            state.projects[room.roomId] = defaultProject(room)
+            changed = true
+            continue
+          }
+        }
+        validateState(state, this.workspaceId)
         return { result: undefined, changed }
       },
     )
@@ -137,11 +160,13 @@ function defaultProject(room: MatrixGatewayRoomConfig): PersistedV3Project {
       ? room.providerSettings.permissionMode
       : 'default',
     snapshotVersion: 1,
+    capabilitySnapshotVersion: 0,
+    capabilities: null,
     sessions: [],
   }
 }
 
-function validateState(value: V3RuntimeState, workspaceId: string): void {
+function validateStateHeader(value: V3RuntimeState, workspaceId: string): void {
   if (
     value.version !== 3
     || value.workspaceId !== workspaceId
@@ -151,6 +176,10 @@ function validateState(value: V3RuntimeState, workspaceId: string): void {
   ) {
     throw new Error('Invalid Codever v3 Gateway runtime state')
   }
+}
+
+function validateState(value: V3RuntimeState, workspaceId: string): void {
+  validateStateHeader(value, workspaceId)
   for (const [roomId, project] of Object.entries(value.projects)) {
     validateProject(project, roomId)
   }
@@ -165,9 +194,15 @@ function validateProject(project: PersistedV3Project, roomId: string): void {
     || !project.provider
     || !Number.isSafeInteger(project.snapshotVersion)
     || project.snapshotVersion < 1
+    || !Number.isSafeInteger(project.capabilitySnapshotVersion)
+    || project.capabilitySnapshotVersion < 0
+    || !(project.capabilities === null || typeof project.capabilities === 'object')
     || !Array.isArray(project.sessions)
   ) {
     throw new Error(`Invalid Codever v3 project state for ${roomId}`)
+  }
+  if (project.capabilities !== null) {
+    matrixGatewayCapabilitiesSchema.parse(project.capabilities)
   }
   const expected = gatewayProjectIdentity(project.cwd, project.name)
   if (expected.id !== project.projectId) {
