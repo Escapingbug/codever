@@ -85,6 +85,12 @@ export interface MatrixGatewayConfig {
     startupEventQueueLimit?: number
     /** Refreshes signed Gateway Room State so clients can distinguish Matrix availability from Gateway availability. */
     gatewayHeartbeatIntervalMs?: number
+    webPush?: {
+        /** Contact URI included in VAPID JWTs. Defaults to Codever's notification address. */
+        subject?: string
+        /** Durable VAPID keys, subscriptions and delivery outbox. */
+        statePath?: string
+    }
 }
 
 export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
@@ -185,6 +191,15 @@ export function validateMatrixGatewayConfig(config: MatrixGatewayConfig): void {
         )
     ) {
         throw new Error('gatewayHeartbeatIntervalMs must be positive')
+    }
+    if (config.webPush?.statePath !== undefined) {
+        requireText(config.webPush.statePath, 'webPush.statePath')
+    }
+    if (
+        config.webPush?.subject !== undefined
+        && !/^(?:mailto:|https:)/u.test(config.webPush.subject)
+    ) {
+        throw new Error('webPush.subject must be a mailto: or https: URI')
     }
 }
 

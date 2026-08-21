@@ -726,7 +726,8 @@ internal class MatrixCvp3NativeProjection(
         commandId ?: return null
         return when (type) {
             "session.ready", "session.updated", "session.lifecycle", "decision.resolved",
-            "extension.interaction.resolved", "project.snapshot" ->
+            "extension.interaction.resolved", "project.snapshot",
+            "notification.subscription.changed" ->
                 MatrixCvp3NativeTerminal(commandId, "succeeded", sessionId)
             "turn.completed" -> MatrixCvp3NativeTerminal(
                 commandId,
@@ -821,7 +822,7 @@ internal class MatrixCvp3NativeProjection(
                 "can_delete_session",
                 "session_extensions",
             ),
-            emptySet(),
+            setOf("web_push"),
             "CVP/3 capabilities",
         )
         val models = value.requiredArray("models", 256)
@@ -863,6 +864,18 @@ internal class MatrixCvp3NativeProjection(
         value.requiredBoolean("can_select_session")
         value.requiredBoolean("can_archive_session")
         value.requiredBoolean("can_delete_session")
+
+        value["web_push"]?.let { candidate ->
+            val webPush = candidate as? JsonObject
+                ?: throw IllegalArgumentException("CVP/3 Web Push capability must be an object.")
+            webPush.requireKeys(
+                setOf("vapid_public_key"),
+                emptySet(),
+                "CVP/3 Web Push capability",
+            )
+            require(webPush.requiredString("vapid_public_key", 87)
+                .matches(Regex("^[A-Za-z0-9_-]{87}$")))
+        }
 
         val extensions = value.requiredArray("session_extensions", 128)
         extensions.forEach { item ->

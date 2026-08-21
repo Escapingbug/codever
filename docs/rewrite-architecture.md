@@ -114,8 +114,30 @@ backgrounded. It owns:
 The WebView subscribes to a versioned native bridge and renders service-owned
 state. Detaching, reloading, or online-updating the PWA cannot cancel a running
 Agent or create a second Matrix client. Browser-only use implements the same CVP/3
-projection in IndexedDB but naturally cannot promise Android-style background
-execution.
+projection in IndexedDB. It cannot keep Matrix `/sync` executing after the
+browser suspends it, but an opted-in standards-based Web Push subscription lets
+the Service Worker wake for a generic task-terminal system notification.
+
+## Browser Web Push boundary
+
+```text
+durable turn.completed / turn.failed
+  -> Gateway Web Push outbox (dedupe + retry)
+  -> browser push service (VAPID + encrypted payload)
+  -> PWA Service Worker
+  -> system notification -> #session=<id>
+```
+
+The PWA registers or removes only its own subscription through encrypted,
+signed CVP/3 commands. The Gateway persists one subscription per Codever device
+and a stable VAPID key pair beside the replay ledger. Push is an attention
+signal, not another conversation transport: the payload contains only bounded
+workspace/project/session routing IDs and terminal status, and the UI still
+loads and verifies the result from Matrix. Visible clients receive a lightweight
+Service Worker message and suppress the duplicate system popup. Expired 404/410
+subscriptions are removed; transient delivery remains in the outbox. A bounded
+Service Worker `eventId` cache absorbs the residual duplicate case where a push
+provider accepted delivery immediately before the Gateway process stopped.
 
 ## Attachment and artifact flow
 

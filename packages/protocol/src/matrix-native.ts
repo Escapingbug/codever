@@ -230,6 +230,13 @@ export const matrixGatewayCapabilitiesSchema = z
     can_archive_session: z.boolean(),
     can_delete_session: z.boolean(),
     session_extensions: z.array(matrixSessionExtensionCapabilitySchema).max(128),
+    web_push: z
+      .object({
+        /** VAPID P-256 public key, base64url encoded without padding. */
+        vapid_public_key: base64Url.length(87),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((capabilities, context) => {

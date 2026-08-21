@@ -3,6 +3,7 @@ import type {
   CommandPayload,
   CodeverAttachment,
   SessionExtensionBinding,
+  WebPushSubscription as Cvp3WebPushSubscription,
 } from "@codever/protocol";
 import type { CommandCompletion } from "../../commandLifecycle";
 import {
@@ -87,6 +88,17 @@ export class WebCodeverClient implements CodeverClient {
     }
     return commandResultFromWeb(
       await this.transport.updateProjectExtensions(extensions),
+    );
+  }
+
+  async updateWebPushSubscription(
+    subscription: Cvp3WebPushSubscription | null,
+  ): Promise<CodeverCommandSendResult> {
+    if (!this.transport.updateWebPushSubscription) {
+      throw new Error("This connection cannot update Web Push notifications.");
+    }
+    return commandResultFromWeb(
+      await this.transport.updateWebPushSubscription(subscription),
     );
   }
 

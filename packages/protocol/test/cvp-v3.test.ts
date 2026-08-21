@@ -4,6 +4,7 @@ import {
   cvp3EventSchema,
   cvp3ProjectKeyGrantPlaintextSchema,
 } from '../src/cvp-v3.js'
+import { matrixGatewayCapabilitiesSchema } from '../src/matrix-native.js'
 
 describe('Codever Protocol v3 (CVP/3)', () => {
   it('uses a client-allocated session id without sequence or revision fields', () => {
@@ -96,6 +97,53 @@ describe('Codever Protocol v3 (CVP/3)', () => {
       operation: 'session.set_lifecycle',
       payload: { operation: 'session.set_lifecycle', state: 'deleted' },
     }).payload).toEqual({ operation: 'session.set_lifecycle', state: 'deleted' })
+  })
+
+  it('registers a device-scoped HTTPS Web Push subscription', () => {
+    const command = cvp3CommandSchema.parse({
+      kind: 'codever.command',
+      version: 3,
+      commandId: 'notification-subscribe-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      deviceId: 'device-1',
+      certificateId: 'certificate-1',
+      createdAt: 1,
+      operation: 'notification.subscribe',
+      payload: {
+        operation: 'notification.subscribe',
+        subscription: {
+          endpoint: 'https://push.example.test/subscription/1',
+          keys: { p256dh: 'A'.repeat(88), auth: 'B'.repeat(22) },
+        },
+      },
+    })
+    expect(command.sessionId).toBeUndefined()
+    expect(command.payload.operation).toBe('notification.subscribe')
+    expect(() => cvp3CommandSchema.parse({
+      ...command,
+      payload: {
+        ...command.payload,
+        subscription: {
+          endpoint: 'http://push.example.test/subscription/1',
+          keys: { p256dh: 'A'.repeat(88), auth: 'B'.repeat(22) },
+        },
+      },
+    })).toThrow('HTTPS')
+  })
+
+  it('advertises the VAPID public key as an optional strict capability', () => {
+    const capabilities = matrixGatewayCapabilitiesSchema.parse({
+      models: [],
+      permission_modes: [],
+      can_create_session: true,
+      can_select_session: false,
+      can_archive_session: true,
+      can_delete_session: true,
+      session_extensions: [],
+      web_push: { vapid_public_key: 'B'.repeat(87) },
+    })
+    expect(capabilities.web_push?.vapid_public_key).toHaveLength(87)
   })
 
   it('carries a six-digit TOTP only on an approval response', () => {

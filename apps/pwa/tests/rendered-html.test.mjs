@@ -61,10 +61,19 @@ test("server-renders the migration-safe Codever boot shell", async () => {
 });
 
 test("ships a complete installable offline shell", async () => {
-  const [manifestText, serviceWorker, source, newSession, history, styles] = await Promise.all([
+  const [
+    manifestText,
+    serviceWorker,
+    source,
+    matrixSettings,
+    newSession,
+    history,
+    styles,
+  ] = await Promise.all([
     readFile(new URL("public/manifest.webmanifest", appRoot), "utf8"),
     readFile(new URL("public/sw.js", appRoot), "utf8"),
     readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
+    readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
     readFile(new URL("app/NewSessionDialog.tsx", appRoot), "utf8"),
     readFile(new URL("app/messageHistory.ts", appRoot), "utf8"),
     readFile(new URL("app/globals.css", appRoot), "utf8"),
@@ -75,7 +84,7 @@ test("ships a complete installable offline shell", async () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/");
   assert.ok(manifest.icons.length > 0);
-  assert.match(serviceWorker, /codever-shell-v7/);
+  assert.match(serviceWorker, /codever-shell-v8/);
   assert.match(serviceWorker, /caches\.open\(CACHE_NAME\)/);
   assert.match(serviceWorker, /event\.request\.mode === "navigate"/);
   assert.match(serviceWorker, /cache:\s*"no-store"/);
@@ -85,6 +94,11 @@ test("ships a complete installable offline shell", async () => {
     /pathname\.startsWith\("\/_matrix\/"\)[\s\S]*?return;/,
   );
   assert.match(serviceWorker, /pathname === "\/api\/version"/);
+  assert.match(serviceWorker, /addEventListener\("push"/);
+  assert.match(serviceWorker, /showNotification/);
+  assert.match(serviceWorker, /notificationclick/);
+  assert.match(serviceWorker, /claimPushEvent/);
+  assert.match(matrixSettings, /Agent notifications/);
   assert.match(
     source,
     /registerPwaUpdates\(setPwaUpdateState, \{[\s\S]*canReload:/,

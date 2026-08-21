@@ -7,6 +7,7 @@ import {
   type Cvp3ProjectKeyGrantPlaintext,
   type CommandPayload,
   type SessionExtensionBinding,
+  type WebPushSubscription as Cvp3WebPushSubscription,
 } from "@codever/protocol";
 import {
   base64UrlDecode,
@@ -189,6 +190,33 @@ export class MatrixCvp3ProtocolClient {
         patch: { defaultExtensions },
       },
     });
+  }
+
+  async updateWebPushSubscription(
+    subscription: Cvp3WebPushSubscription | null,
+  ): Promise<MatrixCvp3SendResult> {
+    await this.initialize();
+    const common = {
+      kind: "codever.command" as const,
+      version: 3 as const,
+      commandId: crypto.randomUUID(),
+      workspaceId: this.config.workspaceId,
+      projectId: this.config.projectId,
+      deviceId: this.identity.keyId,
+      certificateId: this.trust.certificate.certificate.certificateId,
+      createdAt: Date.now(),
+    };
+    return await this.sendCommand(subscription
+      ? {
+          ...common,
+          operation: "notification.subscribe",
+          payload: { operation: "notification.subscribe", subscription },
+        }
+      : {
+          ...common,
+          operation: "notification.unsubscribe",
+          payload: { operation: "notification.unsubscribe" },
+        });
   }
 
   private async sendCommand(command: Cvp3Command): Promise<MatrixCvp3SendResult> {

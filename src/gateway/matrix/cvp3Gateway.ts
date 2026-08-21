@@ -51,6 +51,10 @@ import type {
   PrivilegedExecutionInput,
   PrivilegedExecutionResult,
 } from '@/privilege'
+import {
+  FileGatewayWebPushService,
+  type GatewayWebPushService,
+} from './webPush'
 
 interface Cvp3SessionRuntime {
   record: PersistedCvp3Session
@@ -95,6 +99,7 @@ export interface MatrixCvp3GatewayDependencies {
     lifetimeMs?: number
   }) => Promise<{ pairingLink: string; expiresAt: number }>
   privilegeExecutor?: PrivilegeExecutor
+  webPushService?: GatewayWebPushService
 }
 
 export type MatrixCvp3GatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
@@ -127,6 +132,7 @@ export class MatrixCvp3GatewayRunner {
   private readonly authorizer: MatrixCvp3CommandAuthorizer
   private readonly content: GatewayCvp3ContentLayer
   private readonly extensions: SessionExtensionRegistry
+  private readonly webPush: GatewayWebPushService
   private readonly projects = new Map<string, V3ProjectRuntime>()
   private readonly sessionChains = new Map<string, Promise<void>>()
   private readonly activeCommands = new Map<string, Promise<void>>()
@@ -157,6 +163,15 @@ export class MatrixCvp3GatewayRunner {
       dependencies.listTrustedDevices,
     )
     this.extensions = dependencies.sessionExtensionRegistry ?? new SessionExtensionRegistry()
+    this.webPush = dependencies.webPushService ?? new FileGatewayWebPushService(
+      config.webPush?.statePath ?? `${config.replayLedgerPath}.v3-web-push.json`,
+      {
+        ...(config.webPush?.subject ? { subject: config.webPush.subject } : {}),
+        now: () => this.now(),
+        onLog: dependencies.onLog,
+        canDeliver: (deviceId, projectId) => this.canDeliverWebPush(deviceId, projectId),
+      },
+    )
   }
 
   getState(): MatrixCvp3GatewayState {
@@ -223,6 +238,7 @@ export class MatrixCvp3GatewayRunner {
       await this.runtimeState.initialize(this.config.rooms)
       await this.content.initialize()
       await this.createProjectRuntimes()
+      await this.webPush.initialize()
       this.unsubscribe = this.client.onRoomEvent(event => this.receiveEvent(event))
       await this.client.initializeCrypto(this.config.crypto)
       await this.client.start()
@@ -364,7 +380,10 @@ export class MatrixCvp3GatewayRunner {
     const activeKey = commandKey(command)
     const sessionKey = command.operation === 'project.update'
       ? `${project.config.roomId}\0project-settings`
-      : `${project.config.roomId}\0${command.sessionId ?? command.commandId}`
+      : command.operation === 'notification.subscribe'
+        || command.operation === 'notification.unsubscribe'
+        ? `${project.config.roomId}\0notification-settings\0${command.deviceId}`
+        : `${project.config.roomId}\0${command.sessionId ?? command.commandId}`
     const bypassSessionQueue = command.operation === 'turn.cancel'
       || command.operation === 'decision.answer'
     const previous = bypassSessionQueue
@@ -421,7 +440,45 @@ export class MatrixCvp3GatewayRunner {
       case 'device.invitation.create':
         await this.createInvitation(project, command)
         return
+      case 'notification.subscribe':
+        await this.subscribeNotifications(project, command)
+        return
+      case 'notification.unsubscribe':
+        await this.unsubscribeNotifications(project, command)
+        return
     }
+  }
+
+  private async subscribeNotifications(
+    project: V3ProjectRuntime,
+    command: Cvp3CommandOf<'notification.subscribe'>,
+  ): Promise<void> {
+    await this.webPush.upsertSubscription(command.deviceId, command.payload.subscription, this.now())
+    await this.settleAndDeliver(
+      project,
+      command,
+      this.eventFor(project, undefined, command, 'notification-subscription-enabled', {
+        type: 'notification.subscription.changed',
+        enabled: true,
+      }),
+      'succeeded',
+    )
+  }
+
+  private async unsubscribeNotifications(
+    project: V3ProjectRuntime,
+    command: Cvp3CommandOf<'notification.unsubscribe'>,
+  ): Promise<void> {
+    await this.webPush.removeSubscription(command.deviceId, command.payload.endpoint)
+    await this.settleAndDeliver(
+      project,
+      command,
+      this.eventFor(project, undefined, command, 'notification-subscription-disabled', {
+        type: 'notification.subscription.changed',
+        enabled: false,
+      }),
+      'succeeded',
+    )
   }
 
   private async createSession(
@@ -890,6 +947,7 @@ export class MatrixCvp3GatewayRunner {
       ...(command.sessionId ? { sessionId: command.sessionId } : {}),
       ...(result === undefined ? {} : { result }),
     }, this.now())
+    await this.enqueueTerminalNotification(project, event)
     try {
       const sent = await this.emit(
         project,
@@ -994,14 +1052,15 @@ export class MatrixCvp3GatewayRunner {
     project: V3ProjectRuntime,
     record: Cvp3CommandJournalRecord,
   ): void {
-    if (!record.terminal?.event) return
-    const task = this.emit(
+    const terminalEvent = record.terminal?.event
+    if (!terminalEvent) return
+    const task = this.enqueueTerminalNotification(project, terminalEvent).then(() => this.emit(
       project,
       record.command.sessionId
         ? project.project.sessions.find(session => session.id === record.command.sessionId)
         : undefined,
-      record.terminal.event,
-    ).then(result => this.journal.markTerminalDelivered(
+      terminalEvent,
+    )).then(result => this.journal.markTerminalDelivered(
       record.command,
       result.eventId,
       this.now(),
@@ -1009,6 +1068,49 @@ export class MatrixCvp3GatewayRunner {
       this.log(`[cvp3/matrix] terminal redelivery failed: ${formatError(error)}`)
     }).finally(() => this.executionTasks.delete(task))
     this.executionTasks.add(task)
+  }
+
+  private async enqueueTerminalNotification(
+    project: V3ProjectRuntime,
+    event: Cvp3Event,
+  ): Promise<void> {
+    try {
+      let eligibleDeviceIds: string[] | undefined
+      try {
+        eligibleDeviceIds = await this.webPushDeviceIds(project)
+      } catch (error) {
+        // Persist the notification against current subscriptions and let the
+        // send-time authorization check retry. A temporary registry read must
+        // not lose the only durable notification enqueue opportunity.
+        this.log(`[cvp3/web-push] target discovery deferred: ${formatError(error)}`)
+      }
+      await this.webPush.notifyTerminal(event, eligibleDeviceIds)
+    } catch (error) {
+      // Matrix/CVP terminal durability is authoritative. A notification is an
+      // auxiliary delivery and must never reinterpret the command outcome.
+      this.log(`[cvp3/web-push] notification enqueue failed: ${formatError(error)}`)
+    }
+  }
+
+  private async webPushDeviceIds(project: V3ProjectRuntime): Promise<string[]> {
+    const devices = this.dependencies.listTrustedDevices
+      ? await this.dependencies.listTrustedDevices()
+      : this.config.trustedDevices
+    const now = this.now()
+    return devices
+      .filter(device =>
+        device.allowedRoomIds.includes(project.config.roomId)
+        && device.certificateExpiresAt > now
+      )
+      .map(device => device.deviceId)
+  }
+
+  private async canDeliverWebPush(deviceId: string, projectId: string): Promise<boolean> {
+    const project = [...this.projects.values()].find(candidate =>
+      candidate.project.projectId === projectId
+    )
+    if (!project) return false
+    return (await this.webPushDeviceIds(project)).includes(deviceId)
   }
 
   private projectForRecord(record: Cvp3CommandJournalRecord): V3ProjectRuntime | undefined {
@@ -1303,7 +1405,12 @@ export class MatrixCvp3GatewayRunner {
         `[cvp3/matrix] model capability discovery failed for ${project.project.provider}: `
         + formatError(error),
       )
-      if (project.project.capabilities) return project.project.capabilities
+      if (project.project.capabilities) {
+        return matrixGatewayCapabilitiesSchema.parse({
+          ...project.project.capabilities,
+          web_push: { vapid_public_key: this.webPush.publicKey() },
+        })
+      }
     }
     return matrixGatewayCapabilitiesSchema.parse({
       models,
@@ -1339,6 +1446,7 @@ export class MatrixCvp3GatewayRunner {
                 : { default_value: setting.defaultValue }),
             }),
       })),
+      web_push: { vapid_public_key: this.webPush.publicKey() },
     })
   }
 
@@ -1384,6 +1492,7 @@ export class MatrixCvp3GatewayRunner {
     this.unsubscribe = null
     this.startupEvents = []
     this.content.stopRetries()
+    this.webPush.stop()
     const projects = [...this.projects.values()]
     this.projects.clear()
     for (const project of projects) {

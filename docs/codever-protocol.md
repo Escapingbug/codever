@@ -88,6 +88,16 @@ Session creation, prompt, cancel, archive, restore, and delete use this same
 path. A create command produces an immutable thread root. Delete produces a
 signed lifecycle tombstone; it does not redact Matrix history.
 
+Browser notification enrollment also uses this path. A web device sends
+`notification.subscribe` or `notification.unsubscribe` as a signed,
+project-encrypted CVP/3 command. The subscription is scoped to the authenticated
+`deviceId`; a command cannot install or remove another device's endpoint. The
+Gateway advertises its stable VAPID public key in the optional `web_push`
+capability and acknowledges the change with
+`notification.subscription.changed`. Existing `session.settings` certificate
+authority covers this device-local setting, so adding the optional capability
+does not invalidate an already paired device.
+
 ## Current state and recovery
 
 Current state is an optimization over the event log, not a second authority.
@@ -125,6 +135,19 @@ task notifications running while the WebView is detached or the screen is
 off. Opening the Activity reads the service-owned projection; it does not start
 a separate catch-up protocol. Gateway/session timestamps, WebView focus, and
 network visibility are never reasons to rescan recent thread history.
+
+Browser-only PWA installations use standards-based Web Push when the user opts
+in. The Gateway persists its VAPID key pair, per-device subscriptions, completed
+event IDs, and a retrying notification outbox. `turn.completed` and
+`turn.failed` are enqueued only after the command terminal is durable. Web Push
+payload encryption protects a small routing payload in transit; it contains no
+prompt, Agent output, session title, path, or attachment. A Service Worker may
+wake while the PWA is closed, show a generic system notification, and route a
+click to `#session=<id>`. A visible PWA suppresses the duplicate system popup
+and the Service Worker persists a bounded `eventId` dedupe set. The UI continues
+to use the authenticated Matrix projection as the source of truth. HTTP 404/410
+responses remove expired endpoints; transient failures stay in the durable
+outbox for retry.
 
 ## Encryption and device lifecycle
 

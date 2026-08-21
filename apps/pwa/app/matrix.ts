@@ -26,6 +26,7 @@ import {
   type MatrixStateContent,
   type SignedCommand,
   type SessionExtensionBinding,
+  type WebPushSubscription as Cvp3WebPushSubscription,
 } from "@codever/protocol";
 import {
   generateDeviceKeyPair,
@@ -335,6 +336,9 @@ export type MatrixConnection = {
   send(payload: CommandPayload): Promise<CommandSendResult>;
   updateProjectExtensions?(
     extensions: SessionExtensionBinding[],
+  ): Promise<CommandSendResult>;
+  updateWebPushSubscription?(
+    subscription: Cvp3WebPushSubscription | null,
   ): Promise<CommandSendResult>;
   recoverCommand(commandId: string): Promise<CommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;

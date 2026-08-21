@@ -18,6 +18,7 @@ import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
 import { useDialogFocus } from "./dialogFocus";
 import type { ConnectionRepairReason } from "./connectionPresentation";
+import type { WebPushNotificationState } from "./webPushNotifications";
 
 type Props = {
   open: boolean;
@@ -35,6 +36,8 @@ type Props = {
   invitationReauthRequired: boolean;
   updateState: PwaUpdateState;
   nativeRuntime: CodeverNativeRuntimeInfo | null;
+  webPushState: WebPushNotificationState;
+  webPushBusy: boolean;
   onChange(config: MatrixConnectionConfig): void;
   onPairingLink(link: string): void;
   onClearPairing(): void;
@@ -48,6 +51,8 @@ type Props = {
   onClearInvitation(): void;
   onCheckForUpdates(): void;
   onExportDiagnostics(): void;
+  onEnableWebPush(): void;
+  onDisableWebPush(): void;
 };
 
 export function MatrixSettings(props: Props) {
@@ -70,6 +75,8 @@ function MatrixSettingsDialog({
   invitationReauthRequired,
   updateState,
   nativeRuntime,
+  webPushState,
+  webPushBusy,
   onChange,
   onPairingLink,
   onClearPairing,
@@ -83,6 +90,8 @@ function MatrixSettingsDialog({
   onClearInvitation,
   onCheckForUpdates,
   onExportDiagnostics,
+  onEnableWebPush,
+  onDisableWebPush,
 }: Props) {
   const repairRequired = repairReason !== null;
   const [loginPassword, setLoginPassword] = useState("");
@@ -94,7 +103,8 @@ function MatrixSettingsDialog({
     status === "connecting" ||
     status === "securing" ||
     pairingBusy ||
-    invitationBusy;
+    invitationBusy ||
+    webPushBusy;
   const needsAccount =
     Boolean(pairingPreview) && (!trustedGateway || repairRequired);
   const dialogRef = useRef<HTMLElement>(null);
@@ -288,6 +298,35 @@ function MatrixSettingsDialog({
           </details>
         )}
 
+        {!nativeRuntime && trustedGateway && (
+          <section className="web-push-settings" aria-live="polite">
+            <span>
+              <strong>Agent notifications</strong>
+              <small>{webPushStatusText(webPushState)}</small>
+              {webPushState.status === "error" && (
+                <em>{webPushState.detail}</em>
+              )}
+            </span>
+            {webPushState.status === "enabled" ? (
+              <button
+                type="button"
+                disabled={webPushBusy}
+                onClick={onDisableWebPush}
+              >
+                {webPushBusy ? "Disabling…" : "Disable"}
+              </button>
+            ) : webPushState.status === "prompt" || webPushState.status === "error" ? (
+              <button
+                type="button"
+                disabled={webPushBusy || status !== "connected"}
+                onClick={onEnableWebPush}
+              >
+                {webPushBusy ? "Enabling…" : "Enable"}
+              </button>
+            ) : null}
+          </section>
+        )}
+
         {error && (
           <div className="connection-error" role="alert">
             <strong>
@@ -385,5 +424,22 @@ function updateStatusText(state: PwaUpdateState): string {
       return "Could not check right now";
     case "current":
       return state.checkedAt ? "Up to date" : "Automatic updates enabled";
+  }
+}
+
+function webPushStatusText(state: WebPushNotificationState): string {
+  switch (state.status) {
+    case "enabled":
+      return "System notifications arrive when agent tasks finish in the background.";
+    case "blocked":
+      return "Notifications are blocked in this browser's site settings.";
+    case "unsupported":
+      return "This browser does not support Web Push notifications.";
+    case "unavailable":
+      return "Connect to a compatible Gateway to enable system notifications.";
+    case "error":
+      return "The notification setting could not be synchronized.";
+    case "prompt":
+      return "Get a system notification when an agent task completes or fails.";
   }
 }

@@ -41,6 +41,31 @@ const matrixEventId = z.string().min(1).max(512)
 const timestamp = z.number().int().nonnegative()
 const base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/)
 
+export const webPushSubscriptionSchema = z
+  .object({
+    endpoint: z.string().url().max(4_096).refine(value => {
+      try {
+        const endpoint = new URL(value)
+        return endpoint.protocol === 'https:'
+          && !endpoint.username
+          && !endpoint.password
+          && !endpoint.hash
+      } catch {
+        return false
+      }
+    }, 'Web Push endpoint must be a credential-free HTTPS URL'),
+    expirationTime: timestamp.nullable().optional(),
+    keys: z
+      .object({
+        p256dh: base64Url.min(32).max(256),
+        auth: base64Url.min(16).max(128),
+      })
+      .strict(),
+  })
+  .strict()
+
+export type WebPushSubscription = z.infer<typeof webPushSubscriptionSchema>
+
 export const cvp3SessionExtensionBindingSchema = sessionExtensionBindingSchema
 
 const sessionSettingsPatchSchema = z
@@ -142,6 +167,18 @@ const projectUpdatePayloadSchema = z
       .strict(),
   })
   .strict()
+const notificationSubscribePayloadSchema = z
+  .object({
+    operation: z.literal('notification.subscribe'),
+    subscription: webPushSubscriptionSchema,
+  })
+  .strict()
+const notificationUnsubscribePayloadSchema = z
+  .object({
+    operation: z.literal('notification.unsubscribe'),
+    endpoint: z.string().url().max(4_096).optional(),
+  })
+  .strict()
 
 export const cvp3CommandPayloadSchema = z.discriminatedUnion('operation', [
   sessionCreatePayloadSchema,
@@ -152,6 +189,8 @@ export const cvp3CommandPayloadSchema = z.discriminatedUnion('operation', [
   sessionLifecyclePayloadSchema,
   projectUpdatePayloadSchema,
   deviceInvitationPayloadSchema,
+  notificationSubscribePayloadSchema,
+  notificationUnsubscribePayloadSchema,
 ])
 
 export type Cvp3CommandPayload = z.infer<
@@ -217,6 +256,18 @@ export const cvp3CommandSchema = z.union([
     sessionId: opaqueId.optional(),
     operation: z.literal('device.invitation.create'),
     payload: deviceInvitationPayloadSchema,
+  }).strict(),
+  z.object({
+    ...projectCommandCommon,
+    sessionId: z.undefined().optional(),
+    operation: z.literal('notification.subscribe'),
+    payload: notificationSubscribePayloadSchema,
+  }).strict(),
+  z.object({
+    ...projectCommandCommon,
+    sessionId: z.undefined().optional(),
+    operation: z.literal('notification.unsubscribe'),
+    payload: notificationUnsubscribePayloadSchema,
   }).strict(),
 ])
 
@@ -463,6 +514,12 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
       type: z.literal('device.invitation.created'),
       pairingLink: z.string().min(1).max(128 * 1024),
       expiresAt: timestamp,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('notification.subscription.changed'),
+      enabled: z.boolean(),
     })
     .strict(),
 ])

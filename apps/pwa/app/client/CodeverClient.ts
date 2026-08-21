@@ -8,6 +8,7 @@ import type {
   CodeverAttachment,
   CommandPayload,
   SessionExtensionBinding,
+  WebPushSubscription as Cvp3WebPushSubscription,
 } from "@codever/protocol";
 import type { CommandCompletion } from "../commandLifecycle";
 import type { MatrixLoginTokenResult } from "../matrixAuth";
@@ -96,6 +97,9 @@ export interface CodeverClient {
   send(payload: CommandPayload): Promise<CodeverCommandSendResult>;
   updateProjectExtensions?(
     extensions: SessionExtensionBinding[],
+  ): Promise<CodeverCommandSendResult>;
+  updateWebPushSubscription?(
+    subscription: Cvp3WebPushSubscription | null,
   ): Promise<CodeverCommandSendResult>;
   recoverCommand(commandId: string): Promise<CodeverCommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;

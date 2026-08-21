@@ -67,6 +67,8 @@ function v3AllowedOperations(
       case 'session.settings':
         result.add('session.update')
         result.add('project.update')
+        result.add('notification.subscribe')
+        result.add('notification.unsubscribe')
         break
       case 'session.create': result.add('session.create'); break
       case 'session.archive':

@@ -76,6 +76,13 @@ import {
   type PwaUpdateState,
 } from "./pwaUpdate";
 import {
+  disableWebPushNotifications,
+  enableWebPushNotifications,
+  inspectWebPushNotifications,
+  synchronizeWebPushNotifications,
+  type WebPushNotificationState,
+} from "./webPushNotifications";
+import {
   PwaStateUpgradeBlockedError,
   resetBlockedPwaConnection,
   runPwaStateUpgrade,
@@ -638,6 +645,10 @@ function CodeverAppRuntime() {
     phase: "current",
     currentVersion: CODEVER_BUILD_VERSION,
   });
+  const [webPushState, setWebPushState] = useState<WebPushNotificationState>({
+    status: "unavailable",
+  });
+  const [webPushBusy, setWebPushBusy] = useState(false);
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
   const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
     null,
@@ -1181,6 +1192,82 @@ function CodeverAppRuntime() {
       updater.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const vapidPublicKey = gatewayState?.capabilities.webPush?.vapidPublicKey;
+    if (nativeRuntime || !vapidPublicKey) {
+      void Promise.resolve<WebPushNotificationState>({ status: "unavailable" })
+        .then(state => {
+          if (active) setWebPushState(state);
+        });
+      return () => {
+        active = false;
+      };
+    }
+    const client = codeverClientRef.current;
+    const inspect = client?.runtime === "web" && connectionStatus === "connected"
+      ? synchronizeWebPushNotifications({
+          client,
+          gatewayId: matrixConfig.gatewayId,
+          vapidPublicKey,
+        })
+      : inspectWebPushNotifications(vapidPublicKey);
+    void inspect.then(state => {
+      if (active) setWebPushState(state);
+    }).catch(error => {
+      if (active) setWebPushState({ status: "error", detail: formatUiError(error) });
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    connectionStatus,
+    deviceKeyId,
+    gatewayState?.capabilities.webPush?.vapidPublicKey,
+    matrixConfig.gatewayId,
+    nativeRuntime,
+  ]);
+
+  async function enableAgentNotifications(): Promise<void> {
+    const client = codeverClientRef.current;
+    const vapidPublicKey = gatewayState?.capabilities.webPush?.vapidPublicKey;
+    if (!client || client.runtime !== "web" || !vapidPublicKey) {
+      setWebPushState({ status: "unavailable" });
+      return;
+    }
+    setWebPushBusy(true);
+    try {
+      setWebPushState(await enableWebPushNotifications({
+        client,
+        gatewayId: matrixConfig.gatewayId,
+        vapidPublicKey,
+      }));
+    } catch (error) {
+      setWebPushState({ status: "error", detail: formatUiError(error) });
+    } finally {
+      setWebPushBusy(false);
+    }
+  }
+
+  async function disableAgentNotifications(): Promise<void> {
+    const client = codeverClientRef.current;
+    if (!client || client.runtime !== "web") {
+      setWebPushState({ status: "unavailable" });
+      return;
+    }
+    setWebPushBusy(true);
+    try {
+      setWebPushState(await disableWebPushNotifications({
+        client,
+        gatewayId: matrixConfig.gatewayId,
+      }));
+    } catch (error) {
+      setWebPushState({ status: "error", detail: formatUiError(error) });
+    } finally {
+      setWebPushBusy(false);
+    }
+  }
 
   useEffect(() => {
     connectionStatusRef.current = connectionStatus;
@@ -5937,6 +6024,8 @@ function CodeverAppRuntime() {
         invitationReauthRequired={invitationReauthRequired}
         updateState={pwaUpdateState}
         nativeRuntime={nativeRuntime}
+        webPushState={webPushState}
+        webPushBusy={webPushBusy}
         onChange={setMatrixConfig}
         onPairingLink={(link) => void openPairingLink(link)}
         onClearPairing={() => {
@@ -5976,6 +6065,8 @@ function CodeverAppRuntime() {
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
         onExportDiagnostics={exportConnectionDiagnostics}
+        onEnableWebPush={() => void enableAgentNotifications()}
+        onDisableWebPush={() => void disableAgentNotifications()}
       />
 
       <GatewayForgetDialog

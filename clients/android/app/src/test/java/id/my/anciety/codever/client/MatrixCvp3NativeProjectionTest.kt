@@ -321,6 +321,9 @@ class MatrixCvp3NativeProjectionTest {
                 put("can_archive_session", true)
                 put("can_delete_session", true)
                 put("session_extensions", buildJsonArray {})
+                put("web_push", buildJsonObject {
+                    put("vapid_public_key", "B".repeat(87))
+                })
             })
         },
     )

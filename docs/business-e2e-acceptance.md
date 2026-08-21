@@ -93,7 +93,20 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
      foregrounded.
    - Agent completion produces one notification.
    - Returning to Codever shows current state without a long reconnect.
-7. **Privacy-protected session**
+7. **Background browser Web Push**
+   - From the shipped settings UI, a browser grants notification permission and
+     the Gateway confirms the device-scoped subscription.
+   - With every Codever window closed or backgrounded, one completed or failed
+     Agent task produces exactly one generic system notification.
+   - The notification contains no prompt, Agent output, session title, path, or
+     attachment. Clicking it opens or focuses the PWA at the correct session,
+     whose result is then recovered from authenticated Matrix history.
+   - A visible PWA does not also show a duplicate system popup. Disabling the
+     setting unsubscribes locally immediately and removes the Gateway endpoint;
+     a simulated 410 response also removes an expired endpoint.
+   - Restarting the Gateway preserves the VAPID public key, subscriptions,
+     pending deliveries, and notification event deduplication.
+8. **Privacy-protected session**
    - The installed HaS extension is visible but off by default; direct sessions
      remain usable while it is disabled. Enabling it requires its declarative
      privacy context, and review defaults to on.

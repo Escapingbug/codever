@@ -72,6 +72,7 @@ export type GatewayCapabilities = {
   canArchiveSession?: boolean;
   canDeleteSession?: boolean;
   sessionExtensions: SessionExtensionDescriptor[];
+  webPush?: { vapidPublicKey: string };
 };
 
 export type GatewayStateSnapshot = {
@@ -454,6 +455,17 @@ export function parseGatewayCapabilities(input: unknown): GatewayCapabilities {
         supportedReasoningLevels: levels,
       };
     });
+  const webPush = asRecord(capabilities.web_push);
+  if (
+    capabilities.web_push !== undefined
+    && (
+      !webPush
+      || typeof webPush.vapid_public_key !== "string"
+      || !/^[A-Za-z0-9_-]{87}$/u.test(webPush.vapid_public_key)
+    )
+  ) {
+    throw new Error("The authenticated Gateway Web Push capability is malformed.");
+  }
 
   return {
     models: parseModels(capabilities.models),
@@ -472,6 +484,9 @@ export function parseGatewayCapabilities(input: unknown): GatewayCapabilities {
     sessionExtensions: parseSessionExtensionDescriptors(
       capabilities.session_extensions,
     ),
+    ...(webPush
+      ? { webPush: { vapidPublicKey: webPush.vapid_public_key as string } }
+      : {}),
   };
 }
 

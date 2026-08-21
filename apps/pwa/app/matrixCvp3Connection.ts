@@ -755,6 +755,18 @@ export async function connectMatrixCvp3(
         completion: sent.completion.then(toLegacyCompletion),
       };
     },
+    async updateWebPushSubscription(subscription) {
+      await ready;
+      if (!protocol) throw new Error("The Codever v3 project is not initialized.");
+      const sent = await protocol.updateWebPushSubscription(subscription);
+      return {
+        eventId: sent.eventId ?? `$codever.queued.${sent.commandId}`,
+        commandId: sent.commandId,
+        sequence: 1,
+        revision: 0,
+        completion: sent.completion.then(toLegacyCompletion),
+      };
+    },
     async recoverCommand(commandId) {
       await ready;
       if (!protocol) throw new Error("The CVP/3 project is not initialized.");

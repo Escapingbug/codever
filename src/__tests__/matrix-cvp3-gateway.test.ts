@@ -31,6 +31,7 @@ import type {
 import type { MatrixGatewayConfig, MatrixGatewayCryptoConfig } from '@/gateway/matrix/config'
 import { MatrixCvp3GatewayRunner } from '@/gateway/matrix/cvp3Gateway'
 import { gatewayProjectIdentity } from '@/gateway/matrix/project'
+import type { GatewayWebPushService } from '@/gateway/matrix/webPush'
 import { createTopicSessionRecord } from '@/bridge/topicSession'
 import type { TopicSession } from '@/bridge/channelPort'
 import { registerProvider } from '@/providers/registry'
@@ -168,6 +169,23 @@ describe('MatrixCvp3GatewayRunner', () => {
     const sessionExtensions = new Map<string, readonly { id: string }[]>()
     const sessionCwds = new Map<string, string>()
     const rejected: unknown[] = []
+    const notificationSubscriptions: string[] = []
+    const terminalNotifications: string[] = []
+    const webPushService: GatewayWebPushService = {
+      initialize: async () => undefined,
+      publicKey: () => 'B'.repeat(87),
+      async upsertSubscription(deviceId, subscription) {
+        notificationSubscriptions.push(`${deviceId}:${subscription.endpoint}`)
+      },
+      removeSubscription: async () => undefined,
+      async notifyTerminal(event) {
+        if (event.payload.type === 'turn.completed' || event.payload.type === 'turn.failed') {
+          terminalNotifications.push(event.eventId)
+        }
+      },
+      flush: async () => undefined,
+      stop: () => undefined,
+    }
     registerProvider({
       name: 'test',
       startQuery() { throw new Error('The catalog provider must not execute a query') },
@@ -202,6 +220,7 @@ describe('MatrixCvp3GatewayRunner', () => {
     const runner = new MatrixCvp3GatewayRunner(config, {
       client,
       onRejected: (_event, error) => rejected.push(error),
+      webPushService,
       sessionExtensionRegistry: new SessionExtensionRegistry([extensionProvider]),
       sessionFactory: (room, port, session) => {
         sessionExtensions.set(session.id, session.extensions)
@@ -263,6 +282,7 @@ describe('MatrixCvp3GatewayRunner', () => {
         type: 'workspace.snapshot',
         capabilities: expect.objectContaining({
           models: [expect.objectContaining({ id: 'model-selectable' })],
+          web_push: { vapid_public_key: 'B'.repeat(87) },
         }),
       }),
     }))
@@ -335,6 +355,26 @@ describe('MatrixCvp3GatewayRunner', () => {
       certificateId: 'certificate-1',
       createdAt: 1,
     }
+    await send({
+      ...base,
+      commandId: 'notification-subscribe-1',
+      operation: 'notification.subscribe',
+      payload: {
+        operation: 'notification.subscribe',
+        subscription: {
+          endpoint: 'https://push.example.test/subscriptions/browser-1',
+          keys: { p256dh: 'A'.repeat(88), auth: 'B'.repeat(22) },
+        },
+      },
+    }, '$notification-subscribe-1')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event =>
+        event.causationCommandId === 'notification-subscribe-1'
+        && event.payload.type === 'notification.subscription.changed'
+      ))
+    expect(notificationSubscriptions).toEqual([
+      'phone-1:https://push.example.test/subscriptions/browser-1',
+    ])
     await send({
       ...base,
       commandId: 'project-defaults-1',
@@ -413,6 +453,7 @@ describe('MatrixCvp3GatewayRunner', () => {
         && event.payload.type === 'turn.completed'
       ))
     expect(dispatched.filter(item => item.text === 'block A')).toHaveLength(1)
+    expect(terminalNotifications).toHaveLength(1)
     await runner.stop()
   })
 })

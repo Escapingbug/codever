@@ -709,6 +709,7 @@ function completionFromEvent(event: Cvp3Event): Cvp3CommandCompletion | null {
     case "extension.interaction.resolved":
     case "project.snapshot":
     case "device.invitation.created":
+    case "notification.subscription.changed":
       return { commandId, outcome: "succeeded", ...(event.sessionId ? { sessionId: event.sessionId } : {}), event };
     case "turn.completed":
       return { commandId, outcome: "succeeded", ...(event.sessionId ? { sessionId: event.sessionId } : {}), event };
