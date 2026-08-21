@@ -185,13 +185,14 @@ describe("MatrixCvp3ProtocolClient", () => {
       keyId,
       logicalEventId: terminal.eventId,
     });
-    await client.ingest({
+    const readyRaw = {
       roomId: config.roomId,
       eventId: "$ready",
       sender: "@gateway:example.org",
       timestamp: 3,
       content: { [CODEVER_MATRIX_EXTENSION]: { version: 3, envelope } },
-    });
+    };
+    await client.ingest(readyRaw);
     await expect(sent.completion).resolves.toMatchObject({
       commandId: sent.commandId,
       outcome: "succeeded",
@@ -225,5 +226,54 @@ describe("MatrixCvp3ProtocolClient", () => {
     await rebuilt.acceptKeyGrant(grantState);
     expect(rebuilt.projection.visibleSessions()).toHaveLength(1);
     expect(store.inbox.get("$bad")?.status).toBe("quarantined");
+
+    // An old but structurally valid projection can be semantically empty
+    // while retaining logical-event deduplication IDs. Authoritative startup
+    // must discard that materialized view and rebuild it from the raw inbox.
+    const currentState = rebuilt.projection.durableState();
+    store.projectionState = {
+      ...currentState,
+      sessions: [],
+      messages: [],
+    };
+    const stale = new MatrixCvp3ProtocolClient(
+      config,
+      identity,
+      trust,
+      transport,
+      store,
+    );
+    await stale.acceptKeyGrant(grantState);
+    expect(stale.projection.visibleSessions()).toHaveLength(0);
+    await stale.prepareAuthoritativeRecovery();
+    expect(stale.projection.visibleSessions()).toHaveLength(1);
+
+    // A previously quarantined valid event must get one fresh attempt when
+    // authoritative Matrix history presents the same physical event again.
+    store.projectionState = {
+      ...currentState,
+      sessions: [],
+      messages: [],
+    };
+    store.inbox.set("$ready", {
+      raw: structuredClone(readyRaw),
+      status: "quarantined",
+      error: "historical transient failure",
+    });
+    const quarantinedRecovery = new MatrixCvp3ProtocolClient(
+      config,
+      identity,
+      trust,
+      transport,
+      store,
+    );
+    await quarantinedRecovery.acceptKeyGrant(grantState);
+    await quarantinedRecovery.prepareAuthoritativeRecovery();
+    expect(quarantinedRecovery.projection.visibleSessions()).toHaveLength(0);
+    await quarantinedRecovery.ingest(readyRaw);
+    expect(quarantinedRecovery.projection.visibleSessions()).toHaveLength(1);
+    expect(store.inbox.get("$ready")?.status).toBe("projected");
+    expect(store.inbox.get("$bad")?.status).toBe("quarantined");
+    expect(store.inbox.get("$forged-local-command")?.status).toBe("quarantined");
   });
 });

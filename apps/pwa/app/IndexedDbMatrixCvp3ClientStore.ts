@@ -88,6 +88,16 @@ export class IndexedDbMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
     }
   }
 
+  async getInbox(eventId: string): Promise<MatrixCvp3InboxRecord | null> {
+    const database = await openDatabase();
+    try {
+      const row = await get<InboxRow>(database, INBOX, this.key(eventId));
+      return row ? stripInboxRow(row) : null;
+    } finally {
+      database.close();
+    }
+  }
+
   async listPendingInbox(): Promise<MatrixCvp3InboxRecord[]> {
     const database = await openDatabase();
     try {

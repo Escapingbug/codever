@@ -154,6 +154,12 @@ try {
     await waitForText(second, firstPrompt)
     await waitForText(second, PROVIDER_RESPONSE)
 
+    process.stdout.write('[5b/7] Repairing a valid-but-empty projection and historical quarantines…\n')
+    await suspendAndPoisonCvp3ReadModel(second)
+    await second.goto(pwaUrl)
+    await waitForConnected(second)
+    await waitForSessionIds(second, [firstSession, secondSession])
+
     process.stdout.write('[5c/7] Cold-restoring a trusted browser without claiming an empty inventory…\n')
     const recoveryRegressions: Error[] = []
     await suspendAndClearCvp3ReadModel(second)
@@ -419,6 +425,93 @@ async function sessionIds(page: Page): Promise<string[]> {
         const id = (row as HTMLElement).dataset.sessionId
         return id ? [id] : []
     }))
+}
+
+async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
+    // Reproduce the deployed failure: a projection can pass structural
+    // validation while containing no sessions, and its durable inbox can keep
+    // valid Matrix events quarantined after a transient historical failure.
+    await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
+    const result = await page.evaluate(async () => {
+        return new Promise<{ projectionRows: number; quarantinedRows: number }>((resolve, reject) => {
+            const opened = indexedDB.open('codever-matrix-v3', 2)
+            opened.onerror = () => reject(opened.error ?? new Error('Could not open the CVP/3 test database.'))
+            opened.onblocked = () => reject(new Error('The CVP/3 test database remained open after unloading.'))
+            opened.onsuccess = () => {
+                const database = opened.result
+                if (
+                    !database.objectStoreNames.contains('projection')
+                    || !database.objectStoreNames.contains('inbox')
+                ) {
+                    database.close()
+                    reject(new Error('The CVP/3 read-model stores do not exist.'))
+                    return
+                }
+                const transaction = database.transaction(
+                    ['projection', 'inbox'],
+                    'readwrite',
+                    { durability: 'strict' },
+                )
+                let projectionRows = 0
+                let quarantinedRows = 0
+                const projectionStore = transaction.objectStore('projection')
+                const projections = projectionStore.getAll()
+                projections.onsuccess = () => {
+                    for (const row of projections.result as Array<{
+                        key: string
+                        state?: Record<string, unknown>
+                    }>) {
+                        if (!row.state || row.state.version !== 3) continue
+                        projectionStore.put({
+                            ...row,
+                            state: {
+                                ...row.state,
+                                sessions: [],
+                                messages: [],
+                            },
+                        })
+                        projectionRows += 1
+                    }
+                }
+                const inboxStore = transaction.objectStore('inbox')
+                const inbox = inboxStore.getAll()
+                inbox.onsuccess = () => {
+                    for (const row of inbox.result as Array<{
+                        key: string
+                        scope: string
+                        status: string
+                    }>) {
+                        if (row.status !== 'projected') continue
+                        inboxStore.put({
+                            ...row,
+                            status: 'quarantined',
+                            error: 'injected historical transient failure',
+                            scopeStatus: `${row.scope}\u0000quarantined`,
+                        })
+                        quarantinedRows += 1
+                    }
+                }
+                transaction.oncomplete = () => {
+                    database.close()
+                    resolve({ projectionRows, quarantinedRows })
+                }
+                transaction.onerror = () => {
+                    const error = transaction.error ?? new Error('Could not poison the CVP/3 read model.')
+                    database.close()
+                    reject(error)
+                }
+                transaction.onabort = transaction.onerror
+            }
+        })
+    })
+    assert.ok(
+        result.projectionRows > 0,
+        'Projection repair precondition failed: the trusted browser had no valid durable projection.',
+    )
+    assert.ok(
+        result.quarantinedRows > 0,
+        'Quarantine retry precondition failed: the trusted browser had no projected raw events.',
+    )
 }
 
 async function suspendAndClearCvp3ReadModel(page: Page): Promise<void> {

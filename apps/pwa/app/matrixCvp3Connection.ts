@@ -100,6 +100,7 @@ export async function connectMatrixCvp3(
   let projectId: string | null = null;
   let matrixDeviceKeys: { ed25519: string; curve25519: string } | null = null;
   const readiness = new MatrixCvp3Readiness(Boolean(trust));
+  let authoritativeProjectionPrepared = false;
   let cachedProjectionPublished = false;
   const deliveredMessages = new Map<string, { version: number; physicalEventId: string }>();
   const emittedCompletions = new Set<string>();
@@ -406,6 +407,12 @@ export async function connectMatrixCvp3(
     const operation = recoveryChain.catch(() => undefined).then(async () => {
       readiness.beginRecovery();
       handlers.onStatus("connecting", "matrix_gateway_state_syncing");
+      if (!authoritativeProjectionPrepared) {
+        const active = protocol;
+        if (!active) throw new Error("The CVP/3 project is not initialized.");
+        await active.prepareAuthoritativeRecovery();
+        authoritativeProjectionPrepared = true;
+      }
       const [workspaceRecovered, projectRecovered] = await Promise.all([
         recoverCurrentWorkspaceSnapshot(),
         recoverCurrentProjectSnapshot(),

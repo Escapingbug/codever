@@ -103,6 +103,16 @@ export class MatrixCvp3Projection {
   workspace: V3WorkspaceProjection | null = null;
   project: V3ProjectProjection | null = null;
 
+  reset(): void {
+    this.workspace = null;
+    this.project = null;
+    this.sessions.clear();
+    this.messages.clear();
+    this.inboxFiles.clear();
+    this.completions.clear();
+    this.seenLogicalEvents.clear();
+  }
+
   durableState(): MatrixCvp3ProjectionState {
     return structuredClone({
       version: 3,
@@ -118,13 +128,9 @@ export class MatrixCvp3Projection {
 
   restore(input: unknown): void {
     const state = validateProjectionState(input);
+    this.reset();
     this.workspace = state.workspace;
     this.project = state.project;
-    this.sessions.clear();
-    this.messages.clear();
-    this.inboxFiles.clear();
-    this.completions.clear();
-    this.seenLogicalEvents.clear();
     for (const session of state.sessions) this.sessions.set(session.sessionId, session);
     for (const message of state.messages) this.messages.set(message.logicalId, message);
     for (const file of state.inboxFiles) this.inboxFiles.set(file.fileId, file);

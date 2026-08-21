@@ -53,6 +53,7 @@ export interface MatrixCvp3ClientStore {
   getOutbox(commandId: string): Promise<MatrixCvp3OutboxRecord | null>;
   listPendingOutbox(): Promise<MatrixCvp3OutboxRecord[]>;
   putInbox(record: MatrixCvp3InboxRecord): Promise<boolean>;
+  getInbox(eventId: string): Promise<MatrixCvp3InboxRecord | null>;
   listInbox(): Promise<MatrixCvp3InboxRecord[]>;
   listPendingInbox(): Promise<MatrixCvp3InboxRecord[]>;
   updateInbox(eventId: string, update: Pick<MatrixCvp3InboxRecord, "status" | "error">): Promise<void>;
@@ -96,6 +97,7 @@ export class MatrixCvp3ProtocolClient {
   private projectionSaveChain: Promise<void> = Promise.resolve();
   private initialization: Promise<void> | null = null;
   private projectionNeedsRebuild = false;
+  private readonly retriedQuarantinedEventIds = new Set<string>();
 
   constructor(
     private readonly config: MatrixCvp3ClientConfig,
@@ -259,12 +261,33 @@ export class MatrixCvp3ProtocolClient {
     ));
   }
 
+  async prepareAuthoritativeRecovery(): Promise<void> {
+    await this.initialize();
+    if (!this.keyGrant) {
+      throw new Error("The CVP/3 project key grant has not been loaded.");
+    }
+    this.projection.reset();
+    this.projectionNeedsRebuild = true;
+    await this.rebuildProjection();
+  }
+
   async ingest(raw: MatrixCvp3RawEvent): Promise<void> {
     await this.initialize();
     if (raw.roomId !== this.config.roomId) return;
     if (await this.store.putInbox({ raw, status: "pending" })) {
       await this.drainInbox();
+      return;
     }
+    if (this.retriedQuarantinedEventIds.has(raw.eventId)) return;
+    const existing = await this.store.getInbox(raw.eventId);
+    if (existing?.status !== "quarantined") return;
+    if (this.retriedQuarantinedEventIds.has(raw.eventId)) return;
+    this.retriedQuarantinedEventIds.add(raw.eventId);
+    await this.store.updateInbox(raw.eventId, {
+      status: "pending",
+      error: undefined,
+    });
+    await this.drainInbox();
   }
 
   drainInbox(): Promise<void> {
@@ -489,6 +512,10 @@ export class MemoryMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
     if (this.inbox.has(record.raw.eventId)) return false;
     this.inbox.set(record.raw.eventId, structuredClone(record));
     return true;
+  }
+  async getInbox(eventId: string): Promise<MatrixCvp3InboxRecord | null> {
+    const record = this.inbox.get(eventId);
+    return record ? structuredClone(record) : null;
   }
   async listPendingInbox(): Promise<MatrixCvp3InboxRecord[]> {
     return [...this.inbox.values()].filter(record => record.status === "pending").map(record => structuredClone(record));
