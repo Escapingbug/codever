@@ -41,6 +41,7 @@ export type AndroidMatrixCvp3JourneyOptions = {
     existingSessionId: string
     providerResponse: string
     runId: string
+    onSessionCreated?(sessionId: string): Promise<void>
 }
 
 class WebViewPage {
@@ -346,6 +347,7 @@ export async function runAndroidMatrixCvp3Journey(
             'browser convergence of the Android session',
             CONVERGENCE_TIMEOUT_MS,
         )
+        await options.onSessionCreated?.(createdSessionId)
 
         process.stdout.write('  [A4/6] Completing an Android task while its Activity is backgrounded…\n')
         await android.clickSession(createdSessionId)

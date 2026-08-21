@@ -4,7 +4,11 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { chromium, type Browser, type Page } from 'playwright-core'
+import {
+    CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+    CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
+} from '@codever/protocol'
+import { chromium, type Browser, type Page, type Route } from 'playwright-core'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidMatrixCvp3Journey } from './e2e/androidMatrixCvp3Journey.js'
 import {
@@ -17,6 +21,7 @@ const REQUIRE_ANDROID_ENV = 'CODEVER_MATRIX_CVP3_REQUIRE_ANDROID'
 const STARTUP_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 20_000
 const PROVIDER_RESPONSE = 'Codever deterministic E2E response'
+const COLD_START_NOISE_EVENTS = 40
 
 if (process.env[ENABLE_ENV] !== '1') {
     throw new Error(
@@ -113,7 +118,10 @@ try {
 
     process.stdout.write('[3/7] Pairing the first cache-cold browser…\n')
     browser = await chromium.launch({ headless: true, executablePath: chromeExecutable() })
-    first = await browser.newPage()
+    // Playwright cannot route fetches owned by a service worker. Blocking SW
+    // registration keeps Matrix requests page-owned so the recovery fault
+    // injection below observes the exact production SDK traffic.
+    first = await browser.newPage({ serviceWorkers: 'block' })
     capture(first)
     await pairBrowser(first, pairing[1]!.trim(), fixture)
     await gateway.waitFor(/Gateway ready with 1 trusted device\(s\)\./u)
@@ -134,7 +142,7 @@ try {
     process.stdout.write('[5/7] Pairing a second device and restoring inventory/history without refresh…\n')
     const admin = new GatewayAdminClient({ socketPath: gatewayAdminSocket, timeoutMs: 10_000 })
     const invitation = await admin.createInvitation({ matrixLogin: 'disabled', appUrl: pwaUrl })
-    second = await browser.newPage()
+    second = await browser.newPage({ serviceWorkers: 'block' })
     capture(second)
     await pairBrowser(second, invitation.pairingLink, fixture)
     await waitFor(async () => (await admin.devices()).length === 2, {
@@ -146,6 +154,28 @@ try {
     await waitForText(second, firstPrompt)
     await waitForText(second, PROVIDER_RESPONSE)
 
+    process.stdout.write('[5c/7] Cold-restoring a trusted browser without claiming an empty inventory…\n')
+    const recoveryRegressions: Error[] = []
+    await suspendAndClearCvp3ReadModel(second)
+    await sendTimelineNoise(fixture, COLD_START_NOISE_EVENTS)
+    const coldSnapshotIds = await currentSnapshotEventIds(fixture)
+    const coldProjectionRegression = await assertColdProjectionWaitsForAuthority(
+        second,
+        coldSnapshotIds,
+        [firstSession, secondSession],
+    )
+    if (coldProjectionRegression) recoveryRegressions.push(coldProjectionRegression)
+
+    process.stdout.write('[5e/7] Keeping a failed authoritative restore visible across later Matrix sync…\n')
+    await suspendAndClearCvp3ReadModel(second)
+    const overwrittenFailureRegression = await assertRecoveryFailureSurvivesLaterSync(
+        second,
+        fixture,
+        await currentSnapshotEventIds(fixture),
+        [firstSession, secondSession],
+    )
+    if (overwrittenFailureRegression) recoveryRegressions.push(overwrittenFailureRegression)
+
     const androidSerial = process.env.CODEVER_ANDROID_SERIAL
     if (androidSerial) {
         process.stdout.write('[5a/7] Running the native Android CVP/3 acceptance journey…\n')
@@ -153,6 +183,7 @@ try {
             matrixLogin: 'disabled',
             appUrl: pwaUrl,
         })
+        await suspendAndClearCvp3ReadModel(second)
         await runAndroidMatrixCvp3Journey({
             repositoryRoot,
             serial: androidSerial,
@@ -167,7 +198,24 @@ try {
             existingSessionId: firstSession,
             providerResponse: PROVIDER_RESPONSE,
             runId,
+            async onSessionCreated(createdSessionId) {
+                process.stdout.write('  [A3c/6] Cold-restoring the trusted offline browser from Android state…\n')
+                await second!.goto(pwaUrl)
+                await waitForConnected(second!)
+                await waitForSessionIds(second!, [
+                    firstSession,
+                    secondSession,
+                    createdSessionId,
+                ])
+            },
         })
+        await waitForSessionIds(second, [firstSession, secondSession])
+    }
+    if (recoveryRegressions.length > 0) {
+        throw new AggregateError(
+            recoveryRegressions,
+            `${recoveryRegressions.length} authoritative CVP/3 startup regression(s) detected.`,
+        )
     }
 
     process.stdout.write('[5x/7] Quarantining one poison timeline event without stalling later work…\n')
@@ -370,6 +418,299 @@ async function sessionIds(page: Page): Promise<string[]> {
     return page.locator('button.session-row').evaluateAll(rows => rows.flatMap(row => {
         const id = (row as HTMLElement).dataset.sessionId
         return id ? [id] : []
+    }))
+}
+
+async function suspendAndClearCvp3ReadModel(page: Page): Promise<void> {
+    // Keep this page and therefore its BrowserContext: Matrix login, device
+    // identity, crypto store, and pinned Gateway trust must all survive. The
+    // same-origin JSON route unloads the PWA before its CVP/3 IndexedDB read
+    // model is cleared, so the live client cannot immediately repopulate it.
+    await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
+    const clearedProjectionRows = await page.evaluate(async () => {
+        return new Promise<number>((resolve, reject) => {
+            const opened = indexedDB.open('codever-matrix-v3', 2)
+            opened.onerror = () => reject(opened.error ?? new Error('Could not open the CVP/3 test database.'))
+            opened.onblocked = () => reject(new Error('The CVP/3 test database remained open after unloading.'))
+            opened.onsuccess = () => {
+                const database = opened.result
+                if (
+                    !database.objectStoreNames.contains('projection')
+                    || !database.objectStoreNames.contains('inbox')
+                ) {
+                    database.close()
+                    reject(new Error('The CVP/3 read-model stores do not exist.'))
+                    return
+                }
+                const transaction = database.transaction(
+                    ['projection', 'inbox'],
+                    'readwrite',
+                    { durability: 'strict' },
+                )
+                const count = transaction.objectStore('projection').count()
+                transaction.objectStore('projection').clear()
+                transaction.objectStore('inbox').clear()
+                transaction.oncomplete = () => {
+                    const result = count.result
+                    database.close()
+                    resolve(result)
+                }
+                transaction.onerror = () => {
+                    const error = transaction.error ?? new Error('Could not clear the CVP/3 read model.')
+                    database.close()
+                    reject(error)
+                }
+                transaction.onabort = transaction.onerror
+            }
+        })
+    })
+    assert.ok(
+        clearedProjectionRows > 0,
+        'Cold-start regression precondition failed: the trusted browser had no durable CVP/3 projection.',
+    )
+    const clearedSyncStores = await page.evaluate(async () => {
+        const databaseNames = (await indexedDB.databases()).flatMap(database =>
+            database.name?.startsWith('matrix-js-sdk:codever-matrix-sync-v1-')
+                ? [database.name]
+                : [],
+        )
+        await Promise.all(databaseNames.map(name => new Promise<void>((resolve, reject) => {
+            const deleted = indexedDB.deleteDatabase(name)
+            deleted.onsuccess = () => resolve()
+            deleted.onerror = () => reject(deleted.error ?? new Error('Could not clear the Matrix sync cache.'))
+            deleted.onblocked = () => reject(new Error('The Matrix sync cache remained open after unloading.'))
+        })))
+        return databaseNames.length
+    })
+    assert.equal(
+        clearedSyncStores,
+        1,
+        'Cold-start regression precondition failed: expected one rebuildable Matrix sync cache.',
+    )
+}
+
+async function assertColdProjectionWaitsForAuthority(
+    page: Page,
+    snapshotEventIds: Set<string>,
+    expectedSessionIds: string[],
+): Promise<Error | null> {
+    const gate = await interceptSnapshotRequests(page, snapshotEventIds, 'hold')
+    let regression: Error | null = null
+    try {
+        await page.goto(pwaUrl)
+        await gate.waitForAll()
+        // Let React render the state emitted after Matrix PREPARED while the
+        // authoritative project snapshot and thread replay remain blocked.
+        await delay(500)
+        const actual = {
+            connected: await isConnected(page),
+            emptyInventoryVisible: await page.getByText(
+                'Create your first conversation',
+                { exact: true },
+            ).isVisible().catch(() => false),
+            recoveryIndicatorVisible: await page.locator('.connection-progress').isVisible().catch(() => false),
+            visibleSessionIds: await sessionIds(page),
+        }
+        try {
+            assert.deepEqual(actual, {
+                connected: false,
+                emptyInventoryVisible: false,
+                recoveryIndicatorVisible: true,
+                visibleSessionIds: [],
+            }, 'A trusted browser must remain in recovery until authoritative CVP/3 state is available.')
+        } catch (error) {
+            if (!(error instanceof Error)) throw error
+            regression = error
+        }
+    } finally {
+        gate.release()
+        await gate.dispose()
+    }
+    await waitForConnected(page)
+    await waitForSessionIds(page, expectedSessionIds)
+    return regression
+}
+
+async function assertRecoveryFailureSurvivesLaterSync(
+    page: Page,
+    matrix: DisposableMatrixFixture,
+    snapshotEventIds: Set<string>,
+    expectedSessionIds: string[],
+): Promise<Error | null> {
+    const interceptor = await interceptSnapshotRequests(page, snapshotEventIds, 'fail')
+    let regression: Error | null = null
+    try {
+        await page.goto(pwaUrl)
+        await interceptor.waitForAll()
+        const alert = page.locator('.connection-toast[role="alert"]')
+        // The current bug can overwrite the error before React paints it, so
+        // do not require an observable transient error. Once both authoritative
+        // requests failed, the durable assertion is the state after a later,
+        // explicitly traceable successful /sync.
+        await delay(500)
+        const eventId = await sendSyncTickEvent(matrix)
+        await waitFor(
+            () => (logs.get(page) ?? []).some(line => line.includes(`[matrix-sync-event] ${eventId} `)),
+            {
+                description: 'a later successful Matrix sync after authoritative recovery failed',
+                timeoutMs: CONVERGENCE_TIMEOUT_MS,
+            },
+        )
+        await delay(500)
+        const actual = {
+            connected: await isConnected(page),
+            recoveryFailureVisible: await alert.isVisible().catch(() => false),
+        }
+        try {
+            assert.deepEqual(actual, {
+                connected: false,
+                recoveryFailureVisible: true,
+            }, 'Matrix transport activity must not overwrite a failed CVP/3 recovery.')
+        } catch (error) {
+            if (!(error instanceof Error)) throw error
+            regression = error
+        }
+    } finally {
+        interceptor.release()
+        await interceptor.dispose()
+    }
+    await page.reload()
+    await waitForConnected(page)
+    await waitForSessionIds(page, expectedSessionIds)
+    return regression
+}
+
+async function currentSnapshotEventIds(matrix: DisposableMatrixFixture): Promise<Set<string>> {
+    const response = await fetch(
+        `${matrix.homeserver}/_matrix/client/v3/rooms/${encodeURIComponent(matrix.roomId)}/state`,
+        { headers: { authorization: `Bearer ${matrix.tester.accessToken}` } },
+    )
+    if (!response.ok) {
+        throw new Error(`Could not read CVP/3 pointer state: ${await response.text()}`)
+    }
+    const state = await response.json() as Array<{
+        type?: string
+        content?: { document?: { eventId?: string } }
+    }>
+    const ids = new Set(state.flatMap(event => {
+        if (
+            event.type !== CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
+            && event.type !== CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+        ) return []
+        const eventId = event.content?.document?.eventId
+        return eventId ? [eventId] : []
+    }))
+    assert.equal(ids.size, 2, 'Expected current workspace and project CVP/3 snapshot pointers.')
+    return ids
+}
+
+async function interceptSnapshotRequests(
+    page: Page,
+    snapshotEventIds: Set<string>,
+    behavior: 'hold' | 'fail',
+): Promise<{
+    waitForAll(): Promise<void>
+    release(): void
+    dispose(): Promise<void>
+}> {
+    const intercepted = new Set<string>()
+    const observedRoomEventIds = new Set<string>()
+    let release!: () => void
+    const released = new Promise<void>(resolve => { release = resolve })
+    const pattern = '**/*'
+    const handler = async (route: Route) => {
+        const eventId = roomEventId(route.request().url())
+        if (eventId) observedRoomEventIds.add(eventId)
+        if (!eventId || !snapshotEventIds.has(eventId)) {
+            await route.continue()
+            return
+        }
+        intercepted.add(eventId)
+        if (behavior === 'hold') {
+            await released
+            await route.continue()
+            return
+        }
+        await route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            body: JSON.stringify({
+                errcode: 'M_UNKNOWN',
+                error: 'Injected CVP/3 authoritative snapshot failure',
+            }),
+        })
+    }
+    await page.route(pattern, handler)
+    return {
+        async waitForAll() {
+            try {
+                await waitFor(() => intercepted.size === snapshotEventIds.size, {
+                    description: `${behavior === 'hold' ? 'held' : 'failed'} current CVP/3 snapshot requests`,
+                    timeoutMs: CONVERGENCE_TIMEOUT_MS,
+                })
+            } catch (error) {
+                throw new Error(
+                    `${formatError(error)}; expected=${[...snapshotEventIds].join(',')}`
+                    + `; observed=${[...observedRoomEventIds].join(',') || '<none>'}`,
+                )
+            }
+        },
+        release,
+        dispose: () => page.unroute(pattern, handler),
+    }
+}
+
+function roomEventId(url: string): string | null {
+    const match = new URL(url).pathname.match(/\/_matrix\/client\/[^/]+\/rooms\/[^/]+\/event\/([^/]+)$/u)
+    return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+async function sendSyncTickEvent(matrix: DisposableMatrixFixture): Promise<string> {
+    const transactionId = `recovery-sync-${runId}-${Date.now()}`
+    const response = await fetch(
+        `${matrix.homeserver}/_matrix/client/v3/rooms/${encodeURIComponent(matrix.roomId)}`
+        + `/send/io.codever.e2e.sync_tick/${encodeURIComponent(transactionId)}`,
+        {
+            method: 'PUT',
+            headers: {
+                authorization: `Bearer ${matrix.tester.accessToken}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ runId }),
+        },
+    )
+    if (!response.ok) {
+        throw new Error(`Could not send Matrix sync tick: ${await response.text()}`)
+    }
+    const body = await response.json() as { event_id?: string }
+    assert.ok(body.event_id, 'Matrix sync tick did not return an event ID.')
+    return body.event_id
+}
+
+async function sendTimelineNoise(
+    matrix: DisposableMatrixFixture,
+    count: number,
+): Promise<void> {
+    // Force prior session lifecycle events outside CVP/3's bounded 32-event
+    // initial /sync window. The only valid way to rebuild the complete
+    // inventory is then the authoritative snapshot plus thread directory.
+    await Promise.all(Array.from({ length: count }, async (_, index) => {
+        const transactionId = `cold-start-noise-${runId}-${index}`
+        const response = await fetch(
+            `${matrix.homeserver}/_matrix/client/v3/rooms/${encodeURIComponent(matrix.roomId)}`
+            + `/send/io.codever.e2e.noise/${encodeURIComponent(transactionId)}`,
+            {
+                method: 'PUT',
+                headers: {
+                    authorization: `Bearer ${matrix.tester.accessToken}`,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({ runId, index }),
+            },
+        )
+        if (!response.ok) {
+            throw new Error(`Could not send Matrix cold-start noise ${index}: ${await response.text()}`)
+        }
     }))
 }
 

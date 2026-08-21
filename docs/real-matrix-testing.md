@@ -35,16 +35,22 @@ The journey proves, through real UI and Matrix traffic:
    second session while the first Agent turn is still running.
 3. A second independent browser pairs and restores inventory and transcript
    without a manual refresh or application checkpoint.
-4. The isolated Android APK installs, pairs, restores existing history, and
-   creates a session that appears in the browser.
-5. Android sends a prompt, the Activity moves to the background, the foreground
+4. The second browser retains its Matrix account, device identity, and Gateway
+   trust while its local CVP/3 read model is erased. With current snapshot
+   requests held, it remains visibly in recovery instead of reporting
+   `Connected` with an empty inventory. An injected snapshot failure also
+   remains visible across a later successful Matrix sync.
+5. The isolated Android APK installs and pairs while that trusted browser is
+   offline. Android creates a session, then the browser cold-starts and restores
+   the complete cross-device inventory before the session is deleted.
+6. Android sends a prompt, the Activity moves to the background, the foreground
    service receives the terminal Agent result, and a task notification appears.
-6. Android is force-stopped and restarted, then restores its durable projection
+7. Android is force-stopped and restarted, then restores its durable projection
    and history without resending the command.
-7. Android deletes a session and the browser converges.
-8. A deliberately malformed CVP/3 event is quarantined without blocking the next
+8. Android deletes a session and both browsers converge.
+9. A deliberately malformed CVP/3 event is quarantined without blocking the next
    valid event.
-9. Browser reload/history recovery and concurrent deletion converge on both
+10. Browser reload/history recovery and concurrent deletion converge on both
    browser devices.
 
 A successful Android sub-journey ends with:

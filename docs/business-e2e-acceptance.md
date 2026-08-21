@@ -44,6 +44,14 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
 3. **History and restart**
    - Reloading the browser and force-stopping/restarting the APK restore the
      same session and complete history.
+   - A previously paired browser whose local CVP/3 read model is erased keeps
+     its Matrix login, device identity, and pinned Gateway trust. If another
+     device creates a session while it is offline, startup must restore the
+     complete authoritative inventory. While the current snapshot is delayed,
+     it must show recovery—not `Connected` or an empty-inventory call to action.
+   - If authoritative recovery fails, a later successful Matrix `/sync` must
+     not hide the failure or report `Connected`; recovery remains actionable
+     until the CVP/3 snapshot and session directory have actually converged.
    - Older history can be paged without Gateway history RPCs.
    - A cache-cold client restores history through the selected session's Matrix
      thread only; normal Android startup requests zero room-timeline items.
@@ -177,7 +185,7 @@ APK storage.
 | Create and immediate feedback | Enforced | Enforced |
 | Cross-device prompt and agent response | Enforced | Enforced by the isolated Alpha gate |
 | Text-file and image content reaches the Agent | Enforced | Not yet enforced |
-| History after reload/process restart | Enforced on both browser devices | Enforced for cached history |
+| History after reload/process restart | Enforced on both browser devices, including an erased CVP/3 read model with delayed and failed authoritative recovery | Enforced for cached history; Alpha also creates on Android while the trusted browser is read-model-cold and offline |
 | Archive, restore, and delete | Delete enforced on both devices; deleting the only session remains empty across reload without transient reselection or replacement creation | Full lifecycle enforced twice |
 | Offline read and network recovery | Enforced by the isolated Alpha gate | Enforced with airplane mode |
 | Post-commit ACK/result loss and durable-outbox release | Not applicable | Enforced by the isolated Alpha gate for create and delete |
