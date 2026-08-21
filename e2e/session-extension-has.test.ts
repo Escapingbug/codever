@@ -22,7 +22,6 @@ import type {
 import type { AgentEvent } from '@/providers/types'
 import { createSessionExtensionRegistryFromEnvironment } from '@/runtime/sessionExtensionConfig'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
-import { hasSessionExtensionDescriptor } from '../extensions/has-privacy/src/manifest.js'
 
 const children = new Set<ChildProcess>()
 const servers = new Set<Server>()
@@ -42,14 +41,14 @@ describe('PWA session binding -> HaS process -> Agent runtime', () => {
     it('sends only sanitized text to the Agent and restores streamed output', async () => {
         const fixture = await startHasProcess()
         const binding = parsePwaSessionBinding('metapp-payroll-e2e')
-        const registry = registryFor(fixture)
+        const registry = await registryFor(fixture)
         const normalized = registry.normalizeBindings([binding])
         const agent = new RecordingAgent([
             { kind: 'text', text: '李' },
             { kind: 'text', text: '四已收到请求' },
             { kind: 'result', status: 'success' },
         ])
-        const channel = new RecordingChannel('allow')
+        const channel = new RecordingChannel('send')
         const runtime = createRuntime(registry, normalized, agent, channel)
 
         await runtime.dispatch({
@@ -76,12 +75,12 @@ describe('PWA session binding -> HaS process -> Agent runtime', () => {
 
     it('does not invoke the Agent when the outbound preview is denied', async () => {
         const fixture = await startHasProcess()
-        const registry = registryFor(fixture)
+        const registry = await registryFor(fixture)
         const normalized = registry.normalizeBindings([
             parsePwaSessionBinding('metapp-denied-e2e'),
         ])
         const agent = new RecordingAgent([{ kind: 'result', status: 'success' }])
-        const channel = new RecordingChannel('deny')
+        const channel = new RecordingChannel('cancel')
         const runtime = createRuntime(registry, normalized, agent, channel)
 
         await runtime.dispatch({
@@ -99,21 +98,16 @@ describe('PWA session binding -> HaS process -> Agent runtime', () => {
     })
 
     it('fails closed before Agent invocation when the bound process is offline', async () => {
-        const port = await unusedPort()
-        const token = randomBytes(32).toString('base64url')
-        const registry = createSessionExtensionRegistryFromEnvironment({
-            CODEVER_SESSION_EXTENSIONS_JSON: JSON.stringify([{
-                descriptor: hasSessionExtensionDescriptor,
-                endpoint: `http://127.0.0.1:${port}`,
-                bearerToken: token,
-                timeoutMs: 1_000,
-            }]),
-        })
+        const fixture = await startHasProcess()
+        const registry = await registryFor(fixture)
+        const child = [...children][0]!
+        await stopChild(child)
+        children.delete(child)
         const normalized = registry.normalizeBindings([
             parsePwaSessionBinding('metapp-offline-e2e'),
         ])
         const agent = new RecordingAgent([{ kind: 'result', status: 'success' }])
-        const channel = new RecordingChannel('allow')
+        const channel = new RecordingChannel('send')
         const runtime = createRuntime(registry, normalized, agent, channel)
 
         await runtime.dispatch({
@@ -185,9 +179,9 @@ async function startHasProcess(): Promise<HasProcessFixture> {
 function registryFor(fixture: HasProcessFixture) {
     return createSessionExtensionRegistryFromEnvironment({
         CODEVER_SESSION_EXTENSIONS_JSON: JSON.stringify([{
-            descriptor: hasSessionExtensionDescriptor,
             endpoint: `http://127.0.0.1:${fixture.extensionPort}`,
             bearerToken: fixture.token,
+            expectedExtensionId: 'has-privacy',
             timeoutMs: 5_000,
         }]),
     })
@@ -228,7 +222,7 @@ function parsePwaSessionBinding(contextId: string): SessionExtensionBinding {
 }
 
 function createRuntime(
-    registry: ReturnType<typeof createSessionExtensionRegistryFromEnvironment>,
+    registry: Awaited<ReturnType<typeof createSessionExtensionRegistryFromEnvironment>>,
     bindings: readonly SessionExtensionBinding[],
     agent: RecordingAgent,
     channel: RecordingChannel,
@@ -276,7 +270,7 @@ class RecordingChannel implements ChannelPort {
     readonly decisions: DecisionRequest[] = []
     readonly statuses: SessionStatus[] = []
 
-    constructor(private readonly decision: 'allow' | 'deny') {}
+    constructor(private readonly decision: string) {}
 
     async send(message: ChannelMessage) {
         this.messages.push(message)

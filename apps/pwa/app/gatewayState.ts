@@ -1,4 +1,6 @@
 import type {
+  JsonValue,
+  SessionExtensionBinding,
   SessionExtensionDescriptor,
   SessionExtensionSummary,
 } from "@codever/protocol";
@@ -46,6 +48,8 @@ export type GatewayWorkspaceState = {
   model?: string;
   reasoningEffort?: string;
   permissionMode: string;
+  defaultExtensions?: SessionExtensionBinding[];
+  extensionDefaultsRevision?: number;
 };
 
 export type GatewayCapabilities = {
@@ -262,6 +266,14 @@ export function parseGatewayStateExtension(
     throw new Error("The authenticated Gateway workspace state is malformed.");
   }
   const workspaceCwd = workspace.cwd as string;
+  const defaultExtensions = workspace.default_extensions === undefined
+    ? undefined
+    : parseSessionExtensionBindings(workspace.default_extensions);
+  const extensionDefaultsRevision = workspace.extension_defaults_revision === undefined
+    ? undefined
+    : isPositiveInteger(workspace.extension_defaults_revision)
+      ? workspace.extension_defaults_revision
+      : (() => { throw new Error("The authenticated Gateway extension defaults revision is malformed."); })();
   const sessions: GatewaySessionSummary[] = parsedSessions.map((session) => {
     return {
       id: session.id,
@@ -316,6 +328,10 @@ export function parseGatewayStateExtension(
         ? { reasoningEffort: workspace.reasoning_effort }
         : {}),
       permissionMode: workspace.permission_mode,
+      ...(defaultExtensions === undefined ? {} : { defaultExtensions }),
+      ...(extensionDefaultsRevision === undefined
+        ? {}
+        : { extensionDefaultsRevision }),
     },
     capabilities,
   };
@@ -527,6 +543,12 @@ function gatewayStateExtension(
         ? { reasoning_effort: state.workspace.reasoningEffort }
         : {}),
       permission_mode: state.workspace.permissionMode,
+      ...(state.workspace.defaultExtensions === undefined
+        ? {}
+        : { default_extensions: state.workspace.defaultExtensions }),
+      ...(state.workspace.extensionDefaultsRevision === undefined
+        ? {}
+        : { extension_defaults_revision: state.workspace.extensionDefaultsRevision }),
     },
     capabilities: {
       models: state.capabilities.models.map((model) => ({
@@ -609,6 +631,39 @@ function parseSessionExtensionSummaries(value: unknown): SessionExtensionSummary
       name: extension.name,
       version: extension.version,
     };
+  });
+}
+
+function parseSessionExtensionBindings(value: unknown): SessionExtensionBinding[] {
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new Error("The authenticated Gateway extension defaults are malformed.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const binding = asRecord(entry);
+    if (
+      !binding ||
+      Object.keys(binding).some(key => key !== "id" && key !== "config") ||
+      typeof binding.id !== "string" ||
+      binding.id.length < 1 ||
+      binding.id.length > 256 ||
+      seen.has(binding.id)
+    ) {
+      throw new Error("The authenticated Gateway extension default is malformed.");
+    }
+    seen.add(binding.id);
+    if (binding.config === undefined) return { id: binding.id };
+    const config = asRecord(binding.config);
+    if (
+      !config ||
+      Object.keys(config).length > 32 ||
+      Object.keys(config).some(key => key.length < 1 || key.length > 128) ||
+      !isJsonValue(config) ||
+      JSON.stringify(config).length > 32 * 1024
+    ) {
+      throw new Error("The authenticated Gateway extension default config is malformed.");
+    }
+    return { id: binding.id, config };
   });
 }
 
@@ -706,6 +761,18 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  const record = asRecord(value);
+  return record !== null && Object.values(record).every(isJsonValue);
 }
 
 function isPositiveInteger(value: unknown): value is number {

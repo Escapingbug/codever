@@ -32,6 +32,8 @@ describe('FileCvp3RuntimeStateStore', () => {
         permissionMode: 'default',
         providerSessionId: null,
         extensions: [],
+        extensionRevision: 1,
+        inheritedFromProjectExtensionRevision: null,
       })
     })
 
@@ -69,7 +71,22 @@ describe('FileCvp3RuntimeStateStore', () => {
           reasoningEffort: null,
           permissionMode: 'default',
           snapshotVersion: 1,
-          sessions: [],
+          sessions: [{
+            id: 'session-legacy',
+            sourceCommandId: 'command-legacy',
+            threadRootEventId: '$command-legacy',
+            title: 'Legacy session',
+            createdAt: 1,
+            updatedAt: 1,
+            stateVersion: 1,
+            lifecycle: 'active',
+            provider: 'test',
+            model: null,
+            reasoningEffort: null,
+            permissionMode: 'default',
+            providerSessionId: null,
+            extensions: [],
+          }],
         },
       },
     }), 'utf8')
@@ -78,5 +95,11 @@ describe('FileCvp3RuntimeStateStore', () => {
     const project = await store.project(room.roomId)
     expect(project.capabilitySnapshotVersion).toBe(0)
     expect(project.capabilities).toBeNull()
+    expect(project.defaultExtensions).toEqual([])
+    expect(project.extensionDefaultsRevision).toBe(1)
+    expect(project.sessions[0]).toMatchObject({
+      extensionRevision: 1,
+      inheritedFromProjectExtensionRevision: null,
+    })
   })
 })

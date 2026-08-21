@@ -154,6 +154,54 @@ class MatrixCvp3NativeProjectionTest {
         )
     }
 
+    @Test
+    fun `projects extension capabilities defaults and declarative interactions`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+        val interaction = projection.applyGatewayEvent(
+            event(
+                eventId = "extension-interaction-1",
+                projectId = "project-1",
+                sessionId = "session-a",
+                payload = buildJsonObject {
+                    put("type", "extension.interaction.requested")
+                    put("requestId", "request-1")
+                    put("extension", buildJsonObject {
+                        put("id", "prefix-transform")
+                        put("name", "Prefix transform")
+                        put("version", "1")
+                    })
+                    put("cancelActionId", "cancel")
+                    put("view", buildJsonObject {
+                        put("version", 1)
+                        put("title", "Review transformed input")
+                        put("elements", JsonArray(emptyList()))
+                        put("actions", buildJsonArray {
+                            add(buildJsonObject { put("id", "continue"); put("label", "Continue") })
+                            add(buildJsonObject { put("id", "cancel"); put("label", "Cancel") })
+                        })
+                    })
+                    put("projection", sessionProjection(2, "Session A", "active", "attention", 200))
+                },
+            ),
+            "\$interaction",
+            "\$root-a",
+        )
+
+        assertEquals("request-1", interaction.messages.single().requestId)
+        assertEquals(
+            "prefix-transform",
+            projection.snapshot()!!.getValue("capabilities").jsonObject
+                .getValue("session_extensions").jsonArray.single().jsonObject
+                .getValue("id").jsonPrimitive.content,
+        )
+    }
+
     private fun projection() = MatrixCvp3NativeProjection(
         gatewayId = { "gateway-1" },
         activeDeviceCount = { 2 },
@@ -169,6 +217,19 @@ class MatrixCvp3NativeProjectionTest {
             put("cwd", "/workspace/project")
             put("provider", "codex")
             put("permissionMode", "default")
+            put("installedExtensions", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", "prefix-transform")
+                    put("name", "Prefix transform")
+                    put("description", "Adds a prefix")
+                    put("version", "1")
+                    put("settings", JsonArray(emptyList()))
+                })
+            })
+            put("defaultExtensions", buildJsonArray {
+                add(buildJsonObject { put("id", "prefix-transform") })
+            })
+            put("extensionDefaultsRevision", 2)
         },
     )
 
@@ -262,6 +323,14 @@ class MatrixCvp3NativeProjectionTest {
         put("lifecycle", lifecycle)
         put("activity", activity)
         put("updatedAt", updatedAt)
+        put("extensions", buildJsonArray {
+            add(buildJsonObject {
+                put("id", "prefix-transform")
+                put("name", "Prefix transform")
+                put("version", "1")
+            })
+        })
+        put("extensionRevision", 1)
     }
 
     private fun event(

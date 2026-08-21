@@ -58,7 +58,10 @@ function v3AllowedOperations(
       case 'prompt': result.add('prompt.submit'); break
       case 'cancel': result.add('turn.cancel'); break
       case 'decision': result.add('decision.answer'); break
-      case 'session.settings': result.add('session.update'); break
+      case 'session.settings':
+        result.add('session.update')
+        result.add('project.update')
+        break
       case 'session.create': result.add('session.create'); break
       case 'session.archive':
       case 'session.restore':

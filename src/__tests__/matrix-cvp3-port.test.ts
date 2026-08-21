@@ -113,5 +113,51 @@ describe('MatrixCvp3Port', () => {
       rel_type: 'm.replace',
       event_id: transport.delivered[0]?.eventId,
     })
+
+    const response = port.requestExtensionInteraction({
+      extension: { id: 'prefix-transform', name: 'Prefix transform', version: '1' },
+      cancelActionId: 'cancel',
+      view: {
+        version: 1,
+        title: 'Review transformed input',
+        elements: [{ type: 'readonly_textarea', label: 'Agent input', value: 'SAFE: hello' }],
+        actions: [
+          { id: 'continue', label: 'Continue', style: 'primary' },
+          { id: 'cancel', label: 'Cancel', style: 'secondary' },
+        ],
+      },
+    })
+    await waitFor(() => transport.delivered.length === 3)
+    const interactionExtension = transport.delivered[2]
+      ?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const interaction = await openCvp3Envelope(interactionExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (interaction.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(interaction.plaintext.value.event.payload).toMatchObject({
+      type: 'extension.interaction.requested',
+      extension: { id: 'prefix-transform' },
+      cancelActionId: 'cancel',
+    })
+    const requestId = interaction.plaintext.value.event.payload.type === 'extension.interaction.requested'
+      ? interaction.plaintext.value.event.payload.requestId
+      : ''
+    expect(port.resolveDecision(requestId, 'continue')).toEqual({
+      kind: 'extension',
+      extensionId: 'prefix-transform',
+    })
+    await expect(response).resolves.toEqual({ value: 'continue' })
   })
 })
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`Condition was not met within ${timeoutMs}ms`)
+}

@@ -9,6 +9,7 @@ import {
   cvp3CurrentPointerSchema,
   cvp3ProjectKeyGrantStateSchema,
   type Cvp3Command,
+  type SessionExtensionDescriptor,
 } from '@codever/protocol'
 import {
   base64UrlDecode,
@@ -33,6 +34,11 @@ import { gatewayProjectIdentity } from '@/gateway/matrix/project'
 import { createTopicSessionRecord } from '@/bridge/topicSession'
 import type { TopicSession } from '@/bridge/channelPort'
 import { registerProvider } from '@/providers/registry'
+import {
+  normalizeDeclarativeExtensionConfig,
+  SessionExtensionRegistry,
+  type SessionExtensionProvider,
+} from '@/runtime/sessionExtensions'
 
 class TestMatrixClient extends InMemoryMatrixTransport implements MatrixGatewayClient {
   private readonly listeners = new Set<MatrixGatewayEventListener>()
@@ -151,6 +157,7 @@ describe('MatrixCvp3GatewayRunner', () => {
     }
     const blocked = deferred<void>()
     const dispatched: Array<{ sessionId: string; text: string }> = []
+    const sessionExtensions = new Map<string, readonly { id: string }[]>()
     const rejected: unknown[] = []
     registerProvider({
       name: 'test',
@@ -165,10 +172,30 @@ describe('MatrixCvp3GatewayRunner', () => {
       }],
       getAvailablePermissionModes: () => ['default'],
     })
+    const extensionDescriptor: SessionExtensionDescriptor = {
+      id: 'prefix-transform',
+      name: 'Prefix transform',
+      description: 'Adds a test prefix before provider input.',
+      version: '1',
+      settings: [{ id: 'prefix', type: 'text', label: 'Prefix', required: true }],
+    }
+    const extensionProvider: SessionExtensionProvider = {
+      descriptor: extensionDescriptor,
+      normalizeConfig: config => normalizeDeclarativeExtensionConfig(extensionDescriptor, config),
+      create: binding => ({
+        id: binding.id,
+        summary: { id: binding.id, name: extensionDescriptor.name, version: '1' },
+        prepareTurn: async input => ({ kind: 'ready', input }),
+        presentEvent: async event => [event],
+        lifecycle: async () => undefined,
+      }),
+    }
     const runner = new MatrixCvp3GatewayRunner(config, {
       client,
       onRejected: (_event, error) => rejected.push(error),
+      sessionExtensionRegistry: new SessionExtensionRegistry([extensionProvider]),
       sessionFactory: (room, port, session) => {
+        sessionExtensions.set(session.id, session.extensions)
         const sessionRecord = createTopicSessionRecord({
           id: session.id,
           cwd: room.cwd,
@@ -278,6 +305,19 @@ describe('MatrixCvp3GatewayRunner', () => {
       certificateId: 'certificate-1',
       createdAt: 1,
     }
+    await send({
+      ...base,
+      commandId: 'project-defaults-1',
+      operation: 'project.update',
+      payload: {
+        operation: 'project.update',
+        patch: {
+          defaultExtensions: [{ id: 'prefix-transform', config: { prefix: 'SAFE:' } }],
+        },
+      },
+    }, '$project-defaults-1')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'project-defaults-1'))
     const createA: Cvp3Command = {
       ...base,
       commandId: 'create-a',
@@ -291,6 +331,10 @@ describe('MatrixCvp3GatewayRunner', () => {
     await send(createA, '$root-a')
     await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
       .some(event => event.causationCommandId === 'create-a'))
+    expect(sessionExtensions.get('session-a')).toEqual([{
+      id: 'prefix-transform',
+      config: { prefix: 'SAFE:' },
+    }])
 
     const promptA: Cvp3Command = {
       ...base,

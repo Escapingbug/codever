@@ -52,7 +52,7 @@ function event(text: string): ConversationEvent {
 describe('session extension host', () => {
     it('is an exact pass-through for ordinary sessions', async () => {
         const host = new SessionExtensionHost()
-        const prepared = await host.prepareTurn('ordinary prompt', context, async () => false)
+        const prepared = await host.prepareTurn('ordinary prompt', context, async () => 'unused')
         const canonical = event('ordinary response')
 
         expect(prepared.input).toBe('ordinary prompt')
@@ -82,9 +82,9 @@ describe('session extension host', () => {
             lifecycle: async () => undefined,
         }
         const host = new SessionExtensionHost([extension])
-        const prepared = await host.prepareTurn('original prompt', context, async approval => {
-            expect(approval.title).toBe('Review exact outbound text')
-            return true
+        const prepared = await host.prepareTurn('original prompt', context, async interaction => {
+            expect(interaction.view.title).toBe('Review exact outbound text')
+            return 'allow'
         })
 
         expect(prepared.input).toBe('sanitized prompt')
@@ -106,7 +106,7 @@ describe('session extension host', () => {
             lifecycle: async () => undefined,
         })
         const host = new SessionExtensionHost([extension('A'), extension('B')])
-        const prepared = await host.prepareTurn('prompt', context, async () => true)
+        const prepared = await host.prepareTurn('prompt', context, async () => 'unused')
 
         expect(prepared.input).toBe('promptAB')
         expect(await host.presentEvent(event('responseAB'), context, prepared.stateRefs))
@@ -148,22 +148,31 @@ describe('session extension registry', () => {
         await expect(unavailable.prepareTurn('plaintext', context)).rejects.toThrow('blocked')
     })
 
-    it('accepts only administrator-owned loopback HTTP registrations', () => {
+    it('discovers manifests only from administrator-owned loopback registrations', async () => {
         const registration = JSON.stringify([{
-            descriptor,
             endpoint: 'http://127.0.0.1:8791',
             bearerToken: 'extension-secret-at-least-32-bytes',
+            expectedExtensionId: descriptor.id,
         }])
-        expect(createSessionExtensionRegistryFromEnvironment({
+        const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+            protocolVersion: 1,
+            descriptor,
+        }), { status: 200 }))
+        vi.stubGlobal('fetch', fetchImpl)
+        await expect(createSessionExtensionRegistryFromEnvironment({
             CODEVER_SESSION_EXTENSIONS_JSON: registration,
-        }).descriptors()).toEqual([descriptor])
-        expect(() => createSessionExtensionRegistryFromEnvironment({
+        })).resolves.toMatchObject({})
+        const registry = await createSessionExtensionRegistryFromEnvironment({
+            CODEVER_SESSION_EXTENSIONS_JSON: registration,
+        })
+        expect(registry.descriptors()).toEqual([descriptor])
+        await expect(createSessionExtensionRegistryFromEnvironment({
             CODEVER_SESSION_EXTENSIONS_JSON: JSON.stringify([{
-                descriptor,
                 endpoint: 'https://remote.example',
                 bearerToken: 'extension-secret-at-least-32-bytes',
             }]),
-        })).toThrow('loopback')
+        })).rejects.toThrow('loopback')
+        vi.unstubAllGlobals()
     })
 
     it('rejects unknown, missing, and mistyped declarative settings', () => {
@@ -181,20 +190,39 @@ describe('HTTP session extension boundary', () => {
         const requests: Array<{ path: string; body: Record<string, unknown> }> = []
         const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
             const path = new URL(String(url)).pathname
+            if (path === '/v1/manifest') {
+                return new Response(JSON.stringify({
+                    protocolVersion: 1,
+                    descriptor,
+                }), { status: 200 })
+            }
             const body = JSON.parse(String(init?.body)) as Record<string, unknown>
             requests.push({ path, body })
             if (path === '/v1/turns/prepare') {
                 return new Response(JSON.stringify({
-                    kind: 'approval_required',
+                    kind: 'interaction_required',
                     preparationToken: 'preview-1',
-                    approval: { title: 'Review' },
+                    cancelActionId: 'cancel',
+                    view: {
+                        version: 1,
+                        title: 'Review transformed input',
+                        elements: [{
+                            type: 'readonly_textarea',
+                            label: 'Agent input',
+                            value: 'PREFIX: private',
+                        }],
+                        actions: [
+                            { id: 'continue', label: 'Continue', style: 'primary' },
+                            { id: 'cancel', label: 'Cancel', style: 'secondary' },
+                        ],
+                    },
                 }), { status: 200 })
             }
-            if (path === '/v1/turns/commit') {
+            if (path === '/v1/interactions/respond') {
                 return new Response(JSON.stringify({
                     kind: 'ready',
-                    input: 'sanitized',
-                    stateRef: 'mapping-1',
+                    input: 'PREFIX: private',
+                    stateRef: 'transform-1',
                 }), { status: 200 })
             }
             if (path === '/v1/events/present') {
@@ -203,10 +231,10 @@ describe('HTTP session extension boundary', () => {
             }
             return new Response(JSON.stringify({ handled: true }), { status: 200 })
         }) as typeof fetch
-        const provider = new HttpSessionExtensionProvider({
-            descriptor,
+        const provider = await HttpSessionExtensionProvider.connect({
             endpoint: 'http://127.0.0.1:8791',
             bearerToken: 'extension-secret-at-least-32-bytes',
+            expectedExtensionId: descriptor.id,
             fetch: fetchImpl,
         })
         const instance = provider.create({
@@ -218,16 +246,16 @@ describe('HTTP session extension boundary', () => {
             providerName: 'test-provider',
         })
         const preparation = await instance.prepareTurn('private', context)
-        expect(preparation.kind).toBe('approval_required')
-        if (preparation.kind !== 'approval_required') throw new Error('expected approval')
-        await expect(preparation.approve()).resolves.toEqual({
+        expect(preparation.kind).toBe('interaction_required')
+        if (preparation.kind !== 'interaction_required') throw new Error('expected interaction')
+        await expect(preparation.respond('continue')).resolves.toEqual({
             kind: 'ready',
-            input: 'sanitized',
-            stateRef: 'mapping-1',
+            input: 'PREFIX: private',
+            stateRef: 'transform-1',
         })
         const canonical = event('sanitized response')
         canonical.meta.raw = { secretProviderEnvelope: true }
-        await expect(instance.presentEvent(canonical, context, 'mapping-1'))
+        await expect(instance.presentEvent(canonical, context, 'transform-1'))
             .resolves.toMatchObject([{ text: 'sanitized response' }])
         await expect(instance.presentEvent({
             kind: 'provider_raw',
@@ -237,11 +265,11 @@ describe('HTTP session extension boundary', () => {
                 providerName: 'test-provider',
                 rawMessage: { secretProviderEnvelope: true },
             },
-        }, context, 'mapping-1')).resolves.toEqual([])
+        }, context, 'transform-1')).resolves.toEqual([])
 
         expect(requests.map(request => request.path)).toEqual([
             '/v1/turns/prepare',
-            '/v1/turns/commit',
+            '/v1/interactions/respond',
             '/v1/events/present',
         ])
         const publicEvent = requests[2]?.body.event as ConversationEvent

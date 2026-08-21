@@ -271,7 +271,9 @@ export class MatrixCvp3GatewayRunner {
   ): Promise<void> {
     const command = journalRecord.command
     const activeKey = commandKey(command)
-    const sessionKey = `${project.config.roomId}\0${command.sessionId ?? command.commandId}`
+    const sessionKey = command.operation === 'project.update'
+      ? `${project.config.roomId}\0project-settings`
+      : `${project.config.roomId}\0${command.sessionId ?? command.commandId}`
     const bypassSessionQueue = command.operation === 'turn.cancel'
       || command.operation === 'decision.answer'
     const previous = bypassSessionQueue
@@ -322,6 +324,9 @@ export class MatrixCvp3GatewayRunner {
       case 'session.set_lifecycle':
         await this.setSessionLifecycle(project, command)
         return
+      case 'project.update':
+        await this.updateProject(project, command)
+        return
       case 'device.invitation.create':
         await this.createInvitation(project, command)
         return
@@ -347,11 +352,12 @@ export class MatrixCvp3GatewayRunner {
         ...(command.payload.initialPrompt
           ? { initialPrompt: command.payload.initialPrompt }
           : {}),
-        projection: projection(existing, 'idle'),
+        projection: projection(existing, 'idle', this.extensions),
         provider: existing.provider,
         ...(existing.model ? { model: existing.model } : {}),
         ...(existing.reasoningEffort ? { reasoningEffort: existing.reasoningEffort } : {}),
         permissionMode: existing.permissionMode,
+        extensionBindings: existing.extensions,
       })
       await this.settleAndDeliver(project, command, event, 'succeeded')
       return
@@ -374,7 +380,13 @@ export class MatrixCvp3GatewayRunner {
       reasoningEffort: settings.reasoningEffort,
       permissionMode: settings.permissionMode,
       providerSessionId: null,
-      extensions: this.extensions.normalizeBindings(command.payload.extensions),
+      extensions: this.extensions.normalizeBindings(
+        command.payload.extensions ?? project.project.defaultExtensions,
+      ),
+      extensionRevision: 1,
+      inheritedFromProjectExtensionRevision: command.payload.extensions === undefined
+        ? project.project.extensionDefaultsRevision
+        : null,
     }
     project.project.sessions.push(record)
     const runtime = this.createSessionRuntime(project, record)
@@ -394,11 +406,12 @@ export class MatrixCvp3GatewayRunner {
       ...(command.payload.initialPrompt
         ? { initialPrompt: command.payload.initialPrompt }
         : {}),
-      projection: projection(record, 'idle'),
+      projection: projection(record, 'idle', this.extensions),
       provider: record.provider,
       ...(record.model ? { model: record.model } : {}),
       ...(record.reasoningEffort ? { reasoningEffort: record.reasoningEffort } : {}),
       permissionMode: record.permissionMode,
+      extensionBindings: record.extensions,
     })
     if (!command.payload.initialPrompt) {
       await this.settleAndDeliver(project, command, ready, 'succeeded')
@@ -440,7 +453,7 @@ export class MatrixCvp3GatewayRunner {
         originDeviceId: command.deviceId,
         text: prompt.text,
         ...(prompt.attachments ? { attachments: prompt.attachments } : {}),
-        projection: projection(runtime.record, runtime.activity.phase),
+        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
       },
     ))
     this.transition(runtime, 'working')
@@ -453,7 +466,7 @@ export class MatrixCvp3GatewayRunner {
       {
         type: 'turn.started',
         turnId: command.commandId,
-        projection: projection(runtime.record, runtime.activity.phase),
+        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
       },
     ))
     runtime.port.setCausationCommandId(command.commandId)
@@ -482,7 +495,7 @@ export class MatrixCvp3GatewayRunner {
       type: 'turn.completed',
       turnId: command.commandId,
       outcome: 'succeeded',
-      projection: projection(runtime.record, runtime.activity.phase),
+      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
     })
     await this.settleAndDeliver(project, command, completed, 'succeeded')
     this.log(`[cvp3/matrix] turn ${command.commandId} completed`)
@@ -508,7 +521,7 @@ export class MatrixCvp3GatewayRunner {
       type: 'turn.completed',
       turnId: command.payload.turnId,
       outcome: 'cancelled',
-      projection: projection(runtime.record, runtime.activity.phase),
+      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
     })
     await this.settleAndDeliver(project, command, completed, 'succeeded')
   }
@@ -518,18 +531,30 @@ export class MatrixCvp3GatewayRunner {
     command: Cvp3CommandOf<'decision.answer'>,
   ): Promise<void> {
     const runtime = this.requireActiveSession(project, command.sessionId)
-    if (!runtime.port.resolveDecision(command.payload.requestId, command.payload.decision)) {
+    const decision = runtime.port.resolveDecision(
+      command.payload.requestId,
+      command.payload.decision,
+    )
+    if (!decision) {
       throw new Error(`Unknown or invalid decision request ${command.payload.requestId}`)
     }
     runtime.record.updatedAt = this.now()
     runtime.record.stateVersion += 1
     await this.persist(project)
-    const resolved = this.eventFor(project, runtime.record, command, 'decision-resolved', {
-      type: 'decision.resolved',
-      requestId: command.payload.requestId,
-      decision: command.payload.decision,
-      projection: projection(runtime.record, runtime.activity.phase),
-    })
+    const resolved = decision.kind === 'extension'
+      ? this.eventFor(project, runtime.record, command, 'extension-interaction-resolved', {
+        type: 'extension.interaction.resolved',
+        requestId: command.payload.requestId,
+        extensionId: decision.extensionId ?? 'unknown',
+        actionId: command.payload.decision,
+        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      })
+      : this.eventFor(project, runtime.record, command, 'decision-resolved', {
+        type: 'decision.resolved',
+        requestId: command.payload.requestId,
+        decision: command.payload.decision,
+        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      })
     await this.settleAndDeliver(project, command, resolved, 'succeeded')
   }
 
@@ -579,6 +604,9 @@ export class MatrixCvp3GatewayRunner {
       const bindings = this.extensions.normalizeBindings(patch.extensions)
       await this.destroySessionRuntime(runtime, 'replace')
       runtime.record.extensions = bindings
+      runtime.record.extensionRevision += 1
+      runtime.record.inheritedFromProjectExtensionRevision = null
+      runtime.record.providerSessionId = null
       runtime = this.createSessionRuntime(project, runtime.record)
       project.sessions.set(runtime.record.id, runtime)
     }
@@ -587,8 +615,10 @@ export class MatrixCvp3GatewayRunner {
     await this.persist(project)
     const updated = this.eventFor(project, runtime.record, command, 'session-updated', {
       type: 'session.updated',
-      projection: projection(runtime.record, runtime.activity.phase),
-      patch,
+      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      patch: patch.extensions === undefined
+        ? patch
+        : { ...patch, extensions: runtime.record.extensions },
     })
     await this.settleAndDeliver(project, command, updated, 'succeeded')
   }
@@ -625,7 +655,7 @@ export class MatrixCvp3GatewayRunner {
     }
     const lifecycle = this.eventFor(project, record, command, 'session-lifecycle', {
       type: 'session.lifecycle',
-      projection: projection(record, 'idle'),
+      projection: projection(record, 'idle', this.extensions),
       state: target,
       ...(alreadyApplied ? { alreadyApplied: true } : {}),
     })
@@ -657,6 +687,44 @@ export class MatrixCvp3GatewayRunner {
     })
   }
 
+  private async updateProject(
+    project: V3ProjectRuntime,
+    command: Cvp3CommandOf<'project.update'>,
+  ): Promise<void> {
+    project.project.defaultExtensions = this.extensions.normalizeBindings(
+      command.payload.patch.defaultExtensions,
+    )
+    project.project.extensionDefaultsRevision += 1
+    project.project.snapshotVersion += 1
+    await this.persist(project)
+    await this.publishProjectSnapshot(project)
+    const event: Cvp3Event = {
+      kind: 'codever.event',
+      version: 3,
+      eventId: logicalEventId(command, 'project-updated'),
+      workspaceId: this.config.gatewayId,
+      projectId: project.project.projectId,
+      occurredAt: this.now(),
+      causationCommandId: command.commandId,
+      payload: {
+        type: 'project.snapshot',
+        name: project.project.name,
+        cwd: project.project.cwd,
+        provider: project.project.provider,
+        ...(project.project.model ? { model: project.project.model } : {}),
+        ...(project.project.reasoningEffort
+          ? { reasoningEffort: project.project.reasoningEffort }
+          : {}),
+        permissionMode: project.project.permissionMode,
+        installedExtensions: this.extensions.descriptors(),
+        defaultExtensions: project.project.defaultExtensions,
+        extensionDefaultsRevision: project.project.extensionDefaultsRevision,
+        snapshotVersion: project.project.snapshotVersion,
+      },
+    }
+    await this.settleAndDeliver(project, command, event, 'succeeded')
+  }
+
   private async failCommand(
     project: V3ProjectRuntime,
     command: Cvp3Command,
@@ -674,7 +742,7 @@ export class MatrixCvp3GatewayRunner {
         turnId: command.commandId,
         code: 'execution_failed',
         message: formatError(error),
-        projection: projection(runtime.record, runtime.activity.phase),
+        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
       }
     } else {
       payload = {
@@ -864,7 +932,7 @@ export class MatrixCvp3GatewayRunner {
       projectId: project.project.projectId,
       sessionId: record.id,
       threadRootEventId: record.threadRootEventId,
-      projection: () => projection(record, activity.phase),
+      projection: () => projection(record, activity.phase, this.extensions),
       now: () => this.now(),
       onLog: this.dependencies.onLog,
       onStatusChange: status => {
@@ -1017,6 +1085,9 @@ export class MatrixCvp3GatewayRunner {
           ? { reasoningEffort: project.project.reasoningEffort }
           : {}),
         permissionMode: project.project.permissionMode,
+        installedExtensions: this.extensions.descriptors(),
+        defaultExtensions: project.project.defaultExtensions,
+        extensionDefaultsRevision: project.project.extensionDefaultsRevision,
         snapshotVersion: project.project.snapshotVersion,
       },
     }
@@ -1194,6 +1265,7 @@ export class MatrixCvp3GatewayRunner {
 function projection(
   record: PersistedCvp3Session,
   activity: Cvp3SessionProjection['activity'],
+  extensions: SessionExtensionRegistry,
 ): Cvp3SessionProjection {
   return {
     title: record.title,
@@ -1201,6 +1273,8 @@ function projection(
     activity,
     updatedAt: record.updatedAt,
     stateVersion: record.stateVersion,
+    extensions: extensions.summaries(record.extensions),
+    extensionRevision: record.extensionRevision,
   }
 }
 

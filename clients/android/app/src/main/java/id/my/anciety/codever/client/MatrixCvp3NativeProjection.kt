@@ -49,6 +49,9 @@ internal class MatrixCvp3NativeProjection(
         val model: String?,
         val reasoningEffort: String?,
         val permissionMode: String,
+        val installedExtensions: JsonArray,
+        val defaultExtensions: JsonArray,
+        val extensionDefaultsRevision: Long,
     )
 
     private data class WorkspaceCapabilities(
@@ -69,6 +72,8 @@ internal class MatrixCvp3NativeProjection(
         val model: String?,
         val reasoningEffort: String?,
         val permissionMode: String?,
+        val extensions: JsonArray,
+        val extensionRevision: Long,
     )
 
     private var project: Project? = null
@@ -113,6 +118,8 @@ internal class MatrixCvp3NativeProjection(
                     model = payload.optionalString("model", 256),
                     reasoningEffort = payload.optionalString("reasoningEffort", 64),
                     permissionMode = payload.optionalString("permissionMode", 128),
+                    extensions = payload["extensions"] as? JsonArray ?: JsonArray(emptyList()),
+                    extensionRevision = 1,
                 )
                 MatrixCvp3NativeProjectionResult(
                     messages = initial?.let {
@@ -193,6 +200,13 @@ internal class MatrixCvp3NativeProjection(
                     model = payload.optionalString("model", 256),
                     reasoningEffort = payload.optionalString("reasoningEffort", 64),
                     permissionMode = payload.requiredString("permissionMode", 128),
+                    installedExtensions = payload["installedExtensions"] as? JsonArray
+                        ?: JsonArray(emptyList()),
+                    defaultExtensions = payload["defaultExtensions"] as? JsonArray
+                        ?: JsonArray(emptyList()),
+                    extensionDefaultsRevision = payload.optionalLong("extensionDefaultsRevision")
+                        ?.takeIf { it > 0 }
+                        ?: 1,
                 )
                 return MatrixCvp3NativeProjectionResult(changed = true)
             }
@@ -292,6 +306,23 @@ internal class MatrixCvp3NativeProjection(
                     semantic = payload,
                 ))
             }
+            "extension.interaction.requested" -> if (sessionId != null) {
+                val requestId = payload.requiredString("requestId", 256)
+                val view = payload.requiredObject("view")
+                messages = listOf(ClientMessage(
+                    eventId = "decision:$requestId",
+                    sender = gatewayId(),
+                    timestamp = occurredAt,
+                    encrypted = true,
+                    kind = ClientMessageKind.PERMISSION,
+                    format = ClientMessageFormat.PLAIN,
+                    text = view.requiredString("title", 256),
+                    sessionId = sessionId,
+                    requestId = requestId,
+                    commandId = causation,
+                    semantic = payload,
+                ))
+            }
             "turn.failed" -> if (sessionId != null) {
                 val turnId = payload.requiredString("turnId", 256)
                 messages = listOf(ClientMessage(
@@ -347,8 +378,13 @@ internal class MatrixCvp3NativeProjection(
                 activeProject.model?.let { put("model", it) }
                 activeProject.reasoningEffort?.let { put("reasoning_effort", it) }
                 put("permission_mode", activeProject.permissionMode)
+                put("default_extensions", activeProject.defaultExtensions)
+                put("extension_defaults_revision", activeProject.extensionDefaultsRevision)
             })
-            put("capabilities", workspaceCapabilities?.value ?: defaultCapabilities())
+            put(
+                "capabilities",
+                workspaceCapabilities?.value ?: defaultCapabilities(activeProject.installedExtensions),
+            )
         }
     }
 
@@ -392,6 +428,9 @@ internal class MatrixCvp3NativeProjection(
                 activeProject.model?.let { put("model", it) }
                 activeProject.reasoningEffort?.let { put("reasoningEffort", it) }
                 put("permissionMode", activeProject.permissionMode)
+                put("installedExtensions", activeProject.installedExtensions)
+                put("defaultExtensions", activeProject.defaultExtensions)
+                put("extensionDefaultsRevision", activeProject.extensionDefaultsRevision)
             })
         }
         put("sessions", buildJsonArray {
@@ -409,6 +448,8 @@ internal class MatrixCvp3NativeProjection(
                     session.model?.let { put("model", it) }
                     session.reasoningEffort?.let { put("reasoningEffort", it) }
                     session.permissionMode?.let { put("permissionMode", it) }
+                    put("extensions", session.extensions)
+                    put("extensionRevision", session.extensionRevision)
                 })
             }
         })
@@ -442,6 +483,13 @@ internal class MatrixCvp3NativeProjection(
                 model = it.optionalString("model", 256),
                 reasoningEffort = it.optionalString("reasoningEffort", 64),
                 permissionMode = it.requiredString("permissionMode", 128),
+                installedExtensions = it["installedExtensions"] as? JsonArray
+                    ?: JsonArray(emptyList()),
+                defaultExtensions = it["defaultExtensions"] as? JsonArray
+                    ?: JsonArray(emptyList()),
+                extensionDefaultsRevision = it.optionalLong("extensionDefaultsRevision")
+                    ?.takeIf { version -> version > 0 }
+                    ?: 1,
             )
         }
         val restoredSessions = value["sessions"] as? JsonArray
@@ -467,6 +515,10 @@ internal class MatrixCvp3NativeProjection(
                 model = session.optionalString("model", 256),
                 reasoningEffort = session.optionalString("reasoningEffort", 64),
                 permissionMode = session.optionalString("permissionMode", 128),
+                extensions = session["extensions"] as? JsonArray ?: JsonArray(emptyList()),
+                extensionRevision = session.optionalLong("extensionRevision")
+                    ?.takeIf { it > 0 }
+                    ?: 1,
             )
         }
         (value["seenEvents"] as? JsonArray).orEmpty().takeLast(MAX_SEEN_IDS).forEach {
@@ -527,6 +579,13 @@ internal class MatrixCvp3NativeProjection(
         model = model,
         reasoningEffort = reasoningEffort,
         permissionMode = permissionMode,
+        extensions = projection["extensions"] as? JsonArray
+            ?: sessions[sessionId]?.extensions
+            ?: JsonArray(emptyList()),
+        extensionRevision = projection.optionalLong("extensionRevision")
+            ?.takeIf { it > 0 }
+            ?: sessions[sessionId]?.extensionRevision
+            ?: 1,
     )
 
     private fun terminal(
@@ -538,7 +597,8 @@ internal class MatrixCvp3NativeProjection(
     ): MatrixCvp3NativeTerminal? {
         commandId ?: return null
         return when (type) {
-            "session.ready", "session.updated", "session.lifecycle", "decision.resolved" ->
+            "session.ready", "session.updated", "session.lifecycle", "decision.resolved",
+            "extension.interaction.resolved", "project.snapshot" ->
                 MatrixCvp3NativeTerminal(commandId, "succeeded", sessionId)
             "turn.completed" -> MatrixCvp3NativeTerminal(
                 commandId,
@@ -617,7 +677,7 @@ internal class MatrixCvp3NativeProjection(
         put("provider", session.provider ?: project.provider)
         (session.model ?: project.model)?.let { put("model", it) }
         (session.reasoningEffort ?: project.reasoningEffort)?.let { put("reasoning_effort", it) }
-        put("extensions", JsonArray(emptyList()))
+        put("extensions", session.extensions)
     }
 
     private fun validateCapabilities(value: JsonObject) {
@@ -724,7 +784,9 @@ internal class MatrixCvp3NativeProjection(
         requireUniqueIds(extensions, "CVP/3 extension capabilities")
     }
 
-    private fun defaultCapabilities(): JsonObject = buildJsonObject {
+    private fun defaultCapabilities(
+        installedExtensions: JsonArray = JsonArray(emptyList()),
+    ): JsonObject = buildJsonObject {
         put("models", JsonArray(emptyList()))
         put("permission_modes", buildJsonArray {
             add(buildJsonObject { put("id", "default"); put("name", "Default") })
@@ -733,7 +795,7 @@ internal class MatrixCvp3NativeProjection(
         put("can_select_session", false)
         put("can_archive_session", true)
         put("can_delete_session", true)
-        put("session_extensions", JsonArray(emptyList()))
+        put("session_extensions", installedExtensions)
     }
 
     private fun titleFromPrompt(text: String): String {
@@ -772,6 +834,12 @@ private fun JsonObject.requiredPositiveLong(key: String): Long = requiredLong(ke
 }
 
 private fun JsonObject.optionalInt(key: String): Int? = get(key)?.jsonPrimitive?.intOrNull
+
+private fun JsonObject.optionalLong(key: String): Long? {
+    val primitive = get(key) as? JsonPrimitive ?: return null
+    require(!primitive.isString)
+    return primitive.longOrNull
+}
 
 private fun JsonObject.requiredBoolean(key: String): Boolean {
     val value = get(key)?.jsonPrimitive?.contentOrNull

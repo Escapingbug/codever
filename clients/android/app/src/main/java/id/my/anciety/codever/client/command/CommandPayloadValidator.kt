@@ -72,22 +72,10 @@ data class CancelCommandPayload(
     override val operation = CommandOperation.CANCEL
 }
 
-enum class CommandDecision(val wireName: String) {
-    ALLOW_ONCE("allow_once"),
-    ALLOW_SESSION("allow_session"),
-    DENY("deny"),
-    ;
-
-    companion object {
-        fun fromWireName(value: String): CommandDecision = entries.firstOrNull { it.wireName == value }
-            ?: throw IllegalArgumentException("Command decision is invalid.")
-    }
-}
-
 data class DecisionCommandPayload(
     override val sessionId: String,
     val requestId: String,
-    val decision: CommandDecision,
+    val decision: String,
 ) : ValidatedCommandPayload {
     override val operation = CommandOperation.DECISION
 }
@@ -227,10 +215,12 @@ object CommandPayloadValidator {
 
     private fun validateDecision(value: JsonObject): DecisionCommandPayload {
         value.requireExactKeys(setOf("operation", "sessionId", "requestId", "decision"))
+        val decision = value.requiredString("decision", 32)
+        require(ACTION_ID.matches(decision)) { "Command decision is invalid." }
         return DecisionCommandPayload(
             sessionId = value.requiredOpaqueId("sessionId"),
             requestId = value.requiredOpaqueId("requestId"),
-            decision = CommandDecision.fromWireName(value.requiredString("decision", 64)),
+            decision = decision,
         )
     }
 
@@ -352,6 +342,7 @@ object CommandPayloadValidator {
     }
 
     private val BASE64_URL = Regex("^[A-Za-z0-9_-]+$")
+    private val ACTION_ID = Regex("^[a-z][a-z0-9._-]*$")
 
     private fun isMxcUrl(value: String): Boolean {
         if (!value.startsWith("mxc://")) return false

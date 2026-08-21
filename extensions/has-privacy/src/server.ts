@@ -27,6 +27,17 @@ export function createHasExtensionServer(options: HasExtensionServerOptions): Se
                 })
                 return
             }
+            if (request.method === 'GET' && request.url === '/v1/manifest') {
+                if (!authorized(request.headers.authorization, options.bearerToken)) {
+                    sendJson(response, 401, { error: 'Unauthorized' })
+                    return
+                }
+                sendJson(response, 200, {
+                    protocolVersion: 1,
+                    descriptor: hasSessionExtensionDescriptor,
+                })
+                return
+            }
             if (request.method !== 'POST') {
                 sendJson(response, 404, { error: 'Not found' })
                 return
@@ -55,6 +66,7 @@ function handlers(
 ): ReadonlyMap<string, (body: unknown) => Promise<Record<string, unknown>>> {
     return new Map([
         ['/v1/turns/prepare', body => service.prepare(body)],
+        ['/v1/interactions/respond', body => service.respond(body)],
         ['/v1/turns/commit', body => service.commit(body)],
         ['/v1/turns/reject', body => service.reject(body)],
         ['/v1/events/present', body => service.present(body)],

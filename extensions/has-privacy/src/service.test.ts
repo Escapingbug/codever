@@ -77,15 +77,20 @@ describe('HaS session extension', () => {
         })
 
         expect(prepared).toMatchObject({
-            kind: 'approval_required',
-            approval: {
-                details: expect.stringContaining('请总结李四（contact001@example.cn）的记录'),
+            kind: 'interaction_required',
+            cancelActionId: 'cancel',
+            view: {
+                elements: expect.arrayContaining([expect.objectContaining({
+                    type: 'readonly_textarea',
+                    value: '请总结李四（contact001@example.cn）的记录',
+                })]),
             },
         })
-        const committed = await service.commit({
+        const committed = await service.respond({
             session,
             turn,
             preparationToken: prepared.preparationToken,
+            actionId: 'send',
         })
         expect(committed).toMatchObject({
             kind: 'ready',
@@ -212,6 +217,12 @@ describe('HaS session extension', () => {
             const base = `http://127.0.0.1:${address.port}`
             await expect(fetch(`${base}/health`).then(response => response.json()))
                 .resolves.toMatchObject({ status: 'ok', extension: { id: 'has-privacy' } })
+            await expect(fetch(`${base}/v1/manifest`, {
+                headers: { authorization: 'Bearer extension-secret-at-least-32-bytes' },
+            }).then(response => response.json())).resolves.toMatchObject({
+                protocolVersion: 1,
+                descriptor: { id: 'has-privacy' },
+            })
             await expect(fetch(`${base}/v1/turns/prepare`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -226,9 +237,31 @@ describe('HaS session extension', () => {
                 body: JSON.stringify({ session, turn, binding, input: '张三' }),
             })
             expect(response.status).toBe(200)
-            await expect(response.json()).resolves.toMatchObject({
-                kind: 'approval_required',
-                approval: { details: expect.stringContaining('李四') },
+            const prepared = await response.json() as Record<string, unknown>
+            expect(prepared).toMatchObject({
+                kind: 'interaction_required',
+                view: {
+                    elements: expect.arrayContaining([expect.objectContaining({
+                        type: 'readonly_textarea',
+                        value: '李四',
+                    })]),
+                },
+            })
+            await expect(fetch(`${base}/v1/interactions/respond`, {
+                method: 'POST',
+                headers: {
+                    authorization: 'Bearer extension-secret-at-least-32-bytes',
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                    session,
+                    turn,
+                    preparationToken: prepared.preparationToken,
+                    actionId: 'send',
+                }),
+            }).then(result => result.json())).resolves.toMatchObject({
+                kind: 'ready',
+                input: '李四',
             })
         } finally {
             await new Promise<void>((resolve, reject) =>

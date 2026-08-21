@@ -25,6 +25,7 @@ import {
   type MatrixSessionDirectoryPage,
   type MatrixStateContent,
   type SignedCommand,
+  type SessionExtensionBinding,
 } from "@codever/protocol";
 import {
   generateDeviceKeyPair,
@@ -104,6 +105,7 @@ import {
 } from "./gatewayState";
 import {
   messageFormat,
+  parseExtensionViewPresentation,
   parseToolGroupPresentation,
   type MessageFormat,
   type ToolGroupPresentation,
@@ -331,6 +333,9 @@ export type MatrixConnection = {
     signal?: AbortSignal,
   ): Promise<TrustedGateway>;
   send(payload: CommandPayload): Promise<CommandSendResult>;
+  updateProjectExtensions?(
+    extensions: SessionExtensionBinding[],
+  ): Promise<CommandSendResult>;
   recoverCommand(commandId: string): Promise<CommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;
   downloadAttachment(attachment: CodeverAttachment): Promise<Blob>;
@@ -3039,6 +3044,26 @@ export function parseCodeverEvent(
       ...(typeof effectiveExtension.decision_id === "string"
         ? { requestId: effectiveExtension.decision_id }
         : {}),
+      raw: effectiveExtension,
+    };
+  }
+  if (effectiveExtension.kind === "extension_view") {
+    const presentation = parseExtensionViewPresentation(effectiveExtension);
+    if (
+      !presentation ||
+      typeof effectiveExtension.interaction_id !== "string" ||
+      !effectiveExtension.interaction_id
+    ) return null;
+    return {
+      eventId,
+      sender,
+      timestamp,
+      encrypted,
+      ...collaborationMetadata,
+      kind: "permission",
+      text: presentation.view.title,
+      format: "plain",
+      requestId: effectiveExtension.interaction_id,
       raw: effectiveExtension,
     };
   }

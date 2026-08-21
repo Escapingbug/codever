@@ -1,8 +1,10 @@
-import type {
-    JsonValue,
-    SessionExtensionBinding,
-    SessionExtensionDescriptor,
-    SessionExtensionSummary,
+import {
+    sessionExtensionManifestSchema,
+    sessionExtensionViewSchema,
+    type JsonValue,
+    type SessionExtensionBinding,
+    type SessionExtensionDescriptor,
+    type SessionExtensionSummary,
 } from '@codever/protocol'
 import type { ConversationEvent, RichUserInput } from './semantic'
 import {
@@ -20,9 +22,9 @@ const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_ERROR_CHARS = 500
 
 export interface HttpSessionExtensionProviderOptions {
-    descriptor: SessionExtensionDescriptor
     endpoint: string
     bearerToken: string
+    expectedExtensionId?: string
     timeoutMs?: number
     fetch?: typeof fetch
 }
@@ -32,13 +34,16 @@ export interface HttpSessionExtensionProviderOptions {
  * deliberately loopback-only; remote registration is outside the trust model.
  */
 export class HttpSessionExtensionProvider implements SessionExtensionProvider {
-    readonly descriptor: SessionExtensionDescriptor
+    descriptor: SessionExtensionDescriptor
     private readonly endpoint: string
     private readonly bearerToken: string
     private readonly timeoutMs: number
     private readonly fetchImpl: typeof fetch
 
-    constructor(options: HttpSessionExtensionProviderOptions) {
+    private constructor(
+        options: HttpSessionExtensionProviderOptions,
+        descriptor: SessionExtensionDescriptor,
+    ) {
         const endpoint = new URL(options.endpoint)
         if (
             endpoint.protocol !== 'http:'
@@ -53,11 +58,36 @@ export class HttpSessionExtensionProvider implements SessionExtensionProvider {
         if (Buffer.byteLength(options.bearerToken, 'utf8') < 32) {
             throw new Error('Session extension bearer token must contain at least 32 bytes')
         }
-        this.descriptor = structuredClone(options.descriptor)
+        this.descriptor = structuredClone(descriptor)
         this.endpoint = endpoint.toString().replace(/\/$/u, '')
         this.bearerToken = options.bearerToken
         this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
         this.fetchImpl = options.fetch ?? fetch
+    }
+
+    static async connect(
+        options: HttpSessionExtensionProviderOptions,
+    ): Promise<HttpSessionExtensionProvider> {
+        const provider = new HttpSessionExtensionProvider(options, {
+            id: 'pending',
+            name: 'Pending extension',
+            description: 'Pending extension manifest discovery',
+            version: '0',
+            settings: [],
+        })
+        const manifest = sessionExtensionManifestSchema.parse(
+            await provider.requestManifest(),
+        )
+        if (
+            options.expectedExtensionId
+            && manifest.descriptor.id !== options.expectedExtensionId
+        ) {
+            throw new Error(
+                `Session extension identity mismatch: expected ${options.expectedExtensionId}, got ${manifest.descriptor.id}`,
+            )
+        }
+        provider.descriptor = structuredClone(manifest.descriptor)
+        return provider
     }
 
     normalizeConfig(config: Record<string, JsonValue> | undefined): Record<string, JsonValue> {
@@ -74,6 +104,34 @@ export class HttpSessionExtensionProvider implements SessionExtensionProvider {
             this.timeoutMs,
             this.fetchImpl,
         )
+    }
+
+    private async requestManifest(): Promise<unknown> {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+        try {
+            let response: Response
+            try {
+                response = await this.fetchImpl(`${this.endpoint}/v1/manifest`, {
+                    method: 'GET',
+                    headers: { authorization: `Bearer ${this.bearerToken}` },
+                    signal: controller.signal,
+                })
+            } catch (error) {
+                const detail = controller.signal.aborted ? 'timed out' : safeError(error)
+                throw new Error(`Session extension manifest is unavailable: ${detail}`)
+            }
+            if (!response.ok) {
+                throw new Error(`Session extension manifest request failed with HTTP ${response.status}`)
+            }
+            try {
+                return await response.json()
+            } catch {
+                throw new Error('Session extension returned an invalid manifest')
+            }
+        } finally {
+            clearTimeout(timer)
+        }
     }
 }
 
@@ -109,6 +167,29 @@ class HttpSessionExtensionInstance implements SessionExtensionInstance {
             input,
         })
         if (response.kind === 'ready') return readyTurn(response)
+        if (response.kind === 'interaction_required') {
+            const token = requireText(response.preparationToken, 'preparation token')
+            const view = sessionExtensionViewSchema.parse(response.view)
+            const cancelActionId = requireText(response.cancelActionId, 'cancel action ID')
+            if (!view.actions.some(action => action.id === cancelActionId)) {
+                throw new Error(`${this.id} returned an invalid cancel action`)
+            }
+            return {
+                kind: 'interaction_required',
+                view,
+                cancelActionId,
+                respond: async actionId => {
+                    const result = await this.request('/v1/interactions/respond', {
+                        session: this.sessionPayload(),
+                        turn: context,
+                        preparationToken: token,
+                        actionId,
+                    })
+                    if (result.kind === 'cancelled') return { kind: 'cancelled' }
+                    return readyTurn(result)
+                },
+            }
+        }
         if (response.kind !== 'approval_required') {
             throw new Error(`${this.id} returned an invalid turn preparation`)
         }
@@ -218,6 +299,7 @@ class HttpSessionExtensionInstance implements SessionExtensionInstance {
             clearTimeout(timer)
         }
     }
+
 }
 
 function readyTurn(value: Record<string, unknown>): ReadySessionExtensionTurn {

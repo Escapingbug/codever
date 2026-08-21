@@ -7,6 +7,7 @@ import type {
 import type {
   CodeverAttachment,
   CommandPayload,
+  SessionExtensionBinding,
 } from "@codever/protocol";
 import type { CommandCompletion } from "../commandLifecycle";
 import type { MatrixLoginTokenResult } from "../matrixAuth";
@@ -93,6 +94,9 @@ export interface CodeverClient {
     password?: string,
   ): Promise<MatrixLoginTokenResult>;
   send(payload: CommandPayload): Promise<CodeverCommandSendResult>;
+  updateProjectExtensions?(
+    extensions: SessionExtensionBinding[],
+  ): Promise<CodeverCommandSendResult>;
   recoverCommand(commandId: string): Promise<CodeverCommandSendResult>;
   uploadAttachment(file: File): Promise<CodeverAttachment>;
   downloadAttachment(attachment: CodeverAttachment): Promise<Blob>;

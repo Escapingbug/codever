@@ -69,6 +69,24 @@ describe("MatrixCvp3Projection", () => {
     restored.restore(projection.durableState());
     expect(restored.workspace).toEqual(projection.workspace);
   });
+
+  it("projects extension defaults and resolves an interaction on every device", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(projectSnapshot(), "$project");
+    projection.applyCommand(createCommand("a"), "$root-a");
+    projection.applyEvent(extensionInteraction("requested"), "$request");
+    projection.applyEvent(extensionInteraction("resolved"), "$resolved");
+
+    expect(projection.project).toMatchObject({
+      defaultExtensions: [{ id: "prefix-transform" }],
+      installedExtensions: [{ id: "prefix-transform" }],
+    });
+    expect(projection.messages.get("decision:extension-request-1")).toMatchObject({
+      resolvedActionId: "continue",
+      physicalEventId: "$resolved",
+      version: 2,
+    });
+  });
 });
 
 function workspaceSnapshot(snapshotVersion: number, model: string): Cvp3Event {
@@ -99,6 +117,82 @@ function workspaceSnapshot(snapshotVersion: number, model: string): Cvp3Event {
         session_extensions: [],
       },
       snapshotVersion,
+    },
+  };
+}
+
+function projectSnapshot(): Cvp3Event {
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: "project-snapshot-1",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    occurredAt: 1,
+    payload: {
+      type: "project.snapshot",
+      name: "Project",
+      cwd: "/repo",
+      provider: "test",
+      permissionMode: "default",
+      installedExtensions: [{
+        id: "prefix-transform",
+        name: "Prefix transform",
+        description: "Adds a prefix.",
+        version: "1",
+        settings: [],
+      }],
+      defaultExtensions: [{ id: "prefix-transform" }],
+      extensionDefaultsRevision: 2,
+      snapshotVersion: 2,
+    },
+  };
+}
+
+function extensionInteraction(stage: "requested" | "resolved"): Cvp3Event {
+  const common = {
+    kind: "codever.event" as const,
+    version: 3 as const,
+    eventId: `extension-${stage}-1`,
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: "session-a",
+    occurredAt: stage === "requested" ? 2 : 3,
+  };
+  const projection = {
+    title: "A",
+    lifecycle: "active" as const,
+    activity: "attention" as const,
+    updatedAt: 2,
+    stateVersion: 2,
+  };
+  return stage === "requested" ? {
+    ...common,
+    payload: {
+      type: "extension.interaction.requested",
+      requestId: "extension-request-1",
+      extension: { id: "prefix-transform", name: "Prefix transform", version: "1" },
+      cancelActionId: "cancel",
+      view: {
+        version: 1,
+        title: "Review transformed input",
+        elements: [{ type: "readonly_textarea", label: "Agent input", value: "SAFE: hello" }],
+        actions: [
+          { id: "continue", label: "Continue", style: "primary" },
+          { id: "cancel", label: "Cancel", style: "secondary" },
+        ],
+      },
+      projection,
+    },
+  } : {
+    ...common,
+    causationCommandId: "answer-1",
+    payload: {
+      type: "extension.interaction.resolved",
+      requestId: "extension-request-1",
+      extensionId: "prefix-transform",
+      actionId: "continue",
+      projection: { ...projection, activity: "working", updatedAt: 3, stateVersion: 3 },
     },
   };
 }

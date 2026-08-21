@@ -1,9 +1,11 @@
 import {
     sessionExtensionDescriptorSchema,
+    sessionExtensionViewSchema,
     type JsonValue,
     type SessionExtensionBinding,
     type SessionExtensionDescriptor,
     type SessionExtensionSummary,
+    type SessionExtensionView,
 } from '@codever/protocol'
 import type { ConversationEvent, RichUserInput } from './semantic'
 
@@ -42,9 +44,27 @@ export interface ApprovalRequiredSessionExtensionTurn {
     reject?(): Promise<void>
 }
 
+export interface CancelledSessionExtensionTurn {
+    kind: 'cancelled'
+}
+
+export interface InteractionRequiredSessionExtensionTurn {
+    kind: 'interaction_required'
+    view: SessionExtensionView
+    cancelActionId: string
+    respond(actionId: string): Promise<ReadySessionExtensionTurn | CancelledSessionExtensionTurn>
+}
+
 export type SessionExtensionTurnPreparation =
     | ReadySessionExtensionTurn
     | ApprovalRequiredSessionExtensionTurn
+    | InteractionRequiredSessionExtensionTurn
+
+export interface SessionExtensionInteractionRequest {
+    extension: SessionExtensionSummary
+    view: SessionExtensionView
+    cancelActionId: string
+}
 
 export interface SessionExtensionInstance {
     readonly id: string
@@ -77,7 +97,7 @@ export interface PreparedExtensionTurn {
 
 export class SessionExtensionRejectedError extends Error {
     constructor(readonly extensionId: string) {
-        super(`Session extension ${extensionId} approval was denied`)
+        super(`Session extension ${extensionId} interaction was cancelled`)
         this.name = 'SessionExtensionRejectedError'
     }
 }
@@ -96,19 +116,61 @@ export class SessionExtensionHost {
     async prepareTurn(
         input: string | RichUserInput,
         context: SessionExtensionTurnContext,
-        requestApproval: (approval: SessionExtensionApproval) => Promise<boolean>,
+        requestInteraction: (request: SessionExtensionInteractionRequest) => Promise<string>,
     ): Promise<PreparedExtensionTurn> {
         let preparedInput = input
         const stateRefs = new Map<string, string | undefined>()
         for (const extension of this.extensions) {
             let prepared = await extension.prepareTurn(preparedInput, context)
             if (prepared.kind === 'approval_required') {
-                const approved = await requestApproval(prepared.approval)
-                if (!approved) {
+                const actionId = await requestInteraction({
+                    extension: extension.summary,
+                    view: {
+                        version: 1,
+                        title: prepared.approval.title,
+                        elements: prepared.approval.details
+                            ? [{ type: 'text', text: prepared.approval.details }]
+                            : [],
+                        actions: [
+                            {
+                                id: 'allow',
+                                label: prepared.approval.approveLabel ?? 'Continue',
+                                style: 'primary',
+                            },
+                            {
+                                id: 'deny',
+                                label: prepared.approval.denyLabel ?? 'Cancel',
+                                style: 'secondary',
+                            },
+                        ],
+                    },
+                    cancelActionId: 'deny',
+                })
+                if (actionId !== 'allow') {
                     await prepared.reject?.()
                     throw new SessionExtensionRejectedError(extension.id)
                 }
                 prepared = await prepared.approve()
+            }
+            if (prepared.kind === 'interaction_required') {
+                const interaction = prepared
+                const view = sessionExtensionViewSchema.parse(interaction.view)
+                if (!view.actions.some(action => action.id === interaction.cancelActionId)) {
+                    throw new Error(`Session extension ${extension.id} returned an invalid cancel action`)
+                }
+                const actionId = await requestInteraction({
+                    extension: extension.summary,
+                    view,
+                    cancelActionId: interaction.cancelActionId,
+                })
+                if (!view.actions.some(action => action.id === actionId)) {
+                    throw new Error(`Session extension ${extension.id} received an invalid action`)
+                }
+                const result = await interaction.respond(actionId)
+                if (result.kind === 'cancelled') {
+                    throw new SessionExtensionRejectedError(extension.id)
+                }
+                prepared = result
             }
             preparedInput = prepared.input
             stateRefs.set(extension.id, prepared.stateRef)

@@ -1,5 +1,9 @@
 import type { JsonObject } from "@codever/native-bridge";
-import type { CommandPayload, CodeverAttachment } from "@codever/protocol";
+import type {
+  CommandPayload,
+  CodeverAttachment,
+  SessionExtensionBinding,
+} from "@codever/protocol";
 import type { CommandCompletion } from "../../commandLifecycle";
 import {
   requestMatrixLoginToken,
@@ -73,6 +77,17 @@ export class WebCodeverClient implements CodeverClient {
 
   async send(payload: CommandPayload): Promise<CodeverCommandSendResult> {
     return commandResultFromWeb(await this.transport.send(payload));
+  }
+
+  async updateProjectExtensions(
+    extensions: SessionExtensionBinding[],
+  ): Promise<CodeverCommandSendResult> {
+    if (!this.transport.updateProjectExtensions) {
+      throw new Error("This connection cannot update project extension defaults.");
+    }
+    return commandResultFromWeb(
+      await this.transport.updateProjectExtensions(extensions),
+    );
   }
 
   requestMatrixLoginToken(

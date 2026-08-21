@@ -19,6 +19,7 @@ import type {
   DecisionResponse,
   SessionStatus,
 } from '@/bridge/channelPort'
+import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
 import type { MatrixGatewayRoomConfig } from '@/gateway/matrix/config'
 import type { GatewayCvp3ContentLayer } from '@/gateway/matrix/cvp3Content'
 import type { MatrixTransport } from './transport'
@@ -38,9 +39,16 @@ export interface MatrixCvp3PortOptions {
 }
 
 interface PendingDecision {
+  kind: 'decision' | 'extension'
+  extensionId?: string
   allowedValues: Set<string>
   fallbackValue: string
   resolve(value: DecisionResponse): void
+}
+
+export interface ResolvedV3Decision {
+  kind: 'decision' | 'extension'
+  extensionId?: string
 }
 
 /**
@@ -139,6 +147,7 @@ export class MatrixCvp3Port implements ChannelPort {
     const fallbackValue = request.type === 'permission' ? 'deny' : ''
     const promise = new Promise<DecisionResponse>(resolve => {
       this.pendingDecisions.set(requestId, {
+        kind: 'decision',
         allowedValues: new Set(request.options.map(option => option.value)),
         fallbackValue,
         resolve,
@@ -167,12 +176,51 @@ export class MatrixCvp3Port implements ChannelPort {
     return promise
   }
 
-  resolveDecision(requestId: string, value: string): boolean {
+  requestExtensionInteraction(
+    request: SessionExtensionInteractionRequest,
+  ): Promise<DecisionResponse> {
+    const requestId = randomUUID()
+    const promise = new Promise<DecisionResponse>(resolve => {
+      this.pendingDecisions.set(requestId, {
+        kind: 'extension',
+        extensionId: request.extension.id,
+        allowedValues: new Set(request.view.actions.map(action => action.id)),
+        fallbackValue: request.cancelActionId,
+        resolve,
+      })
+    })
+    const event: Cvp3Event = {
+      ...this.baseEvent(eventId('extension-interaction', requestId, 1)),
+      payload: {
+        type: 'extension.interaction.requested',
+        requestId,
+        extension: request.extension,
+        view: request.view,
+        cancelActionId: request.cancelActionId,
+        projection: this.options.projection(),
+      },
+    }
+    void this.options.contentLayer.sendEvent(
+      this.options.room,
+      event,
+      this.options.transport,
+      { relation: threadRelation(this.options.threadRootEventId) },
+    ).catch(error => {
+      this.options.onLog?.(`[cvp3/matrix] extension interaction delivery failed: ${formatError(error)}`)
+      this.resolveDecision(requestId, request.cancelActionId)
+    })
+    return promise
+  }
+
+  resolveDecision(requestId: string, value: string): ResolvedV3Decision | null {
     const pending = this.pendingDecisions.get(requestId)
-    if (!pending || !pending.allowedValues.has(value)) return false
+    if (!pending || !pending.allowedValues.has(value)) return null
     this.pendingDecisions.delete(requestId)
     pending.resolve({ value })
-    return true
+    return {
+      kind: pending.kind,
+      ...(pending.extensionId ? { extensionId: pending.extensionId } : {}),
+    }
   }
 
   notifyStatus(status: SessionStatus): void {

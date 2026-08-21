@@ -17,6 +17,7 @@ import type {
     DecisionResponse,
     SessionStatus,
 } from '@/bridge/channelPort'
+import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
 import type { MatrixRoomMessageContent, MatrixTransport } from './transport'
 
 export const CODEVER_MATRIX_EXTENSION = 'io.codever' as const
@@ -221,6 +222,45 @@ export class MatrixPort implements ChannelPort {
         return promise
     }
 
+    requestExtensionInteraction(
+        request: SessionExtensionInteractionRequest,
+    ): Promise<DecisionResponse> {
+        const interactionId = randomUUID()
+        const allowedValues = new Set(request.view.actions.map(action => action.id))
+        const body = extensionViewPlainText(request)
+        const promise = new Promise<DecisionResponse>((resolve) => {
+            this.pendingDecisions.set(interactionId, {
+                allowedValues,
+                fallbackValue: request.cancelActionId,
+                resolve,
+            })
+        })
+
+        void this.options.transport.sendEncryptedRoomEvent({
+            roomId: this.options.roomId,
+            eventType: 'm.room.message',
+            content: this.withThreadRelation({
+                msgtype: 'm.text',
+                body,
+                [CODEVER_MATRIX_EXTENSION]: {
+                    version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
+                    kind: 'extension_view',
+                    ...this.sessionMetadata(),
+                    interaction_id: interactionId,
+                    extension: request.extension,
+                    view: request.view,
+                    cancel_action_id: request.cancelActionId,
+                },
+            }),
+            transactionId: this.transactionId('extension-interaction', interactionId),
+        }).catch((error) => {
+            this.options.onLog?.(`[matrix] extension interaction delivery failed: ${formatError(error)}`)
+            this.resolveDecision(interactionId, request.cancelActionId)
+        })
+
+        return promise
+    }
+
     resolveDecision(decisionId: string, value: string): boolean {
         const pending = this.pendingDecisions.get(decisionId)
         if (!pending || !pending.allowedValues.has(value)) return false
@@ -387,6 +427,21 @@ export class MatrixPort implements ChannelPort {
         void upload.catch(() => this.attachmentUploads.delete(operationId))
         return upload
     }
+}
+
+function extensionViewPlainText(request: SessionExtensionInteractionRequest): string {
+    const lines = [`${request.extension.name}: ${request.view.title}`]
+    for (const element of request.view.elements) {
+        if (element.type === 'status' || element.type === 'text') lines.push(element.text)
+        else if (element.type === 'readonly_textarea') {
+            lines.push(`${element.label}: [preview available in Codever]`)
+        } else {
+            if (element.label) lines.push(element.label)
+            lines.push(...element.items.map(item => `• ${item}`))
+        }
+    }
+    lines.push(request.view.actions.map(action => `[${action.label}]`).join(' '))
+    return lines.filter(Boolean).join('\n\n')
 }
 
 function splitMatrixMessage(message: ChannelMessage): ChannelMessage[] {

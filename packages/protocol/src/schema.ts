@@ -74,11 +74,100 @@ export const sessionExtensionDescriptorSchema = z
 
 export type SessionExtensionDescriptor = z.infer<typeof sessionExtensionDescriptorSchema>
 
-export interface SessionExtensionSummary {
-  id: string
-  name: string
-  version: string
-}
+export const sessionExtensionSummarySchema = z
+  .object({
+    id: opaqueId,
+    name: z.string().min(1).max(256),
+    version: z.string().min(1).max(128),
+  })
+  .strict()
+
+export type SessionExtensionSummary = z.infer<typeof sessionExtensionSummarySchema>
+
+export const sessionExtensionManifestSchema = z
+  .object({
+    protocolVersion: z.literal(1),
+    descriptor: sessionExtensionDescriptorSchema,
+  })
+  .strict()
+
+export type SessionExtensionManifest = z.infer<typeof sessionExtensionManifestSchema>
+
+export const sessionExtensionActionIdSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9._-]*$/)
+
+const sessionExtensionViewElementSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('status'),
+      tone: z.enum(['info', 'success', 'warning', 'error']),
+      text: z.string().min(1).max(2_048),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('text'),
+      text: z.string().min(1).max(8_192),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('readonly_textarea'),
+      label: z.string().min(1).max(256),
+      value: z.string().max(8 * 1024),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('list'),
+      label: z.string().min(1).max(256).optional(),
+      items: z.array(z.string().min(1).max(2_048)).min(1).max(32),
+    })
+    .strict(),
+])
+
+export const sessionExtensionViewSchema = z
+  .object({
+    version: z.literal(1),
+    title: z.string().min(1).max(256),
+    elements: z.array(sessionExtensionViewElementSchema).max(16),
+    actions: z
+      .array(z
+        .object({
+          id: sessionExtensionActionIdSchema,
+          label: z.string().min(1).max(64),
+          style: z.enum(['primary', 'secondary', 'danger']).optional(),
+        })
+        .strict())
+      .min(1)
+      .max(8),
+  })
+  .strict()
+  .superRefine((view, context) => {
+    const ids = new Set<string>()
+    view.actions.forEach((action, index) => {
+      if (ids.has(action.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['actions', index, 'id'],
+          message: 'Session extension action IDs must be unique',
+        })
+      }
+      ids.add(action.id)
+    })
+    if (new TextEncoder().encode(JSON.stringify(view)).byteLength > 16 * 1024) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Session extension view is too large',
+      })
+    }
+  })
+
+export type SessionExtensionViewElement = z.infer<typeof sessionExtensionViewElementSchema>
+export type SessionExtensionView = z.infer<typeof sessionExtensionViewSchema>
 
 const sessionExtensionConfigSchema = z
   .record(z.string().min(1).max(128), jsonValueSchema)
@@ -143,7 +232,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       operation: z.literal('decision'),
       sessionId: opaqueId,
       requestId: opaqueId,
-      decision: z.enum(['allow_once', 'allow_session', 'deny']),
+      decision: sessionExtensionActionIdSchema,
     })
     .strict(),
   z

@@ -33,7 +33,9 @@ This is the active architecture.
 7. **Session wrappers are optional and local**: administrator-installed session
    extensions may wrap provider input and presented semantic events. With no
    binding the runtime is a pass-through; extension-specific models, secrets,
-   mappings, and storage stay outside the core.
+   mappings, storage, declarative view contents, and action semantics stay
+   outside the core. Project bindings are defaults for new sessions, not live
+   policy inherited by existing sessions.
 
 ## 3. Runtime Flow
 
@@ -207,12 +209,15 @@ Responsibilities:
 This is the main runtime. New lifecycle behavior should usually be implemented here, not in metadata records.
 
 An optional `SessionExtensionHost` belongs to the runtime boundary. It composes
-immutable, session-bound extensions around a turn, uses the normal
-`ChannelPort.requestDecision()` surface for preview approval, journals provider
-events before display transformation, and fails closed if a bound extension is
-unavailable. The Matrix Gateway registry is administrator-owned; remote PWA
-commands can select an advertised descriptor but cannot register code, an
-endpoint, or a secret. See `docs/session-extensions.md`.
+session-bound extensions around a turn, pauses through a bounded declarative
+interaction surface, journals provider events before display transformation,
+and fails closed if a bound extension is unavailable. The extension owns the
+view contents and interprets returned action IDs. The Matrix Gateway registry
+is administrator-owned; remote PWA commands can select an advertised manifest
+but cannot register code, an endpoint, or a secret. A project stores a default
+binding template; a new session snapshots it, and an explicit later session
+change recreates the runtime and provider conversation. See
+`docs/session-extensions.md`.
 
 ### 4.6 `SessionRecord`
 

@@ -1,3 +1,10 @@
+import {
+  sessionExtensionActionIdSchema,
+  sessionExtensionViewSchema,
+  type SessionExtensionSummary,
+  type SessionExtensionView,
+} from "@codever/protocol";
+
 export type MessageFormat = "markdown" | "html" | "plain";
 
 export type ToolCategory =
@@ -29,6 +36,12 @@ export type ToolGroupPresentation = {
   version: 1;
   groupId: string;
   tools: ToolPresentationItem[];
+};
+
+export type ExtensionViewPresentation = {
+  extension: SessionExtensionSummary;
+  view: SessionExtensionView;
+  cancelActionId: string;
 };
 
 const TOOL_LIMIT = 200;
@@ -68,6 +81,41 @@ export function parseToolGroupPresentation(
     version: 1,
     groupId: boundedText(record.groupId),
     tools,
+  };
+}
+
+export function parseExtensionViewPresentation(
+  value: unknown,
+): ExtensionViewPresentation | undefined {
+  const record = asRecord(value);
+  const extension = asRecord(record?.extension);
+  const parsedView = sessionExtensionViewSchema.safeParse(record?.view);
+  const cancelActionId = record?.type === "extension.interaction.requested"
+    ? record.cancelActionId
+    : record?.cancel_action_id;
+  if (
+    (record?.kind !== "extension_view" && record?.type !== "extension.interaction.requested") ||
+    !extension ||
+    typeof extension.id !== "string" ||
+    !extension.id.trim() ||
+    typeof extension.name !== "string" ||
+    !extension.name.trim() ||
+    typeof extension.version !== "string" ||
+    !extension.version.trim() ||
+    !parsedView.success ||
+    !sessionExtensionActionIdSchema.safeParse(cancelActionId).success ||
+    !parsedView.data.actions.some(action => action.id === cancelActionId)
+  ) {
+    return undefined;
+  }
+  return {
+    extension: {
+      id: boundedText(extension.id),
+      name: boundedText(extension.name),
+      version: boundedText(extension.version),
+    },
+    view: parsedView.data,
+    cancelActionId: cancelActionId as string,
   };
 }
 

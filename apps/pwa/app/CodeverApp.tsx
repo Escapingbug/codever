@@ -57,6 +57,11 @@ import {
 } from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
+import {
+  ExtensionViewCard,
+  type ExtensionViewDecisionState,
+} from "./ExtensionViewCard";
+import { parseExtensionViewPresentation } from "./presentation";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import {
   registerPwaUpdates,
@@ -671,7 +676,7 @@ function CodeverAppRuntime() {
   const [deleteTarget, setDeleteTarget] =
     useState<GatewaySessionSummary | null>(null);
   const [decisionStates, setDecisionStates] = useState<
-    Record<string, "pending" | "submitting" | "approved" | "denied">
+    Record<string, ExtensionViewDecisionState>
   >({});
   const feedRef = useRef<HTMLDivElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1595,9 +1600,14 @@ function CodeverAppRuntime() {
       return;
     }
     if (incoming.requestId && !incoming.historical) {
+      const resolvedActionId = typeof incoming.raw?.resolvedActionId === "string"
+        ? incoming.raw.resolvedActionId
+        : undefined;
       setDecisionStates((current) => ({
         ...current,
-        [incoming.eventId]: "pending",
+        [incoming.replacesEventId ?? incoming.eventId]: resolvedActionId
+          ? { actionId: resolvedActionId }
+          : "pending",
       }));
     }
     const feed = feedRef.current;
@@ -3426,8 +3436,7 @@ function CodeverAppRuntime() {
         if (request) {
           setDecisionStates((current) => ({
             ...current,
-            [request.id]:
-              decision === "deny" ? "denied" : "approved",
+            [request.id]: { actionId: decision },
           }));
         }
       }
@@ -3613,13 +3622,23 @@ function CodeverAppRuntime() {
       // acknowledgement, and command-result work begins.
       await waitForUiCommit();
       connection = codeverClientRef.current;
+      if (input.setAsProjectDefault) {
+        if (!connection?.updateProjectExtensions) {
+          throw new Error("This connection cannot update project extension defaults.");
+        }
+        const update = await connection.updateProjectExtensions(input.extensions ?? []);
+        const completion = await update.completion;
+        if (completion.outcome !== "succeeded") {
+          throw new Error("The project extension defaults could not be updated.");
+        }
+      }
       const sent = await sendRealCommand({
         operation: "session.create",
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
           : {}),
-        ...(input.extensions?.length ? { extensions: input.extensions } : {}),
+        ...(input.extensions ? { extensions: input.extensions } : {}),
       });
       if (!sent || !connection) return;
       rememberPendingSessionCreate(input, sent.commandId);
@@ -4442,7 +4461,7 @@ function CodeverAppRuntime() {
 
   async function decidePermission(
     message: ChatMessage,
-    decision: "allow_once" | "deny",
+    decision: string,
   ) {
     if (!message.requestId) {
       showUiNotice(
@@ -4476,7 +4495,7 @@ function CodeverAppRuntime() {
     if (sent && (await sent.completion).outcome === "succeeded") {
       setDecisionStates((current) => ({
         ...current,
-        [message.id]: decision === "allow_once" ? "approved" : "denied",
+        [message.id]: { actionId: decision },
       }));
     } else {
       setDecisionStates((current) => ({
@@ -5280,6 +5299,36 @@ function CodeverAppRuntime() {
             if (message.kind === "permission") {
               const decisionState =
                 decisionStates[message.id] ?? "pending";
+              const extensionView = parseExtensionViewPresentation(message.raw);
+              if (extensionView) {
+                return (
+                  <div
+                    className={`message-row agent-row ${
+                      message.historical ? "" : "message-enter"
+                    }`}
+                    key={message.id}
+                  >
+                    <div className="agent-mark">C</div>
+                    <ExtensionViewCard
+                      extensionName={extensionView.extension.name}
+                      historical={message.historical}
+                      onAction={(actionId) =>
+                        void decidePermission(message, actionId)
+                      }
+                      state={decisionState}
+                      time={message.time}
+                      view={extensionView.view}
+                      cancelActionId={extensionView.cancelActionId}
+                    />
+                  </div>
+                );
+              }
+              const permissionDecisionState =
+                typeof decisionState === "object"
+                  ? decisionState.actionId === "deny"
+                    ? "denied"
+                    : "approved"
+                  : decisionState;
               const permissionDetails =
                 typeof message.raw?.details === "string"
                   ? message.raw.details
@@ -5312,11 +5361,11 @@ function CodeverAppRuntime() {
                       <div className="decision-state historical">
                         History only · request not replayed
                       </div>
-                    ) : decisionState === "submitting" ? (
+                    ) : permissionDecisionState === "submitting" ? (
                       <div className="decision-state submitting">
                         Signing response…
                       </div>
-                    ) : decisionState === "pending" ? (
+                    ) : permissionDecisionState === "pending" ? (
                       <div className="permission-actions">
                         <button
                           className="approve-button"
@@ -5332,8 +5381,8 @@ function CodeverAppRuntime() {
                         </button>
                       </div>
                     ) : (
-                      <div className={`decision-state ${decisionState}`}>
-                        {decisionState === "approved"
+                      <div className={`decision-state ${permissionDecisionState}`}>
+                        {permissionDecisionState === "approved"
                           ? "✓ Allowed once"
                           : "× Denied"}
                       </div>
@@ -5750,6 +5799,8 @@ function CodeverAppRuntime() {
           workspace={gatewayState.workspace}
           models={gatewayState.capabilities.models}
           extensions={gatewayState.capabilities.sessionExtensions}
+          defaultExtensions={gatewayState.workspace.defaultExtensions}
+          canUpdateProjectDefaults={Boolean(codeverClientRef.current?.updateProjectExtensions)}
           onClose={() => {
             if (!newSessionBusy) setNewSessionOpen(false);
           }}

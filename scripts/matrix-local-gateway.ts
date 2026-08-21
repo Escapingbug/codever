@@ -71,7 +71,7 @@ if (deterministicE2eProvider) {
     )
 }
 const cwd = process.env.CODEVER_CWD ?? process.cwd()
-const sessionExtensionRegistry = createSessionExtensionRegistryFromEnvironment()
+const sessionExtensionRegistry = await createSessionExtensionRegistryFromEnvironment()
 const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
     ?? join(process.cwd(), 'dev', 'matrix', 'gateway-data')
 const runId = Date.now().toString(36).toUpperCase()

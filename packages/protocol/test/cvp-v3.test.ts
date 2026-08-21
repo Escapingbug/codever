@@ -63,6 +63,59 @@ describe('Codever Protocol v3 (CVP/3)', () => {
     }).payload).toEqual({ operation: 'session.set_lifecycle', state: 'deleted' })
   })
 
+  it('models extension-owned views and project defaults without privacy-specific fields', () => {
+    const command = cvp3CommandSchema.parse({
+      kind: 'codever.command',
+      version: 3,
+      commandId: 'project-extension-defaults-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      deviceId: 'device-1',
+      certificateId: 'certificate-1',
+      createdAt: 1,
+      operation: 'project.update',
+      payload: {
+        operation: 'project.update',
+        patch: { defaultExtensions: [{ id: 'prefix-transform', config: { prefix: 'SAFE:' } }] },
+      },
+    })
+    expect(command.payload).toMatchObject({
+      patch: { defaultExtensions: [{ id: 'prefix-transform' }] },
+    })
+
+    expect(cvp3EventSchema.parse({
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'extension-interaction-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      occurredAt: 2,
+      payload: {
+        type: 'extension.interaction.requested',
+        requestId: 'request-1',
+        extension: { id: 'prefix-transform', name: 'Prefix transform', version: '1' },
+        cancelActionId: 'cancel',
+        view: {
+          version: 1,
+          title: 'Review transformed input',
+          elements: [{ type: 'readonly_textarea', label: 'Agent input', value: 'SAFE: hello' }],
+          actions: [
+            { id: 'continue', label: 'Continue', style: 'primary' },
+            { id: 'cancel', label: 'Cancel', style: 'secondary' },
+          ],
+        },
+        projection: {
+          title: 'Session',
+          lifecycle: 'active',
+          activity: 'attention',
+          updatedAt: 2,
+          stateVersion: 2,
+        },
+      },
+    }).payload).toMatchObject({ type: 'extension.interaction.requested' })
+  })
+
   it('uses entity-local message versions for streaming output', () => {
     const event = cvp3EventSchema.parse({
       kind: 'codever.event',

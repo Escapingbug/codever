@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { sessionExtensionViewSchema } from '@codever/protocol'
 import { contentDigest, PrivacyAuditLog } from './audit.js'
 import { mappingFindingCount, mergeMappings, restoreText } from './mapping.js'
 import { HAS_SESSION_EXTENSION_ID } from './manifest.js'
@@ -116,17 +117,49 @@ export class HasSessionExtensionService {
 
         if (!config.reviewRequired) return await this.commitPreview(preview)
         return {
-            kind: 'approval_required',
+            kind: 'interaction_required',
             preparationToken: preview.token,
-            approval: {
-                title: findingCount > 0
-                    ? `Review privacy-protected Agent request (${findingCount} replacement${findingCount === 1 ? '' : 's'})`
-                    : 'Review Agent request (no private entities found)',
-                details: `The Agent will receive exactly:\n\n${inputText(preview.sanitizedInput)}`,
-                approveLabel: 'Send to Agent',
-                denyLabel: 'Cancel',
-            },
+            cancelActionId: 'cancel',
+            view: sessionExtensionViewSchema.parse({
+                version: 1,
+                title: 'Privacy-protected Agent request',
+                elements: [
+                    {
+                        type: 'status',
+                        tone: findingCount > 0 ? 'warning' : 'success',
+                        text: findingCount > 0
+                            ? `${findingCount} private value${findingCount === 1 ? '' : 's'} replaced`
+                            : 'No private values found',
+                    },
+                    {
+                        type: 'readonly_textarea',
+                        label: 'The Agent will receive exactly',
+                        value: inputText(preview.sanitizedInput),
+                    },
+                ],
+                actions: [
+                    { id: 'send', label: 'Send to Agent', style: 'primary' },
+                    { id: 'cancel', label: 'Cancel', style: 'secondary' },
+                ],
+            }),
         }
+    }
+
+    async respond(body: unknown): Promise<Record<string, unknown>> {
+        this.prune()
+        const record = requireRecord(body, 'interaction response')
+        const token = requireText(record.preparationToken, 'preparationToken')
+        const actionId = requireText(record.actionId, 'actionId')
+        if (actionId === 'send') {
+            const prior = this.committed.get(token)
+            if (prior) return { kind: 'ready', input: prior.input, stateRef: prior.stateRef }
+            return await this.commitPreview(this.requirePreview(token, record))
+        }
+        if (actionId === 'cancel') {
+            await this.reject(record)
+            return { kind: 'cancelled' }
+        }
+        throw new Error('Privacy interaction action is invalid')
     }
 
     async commit(body: unknown): Promise<Record<string, unknown>> {

@@ -107,8 +107,8 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /className="permission-details"/);
   assert.match(source, /typeof message\.raw\?\.details === "string"/);
   assert.match(source, /permissionActionLabels\(message\.raw\)/);
-  assert.match(newSession, /Optional session extensions/);
-  assert.match(newSession, /Off by default/);
+  assert.match(newSession, /Project defaults are preselected/);
+  assert.match(newSession, /Use this selection as the project default/);
   assert.match(newSession, /enabledExtensions/);
   assert.doesNotMatch(newSession, /endpoint|bearerToken/);
   assert.match(styles, /\.session-extensions\s*\{/);

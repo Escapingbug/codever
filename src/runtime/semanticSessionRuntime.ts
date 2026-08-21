@@ -4,6 +4,7 @@ import { access, readFile, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { SessionExtensionView } from '@codever/protocol'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
@@ -82,6 +83,17 @@ interface TurnDeliveryState {
 interface QueuedUserInput {
     id: string
     cancelled: boolean
+}
+
+function extensionViewTextFallback(view: SessionExtensionView): string | undefined {
+    const lines = view.elements.flatMap(element => {
+        if (element.type === 'status' || element.type === 'text') return [element.text]
+        if (element.type === 'readonly_textarea') return [`${element.label}:\n${element.value}`]
+        return [element.label, ...element.items.map(item => `• ${item}`)].filter(
+            (line): line is string => Boolean(line),
+        )
+    })
+    return lines.length ? lines.join('\n\n') : undefined
 }
 
 async function waitForShutdownStep(
@@ -331,17 +343,19 @@ export class SemanticSessionRuntime {
             extensionTurn = await this.extensionHost.prepareTurn(
                 prompt,
                 extensionContext,
-                async approval => {
-                    const response = await this.config.channelPort.requestDecision({
-                        type: 'question',
-                        title: approval.title,
-                        details: approval.details,
-                        options: [
-                            { label: approval.approveLabel ?? 'Continue', value: 'allow' },
-                            { label: approval.denyLabel ?? 'Cancel', value: 'deny' },
-                        ],
-                    })
-                    return response.value === 'allow'
+                async interaction => {
+                    const response = this.config.channelPort.requestExtensionInteraction
+                        ? await this.config.channelPort.requestExtensionInteraction(interaction)
+                        : await this.config.channelPort.requestDecision({
+                            type: 'question',
+                            title: `${interaction.extension.name}: ${interaction.view.title}`,
+                            details: extensionViewTextFallback(interaction.view),
+                            options: interaction.view.actions.map(action => ({
+                                label: action.label,
+                                value: action.id,
+                            })),
+                        })
+                    return response.value
                 },
             )
         } catch (error) {

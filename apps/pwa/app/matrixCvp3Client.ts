@@ -6,6 +6,7 @@ import {
   type Cvp3Event,
   type Cvp3ProjectKeyGrantPlaintext,
   type CommandPayload,
+  type SessionExtensionBinding,
 } from "@codever/protocol";
 import {
   base64UrlDecode,
@@ -164,6 +165,31 @@ export class MatrixCvp3ProtocolClient {
       this.identity.keyId,
       this.trust.certificate.certificate.certificateId,
     );
+    return await this.sendCommand(command);
+  }
+
+  async updateProjectExtensions(
+    defaultExtensions: SessionExtensionBinding[],
+  ): Promise<MatrixCvp3SendResult> {
+    await this.initialize();
+    return await this.sendCommand({
+      kind: "codever.command",
+      version: 3,
+      commandId: crypto.randomUUID(),
+      workspaceId: this.config.workspaceId,
+      projectId: this.config.projectId,
+      deviceId: this.identity.keyId,
+      certificateId: this.trust.certificate.certificate.certificateId,
+      createdAt: Date.now(),
+      operation: "project.update",
+      payload: {
+        operation: "project.update",
+        patch: { defaultExtensions },
+      },
+    });
+  }
+
+  private async sendCommand(command: Cvp3Command): Promise<MatrixCvp3SendResult> {
     const key = this.activeProjectKey();
     const signed = await signCvp3Command(
       command,

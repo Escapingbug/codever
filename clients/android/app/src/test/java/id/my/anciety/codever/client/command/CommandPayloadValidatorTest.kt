@@ -82,6 +82,23 @@ class CommandPayloadValidatorTest {
     }
 
     @Test
+    fun `decision accepts bounded extension action ids`() {
+        val parsed = CommandPayloadValidator.validate(buildJsonObject {
+            put("operation", "decision")
+            put("sessionId", "session-1")
+            put("requestId", "interaction-1")
+            put("decision", "continue.safe")
+        }) as DecisionCommandPayload
+        assertEquals("continue.safe", parsed.decision)
+        assertInvalid(buildJsonObject {
+            put("operation", "decision")
+            put("sessionId", "session-1")
+            put("requestId", "interaction-1")
+            put("decision", "Unsafe action")
+        })
+    }
+
+    @Test
     fun `prompt requires content and enforces attachment count and aggregate bytes`() {
         assertInvalid(buildJsonObject {
             put("operation", "prompt")

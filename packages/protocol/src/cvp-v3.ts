@@ -1,6 +1,15 @@
 import { z } from 'zod'
 import { matrixGatewayCapabilitiesSchema } from './matrix-native.js'
-import { attachmentSchema, jsonValueSchema, signatureSchema } from './schema.js'
+import {
+  attachmentSchema,
+  jsonValueSchema,
+  sessionExtensionActionIdSchema,
+  sessionExtensionBindingSchema,
+  sessionExtensionDescriptorSchema,
+  sessionExtensionSummarySchema,
+  sessionExtensionViewSchema,
+  signatureSchema,
+} from './schema.js'
 
 /**
  * Codever Protocol version 3 (CVP/3).
@@ -32,12 +41,7 @@ const matrixEventId = z.string().min(1).max(512)
 const timestamp = z.number().int().nonnegative()
 const base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/)
 
-export const cvp3SessionExtensionBindingSchema = z
-  .object({
-    id: opaqueId,
-    config: z.record(z.string().min(1).max(128), jsonValueSchema).optional(),
-  })
-  .strict()
+export const cvp3SessionExtensionBindingSchema = sessionExtensionBindingSchema
 
 const sessionSettingsPatchSchema = z
   .object({
@@ -126,6 +130,16 @@ const deviceInvitationPayloadSchema = z
     lifetimeMs: z.number().int().min(30_000).max(10 * 60_000).optional(),
   })
   .strict()
+const projectUpdatePayloadSchema = z
+  .object({
+    operation: z.literal('project.update'),
+    patch: z
+      .object({
+        defaultExtensions: z.array(cvp3SessionExtensionBindingSchema).max(8),
+      })
+      .strict(),
+  })
+  .strict()
 
 export const cvp3CommandPayloadSchema = z.discriminatedUnion('operation', [
   sessionCreatePayloadSchema,
@@ -134,6 +148,7 @@ export const cvp3CommandPayloadSchema = z.discriminatedUnion('operation', [
   decisionAnswerPayloadSchema,
   sessionUpdatePayloadSchema,
   sessionLifecyclePayloadSchema,
+  projectUpdatePayloadSchema,
   deviceInvitationPayloadSchema,
 ])
 
@@ -167,6 +182,12 @@ export const cvp3CommandSchema = z.union([
     ...sessionCommandCommon,
     operation: z.literal('prompt.submit'),
     payload: promptSubmitPayloadSchema,
+  }).strict(),
+  z.object({
+    ...projectCommandCommon,
+    sessionId: z.undefined().optional(),
+    operation: z.literal('project.update'),
+    payload: projectUpdatePayloadSchema,
   }).strict(),
   z.object({
     ...sessionCommandCommon,
@@ -214,6 +235,8 @@ const sessionProjectionSchema = z
     activity: z.enum(['idle', 'queued', 'working', 'attention', 'failed']),
     updatedAt: timestamp,
     stateVersion: z.number().int().positive(),
+    extensions: z.array(sessionExtensionSummarySchema).max(8).optional(),
+    extensionRevision: z.number().int().positive().optional(),
   })
   .strict()
 
@@ -241,6 +264,9 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
       model: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.string().min(1).max(128),
+      installedExtensions: z.array(sessionExtensionDescriptorSchema).max(64).optional(),
+      defaultExtensions: z.array(cvp3SessionExtensionBindingSchema).max(8).optional(),
+      extensionDefaultsRevision: z.number().int().positive().optional(),
       snapshotVersion: z.number().int().positive(),
     })
     .strict(),
@@ -261,6 +287,7 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
       model: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.string().min(1).max(128),
+      extensionBindings: z.array(cvp3SessionExtensionBindingSchema).max(8).optional(),
     })
     .strict(),
   z
@@ -373,9 +400,32 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
+      type: z.literal('extension.interaction.requested'),
+      requestId: opaqueId,
+      extension: sessionExtensionSummarySchema,
+      view: sessionExtensionViewSchema,
+      cancelActionId: sessionExtensionActionIdSchema,
+      projection: sessionProjectionSchema,
+    })
+    .strict()
+    .refine(
+      value => value.view.actions.some(action => action.id === value.cancelActionId),
+      { message: 'Extension interaction cancel action must be present in the view' },
+    ),
+  z
+    .object({
       type: z.literal('decision.resolved'),
       requestId: opaqueId,
       decision: z.string().min(1).max(128),
+      projection: sessionProjectionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('extension.interaction.resolved'),
+      requestId: opaqueId,
+      extensionId: opaqueId,
+      actionId: sessionExtensionActionIdSchema,
       projection: sessionProjectionSchema,
     })
     .strict(),

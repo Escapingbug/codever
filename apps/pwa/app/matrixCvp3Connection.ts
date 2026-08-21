@@ -570,6 +570,18 @@ export async function connectMatrixCvp3(
         completion: sent.completion.then(toLegacyCompletion),
       };
     },
+    async updateProjectExtensions(extensions) {
+      await ready;
+      if (!protocol) throw new Error("The Codever v3 project is not initialized.");
+      const sent = await protocol.updateProjectExtensions(extensions);
+      return {
+        eventId: sent.eventId ?? `$codever.queued.${sent.commandId}`,
+        commandId: sent.commandId,
+        sequence: 1,
+        revision: 0,
+        completion: sent.completion.then(toLegacyCompletion),
+      };
+    },
     async recoverCommand(commandId) {
       await ready;
       if (!protocol) throw new Error("The CVP/3 project is not initialized.");
@@ -644,7 +656,7 @@ function toIncomingMessage(
     sender: message.sender === "user" ? "device" : "gateway",
     timestamp: message.timestamp,
     encrypted: true,
-    kind: payload?.type === "decision.requested"
+    kind: payload?.type === "decision.requested" || payload?.type === "extension.interaction.requested"
       ? "permission"
       : payload?.type === "turn.failed"
         ? "error"
@@ -656,7 +668,9 @@ function toIncomingMessage(
     text: message.body,
     sessionId: message.sessionId,
     ...(message.commandId ? { commandId: message.commandId } : {}),
-    ...(payload?.type === "decision.requested" ? { requestId: payload.requestId } : {}),
+    ...(payload?.type === "decision.requested" || payload?.type === "extension.interaction.requested"
+      ? { requestId: payload.requestId }
+      : {}),
     ...(replacesEventId ? { replacesEventId } : {}),
     format: message.format,
     ...(payload?.type === "assistant.message" && payload.attachments
@@ -665,7 +679,14 @@ function toIncomingMessage(
     ...(payload?.type === "assistant.message"
       ? { toolGroup: parseToolGroupPresentation(payload.ui) }
       : {}),
-    raw: payload ? structuredClone(payload) as Record<string, unknown> : {},
+    raw: payload
+      ? {
+          ...structuredClone(payload) as Record<string, unknown>,
+          ...(message.resolvedActionId
+            ? { resolvedActionId: message.resolvedActionId }
+            : {}),
+        }
+      : {},
   };
 }
 
@@ -729,7 +750,7 @@ function gatewayState(
       provider: session.provider ?? project?.provider ?? "unknown",
       ...(session.model ? { model: session.model } : {}),
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
-      extensions: [],
+      extensions: session.extensions ?? [],
     })),
     workspace: {
       projectId: project?.projectId ?? "unknown",
@@ -739,6 +760,8 @@ function gatewayState(
       ...(project?.model ? { model: project.model } : {}),
       ...(project?.reasoningEffort ? { reasoningEffort: project.reasoningEffort } : {}),
       permissionMode: project?.permissionMode ?? "default",
+      defaultExtensions: project?.defaultExtensions ?? [],
+      extensionDefaultsRevision: project?.extensionDefaultsRevision ?? 1,
     },
     capabilities: protocol.projection.workspace
       ? parseGatewayCapabilities(protocol.projection.workspace.capabilities)
@@ -749,7 +772,7 @@ function gatewayState(
           canSelectSession: false,
           canArchiveSession: true,
           canDeleteSession: true,
-          sessionExtensions: [],
+          sessionExtensions: project?.installedExtensions ?? [],
         },
   };
 }

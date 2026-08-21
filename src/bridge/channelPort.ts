@@ -10,6 +10,7 @@ import type { SessionRecord } from './sessionRecord'
 import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
 import type { RetryDeliveryCommandResult } from '@/runtime/semanticSessionRuntime'
 import type { SessionExtensionLifecycleReason } from '@/runtime/sessionExtensions'
+import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -134,6 +135,11 @@ export interface ChannelPort {
 
     /** Request a user decision (permission, question) */
     requestDecision(request: DecisionRequest): Promise<DecisionResponse>
+
+    /** Render an extension-owned declarative view and return the selected action ID. */
+    requestExtensionInteraction?(
+        request: SessionExtensionInteractionRequest,
+    ): Promise<DecisionResponse>
 
     /** Notify channel of session status change */
     notifyStatus(status: SessionStatus): void

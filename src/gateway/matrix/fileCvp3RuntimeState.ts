@@ -24,6 +24,8 @@ export interface PersistedCvp3Session {
   permissionMode: string
   providerSessionId: string | null
   extensions: SessionExtensionBinding[]
+  extensionRevision: number
+  inheritedFromProjectExtensionRevision: number | null
 }
 
 export interface PersistedCvp3Project {
@@ -38,6 +40,8 @@ export interface PersistedCvp3Project {
   snapshotVersion: number
   capabilitySnapshotVersion: number
   capabilities: MatrixGatewayCapabilities | null
+  defaultExtensions: SessionExtensionBinding[]
+  extensionDefaultsRevision: number
   sessions: PersistedCvp3Session[]
 }
 
@@ -78,6 +82,26 @@ export class FileCvp3RuntimeStateStore {
           if (existing.capabilities === undefined) {
             existing.capabilities = null
             changed = true
+          }
+          if (!Array.isArray(existing.defaultExtensions)) {
+            existing.defaultExtensions = []
+            changed = true
+          }
+          if (!Number.isSafeInteger(existing.extensionDefaultsRevision)) {
+            existing.extensionDefaultsRevision = 1
+            changed = true
+          }
+          if (Array.isArray(existing.sessions)) {
+            for (const session of existing.sessions) {
+              if (!Number.isSafeInteger(session.extensionRevision)) {
+                session.extensionRevision = 1
+                changed = true
+              }
+              if (session.inheritedFromProjectExtensionRevision === undefined) {
+                session.inheritedFromProjectExtensionRevision = null
+                changed = true
+              }
+            }
           }
         }
         for (const room of rooms) {
@@ -162,6 +186,8 @@ function defaultProject(room: MatrixGatewayRoomConfig): PersistedCvp3Project {
     snapshotVersion: 1,
     capabilitySnapshotVersion: 0,
     capabilities: null,
+    defaultExtensions: [],
+    extensionDefaultsRevision: 1,
     sessions: [],
   }
 }
@@ -197,6 +223,9 @@ function validateProject(project: PersistedCvp3Project, roomId: string): void {
     || !Number.isSafeInteger(project.capabilitySnapshotVersion)
     || project.capabilitySnapshotVersion < 0
     || !(project.capabilities === null || typeof project.capabilities === 'object')
+    || !Array.isArray(project.defaultExtensions)
+    || !Number.isSafeInteger(project.extensionDefaultsRevision)
+    || project.extensionDefaultsRevision < 1
     || !Array.isArray(project.sessions)
   ) {
     throw new Error(`Invalid CVP/3 project state for ${roomId}`)
@@ -224,6 +253,15 @@ function validateProject(project: PersistedCvp3Project, roomId: string): void {
       || !session.provider
       || !session.permissionMode
       || !Array.isArray(session.extensions)
+      || !Number.isSafeInteger(session.extensionRevision)
+      || session.extensionRevision < 1
+      || (
+        session.inheritedFromProjectExtensionRevision !== null
+        && (
+          !Number.isSafeInteger(session.inheritedFromProjectExtensionRevision)
+          || session.inheritedFromProjectExtensionRevision < 1
+        )
+      )
     ) {
       throw new Error(`Invalid CVP/3 session ${session.id || '<missing>'} in ${roomId}`)
     }

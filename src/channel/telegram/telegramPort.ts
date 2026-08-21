@@ -11,6 +11,7 @@ import { InputFile } from 'grammy'
 import { basename } from 'node:path'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
 import { completePendingDecision, registerPendingDecision } from './decisionRegistry'
+import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
 
 const MAX_MESSAGE_LENGTH = 4000
 const TABLE_IMAGE_SEND_TIMEOUT_MS = 10_000
@@ -134,6 +135,35 @@ export class TelegramPort implements ChannelPort {
         }).catch((e) => {
             console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
             completePendingDecision(decisionId, request.type === 'permission' ? 'deny' : '')
+        })
+
+        return promise
+    }
+
+    requestExtensionInteraction(
+        request: SessionExtensionInteractionRequest,
+    ): Promise<DecisionResponse> {
+        const { decisionId, promise } = registerPendingDecision({
+            fallbackValue: request.cancelActionId,
+        })
+        const buttons = request.view.actions.map(action => ({
+            text: action.label,
+            callback_data: `decision:${decisionId}:${action.id}`,
+        }))
+        const keyboard = {
+            inline_keyboard: Array.from(
+                { length: Math.ceil(buttons.length / 2) },
+                (_, index) => buttons.slice(index * 2, index * 2 + 2),
+            ),
+        }
+        const text = this.extensionViewHtml(request)
+
+        this.sendHtml(text, keyboard).catch((error) => {
+            console.error(
+                '[TelegramPort] Failed to send extension interaction:',
+                error instanceof Error ? error.message : error,
+            )
+            completePendingDecision(decisionId, request.cancelActionId)
         })
 
         return promise
@@ -400,6 +430,28 @@ export class TelegramPort implements ChannelPort {
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
+    }
+
+    private extensionViewHtml(request: SessionExtensionInteractionRequest): string {
+        const lines = [
+            `◇ <b>${this.escapeHtml(request.extension.name)} · ${this.escapeHtml(request.view.title)}</b>`,
+        ]
+        const statusIcons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' }
+        for (const element of request.view.elements) {
+            if (element.type === 'status') {
+                lines.push(`${statusIcons[element.tone]} ${this.escapeHtml(element.text)}`)
+            } else if (element.type === 'text') {
+                lines.push(this.escapeHtml(element.text))
+            } else if (element.type === 'readonly_textarea') {
+                lines.push(`<b>${this.escapeHtml(element.label)}</b>\n<pre>${this.escapeHtml(element.value)}</pre>`)
+            } else {
+                const items = element.items.map(item => `• ${this.escapeHtml(item)}`).join('\n')
+                lines.push(element.label
+                    ? `<b>${this.escapeHtml(element.label)}</b>\n${items}`
+                    : items)
+            }
+        }
+        return lines.join('\n\n')
     }
 
     private log(message: string): void {

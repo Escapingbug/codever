@@ -3,10 +3,14 @@ import type {
   Cvp3Event,
   Cvp3SessionProjection,
   MatrixGatewayCapabilities,
+  SessionExtensionBinding,
+  SessionExtensionDescriptor,
 } from "@codever/protocol";
 import {
   cvp3EventSchema,
   matrixGatewayCapabilitiesSchema,
+  sessionExtensionBindingSchema,
+  sessionExtensionDescriptorSchema,
 } from "@codever/protocol";
 
 export type V3ProjectedSession = Cvp3SessionProjection & {
@@ -17,6 +21,7 @@ export type V3ProjectedSession = Cvp3SessionProjection & {
   model?: string;
   reasoningEffort?: string;
   permissionMode?: string;
+  extensionBindings?: SessionExtensionBinding[];
 };
 
 export type V3ProjectedMessage = {
@@ -32,6 +37,7 @@ export type V3ProjectedMessage = {
   partCount?: number;
   commandId?: string;
   payload?: Cvp3Event["payload"];
+  resolvedActionId?: string;
 };
 
 export type Cvp3CommandCompletion = {
@@ -50,6 +56,9 @@ export type V3ProjectProjection = {
   model?: string;
   reasoningEffort?: string;
   permissionMode: string;
+  installedExtensions: SessionExtensionDescriptor[];
+  defaultExtensions: SessionExtensionBinding[];
+  extensionDefaultsRevision: number;
 };
 
 export type V3WorkspaceProjection = {
@@ -136,6 +145,13 @@ export class MatrixCvp3Projection {
         ...(command.payload.permissionMode
           ? { permissionMode: command.payload.permissionMode }
           : {}),
+        extensionBindings: command.payload.extensions ?? [],
+        extensions: (command.payload.extensions ?? []).map(binding => ({
+          id: binding.id,
+          name: binding.id,
+          version: "pending",
+        })),
+        extensionRevision: 1,
       });
       if (command.payload.initialPrompt) {
         this.addUserPrompt(
@@ -193,6 +209,9 @@ export class MatrixCvp3Projection {
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
           permissionMode: payload.permissionMode,
+          installedExtensions: payload.installedExtensions ?? [],
+          defaultExtensions: payload.defaultExtensions ?? [],
+          extensionDefaultsRevision: payload.extensionDefaultsRevision ?? 1,
         };
       }
       return true;
@@ -211,6 +230,7 @@ export class MatrixCvp3Projection {
         ...(payload.model ? { model: payload.model } : {}),
         ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
         permissionMode: payload.permissionMode,
+        extensionBindings: payload.extensionBindings ?? current?.extensionBindings ?? [],
       });
       if (payload.initialPrompt && payload.rootCommandId) {
         this.addUserPrompt(
@@ -267,6 +287,37 @@ export class MatrixCvp3Projection {
         ...(event.causationCommandId ? { commandId: event.causationCommandId } : {}),
         payload,
       });
+    }
+    if (payload.type === "extension.interaction.requested" && event.sessionId) {
+      this.messages.set(`decision:${payload.requestId}`, {
+        logicalId: `decision:${payload.requestId}`,
+        physicalEventId,
+        sessionId: event.sessionId,
+        sender: "system",
+        timestamp: event.occurredAt,
+        body: payload.view.title,
+        format: "plain",
+        version: 1,
+        ...(event.causationCommandId ? { commandId: event.causationCommandId } : {}),
+        payload,
+      });
+    }
+    if (
+      (payload.type === "decision.resolved" || payload.type === "extension.interaction.resolved")
+      && event.sessionId
+    ) {
+      const key = `decision:${payload.requestId}`;
+      const current = this.messages.get(key);
+      if (current) {
+        this.messages.set(key, {
+          ...current,
+          physicalEventId,
+          version: current.version + 1,
+          resolvedActionId: payload.type === "decision.resolved"
+            ? payload.decision
+            : payload.actionId,
+        });
+      }
     }
     if (payload.type === "turn.failed" && event.sessionId) {
       this.messages.set(`turn-failed:${payload.turnId}`, {
@@ -377,7 +428,12 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
       || !integer(session.updatedAt)
       || !integer(session.stateVersion, 1)
     ) throw new Error("The CVP/3 session projection is invalid.");
-    return structuredClone(session) as V3ProjectedSession;
+    return {
+      ...structuredClone(session),
+      extensionBindings: Array.isArray(session.extensionBindings)
+        ? session.extensionBindings.map(binding => sessionExtensionBindingSchema.parse(binding))
+        : [],
+    } as V3ProjectedSession;
   });
   const messages = boundedArray(value.messages, "messages").map(messageValue => {
     const message = record(messageValue);
@@ -456,7 +512,18 @@ function validateProjectProjection(input: unknown): V3ProjectProjection {
     || !text(project.provider)
     || !text(project.permissionMode)
   ) throw new Error("The CVP/3 project projection is invalid.");
-  return structuredClone(project) as V3ProjectProjection;
+  return {
+    ...structuredClone(project),
+    installedExtensions: Array.isArray(project.installedExtensions)
+      ? project.installedExtensions.map(extension => sessionExtensionDescriptorSchema.parse(extension))
+      : [],
+    defaultExtensions: Array.isArray(project.defaultExtensions)
+      ? project.defaultExtensions.map(binding => sessionExtensionBindingSchema.parse(binding))
+      : [],
+    extensionDefaultsRevision: integer(project.extensionDefaultsRevision, 1)
+      ? project.extensionDefaultsRevision
+      : 1,
+  } as V3ProjectProjection;
 }
 
 function boundedArray(value: unknown, name: string): unknown[] {
@@ -494,6 +561,8 @@ function completionFromEvent(event: Cvp3Event): Cvp3CommandCompletion | null {
     case "session.updated":
     case "session.lifecycle":
     case "decision.resolved":
+    case "extension.interaction.resolved":
+    case "project.snapshot":
     case "device.invitation.created":
       return { commandId, outcome: "succeeded", ...(event.sessionId ? { sessionId: event.sessionId } : {}), event };
     case "turn.completed":

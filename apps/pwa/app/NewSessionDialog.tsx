@@ -18,6 +18,7 @@ type NewSessionInput = {
   model?: string;
   reasoningEffort?: string;
   extensions?: SessionExtensionBinding[];
+  setAsProjectDefault?: boolean;
 };
 
 type Props = {
@@ -27,6 +28,8 @@ type Props = {
   workspace: GatewayWorkspaceState;
   models: GatewayModelCapability[];
   extensions: SessionExtensionDescriptor[];
+  defaultExtensions?: SessionExtensionBinding[];
+  canUpdateProjectDefaults?: boolean;
   onClose(): void;
   onCreate(input: NewSessionInput): void;
 };
@@ -43,6 +46,8 @@ function NewSessionDialogContent({
   workspace,
   models,
   extensions,
+  defaultExtensions = [],
+  canUpdateProjectDefaults = false,
   onClose,
   onCreate,
 }: Props) {
@@ -53,21 +58,30 @@ function NewSessionDialogContent({
         ?.defaultReasoningLevel ??
       "",
   );
-  const [enabledExtensions, setEnabledExtensions] = useState<Record<string, boolean>>({});
+  const [enabledExtensions, setEnabledExtensions] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(defaultExtensions.map(binding => [binding.id, true])),
+  );
+  const [setAsProjectDefault, setSetAsProjectDefault] = useState(false);
   const [extensionConfig, setExtensionConfig] = useState<
     Record<string, Record<string, JsonValue>>
   >(() =>
     Object.fromEntries(
-      extensions.map((extension) => [
-        extension.id,
-        Object.fromEntries(
-          extension.settings.flatMap((setting) =>
-            setting.defaultValue === undefined
-              ? []
-              : [[setting.id, setting.defaultValue]],
-          ),
-        ),
-      ]),
+      extensions.map((extension) => {
+        const inherited = defaultExtensions.find(binding => binding.id === extension.id);
+        return [
+          extension.id,
+          {
+            ...Object.fromEntries(
+              extension.settings.flatMap((setting) =>
+                setting.defaultValue === undefined
+                  ? []
+                  : [[setting.id, setting.defaultValue]],
+              ),
+            ),
+            ...(inherited?.config ?? {}),
+          },
+        ];
+      }),
     ),
   );
   const dialogRef = useRef<HTMLElement>(null);
@@ -114,16 +128,13 @@ function NewSessionDialogContent({
       projectName: workspace.projectName,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
-      ...(extensions.some((extension) => enabledExtensions[extension.id])
-        ? {
-            extensions: extensions
-              .filter((extension) => enabledExtensions[extension.id])
-              .map((extension) => ({
-                id: extension.id,
-                config: extensionConfig[extension.id] ?? {},
-              })),
-          }
-        : {}),
+      extensions: extensions
+        .filter((extension) => enabledExtensions[extension.id])
+        .map((extension) => ({
+          id: extension.id,
+          config: extensionConfig[extension.id] ?? {},
+        })),
+      ...(setAsProjectDefault ? { setAsProjectDefault: true } : {}),
     });
   };
 
@@ -216,10 +227,10 @@ function NewSessionDialogContent({
 
           {extensions.length > 0 && (
             <fieldset className="session-extensions">
-              <legend>Optional session extensions</legend>
+              <legend>Session extensions</legend>
               <p className="session-extensions-note">
-                Off by default. Enabled extensions are fixed for the lifetime of
-                this session so they cannot be bypassed later.
+                Project defaults are preselected. This session receives its own
+                snapshot, so later project changes do not alter it.
               </p>
               {extensions.map((extension) => {
                 const enabled = Boolean(enabledExtensions[extension.id]);
@@ -295,6 +306,17 @@ function NewSessionDialogContent({
                   </section>
                 );
               })}
+              {canUpdateProjectDefaults && (
+                <label className="session-extension-boolean">
+                  <input
+                    type="checkbox"
+                    checked={setAsProjectDefault}
+                    disabled={busy}
+                    onChange={(event) => setSetAsProjectDefault(event.target.checked)}
+                  />
+                  <span>Use this selection as the project default for future sessions</span>
+                </label>
+              )}
             </fieldset>
           )}
 
