@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
 } from "../app/connectionPresentation.ts";
@@ -74,6 +75,21 @@ test("missing native session with retained trust is presented as a repairable st
   assert.equal(presentation.title, "Connection repair required");
   assert.match(presentation.detail, /local sign-in is missing/i);
   assert.match(presentation.detail, /new invitation/i);
+});
+
+test("stale project authorization directs the user to reauthorize without retry copy", () => {
+  const presentation = deriveConnectionPresentation(
+    "error",
+    "matrix_project_authorization_repair_required",
+  );
+  assert.equal(presentation.title, "Device authorization required");
+  assert.match(presentation.detail, /new one-time invitation/i);
+  assert.match(presentation.detail, /will not be deleted/i);
+  assert.doesNotMatch(presentation.detail, /try again|retry/i);
+  assert.equal(
+    connectionRepairReasonForDetail(presentation.rawDetailCode),
+    "project-authorization",
+  );
 });
 
 test("unknown machine codes remain diagnostic-only and use status fallback copy", () => {

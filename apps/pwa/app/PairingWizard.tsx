@@ -18,11 +18,12 @@ import {
   useNativeBackHandler,
 } from "./nativeBackNavigation";
 import { useDialogFocus } from "./dialogFocus";
+import type { ConnectionRepairReason } from "./connectionPresentation";
 
 type Props = {
   preview: PairingPreview | null;
   trustedGateway: CodeverPublicTrust | null;
-  repairRequired: boolean;
+  repairReason: ConnectionRepairReason | null;
   busy: boolean;
   canConfirm: boolean;
   deviceInvitation: GeneratedDeviceInvitation | null;
@@ -39,7 +40,7 @@ type Props = {
 export function PairingWizard({
   preview,
   trustedGateway,
-  repairRequired,
+  repairReason,
   busy,
   canConfirm,
   deviceInvitation,
@@ -52,6 +53,7 @@ export function PairingWizard({
   onCreateInvitation,
   onClearInvitation,
 }: Props) {
+  const repairRequired = repairReason !== null;
   const [link, setLink] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
   const [clipboardError, setClipboardError] = useState<string | null>(null);
@@ -293,14 +295,33 @@ export function PairingWizard({
     <section className="pairing-start">
       {repairRequired && trustedGateway && (
         <div className="connection-repair-notice" role="status">
-          <strong>Repair this device’s connection</strong>
-          <p>
-            This APK still recognizes {trustedGateway.gatewayName}, but its
-            local Matrix sign-in is missing. On another connected Codever
-            device, choose Add another device, then scan or paste that one-time
-            invitation here. Your Codever device identity and approved Gateway
-            will stay the same.
-          </p>
+          {repairReason === "project-authorization" ? (
+            <>
+              <strong>Reauthorize this device</strong>
+              <p>
+                This device still recognizes {trustedGateway.gatewayName}, but
+                its saved authorization no longer matches. On another connected
+                Codever device, choose Add another device. You can also run{" "}
+                <code>codever-matrix gateway invite</code> on the Gateway
+                computer. Scan or paste that one-time invitation below.
+              </p>
+              <p>
+                Reauthorizing this device does not delete conversation history
+                stored on the server.
+              </p>
+            </>
+          ) : (
+            <>
+              <strong>Repair this device’s connection</strong>
+              <p>
+                This APK still recognizes {trustedGateway.gatewayName}, but its
+                local Matrix sign-in is missing. On another connected Codever
+                device, choose Add another device, then scan or paste that
+                one-time invitation here. Your Codever device identity and
+                approved Gateway will stay the same.
+              </p>
+            </>
+          )}
         </div>
       )}
       <div className="pairing-hero">
@@ -308,7 +329,13 @@ export function PairingWizard({
           ↗
         </span>
         <div>
-          <h3>{repairRequired ? "Get a repair invitation" : "Connect to your computer"}</h3>
+          <h3>
+            {repairReason === "project-authorization"
+              ? "Use a new authorization invitation"
+              : repairRequired
+                ? "Get a repair invitation"
+                : "Connect to your computer"}
+          </h3>
           <p>
             Open Codever on another connected device and choose Add another
             device. Then scan its QR code or paste the one-time invitation

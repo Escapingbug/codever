@@ -57,6 +57,10 @@ import {
   parseGatewayCapabilities,
   type GatewayStateSnapshot,
 } from "./gatewayState";
+import {
+  MATRIX_PROJECT_AUTHORIZATION_REPAIR_REQUIRED,
+  resolveAuthoritativeProjectKeyGrant,
+} from "./projectKeyGrantRecovery";
 
 const LOCAL_TIMEOUT_MS = 10_000;
 const INITIAL_SYNC_LIMIT = 32;
@@ -107,6 +111,23 @@ export async function connectMatrixCvp3(
   const deliveredHistory = new Map<string, Set<string>>();
   const historyTokens = new Map<string, string | null>();
   const historyInitialized = new Set<string>();
+  let readySettled = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const completeReady = () => {
+    if (readySettled) return;
+    readySettled = true;
+    resolveReady();
+  };
+  const failReady = (error: unknown) => {
+    if (readySettled) return;
+    readySettled = true;
+    rejectReady(error);
+  };
 
   const publishProjection = () => {
     const active = protocol;
@@ -242,6 +263,56 @@ export async function connectMatrixCvp3(
     return false;
   };
 
+  const authoritativeProjectId = async (): Promise<string> => {
+    if (!trust) throw new Error("This device has not approved a Gateway.");
+    const content = await client.getStateEvent(
+      config.roomId,
+      CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
+      config.gatewayId,
+    );
+    const pointer = await verifyCvp3Pointer(
+      content,
+      trust.gatewayKey.publicKey,
+    );
+    if (
+      pointer.kind !== "workspace.current"
+      || pointer.workspaceId !== config.gatewayId
+      || !pointer.projectId
+      || pointer.roomId !== config.roomId
+      || pointer.gatewayKeyId !== trust.gatewayKey.keyId
+    ) {
+      throw new Error(
+        "The authoritative workspace pointer is bound to another Gateway or room.",
+      );
+    }
+    return pointer.projectId;
+  };
+
+  const openAuthoritativeProjectGrant = async (): Promise<boolean> => {
+    if (!trust) return false;
+    const currentProjectId = await authoritativeProjectId();
+    let content: unknown | null;
+    try {
+      content = await client.getStateEvent(
+        config.roomId,
+        CVP3_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
+        `${currentProjectId}.${identity.keyId}`,
+      );
+    } catch (error) {
+      if (!isMatrixNotFound(error)) throw error;
+      content = null;
+    }
+    const resolution = resolveAuthoritativeProjectKeyGrant(content, {
+      workspaceId: config.gatewayId,
+      projectId: currentProjectId,
+      roomId: config.roomId,
+      deviceId: identity.keyId,
+      certificateId: trust.certificate.certificate.certificateId,
+    });
+    if (resolution.kind === "reauthorization-required") return false;
+    return createProtocol(resolution.grant);
+  };
+
   const ingestEvent = async (event: MatrixEvent): Promise<void> => {
     if (event.isEncrypted() || event.getType() === "m.room.encrypted") {
       await client.decryptEventIfNeeded(event);
@@ -265,16 +336,14 @@ export async function connectMatrixCvp3(
   };
 
   const recoverCurrentProjectSnapshot = async (): Promise<boolean> => {
-    const activeRoom = room ?? client.getRoom(config.roomId);
-    if (!activeRoom || !trust || !protocol || !projectId) return false;
-    const state = activeRoom.currentState.getStateEvents(
+    if (!trust || !protocol || !projectId) return false;
+    const content = await client.getStateEvent(
+      config.roomId,
       CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE,
       projectId,
     );
-    const pointerEvent = Array.isArray(state) ? state[0] : state;
-    if (!pointerEvent) return false;
     const pointer = await verifyCvp3Pointer(
-      pointerEvent.getContent(),
+      content,
       trust.gatewayKey.publicKey,
     );
     if (
@@ -290,16 +359,14 @@ export async function connectMatrixCvp3(
   };
 
   const recoverCurrentWorkspaceSnapshot = async (): Promise<boolean> => {
-    const activeRoom = room ?? client.getRoom(config.roomId);
-    if (!activeRoom || !trust || !protocol || !projectId) return false;
-    const state = activeRoom.currentState.getStateEvents(
+    if (!trust || !protocol || !projectId) return false;
+    const content = await client.getStateEvent(
+      config.roomId,
       CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
       config.gatewayId,
     );
-    const pointerEvent = Array.isArray(state) ? state[0] : state;
-    if (!pointerEvent) return false;
     const pointer = await verifyCvp3Pointer(
-      pointerEvent.getContent(),
+      content,
       trust.gatewayKey.publicKey,
     );
     if (
@@ -429,6 +496,7 @@ export async function connectMatrixCvp3(
       readiness.completeRecovery();
       publishProjection();
       handlers.onStatus("connected");
+      completeReady();
     });
     recoveryChain = operation;
     await operation;
@@ -440,51 +508,63 @@ export async function connectMatrixCvp3(
     handlers.onStatus("error", detail);
   };
 
-  const ready = (async () => {
-    try {
-      await withMatrixTimeout(syncStore.startup(), LOCAL_TIMEOUT_MS, "The Matrix sync store did not open in time.");
-      handlers.onStatus("connecting", "Opening the Matrix encryption store…");
-      await client.initRustCrypto({ useIndexedDB: true, cryptoDatabasePrefix: cryptoScope });
-      const cryptoApi = client.getCrypto();
-      if (!cryptoApi) throw new Error("Matrix encryption did not initialize.");
-      const { AllDevicesIsolationMode } = await import("matrix-js-sdk/lib/crypto-api");
-      cryptoApi.globalBlacklistUnverifiedDevices = true;
-      cryptoApi.setDeviceIsolationMode(new AllDevicesIsolationMode(false));
-      matrixDeviceKeys = await cryptoApi.getOwnDeviceKeys();
-      if (!matrixDeviceKeys) throw new Error("Matrix device keys are unavailable.");
-      client.on(sdk.ClientEvent.Sync, onSync);
-      client.on(sdk.ClientEvent.Event, onMatrixEvent);
-      await client.startClient({ initialSyncLimit: INITIAL_SYNC_LIMIT });
-      await waitForInitialSync(client, sdk.ClientEvent.Sync);
-      room = client.getRoom(config.roomId);
-      if (!room) throw new Error("The bound Matrix project room is unavailable.");
-      if (!client.isRoomEncrypted(config.roomId)) throw new Error("The Matrix project room is not encrypted.");
-      room.on(sdk.RoomStateEvent.Events, onRoomState);
-      if (trust) {
-        await verifyAndPinGatewayDevice(client, trust.gatewayTransport);
-        if (!(await scanGrantState())) {
-          throw new Error("The Gateway has not published this device’s CVP/3 project key grant.");
-        }
-        await recoverAuthoritativeState();
-      } else {
-        handlers.onStatus("connected");
-      }
-    } catch (error) {
-      const detail = formatError(error);
-      readiness.failRecovery(detail);
-      handlers.onStatus("error", detail);
-      throw error;
-    }
+  const transportReady = (async () => {
+    await withMatrixTimeout(syncStore.startup(), LOCAL_TIMEOUT_MS, "The Matrix sync store did not open in time.");
+    handlers.onStatus("connecting", "Opening the Matrix encryption store…");
+    await client.initRustCrypto({ useIndexedDB: true, cryptoDatabasePrefix: cryptoScope });
+    const cryptoApi = client.getCrypto();
+    if (!cryptoApi) throw new Error("Matrix encryption did not initialize.");
+    const { AllDevicesIsolationMode } = await import("matrix-js-sdk/lib/crypto-api");
+    cryptoApi.globalBlacklistUnverifiedDevices = true;
+    cryptoApi.setDeviceIsolationMode(new AllDevicesIsolationMode(false));
+    matrixDeviceKeys = await cryptoApi.getOwnDeviceKeys();
+    if (!matrixDeviceKeys) throw new Error("Matrix device keys are unavailable.");
+    client.on(sdk.ClientEvent.Sync, onSync);
+    client.on(sdk.ClientEvent.Event, onMatrixEvent);
+    await client.startClient({ initialSyncLimit: INITIAL_SYNC_LIMIT });
+    await waitForInitialSync(client, sdk.ClientEvent.Sync);
+    room = client.getRoom(config.roomId);
+    if (!room) throw new Error("The bound Matrix project room is unavailable.");
+    if (!client.isRoomEncrypted(config.roomId)) throw new Error("The Matrix project room is not encrypted.");
+    room.on(sdk.RoomStateEvent.Events, onRoomState);
+    if (trust) await verifyAndPinGatewayDevice(client, trust.gatewayTransport);
   })();
+
+  const initialRecovery = transportReady.then(async () => {
+    if (!trust) {
+      handlers.onStatus("connected");
+      completeReady();
+      return;
+    }
+    if (!(await openAuthoritativeProjectGrant())) {
+      readiness.failRecovery(MATRIX_PROJECT_AUTHORIZATION_REPAIR_REQUIRED);
+      handlers.onStatus("error", MATRIX_PROJECT_AUTHORIZATION_REPAIR_REQUIRED);
+      return;
+    }
+    await recoverAuthoritativeState();
+  });
+  void initialRecovery.catch(error => {
+    const detail = formatError(error);
+    readiness.failRecovery(detail);
+    handlers.onStatus("error", detail);
+    failReady(error);
+  });
 
   const waitForGrant = async (signal?: AbortSignal): Promise<void> => {
     const deadline = Date.now() + 30_000;
+    let nextAuthoritativeCheckAt = 0;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new DOMException("Pairing was cancelled.", "AbortError");
       if (await scanGrantState()) return;
+      if (Date.now() >= nextAuthoritativeCheckAt) {
+        if (await openAuthoritativeProjectGrant()) return;
+        nextAuthoritativeCheckAt = Date.now() + 1_000;
+      }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    throw new Error("The Gateway approved pairing but did not publish the CVP/3 project key grant.");
+    throw new Error(
+      "The computer approved this device, but its conversation authorization did not arrive. Create a new one-time invitation on the computer and add this device again.",
+    );
   };
 
   const pair = async (
@@ -492,7 +572,10 @@ export async function connectMatrixCvp3(
     deviceName: string,
     signal?: AbortSignal,
   ): Promise<TrustedGateway> => {
-    await ready;
+    // Finish the bounded startup authorization check before rotating trust.
+    // This prevents a late stale-grant result from overwriting a successful
+    // reauthorization performed by this same connection.
+    await initialRecovery;
     if (!matrixDeviceKeys) throw new Error("Matrix device keys are unavailable.");
     await waitForOwnMatrixDeviceKeys(config, matrixDeviceKeys, 30_000);
     await verifyAndPinGatewayDevice(client, preview.transport);
@@ -860,6 +943,20 @@ function gatewayState(
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isMatrixNotFound(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    errcode?: unknown;
+    httpStatus?: unknown;
+    status?: unknown;
+  };
+  return (
+    candidate.errcode === "M_NOT_FOUND"
+    || candidate.httpStatus === 404
+    || candidate.status === 404
+  );
 }
 
 function latestThreadEvent(input: unknown): Record<string, unknown> | null {

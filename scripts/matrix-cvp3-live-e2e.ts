@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+    CVP3_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE,
     CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE,
     CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
 } from '@codever/protocol'
@@ -160,6 +161,14 @@ try {
     await waitForConnected(second)
     await waitForSessionIds(second, [firstSession, secondSession])
 
+    process.stdout.write('[5d/7] Recovering an authoritative device grant omitted from local sync state…\n')
+    await suspendAndClearCvp3ReadModel(second)
+    await assertAuthoritativeGrantRecoversMissingSyncState(
+        second,
+        fixture,
+        [firstSession, secondSession],
+    )
+
     process.stdout.write('[5c/7] Cold-restoring a trusted browser without claiming an empty inventory…\n')
     const recoveryRegressions: Error[] = []
     await suspendAndClearCvp3ReadModel(second)
@@ -223,6 +232,13 @@ try {
             `${recoveryRegressions.length} authoritative CVP/3 startup regression(s) detected.`,
         )
     }
+
+    process.stdout.write('[5r/7] Reauthorizing a stale device certificate with a real invitation…\n')
+    await assertProjectAuthorizationRepair(
+        second,
+        admin,
+        [firstSession, secondSession],
+    )
 
     process.stdout.write('[5x/7] Quarantining one poison timeline event without stalling later work…\n')
     await sendPoisonEvent(fixture)
@@ -582,6 +598,143 @@ async function suspendAndClearCvp3ReadModel(page: Page): Promise<void> {
     )
 }
 
+async function assertAuthoritativeGrantRecoversMissingSyncState(
+    page: Page,
+    matrix: DisposableMatrixFixture,
+    expectedSessionIds: string[],
+): Promise<void> {
+    let removedGrants = 0
+    let removedPointers = 0
+    let syncFetchClaimed = false
+    const pattern = '**/*'
+    const handler = async (route: Route) => {
+        const requestUrl = new URL(route.request().url())
+        if (
+            syncFetchClaimed
+            || !/\/_matrix\/client\/[^/]+\/sync$/u.test(requestUrl.pathname)
+        ) {
+            await route.continue()
+            return
+        }
+        syncFetchClaimed = true
+        const response = await route.fetch()
+        const body = await response.json() as {
+            rooms?: {
+                join?: Record<string, {
+                    state?: { events?: Array<{ type?: string }> }
+                    'org.matrix.msc4222.state_after'?: {
+                        events?: Array<{ type?: string }>
+                    }
+                    timeline?: { events?: Array<{ type?: string }> }
+                }>
+            }
+        }
+        const joinedRoom = body.rooms?.join?.[matrix.roomId]
+        const eventLists = [
+            joinedRoom?.state,
+            joinedRoom?.['org.matrix.msc4222.state_after'],
+            joinedRoom?.timeline,
+        ]
+        for (const list of eventLists) {
+            if (!list?.events) continue
+            list.events = list.events.filter(event => {
+                if (event.type === CVP3_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE) {
+                    removedGrants += 1
+                    return false
+                }
+                if (
+                    event.type === CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
+                    || event.type === CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+                ) {
+                    removedPointers += 1
+                    return false
+                }
+                return true
+            })
+        }
+        await route.fulfill({ response, json: body })
+    }
+    await page.route(pattern, handler)
+    try {
+        await page.goto(pwaUrl)
+        await waitFor(() => removedGrants > 0 && removedPointers >= 2, {
+            description: 'CVP/3 grant and pointers removed from the initial Matrix sync state',
+            timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        })
+        await waitForConnected(page)
+        await waitForSessionIds(page, expectedSessionIds)
+    } finally {
+        await page.unrouteAll({ behavior: 'ignoreErrors' })
+    }
+}
+
+async function assertProjectAuthorizationRepair(
+    page: Page,
+    admin: GatewayAdminClient,
+    expectedSessionIds: string[],
+): Promise<void> {
+    await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
+    let originalCertificateId: string | null = null
+    let injectedMismatches = 0
+    const pattern = '**/*'
+    const handler = async (route: Route) => {
+        if (roomStateEventType(route.request().url()) !== CVP3_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE) {
+            await route.continue()
+            return
+        }
+        const response = await route.fetch()
+        const content = await response.json() as Record<string, unknown>
+        const certificateId = typeof content.certificateId === 'string'
+            ? content.certificateId
+            : null
+        originalCertificateId ??= certificateId
+        if (certificateId && certificateId === originalCertificateId) {
+            injectedMismatches += 1
+            await route.fulfill({
+                response,
+                json: {
+                    ...content,
+                    certificateId: `stale-${certificateId}`,
+                },
+            })
+            return
+        }
+        await route.fulfill({ response, json: content })
+    }
+    await page.route(pattern, handler)
+    try {
+        await page.goto(pwaUrl)
+        const dialog = page.getByRole('dialog', { name: 'Repair connection' })
+        await dialog.waitFor({ state: 'visible', timeout: STARTUP_TIMEOUT_MS })
+        await dialog.getByText('Reauthorize this device', { exact: true }).waitFor()
+        await dialog.getByText('codever-matrix gateway invite', { exact: true }).waitFor()
+        assert.ok(injectedMismatches > 0, 'The stale-certificate repair precondition was not injected.')
+        assert.equal(
+            await dialog.getByRole('button', { name: 'Try again', exact: true }).count(),
+            0,
+            'Authorization repair must not offer a retry that cannot change authorization.',
+        )
+        const downloadPromise = page.waitForEvent('download')
+        await dialog.getByRole('button', { name: 'Export diagnostics' }).click()
+        const download = await downloadPromise
+        assert.match(download.suggestedFilename(), /^codever-connection-diagnostics-\d+\.json$/u)
+        await download.delete()
+
+        const invitation = await admin.createInvitation({
+            matrixLogin: 'disabled',
+            appUrl: pwaUrl,
+        })
+        await dialog.getByLabel('One-time pairing link').fill(invitation.pairingLink)
+        await dialog.getByRole('button', { name: 'Continue', exact: true }).click()
+        await dialog.getByText('Computer found').waitFor()
+        await dialog.getByRole('button', { name: /^Connect to /u }).click()
+        await waitForConnected(page)
+        await waitForSessionIds(page, expectedSessionIds)
+    } finally {
+        await page.unroute(pattern, handler)
+    }
+}
+
 async function assertColdProjectionWaitsForAuthority(
     page: Page,
     snapshotEventIds: Set<string>,
@@ -755,6 +908,13 @@ async function interceptSnapshotRequests(
 
 function roomEventId(url: string): string | null {
     const match = new URL(url).pathname.match(/\/_matrix\/client\/[^/]+\/rooms\/[^/]+\/event\/([^/]+)$/u)
+    return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+function roomStateEventType(url: string): string | null {
+    const match = new URL(url).pathname.match(
+        /\/_matrix\/client\/[^/]+\/rooms\/[^/]+\/state\/([^/]+)\/[^/]+$/u,
+    )
     return match?.[1] ? decodeURIComponent(match[1]) : null
 }
 

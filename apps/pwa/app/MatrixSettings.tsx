@@ -17,13 +17,14 @@ import type {
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
 import { useDialogFocus } from "./dialogFocus";
+import type { ConnectionRepairReason } from "./connectionPresentation";
 
 type Props = {
   open: boolean;
   config: MatrixConnectionConfig;
   status: MatrixConnectionStatus;
   progressDetail: string | null;
-  repairRequired: boolean;
+  repairReason: ConnectionRepairReason | null;
   error: string | null;
   pairingPreview: PairingPreview | null;
   trustedGateway: CodeverPublicTrust | null;
@@ -46,6 +47,7 @@ type Props = {
   onCreateInvitation(password?: string): void;
   onClearInvitation(): void;
   onCheckForUpdates(): void;
+  onExportDiagnostics(): void;
 };
 
 export function MatrixSettings(props: Props) {
@@ -60,7 +62,7 @@ function MatrixSettingsDialog({
   error,
   pairingPreview,
   trustedGateway,
-  repairRequired,
+  repairReason,
   pairingBusy,
   deviceInvitation,
   invitationBusy,
@@ -80,7 +82,9 @@ function MatrixSettingsDialog({
   onCreateInvitation,
   onClearInvitation,
   onCheckForUpdates,
+  onExportDiagnostics,
 }: Props) {
+  const repairRequired = repairReason !== null;
   const [loginPassword, setLoginPassword] = useState("");
   const connected =
     status === "connected" ||
@@ -155,7 +159,7 @@ function MatrixSettingsDialog({
         <PairingWizard
           preview={pairingPreview}
           trustedGateway={trustedGateway}
-          repairRequired={repairRequired}
+          repairReason={repairReason}
           busy={busy}
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}
@@ -318,6 +322,9 @@ function MatrixSettingsDialog({
               <small>{updateStatusText(updateState)}</small>
             </span>
           </details>
+          <button type="button" onClick={onExportDiagnostics}>
+            Export diagnostics
+          </button>
           <button
             type="button"
             onClick={onCheckForUpdates}
@@ -349,7 +356,7 @@ function MatrixSettingsDialog({
             >
               Disconnect
             </button>
-          ) : trustedGateway ? (
+          ) : trustedGateway && !repairRequired ? (
             <button
               className="connect-button"
               onClick={onConnect}

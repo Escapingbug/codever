@@ -123,10 +123,13 @@ import {
 import { createPromptCommandPayload } from "./commandPayloads";
 import { deriveComposerState } from "./composerState";
 import {
+  connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
+  type ConnectionRepairReason,
 } from "./connectionPresentation";
 import { deriveGatewayLiveness } from "./gatewayLiveness";
+import { createConnectionDiagnostics } from "./connectionDiagnostics";
 import {
   formatUserFacingError,
   isCommandRecoveryPendingError,
@@ -953,14 +956,15 @@ function CodeverAppRuntime() {
     ? deriveConnectionPresentation("offline", "matrix_gateway_offline")
     : matrixConnectionPresentation;
 
-  const matrixSessionRepairRequired =
-    connectionDetail === "matrix_session_repair_required";
+  const connectionRepairReason = connectionRepairReasonForDetail(
+    connectionDetail,
+  );
 
   useEffect(() => {
-    if (!matrixSessionRepairRequired) return;
+    if (!connectionRepairReason) return;
     const timer = window.setTimeout(() => setSettingsOpen(true), 0);
     return () => window.clearTimeout(timer);
-  }, [matrixSessionRepairRequired]);
+  }, [connectionRepairReason]);
   const composerNotices = [
     ...noticesForScope(uiNotices, "composer"),
     ...noticesForScope(uiNotices, "attachment"),
@@ -2378,15 +2382,18 @@ function CodeverAppRuntime() {
             matrixStartupRef.current.phase = presentedStatus;
           }
           connectionStatusRef.current = presentedStatus;
+          const repairReason: ConnectionRepairReason | null =
+            presentedStatus === "error"
+              ? connectionRepairReasonForDetail(detail)
+              : null;
           matrixSessionRepairRequiredRef.current =
-            presentedStatus === "error" &&
-            detail === "matrix_session_repair_required";
+            repairReason === "matrix-session";
           setConnectionStatus(presentedStatus);
           setConnectionDetail(presentedStatus === "offline" ? null : detail ?? null);
           if (presentedStatus === "error") {
             const presentation = deriveConnectionPresentation(presentedStatus, detail);
             setConnectionError(presentation.detail);
-            if (detail === "matrix_session_repair_required") {
+            if (repairReason) {
               keepSettingsOpenForRepair = true;
               setSettingsOpen(true);
             }
@@ -3217,6 +3224,29 @@ function CodeverAppRuntime() {
     }
   }
   pairingRecoveryRef.current = confirmPairing;
+
+  function exportConnectionDiagnostics(): void {
+    const report = createConnectionDiagnostics({
+      buildVersion: CODEVER_BUILD_VERSION,
+      status: connectionStatus,
+      detail: connectionDetail,
+      deviceKeyId,
+      nativeRuntime,
+      online: navigator.onLine,
+      visibility: document.visibilityState,
+      userAgent: navigator.userAgent,
+    });
+    const url = URL.createObjectURL(
+      new Blob([report], { type: "application/json" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `codever-connection-diagnostics-${Date.now()}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 
   async function sendRealCommand(
     payload: CommandPayload,
@@ -6026,7 +6056,7 @@ function CodeverAppRuntime() {
         config={matrixConfig}
         status={displayedConnectionStatus}
         progressDetail={connectionPresentation.detail}
-        repairRequired={matrixSessionRepairRequired}
+        repairReason={connectionRepairReason}
         error={pairingError ?? connectionError}
         pairingPreview={pairingPreview}
         trustedGateway={trustedGateway}
@@ -6075,6 +6105,7 @@ function CodeverAppRuntime() {
           setInvitationError(null);
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
+        onExportDiagnostics={exportConnectionDiagnostics}
       />
 
       <GatewayForgetDialog

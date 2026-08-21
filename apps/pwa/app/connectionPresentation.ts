@@ -10,6 +10,10 @@ export type ConnectionPresentation = {
   diagnosticDetail?: string;
 };
 
+export type ConnectionRepairReason =
+  | "matrix-session"
+  | "project-authorization";
+
 type DetailCopy = Pick<ConnectionPresentation, "title" | "detail">;
 
 const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
@@ -25,6 +29,11 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Connection repair required",
     detail:
       "This device still trusts your computer, but its local sign-in is missing. Use a new invitation from that computer to repair it.",
+  },
+  matrix_project_authorization_repair_required: {
+    title: "Device authorization required",
+    detail:
+      "This device’s saved authorization no longer matches your computer. Reauthorize it with a new one-time invitation; your server conversation history will not be deleted.",
   },
   matrix_session_restoring: {
     title: "Restoring connection",
@@ -196,6 +205,16 @@ export function connectionStatusForBrowserNetwork(
 ): MatrixConnectionStatus {
   if (online || status === "offline" || status === "error") return status;
   return "offline";
+}
+
+export function connectionRepairReasonForDetail(
+  detail?: string | null,
+): ConnectionRepairReason | null {
+  if (detail === "matrix_session_repair_required") return "matrix-session";
+  if (detail === "matrix_project_authorization_repair_required") {
+    return "project-authorization";
+  }
+  return null;
 }
 
 function connectionPresentationState(
