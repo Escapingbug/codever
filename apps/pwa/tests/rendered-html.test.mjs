@@ -224,6 +224,20 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(
     styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.gateway-card\s*\{[\s\S]*?left:\s*92px;[\s\S]*?max-width:\s*none/,
+  );
+  assert.match(source, /className="gateway-mobile-status-copy"/);
+  assert.match(
+    styles,
+    /\.gateway-mobile-status-copy\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?text-overflow:\s*ellipsis/,
+  );
+  assert.match(source, /className="conversation-status-copy"/);
+  assert.match(
+    styles,
+    /\.conversation-status-copy\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?text-overflow:\s*ellipsis/,
+  );
+  assert.match(
+    styles,
     /@media \(max-width: 900px\)[\s\S]*?\.session-row\s*\{[\s\S]*?min-height:\s*68px/,
   );
   assert.match(

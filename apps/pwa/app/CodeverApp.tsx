@@ -4650,8 +4650,10 @@ function CodeverAppRuntime() {
             <span className="gateway-mobile-status" aria-hidden="true">
               <i
                 className={`connection-dot connection-state-${displayedConnectionStatus}`}
-              />{" "}
-              {trustedGateway ? connectionPresentation.title : "Connect"}
+              />
+              <span className="gateway-mobile-status-copy">
+                {trustedGateway ? connectionPresentation.title : "Connect"}
+              </span>
             </span>
           </div>
           <span className="gateway-more" aria-hidden="true">•••</span>
@@ -4980,25 +4982,27 @@ function CodeverAppRuntime() {
           </span>
           <div className="conversation-heading">
             <h2>{conversationTitle}</h2>
-            <span>
+            <span className="conversation-status">
               <i
                 className={`connection-dot connection-state-${displayedConnectionStatus} ${
                   displayedConnectionStatus === "offline" || displayedConnectionStatus === "error"
                     ? "offline-dot"
                     : ""
                 }`}
-              />{" "}
-              {gatewayAvailable
-                ? gatewayState
-                  ? selectedArchived
-                    ? `${activeWorkspace?.projectName || "Project"} · archived`
-                    : `${activeWorkspace?.projectName || "Project"} · ${
-                        isStreaming
-                          ? agentActivity?.label || "working"
-                          : activeProvider
-                      }`
-                  : "Syncing conversations…"
-                : connectionPresentation.title}
+              />
+              <span className="conversation-status-copy">
+                {gatewayAvailable
+                  ? gatewayState
+                    ? selectedArchived
+                      ? `${activeWorkspace?.projectName || "Project"} · archived`
+                      : `${activeWorkspace?.projectName || "Project"} · ${
+                          isStreaming
+                            ? agentActivity?.label || "working"
+                            : activeProvider
+                        }`
+                    : "Syncing conversations…"
+                  : connectionPresentation.title}
+              </span>
             </span>
           </div>
           <div className="header-actions">

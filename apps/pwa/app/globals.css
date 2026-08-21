@@ -389,7 +389,7 @@ select:focus-visible {
   font-weight: 650;
 }
 
-.gateway-card div span {
+.gateway-card > div > span {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -406,6 +406,7 @@ select:focus-visible {
 .conversation-heading i {
   width: 6px;
   height: 6px;
+  flex: 0 0 auto;
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 3px rgb(40 175 119 / 10%);
@@ -1269,12 +1270,22 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.conversation-heading span {
+.conversation-heading > .conversation-status {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
+  overflow: hidden;
   color: #667085;
   font-size: 10px;
+}
+
+.conversation-status-copy {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-actions {
@@ -4775,7 +4786,7 @@ body {
   font-size: 15px;
 }
 
-.gateway-card div span {
+.gateway-card > div > span {
   font-size: 12px;
 }
 
@@ -4828,7 +4839,7 @@ body {
   font-size: 18px;
 }
 
-.conversation-heading span {
+.conversation-heading > .conversation-status {
   font-size: 12px;
 }
 
@@ -5161,9 +5172,11 @@ body {
     z-index: 4;
     top: calc(4px + env(safe-area-inset-top));
     right: 112px;
+    left: 92px;
     width: auto;
-    max-width: 90px;
+    max-width: none;
     min-height: 44px;
+    justify-content: flex-end;
     gap: 0;
     margin: 0;
     padding: 0 7px;
@@ -5183,7 +5196,9 @@ body {
   }
 
   .gateway-card > div {
-    flex: 0 1 auto;
+    width: 100%;
+    min-width: 0;
+    flex: 1;
     overflow: hidden;
   }
 
@@ -5193,12 +5208,23 @@ body {
 
   .gateway-card div .gateway-mobile-status {
     display: flex !important;
-    max-width: 76px;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    justify-content: flex-end;
     margin: 0;
     overflow: hidden;
     color: #5f687b;
     font-size: 11px;
     font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .gateway-mobile-status-copy {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -5325,7 +5351,7 @@ body {
     font-size: 17px;
   }
 
-  .conversation-heading span {
+  .conversation-heading > .conversation-status {
     font-size: 13px;
   }
 
