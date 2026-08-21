@@ -1430,11 +1430,12 @@ function parseMethodParams(method: RequestMethod, input: unknown): JsonObject {
       return params;
     }
     case "codever.history.page": {
-      const params = paramsWithContext(input, ["sessionId", "before", "limit"]);
+      const params = paramsWithContext(input, ["sessionId", "before", "limit", "source"]);
       opaqueId(params.sessionId, "sessionId");
       optionalOpaqueId(params.before, "before");
       const limit = positiveInteger(params.limit, "limit");
       if (limit > 100) invalidParams("history limit cannot exceed 100.");
+      enumValue(params.source, "source", ["local", "matrix"]);
       return params;
     }
     case "codever.attachment.upload.open": {

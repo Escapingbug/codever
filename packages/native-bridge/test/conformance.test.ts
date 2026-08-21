@@ -382,6 +382,22 @@ describe("native bridge JSON-RPC conformance", () => {
   });
 
   it("uses a native-safe history message DTO without raw Matrix events", () => {
+    expect(
+      parseRpcRequest(request("codever.history.page", {
+        context,
+        sessionId: "session-1",
+        limit: 100,
+        source: "local",
+      })).method,
+    ).toBe("codever.history.page");
+    expect(() =>
+      parseRpcRequest(request("codever.history.page", {
+        context,
+        sessionId: "session-1",
+        limit: 100,
+      })),
+    ).toThrow(/source/);
+
     const page = parseMethodRpcResponse(
       "codever.history.page",
       response({

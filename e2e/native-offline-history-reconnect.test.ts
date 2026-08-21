@@ -20,8 +20,6 @@ import {
     acquireNativeRpcBridge,
     type NativeBridgePort,
 } from '../apps/pwa/app/client/native/NativeRpcBridge'
-import { shouldReconcileRecentHistory } from '../apps/pwa/app/crossDeviceSync'
-
 describe('native offline history and reconnect', () => {
     it('opens cached history offline and replays missed events once after WebView restart', async () => {
         const port = new PersistentHistoryPort([
@@ -40,7 +38,7 @@ describe('native offline history and reconnect', () => {
             onStatus: status => firstStatuses.push(status),
         })
         expect(firstStatuses).toContain('offline')
-        await expect(first.loadRecentHistory('session-history', 30)).resolves.toEqual({
+        await expect(first.loadLocalHistory('session-history')).resolves.toEqual({
             messages: [
                 message('history-1', 1, 'first cached reply', true),
                 message('history-2', 2, 'second cached reply', true),
@@ -68,12 +66,14 @@ describe('native offline history and reconnect', () => {
         expect(port.lastSubscribeAfter).toBe('cursor-barrier-1')
         expect(secondStatuses).toContain('connected')
         expect(replayed).toEqual(['history-3'])
-        await expect(second.loadRecentHistory('session-history', 30)).resolves.toEqual({
-            messages: [
-                message('history-1', 1, 'first cached reply', true),
-                message('history-2', 2, 'second cached reply', true),
-                message('history-3', 3, 'reply received while the UI was gone', false),
-            ],
+        second.markHistoryLoaded('session-history', ['history-1', 'history-2'])
+        await expect(second.loadLocalHistory('session-history')).resolves.toEqual({
+            messages: [message(
+                'history-3',
+                3,
+                'reply received while the UI was gone',
+                false,
+            )],
             hasMore: false,
         })
 
@@ -81,71 +81,42 @@ describe('native offline history and reconnect', () => {
         await nextTurn()
         expect(replayed).toEqual(['history-3', 'history-4'])
         expect(new Set(replayed).size).toBe(replayed.length)
-        expect(cursorValues.get('native-history-device')).toBe('cursor-live-4')
+        expect(cursorValues.get('native-history-device')).toBe('cursor-live-history-4')
         expect(port.failures).toEqual([])
         second.dispose()
     })
 
-    it('repairs more than one hundred outputs when every phone timeline event is lost', async () => {
+    it('recovers more than one hundred detached updates from local native history without Matrix polling', async () => {
         const port = new PersistentHistoryPort([
             message('cross-device-user', 1, 'first message from the phone', false),
             message('cross-device-command', 2, 'running command', false),
         ])
-        let client: NativeBridgeClient
-        let previousUpdatedAt: number | undefined
-        let resolveRecovery!: (messages: ClientMessage[]) => void
-        const deliveredTimelineEvents: string[] = []
-        const recovered = new Promise<ClientMessage[]>(resolve => {
-            resolveRecovery = resolve
-        })
-        client = await createClient(port, { load: () => undefined, save() {} }, {
-            onMessage(message) {
-                deliveredTimelineEvents.push(message.eventId)
-            },
-            onCollaborationState(state) {
-                const session = state.gatewayState?.sessions.find(
-                    candidate => candidate.id === 'session-history',
-                )
-                const nextUpdatedAt = session?.updatedAt
-                if (shouldReconcileRecentHistory({
-                    selectedSessionId: 'session-history',
-                    previousUpdatedAt,
-                    nextUpdatedAt,
-                })) {
-                    void client.loadRecentHistory('session-history', 30)
-                        .then(page => resolveRecovery(page.messages))
-                }
-                previousUpdatedAt = nextUpdatedAt
-            },
-        })
-        await expect(client.loadRecentHistory('session-history', 30)).resolves.toMatchObject({
-            messages: [
-                { eventId: 'cross-device-user' },
-                { eventId: 'cross-device-command' },
-            ],
-        })
-        port.deliverGatewayState(1)
-        await nextTurn()
-
-        // Every ordinary Matrix timeline event is deliberately absent. Only
-        // the authoritative Gateway state advances, so correctness cannot
-        // depend on the native sync retaining its latest 100 timeline events.
         for (let index = 1; index <= 150; index += 1) {
-            port.appendWithoutTimeline(message(
+            port.appendWithoutReplay(message(
                 `cross-device-missed-${index}`,
                 index + 2,
-                `missed browser output ${index}`,
-                true,
+                `browser output ${index}`,
+                false,
             ))
         }
-        port.deliverGatewayState(2)
-
-        await expect(within(recovered, 5_000)).resolves.toEqual(
-            Array.from({ length: 30 }, (_, offset) => expect.objectContaining({
-                eventId: `cross-device-missed-${offset + 121}`,
-            })),
+        const client = await createClient(port, { load: () => undefined, save() {} }, {
+            onMessage() {},
+        })
+        client.markHistoryLoaded('session-history', [
+            'cross-device-user',
+            'cross-device-command',
+        ])
+        const recovered = await client.loadLocalHistory('session-history')
+        expect(recovered.messages.map(message => message.eventId)).toEqual(
+            Array.from({ length: 150 }, (_, offset) =>
+                `cross-device-missed-${offset + 1}`,
+            ),
         )
-        expect(deliveredTimelineEvents).toEqual([])
+        for (let index = 1; index <= 150; index += 1) {
+            port.deliverGatewayState(index)
+        }
+        await nextTurn()
+        expect(port.historyRequestSources).toEqual(['local', 'local'])
         expect(port.failures).toEqual([])
         client.dispose()
     })
@@ -168,6 +139,7 @@ class PersistentHistoryPort implements NativeBridgePort {
     onmessage: NativeBridgePort['onmessage'] = null
     phase: ClientSnapshot['lifecycle']['phase'] = 'offline'
     lastSubscribeAfter: string | undefined
+    readonly historyRequestSources: string[] = []
     readonly failures: string[] = []
     private readonly history: ClientMessage[]
     private replay: ClientEvent[] = []
@@ -191,7 +163,7 @@ class PersistentHistoryPort implements NativeBridgePort {
         this.replay.push(messageEvent(incoming, 'cursor-detached-3'))
     }
 
-    appendWithoutTimeline(incoming: ClientMessage): void {
+    appendWithoutReplay(incoming: ClientMessage): void {
         this.history.push(incoming)
     }
 
@@ -208,7 +180,7 @@ class PersistentHistoryPort implements NativeBridgePort {
 
     deliverLive(incoming: ClientMessage): void {
         this.history.push(incoming)
-        this.deliver([messageEvent(incoming, 'cursor-live-4')])
+        this.deliver([messageEvent(incoming, `cursor-live-${incoming.eventId}`)])
     }
 
     private respond(request: RpcRequest): void {
@@ -249,10 +221,16 @@ class PersistentHistoryPort implements NativeBridgePort {
                 })
                 return
             case 'codever.history.page':
+                this.historyRequestSources.push(request.params.source)
+                const before = request.params.before
+                    ? Number(request.params.before.replace('history-before-', ''))
+                    : this.history.length
+                const start = Math.max(0, before - request.params.limit)
                 this.result(request, {
                     sessionId: request.params.sessionId,
-                    messages: this.history.slice(-request.params.limit),
-                    hasMore: this.history.length > request.params.limit,
+                    messages: this.history.slice(start, before),
+                    ...(start > 0 ? { nextBefore: `history-before-${start}` } : {}),
+                    hasMore: start > 0,
                     asOfCursor: this.history.at(-1)?.eventId ?? 'history-empty',
                 })
                 return
@@ -290,7 +268,10 @@ async function createClient(
         optionalCapabilities: [
             ...REQUIRED_NATIVE_CAPABILITIES,
             ...OPTIONAL_NATIVE_CAPABILITIES,
-        ].map(name => ({ name, versions: [1] })),
+        ].map(name => ({
+            name,
+            versions: name === 'history.page' ? [2, 1] : [1],
+        })),
     })
     const client = new NativeBridgeClient(bridge, hello, {
         onMessage: incoming => handlers.onMessage?.(incoming),
@@ -334,7 +315,7 @@ function messageEvent(incoming: ClientMessage, cursor: string): ClientEvent {
 function helloResult(): HelloResult {
     const capabilities = Object.fromEntries(
         [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-            .map(name => [name, { version: 1 }]),
+            .map(name => [name, { version: name === 'history.page' ? 2 : 1 }]),
     ) as Record<CapabilityName, { version: number }>
     return {
         protocolVersion: 1,
@@ -402,16 +383,6 @@ function gatewayState(updatedAt: number): Record<string, unknown> {
             session_extensions: [],
         },
     }
-}
-
-function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-    return Promise.race([
-        promise,
-        new Promise<T>((_, reject) => setTimeout(
-            () => reject(new Error(`Timed out after ${timeoutMs} ms.`)),
-            timeoutMs,
-        )),
-    ])
 }
 
 function nextTurn(): Promise<void> {

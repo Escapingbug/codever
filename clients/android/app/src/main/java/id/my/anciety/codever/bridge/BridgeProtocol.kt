@@ -320,7 +320,7 @@ class BridgeDispatcher(
     private val eventSink: (String) -> Unit = {},
 ) {
     private var negotiated = false
-    private var negotiatedCapabilities = emptySet<String>()
+    private var negotiatedCapabilities = emptyMap<String, Int>()
     private val mutationMutex = Mutex()
     private val mutationResults = object : LinkedHashMap<String, MutationRecord>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutationRecord>?): Boolean =
@@ -547,16 +547,36 @@ class BridgeDispatcher(
                 }
             }
             "codever.history.page" -> {
+                val historyVersion = negotiatedCapabilities["history.page"]
+                    ?: throw BridgeDispatchException(
+                        BridgeError.CAPABILITY_UNAVAILABLE,
+                        "Native history pagination was not negotiated.",
+                        userAction = "update_native",
+                    )
                 requireContext(
                     request.params,
                     false,
-                    requiredExtra = setOf("sessionId", "limit"),
+                    requiredExtra = if (historyVersion >= 2) {
+                        setOf("sessionId", "limit", "source")
+                    } else {
+                        setOf("sessionId", "limit")
+                    },
                     optionalExtra = setOf("before"),
                 )
+                val allowRemote = if (historyVersion >= 2) {
+                    when (requiredString(request.params, "source", 16)) {
+                        "local" -> false
+                        "matrix" -> true
+                        else -> invalidParams("source has an unsupported value.")
+                    }
+                } else {
+                    true
+                }
                 boundedHistoryPage(
                     requiredString(request.params, "sessionId", 512),
                     optionalString(request.params, "before", 512),
                     requiredInt(request.params, "limit", 1, 100),
+                    allowRemote,
                 )
             }
             "codever.attachment.upload.open" -> {
@@ -878,22 +898,26 @@ class BridgeDispatcher(
         }
         val selectedCapabilities = linkedMapOf<String, Int>()
         required.forEach { (name, versions) ->
-            if (name !in SUPPORTED_CAPABILITIES || 1 !in versions) {
+            val selected = versions
+                .filter { it in supportedCapabilityVersions(name) }
+                .maxOrNull()
+            if (selected == null) {
                 throw BridgeDispatchException(
                     BridgeError.CAPABILITY_UNAVAILABLE,
                     "Required native capability is unavailable: $name.",
                     userAction = "update_native",
                 )
             }
-            selectedCapabilities[name] = 1
+            selectedCapabilities[name] = selected
         }
         optional.forEach { (name, versions) ->
-            if (name in SUPPORTED_CAPABILITIES && 1 in versions) {
-                selectedCapabilities[name] = 1
-            }
+            versions
+                .filter { it in supportedCapabilityVersions(name) }
+                .maxOrNull()
+                ?.let { selectedCapabilities[name] = it }
         }
         negotiated = true
-        negotiatedCapabilities = selectedCapabilities.keys
+        negotiatedCapabilities = selectedCapabilities
         return buildJsonObject {
             put("protocolVersion", BridgeProtocol.VERSION)
             put("bridgeSessionId", bridgeSessionId)
@@ -998,10 +1022,13 @@ class BridgeDispatcher(
         sessionId: String,
         before: String?,
         requestedLimit: Int,
+        allowRemote: Boolean,
     ): JsonObject {
         var limit = requestedLimit
         while (true) {
-            val encoded = historyToJson(runtime.client().historyPage(sessionId, before, limit))
+            val encoded = historyToJson(
+                runtime.client().historyPage(sessionId, before, limit, allowRemote),
+            )
             if (encoded.toString().toByteArray(Charsets.UTF_8).size <= MAX_RPC_RESULT_BYTES) {
                 return encoded
             }
@@ -1284,6 +1311,11 @@ class BridgeDispatcher(
             MATRIX_BOOTSTRAP_CAPABILITY,
             MATRIX_LOGIN_TOKEN_CAPABILITY,
         )
+        fun supportedCapabilityVersions(name: String): Set<Int> = when {
+            name == "history.page" -> setOf(1, 2)
+            name in SUPPORTED_CAPABILITIES -> setOf(1)
+            else -> emptySet()
+        }
         const val MAX_IDEMPOTENCY_RECORDS = 128
         const val MAX_RPC_RESULT_BYTES = 480 * 1024
         const val MAX_EVENT_BATCH_BYTES = 256 * 1024

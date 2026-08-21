@@ -79,7 +79,7 @@ Bridge protocol version 1 currently implements:
 - `events.replay`
 - `state.snapshot`
 - `commands.durable`
-- `history.page`
+- `history.page` v2 (`source=local` is network-free; `source=matrix` is explicit pagination)
 - `attachments.chunked`
 - `pairing.native`
 - `trust.native`

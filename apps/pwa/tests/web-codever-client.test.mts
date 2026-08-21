@@ -75,7 +75,7 @@ function fakeTransport(
     },
     async discardRevisionConflict() {},
     markHistoryLoaded() {},
-    async loadRecentHistory() {
+    async loadLocalHistory() {
       return { messages: [], hasMore: false };
     },
     async loadHistoryPage() {

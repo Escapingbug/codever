@@ -12,6 +12,7 @@ import {
 import { chromium, type Browser, type Page, type Route } from 'playwright-core'
 import { GatewayAdminClient } from '../src/gateway/admin/client.js'
 import { runAndroidMatrixCvp3Journey } from './e2e/androidMatrixCvp3Journey.js'
+import { MATRIX_CVP3_PROJECTION_STATE_VERSION } from '../apps/pwa/app/matrixCvp3Projection.js'
 import {
     createDisposableMatrixFixture,
     type DisposableMatrixFixture,
@@ -448,7 +449,7 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
     // validation while containing no sessions, and its durable inbox can keep
     // valid Matrix events quarantined after a transient historical failure.
     await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
-    const result = await page.evaluate(async () => {
+    const result = await page.evaluate(async (projectionStateVersion) => {
         return new Promise<{ projectionRows: number; quarantinedRows: number }>((resolve, reject) => {
             const opened = indexedDB.open('codever-matrix-v3', 2)
             opened.onerror = () => reject(opened.error ?? new Error('Could not open the CVP/3 test database.'))
@@ -477,7 +478,10 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
                         key: string
                         state?: Record<string, unknown>
                     }>) {
-                        if (!row.state || row.state.version !== 3) continue
+                        if (
+                            !row.state
+                            || row.state.version !== projectionStateVersion
+                        ) continue
                         projectionStore.put({
                             ...row,
                             state: {
@@ -519,7 +523,7 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
                 transaction.onabort = transaction.onerror
             }
         })
-    })
+    }, MATRIX_CVP3_PROJECTION_STATE_VERSION)
     assert.ok(
         result.projectionRows > 0,
         'Projection repair precondition failed: the trusted browser had no valid durable projection.',

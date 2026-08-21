@@ -216,7 +216,10 @@ class BootstrapPort implements NativeBridgePort {
           platform: "android",
         },
         capabilities: Object.fromEntries(
-          REQUIRED_NATIVE_CAPABILITIES.map((name) => [name, { version: 1 }]),
+          REQUIRED_NATIVE_CAPABILITIES.map((name) => [
+            name,
+            { version: name === "history.page" ? 2 : 1 },
+          ]),
         ),
         limits: NATIVE_BRIDGE_LIMITS,
       };

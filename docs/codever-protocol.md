@@ -95,7 +95,9 @@ After a projection change, the Gateway emits an ordinary signed project
 snapshot and updates `io.codever.project.current.v3` to that event. A cold
 client reads the pointer, fetches and verifies the referenced event, then
 enumerates Matrix threads with complete pagination. It loads a selected
-transcript through standard thread relations.
+transcript's initial window through standard thread relations only when the
+local projection has no cached window. Older transcript pages are loaded on
+explicit user pagination.
 
 Clients persist raw Matrix events before projection. Projection success marks
 an inbox record complete. A malformed event is quarantined individually; it
@@ -103,11 +105,15 @@ cannot block later valid events. Events that are valid but await a dependency,
 such as a project key grant, are retried in multi-pass order so a later grant
 can unlock an earlier event without deadlocking the inbox.
 
-The `/sync` token records availability progress only. It is not an application
-checkpoint. If `/sync` is limited or a client was offline for a long time, the
-client rebuilds from the current pointer, the fully paginated thread directory,
-and thread relations. Process death resumes the durable inbox/outbox and never
-manufactures a replacement command.
+The `/sync` token is the incremental Matrix transport cursor, not a CVP
+checkpoint. A client advances it only after every accepted event has completed
+its durable local transition or has been quarantined as poison. If `/sync` is
+limited, the client persists the exact gap boundary before advancing the live
+cursor and closes that gap in a coalesced background worker. The current
+pointer and fully paginated thread directory provide a cache-cold baseline;
+thread relations do not poll for recent state. Process death resumes the
+durable inbox, gap queue, and outbox and never manufactures a replacement
+command.
 
 Offline clients show their last verified encrypted local projection and
 history. They do not report Connected or release new commands until the Matrix
@@ -117,7 +123,8 @@ Android owns this process in its foreground connection service. The service
 keeps `/sync`, raw-inbox persistence, projection, outbox reconciliation, and
 task notifications running while the WebView is detached or the screen is
 off. Opening the Activity reads the service-owned projection; it does not start
-a separate catch-up protocol.
+a separate catch-up protocol. Gateway/session timestamps, WebView focus, and
+network visibility are never reasons to rescan recent thread history.
 
 ## Encryption and device lifecycle
 

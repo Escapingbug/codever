@@ -69,10 +69,13 @@ describe('CVP/3 Matrix transport boundary', () => {
             androidStorage,
             nativeBridgeTypes,
             nativeBridgeValidation,
+            codeverApp,
+            nativeRpcBridge,
             gateway,
             secureContent,
             protocol,
             matrixCvp3Protocol,
+            matrixCvp3Connection,
         ] = await Promise.all([
             readFile(resolve('apps/pwa/app/matrix.ts'), 'utf8'),
             readFile(
@@ -101,10 +104,13 @@ describe('CVP/3 Matrix transport boundary', () => {
             ),
             readFile(resolve('packages/native-bridge/src/types.ts'), 'utf8'),
             readFile(resolve('packages/native-bridge/src/validation.ts'), 'utf8'),
+            readFile(resolve('apps/pwa/app/CodeverApp.tsx'), 'utf8'),
+            readFile(resolve('apps/pwa/app/client/native/NativeRpcBridge.ts'), 'utf8'),
             readFile(resolve('src/gateway/matrix/gateway.ts'), 'utf8'),
             readFile(resolve('src/gateway/matrix/secureContent.ts'), 'utf8'),
             readFile(resolve('packages/protocol/src/schema.ts'), 'utf8'),
             readFile(resolve('packages/protocol/src/cvp-v3.ts'), 'utf8'),
+            readFile(resolve('apps/pwa/app/matrixCvp3Connection.ts'), 'utf8'),
         ])
 
         for (const source of [web, android, gateway, secureContent, protocol]) {
@@ -120,6 +126,37 @@ describe('CVP/3 Matrix transport boundary', () => {
         expect(web).toContain('client.relations(')
         expect(web).not.toContain('client.paginateEventTimeline(thread.liveTimeline')
         expect(android).toContain('matrix.loadThreadHistory(threadRoot, from, maxOf(30, limit))')
+        expect(codeverApp).not.toContain('loadRecentHistory')
+        expect(codeverApp).not.toContain('history:cross-device-sync')
+        expect(codeverApp).not.toContain('shouldReconcileRecentHistory')
+        expect(codeverApp).not.toContain('shouldRecoverVisibleHistory')
+        const nativeHistory = android.slice(
+            android.indexOf('suspend fun historyPage'),
+            android.indexOf('suspend fun uploadAttachment'),
+        )
+        expect(nativeHistory).toContain('withTimeout(HISTORY_PAGE_TOTAL_TIMEOUT_MS)')
+        expect(nativeHistory).toContain('historyMutexes.computeIfAbsent(sessionId)')
+        expect(nativeHistory.indexOf('withTimeout(HISTORY_PAGE_TOTAL_TIMEOUT_MS)')).toBeLessThan(
+            nativeHistory.indexOf('historyMutexes.computeIfAbsent(sessionId)'),
+        )
+        const nativeHistoryBridgeTimeout = nativeRpcBridge.match(
+            /const NATIVE_HISTORY_PAGE_TIMEOUT_MS = ([0-9_]+);/u,
+        )
+        const nativeHistoryBudget = android.match(
+            /const val HISTORY_PAGE_TOTAL_TIMEOUT_MS = ([0-9_]+)L/u,
+        )
+        expect(nativeHistoryBridgeTimeout).not.toBeNull()
+        expect(nativeHistoryBudget).not.toBeNull()
+        expect(Number(nativeHistoryBudget![1].replaceAll('_', ''))).toBeLessThan(
+            Number(nativeHistoryBridgeTimeout![1].replaceAll('_', '')),
+        )
+        expect(androidConnection).toContain('matrix.application_control.gap_persisted')
+        expect(androidConnection).toContain('startApplicationControlGapRecovery(')
+        expect(nativeHistory).toContain('val externalHasMore = allowRemote && online')
+        expect(matrixCvp3Connection).toContain('hasMore: available.length > messages.length')
+        expect(matrixCvp3Connection).not.toContain(
+            'hasMore: active.projection.sessionMessages(sessionId).length > messages.length',
+        )
         expect(android).not.toContain('paginateRoomHistory')
         expect(android).not.toContain('history-checkpoints')
         expect(androidDriver).not.toContain('paginateRoomHistory')

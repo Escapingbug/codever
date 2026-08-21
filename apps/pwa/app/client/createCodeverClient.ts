@@ -8,6 +8,8 @@ import type { CodeverClient, CodeverClientHandlers } from "./CodeverClient";
 import {
   OPTIONAL_NATIVE_CAPABILITIES,
   REQUIRED_NATIVE_CAPABILITIES,
+  hasCurrentNativeCapability,
+  nativeCapabilityVersions,
   bootstrapNativeSession,
   createNativeBridgeClient,
   type NativeBootstrapInput,
@@ -70,7 +72,7 @@ export async function createCodeverClient(
         ...OPTIONAL_NATIVE_CAPABILITIES,
       ].map((name) => ({
         name,
-        versions: [1],
+        versions: nativeCapabilityVersions(name),
       })),
     });
   } catch (error) {
@@ -85,7 +87,7 @@ export async function createCodeverClient(
   }
   handlers.onNativeRuntime?.(hello.native);
   const fullNative = REQUIRED_NATIVE_CAPABILITIES.every(
-    (name) => hello.capabilities[name]?.version === 1,
+    (name) => hasCurrentNativeCapability(hello, name),
   );
   if (fullNative && nativeManaged) {
     // Once a runtime claims the complete durable domain, startup failures are
@@ -126,12 +128,12 @@ export async function bootstrapNativeMatrixSessionIfAvailable(
         ...OPTIONAL_NATIVE_CAPABILITIES,
       ].map((name) => ({
         name,
-        versions: [1],
+        versions: nativeCapabilityVersions(name),
       })),
     });
     if (
       !REQUIRED_NATIVE_CAPABILITIES.every(
-        (name) => hello.capabilities[name]?.version === 1,
+        (name) => hasCurrentNativeCapability(hello, name),
       )
     ) {
       return null;

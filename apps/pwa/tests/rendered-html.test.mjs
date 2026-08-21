@@ -807,7 +807,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   );
   assert.match(matrix, /room\.getLiveTimeline\(\)\.getEvents\(\)/);
   assert.match(matrix, /loadHistoryPage\(sessionId/);
-  assert.match(matrix, /loadRecentHistory\(sessionId/);
+  assert.doesNotMatch(app, /loadRecentHistory/);
+  assert.doesNotMatch(app, /history:cross-device-sync/);
+  assert.doesNotMatch(
+    app,
+    /(?:visibilitychange|window\.addEventListener\("focus"|window\.addEventListener\("online")[\s\S]{0,800}loadHistoryPage/,
+  );
   assert.doesNotMatch(matrix, /kind: "codever\.history\.request"/);
   assert.doesNotMatch(matrix, /kind: "history_request"/);
   assert.doesNotMatch(matrix, /historyPageSchema\.parse|parseHistoryReplayEvent/);

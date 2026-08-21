@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Cvp3Command, Cvp3Event } from "@codever/protocol";
 import { MatrixCvp3Projection } from "./matrixCvp3Projection";
+import { toIncomingMessage } from "./matrixCvp3Connection";
 
 describe("MatrixCvp3Projection", () => {
   it("converges per session despite out-of-order events and physical relation changes", () => {
@@ -138,6 +139,24 @@ describe("MatrixCvp3Projection", () => {
     const restored = new MatrixCvp3Projection();
     restored.restore(projection.durableState());
     expect(restored.visibleInboxFiles()).toEqual(projection.visibleInboxFiles());
+  });
+
+  it("uses the CVP logical ID across clients while retaining Matrix IDs as migration aliases", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(messageEvent(1), "$matrix-version-1");
+    const first = projection.messages.get("assistant:message-1:0");
+    expect(first).toBeDefined();
+
+    const firstIncoming = toIncomingMessage(first!);
+    expect(firstIncoming.eventId).toBe("assistant:message-1:0");
+    expect(firstIncoming.replacesEventId).toBe("$matrix-version-1");
+
+    projection.applyEvent(messageEvent(1, 2), "$matrix-version-2");
+    const second = projection.messages.get("assistant:message-1:0");
+    expect(second).toBeDefined();
+    const secondIncoming = toIncomingMessage(second!, "$matrix-version-1");
+    expect(secondIncoming.eventId).toBe(firstIncoming.eventId);
+    expect(secondIncoming.replacesEventId).toBe("$matrix-version-1");
   });
 });
 
@@ -349,11 +368,13 @@ function turnQueuedEvent(): Cvp3Event {
   };
 }
 
-function messageEvent(index: number): Cvp3Event {
+function messageEvent(index: number, messageVersion = 1): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
-    eventId: `event-${index}`,
+    eventId: messageVersion === 1
+      ? `event-${index}`
+      : `event-${index}-v${messageVersion}`,
     workspaceId: "workspace-1",
     projectId: "project-1",
     sessionId: "session-a",
@@ -361,8 +382,8 @@ function messageEvent(index: number): Cvp3Event {
     payload: {
       type: "assistant.message",
       messageId: `message-${index}`,
-      messageVersion: 1,
-      body: `message ${index}`,
+      messageVersion,
+      body: `message ${index} v${messageVersion}`,
       format: "markdown",
       final: true,
       projection: { title: "A", lifecycle: "active", activity: "working", updatedAt: index + 2, stateVersion: 2 },

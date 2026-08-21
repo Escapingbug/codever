@@ -87,8 +87,10 @@ non-sensitive placeholders.
 9. Current project state is an ordinary signed snapshot referenced by
    `io.codever.project.current.v3`. It is a recovery accelerator, not a separate
    mutable authority or a manual checkpoint.
-10. Session inventory comes from complete Matrix thread pagination and selected
-    history from thread relations. `/sync` is only a live availability cursor.
+10. `/sync` is the sole normal source of recent events. Clients commit its
+    cursor only after durable inbox/projection handling; a limited timeline
+    creates a durable background gap-recovery job. Thread relations are used
+    only to establish a cache-cold selected window and to page older history.
 11. Clients persist a raw event before projection. Poison is quarantined per
     event and dependency-deferred records converge in multiple passes.
 12. CVP/1 and CVP/2 application events are neither emitted nor parsed by
@@ -132,6 +134,12 @@ is the only Agent-to-client local-file delivery authority.
 - Client raw inbox: crash-safe receipt before verification/projection.
 - Client projection: rebuildable sessions, messages, lifecycle, and snapshot.
 - Matrix timeline/threads: durable cross-device history and audit.
+
+The UI reads only the local projection. A session `updatedAt` change, browser
+focus, visibility change, or network recovery never synchronously reloads its
+recent thread relations. Live `/sync` events update the projection directly;
+explicit gap workers and user-requested older pagination are the only recovery
+paths allowed to read remote history.
 
 No layer substitutes for another. In particular, increasing an in-memory event
 window, publishing a manual checkpoint, or resending an already Matrix-acked

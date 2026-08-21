@@ -13,6 +13,8 @@ import {
   sessionExtensionDescriptorSchema,
 } from "@codever/protocol";
 
+export const MATRIX_CVP3_PROJECTION_STATE_VERSION = 4 as const;
+
 export type V3ProjectedSession = Cvp3SessionProjection & {
   sessionId: string;
   projectId: string;
@@ -79,7 +81,7 @@ export type V3WorkspaceProjection = {
 };
 
 export type MatrixCvp3ProjectionState = {
-  version: 4;
+  version: typeof MATRIX_CVP3_PROJECTION_STATE_VERSION;
   workspace: V3WorkspaceProjection | null;
   project: V3ProjectProjection | null;
   sessions: V3ProjectedSession[];
@@ -116,7 +118,7 @@ export class MatrixCvp3Projection {
 
   durableState(): MatrixCvp3ProjectionState {
     return structuredClone({
-      version: 4,
+      version: MATRIX_CVP3_PROJECTION_STATE_VERSION,
       workspace: this.workspace,
       project: this.project,
       sessions: [...this.sessions.values()],
@@ -615,7 +617,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     }
   }
   return {
-    version: 4,
+    version: MATRIX_CVP3_PROJECTION_STATE_VERSION,
     workspace,
     project,
     sessions,

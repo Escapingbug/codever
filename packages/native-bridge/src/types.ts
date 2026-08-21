@@ -610,6 +610,8 @@ export type BridgeMethodParams = {
     sessionId: string;
     before?: string;
     limit: number;
+    /** v2: local projection reads can never perform Matrix network I/O. */
+    source: "local" | "matrix";
   };
   "codever.attachment.upload.open": IdempotentMutationParams & {
     name: string;
