@@ -1,6 +1,6 @@
 # Real Matrix testing
 
-Protocol v3 has one release-blocking Alpha journey and a smaller browser-only
+CVP/3 has one release-blocking Alpha journey and a smaller browser-only
 diagnostic journey. Both use a disposable real Synapse server and the actual
 built PWA/Gateway. Unit tests or mocked Matrix transports are not release
 acceptance.
@@ -42,7 +42,7 @@ The journey proves, through real UI and Matrix traffic:
 6. Android is force-stopped and restarted, then restores its durable projection
    and history without resending the command.
 7. Android deletes a session and the browser converges.
-8. A deliberately malformed v3 event is quarantined without blocking the next
+8. A deliberately malformed CVP/3 event is quarantined without blocking the next
    valid event.
 9. Browser reload/history recovery and concurrent deletion converge on both
    browser devices.
@@ -50,16 +50,16 @@ The journey proves, through real UI and Matrix traffic:
 A successful Android sub-journey ends with:
 
 ```text
-PASS — Android v3 paired, restored, ran in background, notified, restarted, and deleted.
+PASS — Android CVP/3 paired, restored, ran in background, notified, restarted, and deleted.
 ```
 
 The complete run ends with:
 
 ```text
-PASS — Matrix v3 paired, created, ran concurrently, synchronized, restored, quarantined poison, and deleted.
+PASS — CVP/3 over Matrix paired, created, ran concurrently, synchronized, restored, quarantined poison, and deleted.
 ```
 
-Artifacts for a failed run are retained under `artifacts/e2e/matrix-v3-*`.
+Artifacts for a failed run are retained under `artifacts/e2e/matrix-cvp3-*`.
 
 ## Browser-only diagnostic journey
 
@@ -67,7 +67,7 @@ When no Android target is available, the browser/Synapse/Gateway portion can be
 run explicitly:
 
 ```bash
-CODEVER_MATRIX_V3_LIVE_E2E=1 pnpm test:e2e:matrix-v3-live
+CODEVER_MATRIX_CVP3_LIVE_E2E=1 pnpm test:e2e:matrix-cvp3-live
 ```
 
 This command is useful during browser or Gateway development, but it is not the
@@ -106,5 +106,5 @@ scripts at the production room or production Gateway data directory.
   not evidence that all sessions or history were restored.
 - The foreground Android service, not the WebView, owns background sync and
   notifications.
-- Only protocol-v3 application data is accepted. Pairing and signed Gateway
+- Only CVP/3 application data is accepted. Pairing and signed Gateway
   transport rotation are separate control-plane operations.

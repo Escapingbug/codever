@@ -1,5 +1,8 @@
 package id.my.anciety.codever.matrix
 
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_KEY_GRANT_EVENT_TYPE
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
@@ -30,22 +33,18 @@ internal const val CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE =
     "io.codever.session.current.v2"
 internal const val CODEVER_MATRIX_SESSION_DIRECTORY_EVENT_TYPE =
     "io.codever.session.directory.v2"
-internal const val CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE =
-    "io.codever.project.key_grant.v3"
-internal const val CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE =
-    "io.codever.project.current.v3"
-
 internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
     val eventType = root["type"]?.jsonPrimitive?.contentOrNull
     val content = root["content"] as? JsonObject ?: return@runCatching false
     when (eventType) {
-        CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE ->
+        CVP3_MATRIX_KEY_GRANT_EVENT_TYPE ->
             root["state_key"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true &&
                 content["version"]?.jsonPrimitive?.intOrNull == 3 &&
                 content["kind"]?.jsonPrimitive?.contentOrNull == "project.key_grant" &&
                 content["sealedGrant"] is JsonObject
-        CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ->
+        CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+        CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE ->
             root["state_key"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true &&
                 content["document"] is JsonObject && content["signature"] is JsonObject
         "m.room.message" -> {
@@ -76,10 +75,12 @@ internal fun isCodeverPairingResponseEvent(rawJson: String): Boolean = runCatchi
 internal fun codeverApplicationEventKind(rawJson: String): String = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
     when (root["type"]?.jsonPrimitive?.contentOrNull) {
-        CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE ->
+        CVP3_MATRIX_KEY_GRANT_EVENT_TYPE ->
             return@runCatching "v3_project_key_grant"
-        CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ->
+        CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE ->
             return@runCatching "v3_project_pointer"
+        CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE ->
+            return@runCatching "v3_workspace_pointer"
     }
     val extension = root["content"]
         ?.jsonObject
@@ -285,8 +286,9 @@ class MatrixApplicationTimelineClient(
             })
             put("types", buildJsonArray {
                 add(JsonPrimitive("m.room.message"))
-                add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
-                add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                add(JsonPrimitive(CVP3_MATRIX_KEY_GRANT_EVENT_TYPE))
+                add(JsonPrimitive(CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE))
+                add(JsonPrimitive(CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE))
             })
         }.toString()
         val endpoint = URI(
@@ -525,7 +527,7 @@ class MatrixApplicationRoomStateClient(
     }
 }
 
-/** Directly fetches a pointer-referenced v3 room event without scanning history. */
+/** Directly fetches a pointer-referenced CVP/3 room event without scanning history. */
 class MatrixApplicationEventClient(
     private val transport: MatrixApplicationControlSyncTransport =
         RestrictedHttpsMatrixApplicationControlSyncTransport(),
@@ -561,7 +563,7 @@ class MatrixApplicationEventClient(
                 !isCodeverApplicationControlEvent(root.toString())
             ) {
                 throw MatrixApplicationControlPayloadException(
-                    "The pointer-referenced Matrix event is not a trusted Codever v3 event.",
+                    "The pointer-referenced Matrix event is not a trusted CVP/3 event.",
                 )
             }
             matrixApplicationEvent(binding.roomId, root)
@@ -674,15 +676,16 @@ class MatrixApplicationControlSyncClient(
             put("room", buildJsonObject {
                 put("rooms", buildJsonArray { add(JsonPrimitive(roomId)) })
                 put("state", buildJsonObject {
-                    // v3 has only bounded discovery/key state. Session
+                    // CVP/3 has only bounded discovery/key state. Session
                     // inventory is a timeline/thread projection and therefore
                     // never needs a paged custom Room State directory.
                     put("senders", buildJsonArray {
                         add(JsonPrimitive(session.roomBinding.gatewayUserId))
                     })
                     put("types", buildJsonArray {
-                        add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
-                        add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                        add(JsonPrimitive(CVP3_MATRIX_KEY_GRANT_EVENT_TYPE))
+                        add(JsonPrimitive(CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE))
+                        add(JsonPrimitive(CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE))
                     })
                 })
                 put("ephemeral", buildJsonObject { put("types", JsonArray(emptyList())) })
@@ -694,9 +697,10 @@ class MatrixApplicationControlSyncClient(
                     put("types", buildJsonArray {
                         add(JsonPrimitive("m.room.message"))
                         // State changes can also appear in the incremental
-                        // timeline; accept only v3's bounded discovery state.
-                        add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_KEY_GRANT_EVENT_TYPE))
-                        add(JsonPrimitive(CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE))
+                        // timeline; accept only CVP/3's bounded discovery state.
+                        add(JsonPrimitive(CVP3_MATRIX_KEY_GRANT_EVENT_TYPE))
+                        add(JsonPrimitive(CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE))
+                        add(JsonPrimitive(CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE))
                     })
                     put(
                         "limit",
@@ -846,7 +850,7 @@ private fun parseMatrixRetryAfterMs(body: ByteArray): Long? = runCatching {
 }.getOrNull()
 
 /**
- * Sends an already signed and project-encrypted v3 command as an ordinary
+ * Sends an already signed and project-encrypted CVP/3 command as an ordinary
  * Matrix room message. Matrix remains the transport/history protocol; the
  * inner envelope supplies Codever's project confidentiality boundary.
  */
@@ -904,7 +908,7 @@ class MatrixApplicationControlClient(
                 extension?.get("version")?.jsonPrimitive?.intOrNull == 3 &&
                 extension["envelope"] is JsonObject,
         ) {
-            "Application control events must contain a Codever v3 project envelope."
+            "Application control events must contain a CVP/3 project envelope."
         }
     }
 

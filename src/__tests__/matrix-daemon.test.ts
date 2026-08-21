@@ -53,7 +53,7 @@ import {
     createGatewayMatrixScheduler,
     gatewayProjectIdentity,
     MatrixGatewayRunner,
-    V3MatrixGatewayRunner,
+    MatrixCvp3GatewayRunner,
     MatrixJsSdkGatewayClient,
     StrictMatrixCommandAuthorizer,
     validateMatrixGatewayConfig,
@@ -1842,7 +1842,7 @@ describe('MatrixGatewayRunner', () => {
         await runner.stop()
     })
 
-    it('starts the protocol v3 runner through the production daemon entry', async () => {
+    it('starts the CVP/3 runner through the production daemon entry', async () => {
         const fixture = await securityFixture()
         const client = new FakeMatrixGatewayClient()
         const provider = fakeProvider()
@@ -1852,7 +1852,7 @@ describe('MatrixGatewayRunner', () => {
             providerFactory: () => provider,
         })
 
-        expect(runner).toBeInstanceOf(V3MatrixGatewayRunner)
+        expect(runner).toBeInstanceOf(MatrixCvp3GatewayRunner)
         await runner.stop()
     })
 

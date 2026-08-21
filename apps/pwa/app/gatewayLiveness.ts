@@ -17,7 +17,7 @@ export function deriveGatewayLiveness(input: {
   if (input.gatewayUpdatedAt === undefined) {
     return { state: "unavailable", available: false };
   }
-  // Protocol v3 is an offline-first Matrix journal. Once the trusted project
+  // CVP/3 is an offline-first Matrix journal. Once the trusted project
   // snapshot is available, a command can be durably appended even when the
   // Gateway process is temporarily asleep. Snapshot age is therefore not a
   // write lock and must not turn a healthy Matrix client into an unusable UI.

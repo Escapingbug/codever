@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { signatureSchema } from './schema.js'
 import { signedSecureEnvelopeBundleSchema } from './secure-envelope.js'
 
-export const MATRIX_NATIVE_PROTOCOL_VERSION = 2 as const
+/** Pre-CVP/3 application envelope retained only for migration/boundary tests. */
+export const LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION = 2 as const
 export const CODEVER_MATRIX_TIMELINE_CONTENT_TYPE =
   'io.codever.matrix-timeline-content.v2' as const
 export const CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE =
@@ -41,7 +42,7 @@ export type MatrixThreadRelation = z.infer<typeof matrixThreadRelationSchema>
 export const matrixTimelineKeyGrantSchema = z
   .object({
     kind: z.literal('timeline_key_grant'),
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
     room_id: opaqueId,
@@ -57,7 +58,7 @@ export type MatrixTimelineKeyGrant = z.infer<typeof matrixTimelineKeyGrantSchema
 export const matrixTimelineKeyRingGrantSchema = z
   .object({
     kind: z.literal('timeline_key_ring_grant'),
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
     room_id: opaqueId,
@@ -101,7 +102,7 @@ export type MatrixTimelineKeyRingGrant = z.infer<
 export const matrixTimelineEnvelopeHeaderSchema = z
   .object({
     kind: z.literal('codever.matrix-timeline-envelope'),
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     envelopeId: opaqueId,
     contentType: z.literal(CODEVER_MATRIX_TIMELINE_CONTENT_TYPE),
     gatewayId: opaqueId,
@@ -257,7 +258,7 @@ export type MatrixGatewayCapabilities = z.infer<
 
 export const matrixSessionRootSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('session_root'),
     ...revisionFields,
     session_id: opaqueId,
@@ -286,7 +287,7 @@ export type MatrixSessionRoot = z.infer<typeof matrixSessionRootSchema>
 
 export const matrixSessionUpdateSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('session_update'),
     ...revisionFields,
     session_id: opaqueId,
@@ -312,7 +313,7 @@ export type MatrixSessionUpdate = z.infer<typeof matrixSessionUpdateSchema>
 
 export const matrixSessionLifecycleSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('session_lifecycle'),
     ...revisionFields,
     session_id: opaqueId,
@@ -369,7 +370,7 @@ export type MatrixSessionDirectoryDescriptor = z.infer<
 
 export const matrixGatewayStateSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('gateway_state'),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
@@ -415,7 +416,7 @@ export type MatrixGatewayState = z.infer<
 
 export const matrixSessionStateSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('session_state'),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
@@ -459,7 +460,7 @@ export type MatrixSessionState = z.infer<
 
 export const matrixSessionDirectoryPageSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('session_directory'),
     gateway_id: opaqueId,
     conversation_id: opaqueId,
@@ -500,7 +501,7 @@ export type MatrixSessionDirectoryPage = z.infer<
 export const matrixStateEnvelopeHeaderSchema = z
   .object({
     kind: z.literal('codever.matrix-state-envelope'),
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     contentType: z.literal(CODEVER_MATRIX_STATE_CONTENT_TYPE),
     gatewayId: opaqueId,
     conversationId: opaqueId,
@@ -543,7 +544,7 @@ export type MatrixStateContent = z.infer<typeof matrixStateContentSchema>
 
 export const matrixStateEventContentSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('state_envelope'),
     state_envelope: signedMatrixStateEnvelopeSchema,
     // Gateway state distributes the addressed key ring. Session entities reuse
@@ -558,7 +559,7 @@ export type MatrixStateEventContent = z.infer<
 
 export const matrixGatewayRevisionSchema = z
   .object({
-    version: z.literal(MATRIX_NATIVE_PROTOCOL_VERSION),
+    version: z.literal(LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION),
     kind: z.literal('gateway_revision'),
     ...revisionFields,
     gateway_id: opaqueId,

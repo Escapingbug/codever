@@ -1036,7 +1036,7 @@ class MatrixConnectionRuntime(
     }
 
     private suspend fun refreshApplicationProjectionBaseline(session: StoredMatrixSession): Int {
-        // A cursor-independent baseline recovers current v3 key/discovery
+        // A cursor-independent baseline recovers current CVP/3 key/discovery
         // state plus the latest bounded timeline window. It does not publish a
         // synthetic checkpoint and never advances the durable live cursor.
         val batch = applicationControlSyncClient.sync(session, since = null, longPoll = false)

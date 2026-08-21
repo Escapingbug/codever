@@ -281,7 +281,48 @@ export function parseGatewayStateExtension(
     };
   });
 
-  const capabilities = asRecord(extension.capabilities);
+  const capabilities = parseGatewayCapabilities(extension.capabilities);
+
+  const currentSessionId = extension.current_session_id;
+  if (
+    typeof currentSessionId === "string" &&
+    !sessions.some((session) => session.id === currentSessionId)
+  ) {
+    throw new Error(
+      "The authenticated Gateway current session is missing from its session list.",
+    );
+  }
+
+  return {
+    stateVersion: extension.state_version,
+    revision: extension.revision,
+    revisionEpoch: extension.revision_epoch,
+    revisionEpochGeneration: extension.revision_epoch_generation,
+    activeDeviceCount: extension.active_device_count,
+    ...(typeof extension.updated_at === "number"
+      ? { updatedAt: extension.updated_at }
+      : {}),
+    currentSessionId,
+    sessions,
+    workspace: {
+      projectId: workspace.project_id,
+      projectName: workspace.project_name,
+      cwd: workspaceCwd,
+      provider: workspace.provider,
+      ...(typeof workspace.model === "string"
+        ? { model: workspace.model }
+        : {}),
+      ...(typeof workspace.reasoning_effort === "string"
+        ? { reasoningEffort: workspace.reasoning_effort }
+        : {}),
+      permissionMode: workspace.permission_mode,
+    },
+    capabilities,
+  };
+}
+
+export function parseGatewayCapabilities(input: unknown): GatewayCapabilities {
+  const capabilities = asRecord(input);
   if (
     !capabilities ||
     !Array.isArray(capabilities.models) ||
@@ -365,60 +406,24 @@ export function parseGatewayStateExtension(
         supportedReasoningLevels: levels,
       };
     });
-  const sessionExtensions = parseSessionExtensionDescriptors(
-    capabilities.session_extensions,
-  );
-
-  const currentSessionId = extension.current_session_id;
-  if (
-    typeof currentSessionId === "string" &&
-    !sessions.some((session) => session.id === currentSessionId)
-  ) {
-    throw new Error(
-      "The authenticated Gateway current session is missing from its session list.",
-    );
-  }
 
   return {
-    stateVersion: extension.state_version,
-    revision: extension.revision,
-    revisionEpoch: extension.revision_epoch,
-    revisionEpochGeneration: extension.revision_epoch_generation,
-    activeDeviceCount: extension.active_device_count,
-    ...(typeof extension.updated_at === "number"
-      ? { updatedAt: extension.updated_at }
+    models: parseModels(capabilities.models),
+    permissionModes: parseOptions(
+      capabilities.permission_modes,
+      "permission mode",
+    ),
+    canCreateSession: capabilities.can_create_session,
+    canSelectSession: capabilities.can_select_session,
+    ...(typeof capabilities.can_archive_session === "boolean"
+      ? { canArchiveSession: capabilities.can_archive_session }
       : {}),
-    currentSessionId,
-    sessions,
-    workspace: {
-      projectId: workspace.project_id,
-      projectName: workspace.project_name,
-      cwd: workspaceCwd,
-      provider: workspace.provider,
-      ...(typeof workspace.model === "string"
-        ? { model: workspace.model }
-        : {}),
-      ...(typeof workspace.reasoning_effort === "string"
-        ? { reasoningEffort: workspace.reasoning_effort }
-        : {}),
-      permissionMode: workspace.permission_mode,
-    },
-    capabilities: {
-      models: parseModels(capabilities.models),
-      permissionModes: parseOptions(
-        capabilities.permission_modes,
-        "permission mode",
-      ),
-      canCreateSession: capabilities.can_create_session,
-      canSelectSession: capabilities.can_select_session,
-      ...(typeof capabilities.can_archive_session === "boolean"
-        ? { canArchiveSession: capabilities.can_archive_session }
-        : {}),
-      ...(typeof capabilities.can_delete_session === "boolean"
-        ? { canDeleteSession: capabilities.can_delete_session }
-        : {}),
-      sessionExtensions,
-    },
+    ...(typeof capabilities.can_delete_session === "boolean"
+      ? { canDeleteSession: capabilities.can_delete_session }
+      : {}),
+    sessionExtensions: parseSessionExtensionDescriptors(
+      capabilities.session_extensions,
+    ),
   };
 }
 

@@ -207,7 +207,7 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `legacy revision review never blocks an independent v3 command`() {
+    fun `legacy revision review never blocks an independent CVP3 command`() {
         val fixture = fixture()
         val receipt = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("session.delete"))
         fixture.outbox.claimForTransmission(receipt.commandId)
@@ -242,7 +242,7 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `legacy epoch rotation does not reuse a v3 local command identity`() {
+    fun `legacy epoch rotation does not reuse a CVP3 local command identity`() {
         val fixture = fixture()
         fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
         val first = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "first"))
@@ -359,7 +359,7 @@ class DurableCommandOutboxTest {
     }
 
     @Test
-    fun `completion from a retired accepted epoch cannot cause v3 identity reuse`() {
+    fun `completion from a retired accepted epoch cannot cause CVP3 identity reuse`() {
         val fixture = fixture()
         fixture.outbox.reconcileGatewayScope("epoch-1", 1, 0, 0)
         val accepted = fixture.outbox.enqueue(UUID.randomUUID().toString(), payload("prompt", "old"))

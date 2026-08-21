@@ -344,7 +344,7 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
   assert.equal(messages[0].optimistic, false);
 });
 
-test("a v3 Agent response is not merged into its causal user command", () => {
+test("a CVP/3 Agent response is not merged into its causal user command", () => {
   const messages = mergeChatMessages([], [
     {
       id: "$user",

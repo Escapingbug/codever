@@ -15,7 +15,7 @@ import org.matrix.rustcomponents.sdk.SlidingSyncVersion
 
 class MatrixApplicationControlClientTest {
     @Test
-    fun `sends only a v3 project envelope as a room message with a stable transaction id`() =
+    fun `sends only a CVP3 project envelope as a room message with a stable transaction id`() =
         runBlocking {
             lateinit var endpoint: URI
             lateinit var requestReference: ByteArray
@@ -79,7 +79,7 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `recognizes only v3 project state and encrypted room messages`() {
+    fun `recognizes only CVP3 project state and encrypted room messages`() {
         val event = """
             {
               "type":"m.room.message",
@@ -281,12 +281,17 @@ class MatrixApplicationControlClientTest {
                 "m.room.message",
                 "io.codever.project.key_grant.v3",
                 "io.codever.project.current.v3",
+                "io.codever.workspace.current.v3",
             ),
             timeline.getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
         assertEquals(32, timeline.getValue("limit").jsonPrimitive.content.toInt())
         assertEquals(
-            setOf("io.codever.project.key_grant.v3", "io.codever.project.current.v3"),
+            setOf(
+                "io.codever.project.key_grant.v3",
+                "io.codever.project.current.v3",
+                "io.codever.workspace.current.v3",
+            ),
             filter.getValue("room").jsonObject
                 .getValue("state").jsonObject
                 .getValue("types").jsonArray.map { it.jsonPrimitive.content }.toSet(),
@@ -428,7 +433,7 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
-    fun `project pointer fetches one exact trusted v3 event without scanning history`() = runBlocking {
+    fun `project pointer fetches one exact trusted CVP3 event without scanning history`() = runBlocking {
         lateinit var endpoint: URI
         val responseBody = """
             {

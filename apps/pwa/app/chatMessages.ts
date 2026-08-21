@@ -131,7 +131,7 @@ export function mergeChatMessage(
     return mergeLogicalCopies(current, exactIndex, message);
   }
 
-  // A v3 command id is a causal link, not a message identity. The user's
+  // A CVP/3 command id is a causal link, not a message identity. The user's
   // prompt and every Agent event produced by that turn intentionally share
   // the same command id. Only use it to reconcile the optimistic user bubble
   // with the canonical Matrix user event.
