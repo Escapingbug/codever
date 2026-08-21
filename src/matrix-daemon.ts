@@ -1,7 +1,7 @@
 import {
-    V3MatrixGatewayRunner,
+    MatrixCvp3GatewayRunner,
     type MatrixGatewayConfig,
-    type V3MatrixGatewayDependencies,
+    type MatrixCvp3GatewayDependencies,
 } from '@/gateway/matrix'
 
 /**
@@ -11,9 +11,9 @@ import {
  */
 export async function startMatrixDaemon(
     config: MatrixGatewayConfig,
-    dependencies: V3MatrixGatewayDependencies = {},
-): Promise<V3MatrixGatewayRunner> {
-    const runner = new V3MatrixGatewayRunner(config, dependencies)
+    dependencies: MatrixCvp3GatewayDependencies = {},
+): Promise<MatrixCvp3GatewayRunner> {
+    const runner = new MatrixCvp3GatewayRunner(config, dependencies)
     await runner.start()
     return runner
 }

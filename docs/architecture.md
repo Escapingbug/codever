@@ -114,12 +114,12 @@ sign an invitation for a stale Matrix device. Long-lived Matrix access tokens
 remain server-side and may only be exchanged for short-lived one-time device
 login tokens.
 
-### 3.6 Matrix-native protocol v3
+### 3.6 Codever Protocol v3 (CVP/3) over Matrix
 
 Matrix is the durable conversation log, not a per-device mailbox or RPC queue.
 One encrypted room is one project and every session is an `m.thread`. User
 commands and Gateway outputs are ordinary `m.room.message` events carrying a
-signed, application-encrypted v3 envelope. Stable logical IDs are independent
+signed, application-encrypted CVP/3 envelope. Stable logical IDs are independent
 from Matrix physical event IDs; `causationCommandId` links an output to a
 command without making the two messages the same entity.
 
@@ -140,10 +140,10 @@ availability cursor; it is never application authority or a manual checkpoint.
 Android owns sync, inbox projection, command reconciliation, and notification
 inside its foreground connection service. The WebView is a replaceable UI and
 does not need to remain attached for Agent output to converge. Production
-Gateway, PWA, and APK entry points accept only the v3 application data plane;
+Gateway, PWA, and APK entry points accept only the CVP/3 application data plane;
 the independently versioned pairing and device-rotation control plane is the
-only pre-v3 mechanism retained. See
-`docs/matrix-native-conversation-protocol.md`.
+only pre-CVP/3 mechanism retained. See
+`docs/codever-protocol.md`.
 
 ## 4. Main Components
 

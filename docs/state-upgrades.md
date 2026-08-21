@@ -30,7 +30,7 @@ Gateway command processing starts, the owning runtime performs:
 3. For each store, write the active `N -> N+1` step, run its idempotent
    migration, validate the result, and atomically checkpoint the new version.
 4. Reset only incompatible rebuildable/ephemeral state.
-5. Reconcile durable commands with the authenticated v3 event chain and
+5. Reconcile durable commands with the authenticated CVP/3 event chain and
    reconstruct projections from the signed current pointer, Matrix threads,
    and thread relations.
 6. Write `complete` and unlock the runtime.
@@ -55,12 +55,12 @@ number:
 - Android native manifest and each encrypted store;
 - Android Matrix-account manifest and each account store;
 - Gateway runtime/outbox/replay file schemas;
-- Matrix application protocol (`CODEVER_MATRIX_PROTOCOL_VERSION`);
+- Codever Protocol (`CODEVER_PROTOCOL_VERSION`);
 - Web/native bridge protocol (`NATIVE_BRIDGE_PROTOCOL_VERSION`).
 
 A build ID is diagnostic metadata. Store versions decide migration; protocol
 versions decide whether two concurrently running components can communicate.
-Native bridge versions are negotiated. Matrix v3 application events fail
+Native bridge versions are negotiated. CVP/3 application events fail
 closed when their authenticated version is unsupported; a storage migration
 must not silently reinterpret a different wire protocol or reconnect a v2 data
 plane. Pairing is independently versioned because it establishes the trust and

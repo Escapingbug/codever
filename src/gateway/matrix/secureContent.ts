@@ -14,7 +14,7 @@ import { FileReplayStore } from '@codever/security/node'
 import {
     CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE,
     CODEVER_MATRIX_GATEWAY_STATE_EVENT_TYPE,
-    MATRIX_NATIVE_PROTOCOL_VERSION,
+    LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION,
     capabilityRenewalOfferSchema,
     canonicalJsonBytes,
     matrixNativeContentSchema,
@@ -30,7 +30,7 @@ import {
 } from '@codever/protocol'
 import {
     CODEVER_MATRIX_EXTENSION,
-    CODEVER_MATRIX_PROTOCOL_VERSION,
+    LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
     type MatrixRoomMessageContent,
     type MatrixSendEventRequest,
     type MatrixSendEventResult,
@@ -351,7 +351,7 @@ export class GatewaySecureContentLayer {
     ): Promise<OpenedGatewayMatrixContent> {
         const extension = asRecord(input)
         if (
-            extension?.version !== CODEVER_MATRIX_PROTOCOL_VERSION
+            extension?.version !== LEGACY_MATRIX_PORT_ENVELOPE_VERSION
             || extension.kind !== 'secure_envelope'
         ) {
             throw new Error('Application-layer encrypted Matrix envelope is required')
@@ -397,7 +397,7 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             kind: 'command_ack',
             command_id: commandId,
             sequence,
@@ -416,7 +416,7 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             kind: 'revision_conflict',
             command_id: commandId,
             expected_revision: expectedRevision,
@@ -437,7 +437,7 @@ export class GatewaySecureContentLayer {
         transport: MatrixTransport,
     ): Promise<MatrixSendEventResult> {
         const offer = capabilityRenewalOfferSchema.parse({
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             kind: 'capability_renewal_offer',
             request_id: input.requestId,
             certificate_id: input.certificateId,
@@ -488,7 +488,7 @@ export class GatewaySecureContentLayer {
                     }
                     : {}),
                 [CODEVER_MATRIX_EXTENSION]: {
-                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
+                    version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
                     kind: 'collaboration_command',
                     command_id: input.commandId,
                     revision: input.revision,
@@ -522,7 +522,7 @@ export class GatewaySecureContentLayer {
         result?: JsonValue,
     ): Promise<MatrixSendEventResult> {
         return this.sendToDevice(room, deviceId, {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             kind: 'command_result',
             command_id: commandId,
             sequence,
@@ -696,7 +696,7 @@ export class GatewaySecureContentLayer {
             }))
             const grant: MatrixTimelineKeyRingGrant = {
                 kind: 'timeline_key_ring_grant',
-                version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                version: LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION,
                 gateway_id: this.gatewayId,
                 conversation_id: room.conversationId,
                 room_id: room.roomId,
@@ -727,7 +727,7 @@ export class GatewaySecureContentLayer {
             })
         }
         const content = {
-            version: MATRIX_NATIVE_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION,
             kind: 'state_envelope',
             state_envelope: stateEnvelope,
             ...(timelineKeyRingBundle ? { timeline_key_ring_bundle: timelineKeyRingBundle } : {}),
@@ -1204,7 +1204,7 @@ export class GatewaySecureContentLayer {
             }))
             const grant: MatrixTimelineKeyRingGrant = {
                 kind: 'timeline_key_ring_grant',
-                version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                version: LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION,
                 gateway_id: this.gatewayId,
                 conversation_id: room.conversationId,
                 room_id: room.roomId,
@@ -1270,7 +1270,7 @@ export class GatewaySecureContentLayer {
                     ? {}
                     : { 'm.relates_to': outerRelation }),
                 [CODEVER_MATRIX_EXTENSION]: {
-                    version: MATRIX_NATIVE_PROTOCOL_VERSION,
+                    version: LEGACY_MATRIX_NATIVE_ENVELOPE_VERSION,
                     kind: 'timeline_envelope',
                     timeline_envelope: timelineEnvelope,
                     timeline_key_ring_bundle: timelineKeyRingBundle,
@@ -1356,7 +1356,7 @@ export class GatewaySecureContentLayer {
                 msgtype: 'm.notice',
                 body: 'Encrypted Codever message',
                 [CODEVER_MATRIX_EXTENSION]: {
-                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
+                    version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
                     kind: 'secure_envelope',
                     secure_envelope: secureEnvelope,
                 },
@@ -1703,12 +1703,12 @@ function withActiveDeviceCount(
 ): MatrixRoomMessageContent {
     const copy = structuredClone(content)
     const extension = asRecord(copy[CODEVER_MATRIX_EXTENSION])
-    if (extension?.version === CODEVER_MATRIX_PROTOCOL_VERSION) {
+    if (extension?.version === LEGACY_MATRIX_PORT_ENVELOPE_VERSION) {
         extension.active_device_count = activeDeviceCount
     }
     const newContent = asRecord(copy['m.new_content'])
     const newExtension = asRecord(newContent?.[CODEVER_MATRIX_EXTENSION])
-    if (newExtension?.version === CODEVER_MATRIX_PROTOCOL_VERSION) {
+    if (newExtension?.version === LEGACY_MATRIX_PORT_ENVELOPE_VERSION) {
         newExtension.active_device_count = activeDeviceCount
     }
     return copy
@@ -1724,7 +1724,7 @@ function withLogicalDeliveryIdentity(
         asRecord(copy[CODEVER_MATRIX_EXTENSION]),
         asRecord(asRecord(copy['m.new_content'])?.[CODEVER_MATRIX_EXTENSION]),
     ]) {
-        if (!extension || extension.version !== CODEVER_MATRIX_PROTOCOL_VERSION) continue
+        if (!extension || extension.version !== LEGACY_MATRIX_PORT_ENVELOPE_VERSION) continue
         extension.logical_event_id = logicalEventId
         if (replacesLogicalEventId) {
             extension.replaces_logical_event_id = replacesLogicalEventId

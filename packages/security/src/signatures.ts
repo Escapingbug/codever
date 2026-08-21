@@ -1,22 +1,22 @@
 import {
   canonicalJsonBytes,
-  codeverV3CommandSchema,
-  codeverV3CurrentPointerDocumentSchema,
-  codeverV3CurrentPointerSchema,
-  codeverV3EventSchema,
+  cvp3CommandSchema,
+  cvp3CurrentPointerDocumentSchema,
+  cvp3CurrentPointerSchema,
+  cvp3EventSchema,
   commandSchema,
   eventSchema,
   signedCommandSchema,
-  signedCodeverV3CommandSchema,
-  signedCodeverV3EventSchema,
+  signedCvp3CommandSchema,
+  signedCvp3EventSchema,
   signedEventSchema,
   type CodeverCommand,
   type CodeverEvent,
-  type CodeverV3Command,
-  type CodeverV3CurrentPointer,
-  type CodeverV3Event,
-  type SignedCodeverV3Command,
-  type SignedCodeverV3Event,
+  type Cvp3Command,
+  type Cvp3CurrentPointer,
+  type Cvp3Event,
+  type SignedCvp3Command,
+  type SignedCvp3Event,
   type SignedCommand,
   type SignedEvent,
 } from '@codever/protocol'
@@ -119,13 +119,13 @@ export async function signEvent(
   }
 }
 
-export async function signCodeverV3Command(
-  input: CodeverV3Command,
+export async function signCvp3Command(
+  input: Cvp3Command,
   privateKey: CryptoKey,
   keyId: string,
-): Promise<SignedCodeverV3Command> {
-  const command = codeverV3CommandSchema.parse(input)
-  return signedCodeverV3CommandSchema.parse({
+): Promise<SignedCvp3Command> {
+  const command = cvp3CommandSchema.parse(input)
+  return signedCvp3CommandSchema.parse({
     command,
     signature: {
       algorithm: 'ES256',
@@ -135,13 +135,13 @@ export async function signCodeverV3Command(
   })
 }
 
-export async function signCodeverV3Event(
-  input: CodeverV3Event,
+export async function signCvp3Event(
+  input: Cvp3Event,
   privateKey: CryptoKey,
   keyId: string,
-): Promise<SignedCodeverV3Event> {
-  const event = codeverV3EventSchema.parse(input)
-  return signedCodeverV3EventSchema.parse({
+): Promise<SignedCvp3Event> {
+  const event = cvp3EventSchema.parse(input)
+  return signedCvp3EventSchema.parse({
     event,
     signature: {
       algorithm: 'ES256',
@@ -151,30 +151,30 @@ export async function signCodeverV3Event(
   })
 }
 
-export interface CodeverV3CommandBindings {
+export interface Cvp3CommandBindings {
   workspaceId: string
   deviceId: string
   certificateId: string
   projectId?: string
-  allowedOperations?: readonly CodeverV3Command['operation'][]
+  allowedOperations?: readonly Cvp3Command['operation'][]
 }
 
 /**
- * v3 intentionally has no clock, sequence or global revision gate. The active
+ * CVP/3 intentionally has no clock, sequence or global revision gate. The active
  * certificate and durable command-id ledger are its authorization boundary.
  */
-export async function verifyCodeverV3Command(
+export async function verifyCvp3Command(
   input: unknown,
   trustedDeviceKey: CryptoKey | JsonWebKey,
-  bindings: CodeverV3CommandBindings,
-): Promise<CodeverV3Command> {
-  const signed = signedCodeverV3CommandSchema.parse(input)
+  bindings: Cvp3CommandBindings,
+): Promise<Cvp3Command> {
+  const signed = signedCvp3CommandSchema.parse(input)
   const expectedKeyId = await publicKeyId(trustedDeviceKey)
   if (signed.signature.keyId !== expectedKeyId) {
     throw new SecurityError('key_mismatch', 'Signature key is not the enrolled Codever device key')
   }
   if (!(await verify(signed.command, signed.signature.value, trustedDeviceKey))) {
-    throw new SecurityError('invalid_signature', 'Codever v3 command signature is invalid')
+    throw new SecurityError('invalid_signature', 'CVP/3 command signature is invalid')
   }
   const command = signed.command
   if (
@@ -189,29 +189,29 @@ export async function verifyCodeverV3Command(
   ) {
     throw new SecurityError(
       'binding_mismatch',
-      'Codever v3 command is not bound to the enrolled execution context',
+      'CVP/3 command is not bound to the enrolled execution context',
     )
   }
   return command
 }
 
-export interface CodeverV3EventBindings {
+export interface Cvp3EventBindings {
   workspaceId: string
   projectId?: string
 }
 
-export async function verifyCodeverV3Event(
+export async function verifyCvp3Event(
   input: unknown,
   trustedGatewayKey: CryptoKey | JsonWebKey,
-  bindings: CodeverV3EventBindings,
-): Promise<CodeverV3Event> {
-  const signed = signedCodeverV3EventSchema.parse(input)
+  bindings: Cvp3EventBindings,
+): Promise<Cvp3Event> {
+  const signed = signedCvp3EventSchema.parse(input)
   const expectedKeyId = await publicKeyId(trustedGatewayKey)
   if (signed.signature.keyId !== expectedKeyId) {
     throw new SecurityError('key_mismatch', 'Event is not signed by the enrolled Gateway key')
   }
   if (!(await verify(signed.event, signed.signature.value, trustedGatewayKey))) {
-    throw new SecurityError('invalid_signature', 'Codever v3 event signature is invalid')
+    throw new SecurityError('invalid_signature', 'CVP/3 event signature is invalid')
   }
   if (
     signed.event.workspaceId !== bindings.workspaceId
@@ -219,19 +219,19 @@ export async function verifyCodeverV3Event(
   ) {
     throw new SecurityError(
       'binding_mismatch',
-      'Codever v3 event is not bound to the expected workspace and project',
+      'CVP/3 event is not bound to the expected workspace and project',
     )
   }
   return signed.event
 }
 
-export async function signCodeverV3Pointer(
-  documentInput: CodeverV3CurrentPointer['document'],
+export async function signCvp3Pointer(
+  documentInput: Cvp3CurrentPointer['document'],
   privateKey: CryptoKey,
   keyId: string,
-): Promise<CodeverV3CurrentPointer> {
-  const document = codeverV3CurrentPointerDocumentSchema.parse(documentInput)
-  return codeverV3CurrentPointerSchema.parse({
+): Promise<Cvp3CurrentPointer> {
+  const document = cvp3CurrentPointerDocumentSchema.parse(documentInput)
+  return cvp3CurrentPointerSchema.parse({
     document,
     signature: {
       algorithm: 'ES256',
@@ -241,17 +241,17 @@ export async function signCodeverV3Pointer(
   })
 }
 
-export async function verifyCodeverV3Pointer(
+export async function verifyCvp3Pointer(
   input: unknown,
   trustedGatewayKey: CryptoKey | JsonWebKey,
-): Promise<CodeverV3CurrentPointer['document']> {
-  const pointer = codeverV3CurrentPointerSchema.parse(input)
+): Promise<Cvp3CurrentPointer['document']> {
+  const pointer = cvp3CurrentPointerSchema.parse(input)
   const expectedKeyId = await publicKeyId(trustedGatewayKey)
   if (pointer.signature.keyId !== expectedKeyId) {
     throw new SecurityError('key_mismatch', 'Pointer is not signed by the enrolled Gateway key')
   }
   if (!(await verify(pointer.document, pointer.signature.value, trustedGatewayKey))) {
-    throw new SecurityError('invalid_signature', 'Codever v3 state pointer signature is invalid')
+    throw new SecurityError('invalid_signature', 'CVP/3 state pointer signature is invalid')
   }
   return pointer.document
 }

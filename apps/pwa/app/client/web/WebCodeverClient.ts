@@ -11,7 +11,7 @@ import {
   type MatrixConnection,
   type MatrixConnectionConfig,
 } from "../../matrix";
-import { connectMatrixV3 } from "../../matrixV3Connection";
+import { connectMatrixCvp3 } from "../../matrixCvp3Connection";
 import {
   inspectPairingLink,
   saveTrustedGateway,
@@ -155,11 +155,11 @@ export class WebCodeverClient implements CodeverClient {
 }
 
 export type CreateWebCodeverClientDependencies = {
-  connect: typeof connectMatrixV3;
+  connect: typeof connectMatrixCvp3;
 };
 
 const defaultDependencies: CreateWebCodeverClientDependencies = {
-  connect: connectMatrixV3,
+  connect: connectMatrixCvp3,
 };
 
 export async function createWebCodeverClient(

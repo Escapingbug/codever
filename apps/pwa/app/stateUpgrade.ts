@@ -1,5 +1,5 @@
 import {
-  CODEVER_MATRIX_PROTOCOL_VERSION,
+  CODEVER_PROTOCOL_VERSION,
   migrateVersionedState,
   type PersistedStateClass,
   type StateMigration,
@@ -182,6 +182,8 @@ type PwaStateManifest = {
   version: 1;
   phase: "running" | "blocked" | "complete";
   appBuild: string;
+  // Persisted field name from the first CVP/3 release. Keep it until a
+  // versioned manifest migration can rename it without discarding state.
   matrixProtocol: number;
   nativeBridgeProtocol: number;
   startedAt: number;
@@ -277,7 +279,7 @@ export function runPwaStateUpgrade(
     version: 1,
     phase: "running",
     appBuild: CODEVER_BUILD_VERSION,
-    matrixProtocol: CODEVER_MATRIX_PROTOCOL_VERSION,
+    matrixProtocol: CODEVER_PROTOCOL_VERSION,
     nativeBridgeProtocol: NATIVE_BRIDGE_PROTOCOL_VERSION,
     startedAt: previous?.phase === "running" ? previous.startedAt : now,
     completedAt: null,

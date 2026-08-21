@@ -19,7 +19,7 @@ fun interface CommandIdFactory {
 }
 
 /**
- * Durable command lifecycle. Commands are independent protocol-v3 objects;
+ * Durable command lifecycle. Commands are independent CVP/3 objects;
  * unrelated sessions never share a global acknowledgement lane.
  *
  * A transmission lease never allocates a replacement command. If delivery is
@@ -99,7 +99,7 @@ class DurableCommandOutbox internal constructor(
             updatedAt = now,
             sessionId = effectiveSessionId,
             // Retained only as a bridge compatibility field. It is allocated
-            // locally and is not part of v3 authorization or serialization.
+            // locally and is not part of CVP/3 authorization or serialization.
             sequence = Math.addExact(
                 maxOf(
                     snapshot.lastAcknowledgedSequence,

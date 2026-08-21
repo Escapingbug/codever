@@ -87,7 +87,7 @@ export interface MatrixRoomMessageContent extends Record<string, unknown> {
 
 /**
  * Timeline event emitted by a transport. Legacy room messages may be
- * decrypted with Matrix E2EE. Protocol-v3 application events intentionally
+ * decrypted with Matrix E2EE. Protocol-CVP/3 application events intentionally
  * bypass Megolm and must contain a signed Codever project envelope before use.
  * `senderDeviceId`, when present, must come from cryptographic sender
  * information, never an untrusted clear-text content field.

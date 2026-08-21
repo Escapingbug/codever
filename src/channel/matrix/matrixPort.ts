@@ -20,7 +20,7 @@ import type {
 import type { MatrixRoomMessageContent, MatrixTransport } from './transport'
 
 export const CODEVER_MATRIX_EXTENSION = 'io.codever' as const
-export const CODEVER_MATRIX_PROTOCOL_VERSION = 1 as const
+export const LEGACY_MATRIX_PORT_ENVELOPE_VERSION = 1 as const
 
 export interface MatrixPortOptions {
     transport: MatrixTransport
@@ -202,7 +202,7 @@ export class MatrixPort implements ChannelPort {
                 msgtype: 'm.text',
                 body,
                 [CODEVER_MATRIX_EXTENSION]: {
-                    version: CODEVER_MATRIX_PROTOCOL_VERSION,
+                    version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
                     kind: 'decision_request',
                     ...this.sessionMetadata(),
                     decision_id: decisionId,
@@ -248,7 +248,7 @@ export class MatrixPort implements ChannelPort {
         ].join('\n')
         const operationId = randomUUID()
         const extension = {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             kind: 'status',
             ...this.sessionMetadata(),
             operation_id: operationId,
@@ -484,7 +484,7 @@ function buildMessageContent(
             formatted_body: message.text,
         } : {}),
         [CODEVER_MATRIX_EXTENSION]: {
-            version: CODEVER_MATRIX_PROTOCOL_VERSION,
+            version: LEGACY_MATRIX_PORT_ENVELOPE_VERSION,
             ...extension,
         },
     }

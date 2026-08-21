@@ -32,7 +32,7 @@ class NativeStateUpgradeCoordinatorTest {
     }
 
     @Test
-    fun `protocol v3 durable and rebuildable stores are all migration catalogued`() {
+    fun `CVP3 durable and rebuildable stores are all migration catalogued`() {
         val expected = mapOf(
             "matrix-v3-project-keys" to NativePersistedStateClass.SECURITY_CRITICAL,
             "matrix-v3-raw-inbox" to NativePersistedStateClass.DURABLE_COMMAND,

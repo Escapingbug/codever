@@ -1,6 +1,6 @@
 # Codever Matrix/PWA architecture
 
-Status: protocol-v3 implementation
+Status: CVP/3 implementation
 
 Codever is an ACP coding-agent client built on Matrix. Matrix provides durable
 encrypted store-and-forward, multi-device sync, room/thread history, and media;
@@ -22,13 +22,13 @@ it is not execution authority and is not used as an application RPC queue.
 
 ```text
 PWA or Android native service
-  -> durable signed/encrypted v3 command event
+  -> durable signed/encrypted CVP/3 command event
   -> Matrix project-room timeline
-  -> V3MatrixGatewayRunner
+  -> MatrixCvp3GatewayRunner
   -> durable command journal / authorization
   -> TopicSession -> SemanticSessionRuntime -> AgentProvider
   -> ConversationEvent
-  -> signed/encrypted v3 Gateway event
+  -> signed/encrypted CVP/3 Gateway event
   -> durable Matrix outbox
   -> Matrix project thread
   -> client raw inbox -> verified local projection -> UI / notification
@@ -69,7 +69,7 @@ non-sensitive placeholders.
    form an independently versioned pre-trust control plane.
 2. The Gateway directly grants each trusted device the current project key ring
    through addressed `io.codever.project.key_grant.v3` Room State.
-3. Commands and Gateway outputs use the same version-3 application envelope in
+3. Commands and Gateway outputs use the same CVP/3 application envelope in
    ordinary `m.room.message` timeline events.
 4. A device signature authorizes an exact command. A Gateway signature proves
    an exact acknowledgement, lifecycle transition, Agent/tool event, snapshot,
@@ -91,12 +91,12 @@ non-sensitive placeholders.
     history from thread relations. `/sync` is only a live availability cursor.
 11. Clients persist a raw event before projection. Poison is quarantined per
     event and dependency-deferred records converge in multiple passes.
-12. Protocol v1/v2 application events are neither emitted nor parsed by
+12. CVP/1 and CVP/2 application events are neither emitted nor parsed by
     production Gateway, PWA, or APK entry points. There is no negotiated data
     downgrade.
 
 The normative wire and recovery rules are in
-[`matrix-native-conversation-protocol.md`](matrix-native-conversation-protocol.md).
+[`codever-protocol.md`](codever-protocol.md).
 
 ## Android ownership boundary
 
@@ -111,7 +111,7 @@ backgrounded. It owns:
 
 The WebView subscribes to a versioned native bridge and renders service-owned
 state. Detaching, reloading, or online-updating the PWA cannot cancel a running
-Agent or create a second Matrix client. Browser-only use implements the same v3
+Agent or create a second Matrix client. Browser-only use implements the same CVP/3
 projection in IndexedDB but naturally cannot promise Android-style background
 execution.
 

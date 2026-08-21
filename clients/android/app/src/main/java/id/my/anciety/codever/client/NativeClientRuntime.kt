@@ -60,8 +60,10 @@ import id.my.anciety.codever.security.codever.EncryptedGatewayTrustStore
 import id.my.anciety.codever.security.codever.GatewayTrust
 import id.my.anciety.codever.security.codever.GatewayTransportCodec
 import id.my.anciety.codever.security.codever.MatrixTransportBinding
-import id.my.anciety.codever.security.codever.CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE
-import id.my.anciety.codever.security.codever.MatrixV3Protocol
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_KEY_GRANT_EVENT_TYPE
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
+import id.my.anciety.codever.security.codever.CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+import id.my.anciety.codever.security.codever.MatrixCvp3Protocol
 import id.my.anciety.codever.security.codever.PairingCodec
 import id.my.anciety.codever.security.codever.PairingRequest
 import id.my.anciety.codever.security.codever.PairingSecurity
@@ -113,7 +115,7 @@ class NativePairingRejectedException(
     val retryable: Boolean = true,
 ) : IllegalStateException(message)
 class NativeTrustRequiredException(message: String) : IllegalStateException(message)
-private class MatrixV3EventDeferredException(message: String) : IllegalStateException(message)
+private class MatrixCvp3EventDeferredException(message: String) : IllegalStateException(message)
 
 /**
  * Service-owned Codever domain runtime. Matrix tokens, application private
@@ -196,22 +198,22 @@ class NativeClientRuntime(
     ).also {
         stateUpgrade.recoverPreserved("timeline-key-ring", validate = it::validateStoredState)
     }
-    private val matrixV3ProjectKeys = AtomicEncryptedMatrixV3ProjectKeyStore(
-        files.matrixV3ProjectKeys,
+    private val matrixCvp3ProjectKeys = AtomicEncryptedMatrixCvp3ProjectKeyStore(
+        files.matrixCvp3ProjectKeys,
         cipher,
         deviceId,
     ).also {
         stateUpgrade.recoverPreserved("matrix-v3-project-keys", validate = it::validateStoredState)
     }
-    private val matrixV3Inbox = AtomicEncryptedMatrixV3InboxStore(
-        files.matrixV3Inbox,
+    private val matrixCvp3Inbox = AtomicEncryptedMatrixCvp3InboxStore(
+        files.matrixCvp3Inbox,
         cipher,
         deviceId,
     ).also {
         stateUpgrade.recoverPreserved("matrix-v3-raw-inbox", validate = it::validateStoredState)
     }
-    private val matrixV3ProjectionStore = AtomicEncryptedMatrixV3ProjectionStore(
-        files.matrixV3Projection,
+    private val matrixCvp3ProjectionStore = AtomicEncryptedMatrixCvp3ProjectionStore(
+        files.matrixCvp3Projection,
         cipher,
         deviceId,
     ).also {
@@ -221,8 +223,8 @@ class NativeClientRuntime(
             reset = it::clear,
         )
     }
-    private val matrixV3CommandContent = AtomicEncryptedMatrixV3CommandContentStore(
-        files.matrixV3CommandContent,
+    private val matrixCvp3CommandContent = AtomicEncryptedMatrixCvp3CommandContentStore(
+        files.matrixCvp3CommandContent,
         cipher,
         deviceId,
     ).also {
@@ -236,7 +238,7 @@ class NativeClientRuntime(
         cipher,
         now,
     )
-    private val outbox = DurableCommandOutbox.encrypted(files.matrixV3Commands, cipher, deviceId) { migration ->
+    private val outbox = DurableCommandOutbox.encrypted(files.matrixCvp3Commands, cipher, deviceId) { migration ->
         diagnostics.record(
             "command.outbox.migrated",
             mapOf(
@@ -307,10 +309,10 @@ class NativeClientRuntime(
     private val initializedHistoryRelations = mutableSetOf<String>()
     private val historyRelationTokens = mutableMapOf<String, String>()
     @Volatile private var lastLifecycle: Pair<LifecyclePhase, String?>? = null
-    private val matrixV3Projection = MatrixV3NativeProjection(
+    private val matrixCvp3Projection = MatrixCvp3NativeProjection(
         gatewayId = { trust?.gatewayId ?: "gateway" },
         activeDeviceCount = { trust?.response?.response?.activeDeviceCount ?: 1 },
-        initialState = matrixV3ProjectionStore.load(),
+        initialState = matrixCvp3ProjectionStore.load(),
     )
 
     private val eventHub = ClientEventHub(
@@ -336,7 +338,7 @@ class NativeClientRuntime(
             )
         }
         stateUpgrade.complete()
-        gatewayState = matrixV3Projection.snapshot() ?: eventHub.snapshot().gatewayState
+        gatewayState = matrixCvp3Projection.snapshot() ?: eventHub.snapshot().gatewayState
         if (gatewayState != null) {
             diagnostics.record("gateway.state.cache.restored")
         }
@@ -408,7 +410,7 @@ class NativeClientRuntime(
                     return@withLock local
                 }
 
-                val threadRoot = matrixV3Projection.threadRootEventId(sessionId)
+                val threadRoot = matrixCvp3Projection.threadRootEventId(sessionId)
                 if (threadRoot == null) {
                     // A newly-created session has no Matrix thread until its
                     // first prompt. Match the browser client: this is a valid
@@ -760,7 +762,7 @@ class NativeClientRuntime(
                 }
             pairingStorageBlocked = false
             replayPreTrustEvents()
-            replayMatrixV3InboxLocked()
+            replayMatrixCvp3InboxLocked()
             val public = publicTrust() as PublicTrustState.Trusted
             val nextSnapshot = refreshedSnapshot()
             eventHub.publish(ClientEventType.TRUST_CHANGED, PublicClientJson.encodeTrust(public), nextSnapshot)
@@ -770,9 +772,9 @@ class NativeClientRuntime(
         // a key bundle addressed to this device before acknowledging a new
         // pairing, but Matrix delivery and a retry of an already accepted
         // request may still race. Keep the service-owned connection converging
-        // until one complete authenticated v3 projection is committed; never
+        // until one complete authenticated CVP/3 projection is committed; never
         // make the WebView stay foreground merely to wait for that round trip.
-        startMatrixV3ProjectionRefresh(recoverTransport = false)
+        startMatrixCvp3ProjectionRefresh(recoverTransport = false)
         return mutex.withLock { public to snapshot() }
     }
 
@@ -894,7 +896,7 @@ class NativeClientRuntime(
         cancelScheduledCommandRecovery(commandId)
         outbox.get(commandId)?.operationId?.let(automaticRevisionRetryAttempts::remove)
         val released = outbox.release(commandId)
-        if (released) matrixV3CommandContent.remove(commandId)
+        if (released) matrixCvp3CommandContent.remove(commandId)
         if (released) refreshSnapshot(publishLifecycle = false)
         return released
     }
@@ -950,11 +952,11 @@ class NativeClientRuntime(
             trustStore.clear()
             replayStore.clear()
             timelineKeys.clear()
-            matrixV3ProjectKeys.clear()
-            matrixV3Inbox.clear()
-            matrixV3Projection.clear()
-            matrixV3ProjectionStore.clear()
-            matrixV3CommandContent.clear()
+            matrixCvp3ProjectKeys.clear()
+            matrixCvp3Inbox.clear()
+            matrixCvp3Projection.clear()
+            matrixCvp3ProjectionStore.clear()
+            matrixCvp3CommandContent.clear()
             pairingStore.clear()
             outbox.clear()
             transfers.clear()
@@ -1001,8 +1003,8 @@ class NativeClientRuntime(
     override fun onTransportReady(identity: MatrixTransportIdentity) {
         transportIdentity = identity
         gatewayStateSynchronized = trust != null &&
-            matrixV3ProjectKeys.value() != null &&
-            matrixV3Projection.snapshot() != null
+            matrixCvp3ProjectKeys.value() != null &&
+            matrixCvp3Projection.snapshot() != null
         refreshSnapshot(publishLifecycle = true)
         if (trust != null) {
             scope.launch {
@@ -1021,8 +1023,8 @@ class NativeClientRuntime(
                                 mapOf("error" to diagnosticErrorName(error)),
                             )
                         }
-                    replayMatrixV3InboxLocked()
-                    matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+                    replayMatrixCvp3InboxLocked()
+                    matrixCvp3Projection.snapshot()?.let(::acceptMatrixCvp3GatewayState)
                 }
             }
         } else if (
@@ -1048,17 +1050,17 @@ class NativeClientRuntime(
             mapOf("reason" to diagnosticReason),
         )
         if (trust == null || authoritativeStateRefreshJob?.isActive == true) return
-        startMatrixV3ProjectionRefresh(recoverTransport = false)
+        startMatrixCvp3ProjectionRefresh(recoverTransport = false)
     }
 
     override suspend fun onDecryptedEvent(event: MatrixDecryptedEvent) {
         mutex.withLock {
-            val isV3 = isMatrixV3RawEvent(event.rawJson)
-            if (isV3) matrixV3Inbox.put(event)
+            val isV3 = isMatrixCvp3RawEvent(event.rawJson)
+            if (isV3) matrixCvp3Inbox.put(event)
             try {
                 processMatrixEvent(event)
-                if (isV3) matrixV3Inbox.projected(event.eventId)
-            } catch (error: MatrixV3EventDeferredException) {
+                if (isV3) matrixCvp3Inbox.projected(event.eventId)
+            } catch (error: MatrixCvp3EventDeferredException) {
                 diagnostics.record(
                     "matrix.v3_event.deferred",
                     mapOf("reason" to diagnosticErrorName(error)),
@@ -1078,7 +1080,7 @@ class NativeClientRuntime(
                     ),
                 )
                 if (isV3) {
-                    matrixV3Inbox.quarantine(event.eventId, error)
+                    matrixCvp3Inbox.quarantine(event.eventId, error)
                     publishStatus(lifecycle().phase, "matrix_v3_event_quarantined")
                     return@withLock
                 }
@@ -1160,7 +1162,7 @@ class NativeClientRuntime(
                 "codever.v3.command.${transmission.commandId}",
             )
             mutex.withLock {
-                applyOwnMatrixV3Command(content, matrixEventId, transmission.issuedAt)
+                applyOwnMatrixCvp3Command(content, matrixEventId, transmission.issuedAt)
             }
         } catch (error: Exception) {
             val remainsCurrent = mutex.withLock {
@@ -1285,12 +1287,12 @@ class NativeClientRuntime(
     }
 
     private fun signedCommandContent(transmission: CommandTransmission): JsonObject {
-        matrixV3CommandContent.get(transmission.commandId)?.let { return it }
+        matrixCvp3CommandContent.get(transmission.commandId)?.let { return it }
         val activeTrust = trust ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
         val roomId = matrix.publicSession()?.roomBinding?.roomId
             ?: throw IllegalStateException("Matrix room binding is unavailable.")
-        val keys = matrixV3ProjectKeys.value()
-            ?: throw IllegalStateException("The protocol-v3 project key grant is unavailable.")
+        val keys = matrixCvp3ProjectKeys.value()
+            ?: throw IllegalStateException("The CVP/3 project key grant is unavailable.")
         val raw = transmission.payload
         val operation = raw.string("operation")
             ?: throw IllegalArgumentException("Command operation is invalid.")
@@ -1351,7 +1353,7 @@ class NativeClientRuntime(
                     raw.string("permissionMode")?.let { put("permissionMode", it) }
                 }
                 require(patch.isNotEmpty()) {
-                    "Project directory changes belong to a Matrix project room in protocol v3."
+                    "Project directory changes belong to a Matrix project room in CVP/3."
                 }
                 v3Payload = buildJsonObject {
                     put("operation", v3Operation)
@@ -1378,7 +1380,7 @@ class NativeClientRuntime(
                     raw.long("lifetimeMs")?.let { put("lifetimeMs", it) }
                 }
             }
-            else -> throw IllegalArgumentException("Unsupported protocol-v3 command operation.")
+            else -> throw IllegalArgumentException("Unsupported CVP/3 command operation.")
         }
         val command = buildJsonObject {
             put("kind", "codever.command")
@@ -1398,7 +1400,7 @@ class NativeClientRuntime(
             .copyOfRange(0, 12)
         val activeKey = keys.activeKey()
         val envelope = try {
-            MatrixV3Protocol.sealSignedCommand(
+            MatrixCvp3Protocol.sealSignedCommand(
                 command,
                 identity,
                 roomId,
@@ -1410,7 +1412,7 @@ class NativeClientRuntime(
             nonce.fill(0)
             keys.wipe()
         }
-        val threadRoot = v3SessionId?.let(matrixV3Projection::threadRootEventId)
+        val threadRoot = v3SessionId?.let(matrixCvp3Projection::threadRootEventId)
         val content = buildJsonObject {
             put("msgtype", "m.notice")
             put("body", "Encrypted Codever command")
@@ -1427,10 +1429,10 @@ class NativeClientRuntime(
                 put("envelope", envelope)
             })
         }
-        return matrixV3CommandContent.putIfAbsent(transmission.commandId, content)
+        return matrixCvp3CommandContent.putIfAbsent(transmission.commandId, content)
     }
 
-    private fun startMatrixV3ProjectionRefresh(
+    private fun startMatrixCvp3ProjectionRefresh(
         recoverTransport: Boolean,
     ) {
         authoritativeStateRefreshJob?.cancel()
@@ -1501,7 +1503,7 @@ class NativeClientRuntime(
         val root = json.parseToJsonElement(event.rawJson).jsonObject
         val content = (root["content"] as? JsonObject) ?: return
         val eventType = root.string("type") ?: return
-        if (processMatrixV3Event(event, root, content, eventType)) return
+        if (processMatrixCvp3Event(event, root, content, eventType)) return
         val extension = content["io.codever"] as? JsonObject ?: return
         val kind = extension.string("kind") ?: return
         if (kind == "pairing_response") {
@@ -1532,33 +1534,33 @@ class NativeClientRuntime(
         }
     }
 
-    private suspend fun processMatrixV3Event(
+    private suspend fun processMatrixCvp3Event(
         event: MatrixDecryptedEvent,
         root: JsonObject,
         content: JsonObject,
         eventType: String,
     ): Boolean {
         if (
-            eventType != CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE &&
-            eventType != id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE &&
-            eventType != id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE &&
+            eventType != CVP3_MATRIX_KEY_GRANT_EVENT_TYPE &&
+            eventType != CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE &&
+            eventType != CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE &&
             !(eventType == "m.room.message" &&
                 (content["io.codever"] as? JsonObject)?.long("version") == 3L)
         ) return false
-        val activeTrust = trust ?: throw MatrixV3EventDeferredException("gateway_trust_pending")
+        val activeTrust = trust ?: throw MatrixCvp3EventDeferredException("gateway_trust_pending")
         if (event.sender != activeTrust.transportTrust.currentTransport.userId) {
             // The application /sync lane accepts Gateway output only. A local
             // command is projected optimistically at the durable send boundary.
             return true
         }
         val roomId = matrix.publicSession()?.roomBinding?.roomId
-            ?: throw MatrixV3EventDeferredException("matrix_room_pending")
-        if (eventType == CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE) {
+            ?: throw MatrixCvp3EventDeferredException("matrix_room_pending")
+        if (eventType == CVP3_MATRIX_KEY_GRANT_EVENT_TYPE) {
             // Key grants are directly addressed Room State. Matrix sync sends
             // every state key in the room, including grants for other paired
             // devices; those are ordinary irrelevant state, not poison input.
             if (content.string("deviceId") != identity.publicIdentity.keyId) return true
-            val grant = MatrixV3Protocol.openProjectKeyGrant(
+            val grant = MatrixCvp3Protocol.openProjectKeyGrant(
                 state = content,
                 identity = identity,
                 gatewayKey = activeTrust.gatewayKey,
@@ -1566,10 +1568,10 @@ class NativeClientRuntime(
                 expectedRoomId = roomId,
                 expectedCertificateId = activeTrust.certificate.certificateId,
             )
-            matrixV3ProjectKeys.save(grant)
+            matrixCvp3ProjectKeys.save(grant)
             grant.wipe()
             diagnostics.record("matrix.v3_project_keys.accepted")
-            matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+            matrixCvp3Projection.snapshot()?.let(::acceptMatrixCvp3GatewayState)
             scope.launch {
                 runCatching { matrix.refreshThreadDirectory() }
                     .onFailure { error ->
@@ -1578,71 +1580,71 @@ class NativeClientRuntime(
                             mapOf("error" to diagnosticErrorName(error)),
                         )
                     }
-                mutex.withLock { replayMatrixV3InboxLocked() }
+                mutex.withLock { replayMatrixCvp3InboxLocked() }
             }
             return true
         }
         if (
-            eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE ||
-            eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE
+            eventType == CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE ||
+            eventType == CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
         ) {
             val pointer = if (
-                eventType == id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE
+                eventType == CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
             ) {
-                MatrixV3Protocol.verifyProjectPointer(
+                MatrixCvp3Protocol.verifyProjectPointer(
                     content,
                     activeTrust.gatewayKey,
                     activeTrust.gatewayId,
                     roomId,
                 )
             } else {
-                MatrixV3Protocol.verifyWorkspacePointer(
+                MatrixCvp3Protocol.verifyWorkspacePointer(
                     content,
                     activeTrust.gatewayKey,
                     activeTrust.gatewayId,
                     roomId,
                 )
             }
-            val keys = matrixV3ProjectKeys.value()
-                ?: throw MatrixV3EventDeferredException("project_key_grant_pending")
+            val keys = matrixCvp3ProjectKeys.value()
+                ?: throw MatrixCvp3EventDeferredException("project_key_grant_pending")
             try {
                 require(pointer.string("projectId") == keys.projectId) {
-                    "The Matrix v3 project pointer targets another project."
+                    "The CVP/3 project pointer targets another project."
                 }
             } finally {
                 keys.wipe()
             }
             val snapshotEvent = matrix.fetchApplicationEvent(
                 pointer.string("eventId")
-                    ?: throw IllegalArgumentException("The Matrix v3 pointer event ID is missing."),
+                    ?: throw IllegalArgumentException("The CVP/3 pointer event ID is missing."),
             )
-            val inserted = matrixV3Inbox.put(snapshotEvent)
+            val inserted = matrixCvp3Inbox.put(snapshotEvent)
             if (inserted) {
                 try {
                     processMatrixEvent(snapshotEvent)
-                    matrixV3Inbox.projected(snapshotEvent.eventId)
-                } catch (error: MatrixV3EventDeferredException) {
+                    matrixCvp3Inbox.projected(snapshotEvent.eventId)
+                } catch (error: MatrixCvp3EventDeferredException) {
                     throw error
                 } catch (error: Exception) {
-                    matrixV3Inbox.quarantine(snapshotEvent.eventId, error)
+                    matrixCvp3Inbox.quarantine(snapshotEvent.eventId, error)
                     throw error
                 }
             }
             return true
         }
-        val keys = matrixV3ProjectKeys.value()
-            ?: throw MatrixV3EventDeferredException("project_key_grant_pending")
+        val keys = matrixCvp3ProjectKeys.value()
+            ?: throw MatrixCvp3EventDeferredException("project_key_grant_pending")
         val extension = content["io.codever"] as? JsonObject
-            ?: throw IllegalArgumentException("The Matrix v3 extension is missing.")
+            ?: throw IllegalArgumentException("The CVP/3 extension is missing.")
         val opened = try {
-            MatrixV3Protocol.openContent(extension, roomId, keys.projectId, keys)
+            MatrixCvp3Protocol.openContent(extension, roomId, keys.projectId, keys)
         } finally {
             keys.wipe()
         }
         val kind = opened.plaintext.string("kind")
         if (kind != "signed_event") return true
         val signed = opened.plaintext.objectValue("value")
-        val protocolEvent = MatrixV3Protocol.verifyGatewayEvent(
+        val protocolEvent = MatrixCvp3Protocol.verifyGatewayEvent(
             signed,
             activeTrust.gatewayKey,
             activeTrust.gatewayId,
@@ -1651,17 +1653,17 @@ class NativeClientRuntime(
         val protocolPayload = protocolEvent.objectValue("payload")
         if (protocolPayload.string("type") == "workspace.snapshot") {
             require(protocolPayload.string("gatewayKeyId") == activeTrust.gatewayKey.keyId) {
-                "The Matrix v3 workspace snapshot names another Gateway key."
+                "The CVP/3 workspace snapshot names another Gateway key."
             }
         }
         require(opened.logicalEventId == protocolEvent.string("eventId")) {
-            "The v3 event envelope logical ID is invalid."
+            "The CVP/3 event envelope logical ID is invalid."
         }
         val relation = content["m.relates_to"] as? JsonObject
         val threadRootHint = relation
             ?.takeIf { it.string("rel_type") == "m.thread" }
             ?.string("event_id")
-        val result = matrixV3Projection.applyGatewayEvent(
+        val result = matrixCvp3Projection.applyGatewayEvent(
             protocolEvent,
             event.eventId,
             threadRootHint,
@@ -1680,25 +1682,25 @@ class NativeClientRuntime(
                 }
             }
         }
-        result.terminal?.let(::recordMatrixV3Terminal)
-        matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
+        result.terminal?.let(::recordMatrixCvp3Terminal)
+        matrixCvp3Projection.snapshot()?.let(::acceptMatrixCvp3GatewayState)
         // Projection persistence follows ClientEventHub persistence. If the
         // process stops between them, replay is harmless and history upsert
         // IDs deduplicate; the inverse order could lose a public message.
-        matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+        matrixCvp3ProjectionStore.save(matrixCvp3Projection.durableState())
         return true
     }
 
-    private suspend fun applyOwnMatrixV3Command(
+    private suspend fun applyOwnMatrixCvp3Command(
         content: JsonObject,
         matrixEventId: String,
         timestamp: Long,
     ) {
         val activeTrust = trust ?: return
         val roomId = matrix.publicSession()?.roomBinding?.roomId ?: return
-        val keys = matrixV3ProjectKeys.value() ?: return
+        val keys = matrixCvp3ProjectKeys.value() ?: return
         val opened = try {
-            MatrixV3Protocol.openContent(
+            MatrixCvp3Protocol.openContent(
                 content.objectValue("io.codever"),
                 roomId,
                 keys.projectId,
@@ -1708,7 +1710,7 @@ class NativeClientRuntime(
             keys.wipe()
         }
         if (opened.plaintext.string("kind") != "signed_command") return
-        val command = MatrixV3Protocol.verifyDeviceCommand(
+        val command = MatrixCvp3Protocol.verifyDeviceCommand(
             opened.plaintext.objectValue("value"),
             identity.publicIdentity,
             activeTrust.gatewayId,
@@ -1716,18 +1718,18 @@ class NativeClientRuntime(
             activeTrust.certificate.certificateId,
         )
         require(opened.logicalEventId == command.string("commandId")) {
-            "The v3 command envelope logical ID is invalid."
+            "The CVP/3 command envelope logical ID is invalid."
         }
-        val result = matrixV3Projection.applyOwnCommand(command, matrixEventId, timestamp)
+        val result = matrixCvp3Projection.applyOwnCommand(command, matrixEventId, timestamp)
         result.messages.forEach { message ->
             val sessionId = message.sessionId ?: return@forEach
             eventHub.upsertMessage(sessionId, message, refreshedSnapshot())
         }
-        matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
-        matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+        matrixCvp3Projection.snapshot()?.let(::acceptMatrixCvp3GatewayState)
+        matrixCvp3ProjectionStore.save(matrixCvp3Projection.durableState())
     }
 
-    private fun recordMatrixV3Terminal(terminal: MatrixV3NativeTerminal) {
+    private fun recordMatrixCvp3Terminal(terminal: MatrixCvp3NativeTerminal) {
         val current = outbox.get(terminal.commandId) ?: return
         val outcome = when (terminal.outcome) {
             "succeeded" -> DurableOutcome.SUCCEEDED
@@ -1755,11 +1757,11 @@ class NativeClientRuntime(
         )
     }
 
-    private fun acceptMatrixV3GatewayState(snapshot: JsonObject) {
+    private fun acceptMatrixCvp3GatewayState(snapshot: JsonObject) {
         if (snapshot.toString().toByteArray().size > MAX_BRIDGE_EVENT_PAYLOAD_BYTES) return
         val changed = gatewayState != snapshot
         gatewayState = snapshot
-        gatewayStateSynchronized = trust != null && matrixV3ProjectKeys.value() != null
+        gatewayStateSynchronized = trust != null && matrixCvp3ProjectKeys.value() != null
         if (changed) {
             eventHub.publish(
                 ClientEventType.GATEWAY_STATE_CHANGED,
@@ -1771,23 +1773,23 @@ class NativeClientRuntime(
         refreshSnapshot(publishLifecycle = true)
     }
 
-    private suspend fun replayMatrixV3InboxLocked() {
-        drainMatrixV3Inbox(matrixV3Inbox) { record ->
+    private suspend fun replayMatrixCvp3InboxLocked() {
+        drainMatrixCvp3Inbox(matrixCvp3Inbox) { record ->
             try {
                 processMatrixEvent(record.event)
-                matrixV3Inbox.projected(record.event.eventId)
-                MatrixV3InboxProjectionStep.ADVANCED
-            } catch (_: MatrixV3EventDeferredException) {
-                MatrixV3InboxProjectionStep.DEFERRED
+                matrixCvp3Inbox.projected(record.event.eventId)
+                MatrixCvp3InboxProjectionStep.ADVANCED
+            } catch (_: MatrixCvp3EventDeferredException) {
+                MatrixCvp3InboxProjectionStep.DEFERRED
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                matrixV3Inbox.quarantine(record.event.eventId, error)
+                matrixCvp3Inbox.quarantine(record.event.eventId, error)
                 diagnostics.record(
                     "matrix.v3_event.quarantined",
                     mapOf("error" to diagnosticErrorName(error)),
                 )
-                MatrixV3InboxProjectionStep.ADVANCED
+                MatrixCvp3InboxProjectionStep.ADVANCED
             }
         }
     }
@@ -1805,28 +1807,28 @@ class NativeClientRuntime(
         if (extension.long("version") == 3L) {
             val activeTrust = trust ?: return null
             if (event.sender != activeTrust.transportTrust.currentTransport.userId) return null
-            val keys = matrixV3ProjectKeys.value() ?: return null
+            val keys = matrixCvp3ProjectKeys.value() ?: return null
             val opened = try {
-                MatrixV3Protocol.openContent(extension, event.roomId, keys.projectId, keys)
+                MatrixCvp3Protocol.openContent(extension, event.roomId, keys.projectId, keys)
             } finally {
                 keys.wipe()
             }
             if (opened.plaintext.string("kind") != "signed_event") return null
-            val protocolEvent = MatrixV3Protocol.verifyGatewayEvent(
+            val protocolEvent = MatrixCvp3Protocol.verifyGatewayEvent(
                 opened.plaintext.objectValue("value"),
                 activeTrust.gatewayKey,
                 activeTrust.gatewayId,
                 opened.projectId,
             )
             require(opened.logicalEventId == protocolEvent.string("eventId")) {
-                "The v3 historical event envelope logical ID is invalid."
+                "The CVP/3 historical event envelope logical ID is invalid."
             }
             if (protocolEvent.string("sessionId") != expectedSessionId) return null
             val relation = content["m.relates_to"] as? JsonObject
             val threadRootHint = relation
                 ?.takeIf { it.string("rel_type") == "m.thread" }
                 ?.string("event_id")
-            val projected = matrixV3Projection.applyGatewayEvent(
+            val projected = matrixCvp3Projection.applyGatewayEvent(
                 protocolEvent,
                 event.eventId,
                 threadRootHint,
@@ -1835,9 +1837,9 @@ class NativeClientRuntime(
                 val command = outbox.get(commandId)
                 if (command != null) outbox.recordAcknowledgement(commandId, command.sequence, 0)
             }
-            projected.terminal?.let(::recordMatrixV3Terminal)
-            matrixV3Projection.snapshot()?.let(::acceptMatrixV3GatewayState)
-            matrixV3ProjectionStore.save(matrixV3Projection.durableState())
+            projected.terminal?.let(::recordMatrixCvp3Terminal)
+            matrixCvp3Projection.snapshot()?.let(::acceptMatrixCvp3GatewayState)
+            matrixCvp3ProjectionStore.save(matrixCvp3Projection.durableState())
             return projected.messages.singleOrNull()?.copy(historical = true)
         }
         return null
@@ -2333,7 +2335,7 @@ class NativeClientRuntime(
                     "gateway.state.fallback_requested",
                     mapOf("action" to operation.wireName),
                 )
-                startMatrixV3ProjectionRefresh(recoverTransport = false)
+                startMatrixCvp3ProjectionRefresh(recoverTransport = false)
             }
         }
     }
@@ -2456,12 +2458,12 @@ internal fun decodeMatrixToolGroup(extension: JsonObject): ToolGroupPresentation
     return runCatching { PublicClientJson.decodeToolGroup(ui) }.getOrNull()
 }
 
-private fun isMatrixV3RawEvent(rawJson: String): Boolean = runCatching {
+private fun isMatrixCvp3RawEvent(rawJson: String): Boolean = runCatching {
     val root = Json.parseToJsonElement(rawJson).jsonObject
     when (root["type"]?.jsonPrimitive?.contentOrNull) {
-        CODEVER_MATRIX_V3_KEY_GRANT_EVENT_TYPE,
-        id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_PROJECT_POINTER_EVENT_TYPE,
-        id.my.anciety.codever.matrix.CODEVER_MATRIX_V3_WORKSPACE_POINTER_EVENT_TYPE,
+        CVP3_MATRIX_KEY_GRANT_EVENT_TYPE,
+        CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE,
+        CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE,
         -> true
         "m.room.message" ->
             (root["content"] as? JsonObject)
