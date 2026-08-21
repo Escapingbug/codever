@@ -227,6 +227,9 @@ codever start                         Start the daemon
 codever stop                          Stop the daemon
 codever restart                       Restart the daemon
 codever status                        Show daemon and config status
+codever gateway status                Show the local Matrix/PWA Gateway
+codever gateway invite                Pair another PWA device
+codever send-file <path>              Send a file to the workspace inbox
 codever logs [-f]                     Show daemon logs
 codever logs --groups                 List group log directories
 codever logs --group <chatId>         Show logs for a specific group

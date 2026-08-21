@@ -105,8 +105,7 @@ not a TCP port:
 codever gateway ...
   -> GatewayAdminClient
   -> owner-only admin socket
-  -> DeviceInvitationCoordinator
-  -> GatewayPairingService
+  -> invitation/device administration OR workspace file inbox
 ```
 
 The authenticated-PWA `device.invite` operation and the local admin API use the
@@ -116,6 +115,12 @@ sign an invitation for a stale Matrix device. Long-lived Matrix access tokens
 remain server-side and may only be exchanged for short-lived one-time device
 login tokens.
 
+`codever send-file <path>` uses the same owner-only socket, but enters a
+workspace-level file inbox instead of resolving a session. The Gateway reads
+the caller-selected local file, encrypts and uploads the media, and durably
+stages an `inbox.file.received` event without a `sessionId`. The selected PWA
+conversation is never used as an implicit routing signal.
+
 ### 3.6 Codever Protocol v3 (CVP/3) over Matrix
 
 Matrix is the durable conversation log, not a per-device mailbox or RPC queue.
@@ -124,6 +129,15 @@ commands and Gateway outputs are ordinary `m.room.message` events carrying a
 signed, application-encrypted CVP/3 envelope. Stable logical IDs are independent
 from Matrix physical event IDs; `causationCommandId` links an output to a
 command without making the two messages the same entity.
+
+CVP/3 distinguishes business scope from its Matrix transport route. A
+`session.create` command with `scope: scratch` receives an isolated
+Gateway-owned working directory and is projected under the workspace's
+Temporary group rather than a project group. Workspace inbox events have no
+session ID; active project rooms remain only their encrypted carriers until a
+dedicated workspace carrier is introduced. Inbox events are replicated once
+per project room that currently has an authorized device, so the workspace
+list is reachable without inferring a conversation or session.
 
 The Gateway persists the exact outbound content and stable Matrix transaction
 ID before sending. It also journals every accepted command ID before execution,

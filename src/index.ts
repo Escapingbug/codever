@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { chmodSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { config, getDaemonLogPath, getDaemonBaseDir } from './config'
@@ -59,6 +59,10 @@ async function main() {
             qr: { type: 'string' },
             output: { type: 'string' },
             reason: { type: 'string' },
+            caption: { type: 'string' },
+            filename: { type: 'string' },
+            source: { type: 'string' },
+            'idempotency-key': { type: 'string' },
             json: { type: 'boolean', default: false },
         },
         allowPositionals: true,
@@ -69,6 +73,10 @@ async function main() {
 
     if (command === 'gateway') {
         await handleGatewayCommand(positionals.slice(1), values)
+        return
+    }
+    if (command === 'send-file') {
+        await handleGatewayCommand(['send-file', ...positionals.slice(1)], values)
         return
     }
 
@@ -339,6 +347,7 @@ Usage:
   codever gateway devices           List paired PWA devices
   codever gateway cancel <offer>    Cancel an unused invitation
   codever gateway revoke <device>   Revoke a paired PWA device
+  codever send-file <path>          Send a file to the workspace inbox
   codever logs [-f]                 Show daemon logs (follow with -f)
   codever logs --groups             List all group log directories
   codever logs --group <chatId>     Show logs for a specific group
@@ -377,6 +386,8 @@ async function handleGatewayCommand(
   codever gateway devices [--socket PATH] [--json]
   codever gateway cancel <invitation-id> [--socket PATH]
   codever gateway revoke <device-id> [--reason TEXT] [--socket PATH]
+  codever gateway send-file <path> [--caption TEXT] [--filename NAME]
+      [--source LABEL] [--idempotency-key KEY] [--socket PATH] [--json]
 `)
         return
     }
@@ -385,7 +396,10 @@ async function handleGatewayCommand(
         stringOption(values.socket)
         ?? process.env.CODEVER_GATEWAY_ADMIN_SOCKET
         ?? defaultGatewayAdminSocket()
-    const client = new GatewayAdminClient({ socketPath })
+    const client = new GatewayAdminClient({
+        socketPath,
+        timeoutMs: subcommand === 'send-file' ? 120_000 : 5_000,
+    })
 
     if (subcommand === 'status') {
         const status = await client.status()
@@ -470,6 +484,30 @@ async function handleGatewayCommand(
         return
     }
 
+    if (subcommand === 'send-file') {
+        const path = positionals[1]
+        if (!path) {
+            throw new Error('Usage: codever send-file <path> [--caption TEXT] [--filename NAME]')
+        }
+        const result = await client.sendFile({
+            path: resolve(path),
+            ...(stringOption(values.filename) ? { filename: stringOption(values.filename) } : {}),
+            ...(stringOption(values.caption) ? { caption: stringOption(values.caption) } : {}),
+            ...(stringOption(values.source) ? { sourceLabel: stringOption(values.source) } : {}),
+        }, stringOption(values['idempotency-key']))
+        if (values.json) {
+            console.log(JSON.stringify(result, null, 2))
+            return
+        }
+        console.log(
+            result.delivery === 'delivered'
+                ? `Sent ${path} to the Codever workspace file inbox.`
+                : `Queued ${path} for the Codever workspace file inbox.`,
+        )
+        console.log(`File ID: ${result.fileId}`)
+        return
+    }
+
     if (subcommand === 'cancel') {
         const invitationId = positionals[1]
         if (!invitationId) {
@@ -492,7 +530,7 @@ async function handleGatewayCommand(
     }
 
     throw new Error(
-        'Usage: codever gateway [status | invite | devices | cancel <offer> | revoke <device>]',
+        'Usage: codever gateway [status | invite | devices | send-file <path> | cancel <offer> | revoke <device>]',
     )
 }
 

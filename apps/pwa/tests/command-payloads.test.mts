@@ -46,3 +46,12 @@ test("creates canonical session lifecycle commands", () => {
     assert.doesNotThrow(() => canonicalJson(payload));
   }
 });
+
+test("preserves the scratch scope on session creation", () => {
+  const payload = commandPayloadSchema.parse({
+    operation: "session.create",
+    scope: "scratch",
+  });
+  assert.equal(payload.operation, "session.create");
+  assert.equal(payload.scope, "scratch");
+});

@@ -62,6 +62,7 @@ const sessionSettingsPatchSchema = z
 const sessionCreatePayloadSchema = z
   .object({
     operation: z.literal('session.create'),
+    scope: z.enum(['project', 'scratch']).optional(),
     title: z.string().min(1).max(512).optional(),
     model: z.string().min(1).max(256).optional(),
     provider: z.string().min(1).max(256).optional(),
@@ -231,6 +232,8 @@ export type SignedCvp3Command = z.infer<
 const sessionProjectionSchema = z
   .object({
     title: z.string().min(1).max(512),
+    scope: z.enum(['project', 'scratch']).optional(),
+    cwd: z.string().min(1).max(8_192).optional(),
     lifecycle: z.enum(['active', 'archived', 'deleted']),
     activity: z.enum(['idle', 'queued', 'working', 'attention', 'failed']),
     updatedAt: timestamp,
@@ -373,6 +376,20 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
         })
       }
     }),
+  z
+    .object({
+      type: z.literal('inbox.file.received'),
+      fileId: opaqueId,
+      caption: z.string().max(8_192).optional(),
+      source: z
+        .object({
+          kind: z.literal('local-cli'),
+          label: z.string().min(1).max(256).optional(),
+        })
+        .strict(),
+      attachment: attachmentSchema,
+    })
+    .strict(),
   z
     .object({
       type: z.literal('tool.activity'),

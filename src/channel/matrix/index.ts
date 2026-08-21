@@ -1,5 +1,6 @@
 export * from './matrixPort'
 export * from './matrixCvp3Port'
+export * from './cvp3Attachment'
 export * from './memoryTransport'
 export * from './sdkTransport'
 export * from './transport'

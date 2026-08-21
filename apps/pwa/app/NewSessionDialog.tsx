@@ -13,6 +13,7 @@ import {
 } from "./gatewayState";
 
 type NewSessionInput = {
+  scope?: "project" | "scratch";
   cwd: string;
   projectName: string;
   model?: string;
@@ -62,6 +63,7 @@ function NewSessionDialogContent({
     Object.fromEntries(defaultExtensions.map(binding => [binding.id, true])),
   );
   const [setAsProjectDefault, setSetAsProjectDefault] = useState(false);
+  const [scope, setScope] = useState<"project" | "scratch">("project");
   const [extensionConfig, setExtensionConfig] = useState<
     Record<string, Record<string, JsonValue>>
   >(() =>
@@ -124,6 +126,7 @@ function NewSessionDialogContent({
     event.preventDefault();
     if (busy) return;
     onCreate({
+      scope,
       cwd: workspace.cwd,
       projectName: workspace.projectName,
       ...(model ? { model } : {}),
@@ -134,7 +137,9 @@ function NewSessionDialogContent({
           id: extension.id,
           config: extensionConfig[extension.id] ?? {},
         })),
-      ...(setAsProjectDefault ? { setAsProjectDefault: true } : {}),
+      ...(scope === "project" && setAsProjectDefault
+        ? { setAsProjectDefault: true }
+        : {}),
     });
   };
 
@@ -156,7 +161,9 @@ function NewSessionDialogContent({
       >
         <header>
           <div>
-            <span className="eyebrow">Computer · Project</span>
+            <span className="eyebrow">
+              {scope === "scratch" ? "Computer · Temporary" : "Computer · Project"}
+            </span>
             <h2 id="new-session-title">Create a session</h2>
             <p>{gatewayName}</p>
           </div>
@@ -171,6 +178,23 @@ function NewSessionDialogContent({
         </header>
 
         <form onSubmit={submit}>
+          <label className="scratch-session-toggle">
+            <input
+              type="checkbox"
+              checked={scope === "scratch"}
+              disabled={busy}
+              onChange={(event) => {
+                setScope(event.target.checked ? "scratch" : "project");
+                if (event.target.checked) setSetAsProjectDefault(false);
+              }}
+            />
+            <span>
+              <strong>Temporary conversation</strong>
+              <small>Use an isolated folder and keep this session outside project groups.</small>
+            </span>
+          </label>
+
+          {scope === "project" ? <>
           <div className="new-session-grid">
             <label>
               <span>Project</span>
@@ -185,6 +209,12 @@ function NewSessionDialogContent({
             This Matrix room is the durable home for this project. Switch
             project rooms before creating a session for another directory.
           </small>
+          </> : (
+            <small className="project-identity-note scratch-identity-note">
+              The Gateway creates a private working folder for this conversation.
+              Deleting the conversation also removes that folder.
+            </small>
+          )}
 
           <div className="new-session-grid two-columns">
             <label>
@@ -306,7 +336,7 @@ function NewSessionDialogContent({
                   </section>
                 );
               })}
-              {canUpdateProjectDefaults && (
+              {canUpdateProjectDefaults && scope === "project" && (
                 <label className="session-extension-boolean">
                   <input
                     type="checkbox"

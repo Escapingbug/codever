@@ -13,7 +13,14 @@ Matrix room/event/sync version and a CVP version are separate concepts.
 - **Matrix room, event, thread, state, sync, E2EE, or rate limit** means a
   transport object or behavior.
 - A code symbol named `MatrixCvp3*` is specifically a Matrix transport adapter
-  for CVP/3; it does not name a version of Matrix.
+for CVP/3; it does not name a version of Matrix.
+
+Workspace-level semantics are explicit in payloads. Scratch sessions use
+`session.create.scope = "scratch"`; received files use
+`inbox.file.received` without a `sessionId`. A project ID may still be present
+as the authenticated Matrix-room routing binding, but clients must not present
+either entity as owned by that project. A workspace inbox event is replicated
+once per active project room using the same logical file and event IDs.
 - Existing wire event types ending in `.v3`, encrypted-storage domain strings,
   and database filenames remain unchanged because they are compatibility IDs.
 

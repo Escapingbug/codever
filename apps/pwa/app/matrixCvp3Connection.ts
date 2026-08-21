@@ -718,13 +718,18 @@ function gatewayState(
 ): GatewayStateSnapshot {
   const project = protocol.projection.project;
   const sessions = protocol.projection.visibleSessions();
+  const inboxFiles = protocol.projection.visibleInboxFiles();
   return {
     stateVersion: Math.max(1, ...sessions.map(session => session.stateVersion)),
     revision: 0,
     revisionEpoch: "matrix-native-v3",
     revisionEpochGeneration: 1,
     activeDeviceCount: trust?.activeDeviceCount ?? 1,
-    updatedAt: Math.max(0, ...sessions.map(session => session.updatedAt)),
+    updatedAt: Math.max(
+      0,
+      ...sessions.map(session => session.updatedAt),
+      ...inboxFiles.map(file => file.receivedAt),
+    ),
     currentSessionId: null,
     sessions: sessions.map(session => ({
       id: session.sessionId,
@@ -744,13 +749,21 @@ function gatewayState(
           : session.activity === "failed"
             ? "failed"
             : "idle",
+      scope: session.scope ?? "project",
       projectId: session.projectId,
-      projectName: project?.name ?? "Project",
-      cwd: project?.cwd ?? "",
+      projectName: session.scope === "scratch" ? "Temporary" : project?.name ?? "Project",
+      cwd: session.cwd ?? project?.cwd ?? "",
       provider: session.provider ?? project?.provider ?? "unknown",
       ...(session.model ? { model: session.model } : {}),
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       extensions: session.extensions ?? [],
+    })),
+    inboxFiles: inboxFiles.map(file => ({
+      id: file.fileId,
+      receivedAt: file.receivedAt,
+      ...(file.caption ? { caption: file.caption } : {}),
+      ...(file.sourceLabel ? { sourceLabel: file.sourceLabel } : {}),
+      attachment: file.attachment,
     })),
     workspace: {
       projectId: project?.projectId ?? "unknown",

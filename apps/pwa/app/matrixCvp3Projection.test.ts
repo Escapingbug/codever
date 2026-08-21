@@ -87,7 +87,56 @@ describe("MatrixCvp3Projection", () => {
       version: 2,
     });
   });
+
+  it("persists workspace inbox files without assigning them to a session", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(inboxFileEvent(), "$workspace-file");
+
+    expect(projection.visibleInboxFiles()).toEqual([
+      expect.objectContaining({
+        fileId: "workspace-file-1",
+        caption: "Generated report",
+        sourceLabel: "review-agent",
+      }),
+    ]);
+    expect(projection.messages.size).toBe(0);
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(projection.durableState());
+    expect(restored.visibleInboxFiles()).toEqual(projection.visibleInboxFiles());
+  });
 });
+
+function inboxFileEvent(): Cvp3Event {
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: "workspace-file-event-1",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    occurredAt: 5,
+    payload: {
+      type: "inbox.file.received",
+      fileId: "workspace-file-1",
+      caption: "Generated report",
+      source: { kind: "local-cli", label: "review-agent" },
+      attachment: {
+        id: "attachment-1",
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        size: 12,
+        sha256: "A".repeat(43),
+        media: {
+          url: "mxc://example.org/report",
+          key: "B".repeat(43),
+          iv: "C".repeat(16),
+          sha256: "D".repeat(43),
+          size: 28,
+        },
+      },
+    },
+  };
+}
 
 function workspaceSnapshot(snapshotVersion: number, model: string): Cvp3Event {
   return {

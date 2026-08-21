@@ -133,6 +133,7 @@ function parsePendingSessionCreateRecovery(
     !Number.isFinite(record.createdAt) ||
     !isNonEmptyString(sessionInput.cwd) ||
     !isNonEmptyString(sessionInput.projectName) ||
+    !(sessionInput.scope === undefined || sessionInput.scope === "project" || sessionInput.scope === "scratch") ||
     !isOptionalString(sessionInput.model) ||
     !isOptionalString(sessionInput.reasoningEffort) ||
     !isOptionalArray(sessionInput.extensions)

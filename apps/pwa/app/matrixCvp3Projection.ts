@@ -40,6 +40,16 @@ export type V3ProjectedMessage = {
   resolvedActionId?: string;
 };
 
+export type V3ProjectedInboxFile = {
+  fileId: string;
+  physicalEventId: string;
+  projectId: string;
+  receivedAt: number;
+  caption?: string;
+  sourceLabel?: string;
+  attachment: Extract<Cvp3Event["payload"], { type: "inbox.file.received" }>["attachment"];
+};
+
 export type Cvp3CommandCompletion = {
   commandId: string;
   outcome: "succeeded" | "failed" | "rejected" | "interrupted";
@@ -68,11 +78,12 @@ export type V3WorkspaceProjection = {
 };
 
 export type MatrixCvp3ProjectionState = {
-  version: 2;
+  version: 3;
   workspace: V3WorkspaceProjection | null;
   project: V3ProjectProjection | null;
   sessions: V3ProjectedSession[];
   messages: V3ProjectedMessage[];
+  inboxFiles: V3ProjectedInboxFile[];
   completions: Cvp3CommandCompletion[];
   seenLogicalEvents: string[];
 };
@@ -86,6 +97,7 @@ export type MatrixCvp3ProjectionState = {
 export class MatrixCvp3Projection {
   readonly sessions = new Map<string, V3ProjectedSession>();
   readonly messages = new Map<string, V3ProjectedMessage>();
+  readonly inboxFiles = new Map<string, V3ProjectedInboxFile>();
   readonly completions = new Map<string, Cvp3CommandCompletion>();
   readonly seenLogicalEvents = new Set<string>();
   workspace: V3WorkspaceProjection | null = null;
@@ -93,11 +105,12 @@ export class MatrixCvp3Projection {
 
   durableState(): MatrixCvp3ProjectionState {
     return structuredClone({
-      version: 2,
+      version: 3,
       workspace: this.workspace,
       project: this.project,
       sessions: [...this.sessions.values()],
       messages: [...this.messages.values()],
+      inboxFiles: [...this.inboxFiles.values()],
       completions: [...this.completions.values()],
       seenLogicalEvents: [...this.seenLogicalEvents],
     });
@@ -109,10 +122,12 @@ export class MatrixCvp3Projection {
     this.project = state.project;
     this.sessions.clear();
     this.messages.clear();
+    this.inboxFiles.clear();
     this.completions.clear();
     this.seenLogicalEvents.clear();
     for (const session of state.sessions) this.sessions.set(session.sessionId, session);
     for (const message of state.messages) this.messages.set(message.logicalId, message);
+    for (const file of state.inboxFiles) this.inboxFiles.set(file.fileId, file);
     for (const completion of state.completions) {
       this.completions.set(completion.commandId, completion);
     }
@@ -133,6 +148,8 @@ export class MatrixCvp3Projection {
         projectId: command.projectId,
         threadRootEventId: physicalEventId,
         title: command.payload.title ?? titleFromPrompt(command.payload.initialPrompt?.text ?? ""),
+        scope: command.payload.scope ?? "project",
+        ...(this.project?.cwd ? { cwd: this.project.cwd } : {}),
         lifecycle: "active",
         activity: command.payload.initialPrompt ? "queued" : "idle",
         updatedAt: timestamp,
@@ -214,6 +231,18 @@ export class MatrixCvp3Projection {
           extensionDefaultsRevision: payload.extensionDefaultsRevision ?? 1,
         };
       }
+      return true;
+    }
+    if (payload.type === "inbox.file.received" && event.projectId) {
+      this.inboxFiles.set(payload.fileId, {
+        fileId: payload.fileId,
+        physicalEventId,
+        projectId: event.projectId,
+        receivedAt: event.occurredAt,
+        ...(payload.caption ? { caption: payload.caption } : {}),
+        ...(payload.source.label ? { sourceLabel: payload.source.label } : {}),
+        attachment: payload.attachment,
+      });
       return true;
     }
     if (event.sessionId && "projection" in payload) {
@@ -372,6 +401,12 @@ export class MatrixCvp3Projection {
       );
   }
 
+  visibleInboxFiles(): V3ProjectedInboxFile[] {
+    return [...this.inboxFiles.values()].sort((left, right) =>
+      right.receivedAt - left.receivedAt || left.fileId.localeCompare(right.fileId),
+    );
+  }
+
   private applySessionProjection(
     event: Cvp3Event,
     next: Cvp3SessionProjection,
@@ -412,7 +447,7 @@ export class MatrixCvp3Projection {
 
 function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
   const value = record(input);
-  if (value?.version !== 1 && value?.version !== 2) {
+  if (value?.version !== 1 && value?.version !== 2 && value?.version !== 3) {
     throw new Error("Unsupported CVP/3 projection version.");
   }
   const sessions = boundedArray(value.sessions, "sessions").map(sessionValue => {
@@ -450,6 +485,40 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     ) throw new Error("The CVP/3 message projection is invalid.");
     return structuredClone(message) as V3ProjectedMessage;
   });
+  const inboxFiles = value.version === 3
+    ? boundedArray(value.inboxFiles, "inbox files").map(fileValue => {
+        const file = record(fileValue);
+        if (
+          !file
+          || !text(file.fileId)
+          || typeof file.physicalEventId !== "string"
+          || !text(file.projectId)
+          || !integer(file.receivedAt)
+        ) throw new Error("The CVP/3 inbox file projection is invalid.");
+        const payload = cvp3EventSchema.parse({
+          kind: "codever.event",
+          version: 3,
+          eventId: file.fileId,
+          workspaceId: "projection-validation",
+          projectId: file.projectId,
+          occurredAt: file.receivedAt,
+          payload: {
+            type: "inbox.file.received",
+            fileId: file.fileId,
+            ...(file.caption === undefined ? {} : { caption: file.caption }),
+            source: {
+              kind: "local-cli",
+              ...(file.sourceLabel === undefined ? {} : { label: file.sourceLabel }),
+            },
+            attachment: file.attachment,
+          },
+        }).payload;
+        if (payload.type !== "inbox.file.received") {
+          throw new Error("The CVP/3 inbox file projection is invalid.");
+        }
+        return { ...structuredClone(file), attachment: payload.attachment } as V3ProjectedInboxFile;
+      })
+    : [];
   const completions = boundedArray(value.completions, "completions").map(completionValue => {
     const completion = record(completionValue);
     if (
@@ -474,14 +543,16 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     : validateWorkspaceProjection(value.workspace);
   requireUnique(sessions.map(session => session.sessionId), "session");
   requireUnique(messages.map(message => message.logicalId), "message");
+  requireUnique(inboxFiles.map(file => file.fileId), "inbox file");
   requireUnique(completions.map(completion => completion.commandId), "completion");
   requireUnique(seenLogicalEvents, "logical event");
   return {
-    version: 2,
+    version: 3,
     workspace,
     project,
     sessions,
     messages,
+    inboxFiles,
     completions,
     seenLogicalEvents,
   };

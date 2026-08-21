@@ -26,6 +26,25 @@ export const revokeDeviceRequestSchema = z
 
 export type RevokeDeviceRequest = z.infer<typeof revokeDeviceRequestSchema>
 
+export const receiveWorkspaceFileRequestSchema = z
+  .object({
+    path: z.string().min(1).max(8_192),
+    filename: z.string().min(1).max(512).optional(),
+    caption: z.string().max(8_192).optional(),
+    sourceLabel: z.string().min(1).max(256).optional(),
+  })
+  .strict()
+
+export type ReceiveWorkspaceFileRequest = z.infer<
+  typeof receiveWorkspaceFileRequestSchema
+>
+
+export interface ReceiveWorkspaceFileResponse {
+  fileId: string
+  eventId: string
+  delivery: 'delivered' | 'queued'
+}
+
 export interface GatewayAdminStatus {
   version: 1
   gatewayId: string

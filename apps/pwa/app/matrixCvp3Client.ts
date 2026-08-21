@@ -546,6 +546,7 @@ function toCvp3Command(
         operation: "session.create",
         payload: {
           operation: "session.create",
+          ...(payload.scope ? { scope: payload.scope } : {}),
           ...(payload.provider ? { provider: payload.provider } : {}),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),

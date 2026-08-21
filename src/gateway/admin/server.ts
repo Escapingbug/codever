@@ -11,11 +11,14 @@ import {
 } from '@/gateway/pairing'
 import {
   createInvitationRequestSchema,
+  receiveWorkspaceFileRequestSchema,
   revokeDeviceRequestSchema,
   type GatewayAdminDevice,
   type GatewayAdminErrorBody,
   type GatewayAdminInvitation,
   type GatewayAdminStatus,
+  type ReceiveWorkspaceFileRequest,
+  type ReceiveWorkspaceFileResponse,
 } from './types.js'
 
 const MAX_BODY_BYTES = 32 * 1024
@@ -30,6 +33,9 @@ export interface GatewayAdminServerOptions {
   registry: FileTrustedDeviceRegistry
   getGatewayState: () => string
   syncGatewayState?: () => Promise<void>
+  receiveWorkspaceFile?: (
+    input: ReceiveWorkspaceFileRequest & { requestId: string },
+  ) => Promise<ReceiveWorkspaceFileResponse>
   now?: () => number
   rateLimitPerMinute?: number
   onLog?: (message: string) => void
@@ -44,6 +50,11 @@ interface IdempotencyEntry {
   fingerprint: string
   response: GatewayAdminInvitation
   expiresAt: number
+}
+
+interface FileIdempotencyEntry {
+  fingerprint: string
+  promise: Promise<ReceiveWorkspaceFileResponse>
 }
 
 class AdminHttpError extends Error {
@@ -69,6 +80,7 @@ export async function startGatewayAdminServer(
   await prepareSocketPath(options.socketPath)
 
   const idempotency = new Map<string, IdempotencyEntry>()
+  const fileIdempotency = new Map<string, FileIdempotencyEntry>()
   let invitationAttempts: number[] = []
   const server = createServer(async (request, response) => {
     setResponseHeaders(response)
@@ -91,6 +103,44 @@ export async function startGatewayAdminServer(
         sendJson(response, 200, {
           devices: await deviceResponses(options.registry, now()),
         })
+        return
+      }
+      if (request.method === 'POST' && path === '/v1/files') {
+        if (!options.receiveWorkspaceFile) {
+          throw new AdminHttpError(
+            503,
+            'file_inbox_unavailable',
+            'The Gateway workspace file inbox is unavailable',
+          )
+        }
+        const key = requireIdempotencyKey(request)
+        const data = receiveWorkspaceFileRequestSchema.parse(await readJsonBody(request))
+        const fingerprint = JSON.stringify(data)
+        const cached = fileIdempotency.get(key)
+        if (cached) {
+          if (cached.fingerprint !== fingerprint) {
+            throw new AdminHttpError(
+              409,
+              'idempotency_conflict',
+              'The idempotency key was already used for another file',
+            )
+          }
+          sendJson(response, 200, await cached.promise)
+          return
+        }
+        const operation = options.receiveWorkspaceFile({ ...data, requestId: key })
+        fileIdempotency.set(key, { fingerprint, promise: operation })
+        let result: ReceiveWorkspaceFileResponse
+        try {
+          result = await operation
+        } catch (error) {
+          if (fileIdempotency.get(key)?.promise === operation) fileIdempotency.delete(key)
+          throw error
+        }
+        options.onLog?.(
+          `[gateway-admin] accepted workspace inbox file ${result.fileId} ${result.delivery}`,
+        )
+        sendJson(response, 201, result)
         return
       }
       if (request.method === 'POST' && path === '/v1/device-invitations') {

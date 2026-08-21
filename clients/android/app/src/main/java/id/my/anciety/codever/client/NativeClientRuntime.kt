@@ -1306,6 +1306,7 @@ class NativeClientRuntime(
                 v3SessionId = transmission.commandId
                 v3Payload = buildJsonObject {
                     put("operation", v3Operation)
+                    raw.string("scope")?.let { put("scope", it) }
                     raw.string("provider")?.let { put("provider", it) }
                     raw.string("model")?.let { put("model", it) }
                     raw.string("reasoningEffort")?.let { put("reasoningEffort", it) }

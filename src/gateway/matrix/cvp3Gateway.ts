@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { mkdir, rm } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import {
   CODEVER_MATRIX_EXTENSION,
   matrixGatewayCapabilitiesSchema,
@@ -15,6 +17,7 @@ import type { AgentActivityPhase, TopicSession } from '@/bridge/channelPort'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import {
   MatrixCvp3Port,
+  uploadCvp3Attachment,
   type MatrixIncomingEvent,
 } from '@/channel/matrix'
 import {
@@ -87,6 +90,20 @@ export interface MatrixCvp3GatewayDependencies {
 
 export type MatrixCvp3GatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
 
+export interface WorkspaceInboxFileInput {
+  requestId: string
+  path: string
+  filename?: string
+  caption?: string
+  sourceLabel?: string
+}
+
+export interface WorkspaceInboxFileResult {
+  fileId: string
+  eventId: string
+  delivery: 'delivered' | 'queued'
+}
+
 /**
  * Matrix-native CVP/3 Gateway.
  *
@@ -135,6 +152,56 @@ export class MatrixCvp3GatewayRunner {
 
   getState(): MatrixCvp3GatewayState {
     return this.state
+  }
+
+  async receiveWorkspaceFile(
+    input: WorkspaceInboxFileInput,
+  ): Promise<WorkspaceInboxFileResult> {
+    if (this.state !== 'running') {
+      throw new Error(`Cannot receive a workspace file while Gateway is ${this.state}`)
+    }
+    const projects = (
+      await Promise.all([...this.projects.values()].map(async project => ({
+        project,
+        active: await this.content.hasActiveDevices(project.config.roomId),
+      })))
+    ).filter(candidate => candidate.active).map(candidate => candidate.project)
+    if (projects.length === 0) {
+      throw new Error('The workspace file inbox has no active Codever device')
+    }
+    const attachment = await uploadCvp3Attachment(this.client, {
+      path: input.path,
+      ...(input.filename ? { filename: input.filename } : {}),
+    })
+    const eventId = workspaceInboxEventId(input.requestId)
+    const occurredAt = this.now()
+    let delivery: WorkspaceInboxFileResult['delivery'] = 'delivered'
+    for (const project of projects) {
+      const event: Cvp3Event = {
+        kind: 'codever.event',
+        version: 3,
+        eventId,
+        workspaceId: this.config.gatewayId,
+        // Each project ID is a cryptographic route binding only. The logical
+        // event has no session ID and is replicated once per active room so a
+        // workspace device can receive it regardless of its paired project.
+        projectId: project.project.projectId,
+        occurredAt,
+        payload: {
+          type: 'inbox.file.received',
+          fileId: input.requestId,
+          ...(input.caption ? { caption: input.caption } : {}),
+          source: {
+            kind: 'local-cli',
+            ...(input.sourceLabel ? { label: input.sourceLabel } : {}),
+          },
+          attachment,
+        },
+      }
+      const sent = await this.content.queueEvent(project.config, event, this.client)
+      if (sent.status === 'queued') delivery = 'queued'
+    }
+    return { fileId: input.requestId, eventId, delivery }
   }
 
   async start(): Promise<void> {
@@ -364,8 +431,15 @@ export class MatrixCvp3GatewayRunner {
     }
     const settings = this.resolveCreateSettings(project, command)
     const createdAt = this.now()
+    const scope = command.payload.scope ?? 'project'
+    const cwd = scope === 'scratch'
+      ? this.scratchSessionDirectory(command.sessionId)
+      : project.project.cwd
+    if (scope === 'scratch') await mkdir(cwd, { recursive: true, mode: 0o700 })
     const record: PersistedCvp3Session = {
       id: command.sessionId,
+      scope,
+      cwd,
       sourceCommandId: command.commandId,
       threadRootEventId: rootEventId,
       title: command.payload.title?.trim()
@@ -389,14 +463,16 @@ export class MatrixCvp3GatewayRunner {
         : null,
     }
     project.project.sessions.push(record)
-    const runtime = this.createSessionRuntime(project, record)
-    project.sessions.set(record.id, runtime)
+    let runtime: Cvp3SessionRuntime | null = null
     try {
+      runtime = this.createSessionRuntime(project, record)
+      project.sessions.set(record.id, runtime)
       await this.persist(project)
     } catch (error) {
       project.sessions.delete(record.id)
       project.project.sessions = project.project.sessions.filter(candidate => candidate !== record)
-      await this.destroySessionRuntime(runtime, 'delete').catch(() => undefined)
+      if (runtime) await this.destroySessionRuntime(runtime, 'delete').catch(() => undefined)
+      if (scope === 'scratch') await this.removeScratchSessionDirectory(record).catch(() => undefined)
       throw error
     }
     const ready = this.eventFor(project, record, command, 'session-ready', {
@@ -660,6 +736,11 @@ export class MatrixCvp3GatewayRunner {
       ...(alreadyApplied ? { alreadyApplied: true } : {}),
     })
     await this.settleAndDeliver(project, command, lifecycle, 'succeeded')
+    if (target === 'deleted' && record.scope === 'scratch') {
+      await this.removeScratchSessionDirectory(record).catch(error => {
+        this.log(`[cvp3/matrix] scratch directory cleanup failed: ${formatError(error)}`)
+      })
+    }
   }
 
   private async createInvitation(
@@ -913,6 +994,13 @@ export class MatrixCvp3GatewayRunner {
       this.projects.set(room.roomId, project)
       for (const record of projectState.sessions) {
         if (record.lifecycle !== 'active') continue
+        if (record.scope === 'scratch') {
+          const expected = this.scratchSessionDirectory(record.id)
+          if (resolve(record.cwd) !== expected) {
+            throw new Error(`CVP/3 scratch session ${record.id} has an invalid working directory`)
+          }
+          await mkdir(expected, { recursive: true, mode: 0o700 })
+        }
         project.sessions.set(record.id, this.createSessionRuntime(project, record))
       }
     }
@@ -942,6 +1030,7 @@ export class MatrixCvp3GatewayRunner {
     })
     const effectiveRoom: MatrixGatewayRoomConfig = {
       ...project.config,
+      cwd: record.cwd,
       providerName: record.provider,
       ...(record.model ? { model: record.model } : { model: undefined }),
       providerSettings: {
@@ -966,7 +1055,7 @@ export class MatrixCvp3GatewayRunner {
       capabilityProvider = provider
       const sessionRecord = createTopicSessionRecord({
         id: record.id,
-        cwd: project.project.cwd,
+        cwd: record.cwd,
         providerName: record.provider,
         groupChatId: numericCompatibilityId(`${project.config.roomId}\0${record.id}`),
         model: record.model ?? undefined,
@@ -977,7 +1066,7 @@ export class MatrixCvp3GatewayRunner {
       })
       const extensionInstances = this.extensions.createInstances(record.extensions, {
         sessionId: record.id,
-        cwd: project.project.cwd,
+        cwd: record.cwd,
         providerName: record.provider,
         onLog: message => this.log(`[cvp3/extension] ${message}`),
       })
@@ -1058,6 +1147,25 @@ export class MatrixCvp3GatewayRunner {
 
   private persist(project: V3ProjectRuntime): Promise<void> {
     return this.runtimeState.saveProject(project.project)
+  }
+
+  private scratchRoot(): string {
+    return resolve(dirname(this.config.replayLedgerPath), 'scratch-sessions')
+  }
+
+  private scratchSessionDirectory(sessionId: string): string {
+    const component = createHash('sha256')
+      .update(`codever-scratch-session\0${sessionId}`)
+      .digest('hex')
+    return join(this.scratchRoot(), component)
+  }
+
+  private async removeScratchSessionDirectory(record: PersistedCvp3Session): Promise<void> {
+    const expected = this.scratchSessionDirectory(record.id)
+    if (resolve(record.cwd) !== expected) {
+      throw new Error(`Refusing to remove unexpected scratch directory ${record.cwd}`)
+    }
+    await rm(expected, { recursive: true, force: true })
   }
 
   private async publishProjectSnapshot(project: V3ProjectRuntime): Promise<void> {
@@ -1269,6 +1377,8 @@ function projection(
 ): Cvp3SessionProjection {
   return {
     title: record.title,
+    scope: record.scope,
+    cwd: record.cwd,
     lifecycle: record.lifecycle,
     activity,
     updatedAt: record.updatedAt,
@@ -1317,6 +1427,12 @@ function threadRelation(rootEventId: string): Record<string, unknown> {
 function logicalEventId(command: Cvp3Command, stage: string): string {
   return createHash('sha256')
     .update(`codever-v3-event\0${command.deviceId}\0${command.certificateId}\0${command.commandId}\0${stage}`)
+    .digest('base64url')
+}
+
+function workspaceInboxEventId(requestId: string): string {
+  return createHash('sha256')
+    .update(`codever-v3-workspace-inbox\0${requestId}`)
     .digest('base64url')
 }
 

@@ -178,6 +178,7 @@ class CommandPayloadValidatorTest {
     fun `session create accepts bounded declarative extension bindings`() {
         val payload = buildJsonObject {
             put("operation", "session.create")
+            put("scope", "scratch")
             put("extensions", buildJsonArray {
                 add(buildJsonObject {
                     put("id", "has-privacy")
@@ -190,6 +191,7 @@ class CommandPayloadValidatorTest {
         }
         val parsed = CommandPayloadValidator.validate(payload) as SessionCreateCommandPayload
 
+        assertEquals("scratch", parsed.scope)
         assertEquals(1, parsed.extensions.size)
         assertEquals("has-privacy", parsed.extensions.single().id)
         assertEquals("metapp-payroll", parsed.extensions.single().config?.get("contextId")?.let {

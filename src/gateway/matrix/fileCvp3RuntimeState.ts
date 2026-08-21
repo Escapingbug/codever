@@ -8,9 +8,12 @@ import type { MatrixGatewayRoomConfig } from './config'
 import { gatewayProjectIdentity } from './project'
 
 export type Cvp3SessionLifecycle = 'active' | 'archived' | 'deleted'
+export type Cvp3SessionScope = 'project' | 'scratch'
 
 export interface PersistedCvp3Session {
   id: string
+  scope: Cvp3SessionScope
+  cwd: string
   sourceCommandId: string
   threadRootEventId: string
   title: string
@@ -93,6 +96,14 @@ export class FileCvp3RuntimeStateStore {
           }
           if (Array.isArray(existing.sessions)) {
             for (const session of existing.sessions) {
+              if (session.scope !== 'project' && session.scope !== 'scratch') {
+                session.scope = 'project'
+                changed = true
+              }
+              if (typeof session.cwd !== 'string' || !session.cwd) {
+                session.cwd = existing.cwd
+                changed = true
+              }
               if (!Number.isSafeInteger(session.extensionRevision)) {
                 session.extensionRevision = 1
                 changed = true
@@ -242,6 +253,8 @@ function validateProject(project: PersistedCvp3Project, roomId: string): void {
     if (
       !session.id
       || ids.has(session.id)
+      || !['project', 'scratch'].includes(session.scope)
+      || !session.cwd
       || !session.sourceCommandId
       || !session.threadRootEventId
       || !session.title

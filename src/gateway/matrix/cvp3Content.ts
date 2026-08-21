@@ -170,6 +170,41 @@ export class GatewayCvp3ContentLayer {
       relation?: Record<string, unknown>
     } = {},
   ): Promise<MatrixSendEventResult> {
+    const delivery = await this.stageEvent(room, eventInput, transport, options)
+    return this.deliver(delivery, transport)
+  }
+
+  /**
+   * Durably stages an event before attempting Matrix delivery. A transport
+   * failure is reported as queued because the outbox owns subsequent retries.
+   */
+  async queueEvent(
+    room: MatrixGatewayRoomConfig,
+    eventInput: Cvp3Event,
+    transport: MatrixTransport,
+    options: {
+      transactionId?: string
+      relation?: Record<string, unknown>
+    } = {},
+  ): Promise<{ status: 'delivered' | 'queued'; eventId?: string }> {
+    const delivery = await this.stageEvent(room, eventInput, transport, options)
+    try {
+      const result = await this.deliver(delivery, transport)
+      return { status: 'delivered', eventId: result.eventId }
+    } catch {
+      return { status: 'queued' }
+    }
+  }
+
+  private async stageEvent(
+    room: MatrixGatewayRoomConfig,
+    eventInput: Cvp3Event,
+    transport: MatrixTransport,
+    options: {
+      transactionId?: string
+      relation?: Record<string, unknown>
+    },
+  ): Promise<Extract<MatrixCvp3Delivery, { kind: 'event' }>> {
     this.transports.set(room.roomId, transport)
     const event = cvp3EventSchema.parse(eventInput)
     const projectId = this.projectId(room)
@@ -210,7 +245,10 @@ export class GatewayCvp3ContentLayer {
       createdAt: Date.now(),
     })
     await this.outbox.stage(delivery)
-    return this.deliver(this.outbox.delivery(delivery.deliveryId) ?? delivery, transport)
+    return (this.outbox.delivery(delivery.deliveryId) ?? delivery) as Extract<
+      MatrixCvp3Delivery,
+      { kind: 'event' }
+    >
   }
 
   async publishProjectPointer(

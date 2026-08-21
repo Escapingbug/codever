@@ -260,6 +260,7 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
   z
     .object({
       operation: z.literal('session.create'),
+      scope: z.enum(['project', 'scratch']).optional(),
       cwd: z.string().min(1).max(4096).optional(),
       projectName: z.string().min(1).max(256).optional(),
       provider: z.string().min(1).max(256).optional(),

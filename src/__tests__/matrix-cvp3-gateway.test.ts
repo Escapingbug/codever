@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -122,12 +122,20 @@ describe('MatrixCvp3GatewayRunner', () => {
         databasePrefix: 'test',
         allowInMemoryForTesting: true,
       },
-      rooms: [{
-        roomId,
-        conversationId: 'unused-v3',
-        cwd: '/repo',
-        providerName: 'test',
-      }],
+      rooms: [
+        {
+          roomId: '!unpaired-project:example.org',
+          conversationId: 'unpaired-v3',
+          cwd: '/unpaired-repo',
+          providerName: 'test',
+        },
+        {
+          roomId,
+          conversationId: 'unused-v3',
+          cwd: '/repo',
+          providerName: 'test',
+        },
+      ],
       trustedDevices: [{
         deviceId: 'phone-1',
         publicKey: phoneKeys.publicJwk,
@@ -158,6 +166,7 @@ describe('MatrixCvp3GatewayRunner', () => {
     const blocked = deferred<void>()
     const dispatched: Array<{ sessionId: string; text: string }> = []
     const sessionExtensions = new Map<string, readonly { id: string }[]>()
+    const sessionCwds = new Map<string, string>()
     const rejected: unknown[] = []
     registerProvider({
       name: 'test',
@@ -196,6 +205,7 @@ describe('MatrixCvp3GatewayRunner', () => {
       sessionExtensionRegistry: new SessionExtensionRegistry([extensionProvider]),
       sessionFactory: (room, port, session) => {
         sessionExtensions.set(session.id, session.extensions)
+        sessionCwds.set(session.id, room.cwd)
         const sessionRecord = createTopicSessionRecord({
           id: session.id,
           cwd: room.cwd,
@@ -267,6 +277,26 @@ describe('MatrixCvp3GatewayRunner', () => {
         roomId,
       })
 
+    const inboxPath = join(directory, 'workspace-report.txt')
+    await writeFile(inboxPath, 'workspace report', 'utf8')
+    await expect(runner.receiveWorkspaceFile({
+      requestId: 'workspace-file-request-1',
+      path: inboxPath,
+      caption: 'Generated report',
+      sourceLabel: 'review-agent',
+    })).resolves.toMatchObject({ delivery: 'delivered' })
+    expect(client.delivered.some(delivery =>
+      delivery.roomId === '!unpaired-project:example.org'
+      && delivery.content[CODEVER_MATRIX_EXTENSION]
+    )).toBe(false)
+    const inboxEvent = (await events(client, activeKey.key, roomId, projectId))
+      .find(event => event.payload.type === 'inbox.file.received')
+    expect(inboxEvent?.sessionId).toBeUndefined()
+    expect(inboxEvent?.payload).toMatchObject({
+      type: 'inbox.file.received',
+      fileId: 'workspace-file-request-1',
+    })
+
     const send = async (
       command: Cvp3Command,
       matrixEventId: string,
@@ -335,6 +365,20 @@ describe('MatrixCvp3GatewayRunner', () => {
       id: 'prefix-transform',
       config: { prefix: 'SAFE:' },
     }])
+
+    await send({
+      ...base,
+      commandId: 'create-scratch',
+      sessionId: 'session-scratch',
+      operation: 'session.create',
+      payload: { operation: 'session.create', scope: 'scratch', title: 'Temporary' },
+    }, '$root-scratch')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'create-scratch'))
+    const scratchCwd = sessionCwds.get('session-scratch')
+    expect(scratchCwd).toBeTruthy()
+    expect(scratchCwd).not.toBe('/repo')
+    await expect(stat(scratchCwd!)).resolves.toMatchObject({})
 
     const promptA: Cvp3Command = {
       ...base,

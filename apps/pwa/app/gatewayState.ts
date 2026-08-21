@@ -1,5 +1,7 @@
-import type {
-  JsonValue,
+import {
+  attachmentSchema,
+  type CodeverAttachment,
+  type JsonValue,
   SessionExtensionBinding,
   SessionExtensionDescriptor,
   SessionExtensionSummary,
@@ -31,6 +33,7 @@ export type GatewaySessionSummary = {
     | "stopping"
     | "idle"
     | "failed";
+  scope?: "project" | "scratch";
   projectId: string;
   projectName: string;
   cwd: string;
@@ -38,6 +41,14 @@ export type GatewaySessionSummary = {
   model?: string;
   reasoningEffort?: string;
   extensions: SessionExtensionSummary[];
+};
+
+export type GatewayInboxFile = {
+  id: string;
+  receivedAt: number;
+  caption?: string;
+  sourceLabel?: string;
+  attachment: CodeverAttachment;
 };
 
 export type GatewayWorkspaceState = {
@@ -72,6 +83,7 @@ export type GatewayStateSnapshot = {
   updatedAt?: number;
   currentSessionId: string | null;
   sessions: GatewaySessionSummary[];
+  inboxFiles?: GatewayInboxFile[];
   workspace: GatewayWorkspaceState;
   capabilities: GatewayCapabilities;
 };
@@ -189,6 +201,11 @@ export function parseGatewayStateExtension(
         session.archived === undefined ||
         typeof session.archived === "boolean"
       ) ||
+      !(
+        session.scope === undefined ||
+        session.scope === "project" ||
+        session.scope === "scratch"
+      ) ||
       typeof session.provider !== "string" ||
       !session.provider ||
       !(
@@ -222,6 +239,9 @@ export function parseGatewayStateExtension(
       title: session.title,
       updatedAt: session.updated_at,
       status,
+      ...(session.scope === "scratch" || session.scope === "project"
+        ? { scope: session.scope }
+        : {}),
       ...(typeof session.activity_phase === "string"
         ? {
             activityPhase:
@@ -280,6 +300,7 @@ export function parseGatewayStateExtension(
       title: session.title,
       updatedAt: session.updatedAt,
       status: session.status,
+      ...(session.scope ? { scope: session.scope } : {}),
       ...(session.activityPhase ? { activityPhase: session.activityPhase } : {}),
       projectId: session.projectId,
       projectName: session.projectName,
@@ -294,6 +315,7 @@ export function parseGatewayStateExtension(
   });
 
   const capabilities = parseGatewayCapabilities(extension.capabilities);
+  const inboxFiles = parseGatewayInboxFiles(extension.inbox_files);
 
   const currentSessionId = extension.current_session_id;
   if (
@@ -316,6 +338,7 @@ export function parseGatewayStateExtension(
       : {}),
     currentSessionId,
     sessions,
+    ...(extension.inbox_files === undefined ? {} : { inboxFiles }),
     workspace: {
       projectId: workspace.project_id,
       projectName: workspace.project_name,
@@ -519,6 +542,7 @@ function gatewayStateExtension(
       status: session.status === "archived" ? "idle" : session.status,
       ...(session.activityPhase ? { activity_phase: session.activityPhase } : {}),
       ...(session.status === "archived" ? { archived: true } : {}),
+      ...(session.scope ? { scope: session.scope } : {}),
       project_id: session.projectId,
       project_name: session.projectName,
       cwd: session.cwd,
@@ -533,6 +557,17 @@ function gatewayStateExtension(
         version: extension.version,
       })),
     })),
+    ...(state.inboxFiles === undefined
+      ? {}
+      : {
+          inbox_files: state.inboxFiles.map((file) => ({
+            id: file.id,
+            received_at: file.receivedAt,
+            ...(file.caption ? { caption: file.caption } : {}),
+            ...(file.sourceLabel ? { source_label: file.sourceLabel } : {}),
+            attachment: file.attachment,
+          })),
+        }),
     workspace: {
       project_id: state.workspace.projectId,
       project_name: state.workspace.projectName,
@@ -603,6 +638,40 @@ function gatewayStateExtension(
       ),
     },
   };
+}
+
+function parseGatewayInboxFiles(value: unknown): GatewayInboxFile[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 100_000) {
+    throw new Error("The authenticated Gateway file inbox is malformed.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const file = asRecord(entry);
+    if (
+      !file ||
+      typeof file.id !== "string" ||
+      !file.id ||
+      seen.has(file.id) ||
+      !isNonnegativeInteger(file.received_at) ||
+      !(file.caption === undefined || typeof file.caption === "string") ||
+      !(file.source_label === undefined || (
+        typeof file.source_label === "string" && file.source_label.length > 0
+      ))
+    ) {
+      throw new Error("The authenticated Gateway file inbox is malformed.");
+    }
+    seen.add(file.id);
+    return {
+      id: file.id,
+      receivedAt: file.received_at,
+      ...(typeof file.caption === "string" ? { caption: file.caption } : {}),
+      ...(typeof file.source_label === "string"
+        ? { sourceLabel: file.source_label }
+        : {}),
+      attachment: attachmentSchema.parse(file.attachment),
+    };
+  });
 }
 
 function parseSessionExtensionSummaries(value: unknown): SessionExtensionSummary[] {

@@ -6,6 +6,8 @@ import type {
   GatewayAdminErrorBody,
   GatewayAdminInvitation,
   GatewayAdminStatus,
+  ReceiveWorkspaceFileRequest,
+  ReceiveWorkspaceFileResponse,
   RevokeDeviceRequest,
 } from './types.js'
 
@@ -73,6 +75,18 @@ export class GatewayAdminClient {
       'POST',
       `/v1/devices/${encodeURIComponent(deviceId)}/revoke`,
       input,
+    )
+  }
+
+  sendFile(
+    input: ReceiveWorkspaceFileRequest,
+    idempotencyKey: string = randomUUID(),
+  ): Promise<ReceiveWorkspaceFileResponse> {
+    return this.request(
+      'POST',
+      '/v1/files',
+      input,
+      { 'idempotency-key': idempotencyKey },
     )
   }
 

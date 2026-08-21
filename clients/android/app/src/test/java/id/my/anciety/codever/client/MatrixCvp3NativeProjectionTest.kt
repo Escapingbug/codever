@@ -202,6 +202,38 @@ class MatrixCvp3NativeProjectionTest {
         )
     }
 
+    @Test
+    fun `scratch sessions and workspace inbox files survive durable restore`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            sessionReady(
+                "session-scratch",
+                1,
+                "Temporary",
+                100,
+                scope = "scratch",
+                cwd = "/private/scratch/session",
+            ),
+            "\$scratch-root",
+            "\$scratch-root",
+        )
+        projection.applyGatewayEvent(workspaceInboxFile(), "\$inbox-file", null)
+
+        val snapshot = projection.snapshot()!!
+        val session = snapshot.getValue("sessions").jsonArray.single().jsonObject
+        assertEquals("scratch", session.getValue("scope").jsonPrimitive.content)
+        assertEquals("Temporary", session.getValue("project_name").jsonPrimitive.content)
+        assertEquals(1, snapshot.getValue("inbox_files").jsonArray.size)
+
+        val restored = MatrixCvp3NativeProjection(
+            gatewayId = { "gateway-1" },
+            activeDeviceCount = { 2 },
+            initialState = projection.durableState(),
+        )
+        assertEquals(1, restored.snapshot()!!.getValue("inbox_files").jsonArray.size)
+    }
+
     private fun projection() = MatrixCvp3NativeProjection(
         gatewayId = { "gateway-1" },
         activeDeviceCount = { 2 },
@@ -270,6 +302,8 @@ class MatrixCvp3NativeProjectionTest {
         stateVersion: Long,
         title: String,
         updatedAt: Long,
+        scope: String = "project",
+        cwd: String = "/workspace/project",
     ) = event(
         eventId = "ready-$sessionId-$stateVersion",
         projectId = "project-1",
@@ -279,7 +313,40 @@ class MatrixCvp3NativeProjectionTest {
             put("type", "session.ready")
             put("provider", "codex")
             put("permissionMode", "default")
-            put("projection", sessionProjection(stateVersion, title, "active", "idle", updatedAt))
+            put("projection", sessionProjection(stateVersion, title, "active", "idle", updatedAt).let {
+                JsonObject(it + mapOf(
+                    "scope" to kotlinx.serialization.json.JsonPrimitive(scope),
+                    "cwd" to kotlinx.serialization.json.JsonPrimitive(cwd),
+                ))
+            })
+        },
+    )
+
+    private fun workspaceInboxFile() = event(
+        eventId = "workspace-inbox-file-1",
+        projectId = "project-1",
+        payload = buildJsonObject {
+            put("type", "inbox.file.received")
+            put("fileId", "workspace-file-1")
+            put("caption", "Generated report")
+            put("source", buildJsonObject {
+                put("kind", "local-cli")
+                put("label", "review-agent")
+            })
+            put("attachment", buildJsonObject {
+                put("id", "attachment-1")
+                put("name", "report.pdf")
+                put("mimeType", "application/pdf")
+                put("size", 12)
+                put("sha256", "A".repeat(43))
+                put("media", buildJsonObject {
+                    put("url", "mxc://example.org/report")
+                    put("key", "B".repeat(43))
+                    put("iv", "C".repeat(16))
+                    put("sha256", "D".repeat(43))
+                    put("size", 28)
+                })
+            })
         },
     )
 

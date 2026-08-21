@@ -221,6 +221,141 @@ select:focus-visible {
   background: #fbfbfd;
 }
 
+.file-inbox-open > section:not(.workspace-inbox-panel) {
+  display: none;
+}
+
+.workspace-inbox-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  grid-column: 2 / 4;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f8f8fb;
+}
+
+.workspace-inbox-header {
+  display: flex;
+  min-height: 112px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 34px;
+  border-bottom: 1px solid var(--line);
+  background: white;
+}
+
+.workspace-inbox-header h1 {
+  margin: 2px 0 4px;
+  font-size: 27px;
+  letter-spacing: -0.04em;
+}
+
+.workspace-inbox-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.workspace-inbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.workspace-inbox-actions button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid #dedfeb;
+  border-radius: 10px;
+  background: white;
+  color: #5b6477;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspace-inbox-count {
+  display: grid;
+  min-width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--violet-soft);
+  color: var(--violet-dark);
+  font-weight: 750;
+}
+
+.workspace-inbox-list {
+  display: grid;
+  width: min(860px, 100%);
+  margin: 0 auto;
+  padding: 28px 32px 60px;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.workspace-inbox-card {
+  padding: 18px;
+  border: 1px solid #e3e5ed;
+  border-radius: 16px;
+  background: white;
+  box-shadow: 0 8px 24px rgb(31 38 65 / 5%);
+}
+
+.workspace-inbox-card > p {
+  margin: 10px 0 12px;
+  line-height: 1.5;
+}
+
+.workspace-inbox-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: #81899b;
+  font-size: 12px;
+}
+
+.workspace-inbox-source {
+  color: #5c4bc3;
+  font-weight: 720;
+}
+
+.workspace-inbox-empty {
+  display: grid;
+  min-height: 360px;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.workspace-inbox-empty > span {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  border-radius: 16px;
+  background: var(--violet-soft);
+  color: var(--violet-dark);
+  font-size: 26px;
+}
+
+.workspace-inbox-empty strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.workspace-inbox-empty p {
+  margin: 0;
+}
+
+.workspace-inbox-empty code {
+  color: #5143af;
+}
+
 .session-header {
   display: flex;
   height: 91px;
@@ -255,6 +390,10 @@ select:focus-visible {
 }
 
 .mobile-search-button {
+  display: none;
+}
+
+.mobile-files-button {
   display: none;
 }
 
@@ -4255,6 +4394,40 @@ select:focus-visible {
   line-height: 1.45;
 }
 
+.new-session-dialog .scratch-session-toggle {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid #dedfeb;
+  border-radius: 12px;
+  background: #f8f7ff;
+}
+
+.new-session-dialog .scratch-session-toggle > input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.new-session-dialog .scratch-session-toggle > span {
+  display: grid;
+  gap: 2px;
+  font-size: inherit;
+}
+
+.scratch-session-toggle strong {
+  color: #31384b;
+  font-size: 12px;
+}
+
+.scratch-session-toggle small,
+.scratch-identity-note {
+  color: #727b90;
+  line-height: 1.45;
+}
+
 .session-extensions {
   display: grid;
   gap: 9px;
@@ -5119,6 +5292,32 @@ body {
     display: none;
   }
 
+  .workspace-inbox-panel {
+    width: 100%;
+    height: 100dvh;
+  }
+
+  .workspace-inbox-header {
+    min-height: calc(72px + env(safe-area-inset-top));
+    padding: calc(12px + env(safe-area-inset-top)) 14px 12px;
+  }
+
+  .workspace-inbox-header h1 {
+    font-size: 21px;
+  }
+
+  .workspace-inbox-header p {
+    display: none;
+  }
+
+  .workspace-inbox-actions button {
+    min-height: 44px;
+  }
+
+  .workspace-inbox-list {
+    padding: 14px 12px calc(28px + env(safe-area-inset-bottom));
+  }
+
   .session-panel {
     width: 100%;
     height: 100dvh;
@@ -5152,6 +5351,17 @@ body {
     background: transparent;
     color: #626b7e;
     font-size: 22px;
+  }
+
+  .mobile-files-button {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 11px;
+    background: transparent;
+    color: #626b7e;
+    font-size: 19px;
   }
 
   .mobile-search-button[aria-expanded="true"] {

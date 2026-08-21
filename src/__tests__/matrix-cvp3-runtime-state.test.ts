@@ -19,6 +19,8 @@ describe('FileCvp3RuntimeStateStore', () => {
     await store.updateProject(room.roomId, project => {
       project.sessions.push({
         id: 'session-1',
+        scope: 'project',
+        cwd: '/repo',
         sourceCommandId: 'command-1',
         threadRootEventId: '$command-root',
         title: 'Session',
@@ -98,6 +100,8 @@ describe('FileCvp3RuntimeStateStore', () => {
     expect(project.defaultExtensions).toEqual([])
     expect(project.extensionDefaultsRevision).toBe(1)
     expect(project.sessions[0]).toMatchObject({
+      scope: 'project',
+      cwd: '/repo',
       extensionRevision: 1,
       inheritedFromProjectExtensionRevision: null,
     })

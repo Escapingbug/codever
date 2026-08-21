@@ -64,6 +64,8 @@ internal class MatrixCvp3NativeProjection(
         val projectId: String,
         val threadRootEventId: String,
         val title: String,
+        val scope: String,
+        val cwd: String,
         val lifecycle: String,
         val activity: String,
         val updatedAt: Long,
@@ -76,9 +78,18 @@ internal class MatrixCvp3NativeProjection(
         val extensionRevision: Long,
     )
 
+    private data class InboxFile(
+        val id: String,
+        val receivedAt: Long,
+        val caption: String?,
+        val sourceLabel: String?,
+        val attachment: JsonObject,
+    )
+
     private var project: Project? = null
     private var workspaceCapabilities: WorkspaceCapabilities? = null
     private val sessions = linkedMapOf<String, Session>()
+    private val inboxFiles = linkedMapOf<String, InboxFile>()
     private val seenEvents = mutableSetOf<String>()
     private val seenCommands = mutableSetOf<String>()
 
@@ -110,6 +121,10 @@ internal class MatrixCvp3NativeProjection(
                     threadRootEventId = physicalEventId,
                     title = payload.optionalString("title", 512)
                         ?: titleFromPrompt(initial?.optionalString("text", Int.MAX_VALUE).orEmpty()),
+                    scope = payload.optionalString("scope", 32)?.also {
+                        require(it == "project" || it == "scratch")
+                    } ?: "project",
+                    cwd = project?.cwd.orEmpty(),
                     lifecycle = "active",
                     activity = if (initial == null) "idle" else "queued",
                     updatedAt = timestamp,
@@ -211,6 +226,22 @@ internal class MatrixCvp3NativeProjection(
                 return MatrixCvp3NativeProjectionResult(changed = true)
             }
             return MatrixCvp3NativeProjectionResult()
+        }
+
+        if (type == "inbox.file.received" && projectId != null) {
+            val fileId = payload.requiredString("fileId", 256)
+            val attachment = payload.requiredObject("attachment")
+            PublicClientJson.decodeAttachment(attachment)
+            val source = payload.requiredObject("source")
+            require(source.requiredString("kind", 32) == "local-cli")
+            inboxFiles[fileId] = InboxFile(
+                id = fileId,
+                receivedAt = occurredAt,
+                caption = payload.optionalString("caption", 8_192),
+                sourceLabel = source.optionalString("label", 256),
+                attachment = attachment,
+            )
+            return MatrixCvp3NativeProjectionResult(changed = true)
         }
 
         if (sessionId != null && payload["projection"] is JsonObject) {
@@ -355,7 +386,10 @@ internal class MatrixCvp3NativeProjection(
             .filter { it.lifecycle != "deleted" }
             .sortedWith(compareByDescending<Session> { it.updatedAt }.thenBy { it.id })
         val latestVersion = maxOf(1L, visible.maxOfOrNull { it.stateVersion } ?: 1L)
-        val latestTimestamp = visible.maxOfOrNull { it.updatedAt } ?: 0L
+        val latestTimestamp = maxOf(
+            visible.maxOfOrNull { it.updatedAt } ?: 0L,
+            inboxFiles.values.maxOfOrNull { it.receivedAt } ?: 0L,
+        )
         return buildJsonObject {
             put("version", 1)
             put("kind", "gateway_state")
@@ -369,6 +403,17 @@ internal class MatrixCvp3NativeProjection(
             put("current_session_id", JsonNull)
             put("sessions", buildJsonArray {
                 visible.forEach { session -> add(publicSession(session, activeProject)) }
+            })
+            put("inbox_files", buildJsonArray {
+                inboxFiles.values.sortedByDescending { it.receivedAt }.forEach { file ->
+                    add(buildJsonObject {
+                        put("id", file.id)
+                        put("received_at", file.receivedAt)
+                        file.caption?.let { put("caption", it) }
+                        file.sourceLabel?.let { put("source_label", it) }
+                        put("attachment", file.attachment)
+                    })
+                }
             })
             put("workspace", buildJsonObject {
                 put("project_id", activeProject.id)
@@ -399,13 +444,14 @@ internal class MatrixCvp3NativeProjection(
         project = null
         workspaceCapabilities = null
         sessions.clear()
+        inboxFiles.clear()
         seenEvents.clear()
         seenCommands.clear()
     }
 
     @Synchronized
     fun durableState(): JsonObject = buildJsonObject {
-        put("schemaVersion", 2)
+        put("schemaVersion", 3)
         val activeCapabilities = workspaceCapabilities
         if (activeCapabilities == null) {
             put("workspaceCapabilities", JsonNull)
@@ -440,6 +486,8 @@ internal class MatrixCvp3NativeProjection(
                     put("projectId", session.projectId)
                     put("threadRootEventId", session.threadRootEventId)
                     put("title", session.title)
+                    put("scope", session.scope)
+                    put("cwd", session.cwd)
                     put("lifecycle", session.lifecycle)
                     put("activity", session.activity)
                     put("updatedAt", session.updatedAt)
@@ -453,13 +501,24 @@ internal class MatrixCvp3NativeProjection(
                 })
             }
         })
+        put("inboxFiles", buildJsonArray {
+            inboxFiles.values.forEach { file ->
+                add(buildJsonObject {
+                    put("id", file.id)
+                    put("receivedAt", file.receivedAt)
+                    file.caption?.let { put("caption", it) }
+                    file.sourceLabel?.let { put("sourceLabel", it) }
+                    put("attachment", file.attachment)
+                })
+            }
+        })
         put("seenEvents", JsonArray(seenEvents.toList().takeLast(MAX_SEEN_IDS).map(::JsonPrimitive)))
         put("seenCommands", JsonArray(seenCommands.toList().takeLast(MAX_SEEN_IDS).map(::JsonPrimitive)))
     }
 
     private fun restore(value: JsonObject) {
         val schemaVersion = value.requiredLong("schemaVersion")
-        require(schemaVersion == 1L || schemaVersion == 2L)
+        require(schemaVersion == 1L || schemaVersion == 2L || schemaVersion == 3L)
         workspaceCapabilities = if (schemaVersion == 1L) {
             null
         } else {
@@ -504,6 +563,10 @@ internal class MatrixCvp3NativeProjection(
                 projectId = session.requiredString("projectId", 256),
                 threadRootEventId = session.optionalString("threadRootEventId", 512).orEmpty(),
                 title = session.requiredString("title", 512),
+                scope = session.optionalString("scope", 32)?.also {
+                    require(it == "project" || it == "scratch")
+                } ?: "project",
+                cwd = session.optionalString("cwd", 8_192) ?: project?.cwd.orEmpty(),
                 lifecycle = session.requiredOneOf("lifecycle", setOf("active", "archived", "deleted")),
                 activity = session.requiredOneOf(
                     "activity",
@@ -520,6 +583,25 @@ internal class MatrixCvp3NativeProjection(
                     ?.takeIf { it > 0 }
                     ?: 1,
             )
+        }
+        if (schemaVersion >= 3L) {
+            val restoredInbox = value["inboxFiles"] as? JsonArray
+                ?: throw IllegalArgumentException("The CVP/3 inbox projection is invalid.")
+            require(restoredInbox.size <= 100_000)
+            restoredInbox.forEach { item ->
+                val file = item as? JsonObject
+                    ?: throw IllegalArgumentException("The CVP/3 inbox projection is invalid.")
+                val id = file.requiredString("id", 256)
+                val attachment = file.requiredObject("attachment")
+                PublicClientJson.decodeAttachment(attachment)
+                inboxFiles[id] = InboxFile(
+                    id = id,
+                    receivedAt = file.requiredLong("receivedAt"),
+                    caption = file.optionalString("caption", 8_192),
+                    sourceLabel = file.optionalString("sourceLabel", 256),
+                    attachment = attachment,
+                )
+            }
         }
         (value["seenEvents"] as? JsonArray).orEmpty().takeLast(MAX_SEEN_IDS).forEach {
             seenEvents += it.jsonPrimitive.content
@@ -568,6 +650,12 @@ internal class MatrixCvp3NativeProjection(
         projectId = projectId,
         threadRootEventId = threadRootEventId,
         title = projection.requiredString("title", 512),
+        scope = projection.optionalString("scope", 32)?.also {
+            require(it == "project" || it == "scratch")
+        } ?: sessions[sessionId]?.scope ?: "project",
+        cwd = projection.optionalString("cwd", 8_192)
+            ?: sessions[sessionId]?.cwd
+            ?: project?.cwd.orEmpty(),
         lifecycle = projection.requiredOneOf("lifecycle", setOf("active", "archived", "deleted")),
         activity = projection.requiredOneOf(
             "activity",
@@ -672,8 +760,9 @@ internal class MatrixCvp3NativeProjection(
             else -> "idle"
         })
         put("project_id", session.projectId.ifEmpty { project.id })
-        put("project_name", project.name)
-        put("cwd", project.cwd)
+        put("project_name", if (session.scope == "scratch") "Temporary" else project.name)
+        put("scope", session.scope)
+        put("cwd", session.cwd.ifEmpty { project.cwd })
         put("provider", session.provider ?: project.provider)
         (session.model ?: project.model)?.let { put("model", it) }
         (session.reasoningEffort ?: project.reasoningEffort)?.let { put("reasoning_effort", it) }

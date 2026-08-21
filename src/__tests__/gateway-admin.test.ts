@@ -100,6 +100,11 @@ describe('Gateway local admin', () => {
         now: () => now,
       },
     )
+    const receiveWorkspaceFile = vi.fn(async (input: { requestId: string }) => ({
+      fileId: input.requestId,
+      eventId: 'workspace-file-event-1',
+      delivery: 'delivered' as const,
+    }))
     const server = await startGatewayAdminServer({
       socketPath,
       gatewayId: fixture.identity.gatewayId,
@@ -107,6 +112,7 @@ describe('Gateway local admin', () => {
       pairingService: fixture.service,
       registry: fixture.registry,
       getGatewayState: () => 'running',
+      receiveWorkspaceFile,
       now: () => now,
     })
     servers.push(server)
@@ -118,6 +124,23 @@ describe('Gateway local admin', () => {
       activeDeviceCount: 0,
       openInvitationCount: 0,
     })
+    const file = await client.sendFile(
+      { path: '/tmp/report.pdf', caption: 'Generated report' },
+      'workspace-file-key-0001',
+    )
+    await expect(client.sendFile(
+      { path: '/tmp/report.pdf', caption: 'Generated report' },
+      'workspace-file-key-0001',
+    )).resolves.toEqual(file)
+    expect(file).toMatchObject({
+      fileId: 'workspace-file-key-0001',
+      delivery: 'delivered',
+    })
+    expect(receiveWorkspaceFile).toHaveBeenCalledOnce()
+    await expect(client.sendFile(
+      { path: '/tmp/other.pdf' },
+      'workspace-file-key-0001',
+    )).rejects.toMatchObject({ status: 409, code: 'idempotency_conflict' })
     const first = await client.createInvitation(
       {
         matrixLogin: 'disabled',

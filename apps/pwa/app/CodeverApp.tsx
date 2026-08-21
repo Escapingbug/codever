@@ -581,6 +581,7 @@ export function CodeverApp() {
 
 function CodeverAppRuntime() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [primaryView, setPrimaryView] = useState<"chats" | "files">("chats");
   const [search, setSearch] = useState("");
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -867,6 +868,7 @@ function CodeverAppRuntime() {
       }
     >();
     for (const session of activeFilteredSessions) {
+      if (session.scope === "scratch") continue;
       const key = gatewayProjectKey(matrixConfig.gatewayId, session.projectId);
       const project = canonicalProjectsById.get(session.projectId) ?? session;
       const group = groups.get(key) ?? {
@@ -899,6 +901,26 @@ function CodeverAppRuntime() {
     matrixConfig.gatewayId,
     sessionReadState,
   ]);
+  const scratchSessions = useMemo(
+    () => activeFilteredSessions
+      .filter((session) => session.scope === "scratch")
+      .sort((left, right) => compareSessionsForAction(left, right, sessionReadState)),
+    [activeFilteredSessions, sessionReadState],
+  );
+  const conversationGroups = useMemo(() => [
+    ...(scratchSessions.length > 0
+      ? [{
+          key: `${matrixConfig.gatewayId}\u0000scratch`,
+          projectId: "scratch",
+          projectName: "Temporary",
+          cwd: "Isolated workspace · not linked to a project",
+          sessions: scratchSessions,
+          temporary: true,
+        }]
+      : []),
+    ...projectGroups.map((project) => ({ ...project, temporary: false })),
+  ], [matrixConfig.gatewayId, projectGroups, scratchSessions]);
+  const inboxFiles = gatewayState?.inboxFiles ?? [];
   const matrixConnectionPresentation = useMemo(
     () => deriveConnectionPresentation(connectionStatus, connectionDetail),
     [connectionDetail, connectionStatus],
@@ -3593,6 +3615,7 @@ function CodeverAppRuntime() {
   }
 
   function chooseSession(id: string) {
+    setPrimaryView("chats");
     setMobileChatOpen(true);
     activateLocalSession(id);
   }
@@ -3634,6 +3657,7 @@ function CodeverAppRuntime() {
       }
       const sent = await sendRealCommand({
         operation: "session.create",
+        scope: input.scope ?? "project",
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
@@ -4543,16 +4567,33 @@ function CodeverAppRuntime() {
   }
 
   return (
-    <main className={`app-shell ${mobileChatOpen ? "mobile-chat-open" : ""}`}>
+    <main className={`app-shell ${mobileChatOpen ? "mobile-chat-open" : ""} ${primaryView === "files" ? "file-inbox-open" : ""}`}>
       <aside className="rail" aria-label="Primary navigation">
         <div className="brand" title="Codever">
           <span>⌁</span>
         </div>
         <nav className="rail-nav">
-          <div className="rail-button active" aria-current="page">
+          <button
+            type="button"
+            className={`rail-button ${primaryView === "chats" ? "active" : ""}`}
+            aria-current={primaryView === "chats" ? "page" : undefined}
+            onClick={() => setPrimaryView("chats")}
+          >
             <Icon>◫</Icon>
             <span>Chats</span>
-          </div>
+          </button>
+          <button
+            type="button"
+            className={`rail-button ${primaryView === "files" ? "active" : ""}`}
+            aria-current={primaryView === "files" ? "page" : undefined}
+            onClick={() => {
+              setPrimaryView("files");
+              setMobileChatOpen(false);
+            }}
+          >
+            <Icon>⇩</Icon>
+            <span>Files</span>
+          </button>
         </nav>
         <div className="rail-spacer" />
         <button
@@ -4566,6 +4607,48 @@ function CodeverAppRuntime() {
         </button>
       </aside>
 
+      {primaryView === "files" && (
+        <section className="workspace-inbox-panel" aria-label="Workspace file inbox">
+          <header className="workspace-inbox-header">
+            <div>
+              <span className="eyebrow">Workspace</span>
+              <h1>File inbox</h1>
+              <p>Files sent by local agents appear here without being attached to a conversation.</p>
+            </div>
+            <div className="workspace-inbox-actions">
+              <span className="workspace-inbox-count">{inboxFiles.length}</span>
+              <button type="button" onClick={() => setPrimaryView("chats")}>
+                Back to chats
+              </button>
+            </div>
+          </header>
+          <div className="workspace-inbox-list">
+            {inboxFiles.map((file) => (
+              <article className="workspace-inbox-card" key={file.id}>
+                <div className="workspace-inbox-meta">
+                  <span className="workspace-inbox-source">
+                    {file.sourceLabel || "Local Codever CLI"}
+                  </span>
+                  <time>{formatSessionTime(file.receivedAt)}</time>
+                </div>
+                {file.caption && <p>{file.caption}</p>}
+                <AttachmentList
+                  attachments={[file.attachment]}
+                  connection={codeverClientRef.current}
+                />
+              </article>
+            ))}
+            {inboxFiles.length === 0 && (
+              <div className="workspace-inbox-empty">
+                <span aria-hidden="true">⇩</span>
+                <strong>No files yet</strong>
+                <p>Run <code>codever send-file &lt;path&gt;</code> on the Gateway computer.</p>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="session-panel" aria-label="Conversations">
         <header className="session-header">
           <div>
@@ -4573,6 +4656,14 @@ function CodeverAppRuntime() {
             <h1>Codever</h1>
           </div>
           <div className="session-header-actions">
+            <button
+              type="button"
+              className="mobile-files-button"
+              aria-label="Open workspace file inbox"
+              onClick={() => setPrimaryView("files")}
+            >
+              ⇩
+            </button>
             <button
               type="button"
               className="mobile-search-button"
@@ -4688,7 +4779,9 @@ function CodeverAppRuntime() {
                 </span>
                 <span className="session-preview-line">
                   <span>
-                    {pendingSessionCreate.projectName}
+                    {pendingSessionCreate.scope === "scratch"
+                      ? "Temporary"
+                      : pendingSessionCreate.projectName}
                     {pendingSessionCreate.model
                       ? ` · ${pendingSessionCreate.model}`
                       : ""}
@@ -4697,7 +4790,7 @@ function CodeverAppRuntime() {
               </span>
             </div>
           )}
-          {projectGroups.map((project) => {
+          {conversationGroups.map((project) => {
             const expanded = isProjectExpanded({
               state: collapsedProjects,
               projectKey: project.key,
@@ -4728,7 +4821,9 @@ function CodeverAppRuntime() {
                 <span className="project-chevron" aria-hidden="true">
                   {expanded ? "⌄" : "›"}
                 </span>
-                <span className="project-folder" aria-hidden="true">▱</span>
+                <span className="project-folder" aria-hidden="true">
+                  {project.temporary ? "◇" : "▱"}
+                </span>
                 <span className="project-copy">
                   <strong>{project.projectName}</strong>
                   <small>{project.cwd}</small>
@@ -4917,7 +5012,7 @@ function CodeverAppRuntime() {
           )}
           {gatewayState &&
             activeSessionCount > 0 &&
-            projectGroups.length === 0 &&
+            conversationGroups.length === 0 &&
             Boolean(search.trim()) && (
             <div className="empty-search">
               <span>⌕</span>

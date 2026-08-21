@@ -328,6 +328,10 @@ const adminServer = await startGatewayAdminServer({
     syncGatewayState: async () => {
         await runner?.syncState()
     },
+    receiveWorkspaceFile: async input => {
+        if (!runner) throw new Error('Gateway runtime is unavailable')
+        return runner.receiveWorkspaceFile(input)
+    },
     onLog: message => process.stdout.write(`${message}\n`),
 })
 process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)

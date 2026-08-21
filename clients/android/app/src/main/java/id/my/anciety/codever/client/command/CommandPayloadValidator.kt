@@ -111,6 +111,7 @@ data class SessionSettingsCommandPayload(
 }
 
 data class SessionCreateCommandPayload(
+    val scope: String,
     val cwd: String?,
     val projectName: String?,
     val provider: String?,
@@ -124,7 +125,7 @@ data class SessionCreateCommandPayload(
 
     override fun toString(): String =
         "SessionCreateCommandPayload(cwd=<redacted>, projectName=<redacted>, provider=$provider, " +
-            "model=$model, reasoningEffort=$reasoningEffort, permissionMode=$permissionMode, " +
+            "scope=$scope, model=$model, reasoningEffort=$reasoningEffort, permissionMode=$permissionMode, " +
             "extensions=${extensions.map { it.id }})"
 }
 
@@ -244,6 +245,7 @@ object CommandPayloadValidator {
             required = setOf("operation"),
             optional = setOf(
                 "cwd",
+                "scope",
                 "projectName",
                 "provider",
                 "model",
@@ -259,6 +261,9 @@ object CommandPayloadValidator {
             "Session extension IDs must be unique."
         }
         return SessionCreateCommandPayload(
+            scope = value.optionalString("scope")?.also {
+                require(it == "project" || it == "scratch") { "Session scope is invalid." }
+            } ?: "project",
             cwd = value.optionalBoundedString("cwd", 4_096),
             projectName = value.optionalBoundedString("projectName", 256),
             provider = value.optionalBoundedString("provider", 256),

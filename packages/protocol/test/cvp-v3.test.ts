@@ -32,6 +32,41 @@ describe('Codever Protocol v3 (CVP/3)', () => {
     expect(command).not.toHaveProperty('nonce')
   })
 
+  it('creates scratch sessions and workspace inbox files as explicit non-project semantics', () => {
+    const command = cvp3CommandSchema.parse({
+      kind: 'codever.command',
+      version: 3,
+      commandId: 'command-scratch-1',
+      workspaceId: 'workspace-1',
+      projectId: 'transport-project-1',
+      sessionId: 'session-scratch-1',
+      deviceId: 'device-1',
+      certificateId: 'certificate-1',
+      createdAt: 1,
+      operation: 'session.create',
+      payload: { operation: 'session.create', scope: 'scratch' },
+    })
+    expect(command.payload).toMatchObject({ scope: 'scratch' })
+
+    const event = cvp3EventSchema.parse({
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'workspace-file-event-1',
+      workspaceId: 'workspace-1',
+      projectId: 'transport-project-1',
+      occurredAt: 2,
+      payload: {
+        type: 'inbox.file.received',
+        fileId: 'workspace-file-1',
+        caption: 'Generated report',
+        source: { kind: 'local-cli', label: 'review-agent' },
+        attachment: testAttachment(),
+      },
+    })
+    expect(event.sessionId).toBeUndefined()
+    expect(event.payload).toMatchObject({ type: 'inbox.file.received' })
+  })
+
   it('requires the exact business address instead of a global revision', () => {
     expect(() => cvp3CommandSchema.parse({
       kind: 'codever.command',
@@ -161,3 +196,20 @@ describe('Codever Protocol v3 (CVP/3)', () => {
     }).keys).toHaveLength(2)
   })
 })
+
+function testAttachment() {
+  return {
+    id: 'attachment-1',
+    name: 'report.pdf',
+    mimeType: 'application/pdf',
+    size: 12,
+    sha256: 'A'.repeat(43),
+    media: {
+      url: 'mxc://example.org/report',
+      key: 'B'.repeat(43),
+      iv: 'C'.repeat(16),
+      sha256: 'D'.repeat(43),
+      size: 28,
+    },
+  }
+}
