@@ -21,6 +21,7 @@ import {
   MatrixCvp3ProtocolClient,
   type MatrixCvp3RawEvent,
 } from "./matrixCvp3Client";
+import { MatrixCvp3Readiness } from "./matrixCvp3Readiness";
 import {
   acquireMatrixCryptoLock,
   flushAndReleaseMatrixSyncStore,
@@ -98,6 +99,8 @@ export async function connectMatrixCvp3(
   let protocol: MatrixCvp3ProtocolClient | null = null;
   let projectId: string | null = null;
   let matrixDeviceKeys: { ed25519: string; curve25519: string } | null = null;
+  const readiness = new MatrixCvp3Readiness(Boolean(trust));
+  let cachedProjectionPublished = false;
   const deliveredMessages = new Map<string, { version: number; physicalEventId: string }>();
   const emittedCompletions = new Set<string>();
   const deliveredHistory = new Map<string, Set<string>>();
@@ -132,15 +135,37 @@ export async function connectMatrixCvp3(
     });
   };
 
-  const createProtocol = async (grantInput: unknown): Promise<void> => {
-    if (!trust) return;
+  const publishProjectionIfAuthoritative = () => {
+    if (readiness.canPublishAuthoritativeProjection) publishProjection();
+  };
+
+  const publishCachedProjectionIfAvailable = () => {
+    const active = protocol;
+    if (
+      cachedProjectionPublished
+      || readiness.canPublishAuthoritativeProjection
+      || !active
+      || (
+        !active.projection.workspace
+        && !active.projection.project
+        && active.projection.sessions.size === 0
+        && active.projection.messages.size === 0
+        && active.projection.inboxFiles.size === 0
+      )
+    ) return;
+    cachedProjectionPublished = true;
+    publishProjection();
+  };
+
+  const createProtocol = async (grantInput: unknown): Promise<boolean> => {
+    if (!trust) return false;
     const grant = cvp3ProjectKeyGrantStateSchema.parse(grantInput);
     if (
       grant.workspaceId !== config.gatewayId
       || grant.roomId !== config.roomId
       || grant.deviceId !== identity.keyId
       || grant.certificateId !== trust.certificate.certificate.certificateId
-    ) return;
+    ) return false;
     projectId = grant.projectId;
     if (!protocol) {
       const store = new IndexedDbMatrixCvp3ClientStore([
@@ -164,14 +189,14 @@ export async function connectMatrixCvp3(
               eventId: await sendMatrixCvp3ApplicationEvent(
                 client,
                 request.roomId,
-                request.content as RoomMessageEventContent,
+                request.content as unknown as RoomMessageEventContent,
                 request.transactionId,
               ),
             };
           },
         },
         store,
-        publishProjection,
+        publishProjectionIfAuthoritative,
         (_event, error) => {
           // Per-event quarantine is intentionally non-fatal. Diagnostics keep
           // the exact error while the following event continues projecting.
@@ -182,8 +207,16 @@ export async function connectMatrixCvp3(
     await protocol.initialize();
     await protocol.acceptKeyGrant(grant);
     await protocol.drainInbox();
-    await protocol.retryPending();
-    publishProjection();
+    if (readiness.canPublishAuthoritativeProjection) {
+      await protocol.retryPending();
+      publishProjection();
+    } else {
+      // A non-empty durable projection remains useful for offline reading, but
+      // an absent/rebuilt projection cannot be presented as an authoritative
+      // empty Gateway while current snapshots are still being fetched.
+      publishCachedProjectionIfAvailable();
+    }
+    return true;
   };
 
   const scanGrantState = async (): Promise<boolean> => {
@@ -281,6 +314,7 @@ export async function connectMatrixCvp3(
   };
 
   let inboundChain = Promise.resolve();
+  let recoveryChain = Promise.resolve();
   const enqueue = (event: MatrixEvent): void => {
     inboundChain = inboundChain.then(() => ingestEvent(event)).catch(error => {
       handlers.onStatus("error", `A CVP/3 event could not be stored: ${formatError(error)}`);
@@ -298,39 +332,31 @@ export async function connectMatrixCvp3(
   const onRoomState = (event: MatrixEvent) => {
     if (event.getType() === CVP3_MATRIX_PROJECT_KEY_GRANT_EVENT_TYPE) {
       void createProtocol(event.getContent())
-        .then(() => Promise.all([
-          recoverCurrentWorkspaceSnapshot(),
-          recoverCurrentProjectSnapshot(),
-        ]))
-        .then(() => replayKnownTimeline())
+        .then(opened => opened ? recoverAuthoritativeState() : undefined)
         .catch(error => {
-          handlers.onStatus("error", `The project key grant could not be opened: ${formatError(error)}`);
+          reportRecoveryFailure("The project key grant could not be opened", error);
         });
       return;
     }
-    if (event.getType() === CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE) {
-      void recoverCurrentProjectSnapshot().catch(error => {
-        handlers.onStatus("error", `The current project snapshot could not be recovered: ${formatError(error)}`);
-      });
-      return;
-    }
-    if (event.getType() === CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE) {
-      void recoverCurrentWorkspaceSnapshot().catch(error => {
-        handlers.onStatus("error", `The current workspace capabilities could not be recovered: ${formatError(error)}`);
+    if (
+      event.getType() === CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE
+      || event.getType() === CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
+    ) {
+      void recoverAuthoritativeState().catch(error => {
+        reportRecoveryFailure("The current CVP/3 snapshots could not be recovered", error);
       });
     }
   };
   const onSync = (state: string) => {
     if (stopped) return;
     if (state === "SYNCING" || state === "PREPARED") {
-      handlers.onStatus("connected");
       void flushMatrixSyncStore(syncDatabase, syncStore);
-      void protocol?.retryPending();
-    } else if (state === "RECONNECTING" || state === "CATCHUP" || state === "ERROR") {
-      handlers.onStatus("reconnecting", "Encrypted Matrix sync is recovering…");
-    } else if (state === "STOPPED") {
-      handlers.onStatus("offline");
+      if (readiness.canPublishAuthoritativeProjection) {
+        void protocol?.retryPending();
+      }
     }
+    const update = readiness.statusForMatrixSync(state);
+    if (update) handlers.onStatus(update.status, update.detail);
   };
 
   const replayKnownTimeline = async (): Promise<void> => {
@@ -359,7 +385,9 @@ export async function connectMatrixCvp3(
         if (latest) {
           await ingestEvent(new sdk.MatrixEvent({
             ...latest,
-            room_id: latest.room_id ?? config.roomId,
+            room_id: typeof latest.room_id === "string"
+              ? latest.room_id
+              : config.roomId,
           }));
         }
       }
@@ -372,6 +400,37 @@ export async function connectMatrixCvp3(
       from = next;
     }
     throw new Error("The Matrix thread directory exceeded the 100,000-session safety limit.");
+  };
+
+  const recoverAuthoritativeState = async (): Promise<void> => {
+    const operation = recoveryChain.catch(() => undefined).then(async () => {
+      readiness.beginRecovery();
+      handlers.onStatus("connecting", "matrix_gateway_state_syncing");
+      const [workspaceRecovered, projectRecovered] = await Promise.all([
+        recoverCurrentWorkspaceSnapshot(),
+        recoverCurrentProjectSnapshot(),
+      ]);
+      if (!workspaceRecovered || !projectRecovered) {
+        const missing = [
+          !workspaceRecovered ? "workspace" : null,
+          !projectRecovered ? "project" : null,
+        ].filter((value): value is string => value !== null).join(" and ");
+        throw new Error(`The Gateway has not published the current ${missing} snapshot pointer.`);
+      }
+      await replayKnownTimeline();
+      await protocol?.retryPending();
+      readiness.completeRecovery();
+      publishProjection();
+      handlers.onStatus("connected");
+    });
+    recoveryChain = operation;
+    await operation;
+  };
+
+  const reportRecoveryFailure = (context: string, error: unknown): void => {
+    const detail = `${context}: ${formatError(error)}`;
+    readiness.failRecovery(detail);
+    handlers.onStatus("error", detail);
   };
 
   const ready = (async () => {
@@ -399,15 +458,14 @@ export async function connectMatrixCvp3(
         if (!(await scanGrantState())) {
           throw new Error("The Gateway has not published this device’s CVP/3 project key grant.");
         }
-        await Promise.all([
-          recoverCurrentWorkspaceSnapshot(),
-          recoverCurrentProjectSnapshot(),
-        ]);
-        await replayKnownTimeline();
+        await recoverAuthoritativeState();
+      } else {
+        handlers.onStatus("connected");
       }
-      handlers.onStatus("connected");
     } catch (error) {
-      handlers.onStatus("error", formatError(error));
+      const detail = formatError(error);
+      readiness.failRecovery(detail);
+      handlers.onStatus("error", detail);
       throw error;
     }
   })();
@@ -453,12 +511,15 @@ export async function connectMatrixCvp3(
     );
     trust = paired;
     handlers.onTrustUpdated?.(paired);
-    await waitForGrant(signal);
-    await Promise.all([
-      recoverCurrentWorkspaceSnapshot(),
-      recoverCurrentProjectSnapshot(),
-    ]);
-    await replayKnownTimeline();
+    readiness.beginRecovery();
+    handlers.onStatus("connecting", "matrix_gateway_state_syncing");
+    try {
+      await waitForGrant(signal);
+      await recoverAuthoritativeState();
+    } catch (error) {
+      reportRecoveryFailure("The paired Gateway state could not be recovered", error);
+      throw error;
+    }
     return paired;
   };
 

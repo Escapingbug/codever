@@ -321,7 +321,7 @@ async function assertProjectIdentity(page: Page, cwd: string): Promise<void> {
     const dialog = page.locator('.new-session-dialog')
     await dialog.waitFor({ state: 'visible' })
     assert.equal(await dialog.getByRole('option', { name: /New project/u }).count(), 0)
-    const cwdInput = dialog.locator('input').nth(1)
+    const cwdInput = dialog.getByLabel('Working directory')
     assert.equal(await cwdInput.inputValue(), cwd)
     assert.equal(await cwdInput.isDisabled(), true)
     const model = dialog.getByRole('combobox', { name: 'Model' })

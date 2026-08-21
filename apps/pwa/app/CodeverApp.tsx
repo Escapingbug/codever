@@ -4983,7 +4983,10 @@ function CodeverAppRuntime() {
               Connect a computer to start your first conversation
             </div>
           )}
-          {trustedGateway && !gatewayState && (
+          {trustedGateway &&
+            (!gatewayState ||
+              (gatewayState.sessions.length === 0 &&
+                connectionStatus !== "connected")) && (
             <div
               className={`empty-search connection-progress connection-progress-${connectionPresentation.state}`}
               role="status"
@@ -5021,6 +5024,7 @@ function CodeverAppRuntime() {
           )}
           {gatewayState &&
             gatewayState.sessions.length === 0 &&
+            connectionStatus === "connected" &&
             !pendingSessionCreate && (
               <div className="empty-search">
                 <span>+</span>
