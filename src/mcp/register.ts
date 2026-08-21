@@ -1,6 +1,7 @@
 import { registerContextResources, registerContextTools } from './resources'
 import { registerNotifyTools } from './tools/notify'
 import { registerSessionTools, type SessionToolContext } from './tools/session'
+import { registerPrivilegeTools } from './tools/privilege'
 
 export interface CodeverMcpRegistrationOptions {
     includeNotifyTools?: boolean
@@ -19,6 +20,8 @@ export function registerCodeverMcpSurface(server: any, options: CodeverMcpRegist
     if (options.sessionTools) {
         registerSessionTools(server, options.sessionTools)
     }
+
+    registerPrivilegeTools(server)
 }
 
 function hasSessionIdentity(): boolean {

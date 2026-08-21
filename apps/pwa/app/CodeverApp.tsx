@@ -5432,7 +5432,8 @@ function CodeverAppRuntime() {
                 typeof message.raw?.details === "string"
                   ? message.raw.details
                   : undefined;
-              const permissionLabels = permissionActionLabels(message.raw);
+              const permissionActions = permissionActionOptions(message.raw);
+              const privilegeRequest = message.raw?.decisionType === "privilege";
               return (
                 <div
                   className={`message-row agent-row ${
@@ -5450,8 +5451,9 @@ function CodeverAppRuntime() {
                       </div>
                     </div>
                     <p>
-                      Your choice is protected and sent only to your connected
-                      computer.
+                      {privilegeRequest
+                        ? "This exact command will run as root on your connected computer. Review every argument before approving."
+                        : "Your choice is protected and sent only to your connected computer."}
                     </p>
                     {permissionDetails && (
                       <pre className="permission-details">{permissionDetails}</pre>
@@ -5466,23 +5468,20 @@ function CodeverAppRuntime() {
                       </div>
                     ) : permissionDecisionState === "pending" ? (
                       <div className="permission-actions">
-                        <button
-                          className="approve-button"
-                          onClick={() => void decidePermission(message, "allow_once")}
-                        >
-                          {permissionLabels.approve}
-                        </button>
-                        <button
-                          className="deny-button"
-                          onClick={() => void decidePermission(message, "deny")}
-                        >
-                          {permissionLabels.deny}
-                        </button>
+                        {permissionActions.map((action) => (
+                          <button
+                            className={action.deny ? "deny-button" : "approve-button"}
+                            key={action.value}
+                            onClick={() => void decidePermission(message, action.value)}
+                          >
+                            {action.label}
+                          </button>
+                        ))}
                       </div>
                     ) : (
                       <div className={`decision-state ${permissionDecisionState}`}>
                         {permissionDecisionState === "approved"
-                          ? "✓ Allowed once"
+                          ? `✓ ${resolvedPermissionLabel(message.raw, decisionState)}`
                           : "× Denied"}
                       </div>
                     )}
@@ -6070,26 +6069,44 @@ function incomingMessageFromClient(
   };
 }
 
-function permissionActionLabels(
+function permissionActionOptions(
   raw: Record<string, unknown> | undefined,
-): { approve: string; deny: string } {
+): Array<{ label: string; value: string; deny: boolean }> {
   const options = Array.isArray(raw?.options) ? raw.options : [];
-  const labelFor = (value: "allow" | "deny"): string | undefined => {
-    const option = options.find(
-      (candidate) =>
-        candidate !== null &&
-        typeof candidate === "object" &&
-        !Array.isArray(candidate) &&
-        (candidate as Record<string, unknown>).value === value,
-    ) as Record<string, unknown> | undefined;
-    return typeof option?.label === "string" && option.label.trim()
-      ? option.label
-      : undefined;
-  };
-  return {
-    approve: labelFor("allow") ?? "Allow once",
-    deny: labelFor("deny") ?? "Deny",
-  };
+  const parsed = options.flatMap((candidate) => {
+    if (
+      candidate === null ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) return [];
+    const option = candidate as Record<string, unknown>;
+    if (
+      typeof option.value !== "string" ||
+      !option.value ||
+      typeof option.label !== "string" ||
+      !option.label.trim()
+    ) return [];
+    return [{
+      label: option.label,
+      value: option.value,
+      deny: option.value === "deny" || option.value.startsWith("reject"),
+    }];
+  });
+  return parsed.length > 0
+    ? parsed
+    : [
+        { label: "Allow once", value: "allow", deny: false },
+        { label: "Deny", value: "deny", deny: true },
+      ];
+}
+
+function resolvedPermissionLabel(
+  raw: Record<string, unknown> | undefined,
+  state: ExtensionViewDecisionState,
+): string {
+  if (typeof state !== "object") return "Approved";
+  return permissionActionOptions(raw)
+    .find((option) => option.value === state.actionId)?.label ?? "Approved";
 }
 
 async function persistMessageHistoryPage(

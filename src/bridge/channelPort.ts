@@ -11,6 +11,10 @@ import type { DeliveryRecord } from '@/runtime/deliveryOutbox'
 import type { RetryDeliveryCommandResult } from '@/runtime/semanticSessionRuntime'
 import type { SessionExtensionLifecycleReason } from '@/runtime/sessionExtensions'
 import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
+import type {
+    PrivilegedExecutionInput,
+    PrivilegedExecutionResult,
+} from '@/privilege'
 
 export interface ChannelAttachment {
     type: 'document' | 'photo'
@@ -64,10 +68,11 @@ export interface DecisionOption {
 }
 
 export interface DecisionRequest {
-    type: 'permission' | 'question'
+    type: 'permission' | 'question' | 'privilege'
     title: string
     details?: string
     options: DecisionOption[]
+    expiresAt?: number
 }
 
 export interface DecisionResponse {
@@ -194,4 +199,9 @@ export interface TopicSession {
 
     /** Retry a retained channel delivery by ID */
     retryDelivery(deliveryId: string): Promise<RetryDeliveryCommandResult>
+
+    /** Execute a remotely approved administrator operation through the local Helper. */
+    requestPrivilegedExecution?(
+        input: PrivilegedExecutionInput,
+    ): Promise<PrivilegedExecutionResult>
 }

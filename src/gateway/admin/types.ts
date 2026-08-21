@@ -1,4 +1,8 @@
 import { z } from 'zod'
+import {
+  privilegedExecutionInputSchema,
+  type PrivilegedExecutionResult,
+} from '@/privilege'
 
 export const createInvitationRequestSchema = z
   .object({
@@ -11,6 +15,7 @@ export const createInvitationRequestSchema = z
         return protocol === 'https:' || protocol === 'http:'
       }, 'appUrl must use http or https')
       .optional(),
+    privilegeApproval: z.boolean().optional(),
   })
   .strict()
 
@@ -44,6 +49,16 @@ export interface ReceiveWorkspaceFileResponse {
   eventId: string
   delivery: 'delivered' | 'queued'
 }
+
+export const gatewayPrivilegedExecutionRequestSchema = privilegedExecutionInputSchema
+  .extend({ sessionId: z.string().min(1).max(256) })
+  .strict()
+
+export type GatewayPrivilegedExecutionRequest = z.infer<
+  typeof gatewayPrivilegedExecutionRequestSchema
+>
+
+export type GatewayPrivilegedExecutionResponse = PrivilegedExecutionResult
 
 export interface GatewayAdminStatus {
   version: 1

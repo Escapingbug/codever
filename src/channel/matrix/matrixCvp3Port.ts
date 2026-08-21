@@ -36,14 +36,17 @@ export interface MatrixCvp3PortOptions {
 
 interface PendingDecision {
   kind: 'decision' | 'extension'
+  decisionType?: DecisionRequest['type']
   extensionId?: string
   allowedValues: Set<string>
   fallbackValue: string
+  timeout?: ReturnType<typeof setTimeout>
   resolve(value: DecisionResponse): void
 }
 
 export interface ResolvedV3Decision {
   kind: 'decision' | 'extension'
+  decisionType?: DecisionRequest['type']
   extensionId?: string
 }
 
@@ -140,23 +143,33 @@ export class MatrixCvp3Port implements ChannelPort {
 
   requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
     const requestId = randomUUID()
-    const fallbackValue = request.type === 'permission' ? 'deny' : ''
+    const fallbackValue = request.type === 'question' ? '' : 'deny'
     const promise = new Promise<DecisionResponse>(resolve => {
-      this.pendingDecisions.set(requestId, {
+      const pending: PendingDecision = {
         kind: 'decision',
+        decisionType: request.type,
         allowedValues: new Set(request.options.map(option => option.value)),
         fallbackValue,
         resolve,
-      })
+      }
+      this.pendingDecisions.set(requestId, pending)
+      if (request.expiresAt !== undefined) {
+        pending.timeout = setTimeout(
+          () => this.expireDecision(requestId, fallbackValue),
+          Math.max(0, request.expiresAt - Date.now()),
+        )
+      }
     })
     const event: Cvp3Event = {
       ...this.baseEvent(eventId('decision', requestId, 1)),
       payload: {
         type: 'decision.requested',
+        decisionType: request.type,
         requestId,
         title: request.title,
         ...(request.details ? { details: request.details } : {}),
         options: request.options,
+        ...(request.expiresAt === undefined ? {} : { expiresAt: request.expiresAt }),
         projection: this.options.projection(),
       },
     }
@@ -212,11 +225,43 @@ export class MatrixCvp3Port implements ChannelPort {
     const pending = this.pendingDecisions.get(requestId)
     if (!pending || !pending.allowedValues.has(value)) return null
     this.pendingDecisions.delete(requestId)
+    if (pending.timeout) clearTimeout(pending.timeout)
     pending.resolve({ value })
     return {
       kind: pending.kind,
+      ...(pending.decisionType ? { decisionType: pending.decisionType } : {}),
       ...(pending.extensionId ? { extensionId: pending.extensionId } : {}),
     }
+  }
+
+  decisionType(requestId: string): DecisionRequest['type'] | 'extension' | null {
+    const pending = this.pendingDecisions.get(requestId)
+    if (!pending) return null
+    return pending.kind === 'extension' ? 'extension' : pending.decisionType ?? 'permission'
+  }
+
+  private expireDecision(requestId: string, fallbackValue: string): void {
+    const resolved = this.resolveDecision(requestId, fallbackValue)
+    if (!resolved || resolved.kind !== 'decision') return
+    const event: Cvp3Event = {
+      ...this.baseEvent(eventId('decision-expired', requestId, 1)),
+      payload: {
+        type: 'decision.resolved',
+        requestId,
+        decision: fallbackValue,
+        projection: this.options.projection(),
+      },
+    }
+    void this.options.contentLayer.sendEvent(
+      this.options.room,
+      event,
+      this.options.transport,
+      { relation: threadRelation(this.options.threadRootEventId) },
+    ).catch(error => {
+      this.options.onLog?.(
+        `[cvp3/matrix] expired decision delivery failed: ${formatError(error)}`,
+      )
+    })
   }
 
   notifyStatus(status: SessionStatus): void {

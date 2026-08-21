@@ -245,7 +245,7 @@ function isMissingToolName(toolName: string | undefined): boolean {
  *   4. If loadSession succeeds, MCP tools with session identity become available on next turn
  *   If loadSession fails, the session continues without session-scoped MCP tools.
  */
-function buildCodeverMcpBaseConfig(): Array<{
+function buildCodeverMcpBaseConfig(config?: AgentQueryConfig): Array<{
     type: 'stdio'
     name: string
     command: string
@@ -259,11 +259,11 @@ function buildCodeverMcpBaseConfig(): Array<{
         name: 'codever',
         command: mcpServer.command,
         args: mcpServer.args,
-        env: [],
+        env: codeverMcpEnvironment(config),
     }]
 }
 
-function buildCodeverMcpFullConfig(sessionId: string): Array<{
+function buildCodeverMcpFullConfig(sessionId: string, config?: AgentQueryConfig): Array<{
     type: 'stdio'
     name: string
     command: string
@@ -278,9 +278,29 @@ function buildCodeverMcpFullConfig(sessionId: string): Array<{
         command: mcpServer.command,
         args: mcpServer.args,
         env: [
+            ...codeverMcpEnvironment(config),
             { name: 'CODEVER_CONVERSATION_ID', value: sessionId },
         ],
     }]
+}
+
+function codeverMcpEnvironment(
+    config?: AgentQueryConfig,
+): Array<{ name: string; value: string }> {
+    return [
+        ...(config?.codeverSessionId
+            ? [{ name: 'CODEVER_SESSION_ID', value: config.codeverSessionId }]
+            : []),
+        ...(process.env.CODEVER_GATEWAY_ADMIN_SOCKET?.trim()
+            ? [{
+                name: 'CODEVER_GATEWAY_ADMIN_SOCKET',
+                value: process.env.CODEVER_GATEWAY_ADMIN_SOCKET.trim(),
+            }]
+            : []),
+        ...(process.env.CODEVER_PRIVILEGE_AVAILABLE === '1'
+            ? [{ name: 'CODEVER_PRIVILEGE_AVAILABLE', value: '1' }]
+            : []),
+    ]
 }
 
 export function parseRawInput(rawInput: unknown): unknown {
@@ -518,7 +538,7 @@ export class AcpProvider implements AgentProvider {
                     //   At this point sessionId doesn't exist yet, so we can't inject it into env.
                     const sessionResponse = await clientManager.newSession({
                         cwd: config.cwd,
-                        mcpServers: buildCodeverMcpBaseConfig(),
+                        mcpServers: buildCodeverMcpBaseConfig(config),
                     })
                     sessionId = sessionResponse.sessionId
                     this.activeSessionId = sessionId
@@ -541,7 +561,7 @@ export class AcpProvider implements AgentProvider {
                             await clientManager.resumeSession({
                                 sessionId,
                                 cwd: config.cwd,
-                                mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
                             console.error(`[acp:${this.name}] Resumed new session ${sessionId} with full MCP config (no history replay)`)
                         } catch (e) {
@@ -554,7 +574,7 @@ export class AcpProvider implements AgentProvider {
                                     await clientManager.loadSession({
                                         sessionId,
                                         cwd: config.cwd,
-                                        mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                        mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
                                     console.error(`[acp:${this.name}] Reloaded session ${sessionId} with full MCP config (fallback)`)
                                 } catch (loadErr) {
@@ -576,7 +596,7 @@ export class AcpProvider implements AgentProvider {
                             await clientManager.loadSession({
                                 sessionId,
                                 cwd: config.cwd,
-                                mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
                             console.error(`[acp:${this.name}] Reloaded session ${sessionId} with full MCP config (legacy, no resume support)`)
                         } catch (loadErr) {
@@ -623,7 +643,7 @@ export class AcpProvider implements AgentProvider {
                             await clientManager.resumeSession({
                                 sessionId,
                                 cwd: config.cwd,
-                                mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
                             this.activeSessionId = sessionId
                             isResumingSession = true
@@ -640,7 +660,7 @@ export class AcpProvider implements AgentProvider {
                             await clientManager.loadSession({
                                 sessionId,
                                 cwd: config.cwd,
-                                mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
                             this.activeSessionId = sessionId
                             isResumingSession = true
@@ -661,7 +681,7 @@ export class AcpProvider implements AgentProvider {
                         try {
                             const sessionResponse = await clientManager.newSession({
                                 cwd: config.cwd,
-                                mcpServers: buildCodeverMcpBaseConfig(),
+                                mcpServers: buildCodeverMcpBaseConfig(config),
                             })
                             sessionId = sessionResponse.sessionId
                             this.activeSessionId = sessionId
@@ -673,7 +693,7 @@ export class AcpProvider implements AgentProvider {
                                     await clientManager.resumeSession({
                                         sessionId,
                                         cwd: config.cwd,
-                                        mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                        mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
                                     console.error(`[acp:${this.name}] Resumed new session ${sessionId} with full MCP config (after recovery failure)`)
                                 } catch (e) {
@@ -685,7 +705,7 @@ export class AcpProvider implements AgentProvider {
                                     await clientManager.loadSession({
                                         sessionId,
                                         cwd: config.cwd,
-                                        mcpServers: buildCodeverMcpFullConfig(sessionId),
+                                        mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
                                     console.error(`[acp:${this.name}] Loaded new fallback session ${sessionId} with full MCP config`)
                                 } catch (loadErr) {

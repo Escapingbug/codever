@@ -48,6 +48,12 @@ export class MatrixCvp3CommandAuthorizer {
   }
 }
 
+export function canApprovePrivilegedExecution(
+  device: MatrixGatewayTrustedDevice | undefined,
+): boolean {
+  return device?.allowedOperations?.includes('privilege.approve') === true
+}
+
 function v3AllowedOperations(
   legacy: MatrixGatewayTrustedDevice['allowedOperations'],
 ): Cvp3CommandOperation[] | undefined {
@@ -69,6 +75,7 @@ function v3AllowedOperations(
         result.add('session.set_lifecycle')
         break
       case 'device.invite': result.add('device.invitation.create'); break
+      case 'privilege.approve': break
     }
   }
   return [...result]

@@ -52,7 +52,7 @@ const CERTIFICATE_LIFETIME_MS = 365 * 24 * 60 * 60_000
 // the maximum pairing-certificate lifetime enforced by the security package.
 const ROTATION_LIFETIME_MS = 366 * 24 * 60 * 60_000
 const TRANSPORT_SNAPSHOT_LIFETIME_MS = ROTATION_LIFETIME_MS
-const allOperations: PairingOperation[] = [
+export const DEFAULT_PAIRING_OPERATIONS: PairingOperation[] = [
   'prompt',
   'cancel',
   'decision',
@@ -119,7 +119,7 @@ export class GatewayPairingService {
       gatewayKey: await exportPairingPublicKey(this.identity.keys.publicKey),
       gatewayTransport: input.gatewayTransport,
       challenge: generatePairingChallenge(),
-      allowedOperations: unique(input.allowedOperations ?? allOperations),
+      allowedOperations: unique(input.allowedOperations ?? DEFAULT_PAIRING_OPERATIONS),
       issuedAt,
       expiresAt: issuedAt + lifetimeMs,
     }

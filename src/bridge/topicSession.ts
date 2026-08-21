@@ -11,6 +11,11 @@ import { makeTopicKey } from '@/bridge/sessionManager'
 import { SemanticSessionRuntime } from '@/runtime/semanticSessionRuntime'
 import type { SessionExtensionInstance, SessionExtensionLifecycleReason } from '@/runtime/sessionExtensions'
 import { createSessionRecord, type SessionRecord, type SessionRecordOptions } from './sessionRecord'
+import type {
+    PrivilegeExecutor,
+    PrivilegedExecutionInput,
+    PrivilegedExecutionResult,
+} from '@/privilege'
 
 // --- Session metadata factory ---
 
@@ -51,12 +56,13 @@ export interface TopicSessionConfig {
     provider: AgentProvider
     channelPort: ChannelPort
     extensions?: readonly SessionExtensionInstance[]
+    privilegeExecutor?: PrivilegeExecutor
     /** Optional group logger */
     logger?: { group(chatId: number, line: string): void }
 }
 
 export function createTopicSession(options: TopicSessionConfig): TopicSession {
-    const { sessionRecord, provider, channelPort, logger, extensions } = options
+    const { sessionRecord, provider, channelPort, logger, extensions, privilegeExecutor } = options
     const chatId = sessionRecord.groupChatId!
 
     function glog(line: string): void {
@@ -73,6 +79,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         providerSessionId: sessionRecord.conversationId,
         providerSettings: sessionRecord.providerSettings,
         extensions,
+        privilegeExecutor,
         onLog: glog,
         onModelChanged: (model) => {
             sessionRecord.setModel(model)
@@ -165,6 +172,9 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         },
         retryDelivery(deliveryId: string) {
             return runtime.retryDelivery(deliveryId)
+        },
+        requestPrivilegedExecution(input: PrivilegedExecutionInput) {
+            return runtime.requestPrivilegedExecution(input)
         },
     }
 }

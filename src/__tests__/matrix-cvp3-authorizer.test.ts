@@ -4,9 +4,31 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { generateDeviceKeyPair, signCvp3Command } from '@codever/security'
 import { FileCvp3CommandJournal } from '@/gateway/matrix/fileCvp3CommandJournal'
-import { MatrixCvp3CommandAuthorizer } from '@/gateway/matrix/cvp3Authorizer'
+import {
+  MatrixCvp3CommandAuthorizer,
+  canApprovePrivilegedExecution,
+} from '@/gateway/matrix/cvp3Authorizer'
 
 describe('MatrixCvp3CommandAuthorizer', () => {
+  it('requires a separately granted capability for root approvals', () => {
+    const device = {
+      deviceId: 'device-1',
+      publicKey: {} as JsonWebKey,
+      allowedRoomIds: ['!project:example.org'],
+      allowedOperations: ['prompt', 'decision'] as Array<'prompt' | 'decision'>,
+      matrixUserId: '@owner:example.org',
+      matrixDeviceId: 'PHONE',
+      matrixDeviceKeys: ['matrix-phone-key'],
+      certificateExpiresAt: Date.now() + 60_000,
+      sequenceEpoch: 'certificate-1',
+    }
+    expect(canApprovePrivilegedExecution(device)).toBe(false)
+    expect(canApprovePrivilegedExecution({
+      ...device,
+      allowedOperations: [...device.allowedOperations, 'privilege.approve'],
+    })).toBe(true)
+  })
+
   it('authorizes independent commands by certificate and command ID only', async () => {
     const keys = await generateDeviceKeyPair()
     const journal = new FileCvp3CommandJournal(
@@ -53,4 +75,3 @@ describe('MatrixCvp3CommandAuthorizer', () => {
     )).resolves.toMatchObject({ claim: { kind: 'duplicate' } })
   })
 })
-

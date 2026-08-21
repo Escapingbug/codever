@@ -106,7 +106,9 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /session-extension-badge/);
   assert.match(source, /className="permission-details"/);
   assert.match(source, /typeof message\.raw\?\.details === "string"/);
-  assert.match(source, /permissionActionLabels\(message\.raw\)/);
+  assert.match(source, /permissionActionOptions\(message\.raw\)/);
+  assert.match(source, /message\.raw\?\.decisionType === "privilege"/);
+  assert.match(source, /This exact command will run as root/);
   assert.match(newSession, /Project defaults are preselected/);
   assert.match(newSession, /Use this selection as the project default/);
   assert.match(newSession, /enabledExtensions/);

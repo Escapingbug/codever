@@ -13,6 +13,10 @@ import { loadProviderProfiles } from './providers/configured'
 import { resolveNodePath } from './utils/nodePath'
 import { isDaemonRunning, startDaemon, stopDaemon } from './daemon/process'
 import {
+    installPrivilegeHelper,
+    UnixSocketPrivilegeExecutor,
+} from './privilege/index'
+import {
     DEFAULT_WATCHDOG_INTERVAL_MS,
     DEFAULT_WATCHDOG_MAX_RESTARTS,
     DEFAULT_WATCHDOG_RESTART_WINDOW_MS,
@@ -63,6 +67,12 @@ async function main() {
             filename: { type: 'string' },
             source: { type: 'string' },
             'idempotency-key': { type: 'string' },
+            'privilege-approval': { type: 'boolean', default: false },
+            'gateway-data-dir': { type: 'string' },
+            'allow-executable': { type: 'string', multiple: true },
+            'allow-arbitrary-root-executables': { type: 'boolean', default: false },
+            'target-uid': { type: 'string' },
+            'target-gid': { type: 'string' },
             json: { type: 'boolean', default: false },
         },
         allowPositionals: true,
@@ -77,6 +87,11 @@ async function main() {
     }
     if (command === 'send-file') {
         await handleGatewayCommand(['send-file', ...positionals.slice(1)], values)
+        return
+    }
+
+    if (command === 'privilege') {
+        await handlePrivilegeCommand(positionals.slice(1), values)
         return
     }
 
@@ -348,6 +363,8 @@ Usage:
   codever gateway cancel <offer>    Cancel an unused invitation
   codever gateway revoke <device>   Revoke a paired PWA device
   codever send-file <path>          Send a file to the workspace inbox
+  codever privilege status          Check the local root Helper
+  sudo codever privilege install    Install the local root Helper once
   codever logs [-f]                 Show daemon logs (follow with -f)
   codever logs --groups             List all group log directories
   codever logs --group <chatId>     Show logs for a specific group
@@ -373,6 +390,73 @@ Architecture:
     process.exit(1)
 }
 
+async function handlePrivilegeCommand(
+    positionals: string[],
+    values: Record<string, unknown>,
+): Promise<void> {
+    if (values.help) {
+        console.log(`Usage:
+  codever privilege status --gateway-data-dir PATH
+  sudo codever privilege install --gateway-data-dir PATH
+      --allow-executable ABSOLUTE_PATH [--allow-executable ABSOLUTE_PATH ...]
+      [--allow-arbitrary-root-executables]
+      [--target-uid UID --target-gid GID]
+
+The install command prompts for local administrator access once. Later root
+operations require a signed approval from a separately authorized PWA device.
+Prefer an executable allowlist. The arbitrary-executable option grants the
+widest host policy and should only be used on a dedicated machine.
+`)
+        return
+    }
+    const subcommand = positionals[0] ?? 'status'
+    const gatewayDataDirectory = stringOption(values['gateway-data-dir'])
+        ?? process.env.CODEVER_MATRIX_DATA_DIR
+    if (!gatewayDataDirectory) {
+        throw new Error('--gateway-data-dir or CODEVER_MATRIX_DATA_DIR is required')
+    }
+    const credentialPath = join(gatewayDataDirectory, 'privilege-client.json')
+    if (subcommand === 'status') {
+        const status = await new UnixSocketPrivilegeExecutor(credentialPath).status()
+        if (values.json) {
+            console.log(JSON.stringify(status, null, 2))
+            return
+        }
+        console.log(`Privilege Helper: ${status.state}`)
+        console.log(`Credential: ${credentialPath}`)
+        return
+    }
+    if (subcommand !== 'install') {
+        throw new Error(`Unknown privilege command: ${subcommand}`)
+    }
+    const helperBundlePath = fileURLToPath(
+        new URL('./privilege/helperMain.js', import.meta.url),
+    )
+    const targetUid = identityOption(values['target-uid'], '--target-uid')
+    const targetGid = identityOption(values['target-gid'], '--target-gid')
+    const result = await installPrivilegeHelper({
+        gatewayDataDirectory,
+        helperBundlePath,
+        allowedExecutables: stringArrayOption(values['allow-executable']),
+        allowArbitraryRootExecutables:
+            values['allow-arbitrary-root-executables'] === true,
+        ...(targetUid === undefined ? {} : { targetUid }),
+        ...(targetGid === undefined ? {} : { targetGid }),
+    })
+    console.log('Privilege Helper installed and healthy.')
+    console.log(`Service: ${result.layout.serviceName}`)
+    console.log(`Credential: ${result.layout.credentialPath}`)
+    console.log(
+        result.allowArbitraryRootExecutables
+            ? 'Host policy: any safe root-owned executable'
+            : `Host policy: ${result.allowedExecutables.join(', ')}`,
+    )
+    console.log('Restart the Matrix Gateway so it discovers the Helper credential.')
+    console.log(
+        'Pair an approval device with: codever gateway invite --privilege-approval',
+    )
+}
+
 async function handleGatewayCommand(
     positionals: string[],
     values: Record<string, unknown>,
@@ -382,6 +466,7 @@ async function handleGatewayCommand(
   codever gateway status [--socket PATH] [--json]
   codever gateway invite [--socket PATH] [--app-url URL]
       [--lifetime SECONDS] [--matrix-login required|preferred|disabled]
+      [--privilege-approval]
       [--qr terminal|png|none] [--output PATH] [--json]
   codever gateway devices [--socket PATH] [--json]
   codever gateway cancel <invitation-id> [--socket PATH]
@@ -426,6 +511,7 @@ async function handleGatewayCommand(
             ...(lifetimeMs === undefined ? {} : { lifetimeMs }),
             matrixLogin,
             ...(appUrl ? { appUrl } : {}),
+            ...(values['privilege-approval'] ? { privilegeApproval: true } : {}),
         })
         if (values.json) {
             console.log(JSON.stringify(invitation, null, 2))
@@ -556,6 +642,27 @@ function parseMatrixLoginMode(
 
 function stringOption(value: unknown): string | undefined {
     return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function stringArrayOption(value: unknown): string[] {
+    if (value === undefined) return []
+    const candidates = Array.isArray(value) ? value : [value]
+    return candidates.map(candidate => {
+        const parsed = stringOption(candidate)
+        if (!parsed) throw new Error('--allow-executable requires a non-empty path')
+        return parsed
+    })
+}
+
+function identityOption(value: unknown, name: string): number | undefined {
+    const text = stringOption(value)
+    if (text === undefined) return undefined
+    if (!/^\d+$/u.test(text)) throw new Error(`${name} must be a non-negative integer`)
+    const parsed = Number(text)
+    if (!Number.isSafeInteger(parsed)) {
+        throw new Error(`${name} must be a non-negative integer`)
+    }
+    return parsed
 }
 
 function defaultGatewayAdminSocket(): string {

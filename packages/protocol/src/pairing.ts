@@ -17,6 +17,7 @@ export const pairingOperationSchema = z.enum([
   'session.restore',
   'session.delete',
   'device.invite',
+  'privilege.approve',
 ])
 
 export type PairingOperation = z.infer<typeof pairingOperationSchema>

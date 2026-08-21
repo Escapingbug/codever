@@ -4,6 +4,7 @@ import { DeliveryOutbox } from '@/runtime/deliveryOutbox'
 import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { SessionExtensionInstance } from '@/runtime/sessionExtensions'
+import type { PrivilegeExecutor } from '@/privilege'
 import type {
     ChannelMessage,
     ChannelPort,
@@ -56,6 +57,139 @@ function delay(ms: number): Promise<void> {
 }
 
 describe('SemanticSessionRuntime', () => {
+    it('requires a privilege decision and reuses only an explicit ten-minute session lease', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const provider: AgentProvider = {
+            ...createProvider([]),
+            startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        }
+        const requestDecision = vi.fn(async () => ({ value: 'allow_session_10m' }))
+        const channel = {
+            ...createChannel([], []),
+            requestDecision,
+        }
+        const execute = vi.fn<PrivilegeExecutor['execute']>(async request => ({
+            requestId: request.requestId,
+            status: 'succeeded',
+            exitCode: 0,
+            signal: null,
+            stdout: 'ok\n',
+            stderr: '',
+            truncated: false,
+            startedAt: request.requestedAt,
+            completedAt: request.requestedAt + 1,
+        }))
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-privileged',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+            privilegeExecutor: { execute },
+        })
+
+        const running = runtime.dispatch({
+            kind: 'user_message',
+            text: 'perform maintenance',
+            source: 'channel',
+        })
+        await waitUntil(() => runtime.getState() === 'querying')
+
+        await runtime.requestPrivilegedExecution({
+            executable: '/usr/bin/id',
+            args: ['-u'],
+            reason: 'Confirm effective user',
+            timeoutMs: 5_000,
+        })
+        await runtime.requestPrivilegedExecution({
+            executable: '/usr/bin/whoami',
+            args: [],
+            reason: 'Confirm account name',
+            timeoutMs: 5_000,
+        })
+
+        expect(requestDecision).toHaveBeenCalledOnce()
+        expect(requestDecision).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'privilege',
+            details: expect.stringContaining('/usr/bin/id -u'),
+            options: expect.arrayContaining([
+                { label: 'Allow once', value: 'allow_once' },
+                { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+                { label: 'Deny', value: 'deny' },
+            ]),
+        }))
+        expect(execute).toHaveBeenCalledTimes(2)
+        expect(execute.mock.calls[0]?.[0]).toMatchObject({
+            version: 1,
+            sessionId: 'session-privileged',
+            cwd: '/repo',
+            executable: '/usr/bin/id',
+            args: ['-u'],
+        })
+        expect(provider.startQuery).toHaveBeenCalledWith(
+            'perform maintenance',
+            expect.objectContaining({ codeverSessionId: 'session-privileged' }),
+        )
+
+        release()
+        await running
+    })
+
+    it('does not execute a privileged request denied by the approval device', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => {
+            release = resolve
+        })
+        const provider: AgentProvider = {
+            ...createProvider([]),
+            startQuery: vi.fn((): AgentQueryHandle => ({
+                events: (async function* () {
+                    await hold
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        }
+        const execute = vi.fn<PrivilegeExecutor['execute']>()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-denied',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: {
+                ...createChannel([], []),
+                requestDecision: vi.fn(async () => ({ value: 'deny' })),
+            },
+            privilegeExecutor: { execute },
+        })
+        const running = runtime.dispatch({
+            kind: 'user_message',
+            text: 'perform maintenance',
+            source: 'channel',
+        })
+        await waitUntil(() => runtime.getState() === 'querying')
+
+        await expect(runtime.requestPrivilegedExecution({
+            executable: '/usr/bin/id',
+            args: [],
+            reason: 'Denied test',
+            timeoutMs: 5_000,
+        })).rejects.toMatchObject({ name: 'PrivilegeExecutionDeniedError' })
+        expect(execute).not.toHaveBeenCalled()
+
+        release()
+        await running
+    })
+
     it('applies model settings without waiting for an active turn', async () => {
         let release!: () => void
         const hold = new Promise<void>(resolve => {
@@ -822,3 +956,12 @@ describe('SemanticSessionRuntime', () => {
         }, expect.objectContaining({ cwd: '/repo' }))
     })
 })
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+        if (predicate()) return
+        await delay(5)
+    }
+    throw new Error(`Condition was not met within ${timeoutMs}ms`)
+}

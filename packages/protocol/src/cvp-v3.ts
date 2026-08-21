@@ -405,6 +405,7 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('decision.requested'),
+      decisionType: z.enum(['permission', 'question', 'privilege']).default('permission'),
       requestId: opaqueId,
       title: z.string().min(1).max(1_024),
       details: jsonValueSchema.optional(),
@@ -412,6 +413,7 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
         .array(z.object({ label: z.string(), value: z.string() }).strict())
         .min(1)
         .max(16),
+      expiresAt: timestamp.optional(),
       projection: sessionProjectionSchema,
     })
     .strict(),

@@ -69,11 +69,15 @@ export class StrictMatrixCommandAuthorizer {
             throw new MatrixAuthorizationError('certificate-expired', 'Pairing certificate has expired')
         }
 
+        const allowedCommandOperations = policy.allowedOperations?.filter(
+            (operation): operation is CodeverCommand['operation'] => operation !== 'privilege.approve',
+        )
+
         const command = await verifyCommand(signed, policy.publicKey, {
             gatewayId: this.gatewayId,
             deviceId: policy.deviceId,
             conversationId: context.conversationId,
-            allowedOperations: policy.allowedOperations,
+            allowedOperations: allowedCommandOperations,
         }, {
             now,
             // An application-layer delivery arrives inside a fresh envelope

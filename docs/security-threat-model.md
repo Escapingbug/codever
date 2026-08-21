@@ -19,6 +19,9 @@ Codever trust root.
 - the locally enrolled Codever device keys;
 - the Codever application and its bundled dependency execution environment;
 - configured ACP providers while they execute locally.
+- when remote privileged execution is installed: the root-owned Helper bundle,
+  service definition and policy, plus the local Gateway account that holds its
+  client credential.
 
 The PWA hosting origin is part of the trusted computing base. A production
 release must not load executable JavaScript from the Matrix homeserver. The
@@ -35,6 +38,38 @@ hardening boundary.
 - events from unknown or newly created Matrix devices;
 - repeated, reordered, edited or redacted events;
 - provider output rendered in the client.
+- privileged-execution proposals, including executable paths, arguments,
+  reasons and working directories, until both device approval and Helper
+  policy validation succeed.
+
+## Privileged execution boundary
+
+Remote root execution is disabled unless the host owner installs a separate
+root Helper. The administrator password never enters Codever, Matrix, the
+Agent, or the PWA. The Gateway stores only an owner-readable random client
+credential; the root configuration stores its SHA-256 digest.
+
+A privilege decision may be answered only by an active device certificate that
+contains the separately granted `privilege.approve` operation. Normal pairing
+does not grant it. The decision event is carried by the same signed,
+application-encrypted CVP/3 path as other decisions.
+
+The Helper trusts the local Gateway operating-system account. It authenticates
+that account through its owner-only Unix socket credential, then independently
+requires a short-lived, previously unused request, resolves the executable's
+real path, applies its root-owned allowlist or explicit broad policy, rejects
+group/world-writable executables, spawns without an implicit shell, supplies a
+minimal environment, closes stdin, caps output, and kills timed-out process
+groups. A compromised process running as the Gateway account can read the
+Helper credential; defending against compromise of that trusted local account
+is an explicit non-goal.
+
+The ten-minute option is deliberately broader than one-shot approval: any
+subsequent request in that Codever session that passes host policy may execute
+until the in-memory lease expires. An unanswered proposal expires after five
+minutes, and destroying the runtime clears the lease.
+macOS TCC and similar consent databases are outside this mechanism and are not
+bypassed.
 
 ## Gateway acceptance rule
 
@@ -109,6 +144,12 @@ content grants neither execution nor trust.
 - Collaboration prompts, command results and per-device edit targets use a
   durable local recipient outbox. Missing copies retain stable Matrix
   transaction IDs and are retried without duplicating successful recipients.
+- A normal paired device cannot resolve a privilege decision. A
+  `privilege.approve` device can select only an advertised decision value.
+- Helper requests with a wrong credential, expired grant, duplicate request ID,
+  unsafe or policy-excluded executable, oversized output, or elapsed timeout
+  fail closed. Argument metacharacters remain argv bytes and do not implicitly
+  invoke a shell.
 
 ## Current product boundary
 

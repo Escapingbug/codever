@@ -1,4 +1,4 @@
-import type { CommandOperation } from '@codever/protocol'
+import type { PairingOperation } from '@codever/protocol'
 import type { SerializedDeviceKeyPair } from '@codever/security'
 
 export type MatrixGatewayCryptoConfig =
@@ -55,7 +55,7 @@ export interface MatrixGatewayTrustedDevice extends MatrixGatewayPinnedTransport
     deviceName?: string
     publicKey: JsonWebKey
     allowedRoomIds: string[]
-    allowedOperations?: CommandOperation[]
+    allowedOperations?: PairingOperation[]
     /**
      * Raw Ed25519 fingerprints returned by
      * MatrixEvent.getClaimedEd25519Key() after E2EE decryption. These are not

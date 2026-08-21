@@ -19,6 +19,7 @@ The current implementation is a Telegram topic session gateway: each Telegram fo
 - **Session controls**: interrupt, reset, archive, list, and resume sessions from Telegram.
 - **Provider/model controls**: choose provider, model, permission mode, verbosity, and timeout per group/session.
 - **Codever MCP surface**: agents can read Codever environment resources and use tools such as reminders and proactive messages.
+- **Optional remote root approval**: the Matrix/PWA Gateway can delegate exact Linux/macOS administrator commands through a one-time-installed local Helper; see [remote privileged execution](docs/privileged-execution.md).
 - **Local-only runtime**: no hosted backend; the daemon uses Telegram long polling and stores state under your home directory.
 
 ## Requirements

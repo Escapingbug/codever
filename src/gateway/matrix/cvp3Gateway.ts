@@ -39,10 +39,18 @@ import {
   type PersistedCvp3Project,
   type PersistedCvp3Session,
 } from './fileCvp3RuntimeState'
-import { MatrixCvp3CommandAuthorizer } from './cvp3Authorizer'
+import {
+  MatrixCvp3CommandAuthorizer,
+  canApprovePrivilegedExecution,
+} from './cvp3Authorizer'
 import { GatewayCvp3ContentLayer } from './cvp3Content'
 import { materializePromptInput } from './media'
 import { SessionExtensionRegistry } from '@/runtime/sessionExtensions'
+import type {
+  PrivilegeExecutor,
+  PrivilegedExecutionInput,
+  PrivilegedExecutionResult,
+} from '@/privilege'
 
 interface Cvp3SessionRuntime {
   record: PersistedCvp3Session
@@ -86,6 +94,7 @@ export interface MatrixCvp3GatewayDependencies {
     commandId: string
     lifetimeMs?: number
   }) => Promise<{ pairingLink: string; expiresAt: number }>
+  privilegeExecutor?: PrivilegeExecutor
 }
 
 export type MatrixCvp3GatewayState = 'stopped' | 'starting' | 'running' | 'stopping'
@@ -265,6 +274,21 @@ export class MatrixCvp3GatewayRunner {
       await this.content.provisionProject(project.config, this.client)
       await this.publishProjectSnapshot(project)
     }
+  }
+
+  async requestPrivilegedExecution(
+    sessionId: string,
+    input: PrivilegedExecutionInput,
+  ): Promise<PrivilegedExecutionResult> {
+    for (const project of this.projects.values()) {
+      const runtime = project.sessions.get(sessionId)
+      if (!runtime) continue
+      if (!runtime.session.requestPrivilegedExecution) {
+        throw new Error('This session does not support privileged execution')
+      }
+      return await runtime.session.requestPrivilegedExecution(input)
+    }
+    throw new Error(`Unknown active Codever session ${sessionId}`)
   }
 
   private receiveEvent(event: MatrixIncomingEvent): void {
@@ -607,6 +631,17 @@ export class MatrixCvp3GatewayRunner {
     command: Cvp3CommandOf<'decision.answer'>,
   ): Promise<void> {
     const runtime = this.requireActiveSession(project, command.sessionId)
+    if (runtime.port.decisionType(command.payload.requestId) === 'privilege') {
+      const devices = this.dependencies.listTrustedDevices
+        ? await this.dependencies.listTrustedDevices()
+        : this.config.trustedDevices
+      const device = devices.find(candidate => candidate.deviceId === command.deviceId)
+      if (!canApprovePrivilegedExecution(device)) {
+        throw new Error(
+          `Codever device ${command.deviceId} is not authorized to approve privileged execution`,
+        )
+      }
+    }
     const decision = runtime.port.resolveDecision(
       command.payload.requestId,
       command.payload.decision,
@@ -1075,6 +1110,7 @@ export class MatrixCvp3GatewayRunner {
         provider,
         channelPort: port,
         extensions: extensionInstances,
+        privilegeExecutor: this.dependencies.privilegeExecutor,
       })
     }
     runtime = {

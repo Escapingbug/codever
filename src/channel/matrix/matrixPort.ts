@@ -184,7 +184,7 @@ export class MatrixPort implements ChannelPort {
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
         const decisionId = randomUUID()
-        const fallbackValue = request.type === 'permission' ? 'deny' : ''
+        const fallbackValue = request.type === 'question' ? '' : 'deny'
         const allowedValues = new Set(request.options.map(option => option.value))
         const body = [
             request.title,

@@ -150,6 +150,73 @@ describe('MatrixCvp3Port', () => {
       extensionId: 'prefix-transform',
     })
     await expect(response).resolves.toEqual({ value: 'continue' })
+
+    const privilegeResponse = port.requestDecision({
+      type: 'privilege',
+      title: 'Allow remote administrator execution?',
+      details: 'Command:\n/usr/bin/id -u',
+      options: [
+        { label: 'Allow once', value: 'allow_once' },
+        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+        { label: 'Deny', value: 'deny' },
+      ],
+    })
+    await waitFor(() => transport.delivered.length === 4)
+    const privilegeExtension = transport.delivered[3]
+      ?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const privilegeEvent = await openCvp3Envelope(privilegeExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (privilegeEvent.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(privilegeEvent.plaintext.value.event.payload).toMatchObject({
+      type: 'decision.requested',
+      decisionType: 'privilege',
+      details: 'Command:\n/usr/bin/id -u',
+      options: [
+        { label: 'Allow once', value: 'allow_once' },
+        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+        { label: 'Deny', value: 'deny' },
+      ],
+    })
+    const privilegeRequestId = privilegeEvent.plaintext.value.event.payload.type
+      === 'decision.requested'
+      ? privilegeEvent.plaintext.value.event.payload.requestId
+      : ''
+    expect(port.decisionType(privilegeRequestId)).toBe('privilege')
+    expect(port.resolveDecision(privilegeRequestId, 'allow')).toBeNull()
+    expect(port.resolveDecision(privilegeRequestId, 'allow_once')).toEqual({
+      kind: 'decision',
+      decisionType: 'privilege',
+    })
+    await expect(privilegeResponse).resolves.toEqual({ value: 'allow_once' })
+
+    const expiredPrivilegeResponse = port.requestDecision({
+      type: 'privilege',
+      title: 'Expiring root request',
+      options: [
+        { label: 'Allow once', value: 'allow_once' },
+        { label: 'Deny', value: 'deny' },
+      ],
+      expiresAt: Date.now() + 10,
+    })
+    await expect(expiredPrivilegeResponse).resolves.toEqual({ value: 'deny' })
+    await waitFor(() => transport.delivered.length === 6)
+    const expiredExtension = transport.delivered[5]
+      ?.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const expiredEvent = await openCvp3Envelope(expiredExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (expiredEvent.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(expiredEvent.plaintext.value.event.payload).toMatchObject({
+      type: 'decision.resolved',
+      decision: 'deny',
+    })
   })
 })
 

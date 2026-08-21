@@ -113,7 +113,7 @@ export class TelegramPort implements ChannelPort {
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
         const { decisionId, promise } = registerPendingDecision({
-            fallbackValue: request.type === 'permission' ? 'deny' : '',
+            fallbackValue: request.type === 'question' ? '' : 'deny',
         })
         const keyboard = {
             inline_keyboard: [
@@ -124,7 +124,9 @@ export class TelegramPort implements ChannelPort {
             ],
         }
 
-        const text = request.type === 'permission'
+        const text = request.type === 'privilege'
+            ? `⚠️ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
+            : request.type === 'permission'
             ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
             : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
 
@@ -134,7 +136,7 @@ export class TelegramPort implements ChannelPort {
             ...buildMessageThreadParams(this.threadId),
         }).catch((e) => {
             console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
-            completePendingDecision(decisionId, request.type === 'permission' ? 'deny' : '')
+            completePendingDecision(decisionId, request.type === 'question' ? '' : 'deny')
         })
 
         return promise

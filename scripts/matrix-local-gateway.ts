@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import QRCode from 'qrcode'
@@ -35,6 +36,7 @@ import type {
     AgentQueryInput,
 } from '../src/providers/provider.js'
 import { createSessionExtensionRegistryFromEnvironment } from '../src/runtime/sessionExtensionConfig.js'
+import { UnixSocketPrivilegeExecutor } from '../src/privilege/index.js'
 
 interface LocalMatrixFixture {
     homeserver: string
@@ -74,6 +76,16 @@ const cwd = process.env.CODEVER_CWD ?? process.cwd()
 const sessionExtensionRegistry = await createSessionExtensionRegistryFromEnvironment()
 const dataDirectory = process.env.CODEVER_MATRIX_DATA_DIR
     ?? join(process.cwd(), 'dev', 'matrix', 'gateway-data')
+const adminSocketPath = process.env.CODEVER_GATEWAY_ADMIN_SOCKET
+    ?? join(dataDirectory, 'admin.sock')
+process.env.CODEVER_GATEWAY_ADMIN_SOCKET = adminSocketPath
+const defaultPrivilegeCredentialPath = join(dataDirectory, 'privilege-client.json')
+const privilegeCredentialPath = process.env.CODEVER_PRIVILEGE_CREDENTIAL_FILE?.trim()
+    || (existsSync(defaultPrivilegeCredentialPath) ? defaultPrivilegeCredentialPath : undefined)
+const privilegeExecutor = privilegeCredentialPath
+    ? new UnixSocketPrivilegeExecutor(privilegeCredentialPath)
+    : undefined
+if (privilegeExecutor) process.env.CODEVER_PRIVILEGE_AVAILABLE = '1'
 const runId = Date.now().toString(36).toUpperCase()
 const loginUser = process.env.CODEVER_MATRIX_GATEWAY_USER ?? 'gateway'
 const gatewayMatrixDeviceId = `CODEVER_GATEWAY_${runId}`
@@ -281,6 +293,7 @@ const config: MatrixGatewayConfig = {
 runner = new MatrixCvp3GatewayRunner(config, {
     client,
     sessionExtensionRegistry,
+    ...(privilegeExecutor ? { privilegeExecutor } : {}),
     ...(deterministicE2eProvider
         ? { providerFactory: () => e2eProvider(providerName) }
         : {}),
@@ -318,8 +331,7 @@ runner = new MatrixCvp3GatewayRunner(config, {
 
 await runner.start()
 const adminServer = await startGatewayAdminServer({
-    socketPath: process.env.CODEVER_GATEWAY_ADMIN_SOCKET
-        ?? join(dataDirectory, 'admin.sock'),
+    socketPath: adminSocketPath,
     gatewayId: identity.gatewayId,
     coordinator: invitationCoordinator,
     pairingService,
@@ -332,6 +344,12 @@ const adminServer = await startGatewayAdminServer({
         if (!runner) throw new Error('Gateway runtime is unavailable')
         return runner.receiveWorkspaceFile(input)
     },
+    ...(privilegeExecutor
+        ? {
+            onPrivilegedExecution: async ({ sessionId, ...request }) =>
+                await runner!.requestPrivilegedExecution(sessionId, request),
+        }
+        : {}),
     onLog: message => process.stdout.write(`${message}\n`),
 })
 process.stdout.write(`Gateway ready with ${trustedDevices.length} trusted device(s).\n`)

@@ -40,6 +40,8 @@ export interface AgentQueryHandle {
 
 export interface AgentQueryConfig {
     cwd: string
+    /** Codever runtime session identity, distinct from the provider's session ID. */
+    codeverSessionId?: string
     sessionId?: string
     signal: AbortSignal
     model?: string

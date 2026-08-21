@@ -91,11 +91,14 @@ describe('pairing schemas', () => {
         gatewayKey: publicKey,
         gatewayTransport,
         challenge: 'd'.repeat(43),
-        allowedOperations: ['prompt', 'cancel'],
+        allowedOperations: ['prompt', 'cancel', 'privilege.approve'],
         issuedAt: 1,
         expiresAt: 2,
       }),
-    ).toMatchObject({ offerId: 'offer-1' })
+    ).toMatchObject({
+      offerId: 'offer-1',
+      allowedOperations: ['prompt', 'cancel', 'privilege.approve'],
+    })
   })
 
   it('rejects duplicate capabilities and unknown transport authority', () => {

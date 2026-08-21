@@ -179,6 +179,71 @@ describe('Gateway local admin', () => {
     }
   })
 
+  it('issues privilege-scoped invitations and forwards privileged execution to the active runtime', async () => {
+    const fixture = await gatewayFixture()
+    const directory = await temporaryDirectory()
+    const socketPath = join(directory, 'admin.sock')
+    const onPrivilegedExecution = vi.fn(async (request) => ({
+      requestId: `helper-${request.sessionId}`,
+      status: 'succeeded' as const,
+      exitCode: 0,
+      signal: null,
+      stdout: '0\n',
+      stderr: '',
+      truncated: false,
+      startedAt: now,
+      completedAt: now + 1,
+    }))
+    const server = await startGatewayAdminServer({
+      socketPath,
+      gatewayId: fixture.identity.gatewayId,
+      coordinator: new DeviceInvitationCoordinator(
+        fixture.service,
+        fixture.registry,
+        {
+          gatewayName: 'Mac Gateway',
+          gatewayTransport,
+          now: () => now,
+        },
+      ),
+      pairingService: fixture.service,
+      registry: fixture.registry,
+      getGatewayState: () => 'running',
+      onPrivilegedExecution,
+      now: () => now,
+    })
+    servers.push(server)
+    const client = new GatewayAdminClient({ socketPath })
+
+    const invitation = await client.createInvitation({
+      matrixLogin: 'disabled',
+      appUrl: 'https://pwa.example/',
+      privilegeApproval: true,
+    })
+    expect(
+      decodeDeviceInvitationLink(invitation.url).offer.offer.allowedOperations,
+    ).toContain('privilege.approve')
+
+    await expect(client.privilegedExecution({
+      sessionId: 'session-1',
+      executable: '/usr/bin/id',
+      args: ['-u'],
+      reason: 'Confirm root execution',
+      timeoutMs: 5_000,
+    })).resolves.toMatchObject({
+      requestId: 'helper-session-1',
+      status: 'succeeded',
+      stdout: '0\n',
+    })
+    expect(onPrivilegedExecution).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      executable: '/usr/bin/id',
+      args: ['-u'],
+      reason: 'Confirm root execution',
+      timeoutMs: 5_000,
+    })
+  })
+
   it('revokes a paired device and refreshes live Gateway state', async () => {
     const fixture = await gatewayFixture()
     const offer = await fixture.service.createOffer({

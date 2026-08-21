@@ -25,6 +25,18 @@ import {
     type SessionExtensionLifecycleReason,
     type SessionExtensionTurnContext,
 } from './sessionExtensions'
+import {
+    PRIVILEGE_APPROVAL_LEASE_MS,
+    PRIVILEGE_APPROVAL_TIMEOUT_MS,
+    PRIVILEGE_HELPER_PROTOCOL_VERSION,
+    PRIVILEGE_REQUEST_LIFETIME_MS,
+    PrivilegeExecutionDeniedError,
+    formatPrivilegedCommand,
+    privilegedExecutionInputSchema,
+    type PrivilegeExecutor,
+    type PrivilegedExecutionInput,
+    type PrivilegedExecutionResult,
+} from '@/privilege'
 
 export type SemanticRuntimeState = 'idle' | 'querying' | 'canceling' | 'finalizing' | 'dead'
 
@@ -140,6 +152,7 @@ export interface SemanticSessionRuntimeConfig {
     onAvailableCommands?: (commands: ProviderCommand[]) => void
     destroyTimeoutMs?: number
     extensions?: readonly SessionExtensionInstance[]
+    privilegeExecutor?: PrivilegeExecutor
 }
 
 export class SemanticSessionRuntime {
@@ -168,6 +181,8 @@ export class SemanticSessionRuntime {
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
     private readonly extensionHost: SessionExtensionHost
+    private privilegeLeaseExpiresAt = 0
+    private privilegeChain: Promise<void> = Promise.resolve()
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(getProviderType(config.providerName) ?? config.providerName)
@@ -226,8 +241,17 @@ export class SemanticSessionRuntime {
         return run
     }
 
+    requestPrivilegedExecution(
+        input: PrivilegedExecutionInput,
+    ): Promise<PrivilegedExecutionResult> {
+        const run = this.privilegeChain.then(() => this.executePrivileged(input))
+        this.privilegeChain = run.then(() => undefined, () => undefined)
+        return run
+    }
+
     async destroy(reason: SessionExtensionLifecycleReason = 'shutdown'): Promise<void> {
         this.state = 'dead'
+        this.privilegeLeaseExpiresAt = 0
         this.abortController?.abort()
         if (this.currentHandle) {
             await waitForShutdownStep(
@@ -256,6 +280,66 @@ export class SemanticSessionRuntime {
             this.config.destroyTimeoutMs ?? DEFAULT_DESTROY_TIMEOUT_MS,
             (message) => this.log(`[destroy] session extension lifecycle timeout/error: ${message}`),
         )
+    }
+
+    private async executePrivileged(
+        rawInput: PrivilegedExecutionInput,
+    ): Promise<PrivilegedExecutionResult> {
+        if (!this.config.privilegeExecutor) {
+            throw new Error('Remote privileged execution is not installed on this computer')
+        }
+        if (this.state !== 'querying') {
+            throw new Error('Privileged execution is accepted only during an active Agent turn')
+        }
+        const input = privilegedExecutionInputSchema.parse(rawInput)
+        const now = Date.now()
+        if (this.privilegeLeaseExpiresAt <= now) {
+            this.privilegeLeaseExpiresAt = 0
+            const command = formatPrivilegedCommand(input.executable, input.args)
+            const approvalExpiresAt = Date.now() + PRIVILEGE_APPROVAL_TIMEOUT_MS
+            const response = await withTimeoutFallback(
+                this.config.channelPort.requestDecision({
+                    type: 'privilege',
+                    title: 'Allow remote administrator execution?',
+                    details: [
+                        `Reason: ${input.reason}`,
+                        `Project: ${this.config.cwd}`,
+                        'Command:',
+                        command,
+                        '',
+                        'This command will run as root on the connected computer.',
+                    ].join('\n'),
+                    options: [
+                        { label: 'Allow once', value: 'allow_once' },
+                        { label: 'Allow this session for 10 minutes', value: 'allow_session_10m' },
+                        { label: 'Deny', value: 'deny' },
+                    ],
+                    expiresAt: approvalExpiresAt,
+                }),
+                PRIVILEGE_APPROVAL_TIMEOUT_MS,
+                { value: 'deny' },
+            )
+            if (response.value === 'allow_session_10m') {
+                this.privilegeLeaseExpiresAt = Date.now() + PRIVILEGE_APPROVAL_LEASE_MS
+            } else if (response.value !== 'allow_once') {
+                throw new PrivilegeExecutionDeniedError()
+            }
+        }
+        if (this.state !== 'querying') {
+            throw new PrivilegeExecutionDeniedError(
+                'The Agent turn ended before privileged execution could start',
+            )
+        }
+        const requestedAt = Date.now()
+        return await this.config.privilegeExecutor.execute({
+            ...input,
+            version: PRIVILEGE_HELPER_PROTOCOL_VERSION,
+            requestId: randomUUID(),
+            sessionId: this.config.sessionId,
+            cwd: this.config.cwd,
+            requestedAt,
+            expiresAt: requestedAt + PRIVILEGE_REQUEST_LIFETIME_MS,
+        })
     }
 
     getState(): SemanticRuntimeState {
@@ -386,6 +470,7 @@ export class SemanticSessionRuntime {
 
         const handle = this.config.provider.startQuery(this.prepareProviderInput(extensionTurn.input), {
             cwd: this.config.cwd,
+            codeverSessionId: this.config.sessionId,
             sessionId: this.config.providerSessionId ?? undefined,
             signal: this.abortController.signal,
             ...(activeModel ? { model: activeModel } : {}),
@@ -1566,6 +1651,22 @@ function waitForDeliveryRecord(delivery: Promise<DeliveryRecord>, timeoutMs: num
         delivery,
         new Promise<undefined>((resolve) => {
             timeout = setTimeout(() => resolve(undefined), timeoutMs)
+        }),
+    ]).finally(() => {
+        if (timeout) clearTimeout(timeout)
+    })
+}
+
+function withTimeoutFallback<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    fallback: T,
+): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([
+        promise,
+        new Promise<T>((resolve) => {
+            timeout = setTimeout(() => resolve(fallback), timeoutMs)
         }),
     ]).finally(() => {
         if (timeout) clearTimeout(timeout)

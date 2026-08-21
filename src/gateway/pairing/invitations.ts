@@ -3,6 +3,7 @@ import {
   encodePairingLink,
   type MatrixLoginInvitation,
   type MatrixTransportBinding,
+  type PairingOperation,
   type SignedPairingOffer,
 } from '@codever/protocol'
 import { FileTrustedDeviceRegistry, type PairingOfferSource } from './registry.js'
@@ -28,6 +29,7 @@ export interface CreateDeviceInvitationInput {
   lifetimeMs?: number
   matrixLogin?: MatrixLoginMode
   appUrl?: string
+  allowedOperations?: PairingOperation[]
 }
 
 export interface CreatedDeviceInvitation {
@@ -142,6 +144,9 @@ export class DeviceInvitationCoordinator {
       gatewayTransport: this.options.gatewayTransport(),
       source: input.source,
       ...(input.lifetimeMs === undefined ? {} : { lifetimeMs: input.lifetimeMs }),
+      ...(input.allowedOperations === undefined
+        ? {}
+        : { allowedOperations: input.allowedOperations }),
       now,
     })
     const offer = created.signedOffer.offer

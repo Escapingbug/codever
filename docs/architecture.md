@@ -121,7 +121,34 @@ the caller-selected local file, encrypts and uploads the media, and durably
 stages an `inbox.file.received` event without a `sessionId`. The selected PWA
 conversation is never used as an implicit routing signal.
 
-### 3.6 Codever Protocol v3 (CVP/3) over Matrix
+### 3.6 Remote Privileged Execution
+
+The Matrix/PWA runtime may expose `privileged_exec` when a root Helper was
+installed on the Gateway host. The MCP subprocess calls the owner-only Gateway
+admin socket with its Codever session ID. The Gateway calls the active
+`TopicSession` directly, rather than entering the runtime mailbox behind the
+currently blocked provider turn. `SemanticSessionRuntime` accepts the request
+only while that turn is `querying` and owns its one-shot or ten-minute approval
+lease.
+
+```text
+Agent MCP subprocess
+  -> Gateway admin socket
+  -> active TopicSession / SemanticSessionRuntime
+  -> MatrixCvp3Port privilege decision
+  -> PWA device with privilege.approve
+  -> UnixSocketPrivilegeExecutor
+  -> root-owned Privilege Helper
+```
+
+The root Helper is a separate systemd service or macOS LaunchDaemon. It does
+not parse shell command strings: it executes one absolute executable with an
+argument vector and minimal environment. A root-owned policy constrains
+executable paths; request expiry, durable replay claims, timeouts, and bounded
+output are enforced again at the privilege boundary. The local Gateway account
+and Helper credential remain trusted. See `docs/privileged-execution.md`.
+
+### 3.7 Codever Protocol v3 (CVP/3) over Matrix
 
 Matrix is the durable conversation log, not a per-device mailbox or RPC queue.
 One encrypted room is one project and every session is an `m.thread`. User
@@ -310,7 +337,9 @@ Responsibilities:
 The active MCP stdio entry is `src/mcp/stdio.ts`. It registers:
 
 - context resources/tools from `src/mcp/resources.ts`;
-- notify tools from `src/mcp/tools/notify.ts`.
+- notify tools from `src/mcp/tools/notify.ts`;
+- `privileged_exec` from `src/mcp/tools/privilege.ts` when the Matrix Gateway
+  has an installed Privilege Helper.
 
 Shared registration lives in `src/mcp/register.ts`; session tools from `src/mcp/tools/session.ts` are registered only when a daemon/runtime context provides a `SessionToolContext`.
 

@@ -8,6 +8,8 @@ import type {
   GatewayAdminStatus,
   ReceiveWorkspaceFileRequest,
   ReceiveWorkspaceFileResponse,
+  GatewayPrivilegedExecutionRequest,
+  GatewayPrivilegedExecutionResponse,
   RevokeDeviceRequest,
 } from './types.js'
 
@@ -88,6 +90,12 @@ export class GatewayAdminClient {
       input,
       { 'idempotency-key': idempotencyKey },
     )
+  }
+
+  privilegedExecution(
+    input: GatewayPrivilegedExecutionRequest,
+  ): Promise<GatewayPrivilegedExecutionResponse> {
+    return this.request('POST', '/v1/privileged-executions', input)
   }
 
   private request<T>(

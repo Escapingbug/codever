@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { ZodError } from 'zod'
 import {
+  DEFAULT_PAIRING_OPERATIONS,
   DeviceInvitationCoordinator,
   DeviceInvitationError,
   FileTrustedDeviceRegistry,
@@ -12,6 +13,7 @@ import {
 import {
   createInvitationRequestSchema,
   receiveWorkspaceFileRequestSchema,
+  gatewayPrivilegedExecutionRequestSchema,
   revokeDeviceRequestSchema,
   type GatewayAdminDevice,
   type GatewayAdminErrorBody,
@@ -19,6 +21,8 @@ import {
   type GatewayAdminStatus,
   type ReceiveWorkspaceFileRequest,
   type ReceiveWorkspaceFileResponse,
+  type GatewayPrivilegedExecutionRequest,
+  type GatewayPrivilegedExecutionResponse,
 } from './types.js'
 
 const MAX_BODY_BYTES = 32 * 1024
@@ -36,6 +40,9 @@ export interface GatewayAdminServerOptions {
   receiveWorkspaceFile?: (
     input: ReceiveWorkspaceFileRequest & { requestId: string },
   ) => Promise<ReceiveWorkspaceFileResponse>
+  onPrivilegedExecution?: (
+    request: GatewayPrivilegedExecutionRequest,
+  ) => Promise<GatewayPrivilegedExecutionResponse>
   now?: () => number
   rateLimitPerMinute?: number
   onLog?: (message: string) => void
@@ -143,6 +150,20 @@ export async function startGatewayAdminServer(
         sendJson(response, 201, result)
         return
       }
+      if (request.method === 'POST' && path === '/v1/privileged-executions') {
+        if (!options.onPrivilegedExecution) {
+          throw new AdminHttpError(
+            503,
+            'privilege_unavailable',
+            'Remote privileged execution is not configured',
+          )
+        }
+        const data = gatewayPrivilegedExecutionRequestSchema.parse(
+          await readJsonBody(request),
+        )
+        sendJson(response, 200, await options.onPrivilegedExecution(data))
+        return
+      }
       if (request.method === 'POST' && path === '/v1/device-invitations') {
         const key = requireIdempotencyKey(request)
         const data = createInvitationRequestSchema.parse(
@@ -179,6 +200,14 @@ export async function startGatewayAdminServer(
           ...(data.lifetimeMs === undefined ? {} : { lifetimeMs: data.lifetimeMs }),
           matrixLogin: data.matrixLogin ?? 'preferred',
           ...(data.appUrl ? { appUrl: data.appUrl } : {}),
+          ...(data.privilegeApproval
+            ? {
+                allowedOperations: [
+                  ...DEFAULT_PAIRING_OPERATIONS,
+                  'privilege.approve' as const,
+                ],
+              }
+            : {}),
         })
         const invitation: GatewayAdminInvitation = {
           invitationId: created.invitationId,
