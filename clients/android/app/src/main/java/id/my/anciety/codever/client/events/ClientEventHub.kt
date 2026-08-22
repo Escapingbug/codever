@@ -308,12 +308,20 @@ class ClientEventHub(
     }
 
     /** A paginated copy can fill a gap, but it cannot downgrade a live action to read-only history. */
-    private fun preferLiveMessage(existing: ClientMessage, incoming: ClientMessage): ClientMessage =
-        when {
+    private fun preferLiveMessage(existing: ClientMessage, incoming: ClientMessage): ClientMessage {
+        val preferred = when {
             existing.historical == true && incoming.historical != true -> incoming
             existing.historical != true && incoming.historical == true -> existing
             else -> incoming
         }
+        val isStreamedOutput = existing.kind in STREAMED_OUTPUT_KINDS &&
+            incoming.kind in STREAMED_OUTPUT_KINDS
+        // Streamed Agent/tool upserts change one logical bubble, not its
+        // position in the turn. Other message types retain their existing
+        // authority rules, including canonical user-echo clock correction.
+        return if (!isStreamedOutput || preferred.timestamp == existing.timestamp) preferred
+        else preferred.copy(timestamp = existing.timestamp)
+    }
 
     fun removeMessage(
         sessionId: String,
@@ -649,6 +657,7 @@ class ClientEventHub(
     }
 
     private companion object {
+        val STREAMED_OUTPUT_KINDS = setOf(ClientMessageKind.AGENT, ClientMessageKind.TOOL)
         val HISTORY_ORDER = compareBy<StoredHistoryMessage>(
             { it.message.timestamp },
             { it.sequence },
