@@ -3,6 +3,7 @@ import type {
   HelloResult,
 } from "@codever/native-bridge";
 import { CODEVER_BUILD_VERSION } from "../buildInfo";
+import { ConnectionFailureError } from "../connectionFailure";
 import type { MatrixConnectionConfig } from "../matrix";
 import type { CodeverClient, CodeverClientHandlers } from "./CodeverClient";
 import {
@@ -151,7 +152,8 @@ export function isNativeManagedMatrixConfig(
 }
 
 function nativeRuntimeUnavailable(cause?: unknown): Error {
-  return new Error(
+  return new ConnectionFailureError(
+    "matrix_native_runtime_unavailable",
     "This Matrix session is owned by the native runtime, but the installed native host is unavailable or incompatible. Update or reopen the native app; Codever will not create a duplicate Web Matrix device.",
     cause === undefined ? undefined : { cause },
   );

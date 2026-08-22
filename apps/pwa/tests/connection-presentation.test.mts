@@ -7,27 +7,23 @@ import {
   deriveConnectionPresentation,
   deriveMobileConnectionSignal,
 } from "../app/connectionPresentation.ts";
+import {
+  automaticConnectionRetryDelay,
+  connectionRecoveryDisposition,
+} from "../app/connectionRecovery.ts";
 
-test("generic failures provide direct recovery actions instead of pointing back to settings", () => {
+test("generic recoverable failures stay owned by the automatic supervisor", () => {
   const presentation = deriveConnectionPresentation("error");
   assert.doesNotMatch(presentation.detail, /open connection settings/i);
-  assert.deepEqual(
+  assert.equal(
     deriveConnectionRecoveryPlan({
       status: "error",
       detail: null,
       hasSavedConnection: true,
     }),
-    {
-      title: "Recover this device",
-      detail:
-        "Retry the saved connection first. If this screen returns, repair only this device with a new one-time invitation; server conversation history is preserved.",
-      primary: { action: "retry", label: "Retry connection" },
-      secondary: {
-        action: "new-invitation",
-        label: "Use a new invitation",
-      },
-    },
+    null,
   );
+  assert.equal(connectionRecoveryDisposition(null), "automatic");
 });
 
 test("incomplete setup leads directly to a new invitation", () => {
@@ -40,15 +36,17 @@ test("incomplete setup leads directly to a new invitation", () => {
   assert.equal(recovery?.secondary?.action, "export-diagnostics");
 });
 
-test("cache recovery retries without discarding saved trust", () => {
+test("cache recovery is automatic and never suggests replacing saved trust", () => {
   const recovery = deriveConnectionRecoveryPlan({
     status: "error",
     detail: "matrix_projection_repair_required",
     hasSavedConnection: true,
   });
-  assert.equal(recovery?.primary.action, "retry");
-  assert.equal(recovery?.secondary?.action, "export-diagnostics");
-  assert.doesNotMatch(recovery?.detail ?? "", /invitation/i);
+  assert.equal(recovery, null);
+  assert.equal(
+    connectionRecoveryDisposition("matrix_projection_repair_required"),
+    "automatic",
+  );
 });
 
 test("authorization failures do not offer a retry that cannot repair them", () => {
@@ -109,6 +107,13 @@ test("an unrecoverably large Matrix baseline is visible instead of syncing forev
     presentation.detail.includes("matrix_application_control_baseline_too_large"),
     false,
   );
+  const recovery = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: "matrix_application_control_baseline_too_large",
+    hasSavedConnection: true,
+  });
+  assert.equal(recovery?.primary.action, "export-diagnostics");
+  assert.equal(recovery?.secondary, undefined);
 });
 
 test("an oversized incremental response retains the last verified cursor", () => {
@@ -121,17 +126,57 @@ test("an oversized incremental response retains the last verified cursor", () =>
   assert.match(presentation.detail, /last verified position was retained/i);
 });
 
-test("CVP3 recovery failures retain a stable diagnostic stage", () => {
+test("CVP3 recovery failures remain a progress state while retrying", () => {
   const presentation = deriveConnectionPresentation(
-    "error",
+    "reconnecting",
     "matrix_gateway_state_recovery_failed",
   );
-  assert.equal(presentation.title, "Conversation sync needs attention");
-  assert.match(presentation.detail, /export diagnostics/i);
+  assert.equal(presentation.state, "progress");
+  assert.equal(presentation.title, "Restoring conversations");
+  assert.match(presentation.detail, /automatically/i);
   assert.equal(
     presentation.rawDetailCode,
     "matrix_gateway_state_recovery_failed",
   );
+});
+
+test("automatic connection retries back off but never stop", () => {
+  assert.deepEqual(
+    Array.from({ length: 9 }, (_, attempt) =>
+      automaticConnectionRetryDelay(attempt),
+    ),
+    [250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 30_000, 30_000],
+  );
+});
+
+test("only authorization, compatibility, and integrity failures interrupt the user", () => {
+  assert.equal(
+    connectionRecoveryDisposition("matrix_session_repair_required"),
+    "reauthorize",
+  );
+  assert.equal(
+    connectionRecoveryDisposition("matrix_native_runtime_unavailable"),
+    "update",
+  );
+  assert.equal(
+    connectionRecoveryDisposition("matrix_web_locks_unavailable"),
+    "unsupported",
+  );
+  assert.equal(
+    connectionRecoveryDisposition("matrix_event_ingest_failed"),
+    "diagnostics",
+  );
+  assert.equal(
+    connectionRecoveryDisposition("matrix_gateway_state_recovery_failed"),
+    "automatic",
+  );
+  const nativePlan = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: "matrix_native_runtime_unavailable",
+    hasSavedConnection: true,
+  });
+  assert.equal(nativePlan?.primary.action, "export-diagnostics");
+  assert.match(nativePlan?.detail ?? "", /PWA update button cannot replace/i);
 });
 
 test("missing native session with retained trust is presented as a repairable state", () => {

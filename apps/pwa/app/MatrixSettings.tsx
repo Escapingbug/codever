@@ -47,7 +47,6 @@ type Props = {
   onClearPairing(): void;
   onConfirmPairing(): void;
   onClose(): void;
-  onConnect(): void;
   onDisconnect(): void;
   onForget(): void;
   onPasswordLogin(userId: string, password: string): void;
@@ -87,7 +86,6 @@ function MatrixSettingsDialog({
   onClearPairing,
   onConfirmPairing,
   onClose,
-  onConnect,
   onDisconnect,
   onForget,
   onPasswordLogin,
@@ -142,9 +140,6 @@ function MatrixSettingsDialog({
 
   const runRecoveryAction = (action: ConnectionRecoveryAction) => {
     switch (action) {
-      case "retry":
-        onConnect();
-        return;
       case "new-invitation":
         setManualRepairReason("manual");
         return;
@@ -217,9 +212,7 @@ function MatrixSettingsDialog({
                 disabled={busy}
                 onClick={() => runRecoveryAction(recoveryPlan.primary.action)}
               >
-                {busy && recoveryPlan.primary.action === "retry"
-                  ? "Retrying…"
-                  : recoveryPlan.primary.label}
+                {recoveryPlan.primary.label}
               </button>
               {recoveryPlan.secondary && (
                 <button
@@ -464,14 +457,6 @@ function MatrixSettingsDialog({
               disabled={pairingBusy || invitationBusy}
             >
               Disconnect
-            </button>
-          ) : trustedGateway && !repairRequired && !recoveryPlan ? (
-            <button
-              className="connect-button"
-              onClick={onConnect}
-              disabled={busy}
-            >
-              {busy ? "Connecting…" : "Try again"}
             </button>
           ) : null}
         </footer>

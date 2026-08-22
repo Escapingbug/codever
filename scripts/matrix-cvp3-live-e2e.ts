@@ -178,15 +178,23 @@ try {
     )
     if (coldProjectionRegression) recoveryRegressions.push(coldProjectionRegression)
 
-    process.stdout.write('[5e/7] Keeping a failed authoritative restore visible across later Matrix sync…\n')
+    process.stdout.write('[5e/7] Automatically recovering a failed authoritative restore without user action…\n')
     await suspendAndClearCvp3ReadModel(second)
     const overwrittenFailureRegression = await assertRecoveryFailureSurvivesLaterSync(
         second,
-        fixture,
         await currentSnapshotEventIds(fixture),
         [firstSession, secondSession],
     )
     if (overwrittenFailureRegression) recoveryRegressions.push(overwrittenFailureRegression)
+
+    process.stdout.write('[5f/7] Preserving cached conversations while automatic recovery retries…\n')
+    const cachedRecoveryRegression = await assertRecoveryFailureSurvivesLaterSync(
+        second,
+        await currentSnapshotEventIds(fixture),
+        [firstSession, secondSession],
+        [firstSession, secondSession],
+    )
+    if (cachedRecoveryRegression) recoveryRegressions.push(cachedRecoveryRegression)
 
     const androidSerial = process.env.CODEVER_ANDROID_SERIAL
     if (androidSerial) {
@@ -957,62 +965,55 @@ async function assertColdProjectionWaitsForAuthority(
 
 async function assertRecoveryFailureSurvivesLaterSync(
     page: Page,
-    matrix: DisposableMatrixFixture,
     snapshotEventIds: Set<string>,
     expectedSessionIds: string[],
+    expectedSessionIdsDuringRecovery: string[] = [],
 ): Promise<Error | null> {
     const interceptor = await interceptSnapshotRequests(page, snapshotEventIds, 'fail')
     let regression: Error | null = null
+    let interceptorDisposed = false
     try {
         await page.goto(pwaUrl)
         await interceptor.waitForAll()
         const alert = page.locator('.connection-toast[role="alert"]')
-        // The current bug can overwrite the error before React paints it, so
-        // do not require an observable transient error. Once both authoritative
-        // requests failed, the durable assertion is the state after a later,
-        // explicitly traceable successful /sync.
-        await delay(500)
-        const eventId = await sendSyncTickEvent(matrix)
-        await waitFor(
-            () => (logs.get(page) ?? []).some(line => line.includes(`[matrix-sync-event] ${eventId} `)),
-            {
-                description: 'a later successful Matrix sync after authoritative recovery failed',
-                timeoutMs: CONVERGENCE_TIMEOUT_MS,
-            },
-        )
-        await delay(500)
+        await delay(100)
+        const recoveryIndicatorVisible =
+            await page.locator('.connection-progress').isVisible().catch(() => false)
+            || await page.locator(
+                '.gateway-card.connection-state-reconnecting,'
+                + '.gateway-card.connection-state-connecting,'
+                + '.gateway-card.connection-state-securing',
+            ).isVisible().catch(() => false)
         const actual = {
             connected: await isConnected(page),
-            recoveryFailureVisible: await alert.isVisible().catch(() => false),
+            blockingFailureVisible: await alert.isVisible().catch(() => false),
+            recoveryIndicatorVisible,
+            visibleSessionIds: await sessionIds(page),
         }
         try {
             assert.deepEqual(actual, {
                 connected: false,
-                recoveryFailureVisible: true,
-            }, 'Matrix transport activity must not overwrite a failed CVP/3 recovery.')
+                blockingFailureVisible: false,
+                recoveryIndicatorVisible: true,
+                visibleSessionIds: expectedSessionIdsDuringRecovery,
+            }, 'A recoverable CVP/3 failure must remain non-blocking while the supervisor retries.')
         } catch (error) {
             if (!(error instanceof Error)) throw error
             regression = error
         }
-        if (!regression) {
-            await alert.click()
-            const dialog = page.getByRole('dialog', { name: 'Connection' })
-            await dialog.getByText('Retry the saved connection', { exact: true }).waitFor()
-            await dialog.getByRole('button', { name: 'Retry connection', exact: true }).waitFor()
-            await dialog.getByRole('button', { name: 'Export diagnostics', exact: true }).waitFor()
-            assert.equal(
-                await dialog.getByRole('button', { name: 'Use a new invitation', exact: true }).count(),
-                0,
-                'A bounded snapshot recovery failure must not suggest replacing valid device authorization.',
-            )
-        }
+        await interceptor.dispose()
+        interceptorDisposed = true
+        await waitForConnected(page)
+        await waitForSessionIds(page, expectedSessionIds)
+        assert.equal(
+            await alert.isVisible().catch(() => false),
+            false,
+            'Automatic recovery must converge without leaving a connection-attention prompt.',
+        )
     } finally {
         interceptor.release()
-        await interceptor.dispose()
+        if (!interceptorDisposed) await interceptor.dispose()
     }
-    await page.reload()
-    await waitForConnected(page)
-    await waitForSessionIds(page, expectedSessionIds)
     return regression
 }
 
@@ -1106,28 +1107,6 @@ function roomStateEventType(url: string): string | null {
         /\/_matrix\/client\/[^/]+\/rooms\/[^/]+\/state\/([^/]+)\/[^/]+$/u,
     )
     return match?.[1] ? decodeURIComponent(match[1]) : null
-}
-
-async function sendSyncTickEvent(matrix: DisposableMatrixFixture): Promise<string> {
-    const transactionId = `recovery-sync-${runId}-${Date.now()}`
-    const response = await fetch(
-        `${matrix.homeserver}/_matrix/client/v3/rooms/${encodeURIComponent(matrix.roomId)}`
-        + `/send/io.codever.e2e.sync_tick/${encodeURIComponent(transactionId)}`,
-        {
-            method: 'PUT',
-            headers: {
-                authorization: `Bearer ${matrix.tester.accessToken}`,
-                'content-type': 'application/json',
-            },
-            body: JSON.stringify({ runId }),
-        },
-    )
-    if (!response.ok) {
-        throw new Error(`Could not send Matrix sync tick: ${await response.text()}`)
-    }
-    const body = await response.json() as { event_id?: string }
-    assert.ok(body.event_id, 'Matrix sync tick did not return an event ID.')
-    return body.event_id
 }
 
 async function sendTimelineNoise(

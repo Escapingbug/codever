@@ -146,7 +146,11 @@ test("fails closed when a native-owned Matrix session loses its host", async () 
         }) as typeof createWebCodeverClient,
       },
     ),
-    /duplicate Web Matrix device/i,
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "matrix_native_runtime_unavailable" &&
+      /duplicate Web Matrix device/i.test(error.message),
   );
   assert.equal(webCreates, 0);
 });

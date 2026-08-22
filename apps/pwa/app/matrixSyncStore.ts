@@ -1,4 +1,5 @@
 import type { MatrixConnectionConfig } from "./matrix";
+import { ConnectionFailureError } from "./connectionFailure";
 
 const operations = new Map<string, Promise<void>>();
 
@@ -63,7 +64,8 @@ export async function acquireMatrixCryptoLock(
     typeof navigator === "undefined" ? undefined : navigator.locks,
 ): Promise<MatrixCryptoLock> {
   if (!locks) {
-    throw new Error(
+    throw new ConnectionFailureError(
+      "matrix_web_locks_unavailable",
       "This browser cannot safely isolate the Matrix encryption database because Web Locks are unavailable. Use a supported browser, log in as a new Matrix device, and pair again.",
     );
   }
@@ -101,7 +103,8 @@ export async function acquireMatrixCryptoLock(
   const lock = await granted;
   if (!lock) {
     await requestPromise;
-    throw new Error(
+    throw new ConnectionFailureError(
+      "matrix_crypto_lock_contended",
       "Another Codever tab is already using this Matrix device. Close it before reconnecting.",
     );
   }

@@ -1,4 +1,5 @@
 import type { MatrixConnectionStatus } from "./matrix";
+import { connectionRecoveryDisposition } from "./connectionRecovery";
 
 export type ConnectionPresentation = {
   state: "progress" | "ready" | "offline" | "blocked";
@@ -16,7 +17,6 @@ export type ConnectionRepairReason =
   | "manual";
 
 export type ConnectionRecoveryAction =
-  | "retry"
   | "new-invitation"
   | "check-updates"
   | "export-diagnostics";
@@ -61,14 +61,14 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
       "This device’s saved authorization no longer matches your computer. Reauthorize it with a new one-time invitation; your server conversation history will not be deleted.",
   },
   matrix_projection_repair_required: {
-    title: "Local conversation cache needs repair",
+    title: "Restoring conversations",
     detail:
-      "Codever preserved queued messages but could not rebuild its local conversation cache. Restart Codever; if this continues, export diagnostics.",
+      "Codever preserved queued messages and is rebuilding its local conversation cache automatically.",
   },
   matrix_gateway_state_recovery_failed: {
-    title: "Conversation sync needs attention",
+    title: "Restoring conversations",
     detail:
-      "Codever could not verify the current Gateway state. Try again; if this continues, export diagnostics.",
+      "Codever could not verify the latest Gateway state and is trying again automatically.",
   },
   matrix_event_ingest_failed: {
     title: "A conversation update could not be saved",
@@ -125,9 +125,9 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     detail: "Add this device again with a new invitation.",
   },
   matrix_recovery_blocked: {
-    title: "Connection needs attention",
+    title: "Restoring connection",
     detail:
-      "Automatic recovery stopped to preserve this device’s saved trust. Retry the connection or repair it with a new invitation.",
+      "Codever preserved this device’s saved trust and is retrying automatically.",
   },
   matrix_sync_service_build_failed: {
     title: "Background connection could not start",
@@ -173,6 +173,25 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     title: "Connection could not be restored",
     detail: "Codever will retry. Export diagnostics if this continues.",
   },
+  matrix_connection_bootstrap_failed: {
+    title: "Reconnecting",
+    detail: "Codever could not start the connection and is trying again automatically.",
+  },
+  matrix_crypto_lock_contended: {
+    title: "Waiting for another Codever window",
+    detail:
+      "This device connection is active in another window. Codever will continue automatically when it becomes available.",
+  },
+  matrix_native_runtime_unavailable: {
+    title: "Native connection unavailable",
+    detail:
+      "Reopen or update the Codever app. A duplicate browser Matrix device will not be created.",
+  },
+  matrix_web_locks_unavailable: {
+    title: "Browser not supported",
+    detail:
+      "This browser cannot safely share Codever’s encrypted local storage. Use a browser with Web Locks support.",
+  },
   matrix_application_control_sync_rejected: {
     title: "Connection could not resume",
     detail: "Restart Codever. If this continues, export diagnostics for support.",
@@ -213,7 +232,7 @@ const DEFAULT_COPY: Record<MatrixConnectionStatus, DetailCopy> = {
   error: {
     title: "Connection needs attention",
     detail:
-      "Codever could not restore this device’s saved connection automatically.",
+      "Automatic recovery could not continue safely. Export diagnostics for investigation.",
   },
 };
 
@@ -225,25 +244,6 @@ const INVITATION_RECOVERY_DETAILS = new Set([
 
 const UPDATE_RECOVERY_DETAILS = new Set([
   "matrix_sync_service_build_failed",
-]);
-
-const RETRY_RECOVERY_DETAILS = new Set([
-  "matrix_projection_repair_required",
-  "matrix_gateway_state_recovery_failed",
-  "matrix_event_ingest_failed",
-  "matrix_sdk_internal_failure",
-  "matrix_runtime_failed",
-  "matrix_storage_failed",
-  "matrix_first_sync_timeout",
-  "matrix_sync_task_stopped",
-  "matrix_sync_stale",
-  "matrix_send_queue_resume_failed",
-  "matrix_driver_create_failed",
-  "matrix_driver_start_timeout",
-  "matrix_restore_or_sync_failed",
-  "matrix_application_control_sync_rejected",
-  "matrix_application_control_baseline_too_large",
-  "matrix_application_control_incremental_too_large",
 ]);
 
 export function deriveConnectionPresentation(
@@ -328,22 +328,6 @@ export function deriveConnectionRecoveryPlan(input: {
     };
   }
 
-  if (RETRY_RECOVERY_DETAILS.has(detail) && input.hasSavedConnection) {
-    return {
-      title: "Retry the saved connection",
-      detail:
-        "Retry once without clearing this device. Queued commands and saved trust are retained. If the same error returns, export diagnostics.",
-      primary: {
-        action: "retry",
-        label: "Retry connection",
-      },
-      secondary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
-      },
-    };
-  }
-
   if (!input.hasSavedConnection) {
     return {
       title: "Connect this device again",
@@ -360,17 +344,39 @@ export function deriveConnectionRecoveryPlan(input: {
     };
   }
 
+  if (connectionRecoveryDisposition(detail) === "automatic") return null;
+
+  if (detail === "matrix_native_runtime_unavailable") {
+    return {
+      title: "Update the native app",
+      detail:
+        "The installed native shell cannot host this saved connection. Reopen Codever or install the latest APK; the PWA update button cannot replace the native shell.",
+      primary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
+  if (connectionRecoveryDisposition(detail) === "unsupported") {
+    return {
+      title: "Use a supported browser",
+      detail:
+        "This browser cannot safely coordinate Codever’s encrypted local storage. Reconnecting or using another invitation in this browser will not fix it.",
+      primary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
   return {
-    title: "Recover this device",
+    title: "Export connection diagnostics",
     detail:
-      "Retry the saved connection first. If this screen returns, repair only this device with a new one-time invitation; server conversation history is preserved.",
+      "Codever stopped because it could not safely verify the received data. Reconnecting or replacing the invitation cannot repair this condition.",
     primary: {
-      action: "retry",
-      label: "Retry connection",
-    },
-    secondary: {
-      action: "new-invitation",
-      label: "Use a new invitation",
+      action: "export-diagnostics",
+      label: "Export diagnostics",
     },
   };
 }

@@ -41,10 +41,11 @@ The journey proves, through real UI and Matrix traffic:
 5. The second browser retains its Matrix account, device identity, and Gateway
    trust while its local CVP/3 read model is erased. With current snapshot
    requests held, it remains visibly in recovery instead of reporting
-   `Connected` with an empty inventory. An injected snapshot failure also
-   remains visible across a later successful Matrix sync. Opening that failure
-   exposes `Retry connection` and `Export diagnostics` in the first settings
-   viewport, while correctly avoiding an unnecessary reauthorization action.
+   `Connected` with an empty inventory. An injected snapshot failure remains a
+   non-blocking recovery state; after the fault is released the same page
+   reconnects and restores its sessions without a reload, retry button, or new
+   invitation. The same failure is injected again with a retained projection to
+   prove that cached conversations remain visible throughout the retry.
 6. The isolated Android APK installs and pairs while that trusted browser is
    offline. Android creates a session, then the browser cold-starts and restores
    the complete cross-device inventory before the session is deleted.

@@ -579,7 +579,9 @@ test("Matrix crypto lock is held until explicit release", async () => {
 test("Matrix crypto access fails closed without an available Web Lock", async () => {
   await assert.rejects(
     acquireMatrixCryptoLock("crypto-unsupported", null),
-    /Web Locks are unavailable/,
+    (error) =>
+      error?.code === "matrix_web_locks_unavailable" &&
+      /Web Locks are unavailable/.test(error.message),
   );
   await assert.rejects(
     acquireMatrixCryptoLock("crypto-busy", {
@@ -587,7 +589,9 @@ test("Matrix crypto access fails closed without an available Web Lock", async ()
         await callback(null);
       },
     }),
-    /Another Codever tab/,
+    (error) =>
+      error?.code === "matrix_crypto_lock_contended" &&
+      /Another Codever tab/.test(error.message),
   );
 });
 

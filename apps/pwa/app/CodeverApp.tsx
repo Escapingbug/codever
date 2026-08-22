@@ -138,6 +138,11 @@ import {
   type ConnectionRepairReason,
   type MobileConnectionSignal,
 } from "./connectionPresentation";
+import { connectionFailureCode } from "./connectionFailure";
+import {
+  automaticConnectionRetryDelay,
+  connectionRecoveryDisposition,
+} from "./connectionRecovery";
 import { deriveGatewayLiveness } from "./gatewayLiveness";
 import { createConnectionDiagnostics } from "./connectionDiagnostics";
 import {
@@ -914,6 +919,9 @@ function CodeverAppRuntime() {
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const codeverClientRef = useRef<CodeverClient | null>(null);
   const matrixStartupGenerationRef = useRef(0);
+  const connectionRecoveryTimerRef = useRef<number | null>(null);
+  const connectionRecoveryAttemptRef = useRef(0);
+  const connectionRecoveryAllowedRef = useRef(true);
   const matrixStartupRef = useRef<{
     phase: "connecting" | "securing";
     startedAt: number;
@@ -1620,6 +1628,9 @@ function CodeverAppRuntime() {
       if (sessionCreateRecoveryTimerRef.current !== null) {
         window.clearTimeout(sessionCreateRecoveryTimerRef.current);
       }
+      if (connectionRecoveryTimerRef.current !== null) {
+        window.clearTimeout(connectionRecoveryTimerRef.current);
+      }
     },
     [],
   );
@@ -1902,6 +1913,11 @@ function CodeverAppRuntime() {
   useEffect(
     () => () => {
       matrixStartupGenerationRef.current += 1;
+      connectionRecoveryAllowedRef.current = false;
+      if (connectionRecoveryTimerRef.current !== null) {
+        window.clearTimeout(connectionRecoveryTimerRef.current);
+        connectionRecoveryTimerRef.current = null;
+      }
       pairingAbortRef.current?.abort();
       clearSessionLifecycleRecoveries();
       codeverClientRef.current?.dispose();
@@ -2808,15 +2824,56 @@ function CodeverAppRuntime() {
     })();
   }
 
+  function cancelAutomaticConnectionRecovery(resetAttempts = true) {
+    if (connectionRecoveryTimerRef.current !== null) {
+      window.clearTimeout(connectionRecoveryTimerRef.current);
+      connectionRecoveryTimerRef.current = null;
+    }
+    if (resetAttempts) connectionRecoveryAttemptRef.current = 0;
+  }
+
+  function scheduleAutomaticConnectionRecovery(
+    config: MatrixConnectionConfig,
+    detail: string,
+  ) {
+    if (
+      !connectionRecoveryAllowedRef.current ||
+      connectionRecoveryTimerRef.current !== null
+    ) {
+      return;
+    }
+    const attempt = connectionRecoveryAttemptRef.current;
+    connectionRecoveryAttemptRef.current = attempt + 1;
+    const delay = automaticConnectionRetryDelay(attempt);
+    console.warn(
+      `[connection/recovery] ${detail}; retry ${attempt + 1} in ${delay}ms`,
+    );
+    matrixStartupRef.current = null;
+    connectionStatusRef.current = "reconnecting";
+    setConnectionStatus("reconnecting");
+    setConnectionDetail(detail);
+    setConnectionError(null);
+    connectionRecoveryTimerRef.current = window.setTimeout(() => {
+      connectionRecoveryTimerRef.current = null;
+      if (!connectionRecoveryAllowedRef.current) return;
+      void connectCodeverClient(config, false, true, true);
+    }, delay);
+  }
+
   async function connectCodeverClient(
     configInput = matrixConfig,
     closeSettings = true,
     recoveringInterruptedStartup = false,
+    automaticRecovery = false,
   ): Promise<CodeverClient | null> {
     // Native status callbacks may run before createCodeverClient() returns.
     // Remember a repair result synchronously so the routine post-connect close
     // cannot immediately undo the recovery dialog opened by that callback.
     let keepSettingsOpenForRepair = false;
+    if (!automaticRecovery) {
+      connectionRecoveryAllowedRef.current = true;
+      cancelAutomaticConnectionRecovery();
+    }
     matrixSessionRepairRequiredRef.current = false;
     const storedSessionCreateRecovery = pendingSessionCreateRecoveryRef.current;
     const sessionCreateRecovery =
@@ -2841,56 +2898,64 @@ function CodeverAppRuntime() {
       startedAt: Date.now(),
       hiddenAt: null,
     };
-    optimisticMessagesRef.current.clear();
-    reconciledOptimisticMessageIdsRef.current.clear();
-    pendingPromptSessionIdsRef.current.clear();
-    setSubmittingPromptSessionIds(new Set());
-    revisionConflictRef.current = null;
-    nativeCommandReviewRef.current = null;
-    activePromptCommandsRef.current.clear();
-    completedCommandResultsRef.current.clear();
-    completionObservationOrderRef.current = 0;
-    turnPromptLookupRef.current.clear();
-    turnHistoryHydrationRef.current = null;
-    messageElementsRef.current.clear();
-    setObservedCommandCompletions([]);
-    setTurnPromptCache(new Map());
-    setExpandedTurnId(null);
-    setTurnHistoryLoad(null);
-    setFeedReturnAnchor(null);
-    setRevisionConflict(null);
-    setNativeCommandReview(null);
+    if (!automaticRecovery) {
+      optimisticMessagesRef.current.clear();
+      reconciledOptimisticMessageIdsRef.current.clear();
+      pendingPromptSessionIdsRef.current.clear();
+      setSubmittingPromptSessionIds(new Set());
+      revisionConflictRef.current = null;
+      nativeCommandReviewRef.current = null;
+      activePromptCommandsRef.current.clear();
+      completedCommandResultsRef.current.clear();
+      completionObservationOrderRef.current = 0;
+      turnPromptLookupRef.current.clear();
+      turnHistoryHydrationRef.current = null;
+      messageElementsRef.current.clear();
+      setObservedCommandCompletions([]);
+      setTurnPromptCache(new Map());
+      setExpandedTurnId(null);
+      setTurnHistoryLoad(null);
+      setFeedReturnAnchor(null);
+      setRevisionConflict(null);
+      setNativeCommandReview(null);
+    }
     setConnectionError(null);
-    setConnectionDetail("Preparing your connection…");
-    connectionStatusRef.current = "connecting";
-    setConnectionStatus("connecting");
-    setMessages([]);
-    setSelectedSessionId(null);
-    setRunningSessionIds(new Set());
-    setStoppingSessionIds(new Set());
-    setAgentActivitiesBySession(new Map());
-    pendingCreatedSessionIdRef.current = null;
-    updateSessionLifecycleBusy(new Map());
-    setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
-    setNewSessionBusy(Boolean(sessionCreateRecovery));
+    setConnectionDetail(
+      automaticRecovery ? "matrix_sync_retry_wait" : "Preparing your connection…",
+    );
+    connectionStatusRef.current = automaticRecovery ? "reconnecting" : "connecting";
+    setConnectionStatus(automaticRecovery ? "reconnecting" : "connecting");
+    if (!automaticRecovery) {
+      setMessages([]);
+      setSelectedSessionId(null);
+      setRunningSessionIds(new Set());
+      setStoppingSessionIds(new Set());
+      setAgentActivitiesBySession(new Map());
+      pendingCreatedSessionIdRef.current = null;
+      updateSessionLifecycleBusy(new Map());
+      setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
+      setNewSessionBusy(Boolean(sessionCreateRecovery));
+    }
     // A persisted recovery is safe across reloads. Only the short interval
     // before rememberPendingSessionCreate() records a command may defer an
     // application update.
     setSessionCreateReloadBlocked(false);
-    knownGatewaySessionIdsRef.current.clear();
-    liveMessagesBySessionRef.current.clear();
-    setGatewayState(null);
-    setGatewayRevision(null);
-    selectedSessionIdRef.current = null;
-    historySessionIdRef.current = null;
-    historyCursorRef.current = null;
-    historyGenerationRef.current += 1;
-    historyLoadingRef.current = false;
-    setHistoryLoading(false);
-    setHistoryHasMore(false);
-    setFeedHasUnseenMessages(false);
-    setHistoryError(null);
-    setHistoryRetryMode(null);
+    if (!automaticRecovery) {
+      knownGatewaySessionIdsRef.current.clear();
+      liveMessagesBySessionRef.current.clear();
+      setGatewayState(null);
+      setGatewayRevision(null);
+      selectedSessionIdRef.current = null;
+      historySessionIdRef.current = null;
+      historyCursorRef.current = null;
+      historyGenerationRef.current += 1;
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+      setHistoryHasMore(false);
+      setFeedHasUnseenMessages(false);
+      setHistoryError(null);
+      setHistoryRetryMode(null);
+    }
     try {
       const normalized = normalizeMatrixConfig(configInput);
       historyScopeRef.current = matrixHistoryScope({
@@ -2902,8 +2967,10 @@ function CodeverAppRuntime() {
         window.localStorage,
         historyScopeRef.current,
       );
-      selectedSessionIdRef.current = rememberedSessionId;
-      setSelectedSessionId(rememberedSessionId);
+      if (!automaticRecovery) {
+        selectedSessionIdRef.current = rememberedSessionId;
+        setSelectedSessionId(rememberedSessionId);
+      }
       setMatrixConfig(normalized);
       saveMatrixConfig(normalized);
       const connection = await createCodeverClient(normalized, {
@@ -2923,13 +2990,27 @@ function CodeverAppRuntime() {
           ) {
             matrixStartupRef.current.phase = presentedStatus;
           }
-          connectionStatusRef.current = presentedStatus;
           const repairReason: ConnectionRepairReason | null =
             presentedStatus === "error"
               ? connectionRepairReasonForDetail(detail)
               : null;
           matrixSessionRepairRequiredRef.current =
             repairReason === "matrix-session";
+          if (
+            presentedStatus === "error" &&
+            connectionRecoveryDisposition(detail) === "automatic"
+          ) {
+            scheduleAutomaticConnectionRecovery(
+              normalized,
+              detail?.trim() || "matrix_connection_bootstrap_failed",
+            );
+            return;
+          }
+          if (presentedStatus === "error") {
+            connectionRecoveryAllowedRef.current = false;
+            cancelAutomaticConnectionRecovery();
+          }
+          connectionStatusRef.current = presentedStatus;
           setConnectionStatus(presentedStatus);
           setConnectionDetail(presentedStatus === "offline" ? null : detail ?? null);
           if (presentedStatus === "error") {
@@ -2953,6 +3034,7 @@ function CodeverAppRuntime() {
             matrixStartupRef.current = null;
           }
           if (presentedStatus === "connected") {
+            cancelAutomaticConnectionRecovery();
             sessionStorage.removeItem(MATRIX_STARTUP_RECOVERY_SESSION_KEY);
             setConnectionError(null);
             dispatchUiNotice({ type: "scope-recovered", scope: "connection" });
@@ -3164,15 +3246,25 @@ function CodeverAppRuntime() {
     } catch (error) {
       if (!isCurrentStartup()) return null;
       matrixStartupRef.current = null;
+      const detail = connectionFailureCode(error);
+      console.error(`[connection/startup] ${detail}`, error);
+      if (connectionRecoveryDisposition(detail) === "automatic") {
+        scheduleAutomaticConnectionRecovery(configInput, detail);
+        return null;
+      }
+      connectionRecoveryAllowedRef.current = false;
+      cancelAutomaticConnectionRecovery();
       connectionStatusRef.current = "error";
       setConnectionStatus("error");
-      setConnectionDetail(null);
-      setConnectionError(formatUiError(error));
+      setConnectionDetail(detail);
+      setConnectionError(deriveConnectionPresentation("error", detail).detail);
       return null;
     }
   }
 
   function disconnectClient() {
+    connectionRecoveryAllowedRef.current = false;
+    cancelAutomaticConnectionRecovery();
     const queuedSessionCreate = pendingSessionCreateRecoveryRef.current;
     matrixStartupGenerationRef.current += 1;
     const disconnectingClient = codeverClientRef.current;
@@ -3254,6 +3346,8 @@ function CodeverAppRuntime() {
     // published its CodeverClient. A stale startup disposes itself once its
     // current bridge operation settles, releasing the lease to bootstrap.
     matrixStartupGenerationRef.current += 1;
+    connectionRecoveryAllowedRef.current = false;
+    cancelAutomaticConnectionRecovery();
     const attachedClient = codeverClientRef.current;
     codeverClientRef.current = null;
     attachedClient?.dispose();
@@ -6698,7 +6792,6 @@ function CodeverAppRuntime() {
         }}
         onConfirmPairing={() => void confirmPairing()}
         onClose={() => setSettingsOpen(false)}
-        onConnect={() => void connectCodeverClient()}
         onDisconnect={() => disconnectClient()}
         onForget={() => setForgetDialogOpen(true)}
         onPasswordLogin={(userId, password) =>
