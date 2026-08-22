@@ -157,6 +157,10 @@ pnpm test:protocol-integration
 # emulator is connected and explicit mutation permission is supplied.
 CODEVER_WEB_LIVE_E2E=1 pnpm test:e2e:web-live
 
+# Focused real-browser regression: one optimistic prompt must transition from
+# Sending to Sent in place while the command reaches the Agent exactly once.
+pnpm test:e2e:pwa-prompt-reconciliation
+
 # Real browser/Gateway recovery across a Matrix /sync stall longer than the
 # command lifetime and watchdog boundary, without restarting the Agent runtime.
 CODEVER_SYNC_STALL_E2E=1 pnpm test:e2e:web-sync-stall

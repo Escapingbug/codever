@@ -28,6 +28,7 @@ import {
 
 const ENABLE_ENV = 'CODEVER_WEB_LIVE_E2E'
 const ALPHA_ENABLE_ENV = 'CODEVER_ALPHA_LIVE_E2E'
+const PROMPT_RECONCILIATION_ENABLE_ENV = 'CODEVER_PWA_PROMPT_RECONCILIATION_E2E'
 const UI_FEEDBACK_TIMEOUT_MS = 1_500
 const CONVERGENCE_TIMEOUT_MS = 15_000
 const STARTUP_TIMEOUT_MS = 90_000
@@ -43,12 +44,22 @@ type ManagedProcess = {
     stop(): Promise<void>
 }
 
+type PromptDeliveryObservation = {
+    samples: Array<{
+        count: number
+        deliveryStates: string[]
+    }>
+    maxCount: number
+}
+
 const alphaEnabled = process.env[ALPHA_ENABLE_ENV] === '1'
+const promptReconciliationOnly = process.env[PROMPT_RECONCILIATION_ENABLE_ENV] === '1'
 const acceptedCreateRecoveryOnly =
     process.env.CODEVER_ALPHA_ACCEPTED_CREATE_RECOVERY_ONLY === '1'
-if (process.env[ENABLE_ENV] !== '1' && !alphaEnabled) {
+if (process.env[ENABLE_ENV] !== '1' && !alphaEnabled && !promptReconciliationOnly) {
     throw new Error(
-        `Live Web E2E starts a disposable Synapse fixture and mutates Gateway state. Set ${ENABLE_ENV}=1 or ${ALPHA_ENABLE_ENV}=1 to run it.`,
+        'Live Web E2E starts a disposable Synapse fixture and mutates Gateway state. '
+        + `Set ${ENABLE_ENV}=1, ${ALPHA_ENABLE_ENV}=1, or ${PROMPT_RECONCILIATION_ENABLE_ENV}=1 to run it.`,
     )
 }
 
@@ -151,9 +162,11 @@ try {
         fixturePath,
         gatewayDataDirectory,
         gatewayAdminSocket,
-        providerDelayMs: 30_000,
+        providerDelayMs: promptReconciliationOnly ? 1_000 : 30_000,
         sessionExtensionsJson: privacyFixture.gatewayRegistration,
-        startupPairingOperations: LEGACY_PAIRING_OPERATIONS,
+        ...(!promptReconciliationOnly
+            ? { startupPairingOperations: LEGACY_PAIRING_OPERATIONS }
+            : {}),
     })
     const pairingMatch = await gatewayProcess.waitFor(
         /Pairing link \(paste fallback\):\s*\n([^\n]+)\n/u,
@@ -179,6 +192,33 @@ try {
     )
     await gatewayProcess.waitFor(/Gateway ready with 1 trusted device\(s\)\./u)
 
+    if (promptReconciliationOnly) {
+        process.stdout.write('[4/4] Creating a current-project session and verifying one prompt row…\n')
+        await createCurrentWorkspaceSession(firstPage)
+        await sendPromptWithSingleDeliveryTransition(firstPage, prompt)
+        await waitForText(firstPage, PROVIDER_RESPONSE)
+        const providerInvocation = `[e2e-provider] invocation sha256=${
+            createHash('sha256').update(prompt).digest('hex')
+        }`
+        assert.equal(
+            await promptUserRows(firstPage, prompt).count(),
+            1,
+            'The completed Agent turn left more than one copy of its user prompt',
+        )
+        assert.equal(
+            gatewayProcess.output.split(providerInvocation).length - 1,
+            1,
+            'The reconciled prompt did not reach the Agent exactly once',
+        )
+        assert.equal(
+            await acceptedCvp3CommandCount(gatewayDataDirectory, 'prompt.submit'),
+            1,
+            'The Gateway did not accept exactly one prompt command',
+        )
+        process.stdout.write(
+            'PASS — real browser, production PWA, Synapse, Gateway, E2EE, and Agent response kept one reconciled prompt row.\n',
+        )
+    } else {
     process.stdout.write('[3u/8] Upgrading a device paired before session lifecycle capabilities…\n')
     assert.deepEqual(
         decodePairingLink(firstPairingLink).offer.allowedOperations,
@@ -388,8 +428,8 @@ try {
     await openProjectSession(firstPage, projectName)
     await openProjectSession(secondPage, projectName)
 
-    process.stdout.write('[6/8] Sending a prompt and restoring its Matrix-native history…\n')
-    await sendPrompt(firstPage, prompt)
+    process.stdout.write('[6/8] Sending one optimistic prompt, reconciling it in place, and restoring its Matrix-native history…\n')
+    await sendPromptWithSingleDeliveryTransition(firstPage, prompt)
     await waitForText(firstPage, prompt)
     await waitForText(firstPage, PROVIDER_RESPONSE)
     await waitForText(secondPage, prompt)
@@ -786,6 +826,7 @@ try {
     }
 
     process.stdout.write('[8/8] PASS — real browser, Synapse, Gateway, E2EE, history, and deletion converged.\n')
+    }
 } catch (error) {
     await mkdir(artifactDirectory, { recursive: true })
     await Promise.all([
@@ -958,6 +999,39 @@ async function createSession(page: Page, projectName: string, cwd: string): Prom
         1,
         `Session creation must expose exactly one new stable identity; got ${createdSessionIds.join(', ')}`,
     )
+    return createdSessionIds[0]!
+}
+
+async function createCurrentWorkspaceSession(page: Page): Promise<string> {
+    const baseline = await activeSessionCount(page)
+    const existingSessionIds = new Set(await activeSessionIds(page))
+    await page.getByRole('button', { name: 'New conversation' }).click()
+    const dialog = page.locator('.new-session-dialog')
+    await dialog.waitFor({ state: 'visible' })
+    const startedAt = Date.now()
+    await dialog.getByRole('button', { name: 'Create session', exact: true }).click()
+    await page.locator('.session-create-pending').waitFor({
+        state: 'visible',
+        timeout: UI_FEEDBACK_TIMEOUT_MS,
+    })
+    await waitFor(async () => await activeSessionCount(page) === baseline + 1, {
+        description: 'one current-project session',
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        failFast: () => assertNoPageErrors(page),
+    })
+    assert.ok(
+        Date.now() - startedAt <= CONVERGENCE_TIMEOUT_MS,
+        `Session creation exceeded ${CONVERGENCE_TIMEOUT_MS} ms`,
+    )
+    const createdSessionIds = (await activeSessionIds(page)).filter(
+        sessionId => !existingSessionIds.has(sessionId),
+    )
+    assert.equal(
+        createdSessionIds.length,
+        1,
+        `Session creation must expose exactly one new stable identity; got ${createdSessionIds.join(', ')}`,
+    )
+    await openSession(page, createdSessionIds[0]!)
     return createdSessionIds[0]!
 }
 
@@ -1161,10 +1235,121 @@ async function acceptedCommandCount(
         .length
 }
 
+async function acceptedCvp3CommandCount(
+    dataDirectory: string,
+    operation: string,
+): Promise<number> {
+    const content = await readFile(
+        join(dataDirectory, 'gateway-replay.jsonl.v3-commands.jsonl'),
+        'utf8',
+    )
+    return content.split(/\r?\n/u)
+        .filter(Boolean)
+        .map(line => JSON.parse(line) as {
+            kind?: string
+            command?: { operation?: string }
+        })
+        .filter(entry =>
+            entry.kind === 'accepted'
+            && entry.command?.operation === operation
+        )
+        .length
+}
+
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
     const composer = page.locator('textarea[aria-label^="Message "]')
     await composer.fill(prompt)
     await page.getByRole('button', { name: 'Send message' }).click()
+}
+
+async function sendPromptWithSingleDeliveryTransition(
+    page: Page,
+    prompt: string,
+): Promise<void> {
+    const composer = page.locator('textarea[aria-label^="Message "]')
+    await composer.fill(prompt)
+    const observationPromise = observePromptDelivery(page, prompt)
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const observation = await observationPromise
+
+    assert.ok(
+        observation.maxCount <= 1,
+        `One submitted prompt rendered ${observation.maxCount} user rows: ${JSON.stringify(observation.samples)}`,
+    )
+    const sendingIndex = observation.samples.findIndex(
+        sample => sample.deliveryStates.includes('Sending'),
+    )
+    const sentIndex = observation.samples.findIndex(
+        sample => sample.deliveryStates.includes('Sent'),
+    )
+    assert.ok(
+        sendingIndex >= 0,
+        `The optimistic prompt never rendered its Sending state: ${JSON.stringify(observation.samples)}`,
+    )
+    assert.ok(
+        sentIndex > sendingIndex,
+        `The same prompt did not transition from Sending to Sent in place: ${JSON.stringify(observation.samples)}`,
+    )
+    assert.equal(
+        await promptUserRows(page, prompt).count(),
+        1,
+        'The authoritative prompt did not settle as exactly one user row',
+    )
+    process.stdout.write(
+        '[prompt] PASS — one user row transitioned from Sending to Sent without duplication: '
+        + `${JSON.stringify(observation.samples)}\n`,
+    )
+}
+
+function promptUserRows(page: Page, prompt: string): Locator {
+    return page.locator('.chat-feed .message-row.user-row').filter({
+        has: page.locator('.user-bubble > p', { hasText: prompt }),
+    })
+}
+
+async function observePromptDelivery(
+    page: Page,
+    prompt: string,
+): Promise<PromptDeliveryObservation> {
+    const observation: PromptDeliveryObservation = {
+        samples: [],
+        maxCount: 0,
+    }
+    const deadline = Date.now() + CONVERGENCE_TIMEOUT_MS
+    let sentAt: number | null = null
+    while (Date.now() < deadline) {
+        assertNoPageErrors(page)
+        const rows = promptUserRows(page, prompt)
+        const [count, sendingCount, sentCount, failedCount] = await Promise.all([
+            rows.count(),
+            rows.locator('.delivery-indicator[aria-label="Sending"]').count(),
+            rows.locator('.delivery-indicator[aria-label="Sent"]').count(),
+            rows.locator('.delivery-indicator[aria-label="Send failed"]').count(),
+        ])
+        const deliveryStates = [
+            ...Array.from({ length: sendingCount }, () => 'Sending'),
+            ...Array.from({ length: sentCount }, () => 'Sent'),
+            ...Array.from({ length: failedCount }, () => 'Send failed'),
+        ]
+        const current = { count, deliveryStates }
+        const last = observation.samples.at(-1)
+        if (
+            !last
+            || last.count !== current.count
+            || last.deliveryStates.join('\u0000') !== current.deliveryStates.join('\u0000')
+        ) {
+            observation.samples.push(current)
+        }
+        observation.maxCount = Math.max(observation.maxCount, count)
+        if (sentCount > 0 && sentAt === null) sentAt = Date.now()
+        // Continue for a short settle window after acknowledgement so a
+        // delayed canonical projection cannot append a second row.
+        if (sentAt !== null && Date.now() - sentAt >= 250) {
+            return observation
+        }
+        await delay(16)
+    }
+    return observation
 }
 
 async function sendPromptWithAttachment(

@@ -21,6 +21,7 @@
     "test:protocol-integration": "vitest run --config vitest.e2e.config.ts",
     "test:e2e": "pnpm run test:e2e:web-sync-stall && pnpm run test:e2e:web-live && pnpm run test:e2e:android-live",
     "test:e2e:web-live": "tsx scripts/web-live-e2e.ts",
+    "test:e2e:pwa-prompt-reconciliation": "CODEVER_PWA_PROMPT_RECONCILIATION_E2E=1 tsx scripts/web-live-e2e.ts",
     "test:e2e:matrix-cvp3-live": "tsx scripts/matrix-cvp3-live-e2e.ts",
     "test:e2e:web-sync-stall": "tsx scripts/web-sync-stall-e2e.ts",
     "test:e2e:android-live": "tsx scripts/android-live-e2e.ts",

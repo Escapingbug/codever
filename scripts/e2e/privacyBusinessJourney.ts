@@ -130,9 +130,9 @@ export async function startPrivacyBusinessFixture(
 
     return {
         gatewayRegistration: JSON.stringify([{
-            descriptor: hasSessionExtensionDescriptor,
             endpoint: `http://127.0.0.1:${extensionPort}`,
             bearerToken,
+            expectedExtensionId: hasSessionExtensionDescriptor.id,
             timeoutMs: 5_000,
         }]),
         get output() { return extensionOutput },
