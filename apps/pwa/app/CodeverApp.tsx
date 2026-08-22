@@ -1640,12 +1640,15 @@ function CodeverAppRuntime() {
       lifecycleFailure === null
         ? incoming
         : { ...incoming, kind: "error", text: lifecycleFailure };
-    const message = chatMessageFromIncoming(displayIncoming, sessionId);
     const ownUserMessage = Boolean(
       incoming.kind === "user" &&
         incoming.originDeviceId &&
         incoming.originDeviceId === codeverClientRef.current?.deviceId,
     );
+    const message: ChatMessage = {
+      ...chatMessageFromIncoming(displayIncoming, sessionId),
+      ...(ownUserMessage ? { deliveryState: "sent" } : {}),
+    };
     const optimisticMessageId = ownUserMessage
       ? findOptimisticMessageId(optimisticMessagesRef.current.values(), message)
       : undefined;

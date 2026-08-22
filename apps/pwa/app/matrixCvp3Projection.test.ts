@@ -63,6 +63,28 @@ describe("MatrixCvp3Projection", () => {
     expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
   });
 
+  it("preserves the prompt origin through local and Gateway projections", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyCommand(createCommand("a"), "$root-a");
+    projection.applyCommand(promptCommand(), "$local-prompt", 2);
+
+    const local = projection.messages.get("user:prompt-a");
+    expect(local).toMatchObject({ originDeviceId: "device-1" });
+    expect(toIncomingMessage(local!).originDeviceId).toBe("device-1");
+
+    projection.applyEvent(turnQueuedEvent(), "$gateway-prompt");
+    const canonical = projection.messages.get("user:prompt-a");
+    expect(canonical).toMatchObject({
+      originDeviceId: "device-1",
+      physicalEventId: "$gateway-prompt",
+    });
+    expect(toIncomingMessage(canonical!).originDeviceId).toBe("device-1");
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(projection.durableState());
+    expect(restored.messages.get("user:prompt-a")?.originDeviceId).toBe("device-1");
+  });
+
   it("repairs a version-three running projection from its unresolved prompt", () => {
     const first = new MatrixCvp3Projection();
     first.applyCommand(createCommand("a"), "$root-a");
@@ -312,6 +334,22 @@ function createCommand(suffix: string): Cvp3Command {
     createdAt: 1,
     operation: "session.create",
     payload: { operation: "session.create", title: suffix.toUpperCase() },
+  };
+}
+
+function promptCommand(): Cvp3Command {
+  return {
+    kind: "codever.command",
+    version: 3,
+    commandId: "prompt-a",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: "session-a",
+    deviceId: "device-1",
+    certificateId: "certificate-1",
+    createdAt: 2,
+    operation: "prompt.submit",
+    payload: { operation: "prompt.submit", text: "hello" },
   };
 }
 

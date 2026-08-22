@@ -857,6 +857,7 @@ export function toIncomingMessage(
     text: message.body,
     sessionId: message.sessionId,
     ...(message.commandId ? { commandId: message.commandId } : {}),
+    ...(message.originDeviceId ? { originDeviceId: message.originDeviceId } : {}),
     ...(payload?.type === "decision.requested" || payload?.type === "extension.interaction.requested"
       ? { requestId: payload.requestId }
       : {}),

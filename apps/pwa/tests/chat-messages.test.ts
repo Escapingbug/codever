@@ -322,6 +322,7 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
     timestamp: 2_000,
     commandId: "command-1",
     optimistic: true,
+    deliveryState: "sending",
     raw: { source: "optimistic" },
   };
   const canonical = {
@@ -331,6 +332,7 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
     text: "Hello",
     timestamp: 1_000,
     commandId: "command-1",
+    deliveryState: "sent",
     raw: { source: "matrix" },
   };
 
@@ -342,6 +344,7 @@ test("canonical Matrix echo reconciles an optimistic user message", () => {
   assert.equal(messages[0].timestamp, canonical.timestamp);
   assert.deepEqual(messages[0].raw, canonical.raw);
   assert.equal(messages[0].optimistic, false);
+  assert.equal(messages[0].deliveryState, "sent");
 });
 
 test("a CVP/3 Agent response is not merged into its causal user command", () => {

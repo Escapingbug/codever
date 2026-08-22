@@ -69,7 +69,11 @@ fails verification.
 identity: a prompt, acknowledgement, Agent response, tool result, and terminal
 result may all causally refer to one command while retaining distinct logical
 event IDs. Clients only reconcile the optimistic user prompt with its canonical
-user event; they never merge an Agent response into that prompt.
+user event; they never merge an Agent response into that prompt. A projected
+user event MUST retain its originating device ID so the client can select the
+exact optimistic entry even when the durable local projection emits before
+`send()` returns. That authoritative projection updates the selected entry's
+delivery state in place.
 
 ## Commands and exactly-once execution
 

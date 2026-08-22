@@ -39,6 +39,7 @@ export type V3ProjectedMessage = {
   partIndex?: number;
   partCount?: number;
   commandId?: string;
+  originDeviceId?: string;
   payload?: Cvp3Event["payload"];
   resolvedActionId?: string;
 };
@@ -186,6 +187,7 @@ export class MatrixCvp3Projection {
           physicalEventId,
           timestamp,
           command.payload.initialPrompt.text,
+          command.deviceId,
         );
       }
     } else if (command.operation === "prompt.submit") {
@@ -195,6 +197,7 @@ export class MatrixCvp3Projection {
         physicalEventId,
         timestamp,
         command.payload.text,
+        command.deviceId,
       );
     }
     return true;
@@ -278,6 +281,7 @@ export class MatrixCvp3Projection {
           this.sessions.get(event.sessionId)?.threadRootEventId || physicalEventId,
           event.occurredAt,
           payload.initialPrompt.text,
+          payload.originDeviceId,
         );
       }
     }
@@ -289,6 +293,7 @@ export class MatrixCvp3Projection {
         physicalEventId,
         event.occurredAt,
         payload.text,
+        payload.originDeviceId,
         payload,
       );
     }
@@ -442,6 +447,7 @@ export class MatrixCvp3Projection {
     physicalEventId: string,
     timestamp: number,
     body: string,
+    originDeviceId?: string,
     payload?: Cvp3Event["payload"],
   ): void {
     this.messages.set(`user:${commandId}`, {
@@ -454,6 +460,7 @@ export class MatrixCvp3Projection {
       format: "markdown",
       version: 1,
       commandId,
+      ...(originDeviceId ? { originDeviceId } : {}),
       ...(payload ? { payload } : {}),
     });
   }
@@ -536,6 +543,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
       || typeof message.body !== "string"
       || !["plain", "markdown"].includes(String(message.format))
       || !integer(message.version, 1)
+      || !(message.originDeviceId === undefined || text(message.originDeviceId))
     ) throw new Error("The CVP/3 message projection is invalid.");
     return structuredClone(message) as V3ProjectedMessage;
   });
