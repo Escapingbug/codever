@@ -752,7 +752,7 @@ describe('SemanticSessionRuntime', () => {
         }
     })
 
-    it('keeps interleaved tools separate while coalescing assistant fragments for one turn', async () => {
+    it('keeps interleaved tools separate and preserves assistant paragraph boundaries in one bubble', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
         const operations: DeliveryOperation[] = []
@@ -782,10 +782,40 @@ describe('SemanticSessionRuntime', () => {
         const assistantOperations = operations.filter(operation => !operation.message.presentation)
         expect(assistantOperations).toMatchObject([
             { kind: 'send', message: { text: '我先' }, messageId: 1 },
-            { kind: 'edit', message: { text: '我先检查' }, messageId: 1 },
-            { kind: 'edit', message: { text: '我先检查完成。' }, messageId: 1 },
+            { kind: 'edit', message: { text: '我先\n\n检查' }, messageId: 1 },
+            { kind: 'edit', message: { text: '我先\n\n检查\n\n完成。' }, messageId: 1 },
         ])
         expect(operations.filter(operation => operation.message.presentation)).toHaveLength(2)
+    })
+
+    it('does not duplicate an assistant paragraph break already supplied after a tool', async () => {
+        const operations: DeliveryOperation[] = []
+        const channel = {
+            ...createChannel([], [], operations),
+            coalesceAssistantText: true,
+        }
+        const provider = createProvider([
+            { kind: 'text', text: '第一段。' },
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Read', input: { path: 'README.md' }, status: 'running' },
+            { kind: 'text', text: '\n\n第二段。' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
+
+        const assistantOperations = operations.filter(operation => !operation.message.presentation)
+        expect(assistantOperations.at(-1)).toMatchObject({
+            kind: 'edit',
+            message: { text: '第一段。\n\n第二段。' },
+            messageId: 1,
+        })
     })
 
     it('waits for the first assistant send id before turning a concurrent flush into an edit', async () => {

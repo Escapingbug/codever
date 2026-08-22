@@ -181,6 +181,7 @@ export class SemanticSessionRuntime {
     private assistantTextMessageId: string | number | undefined
     private assistantTextIdempotencyKey: string | null = null
     private assistantTextDeliveryChain: Promise<void> = Promise.resolve()
+    private assistantTextBlockBoundaryPending = false
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
@@ -410,6 +411,7 @@ export class SemanticSessionRuntime {
         this.assistantTextMessageId = undefined
         this.assistantTextIdempotencyKey = randomUUID()
         this.assistantTextDeliveryChain = Promise.resolve()
+        this.assistantTextBlockBoundaryPending = false
         this.currentTurnDelivery = {
             hadAssistantText: false,
             deliveryFailures: [],
@@ -747,6 +749,8 @@ export class SemanticSessionRuntime {
         }
 
         const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
+        const endsAssistantTextBlock = event.kind === 'tool'
+            || messages.some(projected => !projected.isAssistantText)
         if (event.kind === 'assistant_text_delta') {
             if (
                 this.config.channelPort.coalesceAssistantText
@@ -768,6 +772,13 @@ export class SemanticSessionRuntime {
                 projected.isTerminal,
                 projected.isAssistantText,
             )
+        }
+        if (
+            this.config.channelPort.coalesceAssistantText
+            && endsAssistantTextBlock
+            && this.assistantTextMessage !== null
+        ) {
+            this.assistantTextBlockBoundaryPending = true
         }
     }
 
@@ -879,10 +890,13 @@ export class SemanticSessionRuntime {
     }
 
     private async deliverCoalescedAssistantText(message: ChannelMessage): Promise<void> {
+        const separator = this.assistantTextMessage && this.assistantTextBlockBoundaryPending
+            ? markdownBlockSeparator(this.assistantTextMessage.text, message.text)
+            : ''
         const cumulativeBody: ChannelMessage = this.assistantTextMessage
             ? {
                 ...message,
-                text: this.assistantTextMessage.text + message.text,
+                text: this.assistantTextMessage.text + separator + message.text,
             }
             : message
         const cumulativeMessage: ChannelMessage = {
@@ -895,6 +909,7 @@ export class SemanticSessionRuntime {
             },
         }
         this.assistantTextMessage = cumulativeMessage
+        this.assistantTextBlockBoundaryPending = false
 
         const delivery = this.assistantTextDeliveryChain.then(async () => {
             const record = this.assistantTextMessageId === undefined
@@ -1758,6 +1773,15 @@ function channelMessageOptions(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : {}
+}
+
+/** Keep separate assistant narration blocks readable inside one live-updated bubble. */
+function markdownBlockSeparator(previous: string, next: string): string {
+    const trailingWhitespace = previous.match(/\s*$/u)?.[0] ?? ''
+    const leadingWhitespace = next.match(/^\s*/u)?.[0] ?? ''
+    const existingNewlines = (trailingWhitespace + leadingWhitespace)
+        .match(/\r\n|\r|\n/gu)?.length ?? 0
+    return '\n'.repeat(Math.max(0, 2 - existingNewlines))
 }
 
 function formatCodeBlock(content: string, language: string | undefined): string {
