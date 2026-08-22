@@ -132,7 +132,9 @@ import {
   connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
+  deriveMobileConnectionSignal,
   type ConnectionRepairReason,
+  type MobileConnectionSignal,
 } from "./connectionPresentation";
 import { deriveGatewayLiveness } from "./gatewayLiveness";
 import { createConnectionDiagnostics } from "./connectionDiagnostics";
@@ -371,6 +373,51 @@ function ArrowDownIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24">
       <path d="M12 5v12M7.5 12.5 12 17l4.5-4.5" />
+    </svg>
+  );
+}
+
+function MobileConnectionIcon({
+  state,
+}: {
+  state: MobileConnectionSignal["state"];
+}) {
+  if (state === "ready") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="m8.3 12.1 2.3 2.3 5.1-5.2" />
+      </svg>
+    );
+  }
+  if (state === "progress") {
+    return (
+      <svg aria-hidden="true" className="mobile-connection-spinner" viewBox="0 0 24 24">
+        <circle className="mobile-connection-track" cx="12" cy="12" r="8.5" />
+        <path d="M12 3.5a8.5 8.5 0 0 1 7.9 5.4" />
+      </svg>
+    );
+  }
+  if (state === "offline") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="m7 7 10 10" />
+      </svg>
+    );
+  }
+  if (state === "attention") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 7.5v5.8M12 16.5h.01" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 8v8M8 12h8" />
     </svg>
   );
 }
@@ -1118,6 +1165,11 @@ function CodeverAppRuntime() {
   const connectionPresentation = gatewayLiveness.state === "offline"
     ? deriveConnectionPresentation("offline", "matrix_gateway_offline")
     : matrixConnectionPresentation;
+  const mobileConnectionSignal = deriveMobileConnectionSignal({
+    trusted: trustedGateway !== null,
+    status: displayedConnectionStatus,
+    gatewayAvailable,
+  });
 
   const connectionRepairReason = connectionRepairReasonForDetail(
     connectionDetail,
@@ -5268,7 +5320,7 @@ function CodeverAppRuntime() {
               : ""
           }`}
           aria-label={`Open connection settings, ${
-            trustedGateway ? connectionPresentation.title : "not connected"
+            mobileConnectionSignal.label
           }`}
           onClick={() => setSettingsOpen(true)}
         >
@@ -5286,11 +5338,13 @@ function CodeverAppRuntime() {
                 : "Scan or paste a one-time code"}
             </span>
             <span className="gateway-mobile-status" aria-hidden="true">
-              <i
-                className={`connection-dot connection-state-${displayedConnectionStatus}`}
-              />
+              <span
+                className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+              >
+                <MobileConnectionIcon state={mobileConnectionSignal.state} />
+              </span>
               <span className="gateway-mobile-status-copy">
-                {trustedGateway ? connectionPresentation.title : "Connect"}
+                {mobileConnectionSignal.label}
               </span>
             </span>
           </div>
@@ -5538,26 +5592,51 @@ function CodeverAppRuntime() {
               className={`empty-search connection-progress connection-progress-${connectionPresentation.state}`}
               role="status"
             >
-              {connectionPresentation.state === "progress" ||
-              connectionPresentation.state === "ready" ? (
-                <span
-                  className="connection-progress-spinner"
-                  aria-hidden="true"
-                />
-              ) : (
-                <span className="connection-progress-symbol" aria-hidden="true">
-                  {connectionPresentation.state === "offline" ? "⌁" : "!"}
-                </span>
-              )}
-              <strong>
+              <span className="connection-progress-desktop-visual" aria-hidden="true">
+                {connectionPresentation.state === "progress" ||
+                connectionPresentation.state === "ready" ? (
+                  <span className="connection-progress-spinner" />
+                ) : (
+                  <span className="connection-progress-symbol">
+                    {connectionPresentation.state === "offline" ? "⌁" : "!"}
+                  </span>
+                )}
+              </span>
+              <span
+                className={`connection-progress-mobile-visual mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                aria-hidden="true"
+              >
+                <MobileConnectionIcon state={mobileConnectionSignal.state} />
+              </span>
+              <strong className="connection-progress-desktop-title">
                 {connectionStatus === "connected"
                   ? "Syncing your conversations"
                   : connectionPresentation.title}
               </strong>
-              <small>{connectionPresentation.detail}</small>
-              <button type="button" onClick={() => setSettingsOpen(true)}>
+              <strong className="connection-progress-mobile-title">
+                {mobileConnectionSignal.label}
+              </strong>
+              <small className="connection-progress-detail">
+                {connectionPresentation.detail}
+              </small>
+              <button
+                type="button"
+                className="connection-progress-desktop-action"
+                onClick={() => setSettingsOpen(true)}
+              >
                 Open connection settings
               </button>
+              {(mobileConnectionSignal.state === "offline" ||
+                mobileConnectionSignal.state === "attention") && (
+                <button
+                  type="button"
+                  className="connection-progress-mobile-action"
+                  aria-label="Open connection settings"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  •••
+                </button>
+              )}
             </div>
           )}
           {gatewayState &&
@@ -5637,17 +5716,32 @@ function CodeverAppRuntime() {
                 }`}
               />
               <span className="conversation-status-copy">
-                {gatewayAvailable
-                  ? gatewayState
-                    ? selectedArchived
-                      ? `${activeWorkspace?.projectName || "Project"} · archived`
-                      : `${activeWorkspace?.projectName || "Project"} · ${
-                          isStreaming
-                            ? agentActivity?.label || "working"
-                            : activeProvider
-                        }`
-                    : "Syncing conversations…"
-                  : connectionPresentation.title}
+                {gatewayAvailable && gatewayState ? (
+                  selectedArchived ? (
+                    `${activeWorkspace?.projectName || "Project"} · archived`
+                  ) : (
+                    `${activeWorkspace?.projectName || "Project"} · ${
+                      isStreaming
+                        ? agentActivity?.label || "working"
+                        : activeProvider
+                    }`
+                  )
+                ) : (
+                  <>
+                    <span className="conversation-connection-desktop">
+                      {connectionPresentation.title}
+                    </span>
+                    <span className="conversation-connection-mobile">
+                      <span
+                        className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                        aria-hidden="true"
+                      >
+                        <MobileConnectionIcon state={mobileConnectionSignal.state} />
+                      </span>
+                      {mobileConnectionSignal.label}
+                    </span>
+                  </>
+                )}
               </span>
             </span>
           </div>

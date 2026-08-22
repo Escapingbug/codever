@@ -4,6 +4,7 @@ import {
   connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
+  deriveMobileConnectionSignal,
 } from "../app/connectionPresentation.ts";
 
 test("maps native progress codes to calm user-facing copy while retaining diagnostics", () => {
@@ -126,4 +127,49 @@ test("reports browser transport phases as offline when the browser knows it has 
   }
   assert.equal(connectionStatusForBrowserNetwork("connected", true), "connected");
   assert.equal(connectionStatusForBrowserNetwork("error", false), "error");
+});
+
+test("collapses mobile connection sub-phases into stable product signals", () => {
+  assert.deepEqual(
+    deriveMobileConnectionSignal({
+      trusted: false,
+      status: "offline",
+      gatewayAvailable: false,
+    }),
+    { state: "setup", label: "Connect" },
+  );
+  for (const status of ["connecting", "securing", "reconnecting"] as const) {
+    assert.deepEqual(
+      deriveMobileConnectionSignal({
+        trusted: true,
+        status,
+        gatewayAvailable: false,
+      }),
+      { state: "progress", label: "Connecting" },
+    );
+  }
+  assert.deepEqual(
+    deriveMobileConnectionSignal({
+      trusted: true,
+      status: "connected",
+      gatewayAvailable: true,
+    }),
+    { state: "ready", label: "Online" },
+  );
+  assert.deepEqual(
+    deriveMobileConnectionSignal({
+      trusted: true,
+      status: "offline",
+      gatewayAvailable: false,
+    }),
+    { state: "offline", label: "Offline" },
+  );
+  assert.deepEqual(
+    deriveMobileConnectionSignal({
+      trusted: true,
+      status: "error",
+      gatewayAvailable: false,
+    }),
+    { state: "attention", label: "Attention" },
+  );
 });
