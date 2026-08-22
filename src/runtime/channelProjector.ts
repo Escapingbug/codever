@@ -19,6 +19,8 @@ export interface ProjectedMessage {
 
 export interface ChannelProjectorOptions {
     verboseLevel?: 0 | 1 | 2
+    /** Keep normal-mode tools in one turn-scoped group across streamed text flushes. */
+    preserveNormalToolGroup?: boolean
 }
 
 interface ProjectedToolState {
@@ -52,7 +54,7 @@ export class ChannelProjector {
 
             case 'decision_request':
                 return [
-                    ...this.flushText(event, true),
+                    ...this.flushText(event, true, true),
                     {
                         message: {
                             text: `<b>${escapeHtml(event.title)}</b>${event.body ? `\n\n${escapeHtml(event.body)}` : ''}`,
@@ -74,7 +76,7 @@ export class ChannelProjector {
 
             case 'mode_change':
                 return [
-                    ...this.flushText(event, true),
+                    ...this.flushText(event, true, true),
                     {
                         message: { text: `Mode: <code>${escapeHtml(event.mode)}</code>`, format: 'html' },
                         isToolEvent: false,
@@ -90,9 +92,9 @@ export class ChannelProjector {
                     return []
                 }
                 const commandText = formatCommandResult(event.command, event.output)
-                if (!commandText) return this.flushText(event, true)
+                if (!commandText) return this.flushText(event, true, true)
                 return [
-                    ...this.flushText(event, true),
+                    ...this.flushText(event, true, true),
                     {
                         message: {
                             text: commandText,
@@ -105,7 +107,7 @@ export class ChannelProjector {
                 ]
 
             case 'turn_finished':
-                return this.projectTurnFinished(event)
+                return this.projectTurnFinished(event, options)
 
             case 'turn_started':
             case 'provider_raw':
@@ -113,8 +115,15 @@ export class ChannelProjector {
         }
     }
 
-    flush(semanticEvent?: ConversationEvent): ProjectedMessage[] {
-        return this.flushText(semanticEvent, true)
+    flush(
+        semanticEvent?: ConversationEvent,
+        closeNormalToolGroup = true,
+    ): ProjectedMessage[] {
+        return this.flushText(
+            semanticEvent,
+            closeNormalToolGroup,
+            closeNormalToolGroup,
+        )
     }
 
     statusMessage(text: string): ProjectedMessage {
@@ -135,6 +144,7 @@ export class ChannelProjector {
 
     private flushText(
         semanticEvent?: ConversationEvent,
+        closeNormalToolGroup = true,
         closeEmptyToolGroup = false,
     ): ProjectedMessage[] {
         const text = this.textBuffer
@@ -143,7 +153,7 @@ export class ChannelProjector {
             return []
         }
         this.textBuffer = ''
-        this.closeNormalToolGroup()
+        if (closeNormalToolGroup) this.closeNormalToolGroup()
         return [{
             message: { text, format: 'markdown' },
             isToolEvent: false,
@@ -155,7 +165,11 @@ export class ChannelProjector {
 
     private projectToolByVerbosity(event: Extract<ConversationEvent, { kind: 'tool' }>, options: ChannelProjectorOptions): ProjectedMessage[] {
         const verboseLevel = options.verboseLevel ?? 1
-        const messages = this.flushText()
+        const messages = this.flushText(
+            undefined,
+            !options.preserveNormalToolGroup,
+            false,
+        )
         if (verboseLevel === 0) {
             const state = this.mergeToolState(event)
             if (isExitPlanModeTool(state) && hasExitPlanContent(state)) {
@@ -222,8 +236,14 @@ export class ChannelProjector {
         this.normalToolGroupToolIds = []
     }
 
-    private projectTurnFinished(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): ProjectedMessage[] {
-        const messages = this.flushText(event, true)
+    private projectTurnFinished(
+        event: Extract<ConversationEvent, { kind: 'turn_finished' }>,
+        options: ChannelProjectorOptions,
+    ): ProjectedMessage[] {
+        const messages = [
+            ...this.settleDanglingTools(event, options),
+            ...this.flushText(event, true, true),
+        ]
         if (event.status === 'success') return messages
 
         messages.push({
@@ -236,6 +256,71 @@ export class ChannelProjector {
             semanticEvent: event,
         })
         return messages
+    }
+
+    private settleDanglingTools(
+        event: Extract<ConversationEvent, { kind: 'turn_finished' }>,
+        options: ChannelProjectorOptions,
+    ): ProjectedMessage[] {
+        if (!options.preserveNormalToolGroup) return []
+        const dangling = [...this.toolStates.entries()].filter(([, state]) =>
+            state.phase === 'started' || state.phase === 'updated'
+        )
+        if (dangling.length === 0) return []
+
+        const phase = event.status === 'success' ? 'completed' : 'failed'
+        for (const [toolCallId, state] of dangling) {
+            this.toolStates.set(toolCallId, {
+                ...state,
+                phase,
+                isError: phase === 'failed' ? true : state.isError,
+                updatedAt: event.meta.timestamp,
+            })
+        }
+
+        const verboseLevel = options.verboseLevel ?? 1
+        if (verboseLevel === 0) return []
+
+        if (verboseLevel === 1 && this.normalToolGroupKey) {
+            const groupKey = this.normalToolGroupKey
+            const latestToolId = this.normalToolGroupToolIds.at(-1)
+            const latestState = latestToolId
+                ? this.toolStates.get(latestToolId)
+                : undefined
+            if (!latestState) return []
+            return [{
+                message: {
+                    text: this.formatToolState(latestState),
+                    format: 'html',
+                    presentation: this.toolGroupPresentation(
+                        groupKey,
+                        this.normalToolGroupToolIds,
+                    ),
+                },
+                toolUseId: groupKey,
+                isToolEvent: true,
+                isTerminal: true,
+                semanticEvent: event,
+            }]
+        }
+
+        return dangling.map(([toolCallId]) => {
+            const state = this.toolStates.get(toolCallId)!
+            return {
+                message: {
+                    text: this.formatToolState(state),
+                    format: 'html' as const,
+                    presentation: this.toolGroupPresentation(
+                        toolCallId,
+                        [toolCallId],
+                    ),
+                },
+                toolUseId: toolCallId,
+                isToolEvent: true,
+                isTerminal: true,
+                semanticEvent: event,
+            }
+        })
     }
 
     private formatTurnFinishedStatus(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): string {

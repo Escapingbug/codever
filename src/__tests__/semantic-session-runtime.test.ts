@@ -1092,6 +1092,46 @@ describe('SemanticSessionRuntime', () => {
         })
     })
 
+    it('keeps a first-party tool stack stable across streamed text and settles dangling calls', async () => {
+        const operations: DeliveryOperation[] = []
+        const channel = {
+            ...createChannel([], [], operations),
+            coalesceAssistantText: true,
+        }
+        const provider = createProvider([
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running' },
+            { kind: 'text', text: '检查中。' },
+            { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: 'passed', isError: false },
+            { kind: 'tool_use', toolUseId: 'tool-2', toolName: 'Read', input: { file_path: '/repo/src/app.ts' }, status: 'running' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+            providerSettings: { verboseLevel: 1 },
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'run tests', source: 'channel' })
+
+        const toolOperations = operations.filter(operation => operation.message.presentation)
+        expect(toolOperations.map(operation => operation.kind)).toEqual([
+            'send',
+            'edit',
+            'edit',
+        ])
+        expect(toolOperations.every(operation => operation.messageId === toolOperations[0].messageId)).toBe(true)
+        expect(toolOperations.at(-1)?.message.presentation).toMatchObject({
+            kind: 'tool_group',
+            tools: [
+                { id: 'tool-1', phase: 'completed' },
+                { id: 'tool-2', phase: 'completed' },
+            ],
+        })
+    })
+
     it('suppresses all tool output in quiet mode while preserving assistant text', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []

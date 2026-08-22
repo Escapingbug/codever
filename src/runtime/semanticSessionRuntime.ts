@@ -748,7 +748,10 @@ export class SemanticSessionRuntime {
             }
         }
 
-        const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
+        const messages = this.projector.project(event, {
+            verboseLevel: this.getVerboseLevel(),
+            preserveNormalToolGroup: Boolean(this.config.channelPort.coalesceAssistantText),
+        })
         const endsAssistantTextBlock = event.kind === 'tool'
             || messages.some(projected => !projected.isAssistantText)
         if (event.kind === 'assistant_text_delta') {
@@ -811,7 +814,12 @@ export class SemanticSessionRuntime {
         if (generation !== this.textFlushGeneration) return this.textFlushChain
         this.cancelScheduledTextFlush()
         this.textFlushChain = this.textFlushChain.then(async () => {
-            const projectedMessages = this.projector.flush()
+            const closesNormalToolGroup = !this.config.channelPort.coalesceAssistantText
+                || (reason !== 'stream-start' && reason !== 'stream-update')
+            const projectedMessages = this.projector.flush(
+                undefined,
+                closesNormalToolGroup,
+            )
             if (projectedMessages.length > 0 && reason !== 'finalize') {
                 this.log(`[session] Flushing buffered assistant text: reason=${reason} messages=${projectedMessages.length}`)
             }
