@@ -44,6 +44,12 @@ internal class MatrixCvp3NativeProjection(
     private val activeDeviceCount: () -> Int,
     initialState: JsonObject? = null,
 ) {
+    private data class AssistantMessageKey(
+        val sessionId: String,
+        val messageId: String,
+        val partIndex: Int,
+    )
+
     private data class Project(
         val id: String,
         val snapshotVersion: Long,
@@ -97,6 +103,7 @@ internal class MatrixCvp3NativeProjection(
     private val inboxFiles = linkedMapOf<String, InboxFile>()
     private val seenEvents = mutableSetOf<String>()
     private val seenCommands = mutableSetOf<String>()
+    private val assistantMessageVersions = linkedMapOf<AssistantMessageKey, Long>()
 
     init {
         initialState?.let(::restore)
@@ -307,28 +314,39 @@ internal class MatrixCvp3NativeProjection(
             "assistant.message" -> if (sessionId != null) {
                 val messageId = payload.requiredString("messageId", 256)
                 val part = payload.optionalInt("partIndex") ?: 0
-                val toolGroup = decodeCvp3ToolGroup(payload)
-                val attachments = (payload["attachments"] as? JsonArray)?.mapNotNull { item ->
-                    runCatching { PublicClientJson.decodeAttachment(item) }.getOrNull()
+                val version = payload.requiredPositiveLong("messageVersion")
+                val versionKey = AssistantMessageKey(sessionId, messageId, part)
+                val currentVersion = assistantMessageVersions[versionKey]
+                if (currentVersion != null && version <= currentVersion) {
+                    messages = emptyList()
+                } else {
+                    assistantMessageVersions[versionKey] = version
+                    if (assistantMessageVersions.size > MAX_SEEN_IDS) {
+                        assistantMessageVersions.remove(assistantMessageVersions.keys.first())
+                    }
+                    val toolGroup = decodeCvp3ToolGroup(payload)
+                    val attachments = (payload["attachments"] as? JsonArray)?.mapNotNull { item ->
+                        runCatching { PublicClientJson.decodeAttachment(item) }.getOrNull()
+                    }
+                    messages = listOf(ClientMessage(
+                        eventId = "assistant:$messageId:$part",
+                        sender = gatewayId(),
+                        timestamp = occurredAt,
+                        encrypted = true,
+                        kind = if (toolGroup == null) ClientMessageKind.AGENT else ClientMessageKind.TOOL,
+                        format = if (payload.optionalString("format", 32) == "plain") {
+                            ClientMessageFormat.PLAIN
+                        } else {
+                            ClientMessageFormat.MARKDOWN
+                        },
+                        text = payload.optionalString("body", Int.MAX_VALUE).orEmpty(),
+                        sessionId = sessionId,
+                        commandId = causation,
+                        attachments = attachments?.takeIf { it.isNotEmpty() },
+                        toolGroup = toolGroup,
+                        semantic = payload,
+                    ))
                 }
-                messages = listOf(ClientMessage(
-                    eventId = "assistant:$messageId:$part",
-                    sender = gatewayId(),
-                    timestamp = occurredAt,
-                    encrypted = true,
-                    kind = if (toolGroup == null) ClientMessageKind.AGENT else ClientMessageKind.TOOL,
-                    format = if (payload.optionalString("format", 32) == "plain") {
-                        ClientMessageFormat.PLAIN
-                    } else {
-                        ClientMessageFormat.MARKDOWN
-                    },
-                    text = payload.optionalString("body", Int.MAX_VALUE).orEmpty(),
-                    sessionId = sessionId,
-                    commandId = causation,
-                    attachments = attachments?.takeIf { it.isNotEmpty() },
-                    toolGroup = toolGroup,
-                    semantic = payload,
-                ))
             }
             "tool.activity" -> if (sessionId != null) {
                 val toolGroup = toolActivityGroup(payload, occurredAt)
@@ -472,11 +490,12 @@ internal class MatrixCvp3NativeProjection(
         inboxFiles.clear()
         seenEvents.clear()
         seenCommands.clear()
+        assistantMessageVersions.clear()
     }
 
     @Synchronized
     fun durableState(): JsonObject = buildJsonObject {
-        put("schemaVersion", 4)
+        put("schemaVersion", 5)
         val activeCapabilities = workspaceCapabilities
         if (activeCapabilities == null) {
             put("workspaceCapabilities", JsonNull)
@@ -540,11 +559,21 @@ internal class MatrixCvp3NativeProjection(
         })
         put("seenEvents", JsonArray(seenEvents.toList().takeLast(MAX_SEEN_IDS).map(::JsonPrimitive)))
         put("seenCommands", JsonArray(seenCommands.toList().takeLast(MAX_SEEN_IDS).map(::JsonPrimitive)))
+        put("assistantMessageVersions", buildJsonArray {
+            assistantMessageVersions.entries.toList().takeLast(MAX_SEEN_IDS).forEach { (key, version) ->
+                add(buildJsonObject {
+                    put("sessionId", key.sessionId)
+                    put("messageId", key.messageId)
+                    put("partIndex", key.partIndex)
+                    put("version", version)
+                })
+            }
+        })
     }
 
     private fun restore(value: JsonObject) {
         val schemaVersion = value.requiredLong("schemaVersion")
-        require(schemaVersion in 1L..4L)
+        require(schemaVersion in 1L..5L)
         workspaceCapabilities = if (schemaVersion == 1L) {
             null
         } else {
@@ -639,6 +668,21 @@ internal class MatrixCvp3NativeProjection(
         }
         (value["seenCommands"] as? JsonArray).orEmpty().takeLast(MAX_SEEN_IDS).forEach {
             seenCommands += it.jsonPrimitive.content
+        }
+        if (schemaVersion >= 5L) {
+            (value["assistantMessageVersions"] as? JsonArray)
+                .orEmpty()
+                .takeLast(MAX_SEEN_IDS)
+                .forEach { item ->
+                    val entry = item as? JsonObject
+                        ?: throw IllegalArgumentException("The CVP/3 assistant version projection is invalid.")
+                    val key = AssistantMessageKey(
+                        sessionId = entry.requiredString("sessionId", 256),
+                        messageId = entry.requiredString("messageId", 256),
+                        partIndex = entry.requiredLong("partIndex").also { require(it in 0..Int.MAX_VALUE) }.toInt(),
+                    )
+                    assistantMessageVersions[key] = entry.requiredPositiveLong("version")
+                }
         }
     }
 

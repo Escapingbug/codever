@@ -633,6 +633,186 @@ describe('SemanticSessionRuntime', () => {
         }
     })
 
+    it('updates one assistant message when quiet periods split a sentence into tiny deltas', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: ChannelMessage[] = []
+            const statuses: SessionStatus[] = []
+            const operations: DeliveryOperation[] = []
+            let releaseFirst!: () => void
+            let releaseSecond!: () => void
+            const firstPause = new Promise<void>(resolve => {
+                releaseFirst = resolve
+            })
+            const secondPause = new Promise<void>(resolve => {
+                releaseSecond = resolve
+            })
+            const provider: AgentProvider = {
+                ...createProvider([]),
+                startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                    events: (async function* () {
+                        yield { kind: 'text', text: '这' } as AgentEvent
+                        await firstPause
+                        yield { kind: 'text', text: '是一' } as AgentEvent
+                        await secondPause
+                        yield { kind: 'text', text: '句话' } as AgentEvent
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt: vi.fn(),
+                })),
+            }
+            const channel = {
+                ...createChannel(sent, statuses, operations),
+                coalesceAssistantText: true,
+            }
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(2_000)
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+            ])
+
+            releaseFirst()
+            await vi.advanceTimersByTimeAsync(2_000)
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+                { kind: 'edit', message: { text: '这是一' }, messageId: 1 },
+            ])
+
+            releaseSecond()
+            await running
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+                { kind: 'edit', message: { text: '这是一' }, messageId: 1 },
+                { kind: 'edit', message: { text: '这是一句话' }, messageId: 1 },
+            ])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('keeps interleaved tools separate while coalescing assistant fragments for one turn', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const operations: DeliveryOperation[] = []
+        const channel = {
+            ...createChannel(sent, statuses, operations),
+            coalesceAssistantText: true,
+        }
+        const provider = createProvider([
+            { kind: 'text', text: '我先' },
+            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'pwd' }, status: 'running' },
+            { kind: 'text', text: '检查' },
+            { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: '/repo', isError: false },
+            { kind: 'text', text: '完成。' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: channel,
+            providerSettings: { verboseLevel: 2 },
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
+
+        const assistantOperations = operations.filter(operation => !operation.message.presentation)
+        expect(assistantOperations).toMatchObject([
+            { kind: 'send', message: { text: '我先' }, messageId: 1 },
+            { kind: 'edit', message: { text: '我先检查' }, messageId: 1 },
+            { kind: 'edit', message: { text: '我先检查完成。' }, messageId: 1 },
+        ])
+        expect(operations.filter(operation => operation.message.presentation)).toHaveLength(2)
+    })
+
+    it('waits for the first assistant send id before turning a concurrent flush into an edit', async () => {
+        vi.useFakeTimers()
+        try {
+            const operations: DeliveryOperation[] = []
+            let releaseProvider!: () => void
+            let releaseFirstSend!: () => void
+            let markFirstSendStarted!: () => void
+            const providerPause = new Promise<void>(resolve => {
+                releaseProvider = resolve
+            })
+            const firstSendPause = new Promise<void>(resolve => {
+                releaseFirstSend = resolve
+            })
+            const firstSendStarted = new Promise<void>(resolve => {
+                markFirstSendStarted = resolve
+            })
+            let nextMessageId = 0
+            const channel: ChannelPort = {
+                coalesceAssistantText: true,
+                send: vi.fn(async (message) => {
+                    const messageId = ++nextMessageId
+                    operations.push({ kind: 'send', message, messageId })
+                    if (messageId === 1) {
+                        markFirstSendStarted()
+                        await firstSendPause
+                    }
+                    return { messageId }
+                }),
+                edit: vi.fn(async (messageId, message) => {
+                    operations.push({ kind: 'edit', message, messageId })
+                }),
+                requestDecision: vi.fn(async () => ({ value: 'allow' })),
+                notifyStatus: vi.fn(),
+            }
+            const provider: AgentProvider = {
+                ...createProvider([]),
+                startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                    events: (async function* () {
+                        yield { kind: 'text', text: '这' } as AgentEvent
+                        await providerPause
+                        yield { kind: 'text', text: '是' } as AgentEvent
+                        yield {
+                            kind: 'tool_use',
+                            toolUseId: 'tool-1',
+                            toolName: 'Bash',
+                            input: { command: 'pwd' },
+                            status: 'running',
+                        } as AgentEvent
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt: vi.fn(),
+                })),
+            }
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+                providerSettings: { verboseLevel: 2 },
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(2_000)
+            await firstSendStarted
+            releaseProvider()
+            await vi.advanceTimersByTimeAsync(0)
+            releaseFirstSend()
+            await running
+
+            expect(operations.filter(operation => !operation.message.presentation)).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+                { kind: 'edit', message: { text: '这是' }, messageId: 1 },
+            ])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('flushes stale assistant text before starting the next provider turn', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []

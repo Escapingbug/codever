@@ -69,7 +69,7 @@ class MatrixCvp3NativeProjectionTest {
             "\$root-a",
         )
         val replay = projection.applyGatewayEvent(
-            assistant("logical-event-2", "message-1", "replacement body"),
+            assistant("logical-event-2", "message-1", "replacement body", version = 2),
             "\$physical-2",
             "\$root-a",
         )
@@ -83,6 +83,60 @@ class MatrixCvp3NativeProjectionTest {
         assertEquals(first.messages.single().eventId, replay.messages.single().eventId)
         assertTrue(exactDuplicate.messages.isEmpty())
         assertFalse(exactDuplicate.changed)
+    }
+
+    @Test
+    fun `older assistant message versions cannot truncate the latest text`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+
+        val latest = projection.applyGatewayEvent(
+            assistant("logical-event-v2", "message-1", "这是一句完整的话", version = 2),
+            "\$physical-v2",
+            "\$root-a",
+        )
+        val stale = projection.applyGatewayEvent(
+            assistant("logical-event-v1", "message-1", "这是", version = 1),
+            "\$physical-v1",
+            "\$root-a",
+        )
+
+        assertEquals("这是一句完整的话", latest.messages.single().text)
+        assertTrue(stale.messages.isEmpty())
+    }
+
+    @Test
+    fun `assistant message versions survive durable restore`() {
+        val original = projection()
+        original.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        original.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+        original.applyGatewayEvent(
+            assistant("logical-event-v3", "message-1", "complete", version = 3),
+            "\$physical-v3",
+            "\$root-a",
+        )
+
+        val restored = MatrixCvp3NativeProjection(
+            gatewayId = { "gateway-1" },
+            activeDeviceCount = { 2 },
+            initialState = original.durableState(),
+        )
+        val stale = restored.applyGatewayEvent(
+            assistant("logical-event-v2", "message-1", "truncated", version = 2),
+            "\$physical-v2",
+            "\$root-a",
+        )
+
+        assertTrue(stale.messages.isEmpty())
     }
 
     @Test
@@ -443,13 +497,19 @@ class MatrixCvp3NativeProjectionTest {
         },
     )
 
-    private fun assistant(eventId: String, messageId: String, body: String) = event(
+    private fun assistant(
+        eventId: String,
+        messageId: String,
+        body: String,
+        version: Int = 1,
+    ) = event(
         eventId = eventId,
         projectId = "project-1",
         sessionId = "session-a",
         payload = buildJsonObject {
             put("type", "assistant.message")
             put("messageId", messageId)
+            put("messageVersion", version)
             put("partIndex", 0)
             put("format", "markdown")
             put("body", body)
@@ -463,6 +523,7 @@ class MatrixCvp3NativeProjectionTest {
         payload = buildJsonObject {
             put("type", "assistant.message")
             put("messageId", "tool-message-1")
+            put("messageVersion", 1)
             put("partIndex", 0)
             put("format", "plain")
             put("body", "Read file")

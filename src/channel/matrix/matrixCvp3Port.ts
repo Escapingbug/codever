@@ -59,6 +59,7 @@ export interface ResolvedV3Decision {
  */
 export class MatrixCvp3Port implements ChannelPort {
   readonly fileReferenceHints = false
+  readonly coalesceAssistantText = true
   private readonly pendingDecisions = new Map<string, PendingDecision>()
   private readonly operationIds = new WeakMap<ChannelMessage, string>()
   private readonly attachmentUploads = new Map<string, Promise<CodeverAttachment[]>>()
@@ -80,10 +81,12 @@ export class MatrixCvp3Port implements ChannelPort {
     const parts = splitMessage(message)
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
+      const versionKey = partVersionKey(messageId, index)
+      const version = this.nextMessageVersion(versionKey)
       const result = await this.sendAssistantEvent({
-        eventId: eventId('assistant', logicalPartId, 1),
+        eventId: eventId('assistant', logicalPartId, version),
         messageId,
-        messageVersion: this.nextMessageVersion(logicalPartId),
+        messageVersion: version,
         body: normalizedBody(part),
         format: part.format === 'markdown' ? 'markdown' : 'plain',
         final: true,
@@ -96,7 +99,7 @@ export class MatrixCvp3Port implements ChannelPort {
       this.physicalEventIds.set(logicalPartId, result.eventId)
       if (index === 0) this.physicalEventIds.set(messageId, result.eventId)
       this.options.onLog?.(
-        `[cvp3/matrix] assistant ${logicalPartId} v${this.messageVersions.get(logicalPartId)} delivered`,
+        `[cvp3/matrix] assistant ${logicalPartId} v${version} delivered`,
       )
     }
     return { messageId }
@@ -116,7 +119,7 @@ export class MatrixCvp3Port implements ChannelPort {
 
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
-      const version = this.nextMessageVersion(logicalPartId)
+      const version = this.nextMessageVersion(partVersionKey(messageId, index))
       const physicalTarget = this.physicalEventIds.get(logicalPartId)
         ?? (index === 0 ? this.physicalEventIds.get(messageId) : undefined)
       const result = await this.sendAssistantEvent({
@@ -421,6 +424,10 @@ function threadRelation(rootEventId: string): Record<string, unknown> {
 
 function partId(messageId: string, index: number, count: number): string {
   return count === 1 ? messageId : `${messageId}.part.${index}`
+}
+
+function partVersionKey(messageId: string, index: number): string {
+  return `${messageId}.part.${index}`
 }
 
 function eventId(kind: string, logicalId: string, version: number): string {

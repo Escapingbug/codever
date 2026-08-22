@@ -125,6 +125,13 @@ export class ChannelDeliveryQueuedError extends Error {
 
 export interface ChannelPort {
     /**
+     * Whether assistant text flushed more than once in one turn should update
+     * one stable channel message. This prevents streaming pauses from turning
+     * short text deltas into separate chat bubbles.
+     */
+    readonly coalesceAssistantText?: boolean
+
+    /**
      * Whether tool-output file:// references should receive channel command
      * hints such as `/file_f1`. First-party clients use structured artifacts.
      */

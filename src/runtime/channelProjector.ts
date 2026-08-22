@@ -11,6 +11,8 @@ export interface ProjectedMessage {
     message: ChannelMessage
     toolUseId?: string
     isToolEvent: boolean
+    /** This message contains a flushed fragment of the current assistant turn. */
+    isAssistantText?: boolean
     isTerminal: boolean
     semanticEvent?: ConversationEvent
 }
@@ -145,6 +147,7 @@ export class ChannelProjector {
         return [{
             message: { text, format: 'markdown' },
             isToolEvent: false,
+            isAssistantText: true,
             isTerminal: semanticEvent?.kind === 'turn_finished',
             semanticEvent,
         }]

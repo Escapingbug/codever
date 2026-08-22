@@ -176,6 +176,9 @@ export class SemanticSessionRuntime {
     private textFlushTimer: ReturnType<typeof setTimeout> | null = null
     private textFlushChain: Promise<void> = Promise.resolve()
     private textFlushGeneration = 0
+    private assistantTextMessage: ChannelMessage | null = null
+    private assistantTextMessageId: string | number | undefined
+    private assistantTextDeliveryChain: Promise<void> = Promise.resolve()
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
@@ -401,6 +404,9 @@ export class SemanticSessionRuntime {
         this.pendingCodeverSendFileCalls.clear()
         this.projector.reset()
         this.toolMessageIds.clear()
+        this.assistantTextMessage = null
+        this.assistantTextMessageId = undefined
+        this.assistantTextDeliveryChain = Promise.resolve()
         this.currentTurnDelivery = {
             hadAssistantText: false,
             deliveryFailures: [],
@@ -748,7 +754,13 @@ export class SemanticSessionRuntime {
         for (const projected of messages) {
             const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
             this.captureTables(message)
-            await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
+            await this.deliver(
+                message,
+                projected.toolUseId,
+                projected.isToolEvent,
+                projected.isTerminal,
+                projected.isAssistantText,
+            )
         }
     }
 
@@ -780,7 +792,13 @@ export class SemanticSessionRuntime {
             for (const projected of projectedMessages) {
                 const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
                 this.captureTables(message)
-                await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
+                await this.deliver(
+                    message,
+                    projected.toolUseId,
+                    projected.isToolEvent,
+                    projected.isTerminal,
+                    projected.isAssistantText,
+                )
             }
         })
         return this.textFlushChain
@@ -804,7 +822,18 @@ export class SemanticSessionRuntime {
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 
-    private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false, isTerminal = false): Promise<void> {
+    private async deliver(
+        message: ChannelMessage,
+        toolUseId?: string,
+        isToolEvent = false,
+        isTerminal = false,
+        isAssistantText = false,
+    ): Promise<void> {
+        if (isAssistantText && this.config.channelPort.coalesceAssistantText) {
+            await this.deliverCoalescedAssistantText(message)
+            return
+        }
+
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
             const delivery = this.outbox.edit(this.toolMessageIds.get(toolUseId), message, isTerminal, {
                 lane: 'progressive-edit',
@@ -832,6 +861,33 @@ export class SemanticSessionRuntime {
         if (isToolEvent && toolUseId && record.messageId !== undefined) {
             this.toolMessageIds.set(toolUseId, record.messageId)
         }
+    }
+
+    private async deliverCoalescedAssistantText(message: ChannelMessage): Promise<void> {
+        const cumulativeMessage: ChannelMessage = this.assistantTextMessage
+            ? {
+                ...message,
+                text: this.assistantTextMessage.text + message.text,
+            }
+            : message
+        this.assistantTextMessage = cumulativeMessage
+
+        const delivery = this.assistantTextDeliveryChain.then(async () => {
+            const record = this.assistantTextMessageId === undefined
+                ? await this.outbox.send(cumulativeMessage)
+                : await this.outbox.editDeferred(
+                    () => this.assistantTextMessageId,
+                    cumulativeMessage,
+                    true,
+                    { lane: 'normal' },
+                )
+            this.noteDeliveryRecord(record)
+            if (record.messageId !== undefined) {
+                this.assistantTextMessageId = record.messageId
+            }
+        })
+        this.assistantTextDeliveryChain = delivery.catch(() => undefined)
+        await delivery
     }
 
     private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
