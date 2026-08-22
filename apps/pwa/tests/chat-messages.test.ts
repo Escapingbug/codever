@@ -646,7 +646,42 @@ test("a newer multipart version replaces all parts without leaving stale text", 
 
   assert.equal(versionTwo.length, 1);
   assert.equal(versionTwo[0].text, "new result");
-  assert.equal(versionTwo[0].multipart?.version, 2);
+  assert.deepEqual(versionTwo[0].multipart?.versions, { 0: 2, 1: 2 });
+});
+
+test("reassembles a growing streamed message with independent part versions", () => {
+  const short = mergeChatMessages([], [
+    cvp3Part({ index: 0, count: 1, text: "short", version: 1 }),
+  ]);
+  const growing = mergeChatMessages(short, [
+    cvp3Part({ index: 0, count: 2, text: "A".repeat(8_192), version: 2 }),
+    cvp3Part({ index: 1, count: 2, text: "Markdown tail", version: 1 }),
+  ]);
+
+  assert.equal(growing.length, 1);
+  assert.equal(growing[0].text, `${"A".repeat(8_192)}Markdown tail`);
+  assert.deepEqual(growing[0].multipart?.versions, { 0: 2, 1: 1 });
+});
+
+test("a streamed agent message replaces partial markdown with its cumulative version", () => {
+  const partial = cvp3Part({
+    index: 0,
+    count: 1,
+    text: "```ts\nconst value",
+    version: 1,
+  });
+  const complete = cvp3Part({
+    index: 0,
+    count: 1,
+    text: "```ts\nconst value = 1;\n```",
+    version: 2,
+  });
+
+  const messages = mergeChatMessages([partial], [complete]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].text, "```ts\nconst value = 1;\n```");
+  assert.equal(messages[0].raw?.messageVersion, 2);
 });
 
 function cvp3Part(input: {

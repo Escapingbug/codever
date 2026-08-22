@@ -674,13 +674,13 @@ describe('SemanticSessionRuntime', () => {
             })
 
             const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
-            await vi.advanceTimersByTimeAsync(2_000)
+            await vi.advanceTimersByTimeAsync(0)
             expect(operations).toMatchObject([
                 { kind: 'send', message: { text: '这' }, messageId: 1 },
             ])
 
             releaseFirst()
-            await vi.advanceTimersByTimeAsync(2_000)
+            await vi.advanceTimersByTimeAsync(600)
             expect(operations).toMatchObject([
                 { kind: 'send', message: { text: '这' }, messageId: 1 },
                 { kind: 'edit', message: { text: '这是一' }, messageId: 1 },
@@ -693,6 +693,60 @@ describe('SemanticSessionRuntime', () => {
                 { kind: 'edit', message: { text: '这是一' }, messageId: 1 },
                 { kind: 'edit', message: { text: '这是一句话' }, messageId: 1 },
             ])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('streams a continuously arriving sentence without waiting for a quiet period', async () => {
+        vi.useFakeTimers()
+        try {
+            const operations: DeliveryOperation[] = []
+            let finish!: () => void
+            const hold = new Promise<void>(resolve => {
+                finish = resolve
+            })
+            const provider: AgentProvider = {
+                ...createProvider([]),
+                startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                    events: (async function* () {
+                        yield { kind: 'text', text: '这' } as AgentEvent
+                        for (const text of ['是', '一', '句', '话']) {
+                            await delay(100)
+                            yield { kind: 'text', text } as AgentEvent
+                        }
+                        await hold
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt: vi.fn(),
+                })),
+            }
+            const channel = {
+                ...createChannel([], [], operations),
+                coalesceAssistantText: true,
+            }
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+            ])
+
+            await vi.advanceTimersByTimeAsync(650)
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这' }, messageId: 1 },
+                { kind: 'edit', message: { text: '这是一句话' }, messageId: 1 },
+            ])
+
+            finish()
+            await running
         } finally {
             vi.useRealTimers()
         }

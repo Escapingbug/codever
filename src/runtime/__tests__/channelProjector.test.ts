@@ -195,6 +195,23 @@ describe('ChannelProjector — patch merge', () => {
         expect(second[0]?.message.presentation?.tools).toHaveLength(1)
         expect(second[0]?.message.presentation?.tools[0]?.id).toBe('after-decision')
     })
+
+    it('retains whitespace-only markdown chunks until visible text arrives', () => {
+        projector.project({
+            kind: 'assistant_text_delta',
+            text: '  ',
+            meta: makeMeta('assistant-whitespace'),
+        })
+        expect(projector.flush()).toEqual([])
+
+        projector.project({
+            kind: 'assistant_text_delta',
+            text: 'indented',
+            meta: makeMeta('assistant-text'),
+        })
+
+        expect(projector.flush()[0]?.message.text).toBe('  indented')
+    })
 })
 
 describe('ChannelProjector — command_result friendly rendering', () => {

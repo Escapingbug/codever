@@ -138,11 +138,11 @@ export class ChannelProjector {
         closeEmptyToolGroup = false,
     ): ProjectedMessage[] {
         const text = this.textBuffer
-        this.textBuffer = ''
         if (!text.trim()) {
             if (closeEmptyToolGroup) this.closeNormalToolGroup()
             return []
         }
+        this.textBuffer = ''
         this.closeNormalToolGroup()
         return [{
             message: { text, format: 'markdown' },

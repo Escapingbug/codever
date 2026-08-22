@@ -299,6 +299,48 @@ describe('MatrixCvp3Port', () => {
         ui: expect.objectContaining({ kind: 'tool_group', groupId: 'read-1' }),
       }),
     ]))
+
+    await port.send({
+      text: 'short',
+      format: 'markdown',
+      replyMarkup: { idempotencyKey: 'growing-agent-message' },
+    })
+    const growingStart = transport.delivered.length
+    await port.edit('growing-agent-message', {
+      text: `${'A'.repeat(8 * 1024)}Markdown tail`,
+      format: 'markdown',
+      replyMarkup: { idempotencyKey: 'growing-agent-message' },
+    }, { terminal: true })
+    const growingPayloads = await Promise.all(
+      transport.delivered.slice(growingStart).map(async delivery => {
+        const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const envelope = await openCvp3Envelope(extension.envelope, {
+          projectKey: base64UrlDecode(projectKey.key),
+          roomId: room.roomId,
+          projectId: grant.projectId,
+          keyId: projectKey.keyId,
+        })
+        if (envelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+        return envelope.plaintext.value.event.payload
+      }),
+    )
+    expect(growingPayloads).toMatchObject([
+      {
+        type: 'assistant.message',
+        messageId: 'growing-agent-message',
+        messageVersion: 2,
+        partIndex: 0,
+        partCount: 2,
+      },
+      {
+        type: 'assistant.message',
+        messageId: 'growing-agent-message',
+        messageVersion: 1,
+        partIndex: 1,
+        partCount: 2,
+        body: 'Markdown tail',
+      },
+    ])
   })
 })
 

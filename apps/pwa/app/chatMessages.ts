@@ -31,9 +31,10 @@ export type ChatMessage = PersistedChatMessage & {
   mergedOperationIds?: string[];
   multipart?: {
     messageId: string;
-    version: number;
     partCount: number;
+    partCountVersion: number;
     parts: Record<number, string>;
+    versions: Record<number, number>;
   };
 };
 
@@ -241,34 +242,51 @@ function mergeMultipartAssistantMessage(
   });
   if (!isMultipart) return null;
 
-  const currentVersion = Math.max(
-    0,
-    ...matching.map((entry) => multipartDescriptor(entry)?.version ?? 0),
-  );
-  if (incomingPart.version < currentVersion) return [...current];
-
-  const version = Math.max(currentVersion, incomingPart.version);
-  const candidates = [...matching, incoming].filter(
-    (entry) => multipartDescriptor(entry)?.version === version,
-  );
-  const descriptor = multipartDescriptor(
-    [...candidates].reverse().find((entry) =>
-      multipartDescriptor(entry)?.partIndex === 0,
-    ) ?? candidates[candidates.length - 1],
-  )!;
+  const candidates = [...matching, incoming];
   const parts: Record<number, string> = {};
+  const versions: Record<number, number> = {};
+  let partCount = 1;
+  let partCountVersion = 0;
   for (const candidate of candidates) {
+    if (candidate.multipart) {
+      if (candidate.multipart.partCountVersion >= partCountVersion) {
+        partCount = candidate.multipart.partCount;
+        partCountVersion = candidate.multipart.partCountVersion;
+      }
+      for (const [indexText, text] of Object.entries(candidate.multipart.parts)) {
+        const index = Number(indexText);
+        const version = candidate.multipart.versions[index] ?? 0;
+        if (version >= (versions[index] ?? 0)) {
+          parts[index] = text;
+          versions[index] = version;
+        }
+      }
+      continue;
+    }
+
     const part = multipartDescriptor(candidate)!;
-    if (candidate.multipart?.version === version) {
-      Object.assign(parts, candidate.multipart.parts);
-    } else if (part.partIndex < descriptor.partCount) {
+    if (part.partIndex === 0 && part.version >= partCountVersion) {
+      partCount = part.partCount;
+      partCountVersion = part.version;
+    } else if (part.version >= partCountVersion) {
+      // A continuation may arrive before the first part of an expansion.
+      // Let it expose the larger shape only while it is not older than the
+      // authoritative first-part shape.
+      partCount = Math.max(partCount, part.partCount);
+    }
+    if (part.version >= (versions[part.partIndex] ?? 0)) {
       parts[part.partIndex] = candidate.text ?? "";
+      versions[part.partIndex] = part.version;
     }
   }
 
-  const firstPart = [...candidates].reverse().find(
-    (entry) => multipartDescriptor(entry)?.partIndex === 0,
-  );
+  const firstPart = candidates
+    .filter((entry) => multipartDescriptor(entry)?.partIndex === 0)
+    .sort((left, right) =>
+      (multipartDescriptor(left)?.version ?? 0) -
+      (multipartDescriptor(right)?.version ?? 0)
+    )
+    .at(-1);
   const base = firstPart ?? candidates[candidates.length - 1];
   const toolGroup = candidates.reduce(
     (group, candidate) => mergeToolGroupPresentation(group, candidate.toolGroup),
@@ -281,7 +299,7 @@ function mergeMultipartAssistantMessage(
   // Keep the aggregate identity distinct from every transport part. The live
   // message cache fast-path replaces exact IDs directly, while a multipart
   // update must always return through this reassembly path.
-  const logicalId = `assistant:${descriptor.messageId}:multipart`;
+  const logicalId = `assistant:${incomingPart.messageId}:multipart`;
   const aggregate: ChatMessage = {
     ...base,
     id: logicalId,
@@ -290,7 +308,7 @@ function mergeMultipartAssistantMessage(
       ? "tool"
       : "agent",
     text: Array.from(
-      { length: descriptor.partCount },
+      { length: partCount },
       (_, index) => parts[index] ?? "",
     ).join(""),
     timestamp,
@@ -310,10 +328,11 @@ function mergeMultipartAssistantMessage(
     ),
     historical: candidates.every((entry) => Boolean(entry.historical)),
     multipart: {
-      messageId: descriptor.messageId,
-      version,
-      partCount: descriptor.partCount,
+      messageId: incomingPart.messageId,
+      partCount,
+      partCountVersion,
       parts,
+      versions,
     },
   };
   const withoutParts = current.filter((entry) => !matching.includes(entry));
@@ -327,7 +346,7 @@ function multipartDescriptor(
   if (message.multipart) {
     return {
       messageId: message.multipart.messageId,
-      version: message.multipart.version,
+      version: message.multipart.partCountVersion,
       partIndex: 0,
       partCount: message.multipart.partCount,
     };
@@ -429,6 +448,19 @@ function preferredLogicalCopy(
   existing: ChatMessage,
   incoming: ChatMessage,
 ): ChatMessage {
+  const existingAssistant = assistantMessageIdentity(existing);
+  const incomingAssistant = assistantMessageIdentity(incoming);
+  if (
+    existingAssistant &&
+    incomingAssistant &&
+    existingAssistant.messageId === incomingAssistant.messageId &&
+    existingAssistant.version !== incomingAssistant.version
+  ) {
+    return incomingAssistant.version > existingAssistant.version
+      ? incoming
+      : existing;
+  }
+
   const existingOperations = new Set(operationIds(existing));
   const incomingOperations = new Set(operationIds(incoming));
   const incomingAddsOperations = [...incomingOperations].some(
@@ -445,6 +477,19 @@ function preferredLogicalCopy(
   return latestToolUpdate(incoming) > latestToolUpdate(existing)
     ? incoming
     : existing;
+}
+
+function assistantMessageIdentity(
+  message: ChatMessage,
+): { messageId: string; version: number } | undefined {
+  const raw = message.raw;
+  if (
+    raw?.type !== "assistant.message" ||
+    typeof raw.messageId !== "string" ||
+    !raw.messageId ||
+    !isPositiveInteger(raw.messageVersion)
+  ) return undefined;
+  return { messageId: raw.messageId, version: raw.messageVersion };
 }
 
 function latestToolUpdate(message: ChatMessage): number {

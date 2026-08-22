@@ -48,6 +48,7 @@ const DESTROY_INTERRUPT_TIMEOUT_MS = 2_500
 const DESTROY_OUTBOX_DRAIN_TIMEOUT_MS = 3_000
 const FINALIZE_OUTBOX_DRAIN_TIMEOUT_MS = 5_000
 const ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS = 1_500
+const ASSISTANT_TEXT_STREAM_UPDATE_MS = 500
 const TERMINAL_TOOL_EDIT_GRACE_MS = ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS + 500
 
 export interface RuntimeProgress {
@@ -178,6 +179,7 @@ export class SemanticSessionRuntime {
     private textFlushGeneration = 0
     private assistantTextMessage: ChannelMessage | null = null
     private assistantTextMessageId: string | number | undefined
+    private assistantTextIdempotencyKey: string | null = null
     private assistantTextDeliveryChain: Promise<void> = Promise.resolve()
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
@@ -406,6 +408,7 @@ export class SemanticSessionRuntime {
         this.toolMessageIds.clear()
         this.assistantTextMessage = null
         this.assistantTextMessageId = undefined
+        this.assistantTextIdempotencyKey = randomUUID()
         this.assistantTextDeliveryChain = Promise.resolve()
         this.currentTurnDelivery = {
             hadAssistantText: false,
@@ -714,10 +717,6 @@ export class SemanticSessionRuntime {
     }
 
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
-        if (event.kind !== 'assistant_text_delta') {
-            this.cancelScheduledTextFlush()
-        }
-
         if (event.kind === 'assistant_text_delta' && event.text.trim()) {
             if (this.currentTurnDelivery) this.currentTurnDelivery.hadAssistantText = true
         }
@@ -749,7 +748,15 @@ export class SemanticSessionRuntime {
 
         const messages = this.projector.project(event, { verboseLevel: this.getVerboseLevel() })
         if (event.kind === 'assistant_text_delta') {
-            this.scheduleAssistantTextFlush()
+            if (
+                this.config.channelPort.coalesceAssistantText
+                && this.assistantTextMessage === null
+                && event.text.trim()
+            ) {
+                await this.flushBufferedAssistantText('stream-start')
+            } else {
+                this.scheduleAssistantTextFlush()
+            }
         }
         for (const projected of messages) {
             const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
@@ -765,12 +772,20 @@ export class SemanticSessionRuntime {
     }
 
     private scheduleAssistantTextFlush(): void {
+        if (this.config.channelPort.coalesceAssistantText && this.textFlushTimer) {
+            return
+        }
         this.cancelScheduledTextFlush()
         const generation = this.textFlushGeneration
         this.textFlushTimer = setTimeout(() => {
             if (generation !== this.textFlushGeneration) return
-            void this.flushBufferedAssistantText('debounce', generation)
-        }, ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS)
+            void this.flushBufferedAssistantText(
+                this.config.channelPort.coalesceAssistantText ? 'stream-update' : 'debounce',
+                generation,
+            )
+        }, this.config.channelPort.coalesceAssistantText
+            ? ASSISTANT_TEXT_STREAM_UPDATE_MS
+            : ASSISTANT_TEXT_FLUSH_DEBOUNCE_MS)
     }
 
     private cancelScheduledTextFlush(): void {
@@ -864,12 +879,21 @@ export class SemanticSessionRuntime {
     }
 
     private async deliverCoalescedAssistantText(message: ChannelMessage): Promise<void> {
-        const cumulativeMessage: ChannelMessage = this.assistantTextMessage
+        const cumulativeBody: ChannelMessage = this.assistantTextMessage
             ? {
                 ...message,
                 text: this.assistantTextMessage.text + message.text,
             }
             : message
+        const cumulativeMessage: ChannelMessage = {
+            ...cumulativeBody,
+            replyMarkup: {
+                ...channelMessageOptions(cumulativeBody.replyMarkup),
+                ...(this.assistantTextIdempotencyKey
+                    ? { idempotencyKey: this.assistantTextIdempotencyKey }
+                    : {}),
+            },
+        }
         this.assistantTextMessage = cumulativeMessage
 
         const delivery = this.assistantTextDeliveryChain.then(async () => {
@@ -1728,6 +1752,12 @@ function withTimeoutFallback<T>(
 function truncateForNotice(value: string, maxLength = 700): string {
     if (value.length <= maxLength) return value
     return `${value.slice(0, maxLength)}...`
+}
+
+function channelMessageOptions(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {}
 }
 
 function formatCodeBlock(content: string, language: string | undefined): string {
