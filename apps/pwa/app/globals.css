@@ -2234,6 +2234,145 @@ select:focus-visible {
   color: #b64a54;
 }
 
+.turn-result-context {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px solid #ececf2;
+}
+
+.error-bubble .turn-result-context {
+  border-top-color: #f0d9dc;
+}
+
+.turn-result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.turn-completion-mark,
+.turn-context-button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 9px;
+}
+
+.turn-completion-mark {
+  margin-right: auto;
+  color: #289276;
+  animation: state-confirm var(--motion-base) var(--motion-ease-out);
+}
+
+.turn-completion-mark.is-failed {
+  color: #b64a54;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.turn-completion-mark svg,
+.turn-context-button svg,
+.turn-origin-preview > svg,
+.jump-to-latest svg {
+  width: 17px;
+  height: 17px;
+}
+
+.turn-completion-mark svg,
+.turn-locate-button svg,
+.jump-to-latest svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.turn-context-button {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: #81899a;
+  transition:
+    color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
+}
+
+.turn-context-button:hover,
+.turn-context-button:focus-visible,
+.turn-result-context.is-expanded .turn-context-button:first-of-type {
+  background: #f0eefb;
+  color: var(--violet-dark);
+}
+
+.turn-context-button:active {
+  transform: scale(0.92);
+}
+
+.turn-context-button:disabled {
+  cursor: wait;
+}
+
+.turn-context-button:not(.turn-locate-button) svg,
+.turn-origin-preview > svg {
+  fill: currentColor;
+}
+
+.turn-locate-button.is-loading svg {
+  opacity: 0.32;
+}
+
+.turn-location-spinner {
+  position: absolute;
+  inset: 2px;
+  border: 1.5px solid rgb(105 87 229 / 15%);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  animation: motion-spin 720ms linear infinite;
+}
+
+.turn-location-error {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid white;
+  border-radius: 50%;
+  background: #c45662;
+}
+
+.turn-origin-preview {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 9px;
+  border: 1px solid #e8e6f4;
+  border-radius: 9px;
+  background: #f8f7fc;
+  color: #626a7c;
+  animation: notice-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.turn-origin-preview > svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: #9288c7;
+}
+
+.turn-origin-preview p {
+  white-space: pre-wrap;
+}
+
+.turn-origin-preview .message-attachments {
+  margin-top: 6px;
+}
+
 .agent-label {
   display: block;
   margin-bottom: 4px;
@@ -2888,18 +3027,51 @@ select:focus-visible {
 .jump-to-latest {
   position: absolute;
   z-index: 6;
-  top: -43px;
-  left: 50%;
-  min-height: 34px;
-  padding: 0 13px;
+  top: -46px;
+  right: clamp(20px, 4vw, 65px);
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
   border: 1px solid #d8d4f5;
-  border-radius: 999px;
+  border-radius: 12px;
   background: rgb(255 255 255 / 96%);
   box-shadow: 0 5px 18px rgb(41 46 67 / 14%);
   color: var(--violet-dark);
-  font-size: 12px;
-  font-weight: 700;
-  transform: translateX(-50%);
+  animation: notice-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.jump-to-latest:hover,
+.jump-to-latest:focus-visible {
+  background: #f4f2fd;
+}
+
+.jump-to-latest.return-to-result {
+  border-color: #c9c3ee;
+}
+
+.return-result-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid white;
+  border-radius: 50%;
+  background: #2b9a7c;
+}
+
+.latest-message-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid white;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: latest-message-pulse 1.6s ease-out infinite;
 }
 
 .ui-notice-list {
@@ -5025,6 +5197,18 @@ i.connection-state-connected {
 @keyframes state-confirm {
   from {
     transform: scale(0.76);
+  }
+}
+
+@keyframes latest-message-pulse {
+  0%,
+  42% {
+    box-shadow: 0 0 0 0 rgb(105 87 229 / 35%);
+  }
+
+  78%,
+  100% {
+    box-shadow: 0 0 0 5px rgb(105 87 229 / 0%);
   }
 }
 
