@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CODEVER_MATRIX_EXTENSION,
   type Cvp3Event,
@@ -200,7 +200,7 @@ describe("MatrixCvp3ProtocolClient", () => {
     expect(client.projection.visibleSessions()).toHaveLength(1);
     expect(store.inbox.get("$bad")?.status).toBe("quarantined");
     expect(store.inbox.get("$forged-local-command")?.status).toBe("quarantined");
-    expect(store.inbox.get("$ready")?.status).toBe("projected");
+    expect(store.inbox.has("$ready")).toBe(false);
 
     const restarted = new MatrixCvp3ProtocolClient(
       config,
@@ -211,10 +211,11 @@ describe("MatrixCvp3ProtocolClient", () => {
     );
     await restarted.acceptKeyGrant(grantState);
     expect(restarted.projection.visibleSessions()).toHaveLength(1);
+    const currentState = restarted.projection.durableState();
 
-    // A missing/corrupt rebuildable projection must recover from durable raw
-    // inbox events instead of treating their projected status as a reason to
-    // skip them forever.
+    // Inbox and projection are one rebuildable unit. If the projection is
+    // missing, startup discards the incomplete pair instead of replaying an
+    // inbox whose size grows for the lifetime of the installation.
     await store.clearProjection();
     const rebuilt = new MatrixCvp3ProtocolClient(
       config,
@@ -224,29 +225,30 @@ describe("MatrixCvp3ProtocolClient", () => {
       store,
     );
     await rebuilt.acceptKeyGrant(grantState);
+    expect(rebuilt.projection.visibleSessions()).toHaveLength(0);
+    expect(store.inbox.size).toBe(0);
+    expect(store.outbox.has(sent.commandId)).toBe(true);
+    await rebuilt.ingest(readyRaw);
     expect(rebuilt.projection.visibleSessions()).toHaveLength(1);
-    expect(store.inbox.get("$bad")?.status).toBe("quarantined");
 
-    // An old but structurally valid projection can be semantically empty
-    // while retaining logical-event deduplication IDs. Authoritative startup
-    // must discard that materialized view and rebuild it from the raw inbox.
-    const currentState = rebuilt.projection.durableState();
-    store.projectionState = {
-      ...currentState,
-      sessions: [],
-      messages: [],
-    };
-    const stale = new MatrixCvp3ProtocolClient(
+    // A current-schema projection remains local-first. Authoritative startup
+    // no longer performs an O(total retained events) inbox replay.
+    store.projectionState = structuredClone(currentState);
+    const listInbox = vi.spyOn(store, "listInbox").mockRejectedValue(
+      new Error("a full historical replay must not run"),
+    );
+    const localFirst = new MatrixCvp3ProtocolClient(
       config,
       identity,
       trust,
       transport,
       store,
     );
-    await stale.acceptKeyGrant(grantState);
-    expect(stale.projection.visibleSessions()).toHaveLength(0);
-    await stale.prepareAuthoritativeRecovery();
-    expect(stale.projection.visibleSessions()).toHaveLength(1);
+    await localFirst.acceptKeyGrant(grantState);
+    await localFirst.prepareAuthoritativeRecovery();
+    expect(localFirst.projection.visibleSessions()).toHaveLength(1);
+    expect(listInbox).not.toHaveBeenCalled();
+    listInbox.mockRestore();
 
     // A previously quarantined valid event must get one fresh attempt when
     // authoritative Matrix history presents the same physical event again.
@@ -254,6 +256,7 @@ describe("MatrixCvp3ProtocolClient", () => {
       ...currentState,
       sessions: [],
       messages: [],
+      seenLogicalEvents: currentState.seenLogicalEvents.filter(id => id !== "ready-1"),
     };
     store.inbox.set("$ready", {
       raw: structuredClone(readyRaw),
@@ -272,8 +275,38 @@ describe("MatrixCvp3ProtocolClient", () => {
     expect(quarantinedRecovery.projection.visibleSessions()).toHaveLength(0);
     await quarantinedRecovery.ingest(readyRaw);
     expect(quarantinedRecovery.projection.visibleSessions()).toHaveLength(1);
-    expect(store.inbox.get("$ready")?.status).toBe("projected");
-    expect(store.inbox.get("$bad")?.status).toBe("quarantined");
-    expect(store.inbox.get("$forged-local-command")?.status).toBe("quarantined");
+    expect(store.inbox.has("$ready")).toBe(false);
+
+    // A corrupt current projection converges by dropping only Matrix-derived
+    // state. The independently durable command remains recoverable.
+    class CorruptReadModelStore extends MemoryMatrixCvp3ClientStore {
+      resets = 0;
+      override async resetRebuildableState() {
+        this.resets += 1;
+        await super.resetRebuildableState();
+      }
+    }
+    const failingStore = new CorruptReadModelStore();
+    failingStore.outbox.set(sent.commandId, structuredClone(store.outbox.get(sent.commandId)!));
+    failingStore.inbox.set("$legacy", {
+      raw: { ...readyRaw, eventId: "$legacy" },
+      status: "projected",
+    });
+    failingStore.projectionState = { incompatible: true } as never;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const repaired = new MatrixCvp3ProtocolClient(
+      config,
+      identity,
+      trust,
+      transport,
+      failingStore,
+    );
+    await repaired.acceptKeyGrant(grantState);
+    expect(failingStore.resets).toBe(1);
+    expect(failingStore.inbox.size).toBe(0);
+    expect(failingStore.outbox.has(sent.commandId)).toBe(true);
+    await repaired.prepareAuthoritativeRecovery();
+    expect(warning).toHaveBeenCalledTimes(1);
+    warning.mockRestore();
   });
 });

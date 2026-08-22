@@ -24,6 +24,9 @@ const STARTUP_TIMEOUT_MS = 90_000
 const CONVERGENCE_TIMEOUT_MS = 20_000
 const PROVIDER_RESPONSE = 'Codever deterministic E2E response'
 const COLD_START_NOISE_EVENTS = 40
+const LEGACY_CVP3_OUTBOX_SENTINEL = '__codever_e2e_preserved_outbox__'
+const LEGACY_CVP3_INBOX_SENTINEL = '__codever_e2e_stale_inbox__'
+const LEGACY_CVP3_PROJECTION_SENTINEL = '__codever_e2e_stale_projection__'
 
 if (process.env[ENABLE_ENV] !== '1') {
     throw new Error(
@@ -142,7 +145,14 @@ try {
     await waitForText(second, firstPrompt)
     await waitForText(second, PROVIDER_RESPONSE)
 
-    process.stdout.write('[5b/7] Repairing a valid-but-empty projection and historical quarantines…\n')
+    process.stdout.write('[5u/7] Migrating a retained pre-manifest CVP/3 cache without losing its outbox…\n')
+    await suspendAndSeedLegacyCvp3Database(second)
+    await second.goto(pwaUrl)
+    await waitForConnected(second)
+    await waitForSessionIds(second, [firstSession, secondSession])
+    await assertLegacyCvp3DatabaseMigrated(second)
+
+    process.stdout.write('[5b/7] Repairing a corrupt local projection without replaying retained history…\n')
     await suspendAndPoisonCvp3ReadModel(second)
     await second.goto(pwaUrl)
     await waitForConnected(second)
@@ -271,12 +281,12 @@ try {
     await waitForText(second, crossDevicePrompt)
     await waitForText(second, PROVIDER_RESPONSE)
 
-    process.stdout.write('[7/7] Deleting two sessions concurrently on separate devices…\n')
+    process.stdout.write('[7/7] Archiving two sessions concurrently on separate devices…\n')
     await openSession(first, firstSession)
     await openSession(second, secondSession)
     await Promise.all([
-        beginDelete(first),
-        beginDelete(second),
+        beginArchive(first),
+        beginArchive(second),
     ])
     await Promise.all([
         waitForSessionIds(first, []),
@@ -286,7 +296,7 @@ try {
     assertNoErrors(second)
     await assertNoBlockingAlerts(first)
     await assertNoBlockingAlerts(second)
-    process.stdout.write('PASS — CVP/3 over Matrix paired, created, ran concurrently, synchronized, restored, quarantined poison, and deleted.\n')
+    process.stdout.write('PASS — CVP/3 over Matrix paired, created, ran concurrently, synchronized, restored, quarantined poison, and archived.\n')
 } catch (error) {
     await mkdir(artifactDirectory, { recursive: true })
     await Promise.all([
@@ -403,15 +413,12 @@ async function sendPrompt(page: Page, prompt: string): Promise<void> {
     await page.getByRole('button', { name: 'Send message' }).click()
 }
 
-async function beginDelete(page: Page): Promise<void> {
+async function beginArchive(page: Page): Promise<void> {
     const details = page.getByRole('button', { name: 'Conversation details' })
     if (await details.getAttribute('aria-expanded') !== 'true') await details.click()
     await page.getByRole('button').filter({
-        has: page.locator('strong', { hasText: /^Delete session$/u }),
+        has: page.locator('strong', { hasText: /^Archive session$/u }),
     }).click()
-    const dialog = page.getByRole('alertdialog')
-    await dialog.waitFor({ state: 'visible' })
-    await dialog.getByRole('button', { name: 'Delete session', exact: true }).click()
 }
 
 async function openSession(page: Page, sessionId: string): Promise<void> {
@@ -517,13 +524,131 @@ async function sessionIds(page: Page): Promise<string[]> {
     }))
 }
 
-async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
-    // Reproduce the deployed failure: a projection can pass structural
-    // validation while containing no sessions, and its durable inbox can keep
-    // valid Matrix events quarantined after a transient historical failure.
+async function suspendAndSeedLegacyCvp3Database(page: Page): Promise<void> {
+    // Simulate the deployed build whose CVP/3 database predates its entries in
+    // the PWA storage manifest. The migration must clear Matrix-derived state
+    // while retaining an independent outbox row in the same physical DB.
     await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
-    const result = await page.evaluate(async (projectionStateVersion) => {
-        return new Promise<{ projectionRows: number; quarantinedRows: number }>((resolve, reject) => {
+    await page.evaluate(async ({ outboxKey, inboxKey, projectionKey, manifestKey }) => {
+        const rawManifest = localStorage.getItem(manifestKey)
+        if (!rawManifest) throw new Error('The IndexedDB upgrade manifest is unavailable.')
+        const manifest = JSON.parse(rawManifest) as {
+            stores?: Array<{ id?: string }>
+            invalidated?: string[]
+        }
+        manifest.stores = (manifest.stores ?? []).filter(entry =>
+            entry.id !== 'cvp3-command-outbox'
+            && entry.id !== 'cvp3-inbox-and-projection'
+        )
+        manifest.invalidated = (manifest.invalidated ?? []).filter(id =>
+            id !== 'cvp3-command-outbox'
+            && id !== 'cvp3-inbox-and-projection'
+        )
+        localStorage.setItem(manifestKey, JSON.stringify(manifest))
+
+        await new Promise<void>((resolve, reject) => {
+            const opened = indexedDB.open('codever-matrix-v3', 2)
+            opened.onerror = () => reject(opened.error ?? new Error('Could not open the CVP/3 test database.'))
+            opened.onblocked = () => reject(new Error('The CVP/3 test database remained open after unloading.'))
+            opened.onsuccess = () => {
+                const database = opened.result
+                const transaction = database.transaction(
+                    ['outbox', 'inbox', 'projection'],
+                    'readwrite',
+                    { durability: 'strict' },
+                )
+                transaction.objectStore('outbox').put({
+                    key: outboxKey,
+                    scope: '__migration_fixture__',
+                    scopeStatus: '__migration_fixture__\u0000completed',
+                    status: 'completed',
+                })
+                transaction.objectStore('inbox').put({
+                    key: inboxKey,
+                    scope: '__migration_fixture__',
+                    scopeStatus: '__migration_fixture__\u0000projected',
+                    status: 'projected',
+                    raw: {
+                        roomId: '!legacy:example.test',
+                        eventId: '$legacy',
+                        sender: '@legacy:example.test',
+                        timestamp: 1,
+                        content: {},
+                    },
+                })
+                transaction.objectStore('projection').put({
+                    key: projectionKey,
+                    state: { version: 0, legacy: true },
+                })
+                transaction.oncomplete = () => {
+                    database.close()
+                    resolve()
+                }
+                transaction.onerror = () => {
+                    const error = transaction.error ?? new Error('Could not seed the legacy CVP/3 database.')
+                    database.close()
+                    reject(error)
+                }
+                transaction.onabort = transaction.onerror
+            }
+        })
+    }, {
+        outboxKey: LEGACY_CVP3_OUTBOX_SENTINEL,
+        inboxKey: LEGACY_CVP3_INBOX_SENTINEL,
+        projectionKey: LEGACY_CVP3_PROJECTION_SENTINEL,
+        manifestKey: 'codever.indexeddb-state-manifest.v1',
+    })
+}
+
+async function assertLegacyCvp3DatabaseMigrated(page: Page): Promise<void> {
+    const result = await page.evaluate(async ({ outboxKey, inboxKey, projectionKey }) => {
+        return new Promise<{ outbox: boolean; inbox: boolean; projection: boolean }>((resolve, reject) => {
+            const opened = indexedDB.open('codever-matrix-v3', 2)
+            opened.onerror = () => reject(opened.error ?? new Error('Could not inspect the CVP/3 test database.'))
+            opened.onsuccess = () => {
+                const database = opened.result
+                const transaction = database.transaction(
+                    ['outbox', 'inbox', 'projection'],
+                    'readonly',
+                )
+                const outbox = transaction.objectStore('outbox').getKey(outboxKey)
+                const inbox = transaction.objectStore('inbox').getKey(inboxKey)
+                const projection = transaction.objectStore('projection').getKey(projectionKey)
+                transaction.oncomplete = () => {
+                    database.close()
+                    resolve({
+                        outbox: outbox.result !== undefined,
+                        inbox: inbox.result !== undefined,
+                        projection: projection.result !== undefined,
+                    })
+                }
+                transaction.onerror = () => {
+                    const error = transaction.error ?? new Error('Could not inspect the migrated CVP/3 database.')
+                    database.close()
+                    reject(error)
+                }
+                transaction.onabort = transaction.onerror
+            }
+        })
+    }, {
+        outboxKey: LEGACY_CVP3_OUTBOX_SENTINEL,
+        inboxKey: LEGACY_CVP3_INBOX_SENTINEL,
+        projectionKey: LEGACY_CVP3_PROJECTION_SENTINEL,
+    })
+    assert.deepEqual(result, {
+        outbox: true,
+        inbox: false,
+        projection: false,
+    }, 'CVP/3 migration must preserve outbox rows and discard only rebuildable state.')
+}
+
+async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
+    // A structurally incompatible projection and its inbox are one rebuildable
+    // unit. Startup must discard both, retain the outbox, and continue directly
+    // to bounded authoritative Matrix recovery.
+    await page.goto(`${pwaUrl}/api/version`, { waitUntil: 'domcontentloaded' })
+    const projectionRows = await page.evaluate(async (projectionStateVersion) => {
+        return new Promise<number>((resolve, reject) => {
             const opened = indexedDB.open('codever-matrix-v3', 2)
             opened.onerror = () => reject(opened.error ?? new Error('Could not open the CVP/3 test database.'))
             opened.onblocked = () => reject(new Error('The CVP/3 test database remained open after unloading.'))
@@ -543,7 +668,6 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
                     { durability: 'strict' },
                 )
                 let projectionRows = 0
-                let quarantinedRows = 0
                 const projectionStore = transaction.objectStore('projection')
                 const projections = projectionStore.getAll()
                 projections.onsuccess = () => {
@@ -559,34 +683,15 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
                             ...row,
                             state: {
                                 ...row.state,
-                                sessions: [],
-                                messages: [],
+                                version: projectionStateVersion + 1,
                             },
                         })
                         projectionRows += 1
                     }
                 }
-                const inboxStore = transaction.objectStore('inbox')
-                const inbox = inboxStore.getAll()
-                inbox.onsuccess = () => {
-                    for (const row of inbox.result as Array<{
-                        key: string
-                        scope: string
-                        status: string
-                    }>) {
-                        if (row.status !== 'projected') continue
-                        inboxStore.put({
-                            ...row,
-                            status: 'quarantined',
-                            error: 'injected historical transient failure',
-                            scopeStatus: `${row.scope}\u0000quarantined`,
-                        })
-                        quarantinedRows += 1
-                    }
-                }
                 transaction.oncomplete = () => {
                     database.close()
-                    resolve({ projectionRows, quarantinedRows })
+                    resolve(projectionRows)
                 }
                 transaction.onerror = () => {
                     const error = transaction.error ?? new Error('Could not poison the CVP/3 read model.')
@@ -598,12 +703,8 @@ async function suspendAndPoisonCvp3ReadModel(page: Page): Promise<void> {
         })
     }, MATRIX_CVP3_PROJECTION_STATE_VERSION)
     assert.ok(
-        result.projectionRows > 0,
-        'Projection repair precondition failed: the trusted browser had no valid durable projection.',
-    )
-    assert.ok(
-        result.quarantinedRows > 0,
-        'Quarantine retry precondition failed: the trusted browser had no projected raw events.',
+        projectionRows > 0,
+        'Projection repair precondition failed: the trusted browser had no durable projection.',
     )
 }
 

@@ -12,6 +12,14 @@ import {
   MESSAGE_HISTORY_DATABASE_NAME,
   ensureMessageHistoryDatabase,
 } from "./messageHistory";
+import {
+  MATRIX_CVP3_DATABASE_NAME,
+  MATRIX_CVP3_OUTBOX_SCHEMA_VERSION,
+  MATRIX_CVP3_READ_MODEL_SCHEMA_VERSION,
+  ensureMatrixCvp3OutboxDatabase,
+  ensureMatrixCvp3ReadModelDatabase,
+  resetMatrixCvp3ReadModel,
+} from "./IndexedDbMatrixCvp3ClientStore";
 import type { UpgradeStorage } from "./stateUpgrade";
 
 export const PWA_INDEXED_DB_MANIFEST_STORAGE_KEY =
@@ -111,6 +119,26 @@ export function pwaIndexedDbCatalog(
       // only after this application-level version gate has completed.
       validate: async () => {},
       reset: () => deleteDatabasesWithPrefix(factory, MATRIX_CRYPTO_DATABASE_PREFIX),
+    },
+    {
+      id: "cvp3-command-outbox",
+      databaseName: MATRIX_CVP3_DATABASE_NAME,
+      stateClass: "durable-command",
+      schemaVersion: MATRIX_CVP3_OUTBOX_SCHEMA_VERSION,
+      legacySchemaVersion: 1,
+      validate: () => ensureMatrixCvp3OutboxDatabase(factory),
+      // Explicit whole-device repair may discard this database, but automatic
+      // version upgrades never invoke reset for a durable-command entry.
+      reset: () => deleteOne(MATRIX_CVP3_DATABASE_NAME),
+    },
+    {
+      id: "cvp3-inbox-and-projection",
+      databaseName: MATRIX_CVP3_DATABASE_NAME,
+      stateClass: "rebuildable-projection",
+      schemaVersion: MATRIX_CVP3_READ_MODEL_SCHEMA_VERSION,
+      legacySchemaVersion: 1,
+      validate: () => ensureMatrixCvp3ReadModelDatabase(factory),
+      reset: () => resetMatrixCvp3ReadModel(factory),
     },
     {
       id: "conversation-history-projection",

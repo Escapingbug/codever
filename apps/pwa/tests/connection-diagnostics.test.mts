@@ -43,3 +43,20 @@ test("retains a safe recovery code for support", () => {
     "matrix_project_authorization_repair_required",
   );
 });
+
+test("retains the CVP3 recovery stage without exporting an underlying error", () => {
+  const report = JSON.parse(createConnectionDiagnostics({
+    buildVersion: "build-1",
+    status: "error",
+    detail: "matrix_gateway_state_recovery_failed",
+    online: true,
+    visibility: "visible",
+    userAgent: "test-browser",
+  }, 0));
+
+  assert.equal(
+    report.connection.detailCode,
+    "matrix_gateway_state_recovery_failed",
+  );
+  assert.equal(report.connection.hasUnstructuredDetail, false);
+});

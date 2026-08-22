@@ -20,9 +20,15 @@ export function reconcilePendingSessionDeletions(
 
 export function sessionsAvailableForAutomaticSelection<T extends { id: string }>(
   sessions: readonly T[],
-  pendingDeletionSessionIds: ReadonlySet<string>,
+  pendingLifecycleSessionIds: ReadonlySet<string>,
 ): T[] {
   return sessions.filter(
-    (session) => !pendingDeletionSessionIds.has(session.id),
+    (session) => !pendingLifecycleSessionIds.has(session.id),
   );
+}
+
+export function pendingSessionLifecycleIds(
+  actions: ReadonlyMap<string, unknown>,
+): Set<string> {
+  return new Set(actions.keys());
 }

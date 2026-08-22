@@ -67,6 +67,19 @@ test("an oversized incremental response retains the last verified cursor", () =>
   assert.match(presentation.detail, /last verified position was retained/i);
 });
 
+test("CVP3 recovery failures retain a stable diagnostic stage", () => {
+  const presentation = deriveConnectionPresentation(
+    "error",
+    "matrix_gateway_state_recovery_failed",
+  );
+  assert.equal(presentation.title, "Conversation sync needs attention");
+  assert.match(presentation.detail, /export diagnostics/i);
+  assert.equal(
+    presentation.rawDetailCode,
+    "matrix_gateway_state_recovery_failed",
+  );
+});
+
 test("missing native session with retained trust is presented as a repairable state", () => {
   const presentation = deriveConnectionPresentation(
     "error",

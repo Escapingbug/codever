@@ -18,6 +18,7 @@ import type { MatrixClient, MatrixEvent, Room } from "matrix-js-sdk";
 import type { RoomMessageEventContent } from "matrix-js-sdk/lib/@types/events";
 import { IndexedDbMatrixCvp3ClientStore } from "./IndexedDbMatrixCvp3ClientStore";
 import {
+  MatrixCvp3ReadModelRepairError,
   MatrixCvp3ProtocolClient,
   type MatrixCvp3RawEvent,
 } from "./matrixCvp3Client";
@@ -388,7 +389,8 @@ export async function connectMatrixCvp3(
   let recoveryChain = Promise.resolve();
   const enqueue = (event: MatrixEvent): void => {
     inboundChain = inboundChain.then(() => ingestEvent(event)).catch(error => {
-      handlers.onStatus("error", `A CVP/3 event could not be stored: ${formatError(error)}`);
+      console.error("[cvp3/matrix] an application event could not be ingested", error);
+      handlers.onStatus("error", "matrix_event_ingest_failed");
     });
   };
   const onMatrixEvent = (event: MatrixEvent) => {
@@ -506,7 +508,13 @@ export async function connectMatrixCvp3(
   };
 
   const reportRecoveryFailure = (context: string, error: unknown): void => {
-    const detail = `${context}: ${formatError(error)}`;
+    console.error(`[cvp3/matrix] ${context}`, error);
+    if (error instanceof MatrixCvp3ReadModelRepairError) {
+      readiness.failRecovery(error.code);
+      handlers.onStatus("error", error.code);
+      return;
+    }
+    const detail = "matrix_gateway_state_recovery_failed";
     readiness.failRecovery(detail);
     handlers.onStatus("error", detail);
   };
@@ -547,9 +555,7 @@ export async function connectMatrixCvp3(
     await recoverAuthoritativeState();
   });
   void initialRecovery.catch(error => {
-    const detail = formatError(error);
-    readiness.failRecovery(detail);
-    handlers.onStatus("error", detail);
+    reportRecoveryFailure("The current CVP/3 state could not be recovered", error);
     failReady(error);
   });
 
@@ -1012,10 +1018,6 @@ function gatewayState(
           sessionExtensions: project?.installedExtensions ?? [],
         },
   };
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isMatrixNotFound(error: unknown): boolean {

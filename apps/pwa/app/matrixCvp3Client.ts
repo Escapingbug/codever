@@ -1,7 +1,6 @@
 import {
   CODEVER_MATRIX_EXTENSION,
   cvp3ProjectKeyGrantStateSchema,
-  type CodeverAttachment,
   type Cvp3Command,
   type Cvp3Event,
   type Cvp3ProjectKeyGrantPlaintext,
@@ -58,9 +57,12 @@ export interface MatrixCvp3ClientStore {
   listInbox(): Promise<MatrixCvp3InboxRecord[]>;
   listPendingInbox(): Promise<MatrixCvp3InboxRecord[]>;
   updateInbox(eventId: string, update: Pick<MatrixCvp3InboxRecord, "status" | "error">): Promise<void>;
+  deleteInbox(eventId: string): Promise<void>;
   loadProjection(): Promise<unknown | null>;
   saveProjection(state: MatrixCvp3ProjectionState): Promise<void>;
   clearProjection(): Promise<void>;
+  /** Drops only Matrix-derived inbox/projection state; durable outbox survives. */
+  resetRebuildableState(): Promise<void>;
 }
 
 export interface MatrixCvp3ClientTransport {
@@ -97,7 +99,6 @@ export class MatrixCvp3ProtocolClient {
   private drainChain: Promise<void> = Promise.resolve();
   private projectionSaveChain: Promise<void> = Promise.resolve();
   private initialization: Promise<void> | null = null;
-  private projectionNeedsRebuild = false;
   private readonly retriedQuarantinedEventIds = new Set<string>();
 
   constructor(
@@ -113,18 +114,22 @@ export class MatrixCvp3ProtocolClient {
   initialize(): Promise<void> {
     if (this.initialization) return this.initialization;
     this.initialization = (async () => {
-      const state = await this.store.loadProjection();
-      if (state === null) {
-        this.projectionNeedsRebuild = true;
-        return;
-      }
       try {
+        const state = await this.store.loadProjection();
+        if (state === null) {
+          // Inbox and projection form one rebuildable read model. Replaying an
+          // unbounded retained inbox before contacting Matrix made startup grow
+          // slower over time. If its materialized projection is absent, discard
+          // the incomplete pair and recover from bounded authoritative state.
+          await this.store.resetRebuildableState();
+          this.projection.reset();
+          return;
+        }
         this.projection.restore(state);
-      } catch {
+      } catch (error) {
         // The projection is rebuildable from the durable raw inbox and Matrix
         // history. Never let a stale/corrupt materialized view block startup.
-        await this.store.clearProjection();
-        this.projectionNeedsRebuild = true;
+        await this.repairRebuildableState(error);
       }
     })();
     return this.initialization;
@@ -157,7 +162,6 @@ export class MatrixCvp3ProtocolClient {
       recipientPrivateKey: this.identity.privateKey,
       senderPublicKey: this.trust.gatewayKey.publicKey,
     });
-    if (this.projectionNeedsRebuild) await this.rebuildProjection();
   }
 
   async send(payload: CommandPayload): Promise<MatrixCvp3SendResult> {
@@ -294,9 +298,10 @@ export class MatrixCvp3ProtocolClient {
     if (!this.keyGrant) {
       throw new Error("The CVP/3 project key grant has not been loaded.");
     }
-    this.projection.reset();
-    this.projectionNeedsRebuild = true;
-    await this.rebuildProjection();
+    // A structurally valid current-schema projection is the local-first view.
+    // Schema changes are handled by the startup migration, while Matrix
+    // pointers and incremental events reconcile it. Do not replay the entire
+    // retained inbox on every reconnect.
   }
 
   async ingest(raw: MatrixCvp3RawEvent): Promise<void> {
@@ -324,7 +329,7 @@ export class MatrixCvp3ProtocolClient {
       for (const record of await this.store.listPendingInbox()) {
         try {
           await this.projectRaw(record.raw);
-          await this.store.updateInbox(record.raw.eventId, { status: "projected", error: undefined });
+          await this.store.deleteInbox(record.raw.eventId);
         } catch (error) {
           const normalized = error instanceof Error ? error : new Error(String(error));
           await this.store.updateInbox(record.raw.eventId, {
@@ -454,33 +459,22 @@ export class MatrixCvp3ProtocolClient {
     if (persistAndPublish) this.onProjection?.();
   }
 
-  private async rebuildProjection(): Promise<void> {
-    for (const record of (await this.store.listInbox())
-      .filter(candidate => candidate.status !== "quarantined")
-      .sort((left, right) =>
-        left.raw.timestamp - right.raw.timestamp
-        || left.raw.eventId.localeCompare(right.raw.eventId)
-      )) {
-      try {
-        await this.projectRaw(record.raw, false);
-        if (record.status === "pending") {
-          await this.store.updateInbox(record.raw.eventId, {
-            status: "projected",
-            error: undefined,
-          });
-        }
-      } catch (error) {
-        const normalized = error instanceof Error ? error : new Error(String(error));
-        await this.store.updateInbox(record.raw.eventId, {
-          status: "quarantined",
-          error: normalized.message,
-        });
-        this.onQuarantine?.(record.raw, normalized);
-      }
+  private async repairRebuildableState(cause: unknown): Promise<void> {
+    try {
+      await this.store.resetRebuildableState();
+    } catch (error) {
+      throw new MatrixCvp3ReadModelRepairError(
+        "The local CVP/3 conversation cache could not be repaired.",
+        { cause: new AggregateError([cause, error], "CVP/3 read-model repair failed.") },
+      );
     }
-    await this.persistProjection();
-    this.projectionNeedsRebuild = false;
+    this.projection.reset();
+    this.retriedQuarantinedEventIds.clear();
     this.onProjection?.();
+    console.warn(
+      "[cvp3/matrix] discarded an incompatible local conversation cache; durable commands were preserved",
+      cause,
+    );
   }
 
   private async recordCompletion(event: Cvp3Event): Promise<void> {
@@ -563,6 +557,9 @@ export class MemoryMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
       ...(update.error ? { error: update.error } : { error: undefined }),
     });
   }
+  async deleteInbox(eventId: string): Promise<void> {
+    this.inbox.delete(eventId);
+  }
   async loadProjection(): Promise<unknown | null> {
     return this.projectionState ? structuredClone(this.projectionState) : null;
   }
@@ -571,6 +568,19 @@ export class MemoryMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
   }
   async clearProjection(): Promise<void> {
     this.projectionState = null;
+  }
+  async resetRebuildableState(): Promise<void> {
+    this.inbox.clear();
+    this.projectionState = null;
+  }
+}
+
+export class MatrixCvp3ReadModelRepairError extends Error {
+  readonly code = "matrix_projection_repair_required";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "MatrixCvp3ReadModelRepairError";
   }
 }
 

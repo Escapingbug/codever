@@ -44,6 +44,10 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
 3. **History and restart**
    - Reloading the browser and force-stopping/restarting the APK restore the
      same session and complete history.
+   - Upgrading from a build that retained the mixed CVP/3 IndexedDB preserves
+     its durable command outbox, discards only the Matrix-derived inbox and
+     projection, and restores current state. The same rule applies when users
+     skip intermediate app versions.
    - A previously paired browser whose local CVP/3 read model is erased keeps
      its Matrix login, device identity, and pinned Gateway trust. If another
      device creates a session while it is offline, startup must restore the

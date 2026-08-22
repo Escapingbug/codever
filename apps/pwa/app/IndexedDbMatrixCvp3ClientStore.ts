@@ -7,11 +7,18 @@ import type { MatrixCvp3ProjectionState } from "./matrixCvp3Projection";
 
 // Persisted identifier from the first CVP/3 release. Renaming it would orphan
 // the durable inbox, outbox and projection during an application upgrade.
-const DATABASE_NAME = "codever-matrix-v3";
+export const MATRIX_CVP3_DATABASE_NAME = "codever-matrix-v3";
 const DATABASE_VERSION = 2;
 const OUTBOX = "outbox";
 const INBOX = "inbox";
 const PROJECTION = "projection";
+
+// Application-level schemas are intentionally independent from the physical
+// IndexedDB version. Version 1 shipped before this database was registered in
+// the PWA upgrade manifest. Bumping the read-model schema discards only state
+// that Matrix can rebuild, even when a user skips several application builds.
+export const MATRIX_CVP3_OUTBOX_SCHEMA_VERSION = 1;
+export const MATRIX_CVP3_READ_MODEL_SCHEMA_VERSION = 2;
 
 type OutboxRow = MatrixCvp3OutboxRecord & {
   key: string;
@@ -25,7 +32,7 @@ type InboxRow = MatrixCvp3InboxRecord & {
   scopeStatus: string;
 };
 
-/** Durable browser raw-inbox and independent command-outbox storage. */
+/** Bounded raw processing inbox and independently durable command outbox. */
 export class IndexedDbMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
   constructor(private readonly scope: string) {
     if (!scope.trim()) throw new Error("CVP/3 IndexedDB scope is required.");
@@ -152,6 +159,21 @@ export class IndexedDbMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
     }
   }
 
+  async deleteInbox(eventId: string): Promise<void> {
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction(
+        INBOX,
+        "readwrite",
+        { durability: "strict" },
+      );
+      transaction.objectStore(INBOX).delete(this.key(eventId));
+      await transactionDone(transaction);
+    } finally {
+      database.close();
+    }
+  }
+
   async loadProjection(): Promise<unknown | null> {
     const database = await openDatabase();
     try {
@@ -189,6 +211,29 @@ export class IndexedDbMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
     }
   }
 
+  async resetRebuildableState(): Promise<void> {
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction(
+        [INBOX, PROJECTION],
+        "readwrite",
+        { durability: "strict" },
+      );
+      const inbox = transaction.objectStore(INBOX);
+      const cursor = inbox.index("scope").openCursor(IDBKeyRange.only(this.scope));
+      cursor.onsuccess = () => {
+        const current = cursor.result;
+        if (!current) return;
+        current.delete();
+        current.continue();
+      };
+      transaction.objectStore(PROJECTION).delete(this.scope);
+      await transactionDone(transaction);
+    } finally {
+      database.close();
+    }
+  }
+
   private key(id: string): string {
     return `${this.scope}\u0000${id}`;
   }
@@ -203,9 +248,70 @@ export class IndexedDbMatrixCvp3ClientStore implements MatrixCvp3ClientStore {
   }
 }
 
-function openDatabase(): Promise<IDBDatabase> {
+export async function ensureMatrixCvp3OutboxDatabase(
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const database = await openDatabase(factory);
+  try {
+    if (!database.objectStoreNames.contains(OUTBOX)) {
+      throw new Error("CVP/3 IndexedDB outbox store is unavailable.");
+    }
+    const transaction = database.transaction(OUTBOX, "readonly");
+    if (!transaction.objectStore(OUTBOX).indexNames.contains("scopeStatus")) {
+      throw new Error("CVP/3 outbox scope index is unavailable.");
+    }
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+export async function ensureMatrixCvp3ReadModelDatabase(
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const database = await openDatabase(factory);
+  try {
+    for (const storeName of [INBOX, PROJECTION]) {
+      if (!database.objectStoreNames.contains(storeName)) {
+        throw new Error(`CVP/3 IndexedDB store ${storeName} is unavailable.`);
+      }
+    }
+    const transaction = database.transaction(INBOX, "readonly");
+    const inbox = transaction.objectStore(INBOX);
+    if (
+      !inbox.indexNames.contains("scopeStatus")
+      || !inbox.indexNames.contains("scope")
+    ) {
+      throw new Error("CVP/3 inbox scope indexes are unavailable.");
+    }
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+/** Clears Matrix-derived state without touching independently durable commands. */
+export async function resetMatrixCvp3ReadModel(
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const database = await openDatabase(factory);
+  try {
+    const transaction = database.transaction(
+      [INBOX, PROJECTION],
+      "readwrite",
+      { durability: "strict" },
+    );
+    transaction.objectStore(INBOX).clear();
+    transaction.objectStore(PROJECTION).clear();
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+function openDatabase(factory: IDBFactory = indexedDB): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const opened = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const opened = factory.open(MATRIX_CVP3_DATABASE_NAME, DATABASE_VERSION);
     opened.onupgradeneeded = () => {
       const database = opened.result;
       if (!database.objectStoreNames.contains(OUTBOX)) {
@@ -269,11 +375,17 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 }
 
 function stripOutboxRow(row: OutboxRow): MatrixCvp3OutboxRecord {
-  const { key: _key, scope: _scope, scopeStatus: _scopeStatus, ...record } = row;
+  const { key, scope, scopeStatus, ...record } = row;
+  void key;
+  void scope;
+  void scopeStatus;
   return structuredClone(record);
 }
 
 function stripInboxRow(row: InboxRow): MatrixCvp3InboxRecord {
-  const { key: _key, scope: _scope, scopeStatus: _scopeStatus, ...record } = row;
+  const { key, scope, scopeStatus, ...record } = row;
+  void key;
+  void scope;
+  void scopeStatus;
   return structuredClone(record);
 }

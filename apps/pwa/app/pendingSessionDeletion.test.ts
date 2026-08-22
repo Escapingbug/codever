@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  pendingSessionLifecycleIds,
   reconcilePendingSessionDeletions,
   sessionsAvailableForAutomaticSelection,
   setSessionDeletionPending,
@@ -36,5 +37,14 @@ describe("pending session deletion", () => {
     expect([
       ...reconcilePendingSessionDeletions(pending, new Set(["other"])),
     ]).toEqual([]);
+  });
+
+  it("derives pending selection exclusions from the live lifecycle map", () => {
+    const actions = new Map<string, "archive">([
+      ["first", "archive"],
+      ["second", "archive"],
+    ]);
+
+    expect([...pendingSessionLifecycleIds(actions)]).toEqual(["first", "second"]);
   });
 });

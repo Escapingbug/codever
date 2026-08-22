@@ -106,6 +106,7 @@ import {
   type PendingSessionCreateRecovery,
 } from "./sessionCreateRecovery";
 import {
+  pendingSessionLifecycleIds,
   sessionsAvailableForAutomaticSelection,
 } from "./pendingSessionDeletion";
 import {
@@ -291,6 +292,8 @@ type PendingSessionLifecycleRecovery = {
   timer: number | null;
   inFlight: boolean;
 };
+
+type SessionLifecycleAction = PendingSessionLifecycleRecovery["action"];
 
 const emptyMatrixConfig: MatrixConnectionConfig = {
   homeserver: "",
@@ -890,7 +893,7 @@ function CodeverAppRuntime() {
     EMPTY_UI_NOTICE_STATE,
   );
   const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<
-    Map<string, "archive">
+    Map<string, SessionLifecycleAction>
   >(() => new Map());
   const [decisionStates, setDecisionStates] = useState<
     Record<string, ExtensionViewDecisionState>
@@ -929,6 +932,9 @@ function CodeverAppRuntime() {
   const sessionCreateRecoveryTimerRef = useRef<number | null>(null);
   const sessionLifecycleRecoveriesRef = useRef(
     new Map<string, PendingSessionLifecycleRecovery>(),
+  );
+  const sessionLifecycleBusyRef = useRef(
+    new Map<string, SessionLifecycleAction>(),
   );
   const pairingAbortRef = useRef<AbortController | null>(null);
   const pairingRecoveryRef = useRef<
@@ -1271,6 +1277,18 @@ function CodeverAppRuntime() {
       now: Date.now(),
       ...(autoDismissMs === undefined ? {} : { autoDismissMs }),
     });
+  }
+
+  function updateSessionLifecycleBusy(
+    update:
+      | Map<string, SessionLifecycleAction>
+      | ((current: ReadonlyMap<string, SessionLifecycleAction>) => Map<string, SessionLifecycleAction>),
+  ): void {
+    const next = typeof update === "function"
+      ? update(sessionLifecycleBusyRef.current)
+      : update;
+    sessionLifecycleBusyRef.current = next;
+    setSessionLifecycleBusy(next);
   }
 
   function dismissUiNotice(key: string) {
@@ -2852,7 +2870,7 @@ function CodeverAppRuntime() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
-    setSessionLifecycleBusy(new Map());
+    updateSessionLifecycleBusy(new Map());
     setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
     setNewSessionBusy(Boolean(sessionCreateRecovery));
     // A persisted recovery is safe across reloads. Only the short interval
@@ -3035,7 +3053,7 @@ function CodeverAppRuntime() {
             });
             const selectableSessions = sessionsAvailableForAutomaticSelection(
               state.gatewayState.sessions,
-              pendingDeletionSessionIds,
+              pendingSessionLifecycleIds(sessionLifecycleBusyRef.current),
             );
             const availableIds = new Set(
               selectableSessions.map((session) => session.id),
@@ -3185,7 +3203,7 @@ function CodeverAppRuntime() {
     setFeedReturnAnchor(null);
     setFeedHasUnseenMessages(false);
     pendingCreatedSessionIdRef.current = null;
-    setSessionLifecycleBusy(new Map());
+    updateSessionLifecycleBusy(new Map());
     setPendingSessionCreate(queuedSessionCreate?.input ?? null);
     setNewSessionBusy(Boolean(queuedSessionCreate));
     setSessionCreateReloadBlocked(false);
@@ -4394,7 +4412,7 @@ function CodeverAppRuntime() {
       );
       return false;
     }
-    setSessionLifecycleBusy((current) => {
+    updateSessionLifecycleBusy((current) => {
       const next = new Map(current);
       next.set(sessionId, action);
       return next;
@@ -4406,7 +4424,7 @@ function CodeverAppRuntime() {
         sessionLifecyclePayload(action, sessionId),
       );
       if (!sent || !connection) {
-        setSessionLifecycleBusy((current) => {
+        updateSessionLifecycleBusy((current) => {
           if (current.get(sessionId) !== action) return current;
           const next = new Map(current);
           next.delete(sessionId);
@@ -4452,7 +4470,7 @@ function CodeverAppRuntime() {
         "error",
         formatUiError(error),
       );
-      setSessionLifecycleBusy((current) => {
+      updateSessionLifecycleBusy((current) => {
         if (current.get(sessionId) !== action) return current;
         const next = new Map(current);
         next.delete(sessionId);
@@ -4539,7 +4557,7 @@ function CodeverAppRuntime() {
           "error",
           formatUiError(error),
         );
-        setSessionLifecycleBusy((current) => {
+        updateSessionLifecycleBusy((current) => {
           if (current.get(recovery.sessionId) !== recovery.action) return current;
           const next = new Map(current);
           next.delete(recovery.sessionId);
@@ -4592,7 +4610,7 @@ function CodeverAppRuntime() {
           `The completed session command could not be released locally: ${formatUiError(error)}`,
         );
       }
-      setSessionLifecycleBusy((current) => {
+      updateSessionLifecycleBusy((current) => {
         if (current.get(sessionId) !== action) return current;
         const next = new Map(current);
         next.delete(sessionId);

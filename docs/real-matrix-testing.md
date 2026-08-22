@@ -35,22 +35,25 @@ The journey proves, through real UI and Matrix traffic:
    second session while the first Agent turn is still running.
 3. A second independent browser pairs and restores inventory and transcript
    without a manual refresh or application checkpoint.
-4. The second browser retains its Matrix account, device identity, and Gateway
+4. A retained pre-manifest `codever-matrix-v3` database is upgraded in place:
+   the durable command outbox survives while stale inbox/projection rows are
+   discarded and rebuilt from authoritative Matrix state.
+5. The second browser retains its Matrix account, device identity, and Gateway
    trust while its local CVP/3 read model is erased. With current snapshot
    requests held, it remains visibly in recovery instead of reporting
    `Connected` with an empty inventory. An injected snapshot failure also
    remains visible across a later successful Matrix sync.
-5. The isolated Android APK installs and pairs while that trusted browser is
+6. The isolated Android APK installs and pairs while that trusted browser is
    offline. Android creates a session, then the browser cold-starts and restores
    the complete cross-device inventory before the session is deleted.
-6. Android sends a prompt, the Activity moves to the background, the foreground
+7. Android sends a prompt, the Activity moves to the background, the foreground
    service receives the terminal Agent result, and a task notification appears.
-7. Android is force-stopped and restarted, then restores its durable projection
+8. Android is force-stopped and restarted, then restores its durable projection
    and history without resending the command.
-8. Android deletes a session and both browsers converge.
-9. A deliberately malformed CVP/3 event is quarantined without blocking the next
+9. Android deletes a session and both browsers converge.
+10. A deliberately malformed CVP/3 event is quarantined without blocking the next
    valid event.
-10. Browser reload/history recovery and concurrent deletion converge on both
+11. Browser reload/history recovery and concurrent archive converge on both
    browser devices.
 
 A successful Android sub-journey ends with:
@@ -62,7 +65,7 @@ PASS — Android CVP/3 paired, restored, ran in background, notified, restarted,
 The complete run ends with:
 
 ```text
-PASS — CVP/3 over Matrix paired, created, ran concurrently, synchronized, restored, quarantined poison, and deleted.
+PASS — CVP/3 over Matrix paired, created, ran concurrently, synchronized, restored, quarantined poison, and archived.
 ```
 
 Artifacts for a failed run are retained under `artifacts/e2e/matrix-cvp3-*`.

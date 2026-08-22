@@ -40,6 +40,21 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
     detail:
       "This device’s saved authorization no longer matches your computer. Reauthorize it with a new one-time invitation; your server conversation history will not be deleted.",
   },
+  matrix_projection_repair_required: {
+    title: "Local conversation cache needs repair",
+    detail:
+      "Codever preserved queued messages but could not rebuild its local conversation cache. Restart Codever; if this continues, export diagnostics.",
+  },
+  matrix_gateway_state_recovery_failed: {
+    title: "Conversation sync needs attention",
+    detail:
+      "Codever could not verify the current Gateway state. Try again; if this continues, export diagnostics.",
+  },
+  matrix_event_ingest_failed: {
+    title: "A conversation update could not be saved",
+    detail:
+      "Codever stopped before presenting an unverified update. Restart Codever; if this continues, export diagnostics.",
+  },
   matrix_session_restoring: {
     title: "Restoring connection",
     detail: "Loading the saved secure connection…",

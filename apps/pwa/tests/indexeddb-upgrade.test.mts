@@ -95,6 +95,48 @@ test("future IndexedDB projection bump resets only its database", async () => {
   assert.equal(resets, 1);
 });
 
+test("a skipped read-model upgrade preserves commands in the same physical database", async () => {
+  const storage = new MemoryStorage();
+  const commands = ["queued-command"];
+  const readModel = ["old-inbox", "old-projection"];
+  const durableV1: PwaIndexedDbCatalogEntry = {
+    ...catalog("durable-command", 1),
+    id: "commands",
+    databaseName: "shared-cvp3-db",
+    validate: async () => assert.deepEqual(commands, ["queued-command"]),
+  };
+  const projectionV1: PwaIndexedDbCatalogEntry = {
+    ...catalog("rebuildable-projection", 1),
+    id: "read-model",
+    databaseName: "shared-cvp3-db",
+    reset: async () => { readModel.length = 0; },
+  };
+  await runPwaIndexedDbUpgrade(
+    storage,
+    unusedFactory,
+    1_000,
+    [durableV1, projectionV1],
+  );
+
+  let resets = 0;
+  await runPwaIndexedDbUpgrade(storage, unusedFactory, 2_000, [
+    durableV1,
+    {
+      ...projectionV1,
+      // A user may install a much newer build without every intermediate APK.
+      schemaVersion: 4,
+      reset: async () => {
+        resets += 1;
+        readModel.length = 0;
+      },
+    },
+  ]);
+
+  assert.equal(resets, 1);
+  assert.deepEqual(commands, ["queued-command"]);
+  assert.deepEqual(readModel, []);
+});
+
 test("interrupted IndexedDB migration replays its idempotent active step", async () => {
   const storage = new MemoryStorage();
   const v1 = catalog("security-critical", 1);
