@@ -5,7 +5,7 @@ import {
   type Cvp3Event,
   type WebPushSubscription,
 } from '@codever/protocol'
-import * as webPush from 'web-push'
+import webPush from 'web-push'
 import { z } from 'zod'
 
 const RETRY_INTERVAL_MS = 30_000
