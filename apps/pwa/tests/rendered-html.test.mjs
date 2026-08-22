@@ -252,6 +252,10 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(source, /className="gateway-mobile-status-copy"/);
   assert.match(
+    source,
+    /title=\{`Connection: \$\{mobileConnectionSignal\.label\}`\}/,
+  );
+  assert.match(
     styles,
     /\.gateway-mobile-status-copy\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?text-overflow:\s*ellipsis/,
   );
@@ -337,6 +341,8 @@ test("ships a complete installable offline shell", async () => {
   assert.match(source, /turnPresentationClass/);
   assert.match(source, /className="activity-copy visually-hidden"/);
   assert.match(source, /aria-label=\{`\$\{session\.title\}\. \$\{statusSummary\}/);
+  assert.match(source, /title=\{`\$\{session\.title\} · \$\{statusSummary\}`\}/);
+  assert.match(source, /title=\{completionLabel\}/);
   assert.match(
     styles,
     /@media \(max-width: 900px\)[\s\S]*?\.new-session-dialog > header\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?top:\s*0/,

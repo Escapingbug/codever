@@ -461,6 +461,7 @@ function TurnResultContext({
   onLocatePrompt(): void;
 }) {
   const locating = locationPhase === "loading";
+  const completionLabel = failed ? "Task ended with an error" : "Task completed";
   const locateLabel = locating
     ? "Loading the original message"
     : locationPhase === "error"
@@ -471,7 +472,8 @@ function TurnResultContext({
       <div className="turn-result-toolbar" aria-label="Completed task context">
         <span
           className={`turn-completion-mark ${failed ? "is-failed" : ""}`}
-          aria-label={failed ? "Task ended with an error" : "Task completed"}
+          aria-label={completionLabel}
+          title={completionLabel}
           role="img"
         >
           {failed ? "!" : <CheckCircleIcon />}
@@ -5341,6 +5343,7 @@ function CodeverAppRuntime() {
           aria-label={`Open connection settings, ${
             mobileConnectionSignal.label
           }`}
+          title={`Connection: ${mobileConnectionSignal.label}`}
           onClick={() => setSettingsOpen(true)}
         >
           <span className="gateway-icon">G</span>
@@ -5476,7 +5479,8 @@ function CodeverAppRuntime() {
                   ? `${lifecycleAction === "delete" ? "Deleting" : lifecycleAction === "archive" ? "Archiving" : "Restoring"}…`
                   : activity?.detail ||
                     activity?.label ||
-                    sessionSignalLabel(signal);
+                    sessionSignalLabel(signal) ||
+                    "Idle";
                 const technicalSummary = `${session.provider}${
                   session.model ? ` · ${session.model}` : ""
                 }${
@@ -5488,6 +5492,7 @@ function CodeverAppRuntime() {
                   data-session-id={session.id}
                   data-project-name={session.projectName}
                   aria-label={`${session.title}. ${statusSummary}. ${technicalSummary}. Updated ${formatSessionTime(session.updatedAt)}`}
+                  title={`${session.title} · ${statusSummary}`}
                   aria-pressed={selectedSessionId === session.id}
                   className={`session-row ${
                     selectedSessionId === session.id
@@ -5742,7 +5747,10 @@ function CodeverAppRuntime() {
                   )
                 ) : (
                   <>
-                    <span className="conversation-connection-desktop">
+                    <span
+                      className="conversation-connection-desktop"
+                      title={mobileConnectionSignal.label}
+                    >
                       <span
                         className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
                         aria-hidden="true"
