@@ -63,6 +63,65 @@ describe("MatrixCvp3Projection", () => {
     expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
   });
 
+  it("settles two interrupted sessions after a Gateway restart despite stale event order", () => {
+    const projection = new MatrixCvp3Projection();
+    for (const suffix of ["a", "b"]) {
+      projection.applyCommand(createCommand(suffix), `$root-${suffix}`);
+      projection.applyCommand(promptCommand(suffix), `$prompt-${suffix}`);
+      projection.applyEvent(turnQueuedEvent(suffix), `$queued-${suffix}`);
+    }
+
+    projection.applyEvent(interruptedEvent("a", 10), "$interrupted-a");
+    projection.applyEvent(interruptedEvent("b", 11), "$interrupted-b");
+
+    // Matrix can deliver the older working projection after the terminal
+    // event. A durable completion must still win for each independent turn.
+    projection.applyEvent(turnEvent("started", 3, "working", "a"), "$late-started-a");
+    projection.applyEvent(turnEvent("started", 3, "working", "b"), "$late-started-b");
+
+    expect(projection.sessions.get("session-a")).toMatchObject({
+      activity: "idle",
+      updatedAt: 10,
+    });
+    expect(projection.sessions.get("session-b")).toMatchObject({
+      activity: "idle",
+      updatedAt: 11,
+    });
+    expect(projection.sessions.get("session-a")?.activeTurnId).toBeUndefined();
+    expect(projection.sessions.get("session-b")?.activeTurnId).toBeUndefined();
+    expect(projection.completions.get("prompt-a")?.outcome).toBe("interrupted");
+    expect(projection.completions.get("prompt-b")?.outcome).toBe("interrupted");
+  });
+
+  it("repairs a version-four cache that already persisted an interrupted turn as working", () => {
+    const first = new MatrixCvp3Projection();
+    first.applyCommand(createCommand("a"), "$root-a");
+    first.applyCommand(promptCommand("a"), "$prompt-a");
+    first.applyEvent(turnQueuedEvent("a"), "$queued-a");
+    first.applyEvent(interruptedEvent("a", 10), "$interrupted-a");
+
+    const legacy = first.durableState() as unknown as {
+      version: number;
+      sessions: Array<Record<string, unknown>>;
+    };
+    legacy.version = 4;
+    Object.assign(legacy.sessions[0]!, {
+      activity: "working",
+      activeTurnId: "prompt-a",
+      updatedAt: 3,
+    });
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(legacy);
+
+    expect(restored.sessions.get("session-a")).toMatchObject({
+      activity: "idle",
+      updatedAt: 10,
+    });
+    expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
+    expect(restored.durableState().version).toBe(5);
+  });
+
   it("preserves the prompt origin through local and Gateway projections", () => {
     const projection = new MatrixCvp3Projection();
     projection.applyCommand(createCommand("a"), "$root-a");
@@ -445,14 +504,14 @@ function createCommand(suffix: string): Cvp3Command {
   };
 }
 
-function promptCommand(): Cvp3Command {
+function promptCommand(suffix = "a"): Cvp3Command {
   return {
     kind: "codever.command",
     version: 3,
-    commandId: "prompt-a",
+    commandId: `prompt-${suffix}`,
     workspaceId: "workspace-1",
     projectId: "project-1",
-    sessionId: "session-a",
+    sessionId: `session-${suffix}`,
     deviceId: "device-1",
     certificateId: "certificate-1",
     createdAt: 2,
@@ -465,42 +524,43 @@ function turnEvent(
   stage: "started" | "completed",
   stateVersion: number,
   activity: "working" | "idle",
+  suffix = "a",
 ): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
-    eventId: `turn-${stage}`,
+    eventId: `turn-${stage}-${suffix}`,
     workspaceId: "workspace-1",
     projectId: "project-1",
-    sessionId: "session-a",
+    sessionId: `session-${suffix}`,
     occurredAt: stateVersion,
-    causationCommandId: "prompt-a",
+    causationCommandId: `prompt-${suffix}`,
     payload: stage === "started" ? {
       type: "turn.started",
-      turnId: "prompt-a",
+      turnId: `prompt-${suffix}`,
       projection: { title: "A", lifecycle: "active", activity, updatedAt: stateVersion, stateVersion },
     } : {
       type: "turn.completed",
-      turnId: "prompt-a",
+      turnId: `prompt-${suffix}`,
       outcome: "succeeded",
       projection: { title: "A", lifecycle: "active", activity, updatedAt: stateVersion, stateVersion },
     },
   };
 }
 
-function turnQueuedEvent(): Cvp3Event {
+function turnQueuedEvent(suffix = "a"): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
-    eventId: "turn-queued",
+    eventId: `turn-queued-${suffix}`,
     workspaceId: "workspace-1",
     projectId: "project-1",
-    sessionId: "session-a",
+    sessionId: `session-${suffix}`,
     occurredAt: 2,
-    causationCommandId: "prompt-a",
+    causationCommandId: `prompt-${suffix}`,
     payload: {
       type: "turn.queued",
-      turnId: "prompt-a",
+      turnId: `prompt-${suffix}`,
       originDeviceId: "device-1",
       text: "hello",
       projection: {
@@ -510,6 +570,26 @@ function turnQueuedEvent(): Cvp3Event {
         updatedAt: 2,
         stateVersion: 2,
       },
+    },
+  };
+}
+
+function interruptedEvent(suffix: string, occurredAt: number): Cvp3Event {
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: `turn-interrupted-${suffix}`,
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: `session-${suffix}`,
+    occurredAt,
+    causationCommandId: `prompt-${suffix}`,
+    payload: {
+      type: "command.rejected",
+      commandId: `prompt-${suffix}`,
+      code: "execution_interrupted",
+      message: "The Gateway restarted after dispatch. The command was not executed again.",
+      retryable: true,
     },
   };
 }

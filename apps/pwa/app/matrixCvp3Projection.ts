@@ -13,7 +13,7 @@ import {
   sessionExtensionDescriptorSchema,
 } from "@codever/protocol";
 
-export const MATRIX_CVP3_PROJECTION_STATE_VERSION = 4 as const;
+export const MATRIX_CVP3_PROJECTION_STATE_VERSION = 5 as const;
 
 export type V3ProjectedSession = Cvp3SessionProjection & {
   sessionId: string;
@@ -142,6 +142,10 @@ export class MatrixCvp3Projection {
       this.completions.set(completion.commandId, completion);
     }
     for (const logicalId of state.seenLogicalEvents) this.seenLogicalEvents.add(logicalId);
+    // Version four could persist a terminal command together with a stale
+    // working session. Reconcile from the durable completion on every restore
+    // so skipped-version upgrades repair themselves without replaying Matrix.
+    for (const sessionId of this.sessions.keys()) this.reconcileCompletedTurn(sessionId);
   }
 
   applyCommand(
@@ -397,6 +401,7 @@ export class MatrixCvp3Projection {
       const completion = completionFromEvent(event);
       if (completion) this.completions.set(event.causationCommandId, completion);
     }
+    if (event.sessionId) this.reconcileCompletedTurn(event.sessionId);
     return true;
   }
 
@@ -498,6 +503,21 @@ export class MatrixCvp3Projection {
       this.sessions.set(sessionId, { ...current, activeTurnId: turnId });
     }
   }
+
+  private reconcileCompletedTurn(sessionId: string): void {
+    const current = this.sessions.get(sessionId);
+    if (!current?.activeTurnId) return;
+    const completion = this.completions.get(current.activeTurnId);
+    if (!completion || (completion.sessionId && completion.sessionId !== sessionId)) return;
+
+    const settled = {
+      ...current,
+      activity: "idle" as const,
+      updatedAt: Math.max(current.updatedAt, completion.event.occurredAt),
+    };
+    delete settled.activeTurnId;
+    this.sessions.set(sessionId, settled);
+  }
 }
 
 function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
@@ -507,6 +527,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     && value?.version !== 2
     && value?.version !== 3
     && value?.version !== 4
+    && value?.version !== 5
   ) {
     throw new Error("Unsupported CVP/3 projection version.");
   }
@@ -547,7 +568,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     ) throw new Error("The CVP/3 message projection is invalid.");
     return structuredClone(message) as V3ProjectedMessage;
   });
-  const inboxFiles = value.version === 3 || value.version === 4
+  const inboxFiles = value.version === 3 || value.version === 4 || value.version === 5
     ? boundedArray(value.inboxFiles, "inbox files").map(fileValue => {
         const file = record(fileValue);
         if (
