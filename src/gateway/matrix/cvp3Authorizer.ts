@@ -66,11 +66,13 @@ function v3AllowedOperations(
       case 'decision': result.add('decision.answer'); break
       case 'session.settings':
         result.add('session.update')
-        result.add('project.update')
         result.add('notification.subscribe')
         result.add('notification.unsubscribe')
         break
       case 'session.create': result.add('session.create'); break
+      case 'project.settings': result.add('project.update'); break
+      case 'provider.sessions.list': result.add('provider.sessions.list'); break
+      case 'provider.session.inspect': result.add('provider.session.inspect'); break
       case 'session.archive':
       case 'session.restore':
       case 'session.delete':

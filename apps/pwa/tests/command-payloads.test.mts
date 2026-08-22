@@ -59,6 +59,42 @@ test("preserves the scratch scope on session creation", () => {
   assert.equal(payload.scope, "scratch");
 });
 
+test("creates project defaults and provider-history commands", () => {
+  assert.deepEqual(commandPayloadSchema.parse({
+    operation: "project.settings",
+    model: "gpt-5",
+    reasoningEffort: "high",
+  }), {
+    operation: "project.settings",
+    model: "gpt-5",
+    reasoningEffort: "high",
+  });
+  assert.deepEqual(commandPayloadSchema.parse({
+    operation: "provider.sessions.list",
+    provider: "codex",
+  }), {
+    operation: "provider.sessions.list",
+    provider: "codex",
+  });
+  assert.deepEqual(commandPayloadSchema.parse({
+    operation: "provider.session.inspect",
+    provider: "codex",
+    providerSessionId: "provider-session-1",
+  }), {
+    operation: "provider.session.inspect",
+    provider: "codex",
+    providerSessionId: "provider-session-1",
+  });
+});
+
+test("provider is fixed after session creation", () => {
+  assert.throws(() => commandPayloadSchema.parse({
+    operation: "session.settings",
+    sessionId: "session-1",
+    provider: "other",
+  }));
+});
+
 test("targets the active CVP/3 turn when stopping a session", () => {
   const payload = commandPayloadSchema.parse(
     createCancelCommandPayload("session-1", "turn-1"),

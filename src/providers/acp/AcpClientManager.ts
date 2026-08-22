@@ -23,6 +23,8 @@ import type {
     SetSessionModelResponse,
     SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse,
+    ListSessionsRequest,
+    ListSessionsResponse,
 } from '@agentclientprotocol/sdk'
 import type { AgentPermissionHandler, AgentPermissionResult } from '@/providers/provider'
 
@@ -114,6 +116,10 @@ export class AcpClientManager {
     /** Whether the agent supports session/resume (unstable) */
     get supportsResumeSession(): boolean {
         return this.initResponse?.agentCapabilities?.sessionCapabilities?.resume != null
+    }
+
+    get supportsListSessions(): boolean {
+        return this.initResponse?.agentCapabilities?.sessionCapabilities?.list != null
     }
 
     setPermissionHandler(handler: AgentPermissionHandler | null): void {
@@ -252,6 +258,17 @@ export class AcpClientManager {
             this.sessionWaiters.set(params.sessionId, [])
         }
         return response
+    }
+
+    async listSessions(params: Omit<ListSessionsRequest, '_meta'>): Promise<ListSessionsResponse> {
+        const conn = this.requireConnection()
+        return conn.listSessions({
+            ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
+            ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+            ...(params.additionalDirectories === undefined
+                ? {}
+                : { additionalDirectories: params.additionalDirectories }),
+        })
     }
 
     async prompt(params: Omit<PromptRequest, '_meta'>): Promise<PromptResponse> {
@@ -402,14 +419,50 @@ export class AcpClientManager {
             try {
                 await this.waitForSessionUpdate(sessionId, { signal: waitAbort.signal })
                 drained += 1
-            } catch {
-                break
+            } catch (error) {
+                if (waitAbort.signal.aborted) break
+                throw error
             } finally {
                 clearTimeout(timer)
             }
         }
 
         return drained
+    }
+
+    async collectSessionUpdatesUntilIdle(
+        sessionId: string,
+        options: { idleMs: number; maxMs: number },
+    ): Promise<SessionNotification[]> {
+        const startedAt = Date.now()
+        const updates: SessionNotification[] = []
+
+        while (Date.now() - startedAt < options.maxMs) {
+            await this.waitForSessionUpdateProcessing()
+
+            let queued = this.dequeueSessionUpdate(sessionId)
+            while (queued) {
+                updates.push(queued)
+                queued = this.dequeueSessionUpdate(sessionId)
+            }
+
+            const remainingMs = options.maxMs - (Date.now() - startedAt)
+            const waitMs = Math.min(options.idleMs, remainingMs)
+            if (waitMs <= 0) break
+
+            const waitAbort = new AbortController()
+            const timer = setTimeout(() => waitAbort.abort(), waitMs)
+            try {
+                updates.push(await this.waitForSessionUpdate(sessionId, { signal: waitAbort.signal }))
+            } catch (error) {
+                if (waitAbort.signal.aborted) break
+                throw error
+            } finally {
+                clearTimeout(timer)
+            }
+        }
+
+        return updates
     }
 
     async waitForSessionUpdateProcessing(): Promise<void> {

@@ -30,6 +30,15 @@ test("selects the topmost visible Codever UI layer", () => {
   assert.equal(
     resolveCodeverBackAction({
       ...emptyState,
+      providerHistoryOpen: true,
+      settingsOpen: true,
+      mobileChatOpen: true,
+    }),
+    "close-provider-history",
+  );
+  assert.equal(
+    resolveCodeverBackAction({
+      ...emptyState,
       newSessionOpen: true,
       settingsOpen: true,
       mobileChatOpen: true,
@@ -80,6 +89,14 @@ test("consumes Back without closing destructive or create dialogs while busy", (
       deleteDialogBusy: true,
     }),
     "block-delete-dialog",
+  );
+  assert.equal(
+    resolveCodeverBackAction({
+      ...emptyState,
+      providerHistoryOpen: true,
+      providerHistoryBusy: true,
+    }),
+    "block-provider-history",
   );
   assert.equal(
     resolveCodeverBackAction({

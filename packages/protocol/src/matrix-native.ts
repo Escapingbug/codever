@@ -165,6 +165,16 @@ const matrixCapabilityOptionSchema = z
   })
   .strict()
 
+const matrixModelCapabilitySchema = matrixCapabilityOptionSchema.safeExtend({
+  default_reasoning_level: z.string().min(1).max(64).optional(),
+  supported_reasoning_levels: z.array(
+    z.object({
+      effort: z.string().min(1).max(64),
+      description: z.string().max(4_096).optional(),
+    }).strict(),
+  ).max(64).optional(),
+}).strict()
+
 const matrixSessionExtensionSettingSchema = z.discriminatedUnion('type', [
   z
     .object({
@@ -214,16 +224,15 @@ const matrixSessionExtensionCapabilitySchema = z
 export const matrixGatewayCapabilitiesSchema = z
   .object({
     models: z.array(
-      matrixCapabilityOptionSchema.safeExtend({
-        default_reasoning_level: z.string().min(1).max(64).optional(),
-        supported_reasoning_levels: z.array(
-          z.object({
-            effort: z.string().min(1).max(64),
-            description: z.string().max(4_096).optional(),
-          }).strict(),
-        ).max(64).optional(),
-      }).strict(),
+      matrixModelCapabilitySchema,
     ).max(256),
+    providers: z.array(
+      matrixCapabilityOptionSchema.safeExtend({
+        models: z.array(matrixModelCapabilitySchema).max(256),
+        can_list_sessions: z.boolean(),
+        can_inspect_sessions: z.boolean(),
+      }).strict(),
+    ).max(64).optional(),
     permission_modes: z.array(matrixCapabilityOptionSchema).max(128),
     can_create_session: z.boolean(),
     can_select_session: z.boolean(),
@@ -242,6 +251,7 @@ export const matrixGatewayCapabilitiesSchema = z
   .superRefine((capabilities, context) => {
     for (const [field, values] of [
       ['models', capabilities.models],
+      ['providers', capabilities.providers ?? []],
       ['permission_modes', capabilities.permission_modes],
       ['session_extensions', capabilities.session_extensions],
     ] as const) {

@@ -72,6 +72,18 @@ export interface SessionEntry {
     firstMessage?: string
 }
 
+export interface ProviderHistoryMessage {
+    id: string
+    role: 'user' | 'assistant'
+    text: string
+}
+
+export interface ProviderSessionHistory {
+    sessionId: string
+    title: string
+    messages: ProviderHistoryMessage[]
+}
+
 export interface AgentProvider {
     readonly name: string
 
@@ -102,6 +114,9 @@ export interface AgentProvider {
 
     /** Get the first user message for a specific session (lazy, on-demand) */
     getSessionFirstMessage?(sessionId: string): Promise<string>
+
+    /** Load a provider-owned session without adopting it into Codever. */
+    getSessionHistory?(sessionId: string, cwd: string): Promise<ProviderSessionHistory>
 
     /** Clear provider-specific session state (e.g., opencode session ID) */
     clearSessionId?(): void

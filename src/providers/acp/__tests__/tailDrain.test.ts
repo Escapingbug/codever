@@ -19,10 +19,14 @@ interface FakeWaiter {
 class FakeAcpClientManager {
     connected = true
     supportsResumeSession = false
+    supportsListSessions = false
     agentCapabilities = { agentCapabilities: { loadSession: false } }
     promptCapabilities = {}
     promptText = 'final tail'
     loadSessionHistoryText: string | null = null
+    newSessionResponse: Record<string, unknown> = { sessionId: 'session-1' }
+    setSessionModelCalls: Array<Record<string, unknown>> = []
+    setSessionConfigOptionCalls: Array<Record<string, unknown>> = []
 
     private queue: FakeSessionNotification[] = []
     private waiters: FakeWaiter[] = []
@@ -33,8 +37,18 @@ class FakeAcpClientManager {
     clearStderrBuffer(): void {}
     getStderrError(): string | null { return null }
 
-    async newSession(): Promise<{ sessionId: string }> {
-        return { sessionId: 'session-1' }
+    async newSession(): Promise<any> {
+        return this.newSessionResponse
+    }
+
+    async setSessionModel(params: Record<string, unknown>): Promise<Record<string, never>> {
+        this.setSessionModelCalls.push(params)
+        return {}
+    }
+
+    async setSessionConfigOption(params: Record<string, unknown>): Promise<Record<string, never>> {
+        this.setSessionConfigOptionCalls.push(params)
+        return {}
     }
 
     async loadSession(): Promise<unknown> {
@@ -255,6 +269,135 @@ describe('AcpProvider tail drain', () => {
         expect(provider.isReady()).toBe(false)
         expect(provider.wasReady()).toBe(true)
         await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    })
+
+    it('uses advertised ACP model and reasoning controls instead of slash commands', async () => {
+        const provider = new AcpProvider({ name: 'test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.newSessionResponse = {
+            sessionId: 'session-1',
+            models: {
+                currentModelId: 'model-a',
+                availableModels: [
+                    { modelId: 'model-a', name: 'Model A' },
+                    { modelId: 'model-b', name: 'Model B' },
+                ],
+            },
+            configOptions: [{
+                type: 'select',
+                id: 'reasoning_effort',
+                name: 'Reasoning effort',
+                category: 'thought_level',
+                currentValue: 'medium',
+                options: [
+                    { value: 'medium', name: 'Medium' },
+                    { value: 'high', name: 'High' },
+                ],
+            }],
+        }
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            model: 'model-b',
+            providerSettings: { reasoningEffort: 'high' },
+            signal: new AbortController().signal,
+        })
+        for await (const _event of handle.events) {
+            // Consume the query so configuration and the prompt both finish.
+        }
+
+        expect(clientManager.setSessionModelCalls).toEqual([
+            { sessionId: 'session-1', modelId: 'model-b' },
+        ])
+        expect(clientManager.setSessionConfigOptionCalls).toEqual([
+            { sessionId: 'session-1', configId: 'reasoning_effort', value: 'high' },
+        ])
+    })
+
+    it('lists and inspects provider-owned ACP sessions without adopting them', async () => {
+        const provider = new AcpProvider({ name: 'test-acp', command: 'fake', args: [] })
+        const requests: Array<Record<string, unknown>> = []
+        const clientManager = {
+            connected: true,
+            supportsListSessions: true,
+            agentCapabilities: { agentCapabilities: { loadSession: true } },
+            async listSessions(request: Record<string, unknown>) {
+                requests.push(request)
+                if (!request.cursor) {
+                    return {
+                        sessions: [{
+                            sessionId: 'older',
+                            cwd: '/repo',
+                            title: 'Older',
+                            updatedAt: '2026-01-01T00:00:00.000Z',
+                        }],
+                        nextCursor: 'next-page',
+                    }
+                }
+                return {
+                    sessions: [{
+                        sessionId: 'newer',
+                        cwd: '/repo',
+                        title: 'Newer',
+                        updatedAt: '2026-02-01T00:00:00.000Z',
+                    }],
+                }
+            },
+            async loadSession() {
+                return {}
+            },
+            async collectSessionUpdatesUntilIdle() {
+                return [
+                    {
+                        sessionId: 'newer',
+                        update: {
+                            sessionUpdate: 'user_message_chunk',
+                            messageId: 'user-1',
+                            content: { type: 'text', text: 'Continue ' },
+                        },
+                    },
+                    {
+                        sessionId: 'newer',
+                        update: {
+                            sessionUpdate: 'user_message_chunk',
+                            messageId: 'user-1',
+                            content: { type: 'text', text: 'this' },
+                        },
+                    },
+                    {
+                        sessionId: 'newer',
+                        update: {
+                            sessionUpdate: 'agent_message_chunk',
+                            messageId: 'agent-1',
+                            content: { type: 'text', text: 'Ready' },
+                        },
+                    },
+                ]
+            },
+        }
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        await expect(provider.listSessions('/repo')).resolves.toMatchObject([
+            { sessionId: 'newer', title: 'Newer', cwd: '/repo' },
+            { sessionId: 'older', title: 'Older', cwd: '/repo' },
+        ])
+        await expect(provider.getSessionHistory('newer', '/repo')).resolves.toEqual({
+            sessionId: 'newer',
+            title: 'Newer',
+            messages: [
+                { id: 'user-1', role: 'user', text: 'Continue this' },
+                { id: 'agent-1', role: 'assistant', text: 'Ready' },
+            ],
+        })
+        expect(requests).toEqual([
+            { cwd: '/repo' },
+            { cwd: '/repo', cursor: 'next-page' },
+            { cwd: '/repo' },
+            { cwd: '/repo', cursor: 'next-page' },
+        ])
     })
 })
 

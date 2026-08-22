@@ -150,6 +150,9 @@ describe('MatrixCvp3GatewayRunner', () => {
           'session.archive',
           'session.restore',
           'session.delete',
+          'project.settings',
+          'provider.sessions.list',
+          'provider.session.inspect',
         ],
         matrixUserId: '@phone:example.org',
         matrixDeviceId: 'PHONE',
@@ -198,6 +201,20 @@ describe('MatrixCvp3GatewayRunner', () => {
         supportedReasoningLevels: [{ effort: 'high' }],
       }],
       getAvailablePermissionModes: () => ['default'],
+      listSessions: async () => [{
+        sessionId: 'provider-session-1',
+        title: 'Provider-owned work',
+        updated: 42,
+        cwd: '/repo',
+      }],
+      getSessionHistory: async sessionId => ({
+        sessionId,
+        title: 'Provider-owned work',
+        messages: [
+          { id: 'provider-message-1', role: 'user', text: 'Earlier prompt' },
+          { id: 'provider-message-2', role: 'assistant', text: 'Earlier answer' },
+        ],
+      }),
     })
     const extensionDescriptor: SessionExtensionDescriptor = {
       id: 'prefix-transform',
@@ -357,6 +374,50 @@ describe('MatrixCvp3GatewayRunner', () => {
     }
     await send({
       ...base,
+      commandId: 'provider-list-1',
+      operation: 'provider.sessions.list',
+      payload: { operation: 'provider.sessions.list', provider: 'test' },
+    }, '$provider-list-1')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'provider-list-1'))
+    expect((await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'provider-list-1'
+      && event.payload.type === 'provider.sessions.listed'
+    )?.payload).toMatchObject({
+      type: 'provider.sessions.listed',
+      sessions: [{ sessionId: 'provider-session-1' }],
+    })
+
+    await send({
+      ...base,
+      commandId: 'provider-inspect-1',
+      operation: 'provider.session.inspect',
+      payload: {
+        operation: 'provider.session.inspect',
+        provider: 'test',
+        providerSessionId: 'provider-session-1',
+      },
+    }, '$provider-inspect-1')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'provider-inspect-1'))
+    const inspectedHistory = (await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'provider-inspect-1'
+      && event.payload.type === 'provider.session.inspected'
+    )?.payload
+    expect(inspectedHistory).toMatchObject({
+      type: 'provider.session.inspected',
+    })
+    if (inspectedHistory?.type !== 'provider.session.inspected') {
+      throw new Error('Provider history inspection did not complete')
+    }
+    expect(inspectedHistory.messages).toHaveLength(2)
+    expect(inspectedHistory.messages[0]).toMatchObject({
+      role: 'user',
+      text: 'Earlier prompt',
+    })
+
+    await send({
+      ...base,
       commandId: 'notification-subscribe-1',
       operation: 'notification.subscribe',
       payload: {
@@ -393,7 +454,11 @@ describe('MatrixCvp3GatewayRunner', () => {
       commandId: 'create-a',
       sessionId: 'session-a',
       operation: 'session.create',
-      payload: { operation: 'session.create', title: 'A' },
+      payload: {
+        operation: 'session.create',
+        title: 'A',
+        providerSessionId: 'provider-session-1',
+      },
     }
     await send(createA, '$root-a-forged-sender', undefined, '@intruder:example.org')
     await waitFor(() => Promise.resolve(rejected.length === 1))
@@ -405,6 +470,23 @@ describe('MatrixCvp3GatewayRunner', () => {
       id: 'prefix-transform',
       config: { prefix: 'SAFE:' },
     }])
+    await send({
+      ...base,
+      commandId: 'provider-list-managed',
+      operation: 'provider.sessions.list',
+      payload: { operation: 'provider.sessions.list', provider: 'test' },
+    }, '$provider-list-managed')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'provider-list-managed'))
+    expect((await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'provider-list-managed'
+      && event.payload.type === 'provider.sessions.listed'
+    )?.payload).toMatchObject({
+      sessions: [{
+        sessionId: 'provider-session-1',
+        managedSessionId: 'session-a',
+      }],
+    })
 
     await send({
       ...base,
@@ -454,6 +536,34 @@ describe('MatrixCvp3GatewayRunner', () => {
       ))
     expect(dispatched.filter(item => item.text === 'block A')).toHaveLength(1)
     expect(terminalNotifications).toHaveLength(1)
+
+    await send({
+      ...base,
+      commandId: 'archive-a',
+      sessionId: 'session-a',
+      operation: 'session.set_lifecycle',
+      payload: { operation: 'session.set_lifecycle', state: 'archived' },
+    }, '$archive-a')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'archive-a'))
+    await send({
+      ...base,
+      commandId: 'provider-list-after-archive',
+      operation: 'provider.sessions.list',
+      payload: { operation: 'provider.sessions.list', provider: 'test' },
+    }, '$provider-list-after-archive')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.causationCommandId === 'provider-list-after-archive'))
+    expect((await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'provider-list-after-archive'
+      && event.payload.type === 'provider.sessions.listed'
+    )?.payload).toMatchObject({ sessions: [{ sessionId: 'provider-session-1' }] })
+    expect((await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'provider-list-after-archive'
+      && event.payload.type === 'provider.sessions.listed'
+    )?.payload).not.toEqual(expect.objectContaining({
+      sessions: [expect.objectContaining({ managedSessionId: 'session-a' })],
+    }))
     await runner.stop()
   })
 })

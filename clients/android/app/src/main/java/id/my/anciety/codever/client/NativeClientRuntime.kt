@@ -1321,10 +1321,15 @@ class NativeClientRuntime(
                     put("operation", v3Operation)
                     raw.string("scope")?.let { put("scope", it) }
                     raw.string("provider")?.let { put("provider", it) }
+                    raw.string("providerSessionId")?.let { put("providerSessionId", it) }
+                    raw.string("title")?.let { put("title", it) }
                     raw.string("model")?.let { put("model", it) }
                     raw.string("reasoningEffort")?.let { put("reasoningEffort", it) }
                     raw.string("permissionMode")?.let { put("permissionMode", it) }
                     raw["extensions"]?.let { put("extensions", it) }
+                    raw.string("initialPrompt")?.let { prompt ->
+                        put("initialPrompt", buildJsonObject { put("text", prompt) })
+                    }
                 }
             }
             "prompt" -> {
@@ -1362,7 +1367,6 @@ class NativeClientRuntime(
                 v3Operation = "session.update"
                 v3SessionId = sessionId ?: throw IllegalArgumentException("Settings session is missing.")
                 val patch = buildJsonObject {
-                    raw.string("provider")?.let { put("provider", it) }
                     raw.string("model")?.let { put("model", it) }
                     raw.string("reasoningEffort")?.let { put("reasoningEffort", it) }
                     raw.string("permissionMode")?.let { put("permissionMode", it) }
@@ -1375,15 +1379,44 @@ class NativeClientRuntime(
                     put("patch", patch)
                 }
             }
+            "project.settings" -> {
+                v3Operation = "project.update"
+                v3SessionId = null
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("patch", buildJsonObject {
+                        raw["model"]?.let { put("model", it) }
+                        raw["reasoningEffort"]?.let { put("reasoningEffort", it) }
+                    })
+                }
+            }
+            "provider.sessions.list" -> {
+                v3Operation = "provider.sessions.list"
+                v3SessionId = null
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("provider", raw.string("provider")!!)
+                    raw.string("cursor")?.let { put("cursor", it) }
+                }
+            }
+            "provider.session.inspect" -> {
+                v3Operation = "provider.session.inspect"
+                v3SessionId = null
+                v3Payload = buildJsonObject {
+                    put("operation", v3Operation)
+                    put("provider", raw.string("provider")!!)
+                    put("providerSessionId", raw.string("providerSessionId")!!)
+                }
+            }
             "session.archive", "session.restore", "session.delete" -> {
                 v3Operation = "session.set_lifecycle"
                 v3SessionId = sessionId ?: throw IllegalArgumentException("Session lifecycle target is missing.")
                 v3Payload = buildJsonObject {
                     put("operation", v3Operation)
                     put("state", when (operation) {
-                        "session.archive" -> "archived"
+                        "session.archive", "session.delete" -> "archived"
                         "session.restore" -> "active"
-                        else -> "deleted"
+                        else -> "archived"
                     })
                 }
             }

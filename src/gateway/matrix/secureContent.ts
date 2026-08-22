@@ -92,6 +92,11 @@ export interface GatewayStateSnapshot {
         model?: string
         reasoningEffort?: string
         extensions: SessionExtensionSummary[]
+        availableCommands: Array<{
+            name: string
+            description?: string
+            inputHint?: string | null
+        }>
     }>
     workspace: {
         projectId: string
@@ -111,6 +116,21 @@ export interface GatewayStateSnapshot {
                 effort: string
                 description?: string
             }>
+        }>
+        providers: Array<{
+            id: string
+            name: string
+            models: Array<{
+                id: string
+                name: string
+                defaultReasoningLevel?: string
+                supportedReasoningLevels?: Array<{
+                    effort: string
+                    description?: string
+                }>
+            }>
+            canListSessions: boolean
+            canInspectSessions: boolean
         }>
         permissionModes: Array<{ id: string; name: string }>
         canCreateSession: boolean

@@ -86,6 +86,7 @@ internal class MatrixCvp3NativeProjection(
         val permissionMode: String?,
         val extensions: JsonArray,
         val extensionRevision: Long,
+        val availableCommands: JsonArray,
         val activeTurnId: String? = null,
     )
 
@@ -147,6 +148,7 @@ internal class MatrixCvp3NativeProjection(
                     permissionMode = payload.optionalString("permissionMode", 128),
                     extensions = payload["extensions"] as? JsonArray ?: JsonArray(emptyList()),
                     extensionRevision = 1,
+                    availableCommands = JsonArray(emptyList()),
                 )
                 MatrixCvp3NativeProjectionResult(
                     messages = initial?.let {
@@ -426,7 +428,7 @@ internal class MatrixCvp3NativeProjection(
     fun snapshot(): JsonObject? {
         val activeProject = project ?: return null
         val visible = sessions.values
-            .filter { it.lifecycle != "deleted" }
+            .filter { it.lifecycle == "active" }
             .sortedWith(compareByDescending<Session> { it.updatedAt }.thenBy { it.id })
         val latestVersion = maxOf(1L, visible.maxOfOrNull { it.stateVersion } ?: 1L)
         val latestTimestamp = maxOf(
@@ -542,6 +544,7 @@ internal class MatrixCvp3NativeProjection(
                     session.permissionMode?.let { put("permissionMode", it) }
                     put("extensions", session.extensions)
                     put("extensionRevision", session.extensionRevision)
+                    put("availableCommands", session.availableCommands)
                     session.activeTurnId?.let { put("activeTurnId", it) }
                 })
             }
@@ -637,6 +640,8 @@ internal class MatrixCvp3NativeProjection(
                 extensionRevision = session.optionalLong("extensionRevision")
                     ?.takeIf { it > 0 }
                     ?: 1,
+                availableCommands = session["availableCommands"] as? JsonArray
+                    ?: JsonArray(emptyList()),
                 activeTurnId = if (schemaVersion >= 4L) {
                     session.optionalString("activeTurnId", 256)
                 } else {
@@ -749,6 +754,9 @@ internal class MatrixCvp3NativeProjection(
             ?.takeIf { it > 0 }
             ?: sessions[sessionId]?.extensionRevision
             ?: 1,
+        availableCommands = projection["availableCommands"] as? JsonArray
+            ?: sessions[sessionId]?.availableCommands
+            ?: JsonArray(emptyList()),
         activeTurnId = sessions[sessionId]?.activeTurnId,
     )
 
@@ -795,6 +803,8 @@ internal class MatrixCvp3NativeProjection(
             "extension.interaction.resolved", "project.snapshot",
             "notification.subscription.changed" ->
                 MatrixCvp3NativeTerminal(commandId, "succeeded", sessionId)
+            "provider.sessions.listed", "provider.session.inspected" ->
+                MatrixCvp3NativeTerminal(commandId, "succeeded", sessionId, result = payload)
             "turn.completed" -> MatrixCvp3NativeTerminal(
                 commandId,
                 if (payload.requiredString("outcome", 32) == "cancelled") "cancelled" else "succeeded",
@@ -875,9 +885,37 @@ internal class MatrixCvp3NativeProjection(
         (session.reasoningEffort ?: project.reasoningEffort)?.let { put("reasoning_effort", it) }
         session.activeTurnId?.let { put("active_turn_id", it) }
         put("extensions", session.extensions)
+        put("available_commands", session.availableCommands)
     }
 
     private fun validateCapabilities(value: JsonObject) {
+        fun validateModels(models: JsonArray, label: String) {
+            models.forEach { item ->
+                val model = item as? JsonObject
+                    ?: throw IllegalArgumentException("A CVP/3 model capability must be an object.")
+                model.requireKeys(
+                    setOf("id", "name"),
+                    setOf("default_reasoning_level", "supported_reasoning_levels"),
+                    "CVP/3 model capability",
+                )
+                model.requiredString("id", 256)
+                model.requiredString("name", 256)
+                model.optionalString("default_reasoning_level", 64)
+                model.optionalArray("supported_reasoning_levels", 64).orEmpty().forEach { levelValue ->
+                    val level = levelValue as? JsonObject
+                        ?: throw IllegalArgumentException("A CVP/3 reasoning capability must be an object.")
+                    level.requireKeys(
+                        setOf("effort"),
+                        setOf("description"),
+                        "CVP/3 reasoning capability",
+                    )
+                    level.requiredString("effort", 64)
+                    level.optionalString("description", 4_096)
+                }
+            }
+            requireUniqueIds(models, label)
+        }
+
         value.requireKeys(
             setOf(
                 "models",
@@ -888,34 +926,31 @@ internal class MatrixCvp3NativeProjection(
                 "can_delete_session",
                 "session_extensions",
             ),
-            setOf("web_push"),
+            setOf("web_push", "providers"),
             "CVP/3 capabilities",
         )
         val models = value.requiredArray("models", 256)
-        models.forEach { item ->
-            val model = item as? JsonObject
-                ?: throw IllegalArgumentException("A CVP/3 model capability must be an object.")
-            model.requireKeys(
-                setOf("id", "name"),
-                setOf("default_reasoning_level", "supported_reasoning_levels"),
-                "CVP/3 model capability",
+        validateModels(models, "CVP/3 model capabilities")
+
+        val providers = value.optionalArray("providers", 64) ?: JsonArray(emptyList())
+        providers.forEach { item ->
+            val provider = item as? JsonObject
+                ?: throw IllegalArgumentException("A CVP/3 provider capability must be an object.")
+            provider.requireKeys(
+                setOf("id", "name", "models", "can_list_sessions", "can_inspect_sessions"),
+                emptySet(),
+                "CVP/3 provider capability",
             )
-            model.requiredString("id", 256)
-            model.requiredString("name", 256)
-            model.optionalString("default_reasoning_level", 64)
-            model.optionalArray("supported_reasoning_levels", 64).orEmpty().forEach { levelValue ->
-                val level = levelValue as? JsonObject
-                    ?: throw IllegalArgumentException("A CVP/3 reasoning capability must be an object.")
-                level.requireKeys(
-                    setOf("effort"),
-                    setOf("description"),
-                    "CVP/3 reasoning capability",
-                )
-                level.requiredString("effort", 64)
-                level.optionalString("description", 4_096)
-            }
+            provider.requiredString("id", 256)
+            provider.requiredString("name", 256)
+            validateModels(
+                provider.requiredArray("models", 256),
+                "CVP/3 provider model capabilities",
+            )
+            provider.requiredBoolean("can_list_sessions")
+            provider.requiredBoolean("can_inspect_sessions")
         }
-        requireUniqueIds(models, "CVP/3 model capabilities")
+        requireUniqueIds(providers, "CVP/3 provider capabilities")
 
         val permissionModes = value.requiredArray("permission_modes", 128)
         permissionModes.forEach { item ->
@@ -997,13 +1032,14 @@ internal class MatrixCvp3NativeProjection(
         installedExtensions: JsonArray = JsonArray(emptyList()),
     ): JsonObject = buildJsonObject {
         put("models", JsonArray(emptyList()))
+        put("providers", JsonArray(emptyList()))
         put("permission_modes", buildJsonArray {
             add(buildJsonObject { put("id", "default"); put("name", "Default") })
         })
         put("can_create_session", true)
         put("can_select_session", false)
         put("can_archive_session", true)
-        put("can_delete_session", true)
+        put("can_delete_session", false)
         put("session_extensions", installedExtensions)
     }
 

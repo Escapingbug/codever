@@ -5,6 +5,7 @@ import {
   SessionExtensionBinding,
   SessionExtensionDescriptor,
   SessionExtensionSummary,
+  ProviderCommand,
 } from "@codever/protocol";
 
 export type GatewayCapabilityOption = {
@@ -42,6 +43,7 @@ export type GatewaySessionSummary = {
   reasoningEffort?: string;
   activeTurnId?: string;
   extensions: SessionExtensionSummary[];
+  availableCommands: ProviderCommand[];
 };
 
 export type GatewayInboxFile = {
@@ -66,6 +68,11 @@ export type GatewayWorkspaceState = {
 
 export type GatewayCapabilities = {
   models: GatewayModelCapability[];
+  providers: Array<GatewayCapabilityOption & {
+    models: GatewayModelCapability[];
+    canListSessions: boolean;
+    canInspectSessions: boolean;
+  }>;
   permissionModes: GatewayCapabilityOption[];
   canCreateSession: boolean;
   canSelectSession: boolean;
@@ -266,6 +273,7 @@ export function parseGatewayStateExtension(
       projectName: session.project_name,
       cwd: session.cwd,
       extensions: parseSessionExtensionSummaries(session.extensions),
+      availableCommands: parseProviderCommands(session.available_commands),
     };
   });
 
@@ -321,6 +329,7 @@ export function parseGatewayStateExtension(
         : {}),
       ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
       extensions: session.extensions,
+      availableCommands: session.availableCommands,
     };
   });
 
@@ -469,6 +478,28 @@ export function parseGatewayCapabilities(input: unknown): GatewayCapabilities {
 
   return {
     models: parseModels(capabilities.models),
+    providers: Array.isArray(capabilities.providers)
+      ? capabilities.providers.map(value => {
+          const provider = asRecord(value);
+          if (
+            !provider ||
+            typeof provider.id !== "string" ||
+            typeof provider.name !== "string" ||
+            !Array.isArray(provider.models) ||
+            typeof provider.can_list_sessions !== "boolean" ||
+            typeof provider.can_inspect_sessions !== "boolean"
+          ) {
+            throw new Error("The authenticated Gateway provider capability is malformed.");
+          }
+          return {
+            id: provider.id,
+            name: provider.name,
+            models: parseModels(provider.models),
+            canListSessions: provider.can_list_sessions,
+            canInspectSessions: provider.can_inspect_sessions,
+          };
+        })
+      : [],
     permissionModes: parseOptions(
       capabilities.permission_modes,
       "permission mode",
@@ -580,6 +611,7 @@ function gatewayStateExtension(
         name: extension.name,
         version: extension.version,
       })),
+      available_commands: session.availableCommands,
     })),
     ...(state.inboxFiles === undefined
       ? {}
@@ -622,6 +654,23 @@ function gatewayStateExtension(
             ...(level.description ? { description: level.description } : {}),
           }),
         ),
+      })),
+      providers: state.capabilities.providers.map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        can_list_sessions: provider.canListSessions,
+        can_inspect_sessions: provider.canInspectSessions,
+        models: provider.models.map((model) => ({
+          id: model.id,
+          name: model.name,
+          ...(model.defaultReasoningLevel
+            ? { default_reasoning_level: model.defaultReasoningLevel }
+            : {}),
+          supported_reasoning_levels: model.supportedReasoningLevels.map(level => ({
+            effort: level.effort,
+            ...(level.description ? { description: level.description } : {}),
+          })),
+        })),
       })),
       permission_modes: state.capabilities.permissionModes.map((mode) => ({
         id: mode.id,
@@ -723,6 +772,29 @@ function parseSessionExtensionSummaries(value: unknown): SessionExtensionSummary
       id: extension.id,
       name: extension.name,
       version: extension.version,
+    };
+  });
+}
+
+function parseProviderCommands(value: unknown): ProviderCommand[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("The authenticated provider command list is malformed.");
+  }
+  return value.map(candidate => {
+    const command = asRecord(candidate);
+    if (
+      !command ||
+      typeof command.name !== "string" ||
+      typeof command.description !== "string" ||
+      !(command.inputHint === null || typeof command.inputHint === "string")
+    ) {
+      throw new Error("The authenticated provider command is malformed.");
+    }
+    return {
+      name: command.name,
+      description: command.description,
+      inputHint: command.inputHint,
     };
   });
 }

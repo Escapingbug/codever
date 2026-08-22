@@ -241,7 +241,6 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       operation: z.literal('session.settings'),
       sessionId: opaqueId,
       model: z.string().min(1).max(256).optional(),
-      provider: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
       cwd: z.string().min(1).max(4096).optional(),
@@ -251,7 +250,6 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
     .refine(
       (settings) =>
         settings.model !== undefined ||
-        settings.provider !== undefined ||
         settings.reasoningEffort !== undefined ||
         settings.permissionMode !== undefined ||
         settings.cwd !== undefined ||
@@ -265,10 +263,13 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
       cwd: z.string().min(1).max(4096).optional(),
       projectName: z.string().min(1).max(256).optional(),
       provider: z.string().min(1).max(256).optional(),
+      providerSessionId: opaqueId.optional(),
+      title: z.string().min(1).max(512).optional(),
       model: z.string().min(1).max(256).optional(),
       reasoningEffort: z.string().min(1).max(64).optional(),
       permissionMode: z.enum(['default', 'accept_edits', 'plan', 'bypass_permissions']).optional(),
       extensions: z.array(sessionExtensionBindingSchema).max(8).optional(),
+      initialPrompt: z.string().min(1).max(64 * 1024).optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -284,6 +285,31 @@ export const commandPayloadSchema = z.discriminatedUnion('operation', [
         ids.add(extension.id)
       }
     }),
+  z
+    .object({
+      operation: z.literal('project.settings'),
+      model: z.string().min(1).max(256).nullable().optional(),
+      reasoningEffort: z.string().min(1).max(64).nullable().optional(),
+    })
+    .strict()
+    .refine(
+      settings => settings.model !== undefined || settings.reasoningEffort !== undefined,
+      'At least one project setting is required',
+    ),
+  z
+    .object({
+      operation: z.literal('provider.sessions.list'),
+      provider: z.string().min(1).max(256),
+      cursor: z.string().min(1).max(4_096).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal('provider.session.inspect'),
+      provider: z.string().min(1).max(256),
+      providerSessionId: opaqueId,
+    })
+    .strict(),
   z
     .object({
       operation: z.literal('session.archive'),
@@ -333,6 +359,9 @@ export const commandSchema = z
       'decision',
       'session.settings',
       'session.create',
+      'project.settings',
+      'provider.sessions.list',
+      'provider.session.inspect',
       'session.archive',
       'session.restore',
       'session.delete',

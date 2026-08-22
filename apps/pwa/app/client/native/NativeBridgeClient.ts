@@ -1067,6 +1067,9 @@ function parseBlockingCommand(error: unknown): BlockingCommand | null {
 function parseCommandOperation(input: unknown): CommandPayload["operation"] | undefined {
   switch (input) {
     case "session.create":
+    case "project.settings":
+    case "provider.sessions.list":
+    case "provider.session.inspect":
     case "session.settings":
     case "session.archive":
     case "session.restore":

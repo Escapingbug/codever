@@ -667,7 +667,7 @@ describe('MatrixGatewayRunner', () => {
         })).rejects.toThrow('not installed')
     })
 
-    it('archives, restores, and permanently removes an app session', async () => {
+    it('archives an app session and treats legacy delete as the same retained state', async () => {
         const fixture = await securityFixture()
         const dispatched: SessionInput[] = []
         const session = fakeTopicSession(dispatched)
@@ -722,36 +722,31 @@ describe('MatrixGatewayRunner', () => {
         })
         expect(session.destroy).toHaveBeenCalledTimes(1)
 
-        await expect(execute(command('session.restore', 3))).resolves.toEqual({
+        await expect(execute(command('session.restore', 3))).rejects.toThrow(
+            'continue them from Provider History',
+        )
+        await expect(execute(command('session.delete', 4))).resolves.toEqual({
             sessionId: 'app-session-1',
-            canonicalCompletionPublished: true,
-        })
-        expect(runtime.archivedSessions.size).toBe(0)
-        expect(runtime.appSessions.get('app-session-1')?.record.archivedAt).toBeNull()
-        const restoredRuntime = runtime.appSessions.get('app-session-1')
-        await expect(execute(command('session.restore', 4))).resolves.toEqual({
-            sessionId: 'app-session-1',
-        })
-        expect(runtime.appSessions.get('app-session-1')).toBe(restoredRuntime)
-
-        await expect(execute(command('session.delete', 5))).resolves.toEqual({
-            sessionId: 'app-session-1',
-            nativeRevisionPublished: true,
-            canonicalCompletionPublished: true,
         })
         expect(runtime.appSessions.size).toBe(0)
-        expect(runtime.archivedSessions.size).toBe(0)
+        expect(runtime.archivedSessions.get('app-session-1')).toMatchObject({
+            archivedAt: fixture.now,
+            providerSessionId: 'provider-session-1',
+        })
         const runtimeStateStore = Reflect.get(runner, 'runtimeStateStore') as {
             getRoom(roomId: string): { appSessions: unknown[] }
         }
         expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
-            .toEqual([])
-        await expect(execute(command('session.delete', 6))).resolves.toEqual({
+            .toEqual([expect.objectContaining({
+                id: 'app-session-1',
+                archivedAt: fixture.now,
+                providerSessionId: 'provider-session-1',
+            })])
+        await expect(execute(command('session.delete', 5))).resolves.toEqual({
             sessionId: 'app-session-1',
-            nativeRevisionPublished: false,
         })
         expect(runtimeStateStore.getRoom(fixture.config.rooms[0]!.roomId).appSessions)
-            .toEqual([])
+            .toHaveLength(1)
     })
 
     it('uses one authoritative session entity as the lifecycle command completion', async () => {
@@ -816,13 +811,12 @@ describe('MatrixGatewayRunner', () => {
         })
     })
 
-    it('coalesces rapid lifecycle mutations within the default Matrix burst budget', async () => {
+    it('publishes one archive entity for archive and the legacy delete alias', async () => {
         const fixture = await securityFixture()
         fixture.config.gatewayHeartbeatIntervalMs = 60_000
         fixture.config.trustedDevices[0]!.allowedOperations = [
             ...(fixture.config.trustedDevices[0]!.allowedOperations ?? []),
             'session.archive',
-            'session.restore',
             'session.delete',
         ]
         const client = new FakeMatrixGatewayClient()
@@ -837,7 +831,6 @@ describe('MatrixGatewayRunner', () => {
 
         const operations = [
             'session.archive',
-            'session.restore',
             'session.delete',
         ] as const
         for (const [index, operation] of operations.entries()) {
@@ -854,19 +847,20 @@ describe('MatrixGatewayRunner', () => {
                 fixture.now,
                 `budget-${operation}`,
             ))
-            await vi.waitFor(() => expect(client.stateSent.filter(request =>
-                request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
-            )).toHaveLength(index + 1))
         }
 
-        // The entity PUT is both realtime state and the sender's authenticated
-        // completion. No ACK, command_result, or duplicate lifecycle timeline
-        // event is needed for these fast successful mutations.
-        expect(client.sent).toEqual([])
+        await vi.waitFor(() => expect(client.stateSent.filter(request =>
+            request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
+        )).toHaveLength(1))
+        await vi.waitFor(() => expect(client.sent).toHaveLength(2))
+
+        // The first command publishes the archive entity. The legacy delete
+        // alias is already applied, so its compatibility ACK/result complete
+        // without another entity PUT.
         expect(client.stateSent.filter(request =>
             request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
-        )).toHaveLength(3)
-        expect(client.stateSent).toHaveLength(3)
+        )).toHaveLength(1)
+        expect(client.stateSent).toHaveLength(1)
         expect((Reflect.get(runner, 'roomSnapshotTimers') as Map<string, unknown>).size).toBe(1)
 
         await runner.stop()

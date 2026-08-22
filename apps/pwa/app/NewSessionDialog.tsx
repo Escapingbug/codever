@@ -16,6 +16,10 @@ type NewSessionInput = {
   scope?: "project" | "scratch";
   cwd: string;
   projectName: string;
+  provider: string;
+  providerSessionId?: string;
+  title?: string;
+  initialPrompt?: string;
   model?: string;
   reasoningEffort?: string;
   extensions?: SessionExtensionBinding[];
@@ -28,6 +32,11 @@ type Props = {
   gatewayName: string;
   workspace: GatewayWorkspaceState;
   models: GatewayModelCapability[];
+  providers: Array<{
+    id: string;
+    name: string;
+    models: GatewayModelCapability[];
+  }>;
   extensions: SessionExtensionDescriptor[];
   defaultExtensions?: SessionExtensionBinding[];
   canUpdateProjectDefaults?: boolean;
@@ -46,16 +55,19 @@ function NewSessionDialogContent({
   gatewayName,
   workspace,
   models,
+  providers,
   extensions,
   defaultExtensions = [],
   canUpdateProjectDefaults = false,
   onClose,
   onCreate,
 }: Props) {
+  const [provider, setProvider] = useState(workspace.provider);
+  const providerModels = providers.find(entry => entry.id === provider)?.models ?? models;
   const [model, setModel] = useState(workspace.model ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(
     workspace.reasoningEffort ??
-      models.find((entry) => entry.id === workspace.model)
+      providerModels.find((entry) => entry.id === workspace.model)
         ?.defaultReasoningLevel ??
       "",
   );
@@ -100,7 +112,7 @@ function NewSessionDialogContent({
     onEscape: requestClose,
   });
 
-  const selectedModel = models.find((entry) => entry.id === model);
+  const selectedModel = providerModels.find((entry) => entry.id === model);
   const reasoningLevels = selectedModel?.supportedReasoningLevels ?? [];
 
   const extensionConfigValid = extensions.every((extension) => {
@@ -115,7 +127,7 @@ function NewSessionDialogContent({
   if (!open) return null;
   const chooseModel = (next: string) => {
     setModel(next);
-    const capability = models.find((entry) => entry.id === next);
+    const capability = providerModels.find((entry) => entry.id === next);
     const supported = capability?.supportedReasoningLevels ?? [];
     if (!supported.some((level) => level.effort === reasoningEffort)) {
       setReasoningEffort(capability?.defaultReasoningLevel ?? supported[0]?.effort ?? "");
@@ -129,6 +141,7 @@ function NewSessionDialogContent({
       scope,
       cwd: workspace.cwd,
       projectName: workspace.projectName,
+      provider,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       extensions: extensions
@@ -212,21 +225,42 @@ function NewSessionDialogContent({
           </> : (
             <small className="project-identity-note scratch-identity-note">
               The Gateway creates a private working folder for this conversation.
-              Deleting the conversation also removes that folder.
+              Archiving removes it from Codever while provider history remains available.
             </small>
           )}
 
           <div className="new-session-grid two-columns">
+            <label>
+              <span>Provider</span>
+              <select
+                value={provider}
+                onChange={(event) => {
+                  const nextProvider = event.target.value;
+                  setProvider(nextProvider);
+                  setModel("");
+                  setReasoningEffort("");
+                  if (nextProvider !== workspace.provider) setSetAsProjectDefault(false);
+                }}
+                disabled={busy || providers.length === 0}
+              >
+                {(providers.length > 0
+                  ? providers
+                  : [{ id: workspace.provider, name: workspace.provider, models }]
+                ).map(entry => (
+                  <option key={entry.id} value={entry.id}>{entry.name}</option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>Model</span>
               <select
                 ref={modelSelectRef}
                 value={model}
                 onChange={(event) => chooseModel(event.target.value)}
-                disabled={busy || models.length === 0}
+                disabled={busy || providerModels.length === 0}
               >
                 {!model && <option value="">Computer default</option>}
-                {models.map((entry) => (
+                {providerModels.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.name}
                   </option>
@@ -336,18 +370,19 @@ function NewSessionDialogContent({
                   </section>
                 );
               })}
-              {canUpdateProjectDefaults && scope === "project" && (
-                <label className="session-extension-boolean">
-                  <input
-                    type="checkbox"
-                    checked={setAsProjectDefault}
-                    disabled={busy}
-                    onChange={(event) => setSetAsProjectDefault(event.target.checked)}
-                  />
-                  <span>Use this selection as the project default for future sessions</span>
-                </label>
-              )}
             </fieldset>
+          )}
+
+          {canUpdateProjectDefaults && scope === "project" && provider === workspace.provider && (
+            <label className="session-extension-boolean project-default-toggle">
+              <input
+                type="checkbox"
+                checked={setAsProjectDefault}
+                disabled={busy}
+                onChange={(event) => setSetAsProjectDefault(event.target.checked)}
+              />
+              <span>Use this selection as the project default for model, reasoning, and extensions</span>
+            </label>
           )}
 
           <footer>

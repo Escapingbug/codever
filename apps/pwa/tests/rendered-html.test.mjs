@@ -437,10 +437,6 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
 });
 
 test("pairs a Gateway without exposing Matrix fingerprints and signs strict commands", async () => {
-  const sessionDeleteDialog = await readFile(
-    new URL("app/SessionDeleteDialog.tsx", appRoot),
-    "utf8",
-  );
   const [
     matrix,
     pairing,
@@ -927,23 +923,12 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(app, /sendRealCommand/);
   assert.match(app, /sessionLifecyclePayload\(action, sessionId\)/);
   assert.match(app, /operation: "session\.archive"/);
-  assert.match(app, /operation: "session\.restore"/);
-  assert.match(app, /operation: "session\.delete"/);
-  assert.match(
-    app,
-    /setSessionDeletionPending\([\s\S]*activateLocalSession\(null\)[\s\S]*runSessionLifecycle\([\s\S]*"delete"/,
-  );
-  assert.doesNotMatch(
-    app,
-    /async function deleteSession\(\)[\s\S]*setSessionOptimisticallyDeleted\([\s\S]*runSessionLifecycle\(/,
-  );
   assert.match(app, /sessionsAvailableForAutomaticSelection/);
-  assert.match(app, /This session is archived/);
-  assert.match(app, /Restore session/);
-  assert.match(app, /Delete session/);
+  assert.match(app, /Remove from Codever; provider history remains/);
+  assert.match(app, /ProviderHistoryDialog/);
+  assert.match(app, /provider\.sessions\.list/);
+  assert.match(app, /provider\.session\.inspect/);
   assert.match(app, /clearSessionMessageHistory/);
-  assert.match(sessionDeleteDialog, /role="alertdialog"/);
-  assert.match(sessionDeleteDialog, /Copies already stored/);
   assert.match(chatMessages, /entry\.commandId === message\.commandId/);
   assert.match(app, /message\.originDeviceName/);
   assert.match(app, /Another device updated this session/);

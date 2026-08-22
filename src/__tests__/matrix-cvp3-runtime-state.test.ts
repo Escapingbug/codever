@@ -36,6 +36,7 @@ describe('FileCvp3RuntimeStateStore', () => {
         extensions: [],
         extensionRevision: 1,
         inheritedFromProjectExtensionRevision: null,
+        availableCommands: [],
       })
     })
 

@@ -921,6 +921,8 @@ function toLegacyCompletion(
     ...(completion.sessionId ? { sessionId: completion.sessionId } : {}),
     ...(payload.type === "device.invitation.created"
       ? { result: { pairingLink: payload.pairingLink, expiresAt: payload.expiresAt } }
+      : payload.type === "provider.sessions.listed" || payload.type === "provider.session.inspected"
+        ? { result: payload }
       : {}),
     ...(payload.type === "turn.failed"
       ? { error: { code: payload.code, message: payload.message, retryable: false } }
@@ -977,6 +979,7 @@ function gatewayState(
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
       extensions: session.extensions ?? [],
+      availableCommands: session.availableCommands ?? [],
     })),
     inboxFiles: inboxFiles.map(file => ({
       id: file.fileId,
@@ -1000,11 +1003,12 @@ function gatewayState(
       ? parseGatewayCapabilities(protocol.projection.workspace.capabilities)
       : {
           models: [],
+          providers: [],
           permissionModes: [{ id: "default", name: "Default" }],
           canCreateSession: true,
           canSelectSession: false,
           canArchiveSession: true,
-          canDeleteSession: true,
+          canDeleteSession: false,
           sessionExtensions: project?.installedExtensions ?? [],
         },
   };

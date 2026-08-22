@@ -352,6 +352,7 @@ function sessionSummary(
       ? { reasoningEffort: session.reasoning_effort }
       : {}),
     extensions: session.extensions,
+    availableCommands: [],
   };
 }
 

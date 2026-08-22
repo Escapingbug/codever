@@ -16,6 +16,7 @@ import type {
     PrivilegedExecutionInput,
     PrivilegedExecutionResult,
 } from '@/privilege'
+import type { ProviderCommand } from '@/providers/types'
 
 // --- Session metadata factory ---
 
@@ -59,10 +60,19 @@ export interface TopicSessionConfig {
     privilegeExecutor?: PrivilegeExecutor
     /** Optional group logger */
     logger?: { group(chatId: number, line: string): void }
+    onAvailableCommands?: (commands: ProviderCommand[]) => void
 }
 
 export function createTopicSession(options: TopicSessionConfig): TopicSession {
-    const { sessionRecord, provider, channelPort, logger, extensions, privilegeExecutor } = options
+    const {
+        sessionRecord,
+        provider,
+        channelPort,
+        logger,
+        extensions,
+        privilegeExecutor,
+        onAvailableCommands,
+    } = options
     const chatId = sessionRecord.groupChatId!
 
     function glog(line: string): void {
@@ -106,6 +116,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         },
         onAvailableCommands: (commands) => {
             sessionRecord.availableCommands = commands
+            onAvailableCommands?.(commands)
         },
     })
 

@@ -168,6 +168,22 @@ dedicated workspace carrier is introduced. Inbox events are replicated once
 per project room that currently has an authorized device, so the workspace
 list is reachable without inferring a conversation or session.
 
+The PWA exposes provider history independently from new-session creation.
+`provider.sessions.list` and `provider.session.inspect` use each provider's
+session-list/load capabilities to browse a bounded read-only preview. Sending
+from that preview creates a new Codever session bound to the existing
+`providerSessionId`; an already active binding opens the managed session.
+Provider selection is fixed by `session.create`. Project defaults cover model
+and reasoning for later sessions, while live model/reasoning changes use ACP's
+structured session model/config APIs. Provider-published
+`available_commands_update` values are projected as a PWA command palette, and
+the resulting slash text remains an ordinary provider prompt.
+
+Archive is the only Codever removal lifecycle. It removes the session from the
+managed projection without deleting Matrix or provider-owned history. Legacy
+delete input aliases archive, restore is rejected, and continuation happens
+through Provider History with a new Codever session identity.
+
 The Gateway persists the exact outbound content and stable Matrix transaction
 ID before sending. It also journals every accepted command ID before execution,
 so Matrix retry, restart, and multi-device redelivery cannot execute a command
@@ -450,7 +466,7 @@ Anything outside this chain should either be a utility or a test helper.
 - Provider events are normalized before rendering.
 - Tool updates are merged by stable tool call id before editing channel messages.
 - Channel sends/edits go through `DeliveryOutbox`.
-- Provider switch creates or installs a new provider context and clears incompatible provider session identity.
+- Telegram's explicit provider-switch command creates or installs a new provider context and clears incompatible provider session identity; Matrix/PWA sessions instead fix the provider at `session.create`.
 - Scheduled and MCP-injected messages use the same runtime path as user messages.
 - Telegram-specific behavior does not leak into provider adapters.
 - Persistence is topic-level for session state; group state stores shared settings such as cwd/provider/model defaults.
