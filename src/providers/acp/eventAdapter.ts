@@ -230,6 +230,26 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 locations,
                 ...(displayTitle ? { displayTitle } : {}),
             })
+
+            // ACP permits the first tool_call snapshot to already be terminal.
+            // Some providers do not follow it with a tool_call_update, so the
+            // initial running presentation must be closed from this snapshot.
+            if (statusIndicatesComplete(toolCall.status)) {
+                const terminal = toolCall as AcpToolCall & AcpToolCallUpdate
+                const output = extractToolOutput(terminal)
+                events.push({
+                    kind: 'tool_result',
+                    toolUseId: toolCall.toolCallId,
+                    toolName,
+                    output,
+                    isError: statusIndicatesError(toolCall.status),
+                    ...(displayTitle ? { displayTitle } : {}),
+                    ...(terminal.rawOutput != null
+                        ? { structuredOutput: terminal.rawOutput }
+                        : {}),
+                    content: mapContentBlocks(terminal.content ?? undefined),
+                })
+            }
             break
         }
 

@@ -549,6 +549,94 @@ test("clears a startup review after native safely resumes the operation", async 
   client.dispose();
 });
 
+test("recovers structured tool cards from older native agent messages", async () => {
+  const messages: Array<Record<string, unknown>> = [];
+  const port = new RuntimePort();
+  const bridge = await acquireNativeRpcBridge(port);
+  const hello = await bridge.hello({
+    webBuild: "test-build",
+    requiredCapabilities: [],
+    optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
+      name,
+      versions: name === "history.page" ? [2, 1] : [1],
+    })),
+  });
+  const client = new NativeBridgeClient(bridge, hello, {
+    onMessage(message) {
+      messages.push(message as unknown as Record<string, unknown>);
+    },
+    onStatus() {},
+  });
+  await client.ready;
+
+  port.deliver({
+    jsonrpc: "2.0",
+    method: "codever.events.deliver",
+    params: {
+      subscriptionId: "subscription-1",
+      events: [{
+        schemaVersion: 1,
+        eventId: "event-old-native-tool-1",
+        cursor: "cursor-old-native-tool-1",
+        occurredAt: 10,
+        type: "message.upserted",
+        payload: {
+          eventId: "assistant:tool-message-1:0",
+          sender: "gateway-1",
+          timestamp: 10,
+          encrypted: true,
+          kind: "agent",
+          text: "Bash",
+          sessionId: "session-1",
+          format: "plain",
+          semantic: {
+            type: "assistant.message",
+            messageId: "tool-message-1",
+            messageVersion: 1,
+            ui: {
+              kind: "tool_group",
+              version: 1,
+              groupId: "bash-1",
+              tools: [{
+                id: "bash-1",
+                name: "Bash",
+                title: "Bash",
+                detail: "pnpm test",
+                category: "execute",
+                phase: "completed",
+                isError: false,
+                startedAt: 1,
+                updatedAt: 10,
+              }],
+            },
+          },
+        },
+      }],
+    },
+  });
+  await nextTurn();
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].kind, "tool");
+  assert.deepEqual(messages[0].toolGroup, {
+    kind: "tool_group",
+    version: 1,
+    groupId: "bash-1",
+    tools: [{
+      id: "bash-1",
+      name: "Bash",
+      title: "Bash",
+      detail: "pnpm test",
+      category: "execute",
+      phase: "completed",
+      isError: false,
+      startedAt: 1,
+      updatedAt: 10,
+    }],
+  });
+  client.dispose();
+});
+
 async function createTestClient(
   port: RuntimePort,
   onReview: (review: CodeverCommandReview | null) => void = () => {},

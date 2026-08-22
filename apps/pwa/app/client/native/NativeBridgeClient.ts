@@ -21,6 +21,7 @@ import {
   type CommandCompletion,
 } from "../../commandLifecycle";
 import { parseGatewayStateExtension } from "../../gatewayState";
+import { parseToolGroupPresentation } from "../../presentation";
 import {
   MatrixRateLimitError,
   type MatrixLoginTokenResult,
@@ -570,7 +571,7 @@ export class NativeBridgeClient implements CodeverClient {
   #acceptEvent(event: ClientEvent): void {
     switch (event.type) {
       case "message.upserted":
-        this.handlers.onMessage(parseClientMessage(event.payload));
+        this.handlers.onMessage(parseCompatibleClientMessage(event.payload));
         break;
       case "command.changed":
         this.#recordCommand(parseCommandView(event.payload));
@@ -875,8 +876,32 @@ export class NativeBridgeClient implements CodeverClient {
     }
     if (page.nextBefore) this.#historyBefore.set(sessionId, page.nextBefore);
     else this.#historyBefore.delete(sessionId);
-    return { messages: page.messages, hasMore: page.hasMore };
+    return {
+      messages: page.messages.map(parseCompatibleClientMessage),
+      hasMore: page.hasMore,
+    };
   }
+}
+
+/**
+ * APKs released before native tool-presentation support still authenticate
+ * the CVP/3 assistant payload, but expose it as an agent message. Recover the
+ * structured UI in the web layer so Android and browser rendering stay equal
+ * while those APKs are upgraded.
+ */
+function parseCompatibleClientMessage(input: unknown) {
+  const message = parseClientMessage(input);
+  if (
+    message.kind !== "agent" ||
+    message.toolGroup ||
+    message.semantic?.type !== "assistant.message"
+  ) {
+    return message;
+  }
+  const toolGroup = parseToolGroupPresentation(message.semantic.ui);
+  return toolGroup
+    ? { ...message, kind: "tool" as const, toolGroup }
+    : message;
 }
 
 export async function createNativeBridgeClient(
