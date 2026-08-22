@@ -417,7 +417,7 @@ export class MatrixCvp3Projection {
 
   visibleSessions(): V3ProjectedSession[] {
     return [...this.sessions.values()]
-      .filter(session => session.lifecycle !== "deleted")
+      .filter(session => session.lifecycle === "active")
       .sort((left, right) =>
         right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId),
       );
@@ -739,6 +739,8 @@ function completionFromEvent(event: Cvp3Event): Cvp3CommandCompletion | null {
     case "project.snapshot":
     case "device.invitation.created":
     case "notification.subscription.changed":
+    case "provider.sessions.listed":
+    case "provider.session.inspected":
       return { commandId, outcome: "succeeded", ...(event.sessionId ? { sessionId: event.sessionId } : {}), event };
     case "turn.completed":
       return { commandId, outcome: "succeeded", ...(event.sessionId ? { sessionId: event.sessionId } : {}), event };

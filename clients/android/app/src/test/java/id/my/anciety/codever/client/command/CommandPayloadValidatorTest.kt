@@ -36,13 +36,26 @@ class CommandPayloadValidatorTest {
                 put("operation", "session.settings")
                 put("sessionId", "session-1")
                 put("model", "gpt-5")
-                put("provider", "cursor")
                 put("reasoningEffort", "high")
                 put("permissionMode", "accept_edits")
                 put("cwd", "/workspace")
                 put("projectName", "Project")
             },
             buildJsonObject { put("operation", "session.create") },
+            buildJsonObject {
+                put("operation", "project.settings")
+                put("model", "gpt-5")
+                put("reasoningEffort", "high")
+            },
+            buildJsonObject {
+                put("operation", "provider.sessions.list")
+                put("provider", "codex")
+            },
+            buildJsonObject {
+                put("operation", "provider.session.inspect")
+                put("provider", "codex")
+                put("providerSessionId", "provider-session-1")
+            },
             lifecycle("session.archive"),
             lifecycle("session.restore"),
             lifecycle("session.delete"),
@@ -59,7 +72,7 @@ class CommandPayloadValidatorTest {
             (CommandPayloadValidator.validate(payloads[2]) as DecisionCommandPayload).totp,
         )
         assertTrue(CommandPayloadValidator.validate(payloads[4]) is SessionCreateCommandPayload)
-        assertTrue(CommandPayloadValidator.validate(payloads[5]) is SessionLifecycleCommandPayload)
+        assertTrue(CommandPayloadValidator.validate(payloads[8]) is SessionLifecycleCommandPayload)
     }
 
     @Test
@@ -169,6 +182,11 @@ class CommandPayloadValidatorTest {
             put("operation", "session.settings")
             put("sessionId", "session-1")
             put("cwd", "x".repeat(4_097))
+        })
+        assertInvalid(buildJsonObject {
+            put("operation", "session.settings")
+            put("sessionId", "session-1")
+            put("provider", "cursor")
         })
         assertInvalid(buildJsonObject {
             put("operation", "session.settings")

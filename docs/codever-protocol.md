@@ -88,9 +88,34 @@ operation twice. Independent append operations such as prompts are serialized
 by the Gateway; state-dependent mutations carry explicit preconditions and
 produce a reviewable conflict instead of hidden client-side retry.
 
-Session creation, prompt, cancel, archive, restore, and delete use this same
-path. A create command produces an immutable thread root. Delete produces a
-signed lifecycle tombstone; it does not redact Matrix history.
+Session creation, prompt, cancel, settings, provider-history inspection, and
+archive use this same path. A create command produces an immutable thread root.
+The provider is selected only by `session.create` and is immutable for the
+life of that Codever session. `session.update` may change model and reasoning,
+which the Gateway applies through the provider's structured ACP model/config
+surface rather than manufacturing provider-specific slash commands.
+
+`project.update` stores the default model and reasoning used by later sessions
+for the project's default provider. Provider-native slash commands remain user
+messages. When ACP publishes `available_commands_update`, clients may render
+those commands as actions that insert the corresponding slash input; Codever
+does not take ownership of provider commands such as `/model`.
+
+Provider-owned history is a separate surface. `provider.sessions.list` lists
+the sessions still retained by a configured provider and
+`provider.session.inspect` returns a bounded read-only transcript preview.
+Creating a session with `providerSessionId` adopts that existing provider
+conversation; the first message sent from the preview is carried as the create
+command's initial prompt. A provider session already managed by an active
+Codever session opens that session instead of creating a duplicate.
+
+Codever has one removal action: archive. It removes a session from the managed
+session projection but retains its metadata tombstone and never invokes a
+provider-level delete. Archived sessions are not restored in place; if the
+provider still lists the conversation, users continue it from Provider
+History, producing a new Codever session identity. Pre-release `delete`
+requests are normalized to archive and `restore` is rejected for compatibility;
+neither redacts Matrix or provider history.
 
 Browser notification enrollment also uses this path. A web device sends
 `notification.subscribe` or `notification.unsubscribe` as a signed,

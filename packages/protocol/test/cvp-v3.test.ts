@@ -68,6 +68,102 @@ describe('Codever Protocol v3 (CVP/3)', () => {
     expect(event.payload).toMatchObject({ type: 'inbox.file.received' })
   })
 
+  it('keeps provider adoption separate from project defaults and session updates', () => {
+    const common = {
+      kind: 'codever.command' as const,
+      version: 3 as const,
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      deviceId: 'device-1',
+      certificateId: 'certificate-1',
+      createdAt: 1,
+    }
+    expect(cvp3CommandSchema.parse({
+      ...common,
+      commandId: 'provider-list-1',
+      operation: 'provider.sessions.list',
+      payload: { operation: 'provider.sessions.list', provider: 'codex' },
+    }).payload).toMatchObject({ provider: 'codex' })
+    expect(cvp3CommandSchema.parse({
+      ...common,
+      commandId: 'provider-inspect-1',
+      operation: 'provider.session.inspect',
+      payload: {
+        operation: 'provider.session.inspect',
+        provider: 'codex',
+        providerSessionId: 'provider-session-1',
+      },
+    }).payload).toMatchObject({ providerSessionId: 'provider-session-1' })
+    expect(cvp3CommandSchema.parse({
+      ...common,
+      commandId: 'provider-adopt-1',
+      sessionId: 'codever-session-1',
+      operation: 'session.create',
+      payload: {
+        operation: 'session.create',
+        provider: 'codex',
+        providerSessionId: 'provider-session-1',
+        initialPrompt: { text: 'Continue here' },
+      },
+    }).payload).toMatchObject({ providerSessionId: 'provider-session-1' })
+    expect(() => cvp3CommandSchema.parse({
+      ...common,
+      commandId: 'provider-switch-1',
+      sessionId: 'codever-session-1',
+      operation: 'session.update',
+      payload: {
+        operation: 'session.update',
+        patch: { provider: 'other' },
+      },
+    })).toThrow()
+  })
+
+  it('publishes provider-native commands and provider history results', () => {
+    expect(cvp3EventSchema.parse({
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'session-command-event-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      occurredAt: 2,
+      payload: {
+        type: 'session.updated',
+        projection: {
+          title: 'Session',
+          lifecycle: 'active',
+          activity: 'idle',
+          updatedAt: 2,
+          stateVersion: 2,
+          availableCommands: [{
+            name: 'model',
+            description: 'Choose a model',
+            inputHint: '<model>',
+          }],
+        },
+        patch: { title: 'Session' },
+      },
+    }).payload).toMatchObject({
+      projection: { availableCommands: [{ name: 'model' }] },
+    })
+
+    expect(cvp3EventSchema.parse({
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'provider-history-event-1',
+      workspaceId: 'workspace-1',
+      projectId: 'project-1',
+      occurredAt: 2,
+      payload: {
+        type: 'provider.session.inspected',
+        provider: 'codex',
+        providerSessionId: 'provider-session-1',
+        title: 'Earlier work',
+        messages: [{ id: 'message-1', role: 'user', text: 'Earlier prompt' }],
+      },
+    }).payload).toMatchObject({ type: 'provider.session.inspected' })
+  })
+
   it('requires the exact business address instead of a global revision', () => {
     expect(() => cvp3CommandSchema.parse({
       kind: 'codever.command',

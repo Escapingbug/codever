@@ -3,6 +3,7 @@ package id.my.anciety.codever.client.command
 import id.my.anciety.codever.security.codever.PairingOperation
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
@@ -12,6 +13,9 @@ enum class CommandOperation(val wireName: String) {
     DECISION("decision"),
     SESSION_SETTINGS("session.settings"),
     SESSION_CREATE("session.create"),
+    PROJECT_SETTINGS("project.settings"),
+    PROVIDER_SESSIONS_LIST("provider.sessions.list"),
+    PROVIDER_SESSION_INSPECT("provider.session.inspect"),
     SESSION_ARCHIVE("session.archive"),
     SESSION_RESTORE("session.restore"),
     SESSION_DELETE("session.delete"),
@@ -100,7 +104,6 @@ enum class CommandPermissionMode(val wireName: String) {
 data class SessionSettingsCommandPayload(
     override val sessionId: String,
     val model: String?,
-    val provider: String?,
     val reasoningEffort: String?,
     val permissionMode: CommandPermissionMode?,
     val cwd: String?,
@@ -109,7 +112,7 @@ data class SessionSettingsCommandPayload(
     override val operation = CommandOperation.SESSION_SETTINGS
 
     override fun toString(): String =
-        "SessionSettingsCommandPayload(sessionId=$sessionId, model=$model, provider=$provider, " +
+        "SessionSettingsCommandPayload(sessionId=$sessionId, model=$model, " +
             "reasoningEffort=$reasoningEffort, permissionMode=$permissionMode, cwd=<redacted>, " +
             "projectName=<redacted>)"
 }
@@ -119,10 +122,13 @@ data class SessionCreateCommandPayload(
     val cwd: String?,
     val projectName: String?,
     val provider: String?,
+    val providerSessionId: String?,
+    val title: String?,
     val model: String?,
     val reasoningEffort: String?,
     val permissionMode: CommandPermissionMode?,
     val extensions: List<SessionExtensionBindingPayload>,
+    val initialPrompt: String?,
 ) : ValidatedCommandPayload {
     override val operation = CommandOperation.SESSION_CREATE
     override val sessionId: String? = null
@@ -131,6 +137,30 @@ data class SessionCreateCommandPayload(
         "SessionCreateCommandPayload(cwd=<redacted>, projectName=<redacted>, provider=$provider, " +
             "scope=$scope, model=$model, reasoningEffort=$reasoningEffort, permissionMode=$permissionMode, " +
             "extensions=${extensions.map { it.id }})"
+}
+
+data class ProjectSettingsCommandPayload(
+    val model: String?,
+    val reasoningEffort: String?,
+) : ValidatedCommandPayload {
+    override val operation = CommandOperation.PROJECT_SETTINGS
+    override val sessionId: String? = null
+}
+
+data class ProviderSessionsListCommandPayload(
+    val provider: String,
+    val cursor: String?,
+) : ValidatedCommandPayload {
+    override val operation = CommandOperation.PROVIDER_SESSIONS_LIST
+    override val sessionId: String? = null
+}
+
+data class ProviderSessionInspectCommandPayload(
+    val provider: String,
+    val providerSessionId: String,
+) : ValidatedCommandPayload {
+    override val operation = CommandOperation.PROVIDER_SESSION_INSPECT
+    override val sessionId: String? = null
 }
 
 data class SessionExtensionBindingPayload(
@@ -174,6 +204,9 @@ object CommandPayloadValidator {
             CommandOperation.DECISION -> validateDecision(value)
             CommandOperation.SESSION_SETTINGS -> validateSessionSettings(value)
             CommandOperation.SESSION_CREATE -> validateSessionCreate(value)
+            CommandOperation.PROJECT_SETTINGS -> validateProjectSettings(value)
+            CommandOperation.PROVIDER_SESSIONS_LIST -> validateProviderSessionsList(value)
+            CommandOperation.PROVIDER_SESSION_INSPECT -> validateProviderSessionInspect(value)
             CommandOperation.SESSION_ARCHIVE,
             CommandOperation.SESSION_RESTORE,
             CommandOperation.SESSION_DELETE,
@@ -236,13 +269,12 @@ object CommandPayloadValidator {
     }
 
     private fun validateSessionSettings(value: JsonObject): SessionSettingsCommandPayload {
-        val settings = setOf("model", "provider", "reasoningEffort", "permissionMode", "cwd", "projectName")
+        val settings = setOf("model", "reasoningEffort", "permissionMode", "cwd", "projectName")
         value.requireExactKeys(required = setOf("operation", "sessionId"), optional = settings)
         require(value.keys.any(settings::contains)) { "At least one session setting is required." }
         return SessionSettingsCommandPayload(
             sessionId = value.requiredOpaqueId("sessionId"),
             model = value.optionalBoundedString("model", 256),
-            provider = value.optionalBoundedString("provider", 256),
             reasoningEffort = value.optionalBoundedString("reasoningEffort", 64),
             permissionMode = value.optionalString("permissionMode")?.let(CommandPermissionMode::fromWireName),
             cwd = value.optionalBoundedString("cwd", 4_096),
@@ -258,10 +290,13 @@ object CommandPayloadValidator {
                 "scope",
                 "projectName",
                 "provider",
+                "providerSessionId",
+                "title",
                 "model",
                 "reasoningEffort",
                 "permissionMode",
                 "extensions",
+                "initialPrompt",
             ),
         )
         val extensions = value.optionalArray("extensions")?.also {
@@ -277,10 +312,46 @@ object CommandPayloadValidator {
             cwd = value.optionalBoundedString("cwd", 4_096),
             projectName = value.optionalBoundedString("projectName", 256),
             provider = value.optionalBoundedString("provider", 256),
+            providerSessionId = value.optionalOpaqueId("providerSessionId"),
+            title = value.optionalBoundedString("title", 512),
             model = value.optionalBoundedString("model", 256),
             reasoningEffort = value.optionalBoundedString("reasoningEffort", 64),
             permissionMode = value.optionalString("permissionMode")?.let(CommandPermissionMode::fromWireName),
             extensions = extensions,
+            initialPrompt = value.optionalBoundedString("initialPrompt", 64 * 1024),
+        )
+    }
+
+    private fun validateProjectSettings(value: JsonObject): ProjectSettingsCommandPayload {
+        value.requireExactKeys(
+            required = setOf("operation"),
+            optional = setOf("model", "reasoningEffort"),
+        )
+        require("model" in value || "reasoningEffort" in value) {
+            "At least one project setting is required."
+        }
+        return ProjectSettingsCommandPayload(
+            model = value.optionalNullableBoundedString("model", 256),
+            reasoningEffort = value.optionalNullableBoundedString("reasoningEffort", 64),
+        )
+    }
+
+    private fun validateProviderSessionsList(value: JsonObject): ProviderSessionsListCommandPayload {
+        value.requireExactKeys(
+            required = setOf("operation", "provider"),
+            optional = setOf("cursor"),
+        )
+        return ProviderSessionsListCommandPayload(
+            provider = value.requiredString("provider", 256),
+            cursor = value.optionalBoundedString("cursor", 4_096),
+        )
+    }
+
+    private fun validateProviderSessionInspect(value: JsonObject): ProviderSessionInspectCommandPayload {
+        value.requireExactKeys(setOf("operation", "provider", "providerSessionId"))
+        return ProviderSessionInspectCommandPayload(
+            provider = value.requiredString("provider", 256),
+            providerSessionId = value.requiredOpaqueId("providerSessionId"),
         )
     }
 
@@ -406,6 +477,11 @@ object CommandPayloadValidator {
 
     private fun JsonObject.optionalBoundedString(key: String, maxLength: Int): String? {
         if (key !in this) return null
+        return requiredString(key, maxLength)
+    }
+
+    private fun JsonObject.optionalNullableBoundedString(key: String, maxLength: Int): String? {
+        if (key !in this || get(key) === JsonNull) return null
         return requiredString(key, maxLength)
     }
 

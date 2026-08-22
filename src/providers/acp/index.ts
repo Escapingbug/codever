@@ -11,7 +11,15 @@
  * callback and are forwarded to the PushableAsyncIterable for consumption.
  */
 
-import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput, ModelEntry } from '@/providers/provider'
+import type {
+    AgentProvider,
+    AgentQueryConfig,
+    AgentQueryHandle,
+    AgentQueryInput,
+    ModelEntry,
+    ProviderSessionHistory,
+    SessionEntry,
+} from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { RichMediaPart, RichUserInput } from '@/runtime/semantic'
 import { normalizeUserInput } from '@/runtime/semantic'
@@ -19,7 +27,13 @@ import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import { AcpClientManager, type AcpClientManagerConfig, type AcpExtensionHandler } from './AcpClientManager'
 import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput, type AcpDebugLog } from './eventAdapter'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
-import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
+import type {
+    SessionNotification,
+    SessionUpdate,
+    ContentBlock as AcpContentBlock,
+    SessionConfigOption,
+    SessionModelState,
+} from '@agentclientprotocol/sdk'
 import { resolve, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -406,6 +420,52 @@ export class AcpProvider implements AgentProvider {
     /** Abort signal for the current query */
     private activeAbortSignal: AbortSignal | null = null
 
+    async listSessions(cwd: string): Promise<SessionEntry[]> {
+        await this.init()
+        if (!this.isReady()) {
+            throw new Error(this.getInitError() ?? `Provider ${this.name} is unavailable`)
+        }
+        if (!this.clientManager.supportsListSessions) return []
+
+        const entries: SessionEntry[] = []
+        let cursor: string | null | undefined
+        do {
+            const response = await this.clientManager.listSessions({ cwd, ...(cursor ? { cursor } : {}) })
+            entries.push(...response.sessions.map(session => ({
+                sessionId: session.sessionId,
+                title: session.title?.trim() || 'Untitled provider session',
+                updated: parseProviderTimestamp(session.updatedAt),
+                cwd: session.cwd,
+            })))
+            cursor = response.nextCursor
+        } while (cursor && entries.length < 256)
+
+        return entries.slice(0, 256).sort((left, right) => right.updated - left.updated)
+    }
+
+    async getSessionHistory(sessionId: string, cwd: string): Promise<ProviderSessionHistory> {
+        await this.init()
+        if (!this.isReady()) {
+            throw new Error(this.getInitError() ?? `Provider ${this.name} is unavailable`)
+        }
+        if (!this.clientManager.agentCapabilities?.agentCapabilities?.loadSession) {
+            throw new Error(`Provider ${this.name} does not support loading session history`)
+        }
+
+        await this.clientManager.loadSession({ sessionId, cwd, mcpServers: [] })
+        const notifications = await this.clientManager.collectSessionUpdatesUntilIdle(sessionId, {
+            idleMs: ACP_HISTORY_DRAIN_IDLE_MS,
+            maxMs: ACP_HISTORY_DRAIN_MAX_MS,
+        })
+        const messages = collectProviderHistoryMessages(notifications)
+        const listed = await this.listSessions(cwd).catch(() => [])
+        return {
+            sessionId,
+            title: listed.find(entry => entry.sessionId === sessionId)?.title ?? 'Provider session',
+            messages,
+        }
+    }
+
     constructor(config: AcpProviderConfig) {
         this.name = config.name
         const managerConfig: AcpClientManagerConfig = {
@@ -417,23 +477,59 @@ export class AcpProvider implements AgentProvider {
         this.clientManager = new AcpClientManager(managerConfig)
     }
 
-    private async applyProviderConfigOptions(sessionId: string, config: AgentQueryConfig): Promise<void> {
+    private async applyProviderConfigOptions(
+        sessionId: string,
+        config: AgentQueryConfig,
+        configOptions: readonly SessionConfigOption[] = [],
+    ): Promise<void> {
         const reasoningEffort = typeof config.providerSettings?.reasoningEffort === 'string'
             ? config.providerSettings.reasoningEffort.trim()
             : ''
         if (!reasoningEffort) return
 
-        try {
-            await this.clientManager.setSessionConfigOption({
-                sessionId,
-                configId: 'reasoning_effort',
-                value: reasoningEffort,
-            })
-            console.error(`[acp:${this.name}] Set reasoning effort to ${reasoningEffort}`)
-        } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e)
-            console.error(`[acp:${this.name}] Failed to set reasoning effort: ${msg}`)
+        const option = configOptions.find(candidate =>
+            candidate.category === 'thought_level'
+            || candidate.id === 'reasoning_effort'
+            || candidate.id === 'reasoningEffort'
+        )
+        if (!option || option.type !== 'select') {
+            throw new Error(
+                `Provider ${this.name} does not advertise structured reasoning configuration`,
+            )
         }
+
+        await this.clientManager.setSessionConfigOption({
+            sessionId,
+            configId: option.id,
+            value: reasoningEffort,
+        })
+        console.error(`[acp:${this.name}] Set reasoning effort to ${reasoningEffort}`)
+    }
+
+    private async applyProviderModel(
+        sessionId: string,
+        model: string | undefined,
+        models: SessionModelState | null | undefined,
+        configOptions: readonly SessionConfigOption[] = [],
+    ): Promise<void> {
+        if (!model) return
+        if (models?.availableModels.some(candidate => candidate.modelId === model)) {
+            await this.clientManager.setSessionModel({ sessionId, modelId: model })
+            console.error(`[acp:${this.name}] Set model to ${model}`)
+            return
+        }
+        const option = configOptions.find(candidate =>
+            candidate.category === 'model' || candidate.id === 'model'
+        )
+        if (option?.type !== 'select') {
+            throw new Error(`Provider ${this.name} does not advertise structured model configuration`)
+        }
+        await this.clientManager.setSessionConfigOption({
+            sessionId,
+            configId: option.id,
+            value: model,
+        })
+        console.error(`[acp:${this.name}] Set model config to ${model}`)
     }
 
     async init(): Promise<void> {
@@ -525,6 +621,8 @@ export class AcpProvider implements AgentProvider {
                 /** Whether the session was resumed via loadSession (which replays history).
                  *  resumeSession does NOT replay history, so drain logic is not needed. */
                 let needsHistoryDrain = false
+                let sessionConfigOptions: readonly SessionConfigOption[] = []
+                let sessionModels: SessionModelState | null | undefined
 
                 console.error(`[acp:${this.name}] startQuery: config.sessionId=${config.sessionId?.slice(0, 8) ?? 'null'} → will ${config.sessionId ? 'resume/load' : 'newSession'}`)
 
@@ -541,6 +639,8 @@ export class AcpProvider implements AgentProvider {
                         mcpServers: buildCodeverMcpBaseConfig(config),
                     })
                     sessionId = sessionResponse.sessionId
+                    sessionConfigOptions = sessionResponse.configOptions ?? []
+                    sessionModels = sessionResponse.models
                     this.activeSessionId = sessionId
                     console.error(`[acp:${this.name}] Created session ${sessionId}`)
 
@@ -558,11 +658,13 @@ export class AcpProvider implements AgentProvider {
                     //   For those, we skip Phase 2 and inject full MCP config after the first prompt.
                     if (supportsResume) {
                         try {
-                            await clientManager.resumeSession({
+                            const resumed = await clientManager.resumeSession({
                                 sessionId,
                                 cwd: config.cwd,
                                 mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
+                            sessionConfigOptions = resumed.configOptions ?? sessionConfigOptions
+                            sessionModels = resumed.models ?? sessionModels
                             console.error(`[acp:${this.name}] Resumed new session ${sessionId} with full MCP config (no history replay)`)
                         } catch (e) {
                             // resumeSession might not be supported by this agent version;
@@ -571,11 +673,13 @@ export class AcpProvider implements AgentProvider {
                             console.error(`[acp:${this.name}] resumeSession failed, falling back to loadSession: ${msg}`)
                             if (supportsLoad) {
                                 try {
-                                    await clientManager.loadSession({
+                                    const loaded = await clientManager.loadSession({
                                         sessionId,
                                         cwd: config.cwd,
                                         mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
+                                    sessionConfigOptions = loaded.configOptions ?? sessionConfigOptions
+                                    sessionModels = loaded.models ?? sessionModels
                                     console.error(`[acp:${this.name}] Reloaded session ${sessionId} with full MCP config (fallback)`)
                                 } catch (loadErr) {
                                     // loadSession may fail if the agent doesn't support loading
@@ -593,11 +697,13 @@ export class AcpProvider implements AgentProvider {
                         // (e.g. Cursor agent). If it fails, we proceed without full MCP config
                         // and retry after the first prompt.
                         try {
-                            await clientManager.loadSession({
+                            const loaded = await clientManager.loadSession({
                                 sessionId,
                                 cwd: config.cwd,
                                 mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
+                            sessionConfigOptions = loaded.configOptions ?? sessionConfigOptions
+                            sessionModels = loaded.models ?? sessionModels
                             console.error(`[acp:${this.name}] Reloaded session ${sessionId} with full MCP config (legacy, no resume support)`)
                         } catch (loadErr) {
                             const loadMsg = loadErr instanceof Error ? loadErr.message : String(loadErr)
@@ -605,32 +711,8 @@ export class AcpProvider implements AgentProvider {
                         }
                     }
 
-                    // Set model if specified
-                    if (config.model) {
-                        try {
-                            await clientManager.setSessionModel({
-                                sessionId: sessionId!,
-                                modelId: config.model,
-                            })
-                            console.error(`[acp:${this.name}] Set model to ${config.model}`)
-                        } catch (e) {
-                            const msg = e instanceof Error ? e.message : String(e)
-                            console.error(`[acp:${this.name}] Failed to set model: ${msg}`)
-                        }
-                        // Also set via config option as fallback
-                        try {
-                            await clientManager.setSessionConfigOption({
-                                sessionId: sessionId!,
-                                configId: 'model',
-                                value: config.model,
-                            })
-                            console.error(`[acp:${this.name}] Set config model to ${config.model}`)
-                        } catch (e) {
-                            const msg = e instanceof Error ? e.message : String(e)
-                            console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
-                        }
-                    }
-                    await this.applyProviderConfigOptions(sessionId!, config)
+                    await this.applyProviderModel(sessionId!, config.model, sessionModels, sessionConfigOptions)
+                    await this.applyProviderConfigOptions(sessionId!, config, sessionConfigOptions)
                 } else {
                     // Attempt to resume or load an existing session (conversationId from
                     // a previous gateway run). If the agent can't find the session (e.g.
@@ -640,11 +722,13 @@ export class AcpProvider implements AgentProvider {
 
                     if (supportsResume) {
                         try {
-                            await clientManager.resumeSession({
+                            const resumed = await clientManager.resumeSession({
                                 sessionId,
                                 cwd: config.cwd,
                                 mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
+                            sessionConfigOptions = resumed.configOptions ?? sessionConfigOptions
+                            sessionModels = resumed.models ?? sessionModels
                             this.activeSessionId = sessionId
                             isResumingSession = true
                             sessionRecovered = true
@@ -657,11 +741,13 @@ export class AcpProvider implements AgentProvider {
 
                     if (!sessionRecovered && supportsLoad) {
                         try {
-                            await clientManager.loadSession({
+                            const loaded = await clientManager.loadSession({
                                 sessionId,
                                 cwd: config.cwd,
                                 mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                             })
+                            sessionConfigOptions = loaded.configOptions ?? sessionConfigOptions
+                            sessionModels = loaded.models ?? sessionModels
                             this.activeSessionId = sessionId
                             isResumingSession = true
                             needsHistoryDrain = true
@@ -684,17 +770,21 @@ export class AcpProvider implements AgentProvider {
                                 mcpServers: buildCodeverMcpBaseConfig(config),
                             })
                             sessionId = sessionResponse.sessionId
+                            sessionConfigOptions = sessionResponse.configOptions ?? []
+                            sessionModels = sessionResponse.models
                             this.activeSessionId = sessionId
                             isResumingSession = false
 
                             // Try to inject full MCP config for the new session
                             if (supportsResume) {
                                 try {
-                                    await clientManager.resumeSession({
+                                    const resumed = await clientManager.resumeSession({
                                         sessionId,
                                         cwd: config.cwd,
                                         mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
+                                    sessionConfigOptions = resumed.configOptions ?? sessionConfigOptions
+                                    sessionModels = resumed.models ?? sessionModels
                                     console.error(`[acp:${this.name}] Resumed new session ${sessionId} with full MCP config (after recovery failure)`)
                                 } catch (e) {
                                     const msg = e instanceof Error ? e.message : String(e)
@@ -702,11 +792,13 @@ export class AcpProvider implements AgentProvider {
                                 }
                             } else if (supportsLoad) {
                                 try {
-                                    await clientManager.loadSession({
+                                    const loaded = await clientManager.loadSession({
                                         sessionId,
                                         cwd: config.cwd,
                                         mcpServers: buildCodeverMcpFullConfig(sessionId, config),
                                     })
+                                    sessionConfigOptions = loaded.configOptions ?? sessionConfigOptions
+                                    sessionModels = loaded.models ?? sessionModels
                                     console.error(`[acp:${this.name}] Loaded new fallback session ${sessionId} with full MCP config`)
                                 } catch (loadErr) {
                                     const loadMsg = loadErr instanceof Error ? loadErr.message : String(loadErr)
@@ -725,31 +817,8 @@ export class AcpProvider implements AgentProvider {
                         }
                     }
 
-                    // Set model if specified (user may have changed model mid-session)
-                    if (config.model) {
-                        try {
-                            await clientManager.setSessionModel({
-                                sessionId: sessionId!,
-                                modelId: config.model,
-                            })
-                            console.error(`[acp:${this.name}] Set model to ${config.model}`)
-                        } catch (e) {
-                            const msg = e instanceof Error ? e.message : String(e)
-                            console.error(`[acp:${this.name}] Failed to set model: ${msg}`)
-                        }
-                        try {
-                            await clientManager.setSessionConfigOption({
-                                sessionId: sessionId!,
-                                configId: 'model',
-                                value: config.model,
-                            })
-                            console.error(`[acp:${this.name}] Set config model to ${config.model}`)
-                        } catch (e) {
-                            const msg = e instanceof Error ? e.message : String(e)
-                            console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
-                        }
-                    }
-                    await this.applyProviderConfigOptions(sessionId!, config)
+                    await this.applyProviderModel(sessionId!, config.model, sessionModels, sessionConfigOptions)
+                    await this.applyProviderConfigOptions(sessionId!, config, sessionConfigOptions)
                 }
 
                 // 2. Push session_init event
@@ -970,4 +1039,44 @@ export class AcpProvider implements AgentProvider {
             this.activeSessionId = null
         }
     }
+}
+
+function parseProviderTimestamp(value: string | null | undefined): number {
+    if (!value) return 0
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+function collectProviderHistoryMessages(
+    notifications: readonly SessionNotification[],
+): ProviderSessionHistory['messages'] {
+    const messages: ProviderSessionHistory['messages'] = []
+    const indexById = new Map<string, number>()
+    let fallbackIndex = 0
+
+    for (const notification of notifications) {
+        const update = notification.update
+        if (
+            update.sessionUpdate !== 'user_message_chunk'
+            && update.sessionUpdate !== 'agent_message_chunk'
+        ) continue
+        if (update.content.type !== 'text') continue
+        const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : 'assistant'
+        const id = update.messageId?.trim() || `${role}-${fallbackIndex++}`
+        const existingIndex = indexById.get(id)
+        if (existingIndex === undefined) {
+            indexById.set(id, messages.length)
+            messages.push({ id, role, text: update.content.text })
+        } else {
+            messages[existingIndex] = {
+                ...messages[existingIndex]!,
+                text: `${messages[existingIndex]!.text}${update.content.text}`,
+            }
+        }
+    }
+
+    return messages
+        .filter(message => message.text.length > 0)
+        .slice(-256)
+        .map(message => ({ ...message, text: message.text.slice(0, 16 * 1024) }))
 }

@@ -49,6 +49,8 @@ export class NativeBackDispatcher {
 export type CodeverBackState = {
   deleteDialogOpen: boolean;
   deleteDialogBusy: boolean;
+  providerHistoryOpen?: boolean;
+  providerHistoryBusy?: boolean;
   newSessionOpen: boolean;
   newSessionBusy: boolean;
   settingsOpen: boolean;
@@ -61,6 +63,8 @@ export type CodeverBackState = {
 export type CodeverBackAction =
   | "close-delete-dialog"
   | "block-delete-dialog"
+  | "close-provider-history"
+  | "block-provider-history"
   | "close-new-session"
   | "block-new-session"
   | "close-settings"
@@ -76,6 +80,11 @@ export function resolveCodeverBackAction(
     return state.deleteDialogBusy
       ? "block-delete-dialog"
       : "close-delete-dialog";
+  }
+  if (state.providerHistoryOpen) {
+    return state.providerHistoryBusy
+      ? "block-provider-history"
+      : "close-provider-history";
   }
   if (state.newSessionOpen) {
     return state.newSessionBusy

@@ -9,6 +9,7 @@ import type {
     TextContent,
     ContentBlock,
     Diff,
+    AvailableCommandsUpdate,
 } from '@agentclientprotocol/sdk'
 import type { AgentEvent, AgentResultEvent, AgentCommandsUpdateEvent, ToolResultContentBlock } from '@/providers/types'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
@@ -348,14 +349,12 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
         }
 
         case 'available_commands_update': {
-            const cmds = (update as any).availableCommands as Array<{
-                name: string
-                description: string
-                input?: { hint: string } | null
-            }> | undefined
+            const cmds = (update as AvailableCommandsUpdate & {
+                sessionUpdate: 'available_commands_update'
+            }).availableCommands
             events.push({
                 kind: 'commands_update',
-                commands: (cmds ?? []).map(c => ({
+                commands: cmds.map(c => ({
                     name: c.name,
                     description: c.description,
                     inputHint: c.input?.hint ?? null,

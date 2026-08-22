@@ -11,8 +11,8 @@ import {
   type JsonValue,
   type MatrixGatewayCapabilities,
 } from '@codever/protocol'
-import type { AgentProvider } from '@/providers/provider'
-import { createProviderInstance, getProvider } from '@/providers/registry'
+import type { AgentProvider, ModelEntry } from '@/providers/provider'
+import { createProviderInstance, getProvider, listProviders } from '@/providers/registry'
 import type { AgentActivityPhase, TopicSession } from '@/bridge/channelPort'
 import { createTopicSession, createTopicSessionRecord } from '@/bridge/topicSession'
 import {
@@ -379,6 +379,8 @@ export class MatrixCvp3GatewayRunner {
     const command = journalRecord.command
     const activeKey = commandKey(command)
     const sessionKey = command.operation === 'project.update'
+      || command.operation === 'provider.sessions.list'
+      || command.operation === 'provider.session.inspect'
       ? `${project.config.roomId}\0project-settings`
       : command.operation === 'notification.subscribe'
         || command.operation === 'notification.unsubscribe'
@@ -436,6 +438,12 @@ export class MatrixCvp3GatewayRunner {
         return
       case 'project.update':
         await this.updateProject(project, command)
+        return
+      case 'provider.sessions.list':
+        await this.listProviderSessions(project, command)
+        return
+      case 'provider.session.inspect':
+        await this.inspectProviderSession(project, command)
         return
       case 'device.invitation.create':
         await this.createInvitation(project, command)
@@ -510,6 +518,16 @@ export class MatrixCvp3GatewayRunner {
       await this.settleAndDeliver(project, command, event, 'succeeded')
       return
     }
+    if (command.payload.providerSessionId) {
+      const managed = project.project.sessions.find(session =>
+        session.lifecycle === 'active'
+        && session.provider === (command.payload.provider ?? project.project.provider)
+        && session.providerSessionId === command.payload.providerSessionId
+      )
+      if (managed) {
+        throw new Error(`Provider session is already managed by Codever session ${managed.id}`)
+      }
+    }
     const settings = this.resolveCreateSettings(project, command)
     const createdAt = this.now()
     const scope = command.payload.scope ?? 'project'
@@ -534,7 +552,7 @@ export class MatrixCvp3GatewayRunner {
       model: settings.model,
       reasoningEffort: settings.reasoningEffort,
       permissionMode: settings.permissionMode,
-      providerSessionId: null,
+      providerSessionId: command.payload.providerSessionId ?? null,
       extensions: this.extensions.normalizeBindings(
         command.payload.extensions ?? project.project.defaultExtensions,
       ),
@@ -542,6 +560,7 @@ export class MatrixCvp3GatewayRunner {
       inheritedFromProjectExtensionRevision: command.payload.extensions === undefined
         ? project.project.extensionDefaultsRevision
         : null,
+      availableCommands: [],
     }
     project.project.sessions.push(record)
     let runtime: Cvp3SessionRuntime | null = null
@@ -733,40 +752,46 @@ export class MatrixCvp3GatewayRunner {
   ): Promise<void> {
     let runtime = this.requireActiveSession(project, command.sessionId)
     const patch = command.payload.patch
-    const provider = patch.provider ?? runtime.record.provider
+    const provider = runtime.record.provider
     const catalog = getProvider(provider)
     if (!catalog) throw new Error(`Provider ${provider} is not configured`)
-    const model = patch.model === undefined ? runtime.record.model : patch.model
-    if (model && !catalog.getAvailableModels().some(item => item.id === model || item.name === model)) {
-      throw new Error(`Model ${model} is not available for provider ${provider}`)
+    const availableModels = catalog.getAvailableModels()
+    const requestedModel = patch.model === undefined ? runtime.record.model : patch.model
+    const selectedModel = requestedModel
+      ? availableModels.find(item => item.id === requestedModel || item.name === requestedModel)
+      : undefined
+    if (requestedModel && !selectedModel) {
+      throw new Error(`Model ${requestedModel} is not available for provider ${provider}`)
     }
+    const model = selectedModel?.id ?? null
+    const modelChanged = model !== runtime.record.model
+    const reasoningEffort = patch.reasoningEffort === undefined
+      ? modelChanged
+        ? selectedModel?.defaultReasoningLevel ?? null
+        : runtime.record.reasoningEffort
+      : patch.reasoningEffort
+    if (catalog) validateReasoningEffort(selectedModel, reasoningEffort)
     const permissionMode = patch.permissionMode ?? runtime.record.permissionMode
     if (permissionMode !== 'default') {
       throw new Error(`Permission mode ${permissionMode} is not currently available`)
     }
-    if (patch.provider !== undefined && patch.provider !== runtime.record.provider) {
-      await dispatchRuntimeCommand(runtime.session, command, 'provider', patch.provider)
+    if (patch.model !== undefined || modelChanged) {
+      await dispatchRuntimeCommand(runtime.session, command, 'model', model ?? '')
     }
-    if (patch.model !== undefined) {
-      await dispatchRuntimeCommand(runtime.session, command, 'model', patch.model ?? '')
-    }
-    if (patch.reasoningEffort !== undefined) {
+    if (patch.reasoningEffort !== undefined || modelChanged) {
       await dispatchRuntimeCommand(
         runtime.session,
         command,
         'reasoningEffort',
-        patch.reasoningEffort ?? '',
+        reasoningEffort ?? '',
       )
     }
     if (patch.permissionMode !== undefined) {
       await dispatchRuntimeCommand(runtime.session, command, 'permissionMode', permissionMode)
     }
     runtime.record.title = patch.title ?? runtime.record.title
-    runtime.record.provider = provider
     runtime.record.model = model
-    runtime.record.reasoningEffort = patch.reasoningEffort === undefined
-      ? runtime.record.reasoningEffort
-      : patch.reasoningEffort
+    runtime.record.reasoningEffort = reasoningEffort
     runtime.record.permissionMode = permissionMode
     runtime.record.providerSessionId = runtime.session.sessionRecord.conversationId
     if (patch.extensions !== undefined) {
@@ -775,7 +800,6 @@ export class MatrixCvp3GatewayRunner {
       runtime.record.extensions = bindings
       runtime.record.extensionRevision += 1
       runtime.record.inheritedFromProjectExtensionRevision = null
-      runtime.record.providerSessionId = null
       runtime = this.createSessionRuntime(project, runtime.record)
       project.sessions.set(runtime.record.id, runtime)
     }
@@ -800,12 +824,14 @@ export class MatrixCvp3GatewayRunner {
     if (!sessionId) throw new Error('Lifecycle command is missing its session ID')
     const record = project.project.sessions.find(candidate => candidate.id === sessionId)
     if (!record) throw new Error(`Unknown Codever session ${sessionId}`)
-    const target = command.payload.state
+    if (command.payload.state === 'active' && record.lifecycle !== 'active') {
+      throw new Error('Archived sessions cannot be restored; continue them from Provider History')
+    }
+    // Legacy delete commands are compatibility aliases for Codever archive.
+    // Provider-owned history is never deleted here.
+    const target = command.payload.state === 'active' ? 'active' : 'archived'
     const alreadyApplied = record.lifecycle === target
     if (!alreadyApplied) {
-      if (record.lifecycle === 'deleted') {
-        throw new Error(`Deleted session ${sessionId} cannot be restored`)
-      }
       if (target === 'active') {
         record.lifecycle = 'active'
         const runtime = this.createSessionRuntime(project, record)
@@ -813,7 +839,7 @@ export class MatrixCvp3GatewayRunner {
       } else {
         const active = project.sessions.get(record.id)
         if (active) {
-          await this.destroySessionRuntime(active, target === 'deleted' ? 'delete' : 'archive')
+          await this.destroySessionRuntime(active, 'archive')
           project.sessions.delete(record.id)
         }
         record.lifecycle = target
@@ -829,11 +855,6 @@ export class MatrixCvp3GatewayRunner {
       ...(alreadyApplied ? { alreadyApplied: true } : {}),
     })
     await this.settleAndDeliver(project, command, lifecycle, 'succeeded')
-    if (target === 'deleted' && record.scope === 'scratch') {
-      await this.removeScratchSessionDirectory(record).catch(error => {
-        this.log(`[cvp3/matrix] scratch directory cleanup failed: ${formatError(error)}`)
-      })
-    }
   }
 
   private async createInvitation(
@@ -865,10 +886,38 @@ export class MatrixCvp3GatewayRunner {
     project: V3ProjectRuntime,
     command: Cvp3CommandOf<'project.update'>,
   ): Promise<void> {
-    project.project.defaultExtensions = this.extensions.normalizeBindings(
-      command.payload.patch.defaultExtensions,
-    )
-    project.project.extensionDefaultsRevision += 1
+    const patch = command.payload.patch
+    const catalog = getProvider(project.project.provider)
+    const availableModels = catalog?.getAvailableModels() ?? []
+    let selectedModel = project.project.model
+      ? availableModels.find(model =>
+        model.id === project.project.model || model.name === project.project.model
+      )
+      : undefined
+    if (patch.model !== undefined) {
+      selectedModel = patch.model
+        ? availableModels.find(model => model.id === patch.model || model.name === patch.model)
+        : undefined
+      if (patch.model && catalog && !selectedModel) {
+        throw new Error(
+          `Model ${patch.model} is not available for provider ${project.project.provider}`,
+        )
+      }
+      project.project.model = selectedModel?.id ?? patch.model
+      if (patch.reasoningEffort === undefined) {
+        project.project.reasoningEffort = selectedModel?.defaultReasoningLevel ?? null
+      }
+    }
+    if (patch.reasoningEffort !== undefined) {
+      if (catalog) validateReasoningEffort(selectedModel, patch.reasoningEffort)
+      project.project.reasoningEffort = patch.reasoningEffort
+    }
+    if (patch.defaultExtensions !== undefined) {
+      project.project.defaultExtensions = this.extensions.normalizeBindings(
+        patch.defaultExtensions,
+      )
+      project.project.extensionDefaultsRevision += 1
+    }
     project.project.snapshotVersion += 1
     await this.persist(project)
     await this.publishProjectSnapshot(project)
@@ -897,6 +946,91 @@ export class MatrixCvp3GatewayRunner {
       },
     }
     await this.settleAndDeliver(project, command, event, 'succeeded')
+  }
+
+  private async listProviderSessions(
+    project: V3ProjectRuntime,
+    command: Cvp3CommandOf<'provider.sessions.list'>,
+  ): Promise<void> {
+    const provider = createProviderInstance(command.payload.provider)
+    if (!provider) throw new Error(`Provider ${command.payload.provider} is not configured`)
+    try {
+      if (!provider.listSessions) {
+        throw new Error(`Provider ${command.payload.provider} does not support session history`)
+      }
+      const listed = (await provider.listSessions(project.project.cwd)).slice(0, 256)
+      const sessions = listed.map(entry => {
+        const managed = project.project.sessions.find(session =>
+          session.lifecycle === 'active'
+          && session.provider === command.payload.provider
+          && session.providerSessionId === entry.sessionId
+        )
+        return {
+          sessionId: entry.sessionId,
+          title: entry.title.trim() || 'Untitled provider session',
+          updatedAt: Math.max(0, Math.trunc(entry.updated)),
+          ...(entry.cwd ? { cwd: entry.cwd } : {}),
+          ...(managed ? { managedSessionId: managed.id } : {}),
+        }
+      })
+      const payload = {
+        type: 'provider.sessions.listed' as const,
+        provider: command.payload.provider,
+        sessions,
+      }
+      await this.settleAndDeliver(
+        project,
+        command,
+        this.eventFor(project, undefined, command, 'provider-sessions-listed', payload),
+        'succeeded',
+        payload,
+      )
+    } finally {
+      await provider.destroy?.().catch(error => {
+        this.log(`[cvp3/matrix] provider session-list cleanup failed: ${formatError(error)}`)
+      })
+    }
+  }
+
+  private async inspectProviderSession(
+    project: V3ProjectRuntime,
+    command: Cvp3CommandOf<'provider.session.inspect'>,
+  ): Promise<void> {
+    const provider = createProviderInstance(command.payload.provider)
+    if (!provider) throw new Error(`Provider ${command.payload.provider} is not configured`)
+    try {
+      if (!provider.getSessionHistory) {
+        throw new Error(`Provider ${command.payload.provider} cannot inspect session history`)
+      }
+      const history = await provider.getSessionHistory(
+        command.payload.providerSessionId,
+        project.project.cwd,
+      )
+      const managed = project.project.sessions.find(session =>
+        session.lifecycle === 'active'
+        && session.provider === command.payload.provider
+        && session.providerSessionId === command.payload.providerSessionId
+      )
+      const payload = {
+        type: 'provider.session.inspected' as const,
+        provider: command.payload.provider,
+        providerSessionId: command.payload.providerSessionId,
+        title: history.title.trim() || 'Provider session',
+        ...(managed ? { managedSessionId: managed.id } : {}),
+        messages: limitProviderHistoryMessages(history.messages),
+      }
+      await this.settleAndDeliver(
+        project,
+        command,
+        this.eventFor(project, undefined, command, 'provider-session-inspected', payload),
+        'succeeded',
+        payload,
+      )
+    } finally {
+      await provider.destroy?.().catch(error => {
+        this.log(`[cvp3/matrix] provider history cleanup failed: ${formatError(error)}`)
+      })
+    }
   }
 
   private async failCommand(
@@ -1214,6 +1348,9 @@ export class MatrixCvp3GatewayRunner {
         channelPort: port,
         extensions: extensionInstances,
         privilegeExecutor: this.dependencies.privilegeExecutor,
+        onAvailableCommands: commands => {
+          record.availableCommands = commands
+        },
       })
     }
     runtime = {
@@ -1245,14 +1382,30 @@ export class MatrixCvp3GatewayRunner {
     ) {
       throw new Error(`Provider ${provider} is not configured`)
     }
-    const model = command.payload.model ?? project.project.model
-    if (
-      model
-      && catalog
-      && !catalog.getAvailableModels().some(item => item.id === model || item.name === model)
-    ) {
-      throw new Error(`Model ${model} is not available for provider ${provider}`)
+    const providerChanged = provider !== project.project.provider
+    const requestedModel = command.payload.model !== undefined
+      ? command.payload.model
+      : providerChanged
+        ? null
+        : project.project.model
+    const selectedModel = requestedModel && catalog
+      ? catalog.getAvailableModels().find(item =>
+        item.id === requestedModel || item.name === requestedModel
+      )
+      : undefined
+    if (requestedModel && catalog && !selectedModel) {
+      throw new Error(`Model ${requestedModel} is not available for provider ${provider}`)
     }
+    const model = selectedModel?.id ?? requestedModel
+    const usesProjectModel = !providerChanged
+      && command.payload.model === undefined
+      && model === project.project.model
+    const reasoningEffort = command.payload.reasoningEffort !== undefined
+      ? command.payload.reasoningEffort
+      : usesProjectModel
+        ? project.project.reasoningEffort
+        : selectedModel?.defaultReasoningLevel ?? null
+    if (catalog) validateReasoningEffort(selectedModel, reasoningEffort)
     const permissionMode = command.payload.permissionMode ?? project.project.permissionMode
     if (permissionMode !== 'default') {
       throw new Error(`Permission mode ${permissionMode} is not currently available`)
@@ -1260,7 +1413,7 @@ export class MatrixCvp3GatewayRunner {
     return {
       provider,
       model,
-      reasoningEffort: command.payload.reasoningEffort ?? project.project.reasoningEffort,
+      reasoningEffort,
       permissionMode,
     }
   }
@@ -1384,8 +1537,10 @@ export class MatrixCvp3GatewayRunner {
 
   private discoverCapabilities(project: V3ProjectRuntime): MatrixGatewayCapabilities {
     let models: MatrixGatewayCapabilities['models'] = []
+    let providers: NonNullable<MatrixGatewayCapabilities['providers']> = []
     try {
-      models = (getProvider(project.project.provider)?.getAvailableModels() ?? []).map(model => ({
+      const mapModels = (providerName: string) =>
+        (getProvider(providerName)?.getAvailableModels() ?? []).map(model => ({
         id: model.id,
         name: model.name,
         ...(model.defaultReasoningLevel
@@ -1399,7 +1554,18 @@ export class MatrixCvp3GatewayRunner {
               })),
             }
           : {}),
-      }))
+        }))
+      models = mapModels(project.project.provider)
+      providers = listProviders().map(providerName => {
+        const provider = getProvider(providerName)!
+        return {
+          id: providerName,
+          name: providerName,
+          models: providerName === project.project.provider ? models : mapModels(providerName),
+          can_list_sessions: typeof provider.listSessions === 'function',
+          can_inspect_sessions: typeof provider.getSessionHistory === 'function',
+        }
+      })
     } catch (error) {
       this.log(
         `[cvp3/matrix] model capability discovery failed for ${project.project.provider}: `
@@ -1414,11 +1580,12 @@ export class MatrixCvp3GatewayRunner {
     }
     return matrixGatewayCapabilitiesSchema.parse({
       models,
+      providers,
       permission_modes: [{ id: 'default', name: 'Default' }],
       can_create_session: true,
       can_select_session: false,
       can_archive_session: true,
-      can_delete_session: true,
+      can_delete_session: false,
       session_extensions: this.extensions.descriptors().map(extension => ({
         id: extension.id,
         name: extension.name,
@@ -1531,6 +1698,39 @@ function projection(
     stateVersion: record.stateVersion,
     extensions: extensions.summaries(record.extensions),
     extensionRevision: record.extensionRevision,
+    availableCommands: record.availableCommands,
+  }
+}
+
+function limitProviderHistoryMessages(
+  input: readonly import('@/providers/provider').ProviderHistoryMessage[],
+): import('@codever/protocol').ProviderHistoryMessage[] {
+  const result: import('@codever/protocol').ProviderHistoryMessage[] = []
+  let bytes = 0
+  for (const message of input.slice(-256)) {
+    const normalized = {
+      id: message.id.slice(0, 256) || `message-${result.length + 1}`,
+      role: message.role,
+      text: message.text.slice(0, 16 * 1024),
+    }
+    const nextBytes = Buffer.byteLength(JSON.stringify(normalized), 'utf8')
+    if (bytes + nextBytes > 90 * 1024) break
+    result.push(normalized)
+    bytes += nextBytes
+  }
+  return result
+}
+
+function validateReasoningEffort(
+  model: ModelEntry | undefined,
+  reasoningEffort: string | null,
+): void {
+  if (!reasoningEffort) return
+  if (!model) throw new Error('Select a model before setting reasoning effort')
+  if (!(model.supportedReasoningLevels ?? []).some(level => level.effort === reasoningEffort)) {
+    throw new Error(
+      `Reasoning effort ${reasoningEffort} is not available for model ${model.id}`,
+    )
   }
 }
 

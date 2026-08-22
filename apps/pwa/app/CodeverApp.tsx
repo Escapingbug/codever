@@ -16,8 +16,12 @@ import {
   MAX_CODEVER_ATTACHMENT_BYTES,
   MAX_CODEVER_PROMPT_ATTACHMENT_BYTES,
   encodePairingLink,
+  providerHistoryMessageSchema,
+  providerSessionEntrySchema,
   type CodeverAttachment,
   type CommandPayload,
+  type ProviderHistoryMessage,
+  type ProviderSessionEntry,
 } from "@codever/protocol";
 import {
   CommandAcknowledgementTimeoutError,
@@ -49,7 +53,7 @@ import {
   NewSessionDialog,
   type NewSessionInput,
 } from "./NewSessionDialog";
-import { SessionDeleteDialog } from "./SessionDeleteDialog";
+import { ProviderHistoryDialog } from "./ProviderHistoryDialog";
 import { GatewayForgetDialog } from "./GatewayForgetDialog";
 import { PrivilegeTotpDialog } from "./PrivilegeTotpDialog";
 import {
@@ -60,7 +64,6 @@ import {
 } from "./privilegeTotp";
 import {
   gatewayProjectKey,
-  type GatewaySessionSummary,
 } from "./gatewayState";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
@@ -103,9 +106,7 @@ import {
   type PendingSessionCreateRecovery,
 } from "./sessionCreateRecovery";
 import {
-  reconcilePendingSessionDeletions,
   sessionsAvailableForAutomaticSelection,
-  setSessionDeletionPending,
 } from "./pendingSessionDeletion";
 import {
   hasShortDeviceInvitation,
@@ -283,7 +284,7 @@ type FeedReturnAnchor = {
 
 type PendingSessionLifecycleRecovery = {
   commandId: string;
-  action: "archive" | "restore" | "delete";
+  action: "archive";
   sessionId: string;
   onSucceeded?: () => void | Promise<void>;
   onFailed?: () => void | Promise<void>;
@@ -816,6 +817,7 @@ function CodeverAppRuntime() {
   >(() => new Map());
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
+  const [providerCommandsOpen, setProviderCommandsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
     () => loadMatrixConfig() ?? emptyMatrixConfig,
@@ -860,11 +862,17 @@ function CodeverAppRuntime() {
   const [invitationReauthRequired, setInvitationReauthRequired] =
     useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [providerHistoryOpen, setProviderHistoryOpen] = useState(false);
+  const [providerHistoryProvider, setProviderHistoryProvider] = useState("");
+  const [providerHistorySessions, setProviderHistorySessions] = useState<ProviderSessionEntry[]>([]);
+  const [providerHistorySelected, setProviderHistorySelected] = useState<ProviderSessionEntry | null>(null);
+  const [providerHistoryMessages, setProviderHistoryMessages] = useState<ProviderHistoryMessage[]>([]);
+  const [providerHistoryLoading, setProviderHistoryLoading] = useState(false);
+  const [providerHistoryError, setProviderHistoryError] = useState<string | null>(null);
   const [forgetDialogOpen, setForgetDialogOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const [pendingSessionCreate, setPendingSessionCreate] =
     useState<NewSessionInput | null>(null);
-  const [archivedOpen, setArchivedOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
     readProjectDisclosureState(
       typeof window === "undefined" ? null : window.localStorage,
@@ -880,10 +888,8 @@ function CodeverAppRuntime() {
     EMPTY_UI_NOTICE_STATE,
   );
   const [sessionLifecycleBusy, setSessionLifecycleBusy] = useState<
-    Map<string, "archive" | "restore" | "delete">
+    Map<string, "archive">
   >(() => new Map());
-  const [deleteTarget, setDeleteTarget] =
-    useState<GatewaySessionSummary | null>(null);
   const [decisionStates, setDecisionStates] = useState<
     Record<string, ExtensionViewDecisionState>
   >({});
@@ -943,7 +949,6 @@ function CodeverAppRuntime() {
   const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
   const pendingPromptSessionIdsRef = useRef(new Set<string>());
   const selectedSessionIdRef = useRef<string | null>(null);
-  const pendingDeletionSessionIdsRef = useRef(new Set<string>());
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
   const pendingOpenedSessionIdRef = useRef<string | null>(null);
   const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
@@ -976,7 +981,6 @@ function CodeverAppRuntime() {
     gatewayState?.sessions.find(
       (session) => session.id === selectedSessionId,
     ) ?? null;
-  const selectedArchived = selected?.status === "archived";
   const selectedLifecycleAction = selected
     ? sessionLifecycleBusy.get(selected.id) ?? null
     : null;
@@ -1012,18 +1016,16 @@ function CodeverAppRuntime() {
     if (latestCompletedTurn) resultIds.add(latestCompletedTurn.result.id);
     return resultIds;
   }, [latestCompletedTurn, messages]);
-  const deleteDialogBusy = Boolean(
-    deleteTarget !== null &&
-      sessionLifecycleBusy.get(deleteTarget.id) === "delete",
-  );
   const nativeBackAction = resolveCodeverBackAction({
-    deleteDialogOpen: deleteTarget !== null,
-    deleteDialogBusy,
+    deleteDialogOpen: false,
+    deleteDialogBusy: false,
+    providerHistoryOpen,
+    providerHistoryBusy: providerHistoryLoading,
     newSessionOpen,
     newSessionBusy,
     settingsOpen,
     detailsOpen,
-    composerOptionsOpen,
+    composerOptionsOpen: composerOptionsOpen || providerCommandsOpen,
     sessionSearchOpen,
     mobileChatOpen,
   });
@@ -1032,7 +1034,9 @@ function CodeverAppRuntime() {
     () => {
       switch (nativeBackAction) {
         case "close-delete-dialog":
-          setDeleteTarget(null);
+          break;
+        case "close-provider-history":
+          setProviderHistoryOpen(false);
           break;
         case "close-new-session":
           setNewSessionOpen(false);
@@ -1045,6 +1049,7 @@ function CodeverAppRuntime() {
           break;
         case "close-composer-options":
           setComposerOptionsOpen(false);
+          setProviderCommandsOpen(false);
           break;
         case "close-session-search":
           setSearch("");
@@ -1054,6 +1059,7 @@ function CodeverAppRuntime() {
           setMobileChatOpen(false);
           break;
         case "block-delete-dialog":
+        case "block-provider-history":
         case "block-new-session":
           break;
         case null:
@@ -1076,20 +1082,8 @@ function CodeverAppRuntime() {
       ),
     [search, visibleGatewaySessions],
   );
-  const activeFilteredSessions = useMemo(
-    () => filteredSessions.filter((session) => session.status !== "archived"),
-    [filteredSessions],
-  );
-  const archivedFilteredSessions = useMemo(
-    () => filteredSessions.filter((session) => session.status === "archived"),
-    [filteredSessions],
-  );
-  const activeSessionCount =
-    visibleGatewaySessions.filter((session) => session.status !== "archived")
-      .length ?? 0;
-  const archivedSessionCount =
-    visibleGatewaySessions.filter((session) => session.status === "archived")
-      .length ?? 0;
+  const activeFilteredSessions = filteredSessions;
+  const activeSessionCount = visibleGatewaySessions.length;
   const canonicalProjectsById = useMemo(
     () =>
       new Map(
@@ -1218,15 +1212,14 @@ function CodeverAppRuntime() {
   const sessionReady = Boolean(
     gatewayAvailable &&
       gatewayState &&
-      selected &&
-      !selectedArchived,
+      selected,
   );
   const composerState = deriveComposerState({
     connectionStatus,
     gatewayAvailable,
     hasGatewayState: Boolean(gatewayState),
     hasSelectedSession: Boolean(selected),
-    selectedArchived,
+    selectedArchived: false,
     attachmentBusy,
     promptSubmitting: isPromptSubmitting,
     isStreaming,
@@ -1253,7 +1246,10 @@ function CodeverAppRuntime() {
         permissionMode: "default",
       }
     : gatewayState?.workspace;
-  const activeModelCapability = gatewayState?.capabilities.models.find(
+  const activeProviderModels = gatewayState?.capabilities.providers.find(
+    (provider) => provider.id === activeProvider,
+  )?.models ?? gatewayState?.capabilities.models ?? [];
+  const activeModelCapability = activeProviderModels.find(
     (model) => model.id === activeWorkspace?.model,
   );
 
@@ -2854,7 +2850,6 @@ function CodeverAppRuntime() {
     setStoppingSessionIds(new Set());
     setAgentActivitiesBySession(new Map());
     pendingCreatedSessionIdRef.current = null;
-    pendingDeletionSessionIdsRef.current = new Set();
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(sessionCreateRecovery?.input ?? null);
     setNewSessionBusy(Boolean(sessionCreateRecovery));
@@ -2979,18 +2974,6 @@ function CodeverAppRuntime() {
             const nextSessionIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
-            const pendingDeletionSessionIds =
-              reconcilePendingSessionDeletions(
-                pendingDeletionSessionIdsRef.current,
-                nextSessionIds,
-              );
-            if (
-              pendingDeletionSessionIds.size !==
-              pendingDeletionSessionIdsRef.current.size
-            ) {
-              pendingDeletionSessionIdsRef.current =
-                pendingDeletionSessionIds;
-            }
             for (const previousSessionId of knownGatewaySessionIdsRef.current) {
               if (nextSessionIds.has(previousSessionId)) continue;
               liveMessagesBySessionRef.current.delete(previousSessionId);
@@ -3000,22 +2983,15 @@ function CodeverAppRuntime() {
                   previousSessionId,
                 ).catch((error) => {
                   showUiNotice(
-                    "history:deleted-session-cleanup",
+                    "history:archived-session-cleanup",
                     "history",
                     "warning",
-                    `Deleted session history could not be cleared locally: ${formatUiError(error)}`,
+                    `Archived session history could not be cleared locally: ${formatUiError(error)}`,
                   );
                 });
               }
             }
             knownGatewaySessionIdsRef.current = nextSessionIds;
-            setDeleteTarget((current) =>
-              current
-                ? state.gatewayState!.sessions.find(
-                    (session) => session.id === current.id,
-                  ) ?? null
-                : null,
-            );
             setGatewayState(state.gatewayState);
             const runningIds = new Set(
               state.gatewayState.sessions
@@ -3207,7 +3183,6 @@ function CodeverAppRuntime() {
     setFeedReturnAnchor(null);
     setFeedHasUnseenMessages(false);
     pendingCreatedSessionIdRef.current = null;
-    pendingDeletionSessionIdsRef.current = new Set();
     setSessionLifecycleBusy(new Map());
     setPendingSessionCreate(queuedSessionCreate?.input ?? null);
     setNewSessionBusy(Boolean(queuedSessionCreate));
@@ -4167,6 +4142,108 @@ function CodeverAppRuntime() {
     activateLocalSession(id);
   }
 
+  async function openProviderHistory(requestedProvider?: string) {
+    const provider = requestedProvider
+      ?? gatewayState?.capabilities.providers.find(candidate =>
+        candidate.id === gatewayState.workspace.provider
+        && candidate.canListSessions
+        && candidate.canInspectSessions
+      )?.id
+      ?? gatewayState?.capabilities.providers.find(candidate =>
+        candidate.canListSessions && candidate.canInspectSessions
+      )?.id
+      ?? "";
+    if (!provider) return;
+    setProviderHistoryOpen(true);
+    setProviderHistoryProvider(provider);
+    setProviderHistorySessions([]);
+    setProviderHistorySelected(null);
+    setProviderHistoryMessages([]);
+    setProviderHistoryError(null);
+    setProviderHistoryLoading(true);
+    let sent: CodeverCommandSendResult | null = null;
+    try {
+      sent = await sendRealCommand({ operation: "provider.sessions.list", provider });
+      if (!sent) throw new Error("Provider history command was not sent.");
+      const completion = await sent.completion;
+      if (completion.outcome !== "succeeded") {
+        throw new Error(completion.error?.message || "Provider history could not be loaded.");
+      }
+      const result = completion.result;
+      if (!result || typeof result !== "object" || Array.isArray(result) || result.type !== "provider.sessions.listed") {
+        throw new Error("The provider returned an invalid session list.");
+      }
+      const sessions = Array.isArray(result.sessions)
+        ? result.sessions.map(entry => providerSessionEntrySchema.parse(entry))
+        : [];
+      setProviderHistorySessions(sessions);
+    } catch (error) {
+      setProviderHistoryError(formatUiError(error));
+    } finally {
+      setProviderHistoryLoading(false);
+      if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
+    }
+  }
+
+  async function inspectProviderHistorySession(session: ProviderSessionEntry) {
+    setProviderHistorySelected(session);
+    setProviderHistoryMessages([]);
+    setProviderHistoryError(null);
+    setProviderHistoryLoading(true);
+    let sent: CodeverCommandSendResult | null = null;
+    try {
+      sent = await sendRealCommand({
+        operation: "provider.session.inspect",
+        provider: providerHistoryProvider,
+        providerSessionId: session.sessionId,
+      });
+      if (!sent) throw new Error("Provider session inspection was not sent.");
+      const completion = await sent.completion;
+      if (completion.outcome !== "succeeded") {
+        throw new Error(completion.error?.message || "Provider session could not be inspected.");
+      }
+      const result = completion.result;
+      if (!result || typeof result !== "object" || Array.isArray(result) || result.type !== "provider.session.inspected") {
+        throw new Error("The provider returned invalid session history.");
+      }
+      setProviderHistoryMessages(
+        Array.isArray(result.messages)
+          ? result.messages.map(message => providerHistoryMessageSchema.parse(message))
+          : [],
+      );
+    } catch (error) {
+      setProviderHistoryError(formatUiError(error));
+    } finally {
+      setProviderHistoryLoading(false);
+      if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
+    }
+  }
+
+  function continueProviderHistorySession(session: ProviderSessionEntry, text: string) {
+    const providerCapability = gatewayState?.capabilities.providers.find(
+      candidate => candidate.id === providerHistoryProvider,
+    );
+    setProviderHistoryOpen(false);
+    void createSession({
+      scope: "project",
+      cwd: gatewayState?.workspace.cwd ?? "",
+      projectName: gatewayState?.workspace.projectName ?? "Project",
+      provider: providerHistoryProvider,
+      providerSessionId: session.sessionId,
+      title: session.title,
+      initialPrompt: text,
+      ...(providerHistoryProvider === gatewayState?.workspace.provider && gatewayState.workspace.model
+        ? { model: gatewayState.workspace.model }
+        : providerCapability?.models[0]
+          ? { model: providerCapability.models[0].id }
+          : {}),
+      ...(providerHistoryProvider === gatewayState?.workspace.provider && gatewayState.workspace.reasoningEffort
+        ? { reasoningEffort: gatewayState.workspace.reasoningEffort }
+        : {}),
+      extensions: gatewayState?.workspace.defaultExtensions ?? [],
+    });
+  }
+
   async function createSession(input: NewSessionInput) {
     if (!gatewayState?.capabilities.canCreateSession) {
       showUiNotice(
@@ -4193,18 +4270,29 @@ function CodeverAppRuntime() {
       await waitForUiCommit();
       connection = codeverClientRef.current;
       if (input.setAsProjectDefault) {
-        if (!connection?.updateProjectExtensions) {
-          throw new Error("This connection cannot update project extension defaults.");
+        const settingsUpdate = await sendRealCommand({
+          operation: "project.settings",
+          model: input.model ?? null,
+          reasoningEffort: input.reasoningEffort ?? null,
+        });
+        if (!settingsUpdate || (await settingsUpdate.completion).outcome !== "succeeded") {
+          throw new Error("The project model and reasoning defaults could not be updated.");
         }
-        const update = await connection.updateProjectExtensions(input.extensions ?? []);
-        const completion = await update.completion;
-        if (completion.outcome !== "succeeded") {
-          throw new Error("The project extension defaults could not be updated.");
+        if (connection?.updateProjectExtensions) {
+          const update = await connection.updateProjectExtensions(input.extensions ?? []);
+          const completion = await update.completion;
+          if (completion.outcome !== "succeeded") {
+            throw new Error("The project extension defaults could not be updated.");
+          }
         }
       }
       const sent = await sendRealCommand({
         operation: "session.create",
         scope: input.scope ?? "project",
+        provider: input.provider,
+        ...(input.providerSessionId ? { providerSessionId: input.providerSessionId } : {}),
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.initialPrompt ? { initialPrompt: input.initialPrompt } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
@@ -4288,16 +4376,13 @@ function CodeverAppRuntime() {
   }
 
   async function runSessionLifecycle(
-    action: "archive" | "restore" | "delete",
+    action: "archive",
     sessionId: string,
     onSucceeded?: () => void | Promise<void>,
     onFailed?: () => void | Promise<void>,
   ): Promise<boolean> {
     const capabilities = gatewayState?.capabilities;
-    const supported =
-      action === "delete"
-        ? capabilities?.canDeleteSession
-        : capabilities?.canArchiveSession;
+    const supported = capabilities?.canArchiveSession;
     if (!supported) {
       showUiNotice(
         `session:${action}`,
@@ -4467,7 +4552,7 @@ function CodeverAppRuntime() {
   async function settleSessionLifecycle(
     connection: CodeverClient,
     sent: CodeverCommandSendResult,
-    action: "archive" | "restore" | "delete",
+    action: "archive",
     sessionId: string,
     onSucceeded?: () => void | Promise<void>,
     onFailed?: () => void | Promise<void>,
@@ -4516,60 +4601,6 @@ function CodeverAppRuntime() {
 
   async function archiveSession(sessionId: string) {
     await runSessionLifecycle("archive", sessionId);
-  }
-
-  async function restoreSession(sessionId: string) {
-    if (await runSessionLifecycle("restore", sessionId)) {
-      setMobileChatOpen(true);
-      activateLocalSession(sessionId);
-    }
-  }
-
-  async function deleteSession() {
-    const target = deleteTarget;
-    if (!target) return;
-    setDeleteTarget(null);
-    setDetailsOpen(false);
-    pendingDeletionSessionIdsRef.current = setSessionDeletionPending(
-      pendingDeletionSessionIdsRef.current,
-      target.id,
-      true,
-    );
-    if (selectedSessionIdRef.current === target.id) {
-      activateLocalSession(null);
-      setMobileChatOpen(false);
-    }
-    const restoreSelection = () => {
-      pendingDeletionSessionIdsRef.current = setSessionDeletionPending(
-        pendingDeletionSessionIdsRef.current,
-        target.id,
-        false,
-      );
-      activateLocalSession(target.id);
-      setMobileChatOpen(true);
-    };
-    const acknowledged = await runSessionLifecycle(
-      "delete",
-      target.id,
-      async () => {
-        liveMessagesBySessionRef.current.delete(target.id);
-        knownGatewaySessionIdsRef.current.delete(target.id);
-        if (historyScopeRef.current) {
-          try {
-            await clearSessionMessageHistory(historyScopeRef.current, target.id);
-          } catch (error) {
-            showUiNotice(
-              "history:deleted-session-cleanup",
-              "history",
-              "warning",
-              `The session was deleted, but its local history could not be cleared: ${formatUiError(error)}`,
-            );
-          }
-        }
-      },
-      restoreSelection,
-    );
-    if (!acknowledged) restoreSelection();
   }
 
   function selectAttachments(event: ChangeEvent<HTMLInputElement>) {
@@ -5276,6 +5307,20 @@ function CodeverAppRuntime() {
           <div className="session-header-actions">
             <button
               type="button"
+              className="mobile-history-button"
+              aria-label="Browse provider sessions"
+              onClick={() => void openProviderHistory()}
+              disabled={
+                !gatewayAvailable ||
+                !gatewayState?.capabilities.providers.some(provider =>
+                  provider.canListSessions && provider.canInspectSessions
+                )
+              }
+            >
+              ↺
+            </button>
+            <button
+              type="button"
               className="mobile-files-button"
               aria-label="Open workspace file inbox"
               onClick={() => setPrimaryView("files")}
@@ -5546,57 +5591,6 @@ function CodeverAppRuntime() {
             </section>
             );
           })}
-          {archivedSessionCount > 0 && (
-            <section className="archived-session-section">
-              <button
-                type="button"
-                className="archived-session-toggle"
-                aria-expanded={archivedOpen || Boolean(search.trim())}
-                onClick={() => setArchivedOpen((value) => !value)}
-              >
-                <span className="archive-mark" aria-hidden="true">▣</span>
-                <span>Archived</span>
-                <b>{archivedSessionCount}</b>
-                <span className="archive-chevron" aria-hidden="true">
-                  {archivedOpen || search.trim() ? "⌃" : "⌄"}
-                </span>
-              </button>
-              {(archivedOpen || Boolean(search.trim())) && (
-                <div className="archived-session-list">
-                  {archivedFilteredSessions.map((session) => (
-                    <button
-                      type="button"
-                      key={session.id}
-                      data-session-id={session.id}
-                      data-project-name={session.projectName}
-                      aria-pressed={selectedSessionId === session.id}
-                      className={`archived-session-row ${
-                        selectedSessionId === session.id ? "selected" : ""
-                      }`}
-                      onClick={() => void chooseSession(session.id)}
-                    >
-                      <span className="archived-session-icon" aria-hidden="true">
-                        ▣
-                      </span>
-                      <span>
-                        <strong>{session.title}</strong>
-                        <small>
-                          {session.projectName} · {session.provider}
-                          {session.extensions.length > 0
-                            ? ` · ${session.extensions.map((item) => item.name).join(", ")}`
-                            : ""}
-                        </small>
-                      </span>
-                      <time>{formatSessionTime(session.updatedAt)}</time>
-                    </button>
-                  ))}
-                  {archivedFilteredSessions.length === 0 && search.trim() && (
-                    <small className="archived-empty">No archived matches</small>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
           {!trustedGateway && (
             <div className="empty-search">
               <span>G</span>
@@ -5676,15 +5670,6 @@ function CodeverAppRuntime() {
                 Create your first conversation
               </div>
             )}
-          {gatewayState &&
-            activeSessionCount === 0 &&
-            archivedSessionCount > 0 &&
-            !search.trim() && (
-              <div className="empty-search compact-empty">
-                <span>＋</span>
-                No active conversations
-              </div>
-            )}
         </div>
 
         <footer className="trust-footer">
@@ -5735,11 +5720,7 @@ function CodeverAppRuntime() {
               )}
               <span className="conversation-status-copy">
                 {gatewayAvailable && gatewayState ? (
-                  selectedArchived ? (
-                    `${activeWorkspace?.projectName || "Project"} · archived`
-                  ) : (
-                    `${activeWorkspace?.projectName || "Project"} · ${activeProvider}`
-                  )
+                  `${activeWorkspace?.projectName || "Project"} · ${activeProvider}`
                 ) : (
                   <>
                     <span className="conversation-connection-desktop">
@@ -5818,60 +5799,22 @@ function CodeverAppRuntime() {
             </span>
             {selected && (
               <div className="session-menu-actions">
-                {selectedArchived ? (
-                  <button
-                    type="button"
-                    className="session-menu-primary"
-                    disabled={
-                      selectedLifecycleBusy ||
-                      !gatewayAvailable ||
-                      !gatewayState?.capabilities.canArchiveSession
-                    }
-                    onClick={() => void restoreSession(selected.id)}
-                  >
-                    <span aria-hidden="true">↺</span>
-                    <span>
-                      <strong>Restore session</strong>
-                      <small>Return it to Recent</small>
-                    </span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="session-menu-primary"
-                    disabled={
-                      selectedLifecycleBusy ||
-                      !gatewayAvailable ||
-                      !gatewayState?.capabilities.canArchiveSession
-                    }
-                    onClick={() => void archiveSession(selected.id)}
-                  >
-                    <span aria-hidden="true">▣</span>
-                    <span>
-                      <strong>
-                        {isStreaming ? "Archive & stop agent" : "Archive session"}
-                      </strong>
-                      <small>Keep it available to restore</small>
-                    </span>
-                  </button>
-                )}
                 <button
                   type="button"
-                  className="session-menu-danger"
+                  className="session-menu-primary"
                   disabled={
                     selectedLifecycleBusy ||
                     !gatewayAvailable ||
-                    !gatewayState?.capabilities.canDeleteSession
+                    !gatewayState?.capabilities.canArchiveSession
                   }
-                  onClick={() => {
-                    setDetailsOpen(false);
-                    setDeleteTarget(selected);
-                  }}
+                  onClick={() => void archiveSession(selected.id)}
                 >
-                  <span aria-hidden="true">×</span>
+                  <span aria-hidden="true">▣</span>
                   <span>
-                    <strong>Delete session</strong>
-                    <small>Remove it from Codever</small>
+                    <strong>
+                      {isStreaming ? "Archive & stop agent" : "Archive session"}
+                    </strong>
+                    <small>Remove from Codever; provider history remains</small>
                   </span>
                 </button>
               </div>
@@ -5879,26 +5822,6 @@ function CodeverAppRuntime() {
           </div>
         )}
 
-        {selectedArchived && selected && (
-          <section className="archived-session-banner" role="status">
-            <span className="archive-banner-icon" aria-hidden="true">▣</span>
-            <span>
-              <strong>This session is archived</strong>
-              <small>Its history remains available. Restore it to continue working.</small>
-            </span>
-            <button
-              type="button"
-              disabled={
-                selectedLifecycleBusy ||
-                !gatewayAvailable ||
-                !gatewayState?.capabilities.canArchiveSession
-              }
-              onClick={() => void restoreSession(selected.id)}
-            >
-              {selectedLifecycleBusy ? "Restoring…" : "Restore"}
-            </button>
-          </section>
-        )}
 
         <div
           className="chat-feed"
@@ -6406,9 +6329,7 @@ function CodeverAppRuntime() {
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}
               placeholder={
-                selectedArchived
-                  ? "Restore this session to continue"
-                  : gatewayAvailable
+                gatewayAvailable
                   ? `Message ${activeProvider}…`
                   : trustedGateway
                     ? "Connect your computer to send messages"
@@ -6446,6 +6367,43 @@ function CodeverAppRuntime() {
               >
                 <span aria-hidden="true">•••</span>
               </button>
+              {(selected?.availableCommands.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  className="composer-options-button provider-commands-button"
+                  aria-label="Provider commands"
+                  aria-expanded={providerCommandsOpen}
+                  onClick={() => setProviderCommandsOpen(open => !open)}
+                >
+                  <span aria-hidden="true">⌘</span>
+                </button>
+              )}
+              {providerCommandsOpen && selected && (
+                <div className="provider-command-palette" role="menu" aria-label="Provider commands">
+                  <header>
+                    <strong>{selected.provider} commands</strong>
+                    <small>Reported by the active ACP session</small>
+                  </header>
+                  {selected.availableCommands.map(command => (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      key={command.name}
+                      onClick={() => {
+                        setDraft(`/${command.name}${command.inputHint ? " " : ""}`);
+                        setProviderCommandsOpen(false);
+                        window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+                      }}
+                    >
+                      <code>{command.name}</code>
+                      <span>
+                        <strong>{command.description || command.name}</strong>
+                        {command.inputHint && <small>{command.inputHint}</small>}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div id="composer-agent-options" className="agent-controls">
                 <label>
                   <span className="status-spark" />
@@ -6455,13 +6413,13 @@ function CodeverAppRuntime() {
                     aria-label="Agent model"
                     disabled={
                       !sessionReady ||
-                      gatewayState!.capabilities.models.length === 0
+                      activeProviderModels.length === 0
                     }
                   >
                     {!activeWorkspace?.model && (
                       <option value="">Computer default</option>
                     )}
-                    {(gatewayState?.capabilities.models ?? []).map((model) => (
+                    {activeProviderModels.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.name}
                       </option>
@@ -6650,9 +6608,10 @@ function CodeverAppRuntime() {
           gatewayName={trustedGateway?.gatewayName || "Gateway"}
           workspace={gatewayState.workspace}
           models={gatewayState.capabilities.models}
+          providers={gatewayState.capabilities.providers}
           extensions={gatewayState.capabilities.sessionExtensions}
           defaultExtensions={gatewayState.workspace.defaultExtensions}
-          canUpdateProjectDefaults={Boolean(codeverClientRef.current?.updateProjectExtensions)}
+          canUpdateProjectDefaults
           onClose={() => {
             if (!newSessionBusy) setNewSessionOpen(false);
           }}
@@ -6660,14 +6619,30 @@ function CodeverAppRuntime() {
         />
       )}
 
-      <SessionDeleteDialog
-        session={deleteTarget}
-        busy={deleteDialogBusy}
-        onClose={() => {
-          if (!deleteDialogBusy) setDeleteTarget(null);
-        }}
-        onConfirm={() => void deleteSession()}
-      />
+      {gatewayState && (
+        <ProviderHistoryDialog
+          open={providerHistoryOpen}
+          provider={providerHistoryProvider || gatewayState.workspace.provider}
+          providers={gatewayState.capabilities.providers.filter(provider =>
+            provider.canListSessions && provider.canInspectSessions
+          )}
+          sessions={providerHistorySessions}
+          selected={providerHistorySelected}
+          messages={providerHistoryMessages}
+          loading={providerHistoryLoading}
+          error={providerHistoryError}
+          onClose={() => {
+            if (!providerHistoryLoading) setProviderHistoryOpen(false);
+          }}
+          onProviderChange={(provider) => void openProviderHistory(provider)}
+          onInspect={(session) => void inspectProviderHistorySession(session)}
+          onOpenManaged={(sessionId) => {
+            setProviderHistoryOpen(false);
+            chooseSession(sessionId);
+          }}
+          onContinue={continueProviderHistorySession}
+        />
+      )}
 
       <MatrixSettings
         open={settingsOpen}
@@ -7064,39 +7039,15 @@ function nativeCommandReviewDescription(
   return `Another device changed the Gateway before this ${action} was accepted. Review the latest state, then retry it or discard it before starting new work.`;
 }
 
-function lifecyclePastTense(
-  action: "archive" | "restore" | "delete",
-): string {
-  switch (action) {
-    case "archive":
-      return "archived";
-    case "restore":
-      return "restored";
-    case "delete":
-      return "deleted";
-  }
+function lifecyclePastTense(action: "archive"): string {
+  return action === "archive" ? "archived" : action;
 }
 
 function sessionLifecyclePayload(
-  action: "archive" | "restore" | "delete",
+  action: "archive",
   sessionId: string,
-): Extract<
-  CommandPayload,
-  {
-    operation:
-      | "session.archive"
-      | "session.restore"
-      | "session.delete";
-  }
-> {
-  switch (action) {
-    case "archive":
-      return { operation: "session.archive", sessionId };
-    case "restore":
-      return { operation: "session.restore", sessionId };
-    case "delete":
-      return { operation: "session.delete", sessionId };
-  }
+): Extract<CommandPayload, { operation: "session.archive" }> {
+  return { operation: "session.archive", sessionId };
 }
 
 function formatUiError(error: unknown): string {

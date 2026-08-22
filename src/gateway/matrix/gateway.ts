@@ -19,7 +19,7 @@ import {
     type SessionExtensionSummary,
 } from '@codever/protocol'
 import type { AgentProvider } from '@/providers/provider'
-import { createProviderInstance, getProvider } from '@/providers/registry'
+import { createProviderInstance, getProvider, listProviders } from '@/providers/registry'
 import {
     ChannelDeliveryQueuedError,
     type AgentActivityPhase,
@@ -100,6 +100,8 @@ interface WorkspaceSettingsInput {
     reasoningEffort?: string | null
     permissionMode?: string
     extensions?: SessionExtensionBinding[]
+    providerSessionId?: string
+    title?: string
 }
 
 interface CommandExecutionResult {
@@ -539,18 +541,7 @@ export class MatrixGatewayRunner {
                     ...(record.matrixThreadRootEventId
                         ? { threadRootEventId: record.matrixThreadRootEventId }
                         : {}),
-                })),
-                ...[...runtime.archivedSessions.values()].map(record => ({
-                    ...gatewaySessionSummary(
-                        record,
-                        'idle',
-                        true,
-                        undefined,
-                        this.sessionExtensionRegistry.summaries(record.extensions),
-                    ),
-                    ...(record.matrixThreadRootEventId
-                        ? { threadRootEventId: record.matrixThreadRootEventId }
-                        : {}),
+                    availableCommands: session.sessionRecord.availableCommands,
                 })),
             ].sort((left, right) => right.updatedAt - left.updatedAt),
             workspace: {
@@ -566,13 +557,26 @@ export class MatrixGatewayRunner {
             },
             capabilities: {
                 models,
+                providers: listProviders().map(providerName => {
+                    const provider = getProvider(providerName)!
+                    const providerModels = providerName === runtime.workspace.provider
+                        ? models
+                        : provider.getAvailableModels()
+                    return {
+                        id: providerName,
+                        name: providerName,
+                        models: providerModels,
+                        canListSessions: typeof provider.listSessions === 'function',
+                        canInspectSessions: typeof provider.getSessionHistory === 'function',
+                    }
+                }),
                 // The runtime currently always asks for permission. Do not
                 // advertise modes whose policy is not actually enforced.
                 permissionModes: [{ id: 'default', name: 'Default' }],
                 canCreateSession: true,
                 canSelectSession: false,
                 canArchiveSession: true,
-                canDeleteSession: true,
+                canDeleteSession: false,
                 sessionExtensions: this.sessionExtensionRegistry.descriptors(),
             },
         }
@@ -1214,6 +1218,16 @@ export class MatrixGatewayRunner {
                     })
                     throw error
                 }
+                if (command.payload.initialPrompt) {
+                    await appSession.session.dispatch({
+                        kind: 'user_message',
+                        text: command.payload.initialPrompt,
+                        source: 'channel',
+                        user: { id: command.deviceId, username: command.deviceId },
+                    })
+                    this.updateAppSessionRecord(appSession)
+                    await this.persistRuntime(runtime)
+                }
                 // An empty session has no Matrix thread yet. Publish its
                 // authoritative entity now and create the immutable thread
                 // root lazily when the first prompt is sent.
@@ -1227,6 +1241,74 @@ export class MatrixGatewayRunner {
                     canonicalCompletionPublished,
                 }
             }
+            case 'project.settings': {
+                const workspace = await resolveWorkspaceSettings(
+                    runtime.workspace,
+                    command.payload,
+                    runtime.capabilityProvider,
+                )
+                runtime.workspace = workspace
+                await this.persistRuntime(runtime)
+                this.scheduleRoomSnapshot(runtime)
+                return { sessionId: null }
+            }
+            case 'provider.sessions.list': {
+                const providerName = command.payload.provider
+                const provider = createProviderInstance(providerName)
+                if (!provider?.listSessions) {
+                    throw new Error(`Provider ${providerName} does not support session history`)
+                }
+                try {
+                    const sessions = (await provider.listSessions(runtime.workspace.cwd)).slice(0, 256)
+                        .map(entry => {
+                            const managed = [...runtime.appSessions.values()].find(candidate =>
+                                candidate.record.provider === providerName
+                                && candidate.record.providerSessionId === entry.sessionId
+                            )
+                            return {
+                                sessionId: entry.sessionId,
+                                title: entry.title.trim() || 'Untitled provider session',
+                                updatedAt: Math.max(0, Math.trunc(entry.updated)),
+                                ...(entry.cwd ? { cwd: entry.cwd } : {}),
+                                ...(managed ? { managedSessionId: managed.record.id } : {}),
+                            }
+                        })
+                    return {
+                        sessionId: null,
+                        result: { type: 'provider.sessions.listed', provider: providerName, sessions },
+                    }
+                } finally {
+                    await provider.destroy?.().catch(error => {
+                        this.log(`[matrix-gateway] provider session-list cleanup failed: ${formatError(error)}`)
+                    })
+                }
+            }
+            case 'provider.session.inspect': {
+                const providerName = command.payload.provider
+                const providerSessionId = command.payload.providerSessionId
+                const provider = createProviderInstance(providerName)
+                if (!provider?.getSessionHistory) {
+                    throw new Error(`Provider ${providerName} cannot inspect session history`)
+                }
+                try {
+                    const history = await provider.getSessionHistory(
+                        providerSessionId,
+                        runtime.workspace.cwd,
+                    )
+                    return {
+                        sessionId: null,
+                        result: {
+                            type: 'provider.session.inspected',
+                            provider: providerName,
+                            providerSessionId,
+                            title: history.title.trim() || 'Provider session',
+                            messages: limitLegacyProviderHistoryMessages(history.messages),
+                        },
+                    }
+                } finally {
+                    await provider.destroy?.()
+                }
+            }
             case 'session.archive': {
                 const { sessionId } = command.payload
                 return this.serializeSessionMutation(
@@ -1236,19 +1318,18 @@ export class MatrixGatewayRunner {
                 )
             }
             case 'session.restore': {
-                const { sessionId } = command.payload
-                return this.serializeSessionMutation(
-                    runtime,
-                    sessionId,
-                    () => this.restoreAppSession(runtime, sessionId, command.commandId),
+                throw new Error(
+                    'Archived sessions cannot be restored; continue them from Provider History',
                 )
             }
             case 'session.delete': {
                 const { sessionId } = command.payload
+                // Legacy delete is a compatibility alias for Codever archive.
+                // The provider-owned session is deliberately never deleted.
                 return this.serializeSessionMutation(
                     runtime,
                     sessionId,
-                    () => this.deleteAppSession(runtime, sessionId, command.commandId),
+                    () => this.archiveAppSession(runtime, sessionId, command.commandId),
                 )
             }
             case 'device.invite': {
@@ -1599,7 +1680,7 @@ export class MatrixGatewayRunner {
         return {
             id: randomUUID(),
             sourceCommandId,
-            title: 'New session',
+            title: settings.title?.trim() || 'New session',
             createdAt,
             updatedAt: createdAt,
             matrixThreadRootEventId: null,
@@ -1610,7 +1691,7 @@ export class MatrixGatewayRunner {
             model: workspace.model,
             reasoningEffort: workspace.reasoningEffort,
             permissionMode: workspace.permissionMode,
-            providerSessionId: null,
+            providerSessionId: settings.providerSessionId ?? null,
             archivedAt: null,
             extensions: this.sessionExtensionRegistry.normalizeBindings(settings.extensions),
         }
@@ -1846,7 +1927,23 @@ export class MatrixGatewayRunner {
         const revision = await this.nativeRevision(runtime)
         const updatedAt = this.now()
         const snapshot = await this.gatewayStateSnapshot(runtime)
+        const archivedRecord = runtime.archivedSessions.get(sessionId)
+        const archivedSession = archivedRecord
+            ? {
+                ...gatewaySessionSummary(
+                    archivedRecord,
+                    'idle',
+                    true,
+                    'idle',
+                    this.sessionExtensionRegistry.summaries(archivedRecord.extensions),
+                ),
+                ...(archivedRecord.matrixThreadRootEventId
+                    ? { threadRootEventId: archivedRecord.matrixThreadRootEventId }
+                    : {}),
+            }
+            : undefined
         const session = snapshot.sessions.find(candidate => candidate.id === sessionId)
+            ?? archivedSession
         const content = session
             ? nativeSessionState(
                 this.config.gatewayId,
@@ -2166,6 +2263,9 @@ function commandSessionId(command: CodeverCommand): string | null {
     switch (command.payload.operation) {
         case 'session.create':
         case 'device.invite':
+        case 'project.settings':
+        case 'provider.sessions.list':
+        case 'provider.session.inspect':
             return null
         case 'prompt':
         case 'cancel':
@@ -2201,6 +2301,7 @@ function gatewaySessionSummary(
             ? { reasoningEffort: record.reasoningEffort }
             : {}),
         extensions,
+        availableCommands: [],
     }
 }
 
@@ -2359,6 +2460,25 @@ function matrixDirectoryStateKey(
     return `${descriptor.state_key_prefix}.${descriptor.slot}.${pageIndex}`
 }
 
+function limitLegacyProviderHistoryMessages(
+    input: readonly import('@/providers/provider').ProviderHistoryMessage[],
+): JsonValue[] {
+    const result: JsonValue[] = []
+    let bytes = 0
+    for (const [index, message] of input.slice(-256).entries()) {
+        const normalized = {
+            id: message.id.slice(0, 256) || `message-${index + 1}`,
+            role: message.role,
+            text: message.text.slice(0, 16 * 1024),
+        }
+        const nextBytes = Buffer.byteLength(JSON.stringify(normalized), 'utf8')
+        if (bytes + nextBytes > 90 * 1024) break
+        result.push(normalized)
+        bytes += nextBytes
+    }
+    return result
+}
+
 function sameSessionEntity(
     left: MatrixSessionState,
     right: MatrixSessionState | undefined,
@@ -2394,6 +2514,22 @@ function nativeRoomStateCapabilities(
                     })),
                 }
                 : {}),
+        })),
+        providers: capabilities.providers.map(provider => ({
+            id: provider.id,
+            name: provider.name,
+            models: provider.models.map(model => ({
+                id: model.id,
+                name: model.name,
+                ...(model.defaultReasoningLevel
+                    ? { default_reasoning_level: model.defaultReasoningLevel }
+                    : {}),
+                ...(model.supportedReasoningLevels
+                    ? { supported_reasoning_levels: model.supportedReasoningLevels }
+                    : {}),
+            })),
+            can_list_sessions: provider.canListSessions,
+            can_inspect_sessions: provider.canInspectSessions,
         })),
         permission_modes: capabilities.permissionModes.map(mode => ({
             id: mode.id,

@@ -2,6 +2,7 @@ import { AtomicJsonFile } from '@codever/security/node'
 import {
   matrixGatewayCapabilitiesSchema,
   type MatrixGatewayCapabilities,
+  type ProviderCommand,
   type SessionExtensionBinding,
 } from '@codever/protocol'
 import type { MatrixGatewayRoomConfig } from './config'
@@ -29,6 +30,7 @@ export interface PersistedCvp3Session {
   extensions: SessionExtensionBinding[]
   extensionRevision: number
   inheritedFromProjectExtensionRevision: number | null
+  availableCommands: ProviderCommand[]
 }
 
 export interface PersistedCvp3Project {
@@ -110,6 +112,10 @@ export class FileCvp3RuntimeStateStore {
               }
               if (session.inheritedFromProjectExtensionRevision === undefined) {
                 session.inheritedFromProjectExtensionRevision = null
+                changed = true
+              }
+              if (!Array.isArray(session.availableCommands)) {
+                session.availableCommands = []
                 changed = true
               }
             }
@@ -268,6 +274,7 @@ function validateProject(project: PersistedCvp3Project, roomId: string): void {
       || !Array.isArray(session.extensions)
       || !Number.isSafeInteger(session.extensionRevision)
       || session.extensionRevision < 1
+      || !Array.isArray(session.availableCommands)
       || (
         session.inheritedFromProjectExtensionRevision !== null
         && (

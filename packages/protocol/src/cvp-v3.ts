@@ -41,6 +41,38 @@ const matrixEventId = z.string().min(1).max(512)
 const timestamp = z.number().int().nonnegative()
 const base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/)
 
+export const providerCommandSchema = z
+  .object({
+    name: z.string().min(1).max(256),
+    description: z.string().max(4_096),
+    inputHint: z.string().max(1_024).nullable(),
+  })
+  .strict()
+
+export type ProviderCommand = z.infer<typeof providerCommandSchema>
+
+export const providerSessionEntrySchema = z
+  .object({
+    sessionId: opaqueId,
+    title: z.string().min(1).max(512),
+    updatedAt: timestamp,
+    cwd: z.string().min(1).max(8_192).optional(),
+    managedSessionId: opaqueId.optional(),
+  })
+  .strict()
+
+export type ProviderSessionEntry = z.infer<typeof providerSessionEntrySchema>
+
+export const providerHistoryMessageSchema = z
+  .object({
+    id: opaqueId,
+    role: z.enum(['user', 'assistant']),
+    text: z.string().max(16 * 1024),
+  })
+  .strict()
+
+export type ProviderHistoryMessage = z.infer<typeof providerHistoryMessageSchema>
+
 export const webPushSubscriptionSchema = z
   .object({
     endpoint: z.string().url().max(4_096).refine(value => {
@@ -72,7 +104,6 @@ const sessionSettingsPatchSchema = z
   .object({
     title: z.string().min(1).max(512).optional(),
     model: z.string().min(1).max(256).nullable().optional(),
-    provider: z.string().min(1).max(256).optional(),
     reasoningEffort: z.string().min(1).max(64).nullable().optional(),
     permissionMode: z
       .enum(['default', 'accept_edits', 'plan', 'bypass_permissions'])
@@ -91,6 +122,7 @@ const sessionCreatePayloadSchema = z
     title: z.string().min(1).max(512).optional(),
     model: z.string().min(1).max(256).optional(),
     provider: z.string().min(1).max(256).optional(),
+    providerSessionId: opaqueId.optional(),
     reasoningEffort: z.string().min(1).max(64).optional(),
     permissionMode: z
       .enum(['default', 'accept_edits', 'plan', 'bypass_permissions'])
@@ -162,9 +194,28 @@ const projectUpdatePayloadSchema = z
     operation: z.literal('project.update'),
     patch: z
       .object({
-        defaultExtensions: z.array(cvp3SessionExtensionBindingSchema).max(8),
+        model: z.string().min(1).max(256).nullable().optional(),
+        reasoningEffort: z.string().min(1).max(64).nullable().optional(),
+        defaultExtensions: z.array(cvp3SessionExtensionBindingSchema).max(8).optional(),
       })
-      .strict(),
+      .strict()
+      .refine(value => Object.values(value).some(field => field !== undefined), {
+        message: 'A project update requires at least one changed field',
+      }),
+  })
+  .strict()
+const providerSessionsListPayloadSchema = z
+  .object({
+    operation: z.literal('provider.sessions.list'),
+    provider: z.string().min(1).max(256),
+    cursor: z.string().min(1).max(4_096).optional(),
+  })
+  .strict()
+const providerSessionInspectPayloadSchema = z
+  .object({
+    operation: z.literal('provider.session.inspect'),
+    provider: z.string().min(1).max(256),
+    providerSessionId: opaqueId,
   })
   .strict()
 const notificationSubscribePayloadSchema = z
@@ -188,6 +239,8 @@ export const cvp3CommandPayloadSchema = z.discriminatedUnion('operation', [
   sessionUpdatePayloadSchema,
   sessionLifecyclePayloadSchema,
   projectUpdatePayloadSchema,
+  providerSessionsListPayloadSchema,
+  providerSessionInspectPayloadSchema,
   deviceInvitationPayloadSchema,
   notificationSubscribePayloadSchema,
   notificationUnsubscribePayloadSchema,
@@ -229,6 +282,18 @@ export const cvp3CommandSchema = z.union([
     sessionId: z.undefined().optional(),
     operation: z.literal('project.update'),
     payload: projectUpdatePayloadSchema,
+  }).strict(),
+  z.object({
+    ...projectCommandCommon,
+    sessionId: z.undefined().optional(),
+    operation: z.literal('provider.sessions.list'),
+    payload: providerSessionsListPayloadSchema,
+  }).strict(),
+  z.object({
+    ...projectCommandCommon,
+    sessionId: z.undefined().optional(),
+    operation: z.literal('provider.session.inspect'),
+    payload: providerSessionInspectPayloadSchema,
   }).strict(),
   z.object({
     ...sessionCommandCommon,
@@ -291,6 +356,7 @@ const sessionProjectionSchema = z
     updatedAt: timestamp,
     stateVersion: z.number().int().positive(),
     extensions: z.array(sessionExtensionSummarySchema).max(8).optional(),
+    availableCommands: z.array(providerCommandSchema).max(256).optional(),
     extensionRevision: z.number().int().positive().optional(),
   })
   .strict()
@@ -509,6 +575,27 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
       retryable: z.boolean(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('provider.sessions.listed'),
+      provider: z.string().min(1).max(256),
+      sessions: z.array(providerSessionEntrySchema).max(256),
+      nextCursor: z.string().min(1).max(4_096).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('provider.session.inspected'),
+      provider: z.string().min(1).max(256),
+      providerSessionId: opaqueId,
+      title: z.string().min(1).max(512),
+      managedSessionId: opaqueId.optional(),
+      messages: z.array(providerHistoryMessageSchema).max(256),
+    })
+    .strict()
+    .refine(value => JSON.stringify(value.messages).length <= 96 * 1024, {
+      message: 'Provider session history is too large',
+    }),
   z
     .object({
       type: z.literal('device.invitation.created'),

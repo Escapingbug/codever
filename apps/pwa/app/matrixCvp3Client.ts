@@ -603,10 +603,15 @@ function toCvp3Command(
           operation: "session.create",
           ...(payload.scope ? { scope: payload.scope } : {}),
           ...(payload.provider ? { provider: payload.provider } : {}),
+          ...(payload.providerSessionId ? { providerSessionId: payload.providerSessionId } : {}),
+          ...(payload.title ? { title: payload.title } : {}),
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
           ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
           ...(payload.extensions ? { extensions: payload.extensions } : {}),
+          ...(payload.initialPrompt
+            ? { initialPrompt: { text: payload.initialPrompt } }
+            : {}),
         },
       };
     case "prompt":
@@ -651,7 +656,6 @@ function toCvp3Command(
         payload: {
           operation: "session.update",
           patch: {
-            ...(payload.provider ? { provider: payload.provider } : {}),
             ...(payload.model ? { model: payload.model } : {}),
             ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
             ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
@@ -659,6 +663,40 @@ function toCvp3Command(
         },
       };
     }
+    case "project.settings":
+      return {
+        ...common,
+        operation: "project.update",
+        payload: {
+          operation: "project.update",
+          patch: {
+            ...(payload.model === undefined ? {} : { model: payload.model }),
+            ...(payload.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: payload.reasoningEffort }),
+          },
+        },
+      };
+    case "provider.sessions.list":
+      return {
+        ...common,
+        operation: "provider.sessions.list",
+        payload: {
+          operation: "provider.sessions.list",
+          provider: payload.provider,
+          ...(payload.cursor ? { cursor: payload.cursor } : {}),
+        },
+      };
+    case "provider.session.inspect":
+      return {
+        ...common,
+        operation: "provider.session.inspect",
+        payload: {
+          operation: "provider.session.inspect",
+          provider: payload.provider,
+          providerSessionId: payload.providerSessionId,
+        },
+      };
     case "session.archive":
     case "session.restore":
     case "session.delete":
@@ -668,11 +706,9 @@ function toCvp3Command(
         operation: "session.set_lifecycle",
         payload: {
           operation: "session.set_lifecycle",
-          state: payload.operation === "session.archive"
+          state: payload.operation === "session.archive" || payload.operation === "session.delete"
             ? "archived"
-            : payload.operation === "session.restore"
-              ? "active"
-              : "deleted",
+            : "active",
         },
       };
     case "device.invite":
