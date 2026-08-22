@@ -280,6 +280,57 @@ export async function loadMessageHistoryPage(
   }
 }
 
+export async function loadTurnPromptHistory(
+  scope: string,
+  sessionId: string,
+  commandId: string,
+): Promise<PersistedChatMessage | null> {
+  if (!scope || !sessionId || !commandId) return null;
+  const database = await openHistoryDatabase();
+  try {
+    return await new Promise<PersistedChatMessage | null>((resolve, reject) => {
+      const transaction = database.transaction(MESSAGE_STORE, "readonly");
+      const index = transaction.objectStore(MESSAGE_STORE).index(BY_SESSION_INDEX);
+      const range = IDBKeyRange.bound(
+        [scope, sessionId, 0, ""],
+        [scope, sessionId, Number.MAX_SAFE_INTEGER, "\uffff"],
+      );
+      const request = index.openCursor(range, "prev");
+      let match: PersistedChatMessage | null = null;
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const candidate = cursor.value as StoredChatMessage;
+        if (candidate.kind === "user" && candidate.commandId === commandId) {
+          const message = structuredClone(candidate) as unknown as Record<
+            string,
+            unknown
+          >;
+          delete message.key;
+          delete message.scope;
+          delete message.sessionId;
+          match = message as PersistedChatMessage;
+          return;
+        }
+        cursor.continue();
+      };
+      request.onerror = () => transaction.abort();
+      transaction.oncomplete = () => resolve(match);
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            request.error ??
+            new Error("Could not load the task's original message."),
+        );
+      transaction.onerror = () => {
+        // onabort reports the final transaction error.
+      };
+    });
+  } finally {
+    database.close();
+  }
+}
+
 export async function clearMessageHistoryScope(scope: string): Promise<void> {
   if (!scope) return;
   return enqueueHistoryWrite(async () => {

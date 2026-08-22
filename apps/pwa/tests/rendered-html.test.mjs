@@ -262,7 +262,35 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(
     styles,
-    /@media \(max-width: 900px\)[\s\S]*?\.session-row\s*\{[\s\S]*?min-height:\s*68px/,
+    /@media \(max-width: 900px\)[\s\S]*?\.session-row\s*\{[\s\S]*?min-height:\s*56px/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.project-session-toggle\s*\{[\s\S]*?min-height:\s*44px/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.session-title-line strong\s*\{[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.conversation-header\s*\{[\s\S]*?height:\s*calc\(58px \+ env\(safe-area-inset-top\)\)/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.chat-feed\s*\{[\s\S]*?gap:\s*8px;[\s\S]*?padding:\s*9px 8px 16px/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.bubble,[\s\S]*?\.permission-card\s*\{[\s\S]*?max-width:\s*92%/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.bubble\s*\{[\s\S]*?font-size:\s*14\.5px/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 900px\)[\s\S]*?\.tool-group-summary\s*\{[\s\S]*?min-height:\s*44px/,
   );
   assert.match(
     styles,

@@ -1290,6 +1290,60 @@ select:focus-visible {
   font-weight: 680;
 }
 
+.connection-progress-mobile-visual,
+.connection-progress-mobile-title,
+.connection-progress-mobile-action,
+.conversation-connection-mobile {
+  display: none;
+}
+
+.mobile-connection-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #747d90;
+}
+
+.mobile-connection-icon svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.mobile-connection-icon.mobile-connection-ready {
+  color: #299170;
+}
+
+.mobile-connection-icon.mobile-connection-progress {
+  color: var(--violet);
+}
+
+.mobile-connection-icon.mobile-connection-offline {
+  color: #8d94a2;
+}
+
+.mobile-connection-icon.mobile-connection-attention {
+  color: #b64a54;
+}
+
+.mobile-connection-icon.mobile-connection-setup {
+  color: var(--violet-dark);
+}
+
+.mobile-connection-track {
+  opacity: 0.2;
+}
+
+.mobile-connection-spinner {
+  animation: motion-spin 760ms linear infinite;
+}
+
 .trust-footer {
   display: flex;
   min-height: 66px;
@@ -2234,6 +2288,145 @@ select:focus-visible {
   color: #b64a54;
 }
 
+.turn-result-context {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px solid #ececf2;
+}
+
+.error-bubble .turn-result-context {
+  border-top-color: #f0d9dc;
+}
+
+.turn-result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.turn-completion-mark,
+.turn-context-button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 9px;
+}
+
+.turn-completion-mark {
+  margin-right: auto;
+  color: #289276;
+  animation: state-confirm var(--motion-base) var(--motion-ease-out);
+}
+
+.turn-completion-mark.is-failed {
+  color: #b64a54;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.turn-completion-mark svg,
+.turn-context-button svg,
+.turn-origin-preview > svg,
+.jump-to-latest svg {
+  width: 17px;
+  height: 17px;
+}
+
+.turn-completion-mark svg,
+.turn-locate-button svg,
+.jump-to-latest svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.turn-context-button {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: #81899a;
+  transition:
+    color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
+}
+
+.turn-context-button:hover,
+.turn-context-button:focus-visible,
+.turn-result-context.is-expanded .turn-context-button:first-of-type {
+  background: #f0eefb;
+  color: var(--violet-dark);
+}
+
+.turn-context-button:active {
+  transform: scale(0.92);
+}
+
+.turn-context-button:disabled {
+  cursor: wait;
+}
+
+.turn-context-button:not(.turn-locate-button) svg,
+.turn-origin-preview > svg {
+  fill: currentColor;
+}
+
+.turn-locate-button.is-loading svg {
+  opacity: 0.32;
+}
+
+.turn-location-spinner {
+  position: absolute;
+  inset: 2px;
+  border: 1.5px solid rgb(105 87 229 / 15%);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  animation: motion-spin 720ms linear infinite;
+}
+
+.turn-location-error {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid white;
+  border-radius: 50%;
+  background: #c45662;
+}
+
+.turn-origin-preview {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 9px;
+  border: 1px solid #e8e6f4;
+  border-radius: 9px;
+  background: #f8f7fc;
+  color: #626a7c;
+  animation: notice-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.turn-origin-preview > svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: #9288c7;
+}
+
+.turn-origin-preview p {
+  white-space: pre-wrap;
+}
+
+.turn-origin-preview .message-attachments {
+  margin-top: 6px;
+}
+
 .agent-label {
   display: block;
   margin-bottom: 4px;
@@ -2888,18 +3081,51 @@ select:focus-visible {
 .jump-to-latest {
   position: absolute;
   z-index: 6;
-  top: -43px;
-  left: 50%;
-  min-height: 34px;
-  padding: 0 13px;
+  top: -46px;
+  right: clamp(20px, 4vw, 65px);
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
   border: 1px solid #d8d4f5;
-  border-radius: 999px;
+  border-radius: 12px;
   background: rgb(255 255 255 / 96%);
   box-shadow: 0 5px 18px rgb(41 46 67 / 14%);
   color: var(--violet-dark);
-  font-size: 12px;
-  font-weight: 700;
-  transform: translateX(-50%);
+  animation: notice-enter var(--motion-base) var(--motion-ease-out);
+}
+
+.jump-to-latest:hover,
+.jump-to-latest:focus-visible {
+  background: #f4f2fd;
+}
+
+.jump-to-latest.return-to-result {
+  border-color: #c9c3ee;
+}
+
+.return-result-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid white;
+  border-radius: 50%;
+  background: #2b9a7c;
+}
+
+.latest-message-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid white;
+  border-radius: 50%;
+  background: var(--violet);
+  animation: latest-message-pulse 1.6s ease-out infinite;
 }
 
 .ui-notice-list {
@@ -5028,6 +5254,18 @@ i.connection-state-connected {
   }
 }
 
+@keyframes latest-message-pulse {
+  0%,
+  42% {
+    box-shadow: 0 0 0 0 rgb(105 87 229 / 35%);
+  }
+
+  78%,
+  100% {
+    box-shadow: 0 0 0 5px rgb(105 87 229 / 0%);
+  }
+}
+
 @keyframes delivery-pending {
   to {
     opacity: 0.48;
@@ -5602,6 +5840,7 @@ body {
     min-width: 0;
     max-width: none;
     justify-content: flex-end;
+    gap: 4px;
     margin: 0;
     overflow: hidden;
     color: #5f687b;
@@ -5609,6 +5848,16 @@ body {
     font-weight: 650;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .gateway-mobile-status .mobile-connection-icon {
+    width: 21px;
+    height: 21px;
+  }
+
+  .gateway-mobile-status .mobile-connection-icon svg {
+    width: 18px;
+    height: 18px;
   }
 
   .gateway-mobile-status-copy {
@@ -5624,9 +5873,10 @@ body {
   }
 
   .session-row {
-    min-height: 68px;
-    gap: 9px;
-    padding: 7px 10px;
+    min-height: 56px;
+    gap: 8px;
+    margin-block: 0;
+    padding: 5px 8px;
   }
 
   .ui-notice button,
@@ -5652,6 +5902,7 @@ body {
   .project-session-toggle {
     min-height: 44px;
     margin-bottom: 0;
+    padding-block: 3px;
   }
 
   .project-copy strong {
@@ -5663,14 +5914,14 @@ body {
   }
 
   .session-avatar {
-    width: 38px;
-    height: 38px;
-    border-radius: 11px;
-    font-size: 11px;
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    font-size: 10px;
   }
 
   .session-copy {
-    gap: 3px;
+    gap: 2px;
   }
 
   .mobile-chat-open .session-panel .session-notices {
@@ -5683,7 +5934,7 @@ body {
   }
 
   .session-title-line strong {
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .session-title-line {
@@ -5691,13 +5942,10 @@ body {
   }
 
   .session-title-line strong {
-    display: -webkit-box;
     flex: 1;
     line-height: 1.25;
-    text-overflow: clip;
-    white-space: normal;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .session-title-line time {
@@ -5705,7 +5953,7 @@ body {
   }
 
   .session-preview-line > span {
-    font-size: 11px;
+    font-size: 10.5px;
   }
 
   .session-technical-summary,
@@ -5732,17 +5980,37 @@ body {
   }
 
   .conversation-header {
-    height: calc(65px + env(safe-area-inset-top));
-    gap: 8px;
+    height: calc(58px + env(safe-area-inset-top));
+    gap: 6px;
     padding: env(safe-area-inset-top) 11px 0 8px;
   }
 
   .conversation-heading h2 {
-    font-size: 17px;
+    font-size: 16px;
   }
 
   .conversation-heading > .conversation-status {
-    font-size: 13px;
+    font-size: 11px;
+  }
+
+  .conversation-connection-desktop {
+    display: none;
+  }
+
+  .conversation-connection-mobile {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .conversation-connection-mobile .mobile-connection-icon {
+    width: 17px;
+    height: 17px;
+  }
+
+  .conversation-connection-mobile .mobile-connection-icon svg {
+    width: 15px;
+    height: 15px;
   }
 
   .mobile-back {
@@ -5753,8 +6021,8 @@ body {
   }
 
   .conversation-avatar {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
   }
 
   .conversation-header .header-actions .header-button {
@@ -5762,20 +6030,94 @@ body {
   }
 
   .chat-feed {
-    gap: 12px;
-    padding: 13px 11px 24px;
+    gap: 8px;
+    padding: 9px 8px 16px;
   }
 
   .encryption-notice {
-    margin-inline: 14px;
+    margin-inline: 10px;
+    padding: 6px 9px;
+  }
+
+  .date-divider {
+    margin-block: 1px;
+  }
+
+  .date-divider span {
+    padding: 4px 9px;
+  }
+
+  .agent-row {
+    gap: 6px;
+  }
+
+  .agent-mark {
+    width: 24px;
+    height: 24px;
+    border-radius: 8px;
+    font-size: 9px;
+  }
+
+  .agent-turn-continuation {
+    margin-top: -4px;
+  }
+
+  .agent-row.agent-turn-continuation {
+    padding-left: 30px;
   }
 
   .bubble,
   .tool-card,
   .tool-group-card,
   .permission-card {
-    max-width: 86%;
+    max-width: 92%;
     width: auto;
+  }
+
+  .bubble {
+    padding: 8px 10px 6px;
+    border-radius: 12px;
+    font-size: 14.5px;
+    line-height: 1.43;
+  }
+
+  .bubble .markdown-content p,
+  .markdown-content ul,
+  .markdown-content ol,
+  .markdown-content blockquote,
+  .markdown-content pre,
+  .markdown-content table {
+    margin-block: 0.5em;
+  }
+
+  .markdown-content li + li {
+    margin-top: 0.18em;
+  }
+
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4 {
+    margin: 0.75em 0 0.3em;
+  }
+
+  .markdown-code-block {
+    margin-block: 0.5em;
+  }
+
+  .markdown-content pre {
+    padding: 9px 10px;
+    padding-top: 38px;
+    line-height: 1.42;
+  }
+
+  .agent-label {
+    margin-bottom: 3px;
+  }
+
+  .turn-result-context {
+    margin-top: 7px;
+    padding-top: 5px;
   }
 
   .tool-group-row {
@@ -5783,12 +6125,28 @@ body {
   }
 
   .tool-group-card {
-    width: min(520px, calc(100% - 18px));
+    width: calc(100% - 4px);
     max-width: none;
   }
 
   .tool-group-summary {
-    grid-template-columns: 32px minmax(0, 1fr) 25px 20px;
+    min-height: 44px;
+    grid-template-columns: 28px minmax(0, 1fr) 25px 18px;
+    gap: 7px;
+    padding: 5px 7px;
+  }
+
+  .tool-group-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .tool-group-copy strong {
+    font-size: 12px;
+  }
+
+  .tool-group-copy small {
+    font-size: 10px;
   }
 
   .tool-group-summary > .tool-state {
@@ -5805,10 +6163,6 @@ body {
     white-space: nowrap;
   }
 
-  .bubble {
-    font-size: 16px;
-  }
-
   .composer textarea,
   .matrix-form-grid input,
   .pairing-link-field textarea,
@@ -5818,7 +6172,27 @@ body {
 
   .tool-card,
   .permission-card {
-    width: min(440px, calc(100% - 35px));
+    width: min(440px, calc(100% - 30px));
+  }
+
+  .tool-heading {
+    min-height: 44px;
+    gap: 8px;
+    padding: 6px 9px;
+  }
+
+  .terminal-mark {
+    width: 28px;
+    height: 28px;
+  }
+
+  .tool-command {
+    padding: 7px 9px;
+  }
+
+  .tool-card > button {
+    min-height: 44px;
+    padding-inline: 9px;
   }
 
   .composer-area {
@@ -5972,6 +6346,65 @@ body {
 
   .archived-session-banner {
     margin: 10px 11px 0;
+  }
+
+  .project-session-group {
+    margin-bottom: 2px;
+  }
+
+  .project-session-group .session-row {
+    width: calc(100% - 20px);
+    margin-inline: 12px 8px;
+  }
+
+  .archived-session-section {
+    margin-top: 6px;
+    padding-top: 5px;
+  }
+
+  .archived-session-row {
+    min-height: 48px;
+    padding-block: 5px;
+  }
+
+  .connection-progress {
+    gap: 6px;
+    padding-block: 28px;
+  }
+
+  .connection-progress-desktop-visual,
+  .connection-progress-desktop-title,
+  .connection-progress-detail,
+  .connection-progress-desktop-action {
+    display: none;
+  }
+
+  .connection-progress-mobile-visual,
+  .connection-progress-mobile-title {
+    display: grid;
+  }
+
+  .connection-progress-mobile-visual {
+    width: 32px;
+    height: 32px;
+  }
+
+  .connection-progress-mobile-visual svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  .connection-progress-mobile-title {
+    font-size: 12px;
+  }
+
+  .connection-progress-mobile-action {
+    display: grid;
+    width: 36px;
+    min-height: 36px;
+    place-items: center;
+    padding: 0;
+    letter-spacing: 1px;
   }
 }
 

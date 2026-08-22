@@ -14,6 +14,11 @@ export type ConnectionRepairReason =
   | "matrix-session"
   | "project-authorization";
 
+export type MobileConnectionSignal = {
+  state: "setup" | "progress" | "ready" | "offline" | "attention";
+  label: "Connect" | "Connecting" | "Online" | "Offline" | "Attention";
+};
+
 type DetailCopy = Pick<ConnectionPresentation, "title" | "detail">;
 
 const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
@@ -215,6 +220,27 @@ export function connectionRepairReasonForDetail(
     return "project-authorization";
   }
   return null;
+}
+
+/**
+ * Mobile chrome exposes one stable product signal instead of mirroring every
+ * transport, authentication, recovery, and projection sub-phase. Detailed
+ * reasons remain available inside connection settings and diagnostics.
+ */
+export function deriveMobileConnectionSignal(input: {
+  trusted: boolean;
+  status: MatrixConnectionStatus;
+  gatewayAvailable: boolean;
+}): MobileConnectionSignal {
+  if (!input.trusted) return { state: "setup", label: "Connect" };
+  if (input.status === "error") {
+    return { state: "attention", label: "Attention" };
+  }
+  if (input.status === "offline") {
+    return { state: "offline", label: "Offline" };
+  }
+  if (input.gatewayAvailable) return { state: "ready", label: "Online" };
+  return { state: "progress", label: "Connecting" };
 }
 
 function connectionPresentationState(

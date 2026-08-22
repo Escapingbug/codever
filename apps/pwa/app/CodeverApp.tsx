@@ -132,7 +132,9 @@ import {
   connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
   deriveConnectionPresentation,
+  deriveMobileConnectionSignal,
   type ConnectionRepairReason,
+  type MobileConnectionSignal,
 } from "./connectionPresentation";
 import { deriveGatewayLiveness } from "./gatewayLiveness";
 import { createConnectionDiagnostics } from "./connectionDiagnostics";
@@ -202,11 +204,19 @@ import {
   clearSessionMessageHistory,
   deleteMessageHistory,
   loadMessageHistoryPage,
+  loadTurnPromptHistory,
   matrixHistoryScope,
   reconcileMessageHistory,
   saveMessageHistory,
   type MessageHistoryCursor,
 } from "./messageHistory";
+import {
+  latestCompletedTurnContext,
+  nextTurnPromptLookup,
+  trimHistoryPageToTurn,
+  turnPrompt,
+  type ObservedCommandCompletion,
+} from "./turnContext";
 import {
   readSelectedSession,
   writeSelectedSession,
@@ -257,6 +267,18 @@ type RevisionConflictNotice = {
 
 type NativeCommandReviewNotice = CodeverCommandReview & {
   busy: boolean;
+};
+
+type TurnHistoryLoadState = {
+  commandId: string;
+  phase: "loading" | "ready" | "error";
+};
+
+type FeedReturnAnchor = {
+  sessionId: string;
+  messageId: string;
+  viewportOffset: number;
+  fallbackScrollTop: number;
 };
 
 type PendingSessionLifecycleRecovery = {
@@ -321,6 +343,85 @@ function Icon({ children }: { children: React.ReactNode }) {
   );
 }
 
+function CheckCircleIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="m8.3 12.1 2.3 2.3 5.1-5.2" />
+    </svg>
+  );
+}
+
+function QuoteIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M5.5 8.2h5v5.1H7.6c0 1.7.8 2.7 2.4 3.1v2c-3-.5-4.5-2.4-4.5-5.7V8.2Zm8 0h5v5.1h-2.9c0 1.7.8 2.7 2.4 3.1v2c-3-.5-4.5-2.4-4.5-5.7V8.2Z" />
+    </svg>
+  );
+}
+
+function LocateIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3" />
+    </svg>
+  );
+}
+
+function ArrowDownIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M12 5v12M7.5 12.5 12 17l4.5-4.5" />
+    </svg>
+  );
+}
+
+function MobileConnectionIcon({
+  state,
+}: {
+  state: MobileConnectionSignal["state"];
+}) {
+  if (state === "ready") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="m8.3 12.1 2.3 2.3 5.1-5.2" />
+      </svg>
+    );
+  }
+  if (state === "progress") {
+    return (
+      <svg aria-hidden="true" className="mobile-connection-spinner" viewBox="0 0 24 24">
+        <circle className="mobile-connection-track" cx="12" cy="12" r="8.5" />
+        <path d="M12 3.5a8.5 8.5 0 0 1 7.9 5.4" />
+      </svg>
+    );
+  }
+  if (state === "offline") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="m7 7 10 10" />
+      </svg>
+    );
+  }
+  if (state === "attention") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 7.5v5.8M12 16.5h.01" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 8v8M8 12h8" />
+    </svg>
+  );
+}
+
 function AttachmentList({
   attachments,
   connection,
@@ -338,6 +439,81 @@ function AttachmentList({
           key={attachment.id}
         />
       ))}
+    </div>
+  );
+}
+
+function TurnResultContext({
+  prompt,
+  connection,
+  expanded,
+  locationPhase,
+  failed,
+  onTogglePrompt,
+  onLocatePrompt,
+}: {
+  prompt: ChatMessage;
+  connection: CodeverClient | null;
+  expanded: boolean;
+  locationPhase: TurnHistoryLoadState["phase"];
+  failed: boolean;
+  onTogglePrompt(): void;
+  onLocatePrompt(): void;
+}) {
+  const locating = locationPhase === "loading";
+  const locateLabel = locating
+    ? "Loading the original message"
+    : locationPhase === "error"
+      ? "Retry loading the original message"
+      : "Jump to the original message";
+  return (
+    <div className={`turn-result-context ${expanded ? "is-expanded" : ""}`}>
+      <div className="turn-result-toolbar" aria-label="Completed task context">
+        <span
+          className={`turn-completion-mark ${failed ? "is-failed" : ""}`}
+          aria-label={failed ? "Task ended with an error" : "Task completed"}
+          role="img"
+        >
+          {failed ? "!" : <CheckCircleIcon />}
+        </span>
+        <button
+          type="button"
+          className="turn-context-button"
+          aria-label={expanded ? "Hide the original message" : "Show the original message"}
+          aria-expanded={expanded}
+          title={expanded ? "Hide original message" : "Show original message"}
+          onClick={onTogglePrompt}
+        >
+          <QuoteIcon />
+        </button>
+        <button
+          type="button"
+          className={`turn-context-button turn-locate-button is-${locationPhase}`}
+          aria-label={locateLabel}
+          aria-busy={locating}
+          disabled={locating}
+          title={locateLabel}
+          onClick={onLocatePrompt}
+        >
+          <LocateIcon />
+          {locating && <span className="turn-location-spinner" aria-hidden="true" />}
+          {locationPhase === "error" && (
+            <span className="turn-location-error" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+      {expanded && (
+        <div className="turn-origin-preview">
+          <QuoteIcon />
+          <div>
+            {prompt.text ? <p>{prompt.text}</p> : null}
+            <AttachmentList
+              attachments={prompt.attachments}
+              connection={connection}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -605,12 +781,24 @@ function CodeverAppRuntime() {
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [feedAwayFromLatest, setFeedAwayFromLatest] = useState(false);
+  const [feedHasUnseenMessages, setFeedHasUnseenMessages] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyRetryMode, setHistoryRetryMode] = useState<
     "restore" | "older" | null
   >(null);
+  const [observedCommandCompletions, setObservedCommandCompletions] = useState<
+    ObservedCommandCompletion[]
+  >([]);
+  const [turnPromptCache, setTurnPromptCache] = useState<
+    Map<string, ChatMessage | null>
+  >(() => new Map());
+  const [expandedTurnId, setExpandedTurnId] = useState<string | null>(null);
+  const [turnHistoryLoad, setTurnHistoryLoad] =
+    useState<TurnHistoryLoadState | null>(null);
+  const [feedReturnAnchor, setFeedReturnAnchor] =
+    useState<FeedReturnAnchor | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -745,6 +933,10 @@ function CodeverAppRuntime() {
   const nativeCommandReviewRef = useRef<NativeCommandReviewNotice | null>(null);
   const activePromptCommandsRef = useRef(new Map<string, string>());
   const completedCommandResultsRef = useRef(new Set<string>());
+  const completionObservationOrderRef = useRef(0);
+  const turnPromptLookupRef = useRef(new Set<string>());
+  const turnHistoryHydrationRef = useRef<string | null>(null);
+  const messageElementsRef = useRef(new Map<string, HTMLDivElement>());
   const optimisticMessagesRef = useRef(
     new Map<string, OptimisticMessageReference>(),
   );
@@ -789,6 +981,21 @@ function CodeverAppRuntime() {
     ? sessionLifecycleBusy.get(selected.id) ?? null
     : null;
   const selectedLifecycleBusy = selectedLifecycleAction !== null;
+  const latestCompletedTurn = useMemo(
+    () =>
+      latestCompletedTurnContext(
+        messages,
+        observedCommandCompletions,
+        turnPromptCache,
+        selectedSessionId,
+      ),
+    [
+      messages,
+      observedCommandCompletions,
+      selectedSessionId,
+      turnPromptCache,
+    ],
+  );
   const deleteDialogBusy = Boolean(
     deleteTarget !== null &&
       sessionLifecycleBusy.get(deleteTarget.id) === "delete",
@@ -958,6 +1165,11 @@ function CodeverAppRuntime() {
   const connectionPresentation = gatewayLiveness.state === "offline"
     ? deriveConnectionPresentation("offline", "matrix_gateway_offline")
     : matrixConnectionPresentation;
+  const mobileConnectionSignal = deriveMobileConnectionSignal({
+    trusted: trustedGateway !== null,
+    status: displayedConnectionStatus,
+    gatewayAvailable,
+  });
 
   const connectionRepairReason = connectionRepairReasonForDetail(
     connectionDetail,
@@ -1149,6 +1361,30 @@ function CodeverAppRuntime() {
     );
   }
 
+  function observeCommandCompletion(result: CommandCompletion): void {
+    if (!result.sessionId) return;
+    const observed: ObservedCommandCompletion = {
+      ...result,
+      observedOrder: ++completionObservationOrderRef.current,
+    };
+    setObservedCommandCompletions((current) =>
+      current.some((completion) => completion.commandId === result.commandId)
+        ? current
+        : [...current, observed],
+    );
+    const prompt = turnPrompt(
+      liveMessagesBySessionRef.current.get(result.sessionId) ?? [],
+      result.commandId,
+    );
+    if (prompt) {
+      setTurnPromptCache((current) => {
+        const next = new Map(current);
+        next.set(result.commandId, prompt);
+        return next;
+      });
+    }
+  }
+
   useEffect(() => {
     writeProjectDisclosureState(window.localStorage, collapsedProjects);
   }, [collapsedProjects]);
@@ -1156,6 +1392,67 @@ function CodeverAppRuntime() {
   useEffect(() => {
     writeSessionReadState(window.localStorage, sessionReadState);
   }, [sessionReadState]);
+
+  useEffect(() => {
+    const sessionId = selectedSessionId;
+    const scope = historyScopeRef.current;
+    if (!sessionId || !scope) return;
+    const unresolved = nextTurnPromptLookup(
+      [
+        ...messages,
+        ...(liveMessagesBySessionRef.current.get(sessionId) ?? []),
+      ],
+      observedCommandCompletions,
+      turnPromptCache,
+      sessionId,
+    );
+    if (!unresolved) return;
+    const lookupKey = `${sessionId}:${unresolved.commandId}`;
+    if (turnPromptLookupRef.current.has(lookupKey)) return;
+    turnPromptLookupRef.current.add(lookupKey);
+    void loadTurnPromptHistory(scope, sessionId, unresolved.commandId)
+      .then((prompt) => {
+        if (historyScopeRef.current !== scope) return;
+        setTurnPromptCache((current) => {
+          const next = new Map(current);
+          next.set(
+            unresolved.commandId,
+            prompt ? { ...prompt, sessionId, historical: true } : null,
+          );
+          return next;
+        });
+      })
+      .catch((error) => {
+        showUiNotice(
+          "history:turn-prompt",
+          "history",
+          "warning",
+          `The task's original message could not be read: ${formatUiError(error)}`,
+        );
+      })
+      .finally(() => turnPromptLookupRef.current.delete(lookupKey));
+  }, [
+    messages,
+    observedCommandCompletions,
+    selectedSessionId,
+    turnPromptCache,
+  ]);
+
+  useEffect(() => {
+    const turn = latestCompletedTurn;
+    if (!turn) return;
+    if (turn.promptInTranscript) return;
+    if (
+      historyLoading ||
+      turnHistoryHydrationRef.current === turn.commandId ||
+      (turnHistoryLoad?.commandId === turn.commandId &&
+        (turnHistoryLoad.phase === "loading" ||
+          turnHistoryLoad.phase === "error"))
+    ) {
+      return;
+    }
+    void hydrateTurnHistory(turn.completion.sessionId!, turn.commandId);
+  }, [historyLoading, latestCompletedTurn, turnHistoryLoad]);
 
   useEffect(() => {
     if (!Object.values(uiNotices).some((notice) => notice.expiresAt !== null)) {
@@ -1564,6 +1861,7 @@ function CodeverAppRuntime() {
         behavior: "auto",
       });
       setFeedAwayFromLatest(false);
+      setFeedHasUnseenMessages(false);
     } else {
       setFeedAwayFromLatest(!isNearFeedBottom(feed));
     }
@@ -1700,6 +1998,9 @@ function CodeverAppRuntime() {
     }
     const feed = feedRef.current;
     followLatestRef.current = !feed || isNearFeedBottom(feed);
+    if (!followLatestRef.current && !incoming.historical) {
+      setFeedHasUnseenMessages(true);
+    }
     setMessages((current) =>
       mergeChatMessage(current, message, {
         reconcileMessageId: optimisticMessageId,
@@ -1995,11 +2296,156 @@ function CodeverAppRuntime() {
     }
   }
 
+  async function hydrateTurnHistory(
+    sessionId: string,
+    commandId: string,
+  ): Promise<void> {
+    const scope = historyScopeRef.current;
+    if (
+      !scope ||
+      historySessionIdRef.current !== sessionId ||
+      historyLoadingRef.current ||
+      turnHistoryHydrationRef.current === commandId
+    ) {
+      return;
+    }
+    const generation = historyGenerationRef.current;
+    turnHistoryHydrationRef.current = commandId;
+    historyLoadingRef.current = true;
+    setTurnHistoryLoad({ commandId, phase: "loading" });
+    setHistoryError(null);
+    setHistoryRetryMode(null);
+    try {
+      while (
+        generation === historyGenerationRef.current &&
+        historySessionIdRef.current === sessionId
+      ) {
+        const cached = await loadMessageHistoryPage(scope, sessionId, {
+          before: historyCursorRef.current,
+          limit: 100,
+        });
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+        if (cached.messages.length > 0) {
+          const cachedMessages = cached.messages.map((message) => ({
+            ...message,
+            sessionId,
+            historical: true,
+          }));
+          const turnPage = trimHistoryPageToTurn(cachedMessages, commandId);
+          prepareHistoryPrepend(feedRef.current, prependScrollRef);
+          historyCursorRef.current = turnPage.prompt
+            ? olderHistoryCursor(
+                historyCursorRef.current,
+                [turnPage.prompt],
+              )
+            : cached.cursor;
+          setMessages((current) =>
+            mergeChatMessages(
+              current,
+              withoutReconciledOptimisticCopies(
+                turnPage.messages,
+                reconciledOptimisticMessageIdsRef.current,
+              ),
+            ),
+          );
+          const connection = codeverClientRef.current;
+          connection?.markHistoryLoaded(
+            sessionId,
+            cachedMessages.flatMap((message) =>
+              message.eventId ? [message.eventId] : [],
+            ),
+          );
+          if (turnPage.prompt) {
+            setHistoryHasMore(
+              turnPage.hasEarlierMessages ||
+                cached.hasMore ||
+                Boolean(connection),
+            );
+            setTurnHistoryLoad({ commandId, phase: "ready" });
+            return;
+          }
+          if (cached.hasMore) {
+            setHistoryHasMore(true);
+            continue;
+          }
+        }
+
+        const connection = codeverClientRef.current;
+        if (!connection) {
+          setHistoryHasMore(false);
+          setTurnHistoryLoad({ commandId, phase: "error" });
+          return;
+        }
+        const remote = await connection.loadHistoryPage(sessionId, 100);
+        const remoteMessages = remote.messages.map((message) =>
+          chatMessageFromIncoming(
+            { ...incomingMessageFromClient(message), historical: true },
+            message.sessionId ?? sessionId,
+          ),
+        );
+        if (remoteMessages.length > 0) {
+          await persistMessageHistoryPage(scope, sessionId, remoteMessages);
+        }
+        if (
+          generation !== historyGenerationRef.current ||
+          historySessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+        if (remoteMessages.length > 0) {
+          const turnPage = trimHistoryPageToTurn(remoteMessages, commandId);
+          prepareHistoryPrepend(feedRef.current, prependScrollRef);
+          historyCursorRef.current = olderHistoryCursor(
+            historyCursorRef.current,
+            turnPage.prompt ? [turnPage.prompt] : remoteMessages,
+          );
+          setMessages((current) =>
+            mergeChatMessages(current, turnPage.messages),
+          );
+          if (turnPage.prompt) {
+            setHistoryHasMore(turnPage.hasEarlierMessages || remote.hasMore);
+            setTurnHistoryLoad({ commandId, phase: "ready" });
+            return;
+          }
+        }
+        setHistoryHasMore(remote.hasMore);
+        if (!remote.hasMore) {
+          setTurnHistoryLoad({ commandId, phase: "error" });
+          return;
+        }
+      }
+    } catch (error) {
+      if (
+        generation === historyGenerationRef.current &&
+        historySessionIdRef.current === sessionId
+      ) {
+        setTurnHistoryLoad({ commandId, phase: "error" });
+        setHistoryError(
+          `The task's original position could not be loaded: ${formatUiError(error)}`,
+        );
+        setHistoryRetryMode("older");
+      }
+    } finally {
+      if (turnHistoryHydrationRef.current === commandId) {
+        turnHistoryHydrationRef.current = null;
+      }
+      if (generation === historyGenerationRef.current) {
+        historyLoadingRef.current = false;
+      }
+    }
+  }
+
   function handleFeedScroll() {
     const feed = feedRef.current;
     if (!feed) return;
     followLatestRef.current = isNearFeedBottom(feed);
     setFeedAwayFromLatest(!followLatestRef.current);
+    if (followLatestRef.current) setFeedHasUnseenMessages(false);
     if (
       feed.scrollTop <= 80 &&
       historyHasMore &&
@@ -2015,6 +2461,77 @@ function CodeverAppRuntime() {
     followLatestRef.current = true;
     feed.scrollTo({ top: feed.scrollHeight, behavior: "auto" });
     setFeedAwayFromLatest(false);
+    setFeedHasUnseenMessages(false);
+  }
+
+  function bindMessageElement(
+    messageId: string,
+    element: HTMLDivElement | null,
+  ): void {
+    if (element) messageElementsRef.current.set(messageId, element);
+    else messageElementsRef.current.delete(messageId);
+  }
+
+  function feedScrollBehavior(): ScrollBehavior {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? "auto"
+      : "smooth";
+  }
+
+  function jumpToTurnOrigin(): void {
+    const turn = latestCompletedTurn;
+    const feed = feedRef.current;
+    const promptId = turn?.promptInTranscript?.id;
+    if (!turn || !feed || !promptId) {
+      if (turn && turnHistoryLoad?.phase === "error") {
+        void hydrateTurnHistory(turn.completion.sessionId!, turn.commandId);
+      }
+      return;
+    }
+    const promptElement = messageElementsRef.current.get(promptId);
+    const resultElement = messageElementsRef.current.get(turn.result.id);
+    if (!promptElement || !resultElement) return;
+    const feedRect = feed.getBoundingClientRect();
+    setFeedReturnAnchor({
+      sessionId: turn.completion.sessionId!,
+      messageId: turn.result.id,
+      viewportOffset: resultElement.getBoundingClientRect().top - feedRect.top,
+      fallbackScrollTop: feed.scrollTop,
+    });
+    const promptRect = promptElement.getBoundingClientRect();
+    const centeredTop =
+      feed.scrollTop +
+      promptRect.top -
+      feedRect.top -
+      Math.max(18, (feed.clientHeight - promptRect.height) / 2);
+    followLatestRef.current = false;
+    feed.scrollTo({
+      top: Math.max(0, centeredTop),
+      behavior: feedScrollBehavior(),
+    });
+    setFeedAwayFromLatest(true);
+  }
+
+  function returnToTurnResult(): void {
+    const feed = feedRef.current;
+    const anchor = feedReturnAnchor;
+    if (!feed || !anchor) return;
+    const target = messageElementsRef.current.get(anchor.messageId);
+    const top = target
+      ? feed.scrollTop +
+        target.getBoundingClientRect().top -
+        feed.getBoundingClientRect().top -
+        anchor.viewportOffset
+      : anchor.fallbackScrollTop;
+    followLatestRef.current = false;
+    feed.scrollTo({ top: Math.max(0, top), behavior: feedScrollBehavior() });
+    setFeedReturnAnchor(null);
+    window.requestAnimationFrame(() => {
+      const currentFeed = feedRef.current;
+      if (currentFeed) {
+        setFeedAwayFromLatest(!isNearFeedBottom(currentFeed));
+      }
+    });
   }
 
   function activateLocalSession(
@@ -2049,8 +2566,12 @@ function CodeverAppRuntime() {
       }
     }
     if (!sessionChanged) return;
+    setExpandedTurnId(null);
+    setFeedReturnAnchor(null);
+    setTurnHistoryLoad(null);
     followLatestRef.current = true;
     setFeedAwayFromLatest(false);
+    setFeedHasUnseenMessages(false);
     setComposerOptionsOpen(false);
     historyGenerationRef.current += 1;
     historySessionIdRef.current = sessionId;
@@ -2296,6 +2817,15 @@ function CodeverAppRuntime() {
     nativeCommandReviewRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
+    completionObservationOrderRef.current = 0;
+    turnPromptLookupRef.current.clear();
+    turnHistoryHydrationRef.current = null;
+    messageElementsRef.current.clear();
+    setObservedCommandCompletions([]);
+    setTurnPromptCache(new Map());
+    setExpandedTurnId(null);
+    setTurnHistoryLoad(null);
+    setFeedReturnAnchor(null);
     setRevisionConflict(null);
     setNativeCommandReview(null);
     setConnectionError(null);
@@ -2327,6 +2857,7 @@ function CodeverAppRuntime() {
     historyLoadingRef.current = false;
     setHistoryLoading(false);
     setHistoryHasMore(false);
+    setFeedHasUnseenMessages(false);
     setHistoryError(null);
     setHistoryRetryMode(null);
     try {
@@ -2586,6 +3117,7 @@ function CodeverAppRuntime() {
         },
         onCommandResult(result) {
           if (!isCurrentStartup()) return;
+          observeCommandCompletion(result);
           const promptSessionId =
             activePromptCommandsRef.current.get(result.commandId);
           if (promptSessionId) {
@@ -2648,6 +3180,16 @@ function CodeverAppRuntime() {
     nativeCommandReviewRef.current = null;
     activePromptCommandsRef.current.clear();
     completedCommandResultsRef.current.clear();
+    completionObservationOrderRef.current = 0;
+    turnPromptLookupRef.current.clear();
+    turnHistoryHydrationRef.current = null;
+    messageElementsRef.current.clear();
+    setObservedCommandCompletions([]);
+    setTurnPromptCache(new Map());
+    setExpandedTurnId(null);
+    setTurnHistoryLoad(null);
+    setFeedReturnAnchor(null);
+    setFeedHasUnseenMessages(false);
     pendingCreatedSessionIdRef.current = null;
     pendingDeletionSessionIdsRef.current = new Set();
     setSessionLifecycleBusy(new Map());
@@ -4781,7 +5323,7 @@ function CodeverAppRuntime() {
               : ""
           }`}
           aria-label={`Open connection settings, ${
-            trustedGateway ? connectionPresentation.title : "not connected"
+            mobileConnectionSignal.label
           }`}
           onClick={() => setSettingsOpen(true)}
         >
@@ -4799,11 +5341,13 @@ function CodeverAppRuntime() {
                 : "Scan or paste a one-time code"}
             </span>
             <span className="gateway-mobile-status" aria-hidden="true">
-              <i
-                className={`connection-dot connection-state-${displayedConnectionStatus}`}
-              />
+              <span
+                className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+              >
+                <MobileConnectionIcon state={mobileConnectionSignal.state} />
+              </span>
               <span className="gateway-mobile-status-copy">
-                {trustedGateway ? connectionPresentation.title : "Connect"}
+                {mobileConnectionSignal.label}
               </span>
             </span>
           </div>
@@ -5051,26 +5595,51 @@ function CodeverAppRuntime() {
               className={`empty-search connection-progress connection-progress-${connectionPresentation.state}`}
               role="status"
             >
-              {connectionPresentation.state === "progress" ||
-              connectionPresentation.state === "ready" ? (
-                <span
-                  className="connection-progress-spinner"
-                  aria-hidden="true"
-                />
-              ) : (
-                <span className="connection-progress-symbol" aria-hidden="true">
-                  {connectionPresentation.state === "offline" ? "⌁" : "!"}
-                </span>
-              )}
-              <strong>
+              <span className="connection-progress-desktop-visual" aria-hidden="true">
+                {connectionPresentation.state === "progress" ||
+                connectionPresentation.state === "ready" ? (
+                  <span className="connection-progress-spinner" />
+                ) : (
+                  <span className="connection-progress-symbol">
+                    {connectionPresentation.state === "offline" ? "⌁" : "!"}
+                  </span>
+                )}
+              </span>
+              <span
+                className={`connection-progress-mobile-visual mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                aria-hidden="true"
+              >
+                <MobileConnectionIcon state={mobileConnectionSignal.state} />
+              </span>
+              <strong className="connection-progress-desktop-title">
                 {connectionStatus === "connected"
                   ? "Syncing your conversations"
                   : connectionPresentation.title}
               </strong>
-              <small>{connectionPresentation.detail}</small>
-              <button type="button" onClick={() => setSettingsOpen(true)}>
+              <strong className="connection-progress-mobile-title">
+                {mobileConnectionSignal.label}
+              </strong>
+              <small className="connection-progress-detail">
+                {connectionPresentation.detail}
+              </small>
+              <button
+                type="button"
+                className="connection-progress-desktop-action"
+                onClick={() => setSettingsOpen(true)}
+              >
                 Open connection settings
               </button>
+              {(mobileConnectionSignal.state === "offline" ||
+                mobileConnectionSignal.state === "attention") && (
+                <button
+                  type="button"
+                  className="connection-progress-mobile-action"
+                  aria-label="Open connection settings"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  •••
+                </button>
+              )}
             </div>
           )}
           {gatewayState &&
@@ -5150,17 +5719,32 @@ function CodeverAppRuntime() {
                 }`}
               />
               <span className="conversation-status-copy">
-                {gatewayAvailable
-                  ? gatewayState
-                    ? selectedArchived
-                      ? `${activeWorkspace?.projectName || "Project"} · archived`
-                      : `${activeWorkspace?.projectName || "Project"} · ${
-                          isStreaming
-                            ? agentActivity?.label || "working"
-                            : activeProvider
-                        }`
-                    : "Syncing conversations…"
-                  : connectionPresentation.title}
+                {gatewayAvailable && gatewayState ? (
+                  selectedArchived ? (
+                    `${activeWorkspace?.projectName || "Project"} · archived`
+                  ) : (
+                    `${activeWorkspace?.projectName || "Project"} · ${
+                      isStreaming
+                        ? agentActivity?.label || "working"
+                        : activeProvider
+                    }`
+                  )
+                ) : (
+                  <>
+                    <span className="conversation-connection-desktop">
+                      {connectionPresentation.title}
+                    </span>
+                    <span className="conversation-connection-mobile">
+                      <span
+                        className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                        aria-hidden="true"
+                      >
+                        <MobileConnectionIcon state={mobileConnectionSignal.state} />
+                      </span>
+                      {mobileConnectionSignal.label}
+                    </span>
+                  </>
+                )}
               </span>
             </span>
           </div>
@@ -5353,6 +5937,32 @@ function CodeverAppRuntime() {
             const agentTurnClass = agentWork
               ? `${previousIsAgentWork ? "agent-turn-continuation" : "agent-turn-start"} ${nextIsAgentWork ? "" : "agent-turn-end"}`
               : "";
+            const isCompletedTurnResult =
+              latestCompletedTurn?.result.id === message.id;
+            const turnLocationPhase = latestCompletedTurn?.promptInTranscript
+              ? "ready"
+              : turnHistoryLoad &&
+                  turnHistoryLoad.commandId === latestCompletedTurn?.commandId
+                ? turnHistoryLoad.phase
+                : "loading";
+            const resultContext =
+              isCompletedTurnResult && latestCompletedTurn ? (
+                <TurnResultContext
+                  prompt={latestCompletedTurn.prompt}
+                  connection={codeverClientRef.current}
+                  expanded={expandedTurnId === latestCompletedTurn.commandId}
+                  locationPhase={turnLocationPhase}
+                  failed={latestCompletedTurn.completion.outcome === "failed"}
+                  onTogglePrompt={() =>
+                    setExpandedTurnId((current) =>
+                      current === latestCompletedTurn.commandId
+                        ? null
+                        : latestCompletedTurn.commandId,
+                    )
+                  }
+                  onLocatePrompt={jumpToTurnOrigin}
+                />
+              ) : null;
             if (message.kind === "notice") {
               return (
                 <div
@@ -5373,12 +5983,14 @@ function CodeverAppRuntime() {
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
+                  ref={(element) => bindMessageElement(message.id, element)}
                 >
                   <div className="agent-mark error-mark">!</div>
                   <div className="bubble agent-bubble error-bubble">
                     <span className="agent-label">TASK NEEDS ATTENTION</span>
                     <p>{message.text}</p>
                     <time>{message.time}</time>
+                    {resultContext}
                   </div>
                 </div>
               );
@@ -5393,6 +6005,7 @@ function CodeverAppRuntime() {
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
+                  ref={(element) => bindMessageElement(message.id, element)}
                 >
                   <div className="bubble user-bubble">
                     {message.originDeviceName &&
@@ -5577,6 +6190,7 @@ function CodeverAppRuntime() {
                   message.historical ? "" : "message-enter"
                 }`}
                 key={message.id}
+                ref={(element) => bindMessageElement(message.id, element)}
               >
                 <div className="agent-mark">C</div>
                 <div className="bubble agent-bubble">
@@ -5593,6 +6207,7 @@ function CodeverAppRuntime() {
                     connection={codeverClientRef.current}
                   />
                   <time>{message.time}</time>
+                  {resultContext}
                 </div>
               </div>
             );
@@ -5619,15 +6234,31 @@ function CodeverAppRuntime() {
         </div>
 
         <div className="composer-area">
-          {feedAwayFromLatest && (
+          {feedReturnAnchor?.sessionId === selectedSessionId ? (
+            <button
+              type="button"
+              className="jump-to-latest return-to-result"
+              aria-label="Return to the task result"
+              title="Return to task result"
+              onClick={returnToTurnResult}
+            >
+              <ArrowDownIcon />
+              <span className="return-result-dot" aria-hidden="true" />
+            </button>
+          ) : feedAwayFromLatest ? (
             <button
               type="button"
               className="jump-to-latest"
+              aria-label="Jump to latest messages"
+              title="Latest messages"
               onClick={scrollFeedToLatest}
             >
-              ↓ Latest messages
+              <ArrowDownIcon />
+              {feedHasUnseenMessages && (
+                <span className="latest-message-dot" aria-hidden="true" />
+              )}
             </button>
-          )}
+          ) : null}
           <div className="context-strip">
             <div className="context-item">
               <span className="context-icon">▱</span>
