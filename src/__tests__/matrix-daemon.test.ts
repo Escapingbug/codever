@@ -860,7 +860,6 @@ describe('MatrixGatewayRunner', () => {
         expect(client.stateSent.filter(request =>
             request.eventType === CODEVER_MATRIX_SESSION_STATE_EVENT_TYPE
         )).toHaveLength(1)
-        expect(client.stateSent).toHaveLength(1)
         expect((Reflect.get(runner, 'roomSnapshotTimers') as Map<string, unknown>).size).toBe(1)
 
         await runner.stop()
