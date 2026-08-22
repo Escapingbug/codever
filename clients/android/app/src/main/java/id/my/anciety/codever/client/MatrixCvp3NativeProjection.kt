@@ -4,6 +4,10 @@ import id.my.anciety.codever.client.events.ClientMessage
 import id.my.anciety.codever.client.events.ClientMessageFormat
 import id.my.anciety.codever.client.events.ClientMessageKind
 import id.my.anciety.codever.client.events.PublicClientJson
+import id.my.anciety.codever.client.events.ToolCategory
+import id.my.anciety.codever.client.events.ToolGroupPresentation
+import id.my.anciety.codever.client.events.ToolPhase
+import id.my.anciety.codever.client.events.ToolPresentationItem
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -303,6 +307,7 @@ internal class MatrixCvp3NativeProjection(
             "assistant.message" -> if (sessionId != null) {
                 val messageId = payload.requiredString("messageId", 256)
                 val part = payload.optionalInt("partIndex") ?: 0
+                val toolGroup = decodeCvp3ToolGroup(payload)
                 val attachments = (payload["attachments"] as? JsonArray)?.mapNotNull { item ->
                     runCatching { PublicClientJson.decodeAttachment(item) }.getOrNull()
                 }
@@ -311,7 +316,7 @@ internal class MatrixCvp3NativeProjection(
                     sender = gatewayId(),
                     timestamp = occurredAt,
                     encrypted = true,
-                    kind = ClientMessageKind.AGENT,
+                    kind = if (toolGroup == null) ClientMessageKind.AGENT else ClientMessageKind.TOOL,
                     format = if (payload.optionalString("format", 32) == "plain") {
                         ClientMessageFormat.PLAIN
                     } else {
@@ -321,6 +326,23 @@ internal class MatrixCvp3NativeProjection(
                     sessionId = sessionId,
                     commandId = causation,
                     attachments = attachments?.takeIf { it.isNotEmpty() },
+                    toolGroup = toolGroup,
+                    semantic = payload,
+                ))
+            }
+            "tool.activity" -> if (sessionId != null) {
+                val toolGroup = toolActivityGroup(payload, occurredAt)
+                messages = listOf(ClientMessage(
+                    eventId = "tool:${toolGroup.groupId}",
+                    sender = gatewayId(),
+                    timestamp = occurredAt,
+                    encrypted = true,
+                    kind = ClientMessageKind.TOOL,
+                    format = ClientMessageFormat.PLAIN,
+                    text = toolGroup.tools.single().name,
+                    sessionId = sessionId,
+                    commandId = causation,
+                    toolGroup = toolGroup,
                     semantic = payload,
                 ))
             }
@@ -946,6 +968,30 @@ internal class MatrixCvp3NativeProjection(
         if (title.isEmpty()) return "New session"
         return if (title.length <= 64) title else title.take(61) + "..."
     }
+}
+
+private fun decodeCvp3ToolGroup(payload: JsonObject): ToolGroupPresentation? {
+    val ui = payload["ui"] ?: return null
+    return runCatching { PublicClientJson.decodeToolGroup(ui) }.getOrNull()
+}
+
+private fun toolActivityGroup(payload: JsonObject, occurredAt: Long): ToolGroupPresentation {
+    val toolCallId = payload.requiredString("toolCallId", 256)
+    val name = payload.requiredString("name", 256)
+    val phase = ToolPhase.fromWire(payload.requiredString("phase", 64))
+    return ToolGroupPresentation(
+        groupId = toolCallId,
+        tools = listOf(ToolPresentationItem(
+            id = toolCallId,
+            name = name,
+            title = name,
+            category = ToolCategory.UNKNOWN,
+            phase = phase,
+            isError = phase == ToolPhase.FAILED,
+            startedAt = occurredAt,
+            updatedAt = occurredAt,
+        )),
+    )
 }
 
 private fun JsonObject.requiredObject(key: String): JsonObject = get(key) as? JsonObject

@@ -51,7 +51,10 @@ import {
   type PairingPreview,
   type TrustedGateway,
 } from "./pairing";
-import { parseToolGroupPresentation } from "./presentation";
+import {
+  parseToolGroupPresentation,
+  type ToolGroupPresentation,
+} from "./presentation";
 import type { CommandCompletion } from "./commandLifecycle";
 import {
   parseGatewayCapabilities,
@@ -836,6 +839,7 @@ export function toIncomingMessage(
   replacesEventId?: string,
 ): IncomingCodeverMessage {
   const payload = message.payload;
+  const toolGroup = toolGroupFromCvp3Payload(payload, message.timestamp);
   return {
     // Logical CVP identity is the cross-client/UI identity. Matrix event IDs
     // change whenever a streamed message version is emitted and are transport
@@ -851,7 +855,7 @@ export function toIncomingMessage(
         ? "error"
         : message.sender === "user"
           ? "user"
-          : payload?.type === "tool.activity"
+          : toolGroup
             ? "tool"
             : "agent",
     text: message.body,
@@ -868,9 +872,7 @@ export function toIncomingMessage(
     ...(payload?.type === "assistant.message" && payload.attachments
       ? { attachments: payload.attachments }
       : {}),
-    ...(payload?.type === "assistant.message"
-      ? { toolGroup: parseToolGroupPresentation(payload.ui) }
-      : {}),
+    ...(toolGroup ? { toolGroup } : {}),
     raw: payload
       ? {
           ...structuredClone(payload) as Record<string, unknown>,
@@ -879,6 +881,31 @@ export function toIncomingMessage(
             : {}),
         }
       : {},
+  };
+}
+
+function toolGroupFromCvp3Payload(
+  payload: import("@codever/protocol").Cvp3Event["payload"] | undefined,
+  timestamp: number,
+): ToolGroupPresentation | undefined {
+  if (payload?.type === "assistant.message") {
+    return parseToolGroupPresentation(payload.ui);
+  }
+  if (payload?.type !== "tool.activity") return undefined;
+  return {
+    kind: "tool_group",
+    version: 1,
+    groupId: payload.toolCallId,
+    tools: [{
+      id: payload.toolCallId,
+      name: payload.name,
+      title: payload.name,
+      category: "unknown",
+      phase: payload.phase,
+      isError: payload.phase === "failed",
+      startedAt: timestamp,
+      updatedAt: timestamp,
+    }],
   };
 }
 

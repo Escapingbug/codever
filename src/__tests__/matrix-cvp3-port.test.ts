@@ -13,6 +13,9 @@ import {
 import { InMemoryMatrixTransport, MatrixCvp3Port } from '@/channel/matrix'
 import { GatewayCvp3ContentLayer } from '@/gateway/matrix/cvp3Content'
 import { gatewayProjectIdentity } from '@/gateway/matrix/project'
+import { ChannelProjector } from '@/runtime/channelProjector'
+import { MatrixCvp3Projection } from '../../apps/pwa/app/matrixCvp3Projection'
+import { toIncomingMessage } from '../../apps/pwa/app/matrixCvp3Connection'
 
 describe('MatrixCvp3Port', () => {
   it('projects logical message versions while treating Matrix replacement as an optional hint', async () => {
@@ -215,6 +218,49 @@ describe('MatrixCvp3Port', () => {
     expect(expiredEvent.plaintext.value.event.payload).toMatchObject({
       type: 'decision.resolved',
       decision: 'deny',
+    })
+
+    const projector = new ChannelProjector()
+    const [projectedTool] = projector.project({
+      kind: 'tool',
+      meta: {
+        id: 'turn-1:tool:read-1:1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        provider: 'acp',
+        seq: 1,
+        timestamp: 1,
+        sourcePhase: 'live',
+      },
+      phase: 'completed',
+      toolCallId: 'read-1',
+      toolName: 'Read',
+      category: 'read',
+      input: { file_path: '/repo/src/index.ts' },
+    }, { verboseLevel: 2 })
+    await port.send({
+      ...projectedTool!.message,
+      replyMarkup: { idempotencyKey: 'tool-message-1' },
+    })
+    const toolDelivery = transport.delivered[6]!
+    const toolExtension = toolDelivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const toolEnvelope = await openCvp3Envelope(toolExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (toolEnvelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    const pwaProjection = new MatrixCvp3Projection()
+    pwaProjection.applyEvent(toolEnvelope.plaintext.value.event, toolDelivery.eventId)
+    const pwaMessage = pwaProjection.messages.get('assistant:tool-message-1:0')
+    expect(pwaMessage).toBeDefined()
+    expect(toIncomingMessage(pwaMessage!)).toMatchObject({
+      kind: 'tool',
+      toolGroup: {
+        groupId: 'read-1',
+        tools: [{ name: 'Read', category: 'read', phase: 'completed' }],
+      },
     })
   })
 })

@@ -180,7 +180,115 @@ describe("MatrixCvp3Projection", () => {
     expect(secondIncoming.eventId).toBe(firstIncoming.eventId);
     expect(secondIncoming.replacesEventId).toBe("$matrix-version-1");
   });
+
+  it("classifies assistant messages with a tool presentation as tool messages", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(toolPresentationMessageEvent(), "$tool-message");
+
+    const projected = projection.messages.get("assistant:tool-message-1:0");
+    expect(projected).toBeDefined();
+    expect(toIncomingMessage(projected!)).toMatchObject({
+      kind: "tool",
+      text: "Read file",
+      toolGroup: {
+        kind: "tool_group",
+        groupId: "tool-call-1",
+        tools: [{ id: "tool-call-1", phase: "completed" }],
+      },
+    });
+  });
+
+  it("synthesizes a tool presentation for native CVP tool activity events", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(toolActivityEvent(), "$tool-activity");
+
+    const projected = projection.messages.get("tool:tool-call-2");
+    expect(projected).toBeDefined();
+    expect(toIncomingMessage(projected!)).toMatchObject({
+      kind: "tool",
+      toolGroup: {
+        groupId: "tool-call-2",
+        tools: [{
+          id: "tool-call-2",
+          name: "Search",
+          phase: "started",
+          category: "unknown",
+        }],
+      },
+    });
+  });
 });
+
+function toolPresentationMessageEvent(): Cvp3Event {
+  const timestamp = 1_700_000_000_000;
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: "tool-message-event-1",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: "session-a",
+    occurredAt: timestamp,
+    payload: {
+      type: "assistant.message",
+      messageId: "tool-message-1",
+      messageVersion: 1,
+      body: "Read file",
+      format: "plain",
+      final: true,
+      projection: {
+        title: "A",
+        lifecycle: "active",
+        activity: "working",
+        updatedAt: timestamp,
+        stateVersion: 2,
+      },
+      ui: {
+        kind: "tool_group",
+        version: 1,
+        groupId: "tool-call-1",
+        tools: [{
+          id: "tool-call-1",
+          name: "Read",
+          title: "Read file",
+          detail: "/workspace/file.ts",
+          category: "read",
+          phase: "completed",
+          isError: false,
+          startedAt: timestamp - 10,
+          updatedAt: timestamp,
+        }],
+      },
+    },
+  };
+}
+
+function toolActivityEvent(): Cvp3Event {
+  const timestamp = 1_700_000_000_100;
+  return {
+    kind: "codever.event",
+    version: 3,
+    eventId: "tool-activity-event-1",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    sessionId: "session-a",
+    occurredAt: timestamp,
+    payload: {
+      type: "tool.activity",
+      toolCallId: "tool-call-2",
+      toolVersion: 1,
+      name: "Search",
+      phase: "started",
+      projection: {
+        title: "A",
+        lifecycle: "active",
+        activity: "working",
+        updatedAt: timestamp,
+        stateVersion: 2,
+      },
+    },
+  };
+}
 
 function inboxFileEvent(): Cvp3Event {
   return {

@@ -1,5 +1,8 @@
 package id.my.anciety.codever.client
 
+import id.my.anciety.codever.client.events.ClientMessageKind
+import id.my.anciety.codever.client.events.ToolCategory
+import id.my.anciety.codever.client.events.ToolPhase
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -80,6 +83,50 @@ class MatrixCvp3NativeProjectionTest {
         assertEquals(first.messages.single().eventId, replay.messages.single().eventId)
         assertTrue(exactDuplicate.messages.isEmpty())
         assertFalse(exactDuplicate.changed)
+    }
+
+    @Test
+    fun `assistant message tool presentation is projected as a tool message`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+
+        val message = projection.applyGatewayEvent(
+            assistantWithToolGroup(),
+            "\$tool-message",
+            "\$root-a",
+        ).messages.single()
+
+        assertEquals(ClientMessageKind.TOOL, message.kind)
+        assertEquals("tool-call-1", message.toolGroup?.groupId)
+        assertEquals(ToolCategory.READ, message.toolGroup?.tools?.single()?.category)
+        assertEquals(ToolPhase.COMPLETED, message.toolGroup?.tools?.single()?.phase)
+    }
+
+    @Test
+    fun `native tool activity is projected with a tool presentation`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            sessionReady("session-a", 1, "Session A", 100),
+            "\$root-a",
+            "\$root-a",
+        )
+
+        val message = projection.applyGatewayEvent(
+            toolActivity(),
+            "\$tool-activity",
+            "\$root-a",
+        ).messages.single()
+
+        assertEquals(ClientMessageKind.TOOL, message.kind)
+        assertEquals("tool-call-2", message.toolGroup?.groupId)
+        assertEquals("Search", message.toolGroup?.tools?.single()?.name)
+        assertEquals(ToolCategory.UNKNOWN, message.toolGroup?.tools?.single()?.category)
     }
 
     @Test
@@ -406,6 +453,51 @@ class MatrixCvp3NativeProjectionTest {
             put("partIndex", 0)
             put("format", "markdown")
             put("body", body)
+        },
+    )
+
+    private fun assistantWithToolGroup() = event(
+        eventId = "tool-message-event-1",
+        projectId = "project-1",
+        sessionId = "session-a",
+        payload = buildJsonObject {
+            put("type", "assistant.message")
+            put("messageId", "tool-message-1")
+            put("partIndex", 0)
+            put("format", "plain")
+            put("body", "Read file")
+            put("ui", buildJsonObject {
+                put("kind", "tool_group")
+                put("version", 1)
+                put("groupId", "tool-call-1")
+                put("tools", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "tool-call-1")
+                        put("name", "Read")
+                        put("title", "Read file")
+                        put("detail", "/workspace/file.ts")
+                        put("category", "read")
+                        put("phase", "completed")
+                        put("isError", false)
+                        put("startedAt", 990)
+                        put("updatedAt", 1000)
+                    })
+                })
+            })
+        },
+    )
+
+    private fun toolActivity() = event(
+        eventId = "tool-activity-event-1",
+        projectId = "project-1",
+        sessionId = "session-a",
+        payload = buildJsonObject {
+            put("type", "tool.activity")
+            put("toolCallId", "tool-call-2")
+            put("toolVersion", 1)
+            put("name", "Search")
+            put("phase", "started")
+            put("projection", sessionProjection(2, "Session A", "active", "working", 200))
         },
     )
 
