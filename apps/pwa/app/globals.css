@@ -6199,7 +6199,8 @@ body {
     position: absolute;
     z-index: 4;
     top: calc(4px + env(safe-area-inset-top));
-    right: 112px;
+    /* Keep clear of files, search, and new-session controls. */
+    right: 160px;
     left: 92px;
     width: auto;
     max-width: none;
@@ -6889,6 +6890,12 @@ body {
 
   .verification-panel strong {
     font-size: 28px;
+  }
+}
+
+@media (max-width: 340px) {
+  .gateway-mobile-status-copy {
+    display: none;
   }
 }
 
