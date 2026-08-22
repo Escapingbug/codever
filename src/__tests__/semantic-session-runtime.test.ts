@@ -403,7 +403,12 @@ describe('SemanticSessionRuntime', () => {
                 if (value.kind === 'turn_finished' && pending) {
                     const text = pending.replace('Alias', 'Original')
                     pending = ''
-                    return [{ ...value, kind: 'assistant_text_delta', text }, value]
+                    return [{
+                        ...value,
+                        kind: 'assistant_text_delta',
+                        text,
+                        messageId: `${value.meta.turnId}:privacy-tail`,
+                    }, value]
                 }
                 return [value]
             },
@@ -651,11 +656,11 @@ describe('SemanticSessionRuntime', () => {
                 ...createProvider([]),
                 startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
                     events: (async function* () {
-                        yield { kind: 'text', text: '这' } as AgentEvent
+                        yield { kind: 'text', text: '这', messageId: 'assistant-1' } as AgentEvent
                         await firstPause
-                        yield { kind: 'text', text: '是一' } as AgentEvent
+                        yield { kind: 'text', text: '是一', messageId: 'assistant-1' } as AgentEvent
                         await secondPause
-                        yield { kind: 'text', text: '句话' } as AgentEvent
+                        yield { kind: 'text', text: '句话', messageId: 'assistant-1' } as AgentEvent
                         yield { kind: 'result', status: 'success' } as AgentEvent
                     })(),
                     interrupt: vi.fn(),
@@ -752,7 +757,7 @@ describe('SemanticSessionRuntime', () => {
         }
     })
 
-    it('keeps interleaved tools separate and preserves assistant paragraph boundaries in one bubble', async () => {
+    it('keeps separate assistant messages in separate bubbles around interleaved tools', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
         const operations: DeliveryOperation[] = []
@@ -761,11 +766,11 @@ describe('SemanticSessionRuntime', () => {
             coalesceAssistantText: true,
         }
         const provider = createProvider([
-            { kind: 'text', text: '我先' },
+            { kind: 'text', text: '我先', messageId: 'assistant-1' },
             { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'pwd' }, status: 'running' },
-            { kind: 'text', text: '检查' },
+            { kind: 'text', text: '检查', messageId: 'assistant-2' },
             { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: '/repo', isError: false },
-            { kind: 'text', text: '完成。' },
+            { kind: 'text', text: '完成。', messageId: 'assistant-3' },
             { kind: 'result', status: 'success' },
         ])
         const runtime = new SemanticSessionRuntime({
@@ -782,22 +787,21 @@ describe('SemanticSessionRuntime', () => {
         const assistantOperations = operations.filter(operation => !operation.message.presentation)
         expect(assistantOperations).toMatchObject([
             { kind: 'send', message: { text: '我先' }, messageId: 1 },
-            { kind: 'edit', message: { text: '我先\n\n检查' }, messageId: 1 },
-            { kind: 'edit', message: { text: '我先\n\n检查\n\n完成。' }, messageId: 1 },
+            { kind: 'send', message: { text: '检查' }, messageId: 3 },
+            { kind: 'send', message: { text: '完成。' }, messageId: 5 },
         ])
         expect(operations.filter(operation => operation.message.presentation)).toHaveLength(2)
     })
 
-    it('does not duplicate an assistant paragraph break already supplied after a tool', async () => {
+    it('starts a new bubble when the provider message id changes without a tool boundary', async () => {
         const operations: DeliveryOperation[] = []
         const channel = {
             ...createChannel([], [], operations),
             coalesceAssistantText: true,
         }
         const provider = createProvider([
-            { kind: 'text', text: '第一段。' },
-            { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Read', input: { path: 'README.md' }, status: 'running' },
-            { kind: 'text', text: '\n\n第二段。' },
+            { kind: 'text', text: '第一条。', messageId: 'assistant-1' },
+            { kind: 'text', text: '第二条。', messageId: 'assistant-2' },
             { kind: 'result', status: 'success' },
         ])
         const runtime = new SemanticSessionRuntime({
@@ -811,11 +815,35 @@ describe('SemanticSessionRuntime', () => {
         await runtime.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
 
         const assistantOperations = operations.filter(operation => !operation.message.presentation)
-        expect(assistantOperations.at(-1)).toMatchObject({
-            kind: 'edit',
-            message: { text: '第一段。\n\n第二段。' },
-            messageId: 1,
+        expect(assistantOperations).toMatchObject([
+            { kind: 'send', message: { text: '第一条。' }, messageId: 1 },
+            { kind: 'send', message: { text: '第二条。' }, messageId: 2 },
+        ])
+    })
+
+    it('does not carry a whitespace-only message into the next bubble', async () => {
+        const operations: DeliveryOperation[] = []
+        const provider = createProvider([
+            { kind: 'text', text: '  ', messageId: 'assistant-1' },
+            { kind: 'text', text: '下一条。', messageId: 'assistant-2' },
+            { kind: 'result', status: 'success' },
+        ])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'test-acp',
+            channelPort: {
+                ...createChannel([], [], operations),
+                coalesceAssistantText: true,
+            },
         })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'inspect', source: 'channel' })
+
+        expect(operations.filter(operation => !operation.message.presentation)).toMatchObject([
+            { kind: 'send', message: { text: '下一条。' }, messageId: 1 },
+        ])
     })
 
     it('waits for the first assistant send id before turning a concurrent flush into an edit', async () => {
@@ -914,6 +942,7 @@ describe('SemanticSessionRuntime', () => {
         ;(runtime as any).projector.project({
             kind: 'assistant_text_delta',
             text: 'stale tail',
+            messageId: 'previous-assistant-message',
             meta: {
                 id: 'late-1',
                 sessionId: 'session-1',
@@ -1100,9 +1129,10 @@ describe('SemanticSessionRuntime', () => {
         }
         const provider = createProvider([
             { kind: 'tool_use', toolUseId: 'tool-1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running' },
-            { kind: 'text', text: '检查中。' },
+            { kind: 'text', text: '检查中。', messageId: 'assistant-1' },
             { kind: 'tool_result', toolUseId: 'tool-1', toolName: 'Bash', output: 'passed', isError: false },
             { kind: 'tool_use', toolUseId: 'tool-2', toolName: 'Read', input: { file_path: '/repo/src/app.ts' }, status: 'running' },
+            { kind: 'text', text: '继续。', messageId: 'assistant-2' },
             { kind: 'result', status: 'success' },
         ])
         const runtime = new SemanticSessionRuntime({
@@ -1123,6 +1153,12 @@ describe('SemanticSessionRuntime', () => {
             'edit',
         ])
         expect(toolOperations.every(operation => operation.messageId === toolOperations[0].messageId)).toBe(true)
+        const assistantOperations = operations.filter(operation => !operation.message.presentation)
+        expect(assistantOperations.map(operation => operation.message.text)).toEqual([
+            '检查中。',
+            '继续。',
+        ])
+        expect(assistantOperations[0].messageId).not.toBe(assistantOperations[1].messageId)
         expect(toolOperations.at(-1)?.message.presentation).toMatchObject({
             kind: 'tool_group',
             tools: [

@@ -37,6 +37,7 @@ function event(text: string): ConversationEvent {
     return {
         kind: 'assistant_text_delta',
         text,
+        messageId: 'assistant-1',
         meta: {
             id: 'event-1',
             sessionId: 'session-1',

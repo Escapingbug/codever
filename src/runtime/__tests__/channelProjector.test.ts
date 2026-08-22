@@ -200,6 +200,7 @@ describe('ChannelProjector — patch merge', () => {
         projector.project({
             kind: 'assistant_text_delta',
             text: '  ',
+            messageId: 'assistant-1',
             meta: makeMeta('assistant-whitespace'),
         })
         expect(projector.flush()).toEqual([])
@@ -207,6 +208,7 @@ describe('ChannelProjector — patch merge', () => {
         projector.project({
             kind: 'assistant_text_delta',
             text: 'indented',
+            messageId: 'assistant-1',
             meta: makeMeta('assistant-text'),
         })
 

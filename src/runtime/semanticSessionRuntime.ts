@@ -181,7 +181,7 @@ export class SemanticSessionRuntime {
     private assistantTextMessageId: string | number | undefined
     private assistantTextIdempotencyKey: string | null = null
     private assistantTextDeliveryChain: Promise<void> = Promise.resolve()
-    private assistantTextBlockBoundaryPending = false
+    private assistantTextSourceMessageId: string | null = null
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
@@ -411,7 +411,7 @@ export class SemanticSessionRuntime {
         this.assistantTextMessageId = undefined
         this.assistantTextIdempotencyKey = randomUUID()
         this.assistantTextDeliveryChain = Promise.resolve()
-        this.assistantTextBlockBoundaryPending = false
+        this.assistantTextSourceMessageId = null
         this.currentTurnDelivery = {
             hadAssistantText: false,
             deliveryFailures: [],
@@ -723,6 +723,19 @@ export class SemanticSessionRuntime {
             if (this.currentTurnDelivery) this.currentTurnDelivery.hadAssistantText = true
         }
 
+        if (
+            event.kind === 'assistant_text_delta'
+            && this.config.channelPort.coalesceAssistantText
+            && this.assistantTextSourceMessageId !== null
+            && this.assistantTextSourceMessageId !== event.messageId
+        ) {
+            await this.flushBufferedAssistantText('message-boundary')
+            this.startAssistantTextMessage()
+        }
+        if (event.kind === 'assistant_text_delta') {
+            this.assistantTextSourceMessageId = event.messageId
+        }
+
         // Record available_commands_update and config_option_update to session state
         if (event.kind === 'command_result') {
             const commandLower = event.command.toLowerCase()
@@ -752,8 +765,6 @@ export class SemanticSessionRuntime {
             verboseLevel: this.getVerboseLevel(),
             preserveNormalToolGroup: Boolean(this.config.channelPort.coalesceAssistantText),
         })
-        const endsAssistantTextBlock = event.kind === 'tool'
-            || messages.some(projected => !projected.isAssistantText)
         if (event.kind === 'assistant_text_delta') {
             if (
                 this.config.channelPort.coalesceAssistantText
@@ -775,13 +786,6 @@ export class SemanticSessionRuntime {
                 projected.isTerminal,
                 projected.isAssistantText,
             )
-        }
-        if (
-            this.config.channelPort.coalesceAssistantText
-            && endsAssistantTextBlock
-            && this.assistantTextMessage !== null
-        ) {
-            this.assistantTextBlockBoundaryPending = true
         }
     }
 
@@ -815,10 +819,13 @@ export class SemanticSessionRuntime {
         this.cancelScheduledTextFlush()
         this.textFlushChain = this.textFlushChain.then(async () => {
             const closesNormalToolGroup = !this.config.channelPort.coalesceAssistantText
-                || (reason !== 'stream-start' && reason !== 'stream-update')
+                || (reason !== 'stream-start'
+                    && reason !== 'stream-update'
+                    && reason !== 'message-boundary')
             const projectedMessages = this.projector.flush(
                 undefined,
                 closesNormalToolGroup,
+                reason === 'message-boundary',
             )
             if (projectedMessages.length > 0 && reason !== 'finalize') {
                 this.log(`[session] Flushing buffered assistant text: reason=${reason} messages=${projectedMessages.length}`)
@@ -898,13 +905,10 @@ export class SemanticSessionRuntime {
     }
 
     private async deliverCoalescedAssistantText(message: ChannelMessage): Promise<void> {
-        const separator = this.assistantTextMessage && this.assistantTextBlockBoundaryPending
-            ? markdownBlockSeparator(this.assistantTextMessage.text, message.text)
-            : ''
         const cumulativeBody: ChannelMessage = this.assistantTextMessage
             ? {
                 ...message,
-                text: this.assistantTextMessage.text + separator + message.text,
+                text: this.assistantTextMessage.text + message.text,
             }
             : message
         const cumulativeMessage: ChannelMessage = {
@@ -917,7 +921,6 @@ export class SemanticSessionRuntime {
             },
         }
         this.assistantTextMessage = cumulativeMessage
-        this.assistantTextBlockBoundaryPending = false
 
         const delivery = this.assistantTextDeliveryChain.then(async () => {
             const record = this.assistantTextMessageId === undefined
@@ -935,6 +938,13 @@ export class SemanticSessionRuntime {
         })
         this.assistantTextDeliveryChain = delivery.catch(() => undefined)
         await delivery
+    }
+
+    private startAssistantTextMessage(): void {
+        this.assistantTextMessage = null
+        this.assistantTextMessageId = undefined
+        this.assistantTextIdempotencyKey = randomUUID()
+        this.assistantTextDeliveryChain = Promise.resolve()
     }
 
     private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
@@ -1781,15 +1791,6 @@ function channelMessageOptions(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : {}
-}
-
-/** Keep separate assistant narration blocks readable inside one live-updated bubble. */
-function markdownBlockSeparator(previous: string, next: string): string {
-    const trailingWhitespace = previous.match(/\s*$/u)?.[0] ?? ''
-    const leadingWhitespace = next.match(/^\s*/u)?.[0] ?? ''
-    const existingNewlines = (trailingWhitespace + leadingWhitespace)
-        .match(/\r\n|\r|\n/gu)?.length ?? 0
-    return '\n'.repeat(Math.max(0, 2 - existingNewlines))
 }
 
 function formatCodeBlock(content: string, language: string | undefined): string {

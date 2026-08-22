@@ -125,9 +125,9 @@ export class ChannelDeliveryQueuedError extends Error {
 
 export interface ChannelPort {
     /**
-     * Whether assistant text flushed more than once in one turn should update
-     * one stable channel message. This prevents streaming pauses from turning
-     * short text deltas into separate chat bubbles.
+     * Whether repeated flushes of one logical assistant message should update
+     * one stable channel message. Provider message boundaries still start new
+     * bubbles; transport pauses inside a message do not.
      */
     readonly coalesceAssistantText?: boolean
 

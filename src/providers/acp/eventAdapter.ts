@@ -157,6 +157,7 @@ export function mapSessionUpdate(update: SessionUpdate, debugLog?: AcpDebugLog):
                 events.push({
                     kind: 'text',
                     text: textContent.text,
+                    ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
                 })
             } else if (block.type === 'resource') {
                 events.push({

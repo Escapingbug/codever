@@ -107,6 +107,8 @@ export type ConversationEvent =
         kind: 'assistant_text_delta'
         meta: SemanticMeta
         text: string
+        /** Stable identity for one logical assistant message/content block. */
+        messageId: string
     }
     | {
         kind: 'tool'

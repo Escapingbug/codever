@@ -118,11 +118,13 @@ export class ChannelProjector {
     flush(
         semanticEvent?: ConversationEvent,
         closeNormalToolGroup = true,
+        discardWhitespaceOnlyText = false,
     ): ProjectedMessage[] {
         return this.flushText(
             semanticEvent,
             closeNormalToolGroup,
             closeNormalToolGroup,
+            discardWhitespaceOnlyText,
         )
     }
 
@@ -146,9 +148,11 @@ export class ChannelProjector {
         semanticEvent?: ConversationEvent,
         closeNormalToolGroup = true,
         closeEmptyToolGroup = false,
+        discardWhitespaceOnlyText = false,
     ): ProjectedMessage[] {
         const text = this.textBuffer
         if (!text.trim()) {
+            if (discardWhitespaceOnlyText) this.textBuffer = ''
             if (closeEmptyToolGroup) this.closeNormalToolGroup()
             return []
         }

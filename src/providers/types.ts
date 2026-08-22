@@ -1,6 +1,8 @@
 export interface AgentTextEvent {
     kind: 'text'
     text: string
+    /** Provider-owned identity shared by every delta of one logical assistant message. */
+    messageId?: string
 }
 
 export interface AgentToolUseEvent {

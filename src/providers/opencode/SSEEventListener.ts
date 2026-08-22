@@ -296,7 +296,12 @@ export class SSEEventListener {
                 const delta = props?.delta as string | undefined
                 const field = props?.field as string | undefined
                 if (field === 'text' && delta) {
-                    results.push({ kind: 'text', text: delta })
+                    const messageId = props?.messageID as string | undefined
+                    results.push({
+                        kind: 'text',
+                        text: delta,
+                        ...(messageId ? { messageId } : {}),
+                    })
                 } else if (delta) {
                     results.push({
                         kind: 'raw',
@@ -353,11 +358,16 @@ export class SSEEventListener {
         switch (type) {
             case 'text': {
                 const text = part.text as string | undefined
+                const messageId = part.messageID as string | undefined
                 const timeEnd = (part.time as Record<string, unknown>)?.end
                 const timeStart = (part.time as Record<string, unknown>)?.start
                 // Non-streamed text (e.g. user message) — emit as-is
                 if (text && !timeStart) {
-                    results.push({ kind: 'text', text })
+                    results.push({
+                        kind: 'text',
+                        text,
+                        ...(messageId ? { messageId } : {}),
+                    })
                 }
                 // Streaming text with time.end = completed, skip (deltas already sent)
                 break

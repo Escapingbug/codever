@@ -25,6 +25,9 @@ export function createProviderSemanticAdapter(provider: string): ProviderSemanti
 export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
     readonly provider: string
     private seq = 0
+    private anonymousTextMessageIndex = 0
+    private activeAnonymousTextMessageId: string | null = null
+    private activeAnonymousTextTurnId: string | null = null
 
     constructor(provider: string) {
         this.provider = provider
@@ -33,9 +36,19 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
     toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[] {
         const meta = this.meta(event, context)
 
+        if (event.kind === 'tool_use' || event.kind === 'tool_result' || event.kind === 'result') {
+            this.activeAnonymousTextMessageId = null
+            this.activeAnonymousTextTurnId = null
+        }
+
         switch (event.kind) {
             case 'text':
-                return [{ kind: 'assistant_text_delta', meta, text: event.text }]
+                return [{
+                    kind: 'assistant_text_delta',
+                    meta,
+                    text: event.text,
+                    messageId: this.textMessageId(event.messageId, context.turnId),
+                }]
 
             case 'tool_use':
                 return [{
@@ -95,6 +108,23 @@ export class DefaultProviderSemanticAdapter implements ProviderSemanticAdapter {
 
     reset(): void {
         this.seq = 0
+        this.anonymousTextMessageIndex = 0
+        this.activeAnonymousTextMessageId = null
+        this.activeAnonymousTextTurnId = null
+    }
+
+    private textMessageId(providerMessageId: string | undefined, turnId: string): string {
+        const explicit = providerMessageId?.trim()
+        if (explicit) {
+            this.activeAnonymousTextMessageId = null
+            this.activeAnonymousTextTurnId = null
+            return explicit
+        }
+        if (!this.activeAnonymousTextMessageId || this.activeAnonymousTextTurnId !== turnId) {
+            this.activeAnonymousTextMessageId = `${turnId}:assistant-message:${++this.anonymousTextMessageIndex}`
+            this.activeAnonymousTextTurnId = turnId
+        }
+        return this.activeAnonymousTextMessageId
     }
 
     private meta(event: AgentEvent, context: ProviderAdapterContext): SemanticMeta {

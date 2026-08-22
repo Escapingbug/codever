@@ -138,6 +138,7 @@ describe('Architecture stability invariants', () => {
             kind: 'assistant_text_delta',
             meta: { id: 'e1', sessionId: 's1', turnId: 't1', seq: 1, timestamp: Date.now(), provider: 'mock', sourcePhase: 'live' },
             text: 'projected text',
+            messageId: 'assistant-1',
         }, { verboseLevel: 1 })
         const messages = projector.flush()
 
