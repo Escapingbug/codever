@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -41,6 +41,7 @@ type ManagedProcess = {
     child: ChildProcess
     output: string
     waitFor(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>
+    crash(): Promise<void>
     stop(): Promise<void>
 }
 
@@ -62,6 +63,7 @@ let gateway: ManagedProcess | undefined
 let browser: Browser | undefined
 let first: Page | undefined
 let second: Page | undefined
+let previousGatewayOutput = ''
 const logs = new Map<Page, string[]>()
 const errors = new Map<Page, Error[]>()
 
@@ -95,23 +97,7 @@ try {
         description: 'PWA server',
         timeoutMs: STARTUP_TIMEOUT_MS,
     })
-    gateway = managedProcess(
-        join(repositoryRoot, 'node_modules', '.bin', 'tsx'),
-        [join(repositoryRoot, 'scripts', 'matrix-local-gateway.ts')],
-        repositoryRoot,
-        {
-            ...process.env,
-            CODEVER_MATRIX_FIXTURE: fixturePath,
-            CODEVER_MATRIX_DATA_DIR: gatewayDataDirectory,
-            CODEVER_MATRIX_GATEWAY_USER: fixture.gateway.username,
-            CODEVER_MATRIX_GATEWAY_PASSWORD: fixture.gateway.password,
-            CODEVER_GATEWAY_NAME: `CVP/3 E2E ${runId}`,
-            CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
-            CODEVER_MATRIX_E2E_PROVIDER: '1',
-            CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '4000',
-            CODEVER_CWD: repositoryRoot,
-        },
-    )
+    gateway = launchGateway(fixture)
     const pairing = await gateway.waitFor(
         /Pairing link \(paste fallback\):\s*\n([^\n]+)\n/u,
         STARTUP_TIMEOUT_MS,
@@ -241,6 +227,33 @@ try {
         [firstSession, secondSession],
     )
 
+    process.stdout.write('[5g/7] Converging two active turns after a real Gateway crash…\n')
+    await openSession(first, firstSession)
+    await openSession(second, secondSession)
+    await Promise.all([
+        sendPrompt(first, `CVP/3 interrupted first ${runId}`),
+        sendPrompt(second, `CVP/3 interrupted second ${runId}`),
+    ])
+    await Promise.all([
+        waitForSessionActive(first, firstSession),
+        waitForSessionActive(second, secondSession),
+        waitForDispatchedPromptSessions([firstSession, secondSession]),
+    ])
+    await gateway.crash()
+    previousGatewayOutput += `${gateway.output}\n\n--- restarted Gateway ---\n`
+    gateway = launchGateway(fixture)
+    await gateway.waitFor(/Gateway ready with 2 trusted device\(s\)\./u, STARTUP_TIMEOUT_MS)
+    await Promise.all([
+        waitForConnected(first),
+        waitForConnected(second),
+    ])
+    await Promise.all([
+        waitForSessionSettled(first, firstSession),
+        waitForSessionSettled(second, secondSession),
+    ])
+    await assertNoBlockingAlerts(first)
+    await assertNoBlockingAlerts(second)
+
     process.stdout.write('[5x/7] Quarantining one poison timeline event without stalling later work…\n')
     await sendPoisonEvent(fixture)
     await openSession(second, secondSession)
@@ -279,7 +292,11 @@ try {
     await Promise.all([
         first?.screenshot({ path: join(artifactDirectory, 'browser-1.png'), fullPage: true }).catch(() => undefined),
         second?.screenshot({ path: join(artifactDirectory, 'browser-2.png'), fullPage: true }).catch(() => undefined),
-        writeFile(join(artifactDirectory, 'gateway.log'), redact(gateway?.output ?? ''), 'utf8'),
+        writeFile(
+            join(artifactDirectory, 'gateway.log'),
+            redact(`${previousGatewayOutput}${gateway?.output ?? ''}`),
+            'utf8',
+        ),
         writeFile(join(artifactDirectory, 'pwa.log'), redact(pwa?.output ?? ''), 'utf8'),
         writeFile(join(artifactDirectory, 'browser.log'), redact(
             [...logs.entries()].map(([page, lines], index) =>
@@ -435,6 +452,62 @@ async function waitForSessionIds(page: Page, expected: string[]): Promise<void> 
         failFast: () => assertNoErrors(page),
     })
     await assertNoBlockingAlerts(page)
+}
+
+async function waitForSessionActive(page: Page, sessionId: string): Promise<void> {
+    const row = page.locator(`button.session-row[data-session-id="${sessionId}"]`)
+    await waitFor(async () => /Sending|Starting|Agent is working|queued/iu.test(
+        await row.getAttribute('aria-label') ?? '',
+    ), {
+        description: `active session ${sessionId}`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        failFast: () => assertNoErrors(page),
+    })
+}
+
+async function waitForDispatchedPromptSessions(sessionIds: string[]): Promise<void> {
+    const journalPath = join(gatewayDataDirectory, 'gateway-replay.jsonl.v3-commands.jsonl')
+    await waitFor(async () => {
+        const entries = (await readFile(journalPath, 'utf8'))
+            .split(/\r?\n/u)
+            .filter(Boolean)
+            .map(line => JSON.parse(line) as {
+                kind: string
+                key?: string
+                command?: { operation?: string; sessionId?: string }
+            })
+        const promptSessions = new Map<string, string>()
+        const dispatched = new Set<string>()
+        const terminal = new Set<string>()
+        for (const entry of entries) {
+            if (
+                entry.kind === 'accepted'
+                && entry.key
+                && entry.command?.operation === 'prompt.submit'
+                && entry.command.sessionId
+            ) promptSessions.set(entry.key, entry.command.sessionId)
+            if (entry.kind === 'dispatched' && entry.key) dispatched.add(entry.key)
+            if (entry.kind === 'terminal' && entry.key) terminal.add(entry.key)
+        }
+        return sessionIds.every(sessionId => [...promptSessions].some(([key, candidate]) =>
+            candidate === sessionId && dispatched.has(key) && !terminal.has(key)
+        ))
+    }, {
+        description: 'both prompt commands to cross the durable dispatch boundary',
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+    })
+}
+
+async function waitForSessionSettled(page: Page, sessionId: string): Promise<void> {
+    const row = page.locator(`button.session-row[data-session-id="${sessionId}"]`)
+    await waitFor(async () => {
+        const label = await row.getAttribute('aria-label') ?? ''
+        return !/Sending|Starting|Agent is working|queued|stopping/iu.test(label)
+    }, {
+        description: `interrupted session ${sessionId} to become idle`,
+        timeoutMs: CONVERGENCE_TIMEOUT_MS,
+        failFast: () => assertNoErrors(page),
+    })
 }
 
 async function sessionIds(page: Page): Promise<string[]> {
@@ -1057,7 +1130,7 @@ async function isConnected(page: Page): Promise<boolean> {
     const label = await page.locator(
         'button[aria-label^="Open connection settings,"]',
     ).getAttribute('aria-label')
-    return label?.endsWith('Connected') ?? false
+    return label?.endsWith('Online') ?? false
 }
 
 async function waitFor(
@@ -1102,6 +1175,14 @@ function managedProcess(
         waitFor(pattern, timeoutMs = STARTUP_TIMEOUT_MS) {
             return waitForOutput(child, () => output, pattern, timeoutMs)
         },
+        async crash() {
+            if (child.exitCode !== null || child.signalCode !== null) return
+            const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+            signalProcess(child, 'SIGKILL')
+            if (!await Promise.race([exited.then(() => true), delay(2_000).then(() => false)])) {
+                throw new Error(`Process did not exit after SIGKILL: ${command} ${args.join(' ')}`)
+            }
+        },
         async stop() {
             if (child.exitCode !== null || child.signalCode !== null) return
             const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
@@ -1112,6 +1193,26 @@ function managedProcess(
             }
         },
     }
+}
+
+function launchGateway(matrix: DisposableMatrixFixture): ManagedProcess {
+    return managedProcess(
+        join(repositoryRoot, 'node_modules', '.bin', 'tsx'),
+        [join(repositoryRoot, 'scripts', 'matrix-local-gateway.ts')],
+        repositoryRoot,
+        {
+            ...process.env,
+            CODEVER_MATRIX_FIXTURE: fixturePath,
+            CODEVER_MATRIX_DATA_DIR: gatewayDataDirectory,
+            CODEVER_MATRIX_GATEWAY_USER: matrix.gateway.username,
+            CODEVER_MATRIX_GATEWAY_PASSWORD: matrix.gateway.password,
+            CODEVER_GATEWAY_NAME: `CVP/3 E2E ${runId}`,
+            CODEVER_GATEWAY_ADMIN_SOCKET: gatewayAdminSocket,
+            CODEVER_MATRIX_E2E_PROVIDER: '1',
+            CODEVER_MATRIX_E2E_PROVIDER_DELAY_MS: '4000',
+            CODEVER_CWD: repositoryRoot,
+        },
+    )
 }
 
 async function waitForOutput(
