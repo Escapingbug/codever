@@ -17,14 +17,18 @@ import type {
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
 import { useDialogFocus } from "./dialogFocus";
-import type { ConnectionRepairReason } from "./connectionPresentation";
+import {
+  deriveConnectionRecoveryPlan,
+  type ConnectionRecoveryAction,
+  type ConnectionRepairReason,
+} from "./connectionPresentation";
 import type { WebPushNotificationState } from "./webPushNotifications";
 
 type Props = {
   open: boolean;
   config: MatrixConnectionConfig;
   status: MatrixConnectionStatus;
-  progressDetail: string | null;
+  connectionDetail: string | null;
   repairReason: ConnectionRepairReason | null;
   error: string | null;
   pairingPreview: PairingPreview | null;
@@ -64,6 +68,7 @@ function MatrixSettingsDialog({
   open,
   config,
   status,
+  connectionDetail,
   error,
   pairingPreview,
   trustedGateway,
@@ -93,7 +98,10 @@ function MatrixSettingsDialog({
   onEnableWebPush,
   onDisableWebPush,
 }: Props) {
-  const repairRequired = repairReason !== null;
+  const [manualRepairReason, setManualRepairReason] =
+    useState<ConnectionRepairReason | null>(null);
+  const effectiveRepairReason = repairReason ?? manualRepairReason;
+  const repairRequired = effectiveRepairReason !== null;
   const [loginPassword, setLoginPassword] = useState("");
   const connected =
     status === "connected" ||
@@ -107,6 +115,17 @@ function MatrixSettingsDialog({
     webPushBusy;
   const needsAccount =
     Boolean(pairingPreview) && (!trustedGateway || repairRequired);
+  const hasSavedConnection = Boolean(
+    config.homeserver.trim() &&
+      config.userId.trim() &&
+      config.accessToken.trim() &&
+      config.roomId.trim(),
+  );
+  const recoveryPlan = deriveConnectionRecoveryPlan({
+    status,
+    detail: connectionDetail,
+    hasSavedConnection,
+  });
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const requestClose = () => {
@@ -120,6 +139,22 @@ function MatrixSettingsDialog({
     initialFocusRef: closeButtonRef,
     onEscape: requestClose,
   });
+
+  const runRecoveryAction = (action: ConnectionRecoveryAction) => {
+    switch (action) {
+      case "retry":
+        onConnect();
+        return;
+      case "new-invitation":
+        setManualRepairReason("manual");
+        return;
+      case "check-updates":
+        onCheckForUpdates();
+        return;
+      case "export-diagnostics":
+        onExportDiagnostics();
+    }
+  };
 
   return (
     <div
@@ -166,10 +201,43 @@ function MatrixSettingsDialog({
           </p>
         </div>
 
+        {recoveryPlan && !repairRequired && (
+          <section className="connection-recovery-panel" aria-live="polite">
+            <div>
+              <span className="connection-recovery-mark" aria-hidden="true">!</span>
+              <span>
+                <strong>{recoveryPlan.title}</strong>
+                <p>{recoveryPlan.detail}</p>
+              </span>
+            </div>
+            <div className="connection-recovery-actions">
+              <button
+                type="button"
+                className="connect-button"
+                disabled={busy}
+                onClick={() => runRecoveryAction(recoveryPlan.primary.action)}
+              >
+                {busy && recoveryPlan.primary.action === "retry"
+                  ? "Retrying…"
+                  : recoveryPlan.primary.label}
+              </button>
+              {recoveryPlan.secondary && (
+                <button
+                  type="button"
+                  disabled={busy && recoveryPlan.secondary.action !== "export-diagnostics"}
+                  onClick={() => runRecoveryAction(recoveryPlan.secondary!.action)}
+                >
+                  {recoveryPlan.secondary.label}
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
         <PairingWizard
           preview={pairingPreview}
           trustedGateway={trustedGateway}
-          repairReason={repairReason}
+          repairReason={effectiveRepairReason}
           busy={busy}
           canConfirm={Boolean(config.accessToken)}
           deviceInvitation={deviceInvitation}
@@ -361,9 +429,11 @@ function MatrixSettingsDialog({
               <small>{updateStatusText(updateState)}</small>
             </span>
           </details>
-          <button type="button" onClick={onExportDiagnostics}>
-            Export diagnostics
-          </button>
+          {(!recoveryPlan || repairRequired) && (
+            <button type="button" onClick={onExportDiagnostics}>
+              Export diagnostics
+            </button>
+          )}
           <button
             type="button"
             onClick={onCheckForUpdates}
@@ -395,7 +465,7 @@ function MatrixSettingsDialog({
             >
               Disconnect
             </button>
-          ) : trustedGateway && !repairRequired ? (
+          ) : trustedGateway && !repairRequired && !recoveryPlan ? (
             <button
               className="connect-button"
               onClick={onConnect}

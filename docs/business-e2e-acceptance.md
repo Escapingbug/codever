@@ -56,6 +56,11 @@ Android APK. Cross-device steps use two independently paired Matrix devices.
    - If authoritative recovery fails, a later successful Matrix `/sync` must
      not hide the failure or report `Connected`; recovery remains actionable
      until the CVP/3 snapshot and session directory have actually converged.
+   - Opening a visible connection failure must expose the safe recovery action
+     in the first settings viewport. Snapshot/cache failures offer retry plus
+     diagnostics without replacing valid authorization; an unknown saved-session
+     failure also offers an explicit path into one-time-invitation repair. The
+     settings page must never tell the user merely to open connection settings.
    - A populated local conversation opens without any Matrix thread-relation
      request. Focus, foreground, network recovery, and 150 consecutive remote
      updates still use zero recent-history requests and arrive exactly once

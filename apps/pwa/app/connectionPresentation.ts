@@ -12,7 +12,27 @@ export type ConnectionPresentation = {
 
 export type ConnectionRepairReason =
   | "matrix-session"
-  | "project-authorization";
+  | "project-authorization"
+  | "manual";
+
+export type ConnectionRecoveryAction =
+  | "retry"
+  | "new-invitation"
+  | "check-updates"
+  | "export-diagnostics";
+
+export type ConnectionRecoveryPlan = {
+  title: string;
+  detail: string;
+  primary: {
+    action: ConnectionRecoveryAction;
+    label: string;
+  };
+  secondary?: {
+    action: ConnectionRecoveryAction;
+    label: string;
+  };
+};
 
 export type MobileConnectionSignal = {
   state: "setup" | "progress" | "ready" | "offline" | "attention";
@@ -106,7 +126,8 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
   },
   matrix_recovery_blocked: {
     title: "Connection needs attention",
-    detail: "Open connection settings to repair or add this device again.",
+    detail:
+      "Automatic recovery stopped to preserve this device’s saved trust. Retry the connection or repair it with a new invitation.",
   },
   matrix_sync_service_build_failed: {
     title: "Background connection could not start",
@@ -191,9 +212,39 @@ const DEFAULT_COPY: Record<MatrixConnectionStatus, DetailCopy> = {
   },
   error: {
     title: "Connection needs attention",
-    detail: "Open connection settings to inspect or repair it.",
+    detail:
+      "Codever could not restore this device’s saved connection automatically.",
   },
 };
+
+const INVITATION_RECOVERY_DETAILS = new Set([
+  "matrix_session_repair_required",
+  "matrix_project_authorization_repair_required",
+  "matrix_login_rejected",
+]);
+
+const UPDATE_RECOVERY_DETAILS = new Set([
+  "matrix_sync_service_build_failed",
+]);
+
+const RETRY_RECOVERY_DETAILS = new Set([
+  "matrix_projection_repair_required",
+  "matrix_gateway_state_recovery_failed",
+  "matrix_event_ingest_failed",
+  "matrix_sdk_internal_failure",
+  "matrix_runtime_failed",
+  "matrix_storage_failed",
+  "matrix_first_sync_timeout",
+  "matrix_sync_task_stopped",
+  "matrix_sync_stale",
+  "matrix_send_queue_resume_failed",
+  "matrix_driver_create_failed",
+  "matrix_driver_start_timeout",
+  "matrix_restore_or_sync_failed",
+  "matrix_application_control_sync_rejected",
+  "matrix_application_control_baseline_too_large",
+  "matrix_application_control_incremental_too_large",
+]);
 
 export function deriveConnectionPresentation(
   status: MatrixConnectionStatus,
@@ -235,6 +286,93 @@ export function connectionRepairReasonForDetail(
     return "project-authorization";
   }
   return null;
+}
+
+export function deriveConnectionRecoveryPlan(input: {
+  status: MatrixConnectionStatus;
+  detail?: string | null;
+  hasSavedConnection: boolean;
+}): ConnectionRecoveryPlan | null {
+  if (input.status !== "error") return null;
+
+  const detail = input.detail?.trim() ?? "";
+  if (INVITATION_RECOVERY_DETAILS.has(detail)) {
+    return {
+      title: "Repair this device",
+      detail:
+        "Create a one-time invitation on another connected Codever device or on the Gateway computer, then scan or paste it here. Server conversation history is preserved.",
+      primary: {
+        action: "new-invitation",
+        label: "Use a new invitation",
+      },
+      secondary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
+  if (UPDATE_RECOVERY_DETAILS.has(detail)) {
+    return {
+      title: "Update the connection runtime",
+      detail:
+        "Check for an available Codever update. If the latest version still cannot start the connection, export diagnostics for investigation.",
+      primary: {
+        action: "check-updates",
+        label: "Check for updates",
+      },
+      secondary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
+  if (RETRY_RECOVERY_DETAILS.has(detail) && input.hasSavedConnection) {
+    return {
+      title: "Retry the saved connection",
+      detail:
+        "Retry once without clearing this device. Queued commands and saved trust are retained. If the same error returns, export diagnostics.",
+      primary: {
+        action: "retry",
+        label: "Retry connection",
+      },
+      secondary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
+  if (!input.hasSavedConnection) {
+    return {
+      title: "Connect this device again",
+      detail:
+        "This device does not have a complete saved connection. Create a one-time invitation on another connected Codever device or on the Gateway computer.",
+      primary: {
+        action: "new-invitation",
+        label: "Use a new invitation",
+      },
+      secondary: {
+        action: "export-diagnostics",
+        label: "Export diagnostics",
+      },
+    };
+  }
+
+  return {
+    title: "Recover this device",
+    detail:
+      "Retry the saved connection first. If this screen returns, repair only this device with a new one-time invitation; server conversation history is preserved.",
+    primary: {
+      action: "retry",
+      label: "Retry connection",
+    },
+    secondary: {
+      action: "new-invitation",
+      label: "Use a new invitation",
+    },
+  };
 }
 
 /**

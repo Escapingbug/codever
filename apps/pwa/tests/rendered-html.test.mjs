@@ -99,6 +99,10 @@ test("ships a complete installable offline shell", async () => {
   assert.match(serviceWorker, /notificationclick/);
   assert.match(serviceWorker, /claimPushEvent/);
   assert.match(matrixSettings, /Agent notifications/);
+  assert.match(matrixSettings, /deriveConnectionRecoveryPlan/);
+  assert.match(matrixSettings, /runRecoveryAction\(recoveryPlan\.primary\.action\)/);
+  assert.match(matrixSettings, /recoveryPlan\.secondary\.label/);
+  assert.match(matrixSettings, /setManualRepairReason\("manual"\)/);
   assert.match(
     source,
     /registerPwaUpdates\(setPwaUpdateState, \{[\s\S]*canReload:/,

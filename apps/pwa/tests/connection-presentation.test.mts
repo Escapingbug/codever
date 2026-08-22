@@ -3,9 +3,63 @@ import test from "node:test";
 import {
   connectionRepairReasonForDetail,
   connectionStatusForBrowserNetwork,
+  deriveConnectionRecoveryPlan,
   deriveConnectionPresentation,
   deriveMobileConnectionSignal,
 } from "../app/connectionPresentation.ts";
+
+test("generic failures provide direct recovery actions instead of pointing back to settings", () => {
+  const presentation = deriveConnectionPresentation("error");
+  assert.doesNotMatch(presentation.detail, /open connection settings/i);
+  assert.deepEqual(
+    deriveConnectionRecoveryPlan({
+      status: "error",
+      detail: null,
+      hasSavedConnection: true,
+    }),
+    {
+      title: "Recover this device",
+      detail:
+        "Retry the saved connection first. If this screen returns, repair only this device with a new one-time invitation; server conversation history is preserved.",
+      primary: { action: "retry", label: "Retry connection" },
+      secondary: {
+        action: "new-invitation",
+        label: "Use a new invitation",
+      },
+    },
+  );
+});
+
+test("incomplete setup leads directly to a new invitation", () => {
+  const recovery = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: null,
+    hasSavedConnection: false,
+  });
+  assert.equal(recovery?.primary.action, "new-invitation");
+  assert.equal(recovery?.secondary?.action, "export-diagnostics");
+});
+
+test("cache recovery retries without discarding saved trust", () => {
+  const recovery = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: "matrix_projection_repair_required",
+    hasSavedConnection: true,
+  });
+  assert.equal(recovery?.primary.action, "retry");
+  assert.equal(recovery?.secondary?.action, "export-diagnostics");
+  assert.doesNotMatch(recovery?.detail ?? "", /invitation/i);
+});
+
+test("authorization failures do not offer a retry that cannot repair them", () => {
+  const recovery = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: "matrix_project_authorization_repair_required",
+    hasSavedConnection: true,
+  });
+  assert.equal(recovery?.primary.action, "new-invitation");
+  assert.equal(recovery?.secondary?.action, "export-diagnostics");
+});
 
 test("maps native progress codes to calm user-facing copy while retaining diagnostics", () => {
   const presentation = deriveConnectionPresentation(

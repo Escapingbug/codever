@@ -314,8 +314,8 @@ export function PairingWizard({
             <>
               <strong>Repair this device’s connection</strong>
               <p>
-                This APK still recognizes {trustedGateway.gatewayName}, but its
-                local Matrix sign-in is missing. On another connected Codever
+                This device still recognizes {trustedGateway.gatewayName}, but
+                its local Matrix sign-in is missing. On another connected Codever
                 device, choose Add another device, then scan or paste that
                 one-time invitation here. Your Codever device identity and
                 approved Gateway will stay the same.

@@ -6674,7 +6674,7 @@ function CodeverAppRuntime() {
         open={settingsOpen}
         config={matrixConfig}
         status={displayedConnectionStatus}
-        progressDetail={connectionPresentation.detail}
+        connectionDetail={connectionDetail}
         repairReason={connectionRepairReason}
         error={pairingError ?? connectionError}
         pairingPreview={pairingPreview}

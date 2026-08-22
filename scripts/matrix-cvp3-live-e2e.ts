@@ -994,6 +994,18 @@ async function assertRecoveryFailureSurvivesLaterSync(
             if (!(error instanceof Error)) throw error
             regression = error
         }
+        if (!regression) {
+            await alert.click()
+            const dialog = page.getByRole('dialog', { name: 'Connection' })
+            await dialog.getByText('Retry the saved connection', { exact: true }).waitFor()
+            await dialog.getByRole('button', { name: 'Retry connection', exact: true }).waitFor()
+            await dialog.getByRole('button', { name: 'Export diagnostics', exact: true }).waitFor()
+            assert.equal(
+                await dialog.getByRole('button', { name: 'Use a new invitation', exact: true }).count(),
+                0,
+                'A bounded snapshot recovery failure must not suggest replacing valid device authorization.',
+            )
+        }
     } finally {
         interceptor.release()
         await interceptor.dispose()
