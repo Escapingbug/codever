@@ -29,6 +29,12 @@ export type ChatMessage = PersistedChatMessage & {
   optimistic?: boolean;
   eventAliases?: string[];
   mergedOperationIds?: string[];
+  multipart?: {
+    messageId: string;
+    version: number;
+    partCount: number;
+    parts: Record<number, string>;
+  };
 };
 
 export type OptimisticMessageReference = {
@@ -122,6 +128,9 @@ export function mergeChatMessage(
     });
   }
 
+  const multipart = mergeMultipartAssistantMessage(current, message);
+  if (multipart) return multipart;
+
   const exactIndex = current.findIndex(
     (entry) =>
       entry.id === message.id ||
@@ -200,6 +209,162 @@ export function mergeChatMessage(
   }
 
   return insertChatMessage(current, message);
+}
+
+type MultipartDescriptor = {
+  messageId: string;
+  version: number;
+  partIndex: number;
+  partCount: number;
+};
+
+/**
+ * CVP/3 splits transport payloads at a byte boundary. Those parts are one
+ * assistant message, not separate chat turns. Reassemble them here so both
+ * the browser Matrix client and the Android native bridge present one bubble.
+ */
+function mergeMultipartAssistantMessage(
+  current: readonly ChatMessage[],
+  incoming: ChatMessage,
+): ChatMessage[] | null {
+  const incomingPart = multipartDescriptor(incoming);
+  if (!incomingPart) return null;
+
+  const matching = current.filter((entry) => {
+    const part = multipartDescriptor(entry);
+    return part?.messageId === incomingPart.messageId &&
+      entry.sessionId === incoming.sessionId;
+  });
+  const isMultipart = incomingPart.partCount > 1 || matching.some((entry) => {
+    const part = multipartDescriptor(entry);
+    return Boolean(entry.multipart || (part && part.partCount > 1));
+  });
+  if (!isMultipart) return null;
+
+  const currentVersion = Math.max(
+    0,
+    ...matching.map((entry) => multipartDescriptor(entry)?.version ?? 0),
+  );
+  if (incomingPart.version < currentVersion) return [...current];
+
+  const version = Math.max(currentVersion, incomingPart.version);
+  const candidates = [...matching, incoming].filter(
+    (entry) => multipartDescriptor(entry)?.version === version,
+  );
+  const descriptor = multipartDescriptor(
+    [...candidates].reverse().find((entry) =>
+      multipartDescriptor(entry)?.partIndex === 0,
+    ) ?? candidates[candidates.length - 1],
+  )!;
+  const parts: Record<number, string> = {};
+  for (const candidate of candidates) {
+    const part = multipartDescriptor(candidate)!;
+    if (candidate.multipart?.version === version) {
+      Object.assign(parts, candidate.multipart.parts);
+    } else if (part.partIndex < descriptor.partCount) {
+      parts[part.partIndex] = candidate.text ?? "";
+    }
+  }
+
+  const firstPart = [...candidates].reverse().find(
+    (entry) => multipartDescriptor(entry)?.partIndex === 0,
+  );
+  const base = firstPart ?? candidates[candidates.length - 1];
+  const toolGroup = candidates.reduce(
+    (group, candidate) => mergeToolGroupPresentation(group, candidate.toolGroup),
+    undefined as ChatMessage["toolGroup"],
+  );
+  const timestamp = minimumDefined(candidates.map((entry) => entry.timestamp));
+  const timeline = timestamp === undefined
+    ? base
+    : candidates.find((entry) => entry.timestamp === timestamp) ?? base;
+  // Keep the aggregate identity distinct from every transport part. The live
+  // message cache fast-path replaces exact IDs directly, while a multipart
+  // update must always return through this reassembly path.
+  const logicalId = `assistant:${descriptor.messageId}:multipart`;
+  const aggregate: ChatMessage = {
+    ...base,
+    id: logicalId,
+    eventId: logicalId,
+    kind: toolGroup || candidates.some((entry) => entry.kind === "tool")
+      ? "tool"
+      : "agent",
+    text: Array.from(
+      { length: descriptor.partCount },
+      (_, index) => parts[index] ?? "",
+    ).join(""),
+    timestamp,
+    time: timeline.time,
+    toolGroup,
+    raw: firstPart?.raw ?? base.raw,
+    eventAliases: uniqueStrings(
+      candidates.flatMap((entry) => [
+        entry.id,
+        entry.eventId,
+        entry.replacesEventId,
+        ...(entry.eventAliases ?? []),
+      ]),
+    ),
+    mergedOperationIds: uniqueStrings(
+      candidates.flatMap((entry) => operationIds(entry)),
+    ),
+    historical: candidates.every((entry) => Boolean(entry.historical)),
+    multipart: {
+      messageId: descriptor.messageId,
+      version,
+      partCount: descriptor.partCount,
+      parts,
+    },
+  };
+  const withoutParts = current.filter((entry) => !matching.includes(entry));
+  return insertChatMessage(withoutParts, aggregate);
+}
+
+function multipartDescriptor(
+  message: ChatMessage | undefined,
+): MultipartDescriptor | undefined {
+  if (!message) return undefined;
+  if (message.multipart) {
+    return {
+      messageId: message.multipart.messageId,
+      version: message.multipart.version,
+      partIndex: 0,
+      partCount: message.multipart.partCount,
+    };
+  }
+  const raw = message.raw;
+  if (
+    raw?.type !== "assistant.message" ||
+    typeof raw.messageId !== "string" ||
+    !raw.messageId ||
+    !isPositiveInteger(raw.messageVersion)
+  ) return undefined;
+  const partIndex = raw.partIndex === undefined ? 0 : raw.partIndex;
+  const partCount = raw.partCount === undefined ? 1 : raw.partCount;
+  if (
+    !isNonnegativeInteger(partIndex) ||
+    !isPositiveInteger(partCount) ||
+    partIndex >= partCount
+  ) return undefined;
+  return {
+    messageId: raw.messageId,
+    version: raw.messageVersion,
+    partIndex,
+    partCount,
+  };
+}
+
+function isNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value > 0;
+}
+
+function minimumDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? Math.min(...defined) : undefined;
 }
 
 function findOperationIndex(

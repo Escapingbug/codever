@@ -88,7 +88,7 @@ export class MatrixCvp3Port implements ChannelPort {
         format: part.format === 'markdown' ? 'markdown' : 'plain',
         final: true,
         ...(parts.length > 1 ? { partIndex: index, partCount: parts.length } : {}),
-        ...(index === 0 && presentation !== undefined
+        ...(presentation !== undefined
           ? { ui: presentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),
@@ -127,7 +127,7 @@ export class MatrixCvp3Port implements ChannelPort {
         format: part.format === 'markdown' ? 'markdown' : 'plain',
         final: context.terminal ?? !context.progressive,
         ...(parts.length > 1 ? { partIndex: index, partCount: parts.length } : {}),
-        ...(index === 0 && presentation !== undefined
+        ...(presentation !== undefined
           ? { ui: presentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),

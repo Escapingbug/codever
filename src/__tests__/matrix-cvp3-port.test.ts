@@ -262,6 +262,43 @@ describe('MatrixCvp3Port', () => {
         tools: [{ name: 'Read', category: 'read', phase: 'completed' }],
       },
     })
+
+    const longToolStart = transport.delivered.length
+    await port.send({
+      ...projectedTool!.message,
+      text: `${'x'.repeat(8 * 1024)}尾`,
+      format: 'plain',
+      replyMarkup: { idempotencyKey: 'long-tool-message-1' },
+    })
+    const longToolPayloads = await Promise.all(
+      transport.delivered.slice(longToolStart).map(async delivery => {
+        const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const envelope = await openCvp3Envelope(extension.envelope, {
+          projectKey: base64UrlDecode(projectKey.key),
+          roomId: room.roomId,
+          projectId: grant.projectId,
+          keyId: projectKey.keyId,
+        })
+        if (envelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+        return envelope.plaintext.value.event.payload
+      }),
+    )
+    expect(longToolPayloads).toHaveLength(2)
+    expect(longToolPayloads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'assistant.message',
+        partIndex: 0,
+        partCount: 2,
+        ui: expect.objectContaining({ kind: 'tool_group', groupId: 'read-1' }),
+      }),
+      expect.objectContaining({
+        type: 'assistant.message',
+        partIndex: 1,
+        partCount: 2,
+        body: '尾',
+        ui: expect.objectContaining({ kind: 'tool_group', groupId: 'read-1' }),
+      }),
+    ]))
   })
 })
 

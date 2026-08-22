@@ -601,3 +601,73 @@ test("migrates a legacy Matrix-event-keyed bubble to its stable CVP logical iden
   assert.equal(recoveredAgain.length, 1);
   assert.equal(recoveredAgain[0].eventId, canonical.eventId);
 });
+
+test("reassembles CVP/3 transport parts into one agent bubble", () => {
+  const messages = mergeChatMessages([], [
+    cvp3Part({ index: 0, count: 2, text: "A".repeat(8_192) }),
+    cvp3Part({ index: 1, count: 2, text: "收尾" }),
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "assistant:message-long:multipart");
+  assert.equal(messages[0].kind, "agent");
+  assert.equal(messages[0].text, `${"A".repeat(8_192)}收尾`);
+  assert.deepEqual(messages[0].multipart?.parts, {
+    0: "A".repeat(8_192),
+    1: "收尾",
+  });
+});
+
+test("keeps a multipart tool as one tool card when a tail arrived as agent text", () => {
+  const tail = cvp3Part({ index: 1, count: 2, text: "完成" });
+  const first = {
+    ...cvp3Part({ index: 0, count: 2, text: "Run command\n" }),
+    kind: "tool",
+    toolGroup: toolGroup("completed", 1_100),
+  };
+
+  const messages = mergeChatMessages([], [tail, first]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].kind, "tool");
+  assert.equal(messages[0].text, "Run command\n完成");
+  assert.equal(messages[0].toolGroup?.tools[0]?.phase, "completed");
+});
+
+test("a newer multipart version replaces all parts without leaving stale text", () => {
+  const versionOne = mergeChatMessages([], [
+    cvp3Part({ index: 0, count: 2, text: "old ", version: 1 }),
+    cvp3Part({ index: 1, count: 2, text: "tail", version: 1 }),
+  ]);
+  const versionTwo = mergeChatMessages(versionOne, [
+    cvp3Part({ index: 0, count: 2, text: "new ", version: 2 }),
+    cvp3Part({ index: 1, count: 2, text: "result", version: 2 }),
+  ]);
+
+  assert.equal(versionTwo.length, 1);
+  assert.equal(versionTwo[0].text, "new result");
+  assert.equal(versionTwo[0].multipart?.version, 2);
+});
+
+function cvp3Part(input: {
+  index: number;
+  count: number;
+  text: string;
+  version?: number;
+}) {
+  return {
+    id: `assistant:message-long:${input.index}`,
+    eventId: `assistant:message-long:${input.index}`,
+    kind: "agent",
+    text: input.text,
+    timestamp: 1_000 + input.index,
+    sessionId: "session-1",
+    raw: {
+      type: "assistant.message",
+      messageId: "message-long",
+      messageVersion: input.version ?? 1,
+      partIndex: input.index,
+      partCount: input.count,
+    },
+  };
+}
