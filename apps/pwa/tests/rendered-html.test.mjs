@@ -298,6 +298,43 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(
     styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.app-shell\s*\{[\s\S]*?grid-template-columns:\s*72px 344px minmax\(520px, 1fr\)/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.session-row\s*\{[\s\S]*?min-height:\s*56px/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.conversation-header\s*\{[\s\S]*?height:\s*62px/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.chat-feed\s*\{[\s\S]*?gap:\s*9px;[\s\S]*?padding:\s*10px clamp\(14px, 2\.4vw, 36px\) 20px/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.bubble\s*\{[\s\S]*?max-width:\s*min\(760px, 84%\);[\s\S]*?font-size:\s*14\.5px/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.tool-group-summary\s*\{[\s\S]*?min-height:\s*44px/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.tool-group-summary > \.tool-state > span\s*\{[\s\S]*?clip-path:\s*inset\(50%\)/,
+  );
+  assert.match(
+    styles,
+    /@media \(min-width: 901px\)[\s\S]*?\.composer\s*\{[\s\S]*?min-height:\s*82px/,
+  );
+  assert.match(source, /inferredCompletedTurnResultIds/);
+  assert.match(source, /className=\{`message-row user-row turn-prompt/);
+  assert.match(source, /turnPresentationClass/);
+  assert.match(source, /className="activity-copy visually-hidden"/);
+  assert.match(source, /aria-label=\{`\$\{session\.title\}\. \$\{statusSummary\}/);
+  assert.match(
+    styles,
     /@media \(max-width: 900px\)[\s\S]*?\.new-session-dialog > header\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?top:\s*0/,
   );
   assert.match(

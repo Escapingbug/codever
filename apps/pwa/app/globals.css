@@ -61,6 +61,18 @@ select:focus-visible {
   outline-offset: 2px;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 78px 352px minmax(520px, 1fr);
@@ -554,6 +566,21 @@ select:focus-visible {
 .conversation-heading i.offline-dot {
   background: #9fa5b2;
   box-shadow: none;
+}
+
+.conversation-connection-desktop {
+  display: inline-flex;
+  align-items: center;
+}
+
+.conversation-connection-desktop .mobile-connection-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.conversation-connection-desktop .mobile-connection-icon svg {
+  width: 16px;
+  height: 16px;
 }
 
 .gateway-card button {
@@ -2267,11 +2294,40 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.agent-activity .activity-copy {
+  position: absolute !important;
+}
+
 .agent-bubble {
   border: 1px solid #e5e7ed;
   border-bottom-left-radius: 4px;
   background: white;
   color: #3f485b;
+}
+
+.turn-prompt {
+  margin-top: 5px;
+}
+
+.turn-process {
+  opacity: 0.86;
+}
+
+.turn-process:has(.running),
+.turn-process:has(.failed),
+.turn-process:has(.phase-running),
+.turn-process:has(.has-error) {
+  opacity: 1;
+}
+
+.turn-result {
+  margin-bottom: 7px;
+  opacity: 1;
+}
+
+.turn-result .agent-bubble {
+  border-left: 2px solid #8d7ee4;
+  box-shadow: 0 4px 14px rgb(42 48 73 / 7%);
 }
 
 .error-mark {
@@ -5669,9 +5725,353 @@ body {
   font-size: 13px;
 }
 
+/* Desktop density follows task rounds: prompts anchor a turn, process output
+   recedes, and the final report keeps the widest readable surface. */
+@media (min-width: 901px) {
+  .app-shell {
+    grid-template-columns: 72px 344px minmax(520px, 1fr);
+  }
+
+  .rail {
+    padding: 18px 8px 13px;
+  }
+
+  .brand {
+    width: 40px;
+    height: 40px;
+    margin-bottom: 22px;
+  }
+
+  .rail-button {
+    min-height: 52px;
+  }
+
+  .session-header {
+    height: 74px;
+    padding: 12px 16px 10px 18px;
+  }
+
+  .session-header h1 {
+    font-size: 22px;
+  }
+
+  .eyebrow,
+  .session-section-label {
+    font-size: 10px;
+  }
+
+  .search-box {
+    height: 36px;
+    margin: 0 13px 9px;
+  }
+
+  .search-box input {
+    font-size: 13px;
+  }
+
+  .gateway-card {
+    min-height: 54px;
+    gap: 9px;
+    margin: 0 13px 10px;
+    padding: 7px 9px;
+  }
+
+  .gateway-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .gateway-card strong {
+    font-size: 13px;
+  }
+
+  .gateway-card .gateway-status-copy {
+    margin-top: 0;
+  }
+
+  .gateway-card .gateway-status-copy .mobile-connection-icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  .gateway-card .gateway-status-copy .mobile-connection-icon svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .session-filters {
+    margin: -2px 13px 7px;
+  }
+
+  .session-filters button {
+    min-height: 32px;
+  }
+
+  .project-session-group {
+    margin-bottom: 4px;
+  }
+
+  .project-session-toggle {
+    min-height: 42px;
+    margin-bottom: 0;
+    padding-block: 3px;
+  }
+
+  .project-copy strong {
+    font-size: 11px;
+  }
+
+  .project-copy small {
+    font-size: 8px;
+  }
+
+  .session-row {
+    min-height: 56px;
+    gap: 9px;
+    margin-block: 0;
+    padding: 7px 9px;
+  }
+
+  .session-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 11px;
+    font-size: 11px;
+  }
+
+  .session-copy {
+    gap: 2px;
+  }
+
+  .session-title-line strong {
+    font-size: 14px;
+  }
+
+  .session-title-line time {
+    font-size: 10px;
+  }
+
+  .session-preview-line > span {
+    font-size: 11px;
+  }
+
+  .trust-footer {
+    display: none;
+  }
+
+  .conversation-header {
+    height: 62px;
+    gap: 9px;
+    padding-inline: 16px;
+  }
+
+  .conversation-avatar {
+    width: 34px;
+    height: 34px;
+  }
+
+  .conversation-heading h2 {
+    font-size: 16px;
+  }
+
+  .conversation-heading > .conversation-status {
+    font-size: 11px;
+  }
+
+  .connection-progress {
+    gap: 6px;
+    padding-block: 28px;
+  }
+
+  .connection-progress-desktop-visual,
+  .connection-progress-desktop-title,
+  .connection-progress-detail,
+  .connection-progress-desktop-action {
+    display: none;
+  }
+
+  .connection-progress-mobile-visual,
+  .connection-progress-mobile-title {
+    display: grid;
+  }
+
+  .connection-progress-mobile-action {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    place-items: center;
+    padding: 0;
+  }
+
+  .chat-feed {
+    gap: 9px;
+    padding: 10px clamp(14px, 2.4vw, 36px) 20px;
+  }
+
+  .date-divider {
+    margin-block: 0;
+  }
+
+  .date-divider span {
+    padding: 3px 9px;
+    font-size: 10px;
+  }
+
+  .agent-row {
+    gap: 7px;
+  }
+
+  .agent-mark {
+    width: 25px;
+    height: 25px;
+    border-radius: 8px;
+    font-size: 9px;
+  }
+
+  .agent-row.agent-turn-continuation {
+    padding-left: 32px;
+  }
+
+  .agent-turn-continuation {
+    margin-top: -5px;
+  }
+
+  .turn-prompt {
+    margin-top: 8px;
+  }
+
+  .turn-process .agent-bubble {
+    border-color: #eceef3;
+    background: #fcfcfd;
+    box-shadow: none;
+  }
+
+  .turn-process .agent-label {
+    display: none;
+  }
+
+  .turn-result.agent-row.agent-turn-continuation {
+    padding-left: 0;
+  }
+
+  .turn-result.agent-row.agent-turn-continuation .agent-mark {
+    display: grid;
+  }
+
+  .turn-result .agent-bubble {
+    max-width: min(820px, 88%);
+  }
+
+  .bubble {
+    max-width: min(760px, 84%);
+    padding: 8px 11px 7px;
+    font-size: 14.5px;
+    line-height: 1.48;
+  }
+
+  .bubble .markdown-content p,
+  .markdown-content ul,
+  .markdown-content ol,
+  .markdown-content blockquote,
+  .markdown-content pre,
+  .markdown-content table {
+    margin-block: 0.52em;
+  }
+
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4 {
+    margin: 0.78em 0 0.32em;
+  }
+
+  .tool-group-card {
+    width: min(760px, 86%);
+  }
+
+  .tool-group-summary {
+    min-height: 44px;
+    grid-template-columns: 28px minmax(0, 1fr) auto 18px;
+    gap: 7px;
+    padding: 5px 8px;
+  }
+
+  .tool-group-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .tool-group-copy strong {
+    font-size: 12px;
+  }
+
+  .tool-group-copy small {
+    font-size: 10px;
+  }
+
+  .tool-group-summary > .tool-state {
+    width: 25px;
+    padding: 3px;
+  }
+
+  .tool-group-summary > .tool-state > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .composer-area {
+    padding-inline: clamp(14px, 2.4vw, 34px);
+  }
+
+  .context-strip {
+    height: 34px;
+  }
+
+  .context-item small {
+    display: none;
+  }
+
+  .context-item b,
+  .branch-item,
+  .token-state {
+    font-size: 11px;
+  }
+
+  .composer {
+    min-height: 82px;
+    padding: 7px 9px 6px;
+  }
+
+  .composer textarea {
+    min-height: 24px;
+    font-size: 14.5px;
+  }
+
+  .composer-hint {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .agent-activity {
+    width: 25px;
+    min-height: 25px;
+    justify-content: center;
+    margin-left: 32px;
+  }
+}
+
 @media (max-width: 1050px) {
   .app-shell {
-    grid-template-columns: 68px 340px minmax(420px, 1fr);
+    grid-template-columns: 68px 328px minmax(420px, 1fr);
   }
 
   .rail {
@@ -5679,11 +6079,11 @@ body {
   }
 
   .chat-feed {
-    padding-inline: 24px;
+    padding-inline: 16px;
   }
 
   .composer-area {
-    padding-inline: 22px;
+    padding-inline: 16px;
   }
 
   .branch-item,

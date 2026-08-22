@@ -996,6 +996,22 @@ function CodeverAppRuntime() {
       turnPromptCache,
     ],
   );
+  const inferredCompletedTurnResultIds = useMemo(() => {
+    const resultIds = new Set<string>();
+    let latestAgentResultId: string | null = null;
+    for (const message of messages) {
+      if (message.kind === "user") {
+        if (latestAgentResultId) resultIds.add(latestAgentResultId);
+        latestAgentResultId = null;
+        continue;
+      }
+      if (message.kind === "agent" || message.kind === "error") {
+        latestAgentResultId = message.id;
+      }
+    }
+    if (latestCompletedTurn) resultIds.add(latestCompletedTurn.result.id);
+    return resultIds;
+  }, [latestCompletedTurn, messages]);
   const deleteDialogBusy = Boolean(
     deleteTarget !== null &&
       sessionLifecycleBusy.get(deleteTarget.id) === "delete",
@@ -5333,12 +5349,12 @@ function CodeverAppRuntime() {
               {trustedGateway?.gatewayName || "Connect a computer"}
             </strong>
             <span className="gateway-status-copy">
-              <i
-                className={`connection-dot connection-state-${displayedConnectionStatus}`}
-              />{" "}
-              {trustedGateway
-                ? connectionPresentation.title
-                : "Scan or paste a one-time code"}
+              <span
+                className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                aria-hidden="true"
+              >
+                <MobileConnectionIcon state={mobileConnectionSignal.state} />
+              </span>
             </span>
             <span className="gateway-mobile-status" aria-hidden="true">
               <span
@@ -5461,11 +5477,17 @@ function CodeverAppRuntime() {
                   : activity?.detail ||
                     activity?.label ||
                     sessionSignalLabel(signal);
+                const technicalSummary = `${session.provider}${
+                  session.model ? ` · ${session.model}` : ""
+                }${
+                  session.reasoningEffort ? ` · ${session.reasoningEffort}` : ""
+                }`;
                 return (
                 <button
                   key={session.id}
                   data-session-id={session.id}
                   data-project-name={session.projectName}
+                  aria-label={`${session.title}. ${statusSummary}. ${technicalSummary}. Updated ${formatSessionTime(session.updatedAt)}`}
                   aria-pressed={selectedSessionId === session.id}
                   className={`session-row ${
                     selectedSessionId === session.id
@@ -5495,32 +5517,26 @@ function CodeverAppRuntime() {
                       <strong>{session.title}</strong>
                       <time>{formatSessionTime(session.updatedAt)}</time>
                     </span>
-                    <span className="session-preview-line">
-                      {statusSummary ? (
-                        <span className="session-status-summary">
-                          {statusSummary}
-                        </span>
-                      ) : (
-                        <span className="session-technical-summary">
-                          {session.provider}
-                          {session.model ? ` · ${session.model}` : ""}
-                          {session.reasoningEffort
-                            ? ` · ${session.reasoningEffort}`
-                            : ""}
-                        </span>
-                      )}
-                      {session.extensions.length > 0 && (
-                        <b
-                          className="session-extension-badge"
-                          title={session.extensions.map((item) => item.name).join(", ")}
-                        >
-                          ◇ {session.extensions[0]?.name}
-                          {session.extensions.length > 1
-                            ? ` +${session.extensions.length - 1}`
-                            : ""}
-                        </b>
-                      )}
-                    </span>
+                    {(lifecycleAction || session.extensions.length > 0) && (
+                      <span className="session-preview-line">
+                        {lifecycleAction && (
+                          <span className="session-status-summary">
+                            {statusSummary}
+                          </span>
+                        )}
+                        {session.extensions.length > 0 && (
+                          <b
+                            className="session-extension-badge"
+                            title={session.extensions.map((item) => item.name).join(", ")}
+                          >
+                            ◇ {session.extensions[0]?.name}
+                            {session.extensions.length > 1
+                              ? ` +${session.extensions.length - 1}`
+                              : ""}
+                          </b>
+                        )}
+                      </span>
+                    )}
                   </span>
                 </button>
                 );
@@ -5711,28 +5727,31 @@ function CodeverAppRuntime() {
           <div className="conversation-heading">
             <h2>{conversationTitle}</h2>
             <span className="conversation-status">
-              <i
-                className={`connection-dot connection-state-${displayedConnectionStatus} ${
-                  displayedConnectionStatus === "offline" || displayedConnectionStatus === "error"
-                    ? "offline-dot"
-                    : ""
-                }`}
-              />
+              {gatewayAvailable && gatewayState && (
+                <i
+                  className={`connection-dot connection-state-${displayedConnectionStatus}`}
+                  aria-hidden="true"
+                />
+              )}
               <span className="conversation-status-copy">
                 {gatewayAvailable && gatewayState ? (
                   selectedArchived ? (
                     `${activeWorkspace?.projectName || "Project"} · archived`
                   ) : (
-                    `${activeWorkspace?.projectName || "Project"} · ${
-                      isStreaming
-                        ? agentActivity?.label || "working"
-                        : activeProvider
-                    }`
+                    `${activeWorkspace?.projectName || "Project"} · ${activeProvider}`
                   )
                 ) : (
                   <>
                     <span className="conversation-connection-desktop">
-                      {connectionPresentation.title}
+                      <span
+                        className={`mobile-connection-icon mobile-connection-${mobileConnectionSignal.state}`}
+                        aria-hidden="true"
+                      >
+                        <MobileConnectionIcon state={mobileConnectionSignal.state} />
+                      </span>
+                      <span className="visually-hidden">
+                        {mobileConnectionSignal.label}
+                      </span>
                     </span>
                     <span className="conversation-connection-mobile">
                       <span
@@ -5939,6 +5958,12 @@ function CodeverAppRuntime() {
               : "";
             const isCompletedTurnResult =
               latestCompletedTurn?.result.id === message.id;
+            const isTurnResult = inferredCompletedTurnResultIds.has(message.id);
+            const turnPresentationClass = agentWork
+              ? isTurnResult
+                ? "turn-result"
+                : "turn-process"
+              : "";
             const turnLocationPhase = latestCompletedTurn?.promptInTranscript
               ? "ready"
               : turnHistoryLoad &&
@@ -5979,7 +6004,7 @@ function CodeverAppRuntime() {
             if (message.kind === "error") {
               return (
                 <div
-                  className={`message-row agent-row ${
+                  className={`message-row agent-row ${isTurnResult ? "turn-result" : ""} ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
@@ -6001,7 +6026,7 @@ function CodeverAppRuntime() {
                 (message.revision !== undefined ? "sent" : undefined);
               return (
                 <div
-                  className={`message-row user-row ${
+                  className={`message-row user-row turn-prompt ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
@@ -6063,7 +6088,7 @@ function CodeverAppRuntime() {
               if (!message.toolGroup) return null;
               return (
                 <div
-                  className={`message-row tool-group-row ${agentTurnClass} ${
+                  className={`message-row tool-group-row ${agentTurnClass} ${turnPresentationClass} ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
@@ -6186,7 +6211,7 @@ function CodeverAppRuntime() {
             }
             return (
               <div
-                className={`message-row agent-row ${agentTurnClass} ${
+                className={`message-row agent-row ${agentTurnClass} ${turnPresentationClass} ${
                   message.historical ? "" : "message-enter"
                 }`}
                 key={message.id}
@@ -6217,15 +6242,17 @@ function CodeverAppRuntime() {
               className={`agent-activity activity-${agentActivity.phase}`}
               key={`${agentActivity.phase}:${agentActivity.label}:${agentActivity.detail ?? ""}`}
               role="status"
+              aria-label={`${agentActivity.label}${agentActivity.detail ? `. ${agentActivity.detail}` : ""}`}
               aria-live="polite"
               aria-atomic="true"
+              title={`${agentActivity.label}${agentActivity.detail ? ` · ${agentActivity.detail}` : ""}`}
             >
               <span className="activity-dots" aria-hidden="true">
                 <span />
                 <span />
                 <span />
               </span>
-              <span>
+              <span className="activity-copy visually-hidden">
                 <strong>{agentActivity.label}</strong>
                 {agentActivity.detail && <small>{agentActivity.detail}</small>}
               </span>
