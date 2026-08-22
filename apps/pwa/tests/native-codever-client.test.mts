@@ -13,6 +13,7 @@ import {
   NativeBridgeClient,
   OPTIONAL_NATIVE_CAPABILITIES,
   REQUIRED_NATIVE_CAPABILITIES,
+  nativeCapabilityVersions,
 } from "../app/client/native/NativeBridgeClient.ts";
 import {
   acquireNativeRpcBridge,
@@ -78,7 +79,7 @@ test("replays native state, sends a durable command, and acknowledges events", a
     requiredCapabilities: [],
     optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
       name,
-      versions: name === "history.page" ? [2, 1] : [1],
+      versions: nativeCapabilityVersions(name),
     })).concat(OPTIONAL_NATIVE_CAPABILITIES.map((name) => ({
       name,
       versions: [1],
@@ -558,7 +559,7 @@ test("recovers structured tool cards from older native agent messages", async ()
     requiredCapabilities: [],
     optionalCapabilities: REQUIRED_NATIVE_CAPABILITIES.map((name) => ({
       name,
-      versions: name === "history.page" ? [2, 1] : [1],
+      versions: nativeCapabilityVersions(name),
     })),
   });
   const client = new NativeBridgeClient(bridge, hello, {
@@ -650,7 +651,7 @@ async function createTestClient(
       ...OPTIONAL_NATIVE_CAPABILITIES,
     ].map((name) => ({
       name,
-      versions: name === "history.page" ? [2, 1] : [1],
+      versions: nativeCapabilityVersions(name),
     })),
   });
   const client = new NativeBridgeClient(bridge, hello, {
@@ -739,7 +740,7 @@ function responseFor(request: Request): unknown {
 function helloResult(): HelloResult {
   const capabilities = Object.fromEntries(
     [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-      .map((name) => [name, { version: name === "history.page" ? 2 : 1 }]),
+      .map((name) => [name, { version: nativeCapabilityVersions(name)[0] }]),
   ) as Record<CapabilityName, { version: number }>;
   return {
     protocolVersion: 1,

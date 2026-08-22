@@ -78,7 +78,7 @@ Bridge protocol version 1 currently implements:
 - `client.lifecycle`
 - `events.replay`
 - `state.snapshot`
-- `commands.durable`
+- `commands.durable` v2 (includes project settings and provider-history operations)
 - `history.page` v2 (`source=local` is network-free; `source=matrix` is explicit pagination)
 - `attachments.chunked`
 - `pairing.native`

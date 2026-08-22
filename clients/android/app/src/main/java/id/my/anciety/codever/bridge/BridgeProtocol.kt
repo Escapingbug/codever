@@ -1312,7 +1312,7 @@ class BridgeDispatcher(
             MATRIX_LOGIN_TOKEN_CAPABILITY,
         )
         fun supportedCapabilityVersions(name: String): Set<Int> = when {
-            name == "history.page" -> setOf(1, 2)
+            name == "history.page" || name == "commands.durable" -> setOf(1, 2)
             name in SUPPORTED_CAPABILITIES -> setOf(1)
             else -> emptySet()
         }

@@ -14,7 +14,10 @@ import {
   bootstrapNativeMatrixSessionIfAvailable,
   createCodeverClient,
 } from "../app/client/createCodeverClient.ts";
-import { REQUIRED_NATIVE_CAPABILITIES } from "../app/client/native/NativeBridgeClient.ts";
+import {
+  REQUIRED_NATIVE_CAPABILITIES,
+  nativeCapabilityVersions,
+} from "../app/client/native/NativeBridgeClient.ts";
 import {
   NativeRpcBridge,
   type NativeBridgePort,
@@ -155,6 +158,29 @@ test("fails closed when a native-owned Matrix session loses its host", async () 
   assert.equal(webCreates, 0);
 });
 
+test("fails closed before command submission when the native durable command set is outdated", async () => {
+  const outdated = new BootstrapPort(1);
+  await assert.rejects(
+    createCodeverClient(
+      { ...config, accessToken: NATIVE_MANAGED_ACCESS_TOKEN },
+      quietHandlers(),
+      {
+        nativePort: () => outdated,
+        createBridge: (port) => new NativeRpcBridge(port),
+        createWeb: (async () => {
+          throw new Error("Web fallback must remain disabled for a native-owned session.");
+        }) as typeof createWebCodeverClient,
+      },
+    ),
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "matrix_native_runtime_unavailable" &&
+      /update/i.test(error.message),
+  );
+  assert.equal(outdated.bootstrapToken, "");
+});
+
 test("consumes a one-time login token only after complete native negotiation", async () => {
   const partial = new HelloPort();
   const input = nativeBootstrapInput();
@@ -203,6 +229,8 @@ class BootstrapPort implements NativeBridgePort {
   onmessage: NativeBridgePort["onmessage"] = null;
   bootstrapToken = "";
 
+  constructor(private readonly commandsDurableVersion = 2) {}
+
   postMessage(message: string): void {
     const request = JSON.parse(message) as {
       id: string;
@@ -222,7 +250,11 @@ class BootstrapPort implements NativeBridgePort {
         capabilities: Object.fromEntries(
           REQUIRED_NATIVE_CAPABILITIES.map((name) => [
             name,
-            { version: name === "history.page" ? 2 : 1 },
+            {
+              version: name === "commands.durable"
+                ? this.commandsDurableVersion
+                : nativeCapabilityVersions(name)[0],
+            },
           ]),
         ),
         limits: NATIVE_BRIDGE_LIMITS,
