@@ -102,12 +102,15 @@ describe('MatrixCvp3Port', () => {
         keyId: projectKey.keyId,
       })
     }))
-    expect(opened.map(item => item.plaintext.kind === 'signed_event'
-      ? item.plaintext.value.event.payload
-      : null)).toMatchObject([
+    const assistantEvents = opened.map(item => {
+      if (item.plaintext.kind !== 'signed_event') throw new Error('expected event')
+      return item.plaintext.value.event
+    })
+    expect(assistantEvents.map(event => event.payload)).toMatchObject([
       { type: 'assistant.message', messageId: 'logical-message-1', messageVersion: 1, body: 'first' },
       { type: 'assistant.message', messageId: 'logical-message-1', messageVersion: 2, body: 'updated' },
     ])
+    expect(assistantEvents.map(event => event.occurredAt)).toEqual([1, 1])
     expect(transport.delivered[0]?.content['m.relates_to']).toMatchObject({
       rel_type: 'm.thread',
       event_id: '$root:example.org',
@@ -251,6 +254,9 @@ describe('MatrixCvp3Port', () => {
       keyId: projectKey.keyId,
     })
     if (toolEnvelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(toolEnvelope.plaintext.value.event.occurredAt).toBeGreaterThan(
+      assistantEvents[0]!.occurredAt,
+    )
     const pwaProjection = new MatrixCvp3Projection()
     pwaProjection.applyEvent(toolEnvelope.plaintext.value.event, toolDelivery.eventId)
     const pwaMessage = pwaProjection.messages.get('assistant:tool-message-1:0')
@@ -340,6 +346,23 @@ describe('MatrixCvp3Port', () => {
         partCount: 2,
         body: 'Markdown tail',
       },
+    ])
+    const growingEvents = await Promise.all(
+      transport.delivered.slice(growingStart).map(async delivery => {
+        const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const envelope = await openCvp3Envelope(extension.envelope, {
+          projectKey: base64UrlDecode(projectKey.key),
+          roomId: room.roomId,
+          projectId: grant.projectId,
+          keyId: projectKey.keyId,
+        })
+        if (envelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+        return envelope.plaintext.value.event
+      }),
+    )
+    expect(growingEvents.map(event => event.occurredAt)).toEqual([
+      growingEvents[0]!.occurredAt,
+      growingEvents[0]!.occurredAt,
     ])
   })
 })

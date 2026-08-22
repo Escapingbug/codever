@@ -65,7 +65,9 @@ export class MatrixCvp3Port implements ChannelPort {
   private readonly attachmentUploads = new Map<string, Promise<CodeverAttachment[]>>()
   private readonly physicalEventIds = new Map<string, string>()
   private readonly messageVersions = new Map<string, number>()
+  private readonly messageTimestamps = new Map<string, number>()
   private causationCommandId: string | null = null
+  private lastOccurredAt = -1
 
   constructor(private readonly options: MatrixCvp3PortOptions) {}
 
@@ -95,6 +97,8 @@ export class MatrixCvp3Port implements ChannelPort {
           ? { ui: presentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),
+      }, {
+        occurredAt: this.messageTimestamp(messageId),
       })
       this.physicalEventIds.set(logicalPartId, result.eventId)
       if (index === 0) this.physicalEventIds.set(messageId, result.eventId)
@@ -119,7 +123,8 @@ export class MatrixCvp3Port implements ChannelPort {
 
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
-      const version = this.nextMessageVersion(partVersionKey(messageId, index))
+      const versionKey = partVersionKey(messageId, index)
+      const version = this.nextMessageVersion(versionKey)
       const physicalTarget = this.physicalEventIds.get(logicalPartId)
         ?? (index === 0 ? this.physicalEventIds.get(messageId) : undefined)
       const result = await this.sendAssistantEvent({
@@ -134,10 +139,17 @@ export class MatrixCvp3Port implements ChannelPort {
           ? { ui: presentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),
-      }, physicalTarget ? {
-        rel_type: 'm.replace',
-        event_id: physicalTarget,
-      } : undefined)
+      }, {
+        occurredAt: this.messageTimestamp(messageId),
+        ...(physicalTarget
+          ? {
+              relation: {
+                rel_type: 'm.replace',
+                event_id: physicalTarget,
+              },
+            }
+          : {}),
+      })
       this.physicalEventIds.set(logicalPartId, result.eventId)
       if (index === 0) this.physicalEventIds.set(messageId, result.eventId)
       this.options.onLog?.(`[cvp3/matrix] assistant ${logicalPartId} v${version} delivered`)
@@ -308,13 +320,16 @@ export class MatrixCvp3Port implements ChannelPort {
       Extract<Cvp3Event['payload'], { type: 'assistant.message' }>,
       'type' | 'projection'
     > & { eventId: string },
-    relation?: Record<string, unknown>,
+    options: {
+      relation?: Record<string, unknown>
+      occurredAt?: number
+    } = {},
   ) {
     const { eventId: logicalEventId, ...eventPayload } = payload
     return this.options.contentLayer.sendEvent(
       this.options.room,
       {
-        ...this.baseEvent(logicalEventId),
+        ...this.baseEvent(logicalEventId, options.occurredAt),
         payload: {
           type: 'assistant.message',
           ...eventPayload,
@@ -322,11 +337,14 @@ export class MatrixCvp3Port implements ChannelPort {
         },
       },
       this.options.transport,
-      { relation: relation ?? threadRelation(this.options.threadRootEventId) },
+      { relation: options.relation ?? threadRelation(this.options.threadRootEventId) },
     )
   }
 
-  private baseEvent(logicalEventId: string): Omit<Cvp3Event, 'payload'> {
+  private baseEvent(
+    logicalEventId: string,
+    occurredAt = this.nextOccurredAt(),
+  ): Omit<Cvp3Event, 'payload'> {
     return {
       kind: 'codever.event',
       version: 3,
@@ -334,7 +352,7 @@ export class MatrixCvp3Port implements ChannelPort {
       workspaceId: this.options.workspaceId,
       projectId: this.options.projectId,
       sessionId: this.options.sessionId,
-      occurredAt: (this.options.now ?? Date.now)(),
+      occurredAt,
       ...(this.causationCommandId
         ? { causationCommandId: this.causationCommandId }
         : {}),
@@ -345,6 +363,21 @@ export class MatrixCvp3Port implements ChannelPort {
     const next = (this.messageVersions.get(messageId) ?? 0) + 1
     this.messageVersions.set(messageId, next)
     return next
+  }
+
+  private messageTimestamp(messageId: string): number {
+    const current = this.messageTimestamps.get(messageId)
+    if (current !== undefined) return current
+    const timestamp = this.nextOccurredAt()
+    this.messageTimestamps.set(messageId, timestamp)
+    return timestamp
+  }
+
+  private nextOccurredAt(): number {
+    const wallClock = (this.options.now ?? Date.now)()
+    const timestamp = Math.max(wallClock, this.lastOccurredAt + 1)
+    this.lastOccurredAt = timestamp
+    return timestamp
   }
 
   private operationIdFor(message: ChannelMessage): string {

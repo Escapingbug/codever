@@ -239,6 +239,27 @@ class ClientEventHubTest {
     }
 
     @Test
+    fun `message updates keep their first timeline position after restart`() {
+        val persistence = InMemoryClientEventPersistence()
+        val generator = CountingCursorGenerator()
+        val first = hub(persistence = persistence, cursorGenerator = generator)
+        first.upsertMessage("session-1", message("agent-1", 100, text = "Working"))
+        first.upsertMessage("session-1", message("tool-1", 200, text = "Bash"))
+        first.upsertMessage("session-1", message("agent-1", 300, text = "Done"))
+
+        val liveOrder = first.historyPage("session-1", limit = 10).messages
+        assertEquals(listOf("agent-1", "tool-1"), liveOrder.map { it.eventId })
+        assertEquals(100L, liveOrder.first().timestamp)
+        assertEquals("Done", liveOrder.first().text)
+
+        val restored = hub(persistence = persistence, cursorGenerator = generator)
+        assertEquals(
+            listOf("agent-1", "tool-1"),
+            restored.historyPage("session-1", limit = 10).messages.map { it.eventId },
+        )
+    }
+
+    @Test
     fun `only cached gateway state rewrites the durable snapshot`() {
         val persistence = CountingPersistence()
         val hub = hub(persistence = persistence)

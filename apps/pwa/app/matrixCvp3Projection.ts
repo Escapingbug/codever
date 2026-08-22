@@ -311,7 +311,9 @@ export class MatrixCvp3Projection {
           physicalEventId,
           sessionId: event.sessionId,
           sender: "agent",
-          timestamp: event.occurredAt,
+          // Streamed versions update one bubble. Its first appearance owns
+          // the timeline position so live delivery and restored history agree.
+          timestamp: current ? Math.min(current.timestamp, event.occurredAt) : event.occurredAt,
           body: payload.body,
           format: payload.format,
           version: payload.messageVersion,
@@ -320,6 +322,10 @@ export class MatrixCvp3Projection {
           ...(event.causationCommandId ? { commandId: event.causationCommandId } : {}),
           payload,
         });
+      } else if (event.occurredAt < current.timestamp) {
+        // A paged Matrix batch may arrive newest-first. Learn the initial
+        // position from an older version without downgrading its final body.
+        this.messages.set(key, { ...current, timestamp: event.occurredAt });
       }
     }
     if (payload.type === "decision.requested" && event.sessionId) {
@@ -384,18 +390,24 @@ export class MatrixCvp3Projection {
       });
     }
     if (payload.type === "tool.activity" && event.sessionId) {
-      this.messages.set(`tool:${payload.toolCallId}`, {
-        logicalId: `tool:${payload.toolCallId}`,
-        physicalEventId,
-        sessionId: event.sessionId,
-        sender: "system",
-        timestamp: event.occurredAt,
-        body: payload.name,
-        format: "plain",
-        version: payload.toolVersion,
-        ...(event.causationCommandId ? { commandId: event.causationCommandId } : {}),
-        payload,
-      });
+      const key = `tool:${payload.toolCallId}`;
+      const current = this.messages.get(key);
+      if (!current || payload.toolVersion > current.version) {
+        this.messages.set(key, {
+          logicalId: key,
+          physicalEventId,
+          sessionId: event.sessionId,
+          sender: "system",
+          timestamp: current ? Math.min(current.timestamp, event.occurredAt) : event.occurredAt,
+          body: payload.name,
+          format: "plain",
+          version: payload.toolVersion,
+          ...(event.causationCommandId ? { commandId: event.causationCommandId } : {}),
+          payload,
+        });
+      } else if (event.occurredAt < current.timestamp) {
+        this.messages.set(key, { ...current, timestamp: event.occurredAt });
+      }
     }
     if (event.causationCommandId) {
       const completion = completionFromEvent(event);

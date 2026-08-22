@@ -240,6 +240,44 @@ describe("MatrixCvp3Projection", () => {
     expect(secondIncoming.replacesEventId).toBe("$matrix-version-1");
   });
 
+  it("keeps streamed Agent and tool messages in one order after projection restore", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(messageEvent(1, 1, 100), "$agent-v1");
+    projection.applyEvent(toolPresentationMessageEvent(200), "$tool");
+    projection.applyEvent(messageEvent(1, 2, 300), "$agent-v2");
+
+    expect(projection.sessionMessages("session-a").map(message => message.logicalId)).toEqual([
+      "assistant:message-1:0",
+      "assistant:tool-message-1:0",
+    ]);
+    expect(projection.messages.get("assistant:message-1:0")).toMatchObject({
+      body: "message 1 v2",
+      timestamp: 100,
+      version: 2,
+    });
+
+    const restored = new MatrixCvp3Projection();
+    restored.restore(projection.durableState());
+    expect(restored.sessionMessages("session-a").map(message => message.logicalId)).toEqual([
+      "assistant:message-1:0",
+      "assistant:tool-message-1:0",
+    ]);
+
+    const newestFirst = new MatrixCvp3Projection();
+    newestFirst.applyEvent(messageEvent(1, 2, 300), "$agent-v2-first");
+    newestFirst.applyEvent(toolPresentationMessageEvent(200), "$tool-second");
+    newestFirst.applyEvent(messageEvent(1, 1, 100), "$agent-v1-last");
+    expect(newestFirst.sessionMessages("session-a").map(message => message.logicalId)).toEqual([
+      "assistant:message-1:0",
+      "assistant:tool-message-1:0",
+    ]);
+    expect(newestFirst.messages.get("assistant:message-1:0")).toMatchObject({
+      body: "message 1 v2",
+      timestamp: 100,
+      version: 2,
+    });
+  });
+
   it("classifies assistant messages with a tool presentation as tool messages", () => {
     const projection = new MatrixCvp3Projection();
     projection.applyEvent(toolPresentationMessageEvent(), "$tool-message");
@@ -278,8 +316,9 @@ describe("MatrixCvp3Projection", () => {
   });
 });
 
-function toolPresentationMessageEvent(): Cvp3Event {
-  const timestamp = 1_700_000_000_000;
+function toolPresentationMessageEvent(
+  timestamp = 1_700_000_000_000,
+): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
@@ -594,7 +633,11 @@ function interruptedEvent(suffix: string, occurredAt: number): Cvp3Event {
   };
 }
 
-function messageEvent(index: number, messageVersion = 1): Cvp3Event {
+function messageEvent(
+  index: number,
+  messageVersion = 1,
+  occurredAt = index + 2,
+): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
@@ -604,7 +647,7 @@ function messageEvent(index: number, messageVersion = 1): Cvp3Event {
     workspaceId: "workspace-1",
     projectId: "project-1",
     sessionId: "session-a",
-    occurredAt: index + 2,
+    occurredAt,
     payload: {
       type: "assistant.message",
       messageId: `message-${index}`,
@@ -612,7 +655,7 @@ function messageEvent(index: number, messageVersion = 1): Cvp3Event {
       body: `message ${index} v${messageVersion}`,
       format: "markdown",
       final: true,
-      projection: { title: "A", lifecycle: "active", activity: "working", updatedAt: index + 2, stateVersion: 2 },
+      projection: { title: "A", lifecycle: "active", activity: "working", updatedAt: occurredAt, stateVersion: 2 },
     },
   };
 }
