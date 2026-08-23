@@ -111,7 +111,10 @@ class WebViewPage {
             const selected = document.querySelector('button.session-row[aria-pressed="true"]');
             const connection = document.querySelector('button[aria-label^="Open connection settings,"]');
             return {
-                connected: Boolean(connection?.getAttribute('aria-label')?.endsWith('Connected')),
+                connected: Boolean(
+                    connection?.classList.contains('connection-state-connected')
+                    && connection.getAttribute('aria-label')?.endsWith('Online')
+                ),
                 sessionIds: Array.from(document.querySelectorAll('button.session-row'))
                     .map(row => row.dataset.sessionId || '').filter(Boolean),
                 selectedSessionId: selected?.dataset.sessionId || '',
@@ -257,6 +260,8 @@ export async function runAndroidMatrixCvp3Journey(
     )
     let android: WebViewPage | undefined
     let forwardedPort: string | undefined
+    let deviceIdleForced = false
+    let powerWhitelisted = false
     try {
         process.stdout.write('  [A1/6] Building and installing the isolated CVP/3 APK…\n')
         await execFileAsync('./gradlew', [':app:assembleE2e'], {
@@ -278,6 +283,30 @@ export async function runAndroidMatrixCvp3Journey(
         )
         await reverse(options.serial, options.pwaPort)
         await reverse(options.serial, options.matrixPort)
+        await adbMaybe(
+            options.serial,
+            'shell',
+            'dumpsys',
+            'deviceidle',
+            'whitelist',
+            `-${PACKAGE_NAME}`,
+        )
+        await startActivity(options.serial)
+        await waitFor(
+            async () => (await nativeUiText(options.serial)).includes(
+                'Persistent connection required',
+            ),
+            'native persistent-connection permission gate',
+            5_000,
+        )
+        assert.equal(
+            (await notificationIds(options.serial)).includes(FOREGROUND_NOTIFICATION_ID),
+            false,
+            'The native service started in a mode Android can suspend during device idle.',
+        )
+        await adb(options.serial, 'shell', 'am', 'force-stop', PACKAGE_NAME)
+        await adb(options.serial, 'shell', 'dumpsys', 'deviceidle', 'whitelist', `+${PACKAGE_NAME}`)
+        powerWhitelisted = true
 
         process.stdout.write('  [A2/6] Pairing native CVP/3 and restoring existing Matrix history…\n')
         await startActivity(options.serial)
@@ -312,7 +341,13 @@ export async function runAndroidMatrixCvp3Journey(
         await waitFor(async () => {
             const state = await android!.state()
             assertHealthy(state)
-            return state.connected && state.sessionIds.includes(options.existingSessionId)
+            if (state.connected && state.sessionIds.includes(options.existingSessionId)) return true
+            throw new Error(JSON.stringify({
+                connected: state.connected,
+                sessionIds: state.sessionIds,
+                expectedSessionId: options.existingSessionId,
+                bodyText: state.bodyText.slice(0, 1_000),
+            }))
         }, 'connected native CVP/3 projection', CONNECT_TIMEOUT_MS)
         await android.clickSession(options.existingSessionId)
         await waitFor(
@@ -349,12 +384,33 @@ export async function runAndroidMatrixCvp3Journey(
         )
         await options.onSessionCreated?.(createdSessionId)
 
-        process.stdout.write('  [A4/6] Completing an Android task while its Activity is backgrounded…\n')
+        process.stdout.write('  [A4/6] Completing and notifying while Android is screen-off and idle…\n')
         await android.clickSession(createdSessionId)
         const prompt = `CVP/3 Android background prompt ${options.runId}`
+        const taskNotificationsBeforeIdle = await diagnosticCount(
+            options.serial,
+            'notification.task_posted',
+        )
+        const nativeEventsBeforeIdle = await diagnosticCount(
+            options.serial,
+            'matrix.application_control.event_committed',
+        )
+        const driverStartsBeforeIdle = await diagnosticCount(options.serial, 'matrix.driver.start')
         await android.fillComposer(prompt)
         await android.clickButton('Send message')
-        await adb(options.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME')
+        // Leave the UI immediately after dispatch. Waiting for browser
+        // convergence here would let a fast provider finish before Android is
+        // actually idle and turn this into a foreground notification test.
+        await adb(options.serial, 'shell', 'dumpsys', 'battery', 'unplug')
+        await adb(options.serial, 'shell', 'input', 'keyevent', 'KEYCODE_SLEEP')
+        const idleResult = await adb(options.serial, 'shell', 'dumpsys', 'deviceidle', 'force-idle')
+        assert.match(idleResult, /forced|idle/iu, `Android did not enter forced idle: ${idleResult}`)
+        deviceIdleForced = true
+        assert.equal(
+            await diagnosticCount(options.serial, 'notification.task_posted'),
+            taskNotificationsBeforeIdle,
+            'The deterministic agent completed before Android entered forced idle; the background assertion is invalid.',
+        )
         await openBrowserSession(options.browserPage, createdSessionId)
         await waitFor(
             () => options.browserPage.locator('.chat-feed').getByText(prompt, { exact: false }).isVisible(),
@@ -370,13 +426,51 @@ export async function runAndroidMatrixCvp3Journey(
             CONVERGENCE_TIMEOUT_MS,
         )
         await waitFor(
+            async () => await diagnosticCount(
+                options.serial,
+                'notification.task_posted',
+            ) > taskNotificationsBeforeIdle,
+            'task completion recorded while Android remains screen-off in forced idle',
+            CONVERGENCE_TIMEOUT_MS,
+        )
+        await waitFor(
             async () => (await notificationIds(options.serial)).some(
                 id => id !== FOREGROUND_NOTIFICATION_ID,
             ),
             'Android task-completion notification',
             CONVERGENCE_TIMEOUT_MS,
         )
+        await waitFor(
+            async () => await diagnosticCount(
+                options.serial,
+                'matrix.application_control.event_committed',
+            ) > nativeEventsBeforeIdle,
+            'native Matrix event commit while the screen remains off in forced idle',
+            CONVERGENCE_TIMEOUT_MS,
+        )
+        assert.equal(
+            await diagnosticCount(options.serial, 'matrix.driver.start'),
+            driverStartsBeforeIdle,
+            'Screen-off delivery rebuilt the complete Matrix SDK transport.',
+        )
         await assertForegroundNotification(options.serial)
+
+        await adb(options.serial, 'shell', 'dumpsys', 'deviceidle', 'unforce')
+        await adb(options.serial, 'shell', 'dumpsys', 'battery', 'reset')
+        await adb(options.serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+        await adbMaybe(options.serial, 'shell', 'wm', 'dismiss-keyguard')
+        deviceIdleForced = false
+        await startActivity(options.serial)
+        await waitFor(async () => {
+            const state = await android!.state()
+            assertHealthy(state)
+            return state.connected && state.sessionIds.includes(createdSessionId)
+        }, 'warm native UI reattachment without a cold Matrix reconnect', 5_000)
+        assert.equal(
+            await diagnosticCount(options.serial, 'matrix.driver.start'),
+            driverStartsBeforeIdle,
+            'Opening Codever after screen-off rebuilt the complete Matrix SDK transport.',
+        )
 
         process.stdout.write('  [A5/6] Restarting and rebuilding the conversation from durable CVP/3 state…\n')
         android.close()
@@ -402,34 +496,43 @@ export async function runAndroidMatrixCvp3Journey(
             return body.includes(prompt) && body.includes(options.providerResponse)
         }, 'native durable thread after restart', CONVERGENCE_TIMEOUT_MS)
 
-        process.stdout.write('  [A6/6] Deleting from Android and converging into the browser…\n')
+        process.stdout.write('  [A6/6] Archiving from Android and converging into the browser…\n')
         await android.clickButton('Conversation details')
         await waitFor(
-            () => android!.hasButton('Delete session'),
+            () => android!.hasButton('Archive session'),
             'Android conversation actions',
             5_000,
         )
-        await android.clickButton('Delete session')
-        await waitFor(
-            async () => (await android!.state()).bodyText.includes('Copies already stored'),
-            'Android delete confirmation',
-            5_000,
-        )
-        await android.clickButton('Delete session', { container: '[role="alertdialog"]' })
+        await android.clickButton('Archive session')
         await waitFor(
             async () => !(await android!.state()).sessionIds.includes(createdSessionId),
-            'Android session deletion',
+            'Android session archival',
             CONVERGENCE_TIMEOUT_MS,
         )
         await waitFor(
             async () => !(await browserSessionIds(options.browserPage)).includes(createdSessionId),
-            'browser convergence of Android deletion',
+            'browser convergence of Android archival',
             CONVERGENCE_TIMEOUT_MS,
         )
         process.stdout.write(
-            '  PASS — Android CVP/3 paired, restored, ran in background, notified, restarted, and deleted.\n',
+            '  PASS — Android CVP/3 paired, restored, ran in background, notified, restarted, and archived.\n',
         )
     } finally {
+        if (deviceIdleForced) {
+            await adbMaybe(options.serial, 'shell', 'dumpsys', 'deviceidle', 'unforce')
+            await adbMaybe(options.serial, 'shell', 'dumpsys', 'battery', 'reset')
+            await adbMaybe(options.serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+        }
+        if (powerWhitelisted) {
+            await adbMaybe(
+                options.serial,
+                'shell',
+                'dumpsys',
+                'deviceidle',
+                'whitelist',
+                `-${PACKAGE_NAME}`,
+            )
+        }
         android?.close()
         if (forwardedPort) {
             await adbMaybe(options.serial, 'forward', '--remove', `tcp:${forwardedPort}`)
@@ -561,6 +664,24 @@ async function notificationIds(serial: string): Promise<string[]> {
         const fields = line.trim().split('|')
         return fields[1] === PACKAGE_NAME && fields[2] ? [fields[2]] : []
     })
+}
+
+async function diagnosticCount(serial: string, marker: string): Promise<number> {
+    const output = await adbMaybe(
+        serial,
+        'shell',
+        'run-as',
+        PACKAGE_NAME,
+        'cat',
+        'files/diagnostics/native-current.log',
+    )
+    return output.split(marker).length - 1
+}
+
+async function nativeUiText(serial: string): Promise<string> {
+    const path = '/sdcard/codever-cvp3-ui.xml'
+    await adbMaybe(serial, 'shell', 'uiautomator', 'dump', path)
+    return adbMaybe(serial, 'shell', 'cat', path)
 }
 
 async function startActivity(serial: string): Promise<void> {

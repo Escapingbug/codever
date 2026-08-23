@@ -17,6 +17,7 @@ enum class ActivityLaunchDecision {
     BIND_ONLY,
     RESTORE_FOREGROUND,
     WAIT_FOR_NOTIFICATION,
+    WAIT_FOR_POWER_EXEMPTION,
 }
 
 object ServiceStartPolicy {
@@ -27,16 +28,22 @@ object ServiceStartPolicy {
         else -> ServiceStartDecision.STOP_DISABLED
     }
 
-    fun shouldRestoreAfterBoot(restoreEnabled: Boolean, notificationsAvailable: Boolean): Boolean =
-        restoreEnabled && notificationsAvailable
+    fun shouldRestoreAfterBoot(
+        restoreEnabled: Boolean,
+        notificationsAvailable: Boolean,
+        powerExempt: Boolean,
+    ): Boolean = restoreEnabled && notificationsAvailable && powerExempt
 
     fun activityLaunch(
         restoreEnabled: Boolean,
         restorePreferenceExists: Boolean,
         notificationsAvailable: Boolean,
+        powerExempt: Boolean,
     ): ActivityLaunchDecision = when {
         !notificationsAvailable && (restoreEnabled || !restorePreferenceExists) ->
             ActivityLaunchDecision.WAIT_FOR_NOTIFICATION
+        !powerExempt && (restoreEnabled || !restorePreferenceExists) ->
+            ActivityLaunchDecision.WAIT_FOR_POWER_EXEMPTION
         !restorePreferenceExists || restoreEnabled -> ActivityLaunchDecision.RESTORE_FOREGROUND
         else -> ActivityLaunchDecision.BIND_ONLY
     }

@@ -577,7 +577,7 @@ export function parseGatewayStateCacheRecord(
   return state;
 }
 
-function gatewayStateExtension(
+export function gatewayStateExtension(
   state: GatewayStateSnapshot,
 ): Record<string, unknown> {
   return {
@@ -605,6 +605,9 @@ function gatewayStateExtension(
       ...(session.model ? { model: session.model } : {}),
       ...(session.reasoningEffort
         ? { reasoning_effort: session.reasoningEffort }
+        : {}),
+      ...(session.activeTurnId
+        ? { active_turn_id: session.activeTurnId }
         : {}),
       extensions: session.extensions.map((extension) => ({
         id: extension.id,

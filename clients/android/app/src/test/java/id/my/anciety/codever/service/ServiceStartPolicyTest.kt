@@ -35,10 +35,11 @@ class ServiceStartPolicyTest {
     }
 
     @Test
-    fun `boot restore requires both opt in and visible notifications`() {
-        assertTrue(ServiceStartPolicy.shouldRestoreAfterBoot(true, true))
-        assertFalse(ServiceStartPolicy.shouldRestoreAfterBoot(true, false))
-        assertFalse(ServiceStartPolicy.shouldRestoreAfterBoot(false, true))
+    fun `boot restore requires opt in notifications and unrestricted power`() {
+        assertTrue(ServiceStartPolicy.shouldRestoreAfterBoot(true, true, true))
+        assertFalse(ServiceStartPolicy.shouldRestoreAfterBoot(true, false, true))
+        assertFalse(ServiceStartPolicy.shouldRestoreAfterBoot(true, true, false))
+        assertFalse(ServiceStartPolicy.shouldRestoreAfterBoot(false, true, true))
     }
 
     @Test
@@ -49,6 +50,7 @@ class ServiceStartPolicyTest {
                 restoreEnabled = false,
                 restorePreferenceExists = true,
                 notificationsAvailable = true,
+                powerExempt = true,
             ),
         )
         assertEquals(
@@ -57,6 +59,7 @@ class ServiceStartPolicyTest {
                 restoreEnabled = false,
                 restorePreferenceExists = true,
                 notificationsAvailable = false,
+                powerExempt = false,
             ),
         )
     }
@@ -65,11 +68,15 @@ class ServiceStartPolicyTest {
     fun `enabled host restores only with a visible notification`() {
         assertEquals(
             ActivityLaunchDecision.RESTORE_FOREGROUND,
-            ServiceStartPolicy.activityLaunch(true, true, true),
+            ServiceStartPolicy.activityLaunch(true, true, true, true),
         )
         assertEquals(
             ActivityLaunchDecision.WAIT_FOR_NOTIFICATION,
-            ServiceStartPolicy.activityLaunch(true, true, false),
+            ServiceStartPolicy.activityLaunch(true, true, false, false),
+        )
+        assertEquals(
+            ActivityLaunchDecision.WAIT_FOR_POWER_EXEMPTION,
+            ServiceStartPolicy.activityLaunch(true, true, true, false),
         )
     }
 
@@ -81,6 +88,7 @@ class ServiceStartPolicyTest {
                 restoreEnabled = false,
                 restorePreferenceExists = false,
                 notificationsAvailable = true,
+                powerExempt = true,
             ),
         )
         assertEquals(
@@ -89,6 +97,7 @@ class ServiceStartPolicyTest {
                 restoreEnabled = false,
                 restorePreferenceExists = false,
                 notificationsAvailable = false,
+                powerExempt = false,
             ),
         )
     }

@@ -89,7 +89,10 @@ class CodeverConnectionService : Service() {
         createNotificationChannel()
         taskNotifier.createChannel()
         initializeClientRuntime()
-        if (preferences.restoreEnabled) {
+        if (
+            preferences.restoreEnabled &&
+            PersistentConnectionPower.isExempt(this)
+        ) {
             enterForeground()
             startClientRuntime()
         }
@@ -111,6 +114,11 @@ class CodeverConnectionService : Service() {
         }
         return when (ServiceStartPolicy.decide(intent?.action, preferences.restoreEnabled)) {
             ServiceStartDecision.KEEP_RUNNING -> {
+                if (!PersistentConnectionPower.isExempt(this)) {
+                    diagnostics.record("service.stop_power_restricted")
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
                 diagnostics.record("service.start", mapOf("source" to (intent?.action ?: "sticky")))
                 preferences.restoreEnabled = true
                 enterForeground()
@@ -463,7 +471,13 @@ class CodeverConnectionService : Service() {
         fun restoreIfEnabled(context: Context): Boolean {
             val enabled = ServicePreferenceStore(context).restoreEnabled
             val notificationsAvailable = NotificationManagerCompat.from(context).areNotificationsEnabled()
-            if (!ServiceStartPolicy.shouldRestoreAfterBoot(enabled, notificationsAvailable)) return false
+            val powerExempt = PersistentConnectionPower.isExempt(context)
+            if (!ServiceStartPolicy.shouldRestoreAfterBoot(
+                    enabled,
+                    notificationsAvailable,
+                    powerExempt,
+                )
+            ) return false
             return try {
                 start(context)
                 true

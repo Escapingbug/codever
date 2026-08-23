@@ -87,6 +87,8 @@ class MatrixConnectionRuntime(
     private var applicationControlGapJob: Job? = null
     private var applicationControlReady = CompletableDeferred<Unit>()
     @Volatile
+    private var applicationControlTransportIdentity: MatrixTransportIdentity? = null
+    @Volatile
     private var applicationControlReceiverReady = false
     @Volatile
     private var applicationControlSince: String? = null
@@ -137,7 +139,9 @@ class MatrixConnectionRuntime(
                             "matrix.application_control.watchdog_stale",
                             mapOf("stage" to if (applicationControlReceiverReady) "ready" else "starting"),
                         )
-                        restartTransportLocked("matrix_application_control_stale")
+                        if (!restartApplicationControlReceiverLocked("watchdog_stale")) {
+                            restartTransportLocked("matrix_application_control_stale")
+                        }
                         return@withLock
                     }
                     val running = runCatching {
@@ -166,6 +170,7 @@ class MatrixConnectionRuntime(
                         stopApplicationControlReceiverLocked()
                         driver = null
                         driverGeneration += 1
+                        applicationControlTransportIdentity = null
                         if (staleDriver != null) stopDriver(staleDriver)
                         if (!decision.blocked) scheduleRetryLocked()
                     }
@@ -206,8 +211,12 @@ class MatrixConnectionRuntime(
                     ),
                 )
                 if (stale) {
-                    restartTransportLocked("matrix_system_wake_recovery")
-                    false
+                    if (restartApplicationControlReceiverLocked("system_wake_$safeReason")) {
+                        true
+                    } else {
+                        restartTransportLocked("matrix_system_wake_recovery")
+                        false
+                    }
                 } else {
                     true
                 }
@@ -328,6 +337,7 @@ class MatrixConnectionRuntime(
             stopDriver(current)
             driver = null
             driverGeneration += 1
+            applicationControlTransportIdentity = null
             files?.let(accountStorage::clear)
             secrets?.sdkStoreKey?.fill(0)
             secrets = null
@@ -478,6 +488,7 @@ class MatrixConnectionRuntime(
         driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
+        applicationControlTransportIdentity = null
         if (clearSession) {
             files?.let(accountStorage::clear)
             secrets?.sdkStoreKey?.fill(0)
@@ -571,6 +582,7 @@ class MatrixConnectionRuntime(
                         if (driver === currentDriver) {
                             driver = null
                             driverGeneration += 1
+                            applicationControlTransportIdentity = null
                         }
                         scheduleRetryLocked()
                         return@runtimeState false
@@ -637,6 +649,7 @@ class MatrixConnectionRuntime(
         driver?.let { stopDriver(it) }
         driver = null
         driverGeneration += 1
+        applicationControlTransportIdentity = null
         val generation = driverGeneration
         val nextDriver = try {
             driverFactory.create(scope)
@@ -686,6 +699,7 @@ class MatrixConnectionRuntime(
                         scope.launch {
                             val current = mutex.withLock {
                                 if (driver === nextDriver && driverGeneration == generation) {
+                                    applicationControlTransportIdentity = identity
                                     startApplicationControlReceiverLocked(
                                         currentSecrets.session,
                                         currentFiles,
@@ -720,6 +734,7 @@ class MatrixConnectionRuntime(
                                     stopDriver(nextDriver)
                                     driver = null
                                     driverGeneration += 1
+                                    applicationControlTransportIdentity = null
                                     if (!decision.blocked) scheduleRetryLocked()
                                 }
                             }
@@ -735,6 +750,7 @@ class MatrixConnectionRuntime(
             if (driver === nextDriver && driverGeneration == generation) {
                 driver = null
                 driverGeneration += 1
+                applicationControlTransportIdentity = null
             }
             val decision = if (error is TimeoutCancellationException) {
                 MatrixRuntimeFailureDecision("matrix_driver_start_timeout", blocked = false)
@@ -1228,6 +1244,35 @@ class MatrixConnectionRuntime(
         }
     }
 
+    /**
+     * Android can strand the independent HTTP long poll while the Matrix SDK,
+     * encryption store, and room subscription remain healthy. Resume only the
+     * cursor-owned receiver. Reopening the complete SDK here turns an ordinary
+     * screen-on into an unnecessary cold connection.
+     */
+    private fun restartApplicationControlReceiverLocked(reason: String): Boolean {
+        val currentDriver = driver ?: return false
+        val currentSecrets = secrets ?: return false
+        val currentFiles = files ?: return false
+        val identity = applicationControlTransportIdentity ?: return false
+        if (!runCatching { currentDriver.isSyncRunning() }.getOrDefault(false)) return false
+
+        diagnostics.record(
+            "matrix.application_control.receiver_warm_restart",
+            mapOf("reason" to reason.take(160)),
+        )
+        stopApplicationControlReceiverLocked()
+        startApplicationControlReceiverLocked(
+            currentSecrets.session,
+            currentFiles,
+            driverGeneration,
+            identity,
+        )
+        liveness.syncUpdated()
+        accept(MatrixRuntimeEvent.NetworkAvailable(syncRunning = true))
+        return true
+    }
+
     private suspend fun restartTransportLocked(detailCode: String) {
         accept(MatrixRuntimeEvent.Failed(detailCode, blocked = false))
         retryJob?.cancel()
@@ -1236,6 +1281,7 @@ class MatrixConnectionRuntime(
         stopApplicationControlReceiverLocked()
         driver = null
         driverGeneration += 1
+        applicationControlTransportIdentity = null
         if (staleDriver != null) stopDriver(staleDriver)
         if (started.get() && networkAvailable && secrets != null) {
             runCatching { connectLocked() }

@@ -257,10 +257,17 @@ try {
         waitForSessionActive(second, secondSession),
         waitForDispatchedPromptSessions([firstSession, secondSession]),
     ])
+    const trustedDeviceCountBeforeRestart = (await admin.devices()).length
     await gateway.crash()
     previousGatewayOutput += `${gateway.output}\n\n--- restarted Gateway ---\n`
     gateway = launchGateway(fixture)
-    await gateway.waitFor(/Gateway ready with 2 trusted device\(s\)\./u, STARTUP_TIMEOUT_MS)
+    await gateway.waitFor(
+        new RegExp(
+            `Gateway ready with ${trustedDeviceCountBeforeRestart} trusted device\\(s\\)\\.`,
+            'u',
+        ),
+        STARTUP_TIMEOUT_MS,
+    )
     await Promise.all([
         waitForConnected(first),
         waitForConnected(second),
@@ -934,22 +941,31 @@ async function assertColdProjectionWaitsForAuthority(
         // Let React render the state emitted after Matrix PREPARED while the
         // authoritative project snapshot and thread replay remain blocked.
         await delay(500)
+        const recoveryIndicatorVisible =
+            await page.locator('.connection-progress').isVisible().catch(() => false)
+            || await page.locator(
+                '.gateway-card.connection-state-reconnecting,'
+                + '.gateway-card.connection-state-connecting,'
+                + '.gateway-card.connection-state-securing',
+            ).isVisible().catch(() => false)
         const actual = {
             connected: await isConnected(page),
             emptyInventoryVisible: await page.getByText(
                 'Create your first conversation',
                 { exact: true },
             ).isVisible().catch(() => false),
-            recoveryIndicatorVisible: await page.locator('.connection-progress').isVisible().catch(() => false),
-            visibleSessionIds: await sessionIds(page),
+            recoveryIndicatorVisible,
+            interactionsLocked: await cachedProjectionInteractionsLocked(page),
+            visibleSessionIds: (await sessionIds(page)).toSorted(),
         }
         try {
             assert.deepEqual(actual, {
                 connected: false,
                 emptyInventoryVisible: false,
                 recoveryIndicatorVisible: true,
-                visibleSessionIds: [],
-            }, 'A trusted browser must remain in recovery until authoritative CVP/3 state is available.')
+                interactionsLocked: true,
+                visibleSessionIds: expectedSessionIds.toSorted(),
+            }, 'A trusted browser must show its read-only cache until authoritative CVP/3 state is available.')
         } catch (error) {
             if (!(error instanceof Error)) throw error
             regression = error
@@ -967,7 +983,7 @@ async function assertRecoveryFailureSurvivesLaterSync(
     page: Page,
     snapshotEventIds: Set<string>,
     expectedSessionIds: string[],
-    expectedSessionIdsDuringRecovery: string[] = [],
+    expectedSessionIdsDuringRecovery: string[] = expectedSessionIds,
 ): Promise<Error | null> {
     const interceptor = await interceptSnapshotRequests(page, snapshotEventIds, 'fail')
     let regression: Error | null = null
@@ -988,14 +1004,16 @@ async function assertRecoveryFailureSurvivesLaterSync(
             connected: await isConnected(page),
             blockingFailureVisible: await alert.isVisible().catch(() => false),
             recoveryIndicatorVisible,
-            visibleSessionIds: await sessionIds(page),
+            interactionsLocked: await cachedProjectionInteractionsLocked(page),
+            visibleSessionIds: (await sessionIds(page)).toSorted(),
         }
         try {
             assert.deepEqual(actual, {
                 connected: false,
                 blockingFailureVisible: false,
                 recoveryIndicatorVisible: true,
-                visibleSessionIds: expectedSessionIdsDuringRecovery,
+                interactionsLocked: true,
+                visibleSessionIds: expectedSessionIdsDuringRecovery.toSorted(),
             }, 'A recoverable CVP/3 failure must remain non-blocking while the supervisor retries.')
         } catch (error) {
             if (!(error instanceof Error)) throw error
@@ -1015,6 +1033,12 @@ async function assertRecoveryFailureSurvivesLaterSync(
         if (!interceptorDisposed) await interceptor.dispose()
     }
     return regression
+}
+
+async function cachedProjectionInteractionsLocked(page: Page): Promise<boolean> {
+    const create = page.getByRole('button', { name: 'New conversation', exact: true })
+    const send = page.getByRole('button', { name: 'Send message', exact: true })
+    return await create.isDisabled() && await send.isDisabled()
 }
 
 async function currentSnapshotEventIds(matrix: DisposableMatrixFixture): Promise<Set<string>> {

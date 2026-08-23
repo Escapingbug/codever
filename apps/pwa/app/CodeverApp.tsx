@@ -65,6 +65,11 @@ import {
 import {
   gatewayProjectKey,
 } from "./gatewayState";
+import {
+  clearGatewayUiCache,
+  readGatewayUiCache,
+  writeGatewayUiCache,
+} from "./gatewayUiCache";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
 import {
@@ -312,6 +317,68 @@ const emptyMatrixConfig: MatrixConnectionConfig = {
   gatewayMatrixDeviceId: "",
   gatewayMatrixEd25519: "",
 };
+
+type InitialGatewayUiState = {
+  config: MatrixConnectionConfig;
+  gatewayState: GatewayStateSnapshot | null;
+  selectedSessionId: string | null;
+  historyScope: string;
+};
+
+function loadInitialGatewayUiState(): InitialGatewayUiState {
+  if (typeof window === "undefined") {
+    return {
+      config: emptyMatrixConfig,
+      gatewayState: null,
+      selectedSessionId: null,
+      historyScope: "",
+    };
+  }
+  const config = loadMatrixConfig() ?? emptyMatrixConfig;
+  const gatewayState = readGatewayUiCache(window.localStorage, config);
+  if (!gatewayState) {
+    return { config, gatewayState: null, selectedSessionId: null, historyScope: "" };
+  }
+  const historyScope = matrixHistoryScope({
+    gatewayId: config.gatewayId,
+    conversationId: config.conversationId,
+    roomId: config.roomId,
+  });
+  const selectableIds = new Set(gatewayState.sessions.map((session) => session.id));
+  const rememberedSessionId = readSelectedSession(window.localStorage, historyScope);
+  const selectedSessionId = rememberedSessionId && selectableIds.has(rememberedSessionId)
+    ? rememberedSessionId
+    : gatewayState.currentSessionId && selectableIds.has(gatewayState.currentSessionId)
+      ? gatewayState.currentSessionId
+      : gatewayState.sessions.find((session) => session.status !== "archived")?.id ??
+        gatewayState.sessions[0]?.id ??
+        null;
+  return { config, gatewayState, selectedSessionId, historyScope };
+}
+
+function sessionIdsWithStatus(
+  state: GatewayStateSnapshot | null,
+  ...statuses: GatewayStateSnapshot["sessions"][number]["status"][]
+): Set<string> {
+  const accepted = new Set(statuses);
+  return new Set(
+    state?.sessions
+      .filter((session) => accepted.has(session.status))
+      .map((session) => session.id) ?? [],
+  );
+}
+
+function sameGatewayUiScope(
+  left: MatrixConnectionConfig,
+  right: MatrixConnectionConfig,
+): boolean {
+  return Boolean(
+    left.gatewayId.trim() &&
+      left.gatewayId.trim() === right.gatewayId.trim() &&
+      left.conversationId.trim() === right.conversationId.trim() &&
+      left.roomId.trim() === right.roomId.trim(),
+  );
+}
 
 const DEVICE_INVITATION_RESULT_TIMEOUT_MS = 95_000;
 const SESSION_CREATE_RESULT_RECOVERY_MS = 15_000;
@@ -783,6 +850,11 @@ export function CodeverApp() {
 }
 
 function CodeverAppRuntime() {
+  const initialGatewayUiRef = useRef<InitialGatewayUiState | null>(null);
+  if (initialGatewayUiRef.current === null) {
+    initialGatewayUiRef.current = loadInitialGatewayUiState();
+  }
+  const initialGatewayUi = initialGatewayUiRef.current;
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [primaryView, setPrimaryView] = useState<"chats" | "files">("chats");
   const [search, setSearch] = useState("");
@@ -811,13 +883,13 @@ function CodeverAppRuntime() {
   const [feedReturnAnchor, setFeedReturnAnchor] =
     useState<FeedReturnAnchor | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    null,
+    initialGatewayUi.selectedSessionId,
   );
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(
-    () => new Set(),
+    () => sessionIdsWithStatus(initialGatewayUi.gatewayState, "running", "stopping"),
   );
   const [stoppingSessionIds, setStoppingSessionIds] = useState<Set<string>>(
-    () => new Set(),
+    () => sessionIdsWithStatus(initialGatewayUi.gatewayState, "stopping"),
   );
   const [submittingPromptSessionIds, setSubmittingPromptSessionIds] = useState<
     Set<string>
@@ -830,7 +902,7 @@ function CodeverAppRuntime() {
   const [providerCommandsOpen, setProviderCommandsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [matrixConfig, setMatrixConfig] = useState<MatrixConnectionConfig>(
-    () => loadMatrixConfig() ?? emptyMatrixConfig,
+    initialGatewayUi.config,
   );
   const [connectionStatus, setConnectionStatus] =
     useState<MatrixConnectionStatus>("offline");
@@ -851,10 +923,10 @@ function CodeverAppRuntime() {
   const [webPushBusy, setWebPushBusy] = useState(false);
   const [deviceKeyId, setDeviceKeyId] = useState<string | null>(null);
   const [activeDeviceCount, setActiveDeviceCount] = useState<number | null>(
-    null,
+    initialGatewayUi.gatewayState?.activeDeviceCount ?? null,
   );
   const [gatewayState, setGatewayState] =
-    useState<GatewayStateSnapshot | null>(null);
+    useState<GatewayStateSnapshot | null>(initialGatewayUi.gatewayState);
   const [, setGatewayRevision] = useState<number | null>(null);
   const [revisionConflict, setRevisionConflict] =
     useState<RevisionConflictNotice | null>(null);
@@ -964,13 +1036,17 @@ function CodeverAppRuntime() {
   );
   const reconciledOptimisticMessageIdsRef = useRef(new Set<string>());
   const pendingPromptSessionIdsRef = useRef(new Set<string>());
-  const selectedSessionIdRef = useRef<string | null>(null);
+  const selectedSessionIdRef = useRef<string | null>(
+    initialGatewayUi.selectedSessionId,
+  );
   const pendingCreatedSessionIdRef = useRef<string | null>(null);
   const pendingOpenedSessionIdRef = useRef<string | null>(null);
   const activateLocalSessionRef = useRef<(sessionId: string) => void>(() => {});
-  const knownGatewaySessionIdsRef = useRef(new Set<string>());
+  const knownGatewaySessionIdsRef = useRef(
+    new Set(initialGatewayUi.gatewayState?.sessions.map((session) => session.id)),
+  );
   const liveMessagesBySessionRef = useRef(new Map<string, ChatMessage[]>());
-  const historyScopeRef = useRef("");
+  const historyScopeRef = useRef(initialGatewayUi.historyScope);
   const historySessionIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
   const historyGenerationRef = useRef(0);
@@ -2870,6 +2946,9 @@ function CodeverAppRuntime() {
     // Remember a repair result synchronously so the routine post-connect close
     // cannot immediately undo the recovery dialog opened by that callback.
     let keepSettingsOpenForRepair = false;
+    const preserveGatewayProjection =
+      gatewayState !== null &&
+      sameGatewayUiScope(matrixConfig, configInput);
     if (!automaticRecovery) {
       connectionRecoveryAllowedRef.current = true;
       cancelAutomaticConnectionRecovery();
@@ -2925,7 +3004,7 @@ function CodeverAppRuntime() {
     );
     connectionStatusRef.current = automaticRecovery ? "reconnecting" : "connecting";
     setConnectionStatus(automaticRecovery ? "reconnecting" : "connecting");
-    if (!automaticRecovery) {
+    if (!automaticRecovery && !preserveGatewayProjection) {
       setMessages([]);
       setSelectedSessionId(null);
       setRunningSessionIds(new Set());
@@ -2940,7 +3019,7 @@ function CodeverAppRuntime() {
     // before rememberPendingSessionCreate() records a command may defer an
     // application update.
     setSessionCreateReloadBlocked(false);
-    if (!automaticRecovery) {
+    if (!automaticRecovery && !preserveGatewayProjection) {
       knownGatewaySessionIdsRef.current.clear();
       liveMessagesBySessionRef.current.clear();
       setGatewayState(null);
@@ -2967,7 +3046,7 @@ function CodeverAppRuntime() {
         window.localStorage,
         historyScopeRef.current,
       );
-      if (!automaticRecovery) {
+      if (!automaticRecovery && !preserveGatewayProjection) {
         selectedSessionIdRef.current = rememberedSessionId;
         setSelectedSessionId(rememberedSessionId);
       }
@@ -3073,6 +3152,11 @@ function CodeverAppRuntime() {
             );
           }
           if (state.gatewayState) {
+            writeGatewayUiCache(
+              window.localStorage,
+              normalized,
+              state.gatewayState,
+            );
             const nextSessionIds = new Set(
               state.gatewayState.sessions.map((session) => session.id),
             );
@@ -3374,6 +3458,7 @@ function CodeverAppRuntime() {
       clearPendingSessionCreateUi();
     }
     clearMatrixConfig();
+    clearGatewayUiCache(window.localStorage);
     clearPendingPairing();
     clearTrustedGateway();
     setMatrixConfig(emptyMatrixConfig);

@@ -785,7 +785,13 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(settings, /Advanced: use an access token/);
   assert.doesNotMatch(settings, /label: "Matrix account"|label: "This device"/);
   assert.doesNotMatch(settings, /Gateway Matrix user|Gateway Ed25519 fingerprint/);
-  assert.match(app, /useState<GatewayStateSnapshot \| null>\(null\)/);
+  assert.match(
+    app,
+    /useState<GatewayStateSnapshot \| null>\(initialGatewayUi\.gatewayState\)/,
+  );
+  assert.match(app, /readGatewayUiCache\(window\.localStorage, config\)/);
+  assert.match(app, /writeGatewayUiCache\(/);
+  assert.match(app, /clearGatewayUiCache\(window\.localStorage\)/);
   assert.match(
     app,
     /setActiveDeviceCount\(state\.gatewayState\.activeDeviceCount\)/,

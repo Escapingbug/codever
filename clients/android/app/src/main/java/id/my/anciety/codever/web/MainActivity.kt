@@ -57,6 +57,7 @@ import id.my.anciety.codever.client.events.PublicTrustState
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.service.CodeverConnectionService
 import id.my.anciety.codever.service.ActivityLaunchDecision
+import id.my.anciety.codever.service.PersistentConnectionPower
 import id.my.anciety.codever.service.ServicePreferenceStore
 import id.my.anciety.codever.service.ServiceStartPolicy
 import id.my.anciety.codever.matrix.MatrixBootstrap
@@ -89,7 +90,8 @@ class MainActivity : ComponentActivity() {
     ) { granted ->
         preferences.edit().putBoolean(KEY_NOTIFICATION_REQUESTED, true).apply()
         if (granted && notificationsAvailable()) {
-            startForegroundAndBind()
+            if (persistentPowerAvailable()) startForegroundAndBind()
+            else showPowerGate()
         } else {
             showNotificationGate()
         }
@@ -114,7 +116,11 @@ class MainActivity : ComponentActivity() {
                     },
                 ),
             )
-            if (pendingForegroundStart && notificationsAvailable()) {
+            if (
+                pendingForegroundStart &&
+                notificationsAvailable() &&
+                persistentPowerAvailable()
+            ) {
                 serviceBinder?.startInBackground()
                 pendingForegroundStart = false
             }
@@ -161,20 +167,12 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         foreground = true
         serviceBinder?.setUiForeground(true)
-        if (pendingForegroundStart && notificationsAvailable()) {
-            startForegroundAndBind()
-        } else {
-            ensureHostBound()
-        }
+        resumePersistentHost()
     }
 
     override fun onResume() {
         super.onResume()
-        if (pendingForegroundStart && notificationsAvailable()) {
-            startForegroundAndBind()
-        } else {
-            ensureHostBound()
-        }
+        resumePersistentHost()
     }
 
     override fun onStop() {
@@ -259,6 +257,26 @@ class MainActivity : ComponentActivity() {
         return permissionGranted && NotificationManagerCompat.from(this).areNotificationsEnabled()
     }
 
+    private fun persistentPowerAvailable(): Boolean =
+        PersistentConnectionPower.isExempt(this)
+
+    private fun resumePersistentHost() {
+        val persistentConnectionExpected = pendingForegroundStart ||
+            ServicePreferenceStore(this).restoreEnabled
+        when {
+            persistentConnectionExpected && !notificationsAvailable() -> {
+                pendingForegroundStart = true
+                showNotificationGate()
+            }
+            persistentConnectionExpected && !persistentPowerAvailable() -> {
+                pendingForegroundStart = true
+                showPowerGate()
+            }
+            pendingForegroundStart -> startForegroundAndBind()
+            else -> ensureHostBound()
+        }
+    }
+
     private fun ensureHostBound() {
         if (serviceBound || bindingRequested) return
         val servicePreferences = ServicePreferenceStore(this)
@@ -268,6 +286,7 @@ class MainActivity : ComponentActivity() {
             restoreEnabled,
             restorePreferenceExists,
             notificationsAvailable(),
+            persistentPowerAvailable(),
         )) {
             ActivityLaunchDecision.BIND_ONLY -> bindHostOnly()
             ActivityLaunchDecision.RESTORE_FOREGROUND -> {
@@ -281,6 +300,10 @@ class MainActivity : ComponentActivity() {
             ActivityLaunchDecision.WAIT_FOR_NOTIFICATION -> {
                 pendingForegroundStart = true
                 showNotificationGate()
+            }
+            ActivityLaunchDecision.WAIT_FOR_POWER_EXEMPTION -> {
+                pendingForegroundStart = true
+                showPowerGate()
             }
         }
     }
@@ -312,6 +335,10 @@ class MainActivity : ComponentActivity() {
             showNotificationGate()
             return
         }
+        if (!persistentPowerAvailable()) {
+            showPowerGate()
+            return
+        }
         CodeverConnectionService.startFromUser(this)
         serviceBinder?.let {
             it.startInBackground()
@@ -337,6 +364,33 @@ class MainActivity : ComponentActivity() {
                 openNotificationSettings()
             }
         })
+    }
+
+    private fun showPowerGate() {
+        pendingForegroundStart = true
+        showContent(messageView(
+            title = "Persistent connection required",
+            detail = "Allow Codever to stay connected while the screen is off. Android otherwise pauses Matrix updates and task notifications during device idle.",
+            action = "Allow persistent connection",
+        ) {
+            val requested = runCatching {
+                startActivity(PersistentConnectionPower.requestIntent(this))
+            }.isSuccess
+            if (!requested) {
+                runCatching {
+                    startActivity(PersistentConnectionPower.settingsIntent(this))
+                }.onFailure {
+                    openApplicationSettings()
+                }
+            }
+        })
+    }
+
+    private fun openApplicationSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.parse("package:$packageName")),
+        )
     }
 
     private fun openNotificationSettings() {
@@ -663,6 +717,15 @@ class MainActivity : ComponentActivity() {
                 throw BridgeRuntimeFailure(
                     BridgeError.INVALID_STATE,
                     "A visible persistent notification must be allowed before the native host starts.",
+                    userAction = "open_app",
+                )
+            }
+            if (!persistentPowerAvailable()) {
+                pendingForegroundStart = true
+                webView?.post { showPowerGate() }
+                throw BridgeRuntimeFailure(
+                    BridgeError.INVALID_STATE,
+                    "Allow Codever to stay active while the screen is off before starting the native host.",
                     userAction = "open_app",
                 )
             }

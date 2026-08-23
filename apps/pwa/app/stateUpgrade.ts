@@ -20,6 +20,7 @@ import {
 import { SESSION_READ_STATE_STORAGE_KEY } from "./sessionIndicators";
 import { SELECTED_SESSION_STORAGE_PREFIX } from "./selectedSessionState";
 import { NATIVE_CURSOR_STORAGE_PREFIX } from "./client/native/storageKeys";
+import { GATEWAY_UI_CACHE_STORAGE_KEY } from "./gatewayUiCache";
 
 export const PWA_STATE_MANIFEST_STORAGE_KEY = "codever.state-manifest.v1";
 export const PWA_STATE_SCHEMA_VERSION = 1;
@@ -132,6 +133,15 @@ export const PWA_STATE_CATALOG: readonly PwaStateCatalogEntry[] = Object.freeze(
     stateClass: "rebuildable-projection",
     schemaVersion: 1,
     legacySchemaVersion: 1,
+  },
+  {
+    id: "gateway-ui-projection",
+    key: GATEWAY_UI_CACHE_STORAGE_KEY,
+    prefix: false,
+    stateClass: "rebuildable-projection",
+    schemaVersion: 1,
+    legacySchemaVersion: 1,
+    validate: versionedJsonValidator(GATEWAY_UI_CACHE_STORAGE_KEY, 1),
   },
   {
     id: "selected-session",
