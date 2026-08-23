@@ -47,11 +47,13 @@ not a public manifest.
 
 ## Upload and publish through the Gateway
 
-The checked publisher uploads the APK first, verifies the remote hash, then
-submits `client-release.json` to the owner-only Gateway admin socket. The
-Gateway durably records the latest account release and replaces the encrypted
-workspace snapshot. Retrying the same release is idempotent; changing an
-already published version or moving backward is rejected.
+The checked publisher uploads the APK to the SSH artifact host first, verifies
+the remote hash, then submits `client-release.json` to the owner-only Gateway
+admin socket on the machine running the publisher. The artifact server does
+not need access to the Gateway socket. The Gateway durably records the latest
+account release and replaces the encrypted workspace snapshot. Retrying the
+same release is idempotent; changing an already published version or moving
+backward is rejected.
 
 ```sh
 pnpm publish:android-update -- \
@@ -60,8 +62,13 @@ pnpm publish:android-update -- \
   /absolute/path/to/gateway-data/admin.sock
 ```
 
+Run this command on the Gateway host (the Mac in the split-host deployment).
 The admin socket path can instead be supplied through
 `CODEVER_NATIVE_UPDATE_ADMIN_SOCKET`.
+
+If the artifact host uses a dedicated deployment key that is not loaded into
+the current SSH agent, set its absolute path through
+`CODEVER_NATIVE_UPDATE_SSH_IDENTITY_FILE`.
 
 ## Android signing transition
 
