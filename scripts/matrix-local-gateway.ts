@@ -344,6 +344,10 @@ const adminServer = await startGatewayAdminServer({
         if (!runner) throw new Error('Gateway runtime is unavailable')
         return runner.receiveWorkspaceFile(input)
     },
+    publishNativeClientRelease: async release => {
+        if (!runner) throw new Error('Gateway runtime is unavailable')
+        return runner.publishNativeClientRelease(release)
+    },
     ...(privilegeExecutor
         ? {
             onPrivilegedExecution: async ({ sessionId, ...request }) =>

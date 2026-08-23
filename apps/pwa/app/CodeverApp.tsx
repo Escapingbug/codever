@@ -23,6 +23,7 @@ import {
   type ProviderHistoryMessage,
   type ProviderSessionEntry,
 } from "@codever/protocol";
+import type { NativeUpdateStatus } from "@codever/native-bridge";
 import {
   CommandAcknowledgementTimeoutError,
   CommandCompletionTimeoutError,
@@ -913,6 +914,8 @@ function CodeverAppRuntime() {
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [nativeRuntime, setNativeRuntime] =
     useState<CodeverNativeRuntimeInfo | null>(null);
+  const [nativeUpdateState, setNativeUpdateState] =
+    useState<NativeUpdateStatus | null>(null);
   const [pwaUpdateState, setPwaUpdateState] = useState<PwaUpdateState>({
     phase: "current",
     currentVersion: CODEVER_BUILD_VERSION,
@@ -3126,7 +3129,10 @@ function CodeverAppRuntime() {
           }
         },
         onNativeRuntime(runtime) {
-          if (isCurrentStartup()) setNativeRuntime(runtime);
+          if (isCurrentStartup()) {
+            setNativeRuntime(runtime);
+            if (!runtime) setNativeUpdateState(null);
+          }
         },
         onTrustUpdated(trust) {
           if (!isCurrentStartup()) return;
@@ -3317,6 +3323,13 @@ function CodeverAppRuntime() {
       }
       codeverClientRef.current = connection;
       setDeviceKeyId(connection.deviceId);
+      if (connection.nativeUpdateStatus) {
+        void connection.nativeUpdateStatus()
+          .then((value) => {
+            if (codeverClientRef.current === connection) setNativeUpdateState(value);
+          })
+          .catch(() => undefined);
+      }
       if (closeSettings && !keepSettingsOpenForRepair) setSettingsOpen(false);
       void connection.ready
         .then(() => {
@@ -6864,6 +6877,7 @@ function CodeverAppRuntime() {
         invitationError={invitationError}
         invitationReauthRequired={invitationReauthRequired}
         updateState={pwaUpdateState}
+        nativeUpdateState={nativeUpdateState}
         nativeRuntime={nativeRuntime}
         webPushState={webPushState}
         webPushBusy={webPushBusy}
@@ -6904,6 +6918,33 @@ function CodeverAppRuntime() {
           setInvitationError(null);
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
+        onRefreshNativeUpdate={() => {
+          const connection = codeverClientRef.current;
+          if (!connection?.nativeUpdateStatus) return;
+          void connection.nativeUpdateStatus()
+            .then(setNativeUpdateState)
+            .catch(() => setNativeUpdateState((current) => current ? {
+              ...current,
+              phase: "failed",
+              detailCode: "bridge_request_failed",
+            } : current));
+        }}
+        onInstallNativeUpdate={() => {
+          const connection = codeverClientRef.current;
+          if (!connection?.installNativeUpdate) return;
+          setNativeUpdateState((current) => current ? {
+            ...current,
+            phase: "installing",
+            detailCode: undefined,
+          } : current);
+          void connection.installNativeUpdate()
+            .then(setNativeUpdateState)
+            .catch(() => setNativeUpdateState((current) => current ? {
+              ...current,
+              phase: "failed",
+              detailCode: "bridge_request_failed",
+            } : current));
+        }}
         onExportDiagnostics={exportConnectionDiagnostics}
         onEnableWebPush={() => void enableAgentNotifications()}
         onDisableWebPush={() => void disableAgentNotifications()}

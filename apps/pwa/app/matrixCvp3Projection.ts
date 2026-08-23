@@ -3,17 +3,19 @@ import type {
   Cvp3Event,
   Cvp3SessionProjection,
   MatrixGatewayCapabilities,
+  NativeClientRelease,
   SessionExtensionBinding,
   SessionExtensionDescriptor,
 } from "@codever/protocol";
 import {
   cvp3EventSchema,
   matrixGatewayCapabilitiesSchema,
+  nativeClientReleaseSchema,
   sessionExtensionBindingSchema,
   sessionExtensionDescriptorSchema,
 } from "@codever/protocol";
 
-export const MATRIX_CVP3_PROJECTION_STATE_VERSION = 5 as const;
+export const MATRIX_CVP3_PROJECTION_STATE_VERSION = 6 as const;
 
 export type V3ProjectedSession = Cvp3SessionProjection & {
   sessionId: string;
@@ -79,6 +81,7 @@ export type V3WorkspaceProjection = {
   snapshotVersion: number;
   gatewayKeyId: string;
   capabilities: MatrixGatewayCapabilities;
+  clientReleases: NativeClientRelease[];
 };
 
 export type MatrixCvp3ProjectionState = {
@@ -218,14 +221,22 @@ export class MatrixCvp3Projection {
     // their monotonic entity version even when that old cache contains the
     // logical ID, so an app upgrade repairs itself without a cache reset.
     if (payload.type === "workspace.snapshot") {
+      const clientReleases = mergeNativeClientReleases(
+        this.workspace?.clientReleases ?? [],
+        payload.clientReleases ?? [],
+      );
       if (this.workspace && payload.snapshotVersion <= this.workspace.snapshotVersion) {
-        return false;
+        if (clientReleases === this.workspace.clientReleases) return false;
+        this.seenLogicalEvents.add(event.eventId);
+        this.workspace = { ...this.workspace, clientReleases };
+        return true;
       }
       this.seenLogicalEvents.add(event.eventId);
       this.workspace = {
         snapshotVersion: payload.snapshotVersion,
         gatewayKeyId: payload.gatewayKeyId,
         capabilities: structuredClone(payload.capabilities),
+        clientReleases,
       };
       return true;
     }
@@ -540,6 +551,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     && value?.version !== 3
     && value?.version !== 4
     && value?.version !== 5
+    && value?.version !== 6
   ) {
     throw new Error("Unsupported CVP/3 projection version.");
   }
@@ -580,7 +592,7 @@ function validateProjectionState(input: unknown): MatrixCvp3ProjectionState {
     ) throw new Error("The CVP/3 message projection is invalid.");
     return structuredClone(message) as V3ProjectedMessage;
   });
-  const inboxFiles = value.version === 3 || value.version === 4 || value.version === 5
+  const inboxFiles = value.version >= 3
     ? boundedArray(value.inboxFiles, "inbox files").map(fileValue => {
         const file = record(fileValue);
         if (
@@ -684,7 +696,42 @@ function validateWorkspaceProjection(input: unknown): V3WorkspaceProjection {
     snapshotVersion: workspace.snapshotVersion,
     gatewayKeyId: workspace.gatewayKeyId,
     capabilities: matrixGatewayCapabilitiesSchema.parse(workspace.capabilities),
+    clientReleases: mergeNativeClientReleases(
+      [],
+      Array.isArray(workspace.clientReleases) ? workspace.clientReleases : [],
+    ),
   };
+}
+
+function mergeNativeClientReleases(
+  current: NativeClientRelease[],
+  incoming: readonly unknown[],
+): NativeClientRelease[] {
+  const releases = new Map<string, NativeClientRelease>();
+  for (const release of current) releases.set(nativeClientReleaseKey(release), release);
+  let changed = false;
+  for (const value of incoming) {
+    const release = nativeClientReleaseSchema.parse(value);
+    const key = nativeClientReleaseKey(release);
+    const existing = releases.get(key);
+    if (!existing || release.versionCode > existing.versionCode) {
+      releases.set(key, structuredClone(release));
+      changed = true;
+    } else if (
+      release.versionCode === existing.versionCode
+      && JSON.stringify(release) !== JSON.stringify(existing)
+    ) {
+      throw new Error(`Native client release ${key}/${release.versionCode} is immutable.`);
+    }
+  }
+  if (!changed) return current;
+  return [...releases.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, release]) => release);
+}
+
+function nativeClientReleaseKey(release: NativeClientRelease): string {
+  return `${release.platform}\u0000${release.channel}\u0000${release.architecture}`;
 }
 
 function validateProjectProjection(input: unknown): V3ProjectProjection {

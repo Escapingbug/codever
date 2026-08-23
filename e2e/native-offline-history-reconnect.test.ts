@@ -13,6 +13,7 @@ import {
     NativeBridgeClient,
     OPTIONAL_NATIVE_CAPABILITIES,
     REQUIRED_NATIVE_CAPABILITIES,
+    nativeCapabilityVersions,
     type NativeCursorStore,
 } from '../apps/pwa/app/client/native/NativeBridgeClient'
 import type { CollaborationState } from '../apps/pwa/app/client/CodeverClient'
@@ -270,7 +271,7 @@ async function createClient(
             ...OPTIONAL_NATIVE_CAPABILITIES,
         ].map(name => ({
             name,
-            versions: name === 'history.page' ? [2, 1] : [1],
+            versions: nativeCapabilityVersions(name),
         })),
     })
     const client = new NativeBridgeClient(bridge, hello, {
@@ -315,7 +316,7 @@ function messageEvent(incoming: ClientMessage, cursor: string): ClientEvent {
 function helloResult(): HelloResult {
     const capabilities = Object.fromEntries(
         [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-            .map(name => [name, { version: name === 'history.page' ? 2 : 1 }]),
+            .map(name => [name, { version: nativeCapabilityVersions(name)[0]! }]),
     ) as Record<CapabilityName, { version: number }>
     return {
         protocolVersion: 1,

@@ -16,6 +16,7 @@ import type {
 } from "./pairing";
 import { CODEVER_BUILD_VERSION } from "./buildInfo";
 import type { PwaUpdateState } from "./pwaUpdate";
+import type { NativeUpdateStatus } from "@codever/native-bridge";
 import { useDialogFocus } from "./dialogFocus";
 import {
   deriveConnectionRecoveryPlan,
@@ -39,6 +40,7 @@ type Props = {
   invitationError: string | null;
   invitationReauthRequired: boolean;
   updateState: PwaUpdateState;
+  nativeUpdateState: NativeUpdateStatus | null;
   nativeRuntime: CodeverNativeRuntimeInfo | null;
   webPushState: WebPushNotificationState;
   webPushBusy: boolean;
@@ -53,6 +55,8 @@ type Props = {
   onCreateInvitation(password?: string): void;
   onClearInvitation(): void;
   onCheckForUpdates(): void;
+  onRefreshNativeUpdate(): void;
+  onInstallNativeUpdate(): void;
   onExportDiagnostics(): void;
   onEnableWebPush(): void;
   onDisableWebPush(): void;
@@ -78,6 +82,7 @@ function MatrixSettingsDialog({
   invitationError,
   invitationReauthRequired,
   updateState,
+  nativeUpdateState,
   nativeRuntime,
   webPushState,
   webPushBusy,
@@ -92,6 +97,8 @@ function MatrixSettingsDialog({
   onCreateInvitation,
   onClearInvitation,
   onCheckForUpdates,
+  onRefreshNativeUpdate,
+  onInstallNativeUpdate,
   onExportDiagnostics,
   onEnableWebPush,
   onDisableWebPush,
@@ -420,6 +427,9 @@ function MatrixSettingsDialog({
                 </>
               )}
               <small>{updateStatusText(updateState)}</small>
+              {nativeRuntime && (
+                <small>{nativeUpdateStatusText(nativeUpdateState)}</small>
+              )}
             </span>
           </details>
           {(!recoveryPlan || repairRequired) && (
@@ -438,6 +448,32 @@ function MatrixSettingsDialog({
           >
             {updateState.phase === "checking" ? "Checking…" : "Check for updates"}
           </button>
+          {nativeRuntime && nativeUpdateState && (
+            <button
+              type="button"
+              onClick={onRefreshNativeUpdate}
+              disabled={
+                nativeUpdateState.phase === "checking" ||
+                nativeUpdateState.phase === "downloading" ||
+                nativeUpdateState.phase === "installing"
+              }
+            >
+              {nativeUpdateState.phase === "checking" ||
+              nativeUpdateState.phase === "downloading"
+                ? "Receiving APK release…"
+                : "Refresh APK status"}
+            </button>
+          )}
+          {nativeRuntime && nativeUpdateState && (
+            nativeUpdateState.phase === "ready" ||
+            nativeUpdateState.phase === "permission_required"
+          ) && (
+            <button type="button" onClick={onInstallNativeUpdate}>
+              {nativeUpdateState.phase === "permission_required"
+                ? "Allow and install APK"
+                : "Install APK update"}
+            </button>
+          )}
         </div>
 
         <footer>
@@ -479,6 +515,31 @@ function updateStatusText(state: PwaUpdateState): string {
       return "Could not check right now";
     case "current":
       return state.checkedAt ? "Up to date" : "Automatic updates enabled";
+  }
+}
+
+function nativeUpdateStatusText(state: NativeUpdateStatus | null): string {
+  if (!state) return "APK update channel unavailable in this native build";
+  const latest = state.latestVersionName ?? "the latest APK";
+  switch (state.phase) {
+    case "checking":
+      return "APK: receiving the latest release from your Gateway…";
+    case "available":
+      return `APK: ${latest} is available`;
+    case "downloading":
+      return state.totalBytes
+        ? `APK: downloading ${Math.floor(((state.downloadedBytes ?? 0) / state.totalBytes) * 100)}%`
+        : "APK: downloading…";
+    case "ready":
+      return `APK: ${latest} is ready to install`;
+    case "installing":
+      return "APK: handing the verified update to Android…";
+    case "permission_required":
+      return "APK: Android needs permission to install this update";
+    case "failed":
+      return "APK: the last update attempt failed; the current app remains unchanged";
+    case "current":
+      return "APK: up to date; releases arrive through your Gateway";
   }
 }
 

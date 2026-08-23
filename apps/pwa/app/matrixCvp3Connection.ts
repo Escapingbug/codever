@@ -1017,6 +1017,7 @@ function gatewayState(
           canDeleteSession: false,
           sessionExtensions: project?.installedExtensions ?? [],
         },
+    nativeClientReleases: protocol.projection.workspace?.clientReleases ?? [],
   };
 }
 

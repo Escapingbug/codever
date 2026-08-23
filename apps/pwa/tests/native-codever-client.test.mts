@@ -638,6 +638,20 @@ test("recovers structured tool cards from older native agent messages", async ()
   client.dispose();
 });
 
+test("reports and installs an APK release already received from the Gateway", async () => {
+  const port = new RuntimePort();
+  const client = await createTestClient(port);
+
+  assert.equal((await client.nativeUpdateStatus()).phase, "ready");
+  assert.equal((await client.installNativeUpdate()).phase, "installing");
+  const install = port.requests.find((request) => request.method === "codever.update.install");
+  assert.match(
+    (install?.params as BridgeMethodParams["codever.update.install"]).idempotencyKey,
+    /^[0-9a-f-]{36}$/,
+  );
+  client.dispose();
+});
+
 async function createTestClient(
   port: RuntimePort,
   onReview: (review: CodeverCommandReview | null) => void = () => {},
@@ -732,9 +746,26 @@ function responseFor(request: Request): unknown {
         loginToken: "single-use-token",
         expiresAt: 120_000,
       };
+    case "codever.update.status":
+      return nativeUpdateStatus("ready");
+    case "codever.update.install":
+      return nativeUpdateStatus("installing");
     default:
       throw new Error(`Unexpected native method in test: ${request.method}`);
   }
+}
+
+function nativeUpdateStatus(phase: "ready" | "installing") {
+  return {
+    phase,
+    currentVersionCode: 41,
+    currentVersionName: "0.1.0-alpha.41",
+    latestVersionCode: 42,
+    latestVersionName: "0.1.0-alpha.42",
+    buildId: "android-alpha-42",
+    totalBytes: 1_000,
+    checkedAt: 1_787_400_000_000,
+  };
 }
 
 function helloResult(): HelloResult {

@@ -14,6 +14,7 @@ import {
   createInvitationRequestSchema,
   receiveWorkspaceFileRequestSchema,
   gatewayPrivilegedExecutionRequestSchema,
+  publishNativeClientReleaseRequestSchema,
   revokeDeviceRequestSchema,
   type GatewayAdminDevice,
   type GatewayAdminErrorBody,
@@ -23,6 +24,8 @@ import {
   type ReceiveWorkspaceFileResponse,
   type GatewayPrivilegedExecutionRequest,
   type GatewayPrivilegedExecutionResponse,
+  type PublishNativeClientReleaseRequest,
+  type PublishNativeClientReleaseResponse,
 } from './types.js'
 
 const MAX_BODY_BYTES = 32 * 1024
@@ -43,6 +46,9 @@ export interface GatewayAdminServerOptions {
   onPrivilegedExecution?: (
     request: GatewayPrivilegedExecutionRequest,
   ) => Promise<GatewayPrivilegedExecutionResponse>
+  publishNativeClientRelease?: (
+    request: PublishNativeClientReleaseRequest,
+  ) => Promise<PublishNativeClientReleaseResponse>
   now?: () => number
   rateLimitPerMinute?: number
   onLog?: (message: string) => void
@@ -162,6 +168,25 @@ export async function startGatewayAdminServer(
           await readJsonBody(request),
         )
         sendJson(response, 200, await options.onPrivilegedExecution(data))
+        return
+      }
+      if (request.method === 'POST' && path === '/v1/client-releases/android') {
+        if (!options.publishNativeClientRelease) {
+          throw new AdminHttpError(
+            503,
+            'native_release_unavailable',
+            'Native client release publication is unavailable',
+          )
+        }
+        const data = publishNativeClientReleaseRequestSchema.parse(
+          await readJsonBody(request),
+        )
+        const result = await options.publishNativeClientRelease(data)
+        options.onLog?.(
+          `[gateway-admin] published native release android/${result.release.channel}/`
+          + `${result.release.versionCode} projects=${result.projectCount}`,
+        )
+        sendJson(response, result.changed ? 201 : 200, result)
         return
       }
       if (request.method === 'POST' && path === '/v1/device-invitations') {

@@ -12,6 +12,7 @@ import {
   type CommandView,
   type HelloResult,
   type JsonObject,
+  type NativeUpdateStatus,
 } from "@codever/native-bridge";
 import type { CodeverAttachment, CommandPayload } from "@codever/protocol";
 import {
@@ -51,7 +52,10 @@ export const REQUIRED_NATIVE_CAPABILITIES = [
   "background.foreground-service",
 ] as const;
 
-export const OPTIONAL_NATIVE_CAPABILITIES = ["matrix.login-token"] as const;
+export const OPTIONAL_NATIVE_CAPABILITIES = [
+  "matrix.login-token",
+  "client.update",
+] as const;
 
 export function nativeCapabilityVersions(
   name: (typeof REQUIRED_NATIVE_CAPABILITIES)[number] |
@@ -158,6 +162,31 @@ export class NativeBridgeClient implements CodeverClient {
 
   get deviceName(): string {
     return this.#deviceName;
+  }
+
+  async nativeUpdateStatus(): Promise<NativeUpdateStatus> {
+    this.#requireNativeUpdateCapability();
+    return this.bridge.request("codever.update.status", {
+      context: this.bridge.context(),
+    });
+  }
+
+  async installNativeUpdate(): Promise<NativeUpdateStatus> {
+    this.#requireNativeUpdateCapability();
+    return this.bridge.request("codever.update.install", {
+      context: this.bridge.context(),
+      idempotencyKey: crypto.randomUUID(),
+    });
+  }
+
+  #requireNativeUpdateCapability(): void {
+    if (this.helloResult.capabilities["client.update"]?.version !== 1) {
+      throw new BridgeProtocolError(
+        "CAPABILITY_UNAVAILABLE",
+        "This APK does not support direct native updates.",
+        { userAction: "update_native" },
+      );
+    }
   }
 
   async pair(

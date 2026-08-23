@@ -10,6 +10,8 @@ import type {
   ReceiveWorkspaceFileResponse,
   GatewayPrivilegedExecutionRequest,
   GatewayPrivilegedExecutionResponse,
+  PublishNativeClientReleaseRequest,
+  PublishNativeClientReleaseResponse,
   RevokeDeviceRequest,
 } from './types.js'
 
@@ -96,6 +98,12 @@ export class GatewayAdminClient {
     input: GatewayPrivilegedExecutionRequest,
   ): Promise<GatewayPrivilegedExecutionResponse> {
     return this.request('POST', '/v1/privileged-executions', input)
+  }
+
+  publishNativeClientRelease(
+    input: PublishNativeClientReleaseRequest,
+  ): Promise<PublishNativeClientReleaseResponse> {
+    return this.request('POST', '/v1/client-releases/android', input)
   }
 
   private request<T>(

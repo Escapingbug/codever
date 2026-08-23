@@ -6,6 +6,7 @@ import {
   SessionExtensionDescriptor,
   SessionExtensionSummary,
   ProviderCommand,
+  type NativeClientRelease,
 } from "@codever/protocol";
 
 export type GatewayCapabilityOption = {
@@ -95,6 +96,7 @@ export type GatewayStateSnapshot = {
   inboxFiles?: GatewayInboxFile[];
   workspace: GatewayWorkspaceState;
   capabilities: GatewayCapabilities;
+  nativeClientReleases?: NativeClientRelease[];
 };
 
 export type GatewayStateCacheBinding = {

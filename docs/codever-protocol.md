@@ -44,6 +44,7 @@ as the control plane that establishes device trust and distributes CVP/3 keys.
 | User prompt or mutation | ordinary `m.room.message` command event | device signature, certificate, stable `command_id` |
 | Agent/tool/status output | ordinary `m.room.message` thread event | Gateway signature and stable logical `event_id` |
 | Current project projection | ordinary signed snapshot event | `io.codever.project.current.v3` points to its physical event ID |
+| Current native client release | account-owned workspace snapshot field | Gateway admin publication, replicated to active project rooms |
 | Project key grant | directly addressed Room State | `io.codever.project.key_grant.v3` keyed by device ID |
 | Transcript and audit | thread timeline and relations | append-only signed events |
 
@@ -158,6 +159,16 @@ Offline clients show their last verified encrypted local projection and
 history. They do not report Connected or release new commands until the Matrix
 transport and authenticated CVP/3 projection are writable.
 
+The Gateway also persists the latest native client release per platform,
+channel, and architecture. Deployment installs the immutable artifact first,
+then publishes its bounded metadata through the owner-only local admin socket.
+The Gateway replaces `workspace.snapshot` in each active project room, so an
+online Android service receives it through ordinary incremental sync and an
+offline device receives only the current release on recovery. The artifact URL
+is not a discovery API: Android accepts metadata only from the authenticated
+CVP snapshot, then independently verifies the APK hash, identity, version, ABI,
+and Android application-signing certificate before installation.
+
 Android owns this process in its foreground connection service. The service
 keeps `/sync`, raw-inbox persistence, projection, outbox reconciliation, and
 task notifications running while the WebView is detached or the screen is
@@ -206,6 +217,8 @@ Traffic scales with visible business activity:
 - Agent/tool events or edits that are actually visible;
 - one snapshot event plus one pointer replacement when the current projection
   materially changes;
+- one workspace snapshot plus one pointer replacement per active project when
+  an account native-client release changes;
 - one pairwise key-grant state event only when a device or key epoch changes.
 
 There is no per-device fan-out for ordinary conversation output, heartbeat

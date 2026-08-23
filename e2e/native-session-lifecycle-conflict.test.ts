@@ -29,6 +29,7 @@ import {
     NativeBridgeClient,
     OPTIONAL_NATIVE_CAPABILITIES,
     REQUIRED_NATIVE_CAPABILITIES,
+    nativeCapabilityVersions,
 } from '../apps/pwa/app/client/native/NativeBridgeClient'
 import {
     acquireNativeRpcBridge,
@@ -92,7 +93,7 @@ describe('native session lifecycle revision recovery', () => {
                 ...OPTIONAL_NATIVE_CAPABILITIES,
             ].map(name => ({
                 name,
-                versions: name === 'history.page' ? [2, 1] : [1],
+                versions: nativeCapabilityVersions(name),
             })),
         })
         const reviews: Array<string | null> = []
@@ -544,7 +545,7 @@ function commandContext(deviceId: string) {
 function helloResult(): HelloResult {
     const capabilities = Object.fromEntries(
         [...REQUIRED_NATIVE_CAPABILITIES, ...OPTIONAL_NATIVE_CAPABILITIES]
-            .map(name => [name, { version: name === 'history.page' ? 2 : 1 }]),
+            .map(name => [name, { version: nativeCapabilityVersions(name)[0]! }]),
     ) as Record<CapabilityName, { version: number }>
     return {
         protocolVersion: 1,

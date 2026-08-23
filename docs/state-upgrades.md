@@ -84,6 +84,11 @@ For every release that changes persistent state:
 6. A migration is not accepted if only codec unit tests pass. The Web live E2E
    and Android Alpha E2E must finish business commands after the upgraded state
    reaches `complete`.
+7. The native release path must also pass `test:e2e:android-update`: install an
+   older `.e2e` APK, inject the same account release object published by the
+   Gateway, cover-install it with `PackageInstaller`, prove application data
+   survived, and prove the new build converged stale update cache. Gateway
+   tests separately prove durable admin publication into `workspace.snapshot`.
 
 Adding a new persistent key/database without adding it to the owning catalog is
 a release-blocking defect.

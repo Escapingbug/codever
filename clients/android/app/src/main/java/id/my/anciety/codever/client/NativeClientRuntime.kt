@@ -41,6 +41,8 @@ import id.my.anciety.codever.client.events.SubscriptionCursorResult
 import id.my.anciety.codever.client.events.ToolGroupPresentation
 import id.my.anciety.codever.client.events.compactSnapshotCommands
 import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
+import id.my.anciety.codever.update.NativeUpdateStore
+import id.my.anciety.codever.update.NativeUpdateManager
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
@@ -91,15 +93,17 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 data class NativePairingPreview(
@@ -154,6 +158,7 @@ class NativeClientRuntime(
     )
 
     val deviceId: String = identity.publicIdentity.keyId
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     // History pagination is an explicit, per-conversation user action. Never
@@ -263,6 +268,13 @@ class NativeClientRuntime(
             "attachment-transfer-scratch",
             validate = files::validateTransferScratch,
             reset = files::clearTransferScratch,
+        )
+    }
+    private val nativeUpdateStore = NativeUpdateStore(context).also {
+        stateUpgrade.recoverRebuildable(
+            "native-update-cache",
+            validate = it::validate,
+            reset = it::reset,
         )
     }
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
@@ -1810,6 +1822,7 @@ class NativeClientRuntime(
         val changed = gatewayState != snapshot
         gatewayState = snapshot
         gatewayStateSynchronized = trust != null && matrixCvp3ProjectKeys.value() != null
+        acceptPublishedNativeRelease(snapshot)
         if (changed) {
             eventHub.publish(
                 ClientEventType.GATEWAY_STATE_CHANGED,
@@ -1819,6 +1832,32 @@ class NativeClientRuntime(
         }
         schedulePendingCommandRecoveries(immediate = true)
         refreshSnapshot(publishLifecycle = true)
+    }
+
+    private fun acceptPublishedNativeRelease(snapshot: JsonObject) {
+        val release = (snapshot["native_client_releases"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { it as? JsonObject }
+            .filter { candidate ->
+                candidate["platform"]?.let { it as? JsonPrimitive }
+                    ?.contentOrNull == "android" &&
+                    candidate["channel"]?.let { it as? JsonPrimitive }
+                        ?.contentOrNull == "alpha"
+            }
+            .maxByOrNull { candidate ->
+                candidate["versionCode"]?.let { it as? JsonPrimitive }
+                    ?.longOrNull ?: 0L
+            }
+            ?: return
+        scope.launch {
+            runCatching { NativeUpdateManager.get(appContext).acceptPublishedRelease(release) }
+                .onFailure { error ->
+                    diagnostics.record(
+                        "update.gateway_release_dispatch_failed",
+                        mapOf("error" to diagnosticErrorName(error)),
+                    )
+                }
+        }
     }
 
     private suspend fun replayMatrixCvp3InboxLocked() {

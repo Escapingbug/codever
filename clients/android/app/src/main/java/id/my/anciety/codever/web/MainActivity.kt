@@ -33,9 +33,11 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -60,13 +62,19 @@ import id.my.anciety.codever.service.ActivityLaunchDecision
 import id.my.anciety.codever.service.PersistentConnectionPower
 import id.my.anciety.codever.service.ServicePreferenceStore
 import id.my.anciety.codever.service.ServiceStartPolicy
+import id.my.anciety.codever.update.NativeUpdateManager
+import id.my.anciety.codever.update.NativeUpdatePhase
+import id.my.anciety.codever.update.NativeUpdateStatus
 import id.my.anciety.codever.matrix.MatrixBootstrap
 import id.my.anciety.codever.matrix.PublicMatrixSession
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import kotlin.coroutines.resume
 
 class MainActivity : ComponentActivity() {
@@ -84,6 +92,17 @@ class MainActivity : ComponentActivity() {
     private var nativeBackDispatchPending = false
     private var nativeBackDispatchGeneration = 0L
     private val diagnostics by lazy { NativeDiagnosticLog.get(this) }
+    private val updateManager: NativeUpdateManager? by lazy {
+        runCatching { NativeUpdateManager.get(this) }
+            .onFailure { error ->
+                diagnostics.record(
+                    "update.initialization_failed",
+                    mapOf("error" to error.javaClass.simpleName.take(160)),
+                )
+            }
+            .getOrNull()
+    }
+    private var pendingNativeUpdateInstall = false
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -172,6 +191,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (pendingNativeUpdateInstall && packageManager.canRequestPackageInstalls()) {
+            pendingNativeUpdateInstall = false
+            installNativeUpdate()
+        }
         resumePersistentHost()
     }
 
@@ -574,7 +597,47 @@ class MainActivity : ComponentActivity() {
         when (intent?.action) {
             ACTION_EXPORT_DIAGNOSTICS -> exportDiagnostics(intent)
             ACTION_OPEN_SESSION -> openSessionFromNotification(intent)
+            ACTION_INSTALL_NATIVE_UPDATE -> {
+                intent.action = null
+                installNativeUpdate()
+            }
+            ACTION_E2E_PUBLISH_NATIVE_RELEASE -> {
+                if (!BuildConfig.ALLOW_INSECURE_E2E_LOOPBACK) {
+                    diagnostics.record("update.e2e_release_ignored")
+                    return
+                }
+                intent.action = null
+                val encoded = intent.getStringExtra(EXTRA_E2E_NATIVE_RELEASE)
+                    ?: throw IllegalArgumentException("The E2E native release is missing.")
+                val release = Json.parseToJsonElement(
+                    Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+                        .toString(Charsets.UTF_8),
+                ).jsonObject
+                lifecycleScope.launch(Dispatchers.IO) {
+                    updateManager?.acceptPublishedRelease(release)
+                }
+            }
         }
+    }
+
+    private fun installNativeUpdate() {
+        val manager = updateManager ?: return
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { manager.installReady() }
+            if (result.phase == NativeUpdatePhase.PERMISSION_REQUIRED) {
+                openNativeUpdateInstallPermission()
+            }
+        }
+    }
+
+    private fun openNativeUpdateInstallPermission() {
+        pendingNativeUpdateInstall = true
+        startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:$packageName"),
+            ),
+        )
     }
 
     private fun openSessionFromNotification(intent: Intent) {
@@ -775,6 +838,23 @@ class MainActivity : ComponentActivity() {
             }
             return snapshot
         }
+
+        override fun nativeUpdateStatus(): NativeUpdateStatus = requireNativeUpdateManager().status()
+
+        override suspend fun installNativeUpdate(): NativeUpdateStatus {
+            val result = withContext(Dispatchers.IO) { requireNativeUpdateManager().installReady() }
+            if (result.phase == NativeUpdatePhase.PERMISSION_REQUIRED) {
+                withContext(Dispatchers.Main.immediate) { openNativeUpdateInstallPermission() }
+            }
+            return result
+        }
+
+        private fun requireNativeUpdateManager(): NativeUpdateManager =
+            updateManager ?: throw BridgeRuntimeFailure(
+                BridgeError.NATIVE_INTERNAL,
+                "The native update verifier could not be initialized.",
+                userAction = "update_native",
+            )
     }
 
     private suspend fun confirmNativePairing(
@@ -811,6 +891,11 @@ class MainActivity : ComponentActivity() {
         private const val SERVICE_BIND_TIMEOUT_MS = 10_000L
         const val ACTION_EXPORT_DIAGNOSTICS =
             "id.my.anciety.codever.action.EXPORT_DIAGNOSTICS"
+        const val ACTION_INSTALL_NATIVE_UPDATE =
+            "id.my.anciety.codever.action.INSTALL_NATIVE_UPDATE"
+        const val ACTION_E2E_PUBLISH_NATIVE_RELEASE =
+            "id.my.anciety.codever.action.E2E_PUBLISH_NATIVE_RELEASE"
+        const val EXTRA_E2E_NATIVE_RELEASE = "native-release"
         const val ACTION_OPEN_SESSION =
             "id.my.anciety.codever.action.OPEN_SESSION"
         const val EXTRA_SESSION_ID =

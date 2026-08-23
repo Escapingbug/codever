@@ -268,6 +268,12 @@ class MatrixCvp3NativeProjectionTest {
             .getValue("models").jsonArray.single().jsonObject
             .getValue("id").jsonPrimitive.content
         assertEquals("gpt-5.6-sol", model)
+        assertEquals(
+            42L,
+            projection.snapshot()!!
+                .getValue("native_client_releases").jsonArray.single().jsonObject
+                .getValue("versionCode").jsonPrimitive.content.toLong(),
+        )
 
         val restored = MatrixCvp3NativeProjection(
             gatewayId = { "gateway-1" },
@@ -280,6 +286,41 @@ class MatrixCvp3NativeProjectionTest {
                 .getValue("capabilities").jsonObject
                 .getValue("models").jsonArray.single().jsonObject
                 .getValue("id").jsonPrimitive.content,
+        )
+        assertEquals(
+            42L,
+            restored.snapshot()!!
+                .getValue("native_client_releases").jsonArray.single().jsonObject
+                .getValue("versionCode").jsonPrimitive.content.toLong(),
+        )
+    }
+
+    @Test
+    fun `new account release survives a lower version project capability snapshot`() {
+        val projection = projection()
+        projection.applyGatewayEvent(projectSnapshot(), "\$project", null)
+        projection.applyGatewayEvent(
+            workspaceSnapshot(10, "project-a-model", 42),
+            "\$workspace-a",
+            null,
+        )
+        projection.applyGatewayEvent(
+            workspaceSnapshot(1, "project-b-model", 43),
+            "\$workspace-b",
+            null,
+        )
+
+        val snapshot = projection.snapshot()!!
+        assertEquals(
+            "project-a-model",
+            snapshot.getValue("capabilities").jsonObject
+                .getValue("models").jsonArray.single().jsonObject
+                .getValue("id").jsonPrimitive.content,
+        )
+        assertEquals(
+            43L,
+            snapshot.getValue("native_client_releases").jsonArray.single().jsonObject
+                .getValue("versionCode").jsonPrimitive.content.toLong(),
         )
     }
 
@@ -394,7 +435,11 @@ class MatrixCvp3NativeProjectionTest {
         },
     )
 
-    private fun workspaceSnapshot(snapshotVersion: Long, model: String) = event(
+    private fun workspaceSnapshot(
+        snapshotVersion: Long,
+        model: String,
+        releaseVersion: Long = 42,
+    ) = event(
         eventId = "workspace-snapshot-$snapshotVersion",
         projectId = "project-1",
         payload = buildJsonObject {
@@ -403,6 +448,33 @@ class MatrixCvp3NativeProjectionTest {
             put("protocolMax", 3)
             put("gatewayKeyId", "gateway-key-1")
             put("snapshotVersion", snapshotVersion)
+            put("clientReleases", buildJsonArray {
+                add(buildJsonObject {
+                    put("platform", "android")
+                    put("channel", "alpha")
+                    put("architecture", "arm64-v8a")
+                    put("packageName", "id.my.anciety.codever")
+                    put("versionCode", releaseVersion)
+                    put("versionName", "0.1.0-alpha.$releaseVersion")
+                    put("buildId", "build-$releaseVersion")
+                    put("publishedAt", releaseVersion)
+                    put("minimumAndroid", 26)
+                    put("nativeBridgeMinimum", 1)
+                    put("nativeBridgeMaximum", 1)
+                    put("importance", "recommended")
+                    put("releaseNotes", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("Test release")) })
+                    put("artifact", buildJsonObject {
+                        put(
+                            "url",
+                            "https://rd.anciety.my.id/native-updates/releases/android/alpha/" +
+                                "$releaseVersion/codever.apk",
+                        )
+                        put("size", 1_024)
+                        put("sha256", "a".repeat(64))
+                        put("signingCertificateSha256", "b".repeat(64))
+                    })
+                })
+            })
             put("capabilities", buildJsonObject {
                 put("models", buildJsonArray {
                     add(buildJsonObject {

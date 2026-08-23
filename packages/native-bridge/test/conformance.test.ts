@@ -577,6 +577,33 @@ describe("native bridge JSON-RPC conformance", () => {
     })).method).toBe("codever.events.ack");
   });
 
+  it("strictly validates native update commands and progress", () => {
+    expect(parseRpcRequest(request("codever.update.status", { context })).method)
+      .toBe("codever.update.status");
+    expect(() => parseRpcRequest(request("codever.update.install", { context })))
+      .toThrow(/idempotencyKey/);
+
+    const parsed = parseMethodRpcResponse("codever.update.status", response({
+      phase: "downloading",
+      currentVersionCode: 41,
+      currentVersionName: "0.1.0-alpha.41",
+      latestVersionCode: 42,
+      latestVersionName: "0.1.0-alpha.42",
+      buildId: "android-alpha-42",
+      downloadedBytes: 500,
+      totalBytes: 1_000,
+      checkedAt: 1_787_400_000_000,
+    }));
+    expect("result" in parsed && parsed.result.phase).toBe("downloading");
+    expect(() => parseMethodRpcResponse("codever.update.status", response({
+      phase: "downloading",
+      currentVersionCode: 41,
+      currentVersionName: "0.1.0-alpha.41",
+      downloadedBytes: 2,
+      totalBytes: 1,
+    }))).toThrow(/cannot exceed/);
+  });
+
   it("strictly validates replay subscription and activation cursors", () => {
     const subscribe = parseRpcRequest(request("codever.events.subscribe", {
       context,

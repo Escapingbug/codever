@@ -183,7 +183,8 @@ after explicit approval.
   the UI must restart that transfer.
 - Add session-specific notification deep links and product message
   notifications; the current ongoing notification opens the main Activity.
-- Produce a signed release APK and define signing-key custody and an APK update
-  channel. The current artifact is debug-signed only.
+- Complete stable Android application-signing key custody and the one-time
+  transition from existing debug-signed development installs. Gateway-published
+  releases already use the account workspace snapshot as their update channel.
 - Validate the `remoteMessaging` classification with Google Play policy before
   Play distribution. Directly distributed APKs do not undergo that review.

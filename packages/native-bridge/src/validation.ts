@@ -24,6 +24,7 @@ import {
   type JsonValue,
   type MatrixRoomBinding,
   type MatrixLoginTokenResult,
+  type NativeUpdateStatus,
   type MethodRpcResponse,
   type PairingCompleteResult,
   type PairingPreview,
@@ -427,6 +428,10 @@ function parseMethodResult<M extends RequestMethod>(
     case "codever.client.disconnect":
       result = parseClientDisconnectResult(input);
       break;
+    case "codever.update.status":
+    case "codever.update.install":
+      result = parseNativeUpdateStatus(input);
+      break;
     case "codever.events.subscribe":
       result = parseEventsSubscribeResult(input);
       break;
@@ -503,6 +508,82 @@ function parseClientStartResult(input: unknown): ClientStartResult {
     invalidParams("Start result deviceId must match snapshot.deviceId.");
   }
   return { deviceId, snapshot };
+}
+
+function parseNativeUpdateStatus(input: unknown): NativeUpdateStatus {
+  const value = strictObject(
+    input,
+    [
+      "phase",
+      "currentVersionCode",
+      "currentVersionName",
+      "latestVersionCode",
+      "latestVersionName",
+      "buildId",
+      "downloadedBytes",
+      "totalBytes",
+      "detailCode",
+      "checkedAt",
+    ],
+    "native update status",
+  );
+  const phase = enumValue(value.phase, "update.phase", [
+    "current",
+    "checking",
+    "available",
+    "downloading",
+    "ready",
+    "installing",
+    "permission_required",
+    "failed",
+  ]);
+  const latestVersionCode = optionalPositiveInteger(
+    value.latestVersionCode,
+    "update.latestVersionCode",
+  );
+  const downloadedBytes = optionalNonnegativeInteger(
+    value.downloadedBytes,
+    "update.downloadedBytes",
+  );
+  const totalBytes = optionalPositiveInteger(value.totalBytes, "update.totalBytes");
+  if (
+    downloadedBytes !== undefined &&
+    totalBytes !== undefined &&
+    downloadedBytes > totalBytes
+  ) {
+    invalidParams("update.downloadedBytes cannot exceed update.totalBytes.");
+  }
+  return {
+    phase: phase as NativeUpdateStatus["phase"],
+    currentVersionCode: positiveInteger(
+      value.currentVersionCode,
+      "update.currentVersionCode",
+    ),
+    currentVersionName: requiredString(
+      value.currentVersionName,
+      "update.currentVersionName",
+      256,
+    ),
+    ...(latestVersionCode === undefined ? {} : { latestVersionCode }),
+    ...(value.latestVersionName === undefined ? {} : {
+      latestVersionName: requiredString(
+        value.latestVersionName,
+        "update.latestVersionName",
+        256,
+      ),
+    }),
+    ...(value.buildId === undefined ? {} : {
+      buildId: requiredString(value.buildId, "update.buildId", 256),
+    }),
+    ...(downloadedBytes === undefined ? {} : { downloadedBytes }),
+    ...(totalBytes === undefined ? {} : { totalBytes }),
+    ...(value.detailCode === undefined ? {} : {
+      detailCode: requiredString(value.detailCode, "update.detailCode", 160),
+    }),
+    ...(value.checkedAt === undefined ? {} : {
+      checkedAt: positiveInteger(value.checkedAt, "update.checkedAt"),
+    }),
+  };
 }
 
 function parseClientBootstrapResult(input: unknown): ClientBootstrapResult {
@@ -1363,7 +1444,10 @@ function parseMethodParams(method: RequestMethod, input: unknown): JsonObject {
     }
     case "codever.client.snapshot":
     case "codever.trust.get":
+    case "codever.update.status":
       return paramsWithContext(input, []);
+    case "codever.update.install":
+      return mutationParams(input, []);
     case "codever.client.disconnect": {
       const params = mutationParams(input, ["mode"]);
       enumValue(params.mode, "mode", ["stop", "revoke"]);

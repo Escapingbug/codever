@@ -67,6 +67,7 @@ internal class MatrixCvp3NativeProjection(
     private data class WorkspaceCapabilities(
         val snapshotVersion: Long,
         val value: JsonObject,
+        val clientReleases: JsonArray,
     )
 
     private data class Session(
@@ -198,8 +199,19 @@ internal class MatrixCvp3NativeProjection(
         if (type == "workspace.snapshot") {
             val version = payload.requiredPositiveLong("snapshotVersion")
             val current = workspaceCapabilities
+            val incomingReleases = payload["clientReleases"] as? JsonArray
+                ?: JsonArray(emptyList())
+            val clientReleases = mergeNativeClientReleases(
+                current?.clientReleases ?: JsonArray(emptyList()),
+                incomingReleases,
+            )
             if (current != null && version <= current.snapshotVersion) {
-                return MatrixCvp3NativeProjectionResult()
+                if (clientReleases == current.clientReleases) {
+                    return MatrixCvp3NativeProjectionResult()
+                }
+                seenEvents.add(eventId)
+                workspaceCapabilities = current.copy(clientReleases = clientReleases)
+                return MatrixCvp3NativeProjectionResult(changed = true)
             }
             val protocolMin = payload.requiredPositiveLong("protocolMin")
             val protocolMax = payload.requiredPositiveLong("protocolMax")
@@ -210,7 +222,7 @@ internal class MatrixCvp3NativeProjection(
             val capabilities = payload.requiredObject("capabilities")
             validateCapabilities(capabilities)
             seenEvents.add(eventId)
-            workspaceCapabilities = WorkspaceCapabilities(version, capabilities)
+            workspaceCapabilities = WorkspaceCapabilities(version, capabilities, clientReleases)
             return MatrixCvp3NativeProjectionResult(changed = true)
         }
 
@@ -475,6 +487,10 @@ internal class MatrixCvp3NativeProjection(
                 "capabilities",
                 workspaceCapabilities?.value ?: defaultCapabilities(activeProject.installedExtensions),
             )
+            put(
+                "native_client_releases",
+                workspaceCapabilities?.clientReleases ?: JsonArray(emptyList()),
+            )
         }
     }
 
@@ -497,7 +513,7 @@ internal class MatrixCvp3NativeProjection(
 
     @Synchronized
     fun durableState(): JsonObject = buildJsonObject {
-        put("schemaVersion", 5)
+        put("schemaVersion", 6)
         val activeCapabilities = workspaceCapabilities
         if (activeCapabilities == null) {
             put("workspaceCapabilities", JsonNull)
@@ -505,6 +521,7 @@ internal class MatrixCvp3NativeProjection(
             put("workspaceCapabilities", buildJsonObject {
                 put("snapshotVersion", activeCapabilities.snapshotVersion)
                 put("value", activeCapabilities.value)
+                put("clientReleases", activeCapabilities.clientReleases)
             })
         }
         val activeProject = project
@@ -576,16 +593,27 @@ internal class MatrixCvp3NativeProjection(
 
     private fun restore(value: JsonObject) {
         val schemaVersion = value.requiredLong("schemaVersion")
-        require(schemaVersion in 1L..5L)
+        require(schemaVersion in 1L..6L)
         workspaceCapabilities = if (schemaVersion == 1L) {
             null
         } else {
             (value["workspaceCapabilities"] as? JsonObject)?.let {
                 val capabilities = it.requiredObject("value")
                 validateCapabilities(capabilities)
+                val clientReleases = if (schemaVersion >= 6L) {
+                    it["clientReleases"] as? JsonArray
+                        ?: throw IllegalArgumentException("The native release projection is invalid.")
+                } else {
+                    JsonArray(emptyList())
+                }
+                val mergedClientReleases = mergeNativeClientReleases(
+                    JsonArray(emptyList()),
+                    clientReleases,
+                )
                 WorkspaceCapabilities(
                     snapshotVersion = it.requiredPositiveLong("snapshotVersion"),
                     value = capabilities,
+                    clientReleases = mergedClientReleases,
                 )
             }
         }
@@ -693,6 +721,47 @@ internal class MatrixCvp3NativeProjection(
 
     private companion object {
         const val MAX_SEEN_IDS = 10_000
+    }
+
+    private fun mergeNativeClientReleases(current: JsonArray, incoming: JsonArray): JsonArray {
+        require(incoming.size <= 8)
+        val releases = linkedMapOf<String, JsonObject>()
+        current.forEach { item ->
+            val release = item as? JsonObject
+                ?: throw IllegalArgumentException("The native release projection is invalid.")
+            releases[nativeClientReleaseKey(release)] = release
+        }
+        var changed = false
+        incoming.forEach { item ->
+            val release = item as? JsonObject
+                ?: throw IllegalArgumentException("The native release projection is invalid.")
+            require(release.toString().toByteArray().size <= 16 * 1024)
+            require(release["artifact"] is JsonObject)
+            val key = nativeClientReleaseKey(release)
+            val version = release.requiredPositiveLong("versionCode")
+            val existing = releases[key]
+            val existingVersion = existing?.requiredPositiveLong("versionCode")
+            when {
+                existing == null || version > existingVersion!! -> {
+                    releases[key] = release
+                    changed = true
+                }
+                version == existingVersion && release != existing ->
+                    throw IllegalArgumentException(
+                        "Native client release $key/$version is immutable.",
+                    )
+            }
+        }
+        if (!changed) return current
+        return JsonArray(releases.toSortedMap().values.toList())
+    }
+
+    private fun nativeClientReleaseKey(release: JsonObject): String {
+        val platform = release.requiredString("platform", 32)
+        require(platform == "android")
+        val channel = release.requiredString("channel", 32)
+        val architecture = release.requiredString("architecture", 32)
+        return "$platform\u0000$channel\u0000$architecture"
     }
 
     private fun applySessionProjection(

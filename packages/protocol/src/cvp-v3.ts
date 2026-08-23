@@ -98,6 +98,51 @@ export const webPushSubscriptionSchema = z
 
 export type WebPushSubscription = z.infer<typeof webPushSubscriptionSchema>
 
+export const nativeClientReleaseSchema = z
+  .object({
+    platform: z.literal('android'),
+    channel: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+    architecture: z.literal('arm64-v8a'),
+    packageName: z.string().min(1).max(256),
+    versionCode: z.number().int().positive().max(2_100_000_000),
+    versionName: z.string().min(1).max(256),
+    buildId: opaqueId,
+    publishedAt: z.number().int().positive(),
+    minimumAndroid: z.number().int().min(21).max(10_000),
+    nativeBridgeMinimum: z.number().int().positive().max(1_000),
+    nativeBridgeMaximum: z.number().int().positive().max(1_000),
+    importance: z.enum(['recommended', 'required']),
+    releaseNotes: z.array(z.string().min(1).max(500)).max(20),
+    artifact: z
+      .object({
+        url: z.url().max(2_048).refine(value => {
+          const url = new URL(value)
+          const trustedScheme = url.protocol === 'https:'
+            || (
+              url.protocol === 'http:'
+              && url.hostname === '127.0.0.1'
+              && Number(url.port) >= 1
+              && Number(url.port) <= 65_535
+            )
+          return trustedScheme
+            && !url.username
+            && !url.password
+            && !url.search
+            && !url.hash
+        }, 'Native release artifacts must use credential-free HTTPS URLs'),
+        size: z.number().int().positive().max(100 * 1024 * 1024),
+        sha256: z.string().regex(/^[0-9a-f]{64}$/),
+        signingCertificateSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine(value => value.nativeBridgeMinimum <= value.nativeBridgeMaximum, {
+    message: 'Native bridge minimum cannot exceed its maximum',
+  })
+
+export type NativeClientRelease = z.infer<typeof nativeClientReleaseSchema>
+
 export const cvp3SessionExtensionBindingSchema = sessionExtensionBindingSchema
 
 const sessionSettingsPatchSchema = z
@@ -373,6 +418,7 @@ export const cvp3EventPayloadSchema = z.discriminatedUnion('type', [
       protocolMax: z.number().int().positive(),
       gatewayKeyId: opaqueId,
       capabilities: matrixGatewayCapabilitiesSchema,
+      clientReleases: z.array(nativeClientReleaseSchema).max(8).optional(),
       snapshotVersion: z.number().int().positive(),
     })
     .strict(),

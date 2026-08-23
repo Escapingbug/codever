@@ -83,6 +83,11 @@ internal val NATIVE_STATE_CATALOG = listOf(
     NativeStateCatalogEntry(
         "matrix-v3-projection",
         NativePersistedStateClass.REBUILDABLE_PROJECTION,
+        3,
+    ),
+    NativeStateCatalogEntry(
+        "native-update-cache",
+        NativePersistedStateClass.REBUILDABLE_PROJECTION,
         2,
     ),
 )

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Cvp3Command, Cvp3Event } from "@codever/protocol";
-import { MatrixCvp3Projection } from "./matrixCvp3Projection";
+import {
+  MATRIX_CVP3_PROJECTION_STATE_VERSION,
+  MatrixCvp3Projection,
+} from "./matrixCvp3Projection";
 import { toIncomingMessage } from "./matrixCvp3Connection";
 
 describe("MatrixCvp3Projection", () => {
@@ -119,7 +122,7 @@ describe("MatrixCvp3Projection", () => {
       updatedAt: 10,
     });
     expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
-    expect(restored.durableState().version).toBe(5);
+    expect(restored.durableState().version).toBe(MATRIX_CVP3_PROJECTION_STATE_VERSION);
   });
 
   it("preserves the prompt origin through local and Gateway projections", () => {
@@ -176,6 +179,7 @@ describe("MatrixCvp3Projection", () => {
 
     expect(projection.workspace).toEqual(expect.objectContaining({
       snapshotVersion: 2,
+      clientReleases: [expect.objectContaining({ versionCode: 42 })],
       capabilities: expect.objectContaining({
         models: [expect.objectContaining({ id: "gpt-5.6-sol" })],
       }),
@@ -184,6 +188,18 @@ describe("MatrixCvp3Projection", () => {
     const restored = new MatrixCvp3Projection();
     restored.restore(projection.durableState());
     expect(restored.workspace).toEqual(projection.workspace);
+  });
+
+  it("accepts a newer account release from a lower-version project snapshot", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyEvent(workspaceSnapshot(10, "project-a-model", 42), "$workspace-a");
+    projection.applyEvent(workspaceSnapshot(1, "project-b-model", 43), "$workspace-b");
+
+    expect(projection.workspace).toMatchObject({
+      snapshotVersion: 10,
+      capabilities: { models: [{ id: "project-a-model" }] },
+      clientReleases: [{ versionCode: 43 }],
+    });
   });
 
   it("projects extension defaults and resolves an interaction on every device", () => {
@@ -419,7 +435,11 @@ function inboxFileEvent(): Cvp3Event {
   };
 }
 
-function workspaceSnapshot(snapshotVersion: number, model: string): Cvp3Event {
+function workspaceSnapshot(
+  snapshotVersion: number,
+  model: string,
+  releaseVersion = 42,
+): Cvp3Event {
   return {
     kind: "codever.event",
     version: 3,
@@ -432,6 +452,27 @@ function workspaceSnapshot(snapshotVersion: number, model: string): Cvp3Event {
       protocolMin: 3,
       protocolMax: 3,
       gatewayKeyId: "gateway-key-1",
+      clientReleases: [{
+        platform: "android",
+        channel: "alpha",
+        architecture: "arm64-v8a",
+        packageName: "id.my.anciety.codever",
+        versionCode: releaseVersion,
+        versionName: `0.1.0-alpha.${releaseVersion}`,
+        buildId: `build-${releaseVersion}`,
+        publishedAt: releaseVersion,
+        minimumAndroid: 26,
+        nativeBridgeMinimum: 1,
+        nativeBridgeMaximum: 1,
+        importance: "recommended",
+        releaseNotes: ["Test release"],
+        artifact: {
+          url: `https://rd.anciety.my.id/native-updates/releases/android/alpha/${releaseVersion}/codever.apk`,
+          size: 1_024,
+          sha256: "a".repeat(64),
+          signingCertificateSha256: "b".repeat(64),
+        },
+      }],
       capabilities: {
         models: [{
           id: model,

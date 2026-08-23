@@ -314,6 +314,23 @@ describe('MatrixCvp3GatewayRunner', () => {
         roomId,
       })
 
+    await expect(runner.publishNativeClientRelease(nativeRelease(42))).resolves.toMatchObject({
+      changed: true,
+      projectCount: 1,
+      release: { versionCode: 42 },
+    })
+    const publishedWorkspace = (await events(client, activeKey.key, roomId, projectId))
+      .filter(event => event.payload.type === 'workspace.snapshot')
+      .at(-1)
+    expect(publishedWorkspace?.payload).toMatchObject({
+      type: 'workspace.snapshot',
+      clientReleases: [{
+        platform: 'android',
+        channel: 'alpha',
+        versionCode: 42,
+      }],
+    })
+
     const inboxPath = join(directory, 'workspace-report.txt')
     await writeFile(inboxPath, 'workspace report', 'utf8')
     await expect(runner.receiveWorkspaceFile({
@@ -567,6 +584,30 @@ describe('MatrixCvp3GatewayRunner', () => {
     await runner.stop()
   })
 })
+
+function nativeRelease(versionCode: number) {
+  return {
+    platform: 'android' as const,
+    channel: 'alpha',
+    architecture: 'arm64-v8a' as const,
+    packageName: 'id.my.anciety.codever',
+    versionCode,
+    versionName: `0.1.0-alpha.${versionCode}`,
+    buildId: `android-alpha-${versionCode}`,
+    publishedAt: 1_787_400_000_000 + versionCode,
+    minimumAndroid: 31,
+    nativeBridgeMinimum: 1,
+    nativeBridgeMaximum: 1,
+    importance: 'recommended' as const,
+    releaseNotes: ['Gateway-published update'],
+    artifact: {
+      url: `https://rd.anciety.my.id/native-updates/releases/android/alpha/${versionCode}/codever.apk`,
+      size: 1_024,
+      sha256: 'a'.repeat(64),
+      signingCertificateSha256: 'b'.repeat(64),
+    },
+  }
+}
 
 async function events(
   client: TestMatrixClient,

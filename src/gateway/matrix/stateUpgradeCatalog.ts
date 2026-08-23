@@ -68,6 +68,12 @@ export const GATEWAY_STATE_CATALOG: readonly GatewayStateCatalogEntry[] = Object
         schemaVersion: 1,
         migrationFromVersions: new Set<number>(),
     },
+    {
+        id: 'native-client-release-state',
+        stateClass: 'durable-command',
+        schemaVersion: 1,
+        migrationFromVersions: new Set<number>(),
+    },
 ])
 
 function migrationKeys(

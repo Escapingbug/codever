@@ -498,6 +498,9 @@ test("pairs a Gateway without exposing Matrix fingerprints and signs strict comm
   assert.match(matrix, /initRustCrypto\(\{/);
   assert.doesNotMatch(matrix, /readonly client: MatrixClient/);
   assert.match(codeverClient, /disconnect\(\): Promise<void>/);
+  assert.match(settings, /Refresh APK status/);
+  assert.match(settings, /Install APK update/);
+  assert.match(app, /nativeUpdateStatus/);
   assert.match(codeverClient, /dispose\(\): void/);
   assert.match(webCodeverClient, /createWebCodeverClient/);
   assert.match(webCodeverClient, /this\.transport\.stop\(\)/);

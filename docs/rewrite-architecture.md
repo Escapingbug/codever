@@ -111,6 +111,16 @@ backgrounded. It owns:
 - notification emission when an Agent task reaches a user-relevant result;
 - versioned store migrations before connection starts.
 
+Native application releases are account state owned by the Gateway. Deployment
+stores an immutable APK first, then submits its metadata to the owner-only
+Gateway admin socket. The Gateway persists the latest release and includes it
+in the ordinary signed, encrypted `workspace.snapshot`; offline devices receive
+only that latest state when Matrix synchronization resumes. Android verifies
+the APK hash, package identity, monotonic version, architecture, and application
+signing certificate before `PackageInstaller` can replace it. Downloads are
+resumable and rebuildable; Matrix tokens, trust, commands, and history never
+enter update storage. There is no public update manifest or second update key.
+
 The WebView subscribes to a versioned native bridge and renders service-owned
 state. Detaching, reloading, or online-updating the PWA cannot cancel a running
 Agent or create a second Matrix client. Browser-only use implements the same CVP/3

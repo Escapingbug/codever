@@ -16,4 +16,12 @@
     <string name="task_notification_cancelled_title">Agent task cancelled</string>
     <string name="task_notification_cancelled_body">Tap to return to the conversation.</string>
     <string name="diagnostics_share_title">Share Codever diagnostics</string>
+    <string name="update_notification_channel_name">Codever updates</string>
+    <string name="update_notification_channel_description">Verified native host updates</string>
+    <string name="update_ready_title">Codever update ready</string>
+    <string name="update_ready_body">Version %1$s is verified. Tap to install it.</string>
+    <string name="update_confirmation_title">Finish updating Codever</string>
+    <string name="update_confirmation_body">Android needs confirmation before installing this verified update.</string>
+    <string name="update_failed_title">Codever update needs attention</string>
+    <string name="update_failed_body">Open Codever to retry the native update.</string>
 </resources>

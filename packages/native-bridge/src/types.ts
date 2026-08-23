@@ -110,6 +110,7 @@ export type CapabilityName =
   | "trust.native"
   | "matrix.session-bootstrap"
   | "matrix.login-token"
+  | "client.update"
   | "background.foreground-service";
 
 export type CapabilityRequest = {
@@ -491,6 +492,27 @@ export type CommandReleaseResult = {
   released: true;
 };
 
+export type NativeUpdateStatus = {
+  phase:
+    | "current"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "ready"
+    | "installing"
+    | "permission_required"
+    | "failed";
+  currentVersionCode: number;
+  currentVersionName: string;
+  latestVersionCode?: number;
+  latestVersionName?: string;
+  buildId?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  detailCode?: string;
+  checkedAt?: number;
+};
+
 export const REQUEST_METHODS = [
   "codever.bridge.hello",
   "codever.client.start",
@@ -498,6 +520,8 @@ export const REQUEST_METHODS = [
   "codever.matrix.loginToken",
   "codever.client.snapshot",
   "codever.client.disconnect",
+  "codever.update.status",
+  "codever.update.install",
   "codever.events.subscribe",
   "codever.events.activate",
   "codever.events.ack",
@@ -529,6 +553,7 @@ export const MUTATION_METHODS = [
   "codever.client.bootstrap",
   "codever.matrix.loginToken",
   "codever.client.disconnect",
+  "codever.update.install",
   "codever.command.send",
   "codever.command.cancel",
   "codever.command.recover",
@@ -588,6 +613,8 @@ export type BridgeMethodParams = {
   "codever.client.disconnect": IdempotentMutationParams & {
     mode: "stop" | "revoke";
   };
+  "codever.update.status": ContextParams;
+  "codever.update.install": IdempotentMutationParams;
   "codever.events.subscribe": EventsSubscribeParams;
   "codever.events.activate": EventsActivateParams;
   "codever.events.ack": EventsAckParams;
@@ -655,6 +682,8 @@ export type BridgeMethodResults = {
   "codever.matrix.loginToken": MatrixLoginTokenResult;
   "codever.client.snapshot": ClientSnapshot;
   "codever.client.disconnect": ClientDisconnectResult;
+  "codever.update.status": NativeUpdateStatus;
+  "codever.update.install": NativeUpdateStatus;
   "codever.events.subscribe": EventsSubscribeResult;
   "codever.events.activate": EventsCursorResult;
   "codever.events.ack": EventsCursorResult;

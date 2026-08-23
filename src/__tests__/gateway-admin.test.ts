@@ -105,6 +105,11 @@ describe('Gateway local admin', () => {
       eventId: 'workspace-file-event-1',
       delivery: 'delivered' as const,
     }))
+    const publishNativeClientRelease = vi.fn(async (release: ReturnType<typeof nativeRelease>) => ({
+      changed: true,
+      release,
+      projectCount: 1,
+    }))
     const server = await startGatewayAdminServer({
       socketPath,
       gatewayId: fixture.identity.gatewayId,
@@ -113,6 +118,7 @@ describe('Gateway local admin', () => {
       registry: fixture.registry,
       getGatewayState: () => 'running',
       receiveWorkspaceFile,
+      publishNativeClientRelease,
       now: () => now,
     })
     servers.push(server)
@@ -124,6 +130,12 @@ describe('Gateway local admin', () => {
       activeDeviceCount: 0,
       openInvitationCount: 0,
     })
+    await expect(client.publishNativeClientRelease(nativeRelease(42))).resolves.toMatchObject({
+      changed: true,
+      release: { platform: 'android', versionCode: 42 },
+      projectCount: 1,
+    })
+    expect(publishNativeClientRelease).toHaveBeenCalledOnce()
     const file = await client.sendFile(
       { path: '/tmp/report.pdf', caption: 'Generated report' },
       'workspace-file-key-0001',
@@ -484,6 +496,30 @@ describe('Gateway local admin', () => {
     ])
   })
 })
+
+function nativeRelease(versionCode: number) {
+  return {
+    platform: 'android' as const,
+    channel: 'alpha',
+    architecture: 'arm64-v8a' as const,
+    packageName: 'id.my.anciety.codever',
+    versionCode,
+    versionName: `0.1.0-alpha.${versionCode}`,
+    buildId: `android-alpha-${versionCode}`,
+    publishedAt: now,
+    minimumAndroid: 31,
+    nativeBridgeMinimum: 1,
+    nativeBridgeMaximum: 1,
+    importance: 'recommended' as const,
+    releaseNotes: ['Gateway-published update'],
+    artifact: {
+      url: `https://rd.anciety.my.id/native-updates/releases/android/alpha/${versionCode}/codever.apk`,
+      size: 1_024,
+      sha256: 'a'.repeat(64),
+      signingCertificateSha256: 'b'.repeat(64),
+    },
+  }
+}
 
 async function gatewayFixture() {
   const directory = await temporaryDirectory()

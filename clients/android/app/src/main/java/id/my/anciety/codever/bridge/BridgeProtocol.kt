@@ -36,6 +36,7 @@ import id.my.anciety.codever.matrix.MatrixLoginTokenRateLimitException
 import id.my.anciety.codever.matrix.MatrixOfflineException
 import id.my.anciety.codever.matrix.MatrixRoomBinding
 import id.my.anciety.codever.matrix.PublicMatrixSession
+import id.my.anciety.codever.update.NativeUpdateStatus
 import id.my.anciety.codever.security.codever.CodeverSecurityException
 import id.my.anciety.codever.security.codever.SecurityErrorCode
 import kotlinx.coroutines.CancellationException
@@ -136,6 +137,8 @@ object BridgeProtocol {
         "codever.matrix.loginToken",
         "codever.client.snapshot",
         "codever.client.disconnect",
+        "codever.update.status",
+        "codever.update.install",
         "codever.events.subscribe",
         "codever.events.activate",
         "codever.events.ack",
@@ -312,6 +315,14 @@ interface BridgeRuntime {
     ): Pair<PublicTrustState.Trusted, ClientSnapshot>
 
     suspend fun disconnect(mode: String): ClientSnapshot
+
+    fun nativeUpdateStatus(): NativeUpdateStatus = throw BridgeRuntimeFailure(
+        BridgeError.CAPABILITY_UNAVAILABLE,
+        "Native application updates are unavailable.",
+        userAction = "update_native",
+    )
+
+    suspend fun installNativeUpdate(): NativeUpdateStatus = nativeUpdateStatus()
 }
 
 class BridgeDispatcher(
@@ -416,6 +427,18 @@ class BridgeDispatcher(
                         put("mode", mode)
                         put("snapshot", PublicClientJson.encodeSnapshot(runtime.disconnect(mode)))
                     }
+                }
+            }
+            "codever.update.status" -> {
+                requireUpdateCapability()
+                requireContext(request.params, mutation = false)
+                nativeUpdateStatusToJson(runtime.nativeUpdateStatus())
+            }
+            "codever.update.install" -> {
+                requireUpdateCapability()
+                requireContext(request.params, mutation = true)
+                mutationResult(request) {
+                    nativeUpdateStatusToJson(runtime.installNativeUpdate())
                 }
             }
             "codever.events.subscribe" -> {
@@ -1291,6 +1314,29 @@ class BridgeDispatcher(
     private fun invalidParams(message: String): Nothing =
         throw BridgeDispatchException(BridgeError.INVALID_PARAMS, message)
 
+    private fun requireUpdateCapability() {
+        if (NATIVE_UPDATE_CAPABILITY !in negotiatedCapabilities) {
+            throw BridgeDispatchException(
+                BridgeError.CAPABILITY_UNAVAILABLE,
+                "Native application updates were not negotiated.",
+                userAction = "update_native",
+            )
+        }
+    }
+
+    private fun nativeUpdateStatusToJson(status: NativeUpdateStatus): JsonObject = buildJsonObject {
+        put("phase", status.phase.wireName)
+        put("currentVersionCode", status.currentVersionCode)
+        put("currentVersionName", status.currentVersionName)
+        status.latestVersionCode?.let { put("latestVersionCode", it) }
+        status.latestVersionName?.let { put("latestVersionName", it) }
+        status.buildId?.let { put("buildId", it) }
+        status.downloadedBytes?.let { put("downloadedBytes", it) }
+        status.totalBytes?.let { put("totalBytes", it) }
+        status.detailCode?.let { put("detailCode", it) }
+        status.checkedAt?.let { put("checkedAt", it) }
+    }
+
     private fun operationNotFound(message: String): Nothing =
         throw BridgeDispatchException(BridgeError.OPERATION_NOT_FOUND, message)
 
@@ -1298,6 +1344,7 @@ class BridgeDispatcher(
         const val FOREGROUND_SERVICE_CAPABILITY = "background.foreground-service"
         const val MATRIX_BOOTSTRAP_CAPABILITY = "matrix.session-bootstrap"
         const val MATRIX_LOGIN_TOKEN_CAPABILITY = "matrix.login-token"
+        const val NATIVE_UPDATE_CAPABILITY = "client.update"
         val SUPPORTED_CAPABILITIES = setOf(
             "client.lifecycle",
             "events.replay",
@@ -1310,6 +1357,7 @@ class BridgeDispatcher(
             FOREGROUND_SERVICE_CAPABILITY,
             MATRIX_BOOTSTRAP_CAPABILITY,
             MATRIX_LOGIN_TOKEN_CAPABILITY,
+            NATIVE_UPDATE_CAPABILITY,
         )
         fun supportedCapabilityVersions(name: String): Set<Int> = when {
             name == "history.page" || name == "commands.durable" -> setOf(1, 2)

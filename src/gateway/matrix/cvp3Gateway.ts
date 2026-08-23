@@ -10,6 +10,7 @@ import {
   type Cvp3SessionProjection,
   type JsonValue,
   type MatrixGatewayCapabilities,
+  type NativeClientRelease,
 } from '@codever/protocol'
 import type { AgentProvider, ModelEntry } from '@/providers/provider'
 import { createProviderInstance, getProvider, listProviders } from '@/providers/registry'
@@ -44,6 +45,7 @@ import {
   canApprovePrivilegedExecution,
 } from './cvp3Authorizer'
 import { GatewayCvp3ContentLayer } from './cvp3Content'
+import { FileNativeClientReleaseStore } from './fileNativeClientReleaseStore'
 import { materializePromptInput } from './media'
 import { SessionExtensionRegistry } from '@/runtime/sessionExtensions'
 import type {
@@ -118,6 +120,12 @@ export interface WorkspaceInboxFileResult {
   delivery: 'delivered' | 'queued'
 }
 
+export interface PublishNativeClientReleaseResult {
+  changed: boolean
+  release: NativeClientRelease
+  projectCount: number
+}
+
 /**
  * Matrix-native CVP/3 Gateway.
  *
@@ -129,6 +137,7 @@ export class MatrixCvp3GatewayRunner {
   private readonly client: MatrixGatewayClient
   private readonly journal: FileCvp3CommandJournal
   private readonly runtimeState: FileCvp3RuntimeStateStore
+  private readonly nativeClientReleases: FileNativeClientReleaseStore
   private readonly authorizer: MatrixCvp3CommandAuthorizer
   private readonly content: GatewayCvp3ContentLayer
   private readonly extensions: SessionExtensionRegistry
@@ -142,6 +151,7 @@ export class MatrixCvp3GatewayRunner {
   private eventChain: Promise<void> = Promise.resolve()
   private unsubscribe: (() => void) | null = null
   private state: MatrixCvp3GatewayState = 'stopped'
+  private publishedClientReleases: NativeClientRelease[] = []
 
   constructor(
     private readonly config: MatrixGatewayConfig,
@@ -153,6 +163,10 @@ export class MatrixCvp3GatewayRunner {
     this.journal = new FileCvp3CommandJournal(`${config.replayLedgerPath}.v3-commands.jsonl`)
     this.runtimeState = new FileCvp3RuntimeStateStore(
       `${config.replayLedgerPath}.v3-runtime-state.json`,
+      config.gatewayId,
+    )
+    this.nativeClientReleases = new FileNativeClientReleaseStore(
+      `${config.replayLedgerPath}.v3-client-releases.json`,
       config.gatewayId,
     )
     this.authorizer = new MatrixCvp3CommandAuthorizer(config.gatewayId, this.journal)
@@ -236,6 +250,8 @@ export class MatrixCvp3GatewayRunner {
     try {
       await this.journal.initialize()
       await this.runtimeState.initialize(this.config.rooms)
+      await this.nativeClientReleases.initialize()
+      this.publishedClientReleases = await this.nativeClientReleases.releases()
       await this.content.initialize()
       await this.createProjectRuntimes()
       await this.webPush.initialize()
@@ -290,6 +306,41 @@ export class MatrixCvp3GatewayRunner {
       await this.content.provisionProject(project.config, this.client)
       await this.publishProjectSnapshot(project)
     }
+  }
+
+  publishNativeClientRelease(
+    input: NativeClientRelease,
+  ): Promise<PublishNativeClientReleaseResult> {
+    if (this.state !== 'running') {
+      throw new Error(`Cannot publish a native client release while Gateway is ${this.state}`)
+    }
+    const operation = this.eventChain.then(async () => {
+      const published = await this.nativeClientReleases.publish(input)
+      this.publishedClientReleases = published.releases
+      if (published.changed) {
+        for (const project of this.projects.values()) {
+          project.project.capabilitySnapshotVersion += 1
+          await this.persist(project)
+        }
+      }
+      // Publish even for an idempotent retry. If the previous admin request
+      // committed the local release but lost a Matrix acknowledgement, the
+      // durable CVP outbox and stable snapshot ID finish the same publication.
+      const activeProjects: V3ProjectRuntime[] = []
+      for (const project of this.projects.values()) {
+        if (await this.content.hasActiveDevices(project.config.roomId)) {
+          activeProjects.push(project)
+        }
+      }
+      for (const project of activeProjects) await this.publishWorkspaceSnapshot(project)
+      return {
+        changed: published.changed,
+        release: published.release,
+        projectCount: activeProjects.length,
+      }
+    })
+    this.eventChain = operation.then(() => undefined, () => undefined)
+    return operation
   }
 
   async requestPrivilegedExecution(
@@ -1523,6 +1574,9 @@ export class MatrixCvp3GatewayRunner {
         protocolMax: 3,
         gatewayKeyId: this.config.applicationSecurity.gatewayKeyPair.keyId,
         capabilities: project.project.capabilities,
+        ...(this.publishedClientReleases.length > 0
+          ? { clientReleases: structuredClone(this.publishedClientReleases) }
+          : {}),
         snapshotVersion: project.project.capabilitySnapshotVersion,
       },
     }

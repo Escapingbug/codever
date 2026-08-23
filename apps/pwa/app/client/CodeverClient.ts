@@ -3,6 +3,7 @@ import type {
   HelloResult,
   PairingPreview,
   PublicTrustState,
+  NativeUpdateStatus,
 } from "@codever/native-bridge";
 import type {
   CodeverAttachment,
@@ -118,6 +119,8 @@ export interface CodeverClient {
     timeoutMs: number,
   ): Promise<CommandCompletion>;
   releaseCommand(commandId: string): Promise<void>;
+  nativeUpdateStatus?(): Promise<NativeUpdateStatus>;
+  installNativeUpdate?(): Promise<NativeUpdateStatus>;
 
   disconnect(): Promise<void>;
   dispose(): void;

@@ -1,5 +1,9 @@
 import { z } from 'zod'
 import {
+  nativeClientReleaseSchema,
+  type NativeClientRelease,
+} from '@codever/protocol'
+import {
   privilegedExecutionInputSchema,
   type PrivilegedExecutionResult,
 } from '@/privilege'
@@ -59,6 +63,16 @@ export type GatewayPrivilegedExecutionRequest = z.infer<
 >
 
 export type GatewayPrivilegedExecutionResponse = PrivilegedExecutionResult
+
+export const publishNativeClientReleaseRequestSchema = nativeClientReleaseSchema
+
+export type PublishNativeClientReleaseRequest = NativeClientRelease
+
+export interface PublishNativeClientReleaseResponse {
+  changed: boolean
+  release: NativeClientRelease
+  projectCount: number
+}
 
 export interface GatewayAdminStatus {
   version: 1
