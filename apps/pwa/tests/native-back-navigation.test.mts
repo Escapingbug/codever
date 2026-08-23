@@ -93,18 +93,20 @@ test("consumes Back without closing destructive or create dialogs while busy", (
   assert.equal(
     resolveCodeverBackAction({
       ...emptyState,
-      providerHistoryOpen: true,
-      providerHistoryBusy: true,
-    }),
-    "block-provider-history",
-  );
-  assert.equal(
-    resolveCodeverBackAction({
-      ...emptyState,
       newSessionOpen: true,
       newSessionBusy: true,
     }),
     "block-new-session",
+  );
+});
+
+test("closes provider history while its background request is still loading", () => {
+  assert.equal(
+    resolveCodeverBackAction({
+      ...emptyState,
+      providerHistoryOpen: true,
+    }),
+    "close-provider-history",
   );
 });
 

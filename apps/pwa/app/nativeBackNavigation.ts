@@ -50,7 +50,6 @@ export type CodeverBackState = {
   deleteDialogOpen: boolean;
   deleteDialogBusy: boolean;
   providerHistoryOpen?: boolean;
-  providerHistoryBusy?: boolean;
   newSessionOpen: boolean;
   newSessionBusy: boolean;
   settingsOpen: boolean;
@@ -64,7 +63,6 @@ export type CodeverBackAction =
   | "close-delete-dialog"
   | "block-delete-dialog"
   | "close-provider-history"
-  | "block-provider-history"
   | "close-new-session"
   | "block-new-session"
   | "close-settings"
@@ -82,9 +80,7 @@ export function resolveCodeverBackAction(
       : "close-delete-dialog";
   }
   if (state.providerHistoryOpen) {
-    return state.providerHistoryBusy
-      ? "block-provider-history"
-      : "close-provider-history";
+    return "close-provider-history";
   }
   if (state.newSessionOpen) {
     return state.newSessionBusy

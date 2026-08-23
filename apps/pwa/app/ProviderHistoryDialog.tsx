@@ -22,7 +22,7 @@ type Props = {
   sessions: ProviderSessionEntry[];
   selected: ProviderSessionEntry | null;
   messages: ProviderHistoryMessage[];
-  loading: boolean;
+  loading: "sessions" | "session" | null;
   error: string | null;
   onClose(): void;
   onProviderChange(provider: string): void;
@@ -62,14 +62,13 @@ function ProviderHistoryDialogContent({
     open,
     containerRef: dialogRef,
     initialFocusRef: providerRef,
-    escapeDisabled: loading,
     onEscape: onClose,
   });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!selected || !text || loading) return;
+    if (!selected || !text || loading === "session") return;
     setDraftState({ key: draftKey, text: "" });
     onContinue(selected, text);
   };
@@ -78,9 +77,7 @@ function ProviderHistoryDialogContent({
     <div
       className="new-session-backdrop provider-history-backdrop"
       role="presentation"
-      onMouseDown={() => {
-        if (!loading) onClose();
-      }}
+      onMouseDown={onClose}
     >
       <section
         ref={dialogRef}
@@ -88,7 +85,7 @@ function ProviderHistoryDialogContent({
         role="dialog"
         aria-modal="true"
         aria-labelledby="provider-history-title"
-        aria-busy={loading}
+        aria-busy={loading !== null}
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -98,7 +95,7 @@ function ProviderHistoryDialogContent({
             <h2 id="provider-history-title">Provider sessions</h2>
             <p>Browse first. Sending a message adopts the session into Codever.</p>
           </div>
-          <button type="button" onClick={onClose} disabled={loading} aria-label="Close provider history">×</button>
+          <button type="button" onClick={onClose} aria-label="Close provider history">×</button>
         </header>
 
         <div className="provider-history-toolbar">
@@ -107,7 +104,7 @@ function ProviderHistoryDialogContent({
             <select
               ref={providerRef}
               value={provider}
-              disabled={loading}
+              disabled={loading !== null}
               onChange={(event) => onProviderChange(event.target.value)}
             >
               {providers.map(option => (
@@ -115,7 +112,13 @@ function ProviderHistoryDialogContent({
               ))}
             </select>
           </label>
-          <small>Archiving in Codever never removes these provider copies.</small>
+          <small>
+            {loading === "sessions"
+              ? sessions.length === 0
+                ? "Loading provider sessions in the background…"
+                : "Refreshing provider sessions in the background…"
+              : "Archiving in Codever never removes these provider copies."}
+          </small>
         </div>
 
         <div className="provider-history-body">
@@ -126,7 +129,7 @@ function ProviderHistoryDialogContent({
                 key={session.sessionId}
                 className={selected?.sessionId === session.sessionId ? "selected" : ""}
                 onClick={() => onInspect(session)}
-                disabled={loading}
+                disabled={loading !== null}
               >
                 <strong>{session.title}</strong>
                 <small>
@@ -135,7 +138,10 @@ function ProviderHistoryDialogContent({
                 </small>
               </button>
             ))}
-            {!loading && sessions.length === 0 && (
+            {loading === "sessions" && sessions.length === 0 && (
+              <p className="provider-history-empty">Loading provider sessions…</p>
+            )}
+            {loading === null && sessions.length === 0 && (
               <p className="provider-history-empty">No sessions were reported for this project.</p>
             )}
           </aside>
@@ -144,13 +150,13 @@ function ProviderHistoryDialogContent({
             {error && (
               <div className="provider-history-error" role="alert">
                 <p>{error}</p>
-                <button type="button" onClick={onRetry} disabled={loading}>
+                <button type="button" onClick={onRetry} disabled={loading !== null}>
                   Retry
                 </button>
               </div>
             )}
-            {loading && <p className="provider-history-empty">Loading provider history…</p>}
-            {!loading && selected && (
+            {loading === "session" && <p className="provider-history-empty">Loading session history…</p>}
+            {loading !== "session" && selected && (
               <>
                 <header>
                   <div>
@@ -182,13 +188,18 @@ function ProviderHistoryDialogContent({
                       placeholder="Continue this provider session in Codever"
                       rows={2}
                     />
-                    <button type="submit" disabled={!draft.trim()}>Continue in Codever</button>
+                    <button type="submit" disabled={!draft.trim() || loading === "session"}>
+                      Continue in Codever
+                    </button>
                   </form>
                 )}
               </>
             )}
-            {!loading && !selected && !error && (
+            {loading === null && !selected && !error && (
               <p className="provider-history-empty">Choose a provider session to inspect it.</p>
+            )}
+            {loading === "sessions" && !selected && (
+              <p className="provider-history-empty">You can close this window while sessions load.</p>
             )}
           </section>
         </div>

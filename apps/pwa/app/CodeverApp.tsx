@@ -288,6 +288,13 @@ type TurnHistoryLoadState = {
   phase: "loading" | "ready" | "error";
 };
 
+type ProviderHistoryLoadState = {
+  id: number;
+  provider: string;
+  kind: "sessions" | "session";
+  providerSessionId?: string;
+};
+
 type FeedReturnAnchor = {
   sessionId: string;
   messageId: string;
@@ -955,7 +962,8 @@ function CodeverAppRuntime() {
   const [providerHistorySessions, setProviderHistorySessions] = useState<ProviderSessionEntry[]>([]);
   const [providerHistorySelected, setProviderHistorySelected] = useState<ProviderSessionEntry | null>(null);
   const [providerHistoryMessages, setProviderHistoryMessages] = useState<ProviderHistoryMessage[]>([]);
-  const [providerHistoryLoading, setProviderHistoryLoading] = useState(false);
+  const [providerHistoryLoad, setProviderHistoryLoad] =
+    useState<ProviderHistoryLoadState | null>(null);
   const [providerHistoryError, setProviderHistoryError] = useState<string | null>(null);
   const [forgetDialogOpen, setForgetDialogOpen] = useState(false);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
@@ -1057,6 +1065,10 @@ function CodeverAppRuntime() {
   const historyCursorRef = useRef<MessageHistoryCursor | null>(null);
   const historyGenerationRef = useRef(0);
   const historyLoadingRef = useRef(false);
+  const providerHistoryProviderRef = useRef("");
+  const providerHistoryLoadRef = useRef<ProviderHistoryLoadState | null>(null);
+  const providerHistoryLoadIdRef = useRef(0);
+  const providerHistoryLoadedProviderRef = useRef<string | null>(null);
   const deviceInvitationLifecycleRef = useRef(
     new DeviceInvitationLifecycle<GeneratedDeviceInvitation>(),
   );
@@ -1118,7 +1130,6 @@ function CodeverAppRuntime() {
     deleteDialogOpen: false,
     deleteDialogBusy: false,
     providerHistoryOpen,
-    providerHistoryBusy: providerHistoryLoading,
     newSessionOpen,
     newSessionBusy,
     settingsOpen,
@@ -1157,7 +1168,6 @@ function CodeverAppRuntime() {
           setMobileChatOpen(false);
           break;
         case "block-delete-dialog":
-        case "block-provider-history":
         case "block-new-session":
           break;
         case null:
@@ -4437,12 +4447,32 @@ function CodeverAppRuntime() {
       ?? "";
     if (!provider) return;
     setProviderHistoryOpen(true);
+    if (
+      providerHistoryProviderRef.current === provider
+      && (
+        providerHistoryLoadRef.current?.provider === provider
+        || providerHistoryLoadedProviderRef.current === provider
+      )
+    ) {
+      return;
+    }
+    const providerChanged = providerHistoryProviderRef.current !== provider;
+    providerHistoryProviderRef.current = provider;
     setProviderHistoryProvider(provider);
-    setProviderHistorySessions([]);
-    setProviderHistorySelected(null);
-    setProviderHistoryMessages([]);
+    if (providerChanged) {
+      providerHistoryLoadedProviderRef.current = null;
+      setProviderHistorySessions([]);
+      setProviderHistorySelected(null);
+      setProviderHistoryMessages([]);
+    }
     setProviderHistoryError(null);
-    setProviderHistoryLoading(true);
+    const load: ProviderHistoryLoadState = {
+      id: ++providerHistoryLoadIdRef.current,
+      provider,
+      kind: "sessions",
+    };
+    providerHistoryLoadRef.current = load;
+    setProviderHistoryLoad(load);
     let sent: CodeverCommandSendResult | null = null;
     try {
       sent = await sendRealCommand({ operation: "provider.sessions.list", provider });
@@ -4458,25 +4488,42 @@ function CodeverAppRuntime() {
       const sessions = Array.isArray(result.sessions)
         ? result.sessions.map(entry => providerSessionEntrySchema.parse(entry))
         : [];
-      setProviderHistorySessions(sessions);
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        providerHistoryLoadedProviderRef.current = provider;
+        setProviderHistorySessions(sessions);
+      }
     } catch (error) {
-      setProviderHistoryError(formatUiError(error));
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        setProviderHistoryError(formatUiError(error));
+      }
     } finally {
-      setProviderHistoryLoading(false);
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        providerHistoryLoadRef.current = null;
+        setProviderHistoryLoad(null);
+      }
       if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
     }
   }
 
   async function inspectProviderHistorySession(session: ProviderSessionEntry) {
+    const provider = providerHistoryProviderRef.current;
+    if (!provider || providerHistoryLoadRef.current) return;
     setProviderHistorySelected(session);
     setProviderHistoryMessages([]);
     setProviderHistoryError(null);
-    setProviderHistoryLoading(true);
+    const load: ProviderHistoryLoadState = {
+      id: ++providerHistoryLoadIdRef.current,
+      provider,
+      kind: "session",
+      providerSessionId: session.sessionId,
+    };
+    providerHistoryLoadRef.current = load;
+    setProviderHistoryLoad(load);
     let sent: CodeverCommandSendResult | null = null;
     try {
       sent = await sendRealCommand({
         operation: "provider.session.inspect",
-        provider: providerHistoryProvider,
+        provider,
         providerSessionId: session.sessionId,
       });
       if (!sent) throw new Error("Provider session inspection was not sent.");
@@ -4488,15 +4535,22 @@ function CodeverAppRuntime() {
       if (!result || typeof result !== "object" || Array.isArray(result) || result.type !== "provider.session.inspected") {
         throw new Error("The provider returned invalid session history.");
       }
-      setProviderHistoryMessages(
-        Array.isArray(result.messages)
-          ? result.messages.map(message => providerHistoryMessageSchema.parse(message))
-          : [],
-      );
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        setProviderHistoryMessages(
+          Array.isArray(result.messages)
+            ? result.messages.map(message => providerHistoryMessageSchema.parse(message))
+            : [],
+        );
+      }
     } catch (error) {
-      setProviderHistoryError(formatUiError(error));
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        setProviderHistoryError(formatUiError(error));
+      }
     } finally {
-      setProviderHistoryLoading(false);
+      if (providerHistoryLoadRef.current?.id === load.id) {
+        providerHistoryLoadRef.current = null;
+        setProviderHistoryLoad(null);
+      }
       if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
     }
   }
@@ -6917,11 +6971,9 @@ function CodeverAppRuntime() {
           sessions={providerHistorySessions}
           selected={providerHistorySelected}
           messages={providerHistoryMessages}
-          loading={providerHistoryLoading}
+          loading={providerHistoryLoad?.kind ?? null}
           error={providerHistoryError}
-          onClose={() => {
-            if (!providerHistoryLoading) setProviderHistoryOpen(false);
-          }}
+          onClose={() => setProviderHistoryOpen(false)}
           onProviderChange={(provider) => void openProviderHistory(provider)}
           onInspect={(session) => void inspectProviderHistorySession(session)}
           onRetry={() => {
