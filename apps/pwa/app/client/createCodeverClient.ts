@@ -1,6 +1,8 @@
-import type {
-  ClientBootstrapResult,
-  HelloResult,
+import {
+  BridgeProtocolError,
+  type ClientBootstrapResult,
+  type HelloResult,
+  type NativeUpdateStatus,
 } from "@codever/native-bridge";
 import { CODEVER_BUILD_VERSION } from "../buildInfo";
 import { ConnectionFailureError } from "../connectionFailure";
@@ -100,9 +102,64 @@ export async function createCodeverClient(
     handlers.onStatus("connecting", WEB_SESSION_DETAIL);
     return dependencies.createWeb(config, handlers);
   }
-  if (nativeManaged) throw nativeRuntimeUnavailable();
+  if (nativeManaged) throw nativeRuntimeOutdated();
   handlers.onStatus("connecting", NATIVE_FALLBACK_DETAIL);
   return dependencies.createWeb(config, handlers);
+}
+
+/**
+ * Keeps native app recovery available even when the installed shell is too old
+ * to construct the full durable Codever client. The update capability has its
+ * own short-lived bridge lease so a compatibility failure never leaves the
+ * user with diagnostics as the only possible action.
+ */
+export async function advanceNativeAppUpdate(
+  options: {
+    installReady?: boolean;
+    dependencies?: Pick<
+      CreateCodeverClientDependencies,
+      "nativePort" | "createBridge"
+    >;
+  } = {},
+): Promise<NativeUpdateStatus> {
+  const dependencies = options.dependencies ?? defaultDependencies;
+  const port = dependencies.nativePort();
+  if (!port) {
+    throw new BridgeProtocolError(
+      "BRIDGE_NOT_READY",
+      "The native app did not answer the update request.",
+      { retryable: true, userAction: "update_native" },
+    );
+  }
+  const bridge = await dependencies.createBridge(port);
+  try {
+    const hello = await bridge.hello({
+      webBuild: CODEVER_BUILD_VERSION,
+      requiredCapabilities: [{ name: "client.update", versions: [1] }],
+    });
+    if (hello.capabilities["client.update"]?.version !== 1) {
+      throw new BridgeProtocolError(
+        "CAPABILITY_UNAVAILABLE",
+        "This APK cannot install direct native updates.",
+        { userAction: "update_native" },
+      );
+    }
+    const status = await bridge.request("codever.update.status", {
+      context: bridge.context(),
+    });
+    if (
+      options.installReady === false ||
+      (status.phase !== "ready" && status.phase !== "permission_required")
+    ) {
+      return status;
+    }
+    return await bridge.request("codever.update.install", {
+      context: bridge.context(),
+      idempotencyKey: crypto.randomUUID(),
+    });
+  } finally {
+    bridge.close();
+  }
 }
 
 /**
@@ -156,6 +213,13 @@ function nativeRuntimeUnavailable(cause?: unknown): Error {
     "matrix_native_runtime_unavailable",
     "This Matrix session is owned by the native runtime, but the installed native host is unavailable or incompatible. Update or reopen the native app; Codever will not create a duplicate Web Matrix device.",
     cause === undefined ? undefined : { cause },
+  );
+}
+
+function nativeRuntimeOutdated(): Error {
+  return new ConnectionFailureError(
+    "matrix_native_runtime_outdated",
+    "This Matrix session needs a newer native runtime. Update the native app; Codever will not create a duplicate Web Matrix device.",
   );
 }
 

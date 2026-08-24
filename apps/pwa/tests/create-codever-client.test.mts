@@ -11,6 +11,7 @@ import type {
 } from "../app/client/CodeverClient.ts";
 import {
   NATIVE_MANAGED_ACCESS_TOKEN,
+  advanceNativeAppUpdate,
   bootstrapNativeMatrixSessionIfAvailable,
   createCodeverClient,
 } from "../app/client/createCodeverClient.ts";
@@ -175,10 +176,27 @@ test("fails closed before command submission when the native durable command set
     (error) =>
       error instanceof Error &&
       "code" in error &&
-      error.code === "matrix_native_runtime_unavailable" &&
+      error.code === "matrix_native_runtime_outdated" &&
       /update/i.test(error.message),
   );
   assert.equal(outdated.bootstrapToken, "");
+});
+
+test("an outdated full client can still advance the independent native updater", async () => {
+  const port = new NativeUpdatePort();
+  const result = await advanceNativeAppUpdate({
+    dependencies: {
+      nativePort: () => port,
+      createBridge: (nativePort) => new NativeRpcBridge(nativePort),
+    },
+  });
+  assert.equal(result.phase, "installing");
+  assert.deepEqual(port.methods, [
+    "codever.bridge.hello",
+    "codever.update.status",
+    "codever.update.install",
+  ]);
+  assert.equal(port.onmessage, null);
 });
 
 test("consumes a one-time login token only after complete native negotiation", async () => {
@@ -286,6 +304,51 @@ class BootstrapPort implements NativeBridgePort {
         },
       };
     }
+    queueMicrotask(() => {
+      this.onmessage?.({
+        data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }),
+      });
+    });
+  }
+}
+
+class NativeUpdatePort implements NativeBridgePort {
+  onmessage: NativeBridgePort["onmessage"] = null;
+  methods: string[] = [];
+
+  postMessage(message: string): void {
+    const request = JSON.parse(message) as {
+      id: string;
+      method: string;
+    };
+    this.methods.push(request.method);
+    const result = request.method === "codever.bridge.hello"
+      ? {
+          protocolVersion: 1,
+          bridgeSessionId: "bridge-update-1",
+          native: {
+            runtimeVersion: "0.1.0-old",
+            runtimeBuild: "android-outdated",
+            platform: "android",
+          },
+          capabilities: { "client.update": { version: 1 } },
+          limits: NATIVE_BRIDGE_LIMITS,
+        }
+      : request.method === "codever.update.status"
+        ? {
+            phase: "ready",
+            currentVersionCode: 1,
+            currentVersionName: "0.1.0-old",
+            latestVersionCode: 2,
+            latestVersionName: "0.1.0-new",
+          }
+        : {
+            phase: "installing",
+            currentVersionCode: 1,
+            currentVersionName: "0.1.0-old",
+            latestVersionCode: 2,
+            latestVersionName: "0.1.0-new",
+          };
     queueMicrotask(() => {
       this.onmessage?.({
         data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }),

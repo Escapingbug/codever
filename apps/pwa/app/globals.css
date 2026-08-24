@@ -3955,20 +3955,13 @@ select:focus-visible {
 }
 
 .settings-build-version {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
   margin: 0 22px 14px;
   color: var(--muted);
   font-size: 10px;
-  text-align: right;
 }
 
 .settings-build-details {
   min-width: 0;
-  flex: 1;
-  text-align: left;
 }
 
 .settings-build-details summary {
@@ -3980,11 +3973,22 @@ select:focus-visible {
   line-height: 32px;
 }
 
-.settings-build-details > span {
+.settings-build-details-body {
+  display: grid;
+  gap: 10px;
+  padding: 5px 0 8px;
+}
+
+.settings-build-details-body > span {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 5px 0 8px;
+}
+
+.settings-build-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .settings-build-version small {
@@ -4253,6 +4257,13 @@ select:focus-visible {
   color: #765b60;
   font-size: 11px;
   line-height: 1.5;
+}
+
+.connection-recovery-panel > small {
+  padding-left: 36px;
+  color: #765b60;
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .connection-recovery-actions {
@@ -5279,6 +5290,21 @@ select:focus-visible {
 
 .provider-history-error {
   color: #a43f4d;
+}
+
+.provider-history-error p {
+  margin: 0 0 10px;
+}
+
+.provider-history-error button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #e4b8bf;
+  border-radius: 8px;
+  background: #fff;
+  color: #8e3441;
+  font: inherit;
+  font-weight: 700;
 }
 
 .session-delete-dialog {
@@ -7103,6 +7129,10 @@ body {
   }
 
   .connection-recovery-actions {
+    padding-left: 0;
+  }
+
+  .connection-recovery-panel > small {
     padding-left: 0;
   }
 

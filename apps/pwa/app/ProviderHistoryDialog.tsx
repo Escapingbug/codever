@@ -27,6 +27,7 @@ type Props = {
   onClose(): void;
   onProviderChange(provider: string): void;
   onInspect(session: ProviderSessionEntry): void;
+  onRetry(): void;
   onOpenManaged(sessionId: string): void;
   onContinue(session: ProviderSessionEntry, text: string): void;
 };
@@ -48,6 +49,7 @@ function ProviderHistoryDialogContent({
   onClose,
   onProviderChange,
   onInspect,
+  onRetry,
   onOpenManaged,
   onContinue,
 }: Props) {
@@ -139,7 +141,14 @@ function ProviderHistoryDialogContent({
           </aside>
 
           <section className="provider-history-preview">
-            {error && <p className="provider-history-error" role="alert">{error}</p>}
+            {error && (
+              <div className="provider-history-error" role="alert">
+                <p>{error}</p>
+                <button type="button" onClick={onRetry} disabled={loading}>
+                  Retry
+                </button>
+              </div>
+            )}
             {loading && <p className="provider-history-empty">Loading provider history…</p>}
             {!loading && selected && (
               <>

@@ -207,6 +207,7 @@ import type {
 import { CommandReviewRequiredError } from "./client/CodeverClient";
 import {
   NATIVE_MANAGED_ACCESS_TOKEN,
+  advanceNativeAppUpdate,
   bootstrapNativeMatrixSessionIfAvailable,
   createCodeverClient,
   isNativeManagedMatrixConfig,
@@ -916,6 +917,8 @@ function CodeverAppRuntime() {
     useState<CodeverNativeRuntimeInfo | null>(null);
   const [nativeUpdateState, setNativeUpdateState] =
     useState<NativeUpdateStatus | null>(null);
+  const [nativeUpdateBusy, setNativeUpdateBusy] = useState(false);
+  const nativeUpdateBusyRef = useRef(false);
   const [pwaUpdateState, setPwaUpdateState] = useState<PwaUpdateState>({
     phase: "current",
     currentVersion: CODEVER_BUILD_VERSION,
@@ -3914,6 +3917,73 @@ function CodeverAppRuntime() {
   }
   pairingRecoveryRef.current = confirmPairing;
 
+  async function recoverNativeAppUpdate(installReady: boolean): Promise<void> {
+    if (nativeUpdateBusyRef.current) return;
+    nativeUpdateBusyRef.current = true;
+    setNativeUpdateBusy(true);
+    try {
+      const connection = codeverClientRef.current;
+      let status: NativeUpdateStatus;
+      if (connection?.nativeUpdateStatus) {
+        status = await connection.nativeUpdateStatus();
+        if (
+          installReady &&
+          connection.installNativeUpdate &&
+          (status.phase === "ready" || status.phase === "permission_required")
+        ) {
+          status = await connection.installNativeUpdate();
+        }
+      } else {
+        status = await advanceNativeAppUpdate({ installReady });
+      }
+      setNativeUpdateState(status);
+      if (
+        status.phase === "current" &&
+        connectionDetail === "matrix_native_runtime_outdated"
+      ) {
+        setConnectionError(
+          "No compatible APK update has reached this device yet. Restart Codever; if the update requirement remains, export diagnostics.",
+        );
+      } else if (status.phase === "failed") {
+        setConnectionError(
+          "The APK update did not complete. Restart Codever and try again; if it still fails, export diagnostics.",
+        );
+      }
+    } catch {
+      setNativeUpdateState((current) => current ? {
+        ...current,
+        phase: "failed",
+        detailCode: "bridge_request_failed",
+      } : current);
+      setConnectionError(
+        "The native updater did not respond. Restart Codever and try again; if it still fails, export diagnostics.",
+      );
+    } finally {
+      nativeUpdateBusyRef.current = false;
+      setNativeUpdateBusy(false);
+    }
+  }
+
+  async function copyPageLinkForAnotherBrowser(): Promise<void> {
+    const pageLink = window.location.href;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(pageLink);
+      showUiNotice(
+        "connection:browser-link-copied",
+        "connection",
+        "success",
+        "Codever link copied. Open it in a current Chrome, Edge, or Safari browser.",
+        5_000,
+      );
+    } catch {
+      window.prompt(
+        "Copy this Codever link and open it in a current Chrome, Edge, or Safari browser:",
+        pageLink,
+      );
+    }
+  }
+
   function exportConnectionDiagnostics(): void {
     const report = createConnectionDiagnostics({
       buildVersion: CODEVER_BUILD_VERSION,
@@ -6854,6 +6924,13 @@ function CodeverAppRuntime() {
           }}
           onProviderChange={(provider) => void openProviderHistory(provider)}
           onInspect={(session) => void inspectProviderHistorySession(session)}
+          onRetry={() => {
+            if (providerHistorySelected) {
+              void inspectProviderHistorySession(providerHistorySelected);
+            } else {
+              void openProviderHistory(providerHistoryProvider);
+            }
+          }}
           onOpenManaged={(sessionId) => {
             setProviderHistoryOpen(false);
             chooseSession(sessionId);
@@ -6878,6 +6955,7 @@ function CodeverAppRuntime() {
         invitationReauthRequired={invitationReauthRequired}
         updateState={pwaUpdateState}
         nativeUpdateState={nativeUpdateState}
+        nativeUpdateBusy={nativeUpdateBusy}
         nativeRuntime={nativeRuntime}
         webPushState={webPushState}
         webPushBusy={webPushBusy}
@@ -6918,33 +6996,11 @@ function CodeverAppRuntime() {
           setInvitationError(null);
         }}
         onCheckForUpdates={() => void pwaUpdateRef.current?.checkNow()}
-        onRefreshNativeUpdate={() => {
-          const connection = codeverClientRef.current;
-          if (!connection?.nativeUpdateStatus) return;
-          void connection.nativeUpdateStatus()
-            .then(setNativeUpdateState)
-            .catch(() => setNativeUpdateState((current) => current ? {
-              ...current,
-              phase: "failed",
-              detailCode: "bridge_request_failed",
-            } : current));
-        }}
-        onInstallNativeUpdate={() => {
-          const connection = codeverClientRef.current;
-          if (!connection?.installNativeUpdate) return;
-          setNativeUpdateState((current) => current ? {
-            ...current,
-            phase: "installing",
-            detailCode: undefined,
-          } : current);
-          void connection.installNativeUpdate()
-            .then(setNativeUpdateState)
-            .catch(() => setNativeUpdateState((current) => current ? {
-              ...current,
-              phase: "failed",
-              detailCode: "bridge_request_failed",
-            } : current));
-        }}
+        onUpdateNativeApp={() => void recoverNativeAppUpdate(true)}
+        onRestartApp={() => window.location.reload()}
+        onCopyPageLink={() => void copyPageLinkForAnotherBrowser()}
+        onRefreshNativeUpdate={() => void recoverNativeAppUpdate(false)}
+        onInstallNativeUpdate={() => void recoverNativeAppUpdate(true)}
         onExportDiagnostics={exportConnectionDiagnostics}
         onEnableWebPush={() => void enableAgentNotifications()}
         onDisableWebPush={() => void disableAgentNotifications()}

@@ -19,6 +19,9 @@ export type ConnectionRepairReason =
 export type ConnectionRecoveryAction =
   | "new-invitation"
   | "check-updates"
+  | "update-native-app"
+  | "reload-app"
+  | "copy-page-link"
   | "export-diagnostics";
 
 export type ConnectionRecoveryPlan = {
@@ -185,7 +188,12 @@ const NATIVE_DETAIL_COPY: Readonly<Record<string, DetailCopy>> = {
   matrix_native_runtime_unavailable: {
     title: "Native connection unavailable",
     detail:
-      "Reopen or update the Codever app. A duplicate browser Matrix device will not be created.",
+      "The native service did not answer. Restart Codever to reconnect to it; a duplicate browser Matrix device will not be created.",
+  },
+  matrix_native_runtime_outdated: {
+    title: "Native app update required",
+    detail:
+      "The installed native shell is older than this Codever UI. Update the native app to keep using the saved connection.",
   },
   matrix_web_locks_unavailable: {
     title: "Browser not supported",
@@ -292,6 +300,7 @@ export function deriveConnectionRecoveryPlan(input: {
   status: MatrixConnectionStatus;
   detail?: string | null;
   hasSavedConnection: boolean;
+  nativeRuntimeAvailable?: boolean;
 }): ConnectionRecoveryPlan | null {
   if (input.status !== "error") return null;
 
@@ -305,10 +314,6 @@ export function deriveConnectionRecoveryPlan(input: {
         action: "new-invitation",
         label: "Use a new invitation",
       },
-      secondary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
-      },
     };
   }
 
@@ -318,12 +323,12 @@ export function deriveConnectionRecoveryPlan(input: {
       detail:
         "Check for an available Codever update. If the latest version still cannot start the connection, export diagnostics for investigation.",
       primary: {
-        action: "check-updates",
-        label: "Check for updates",
-      },
-      secondary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
+        action: input.nativeRuntimeAvailable
+          ? "update-native-app"
+          : "check-updates",
+        label: input.nativeRuntimeAvailable
+          ? "Update native app"
+          : "Check for updates",
       },
     };
   }
@@ -337,23 +342,35 @@ export function deriveConnectionRecoveryPlan(input: {
         action: "new-invitation",
         label: "Use a new invitation",
       },
-      secondary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
-      },
     };
   }
 
   if (connectionRecoveryDisposition(detail) === "automatic") return null;
 
-  if (detail === "matrix_native_runtime_unavailable") {
+  if (detail === "matrix_native_runtime_outdated") {
     return {
       title: "Update the native app",
       detail:
-        "The installed native shell cannot host this saved connection. Reopen Codever or install the latest APK; the PWA update button cannot replace the native shell.",
+        "The saved connection is intact, but this native shell is too old. Codever can use the shell’s independent update channel even though the full connection runtime cannot start.",
       primary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
+        action: "update-native-app",
+        label: "Update native app",
+      },
+      secondary: {
+        action: "reload-app",
+        label: "Restart Codever",
+      },
+    };
+  }
+
+  if (detail === "matrix_native_runtime_unavailable") {
+    return {
+      title: "Restart the native app",
+      detail:
+        "The saved connection is intact, but the native service did not answer. Restart Codever to attach the UI again.",
+      primary: {
+        action: "reload-app",
+        label: "Restart Codever",
       },
     };
   }
@@ -362,10 +379,42 @@ export function deriveConnectionRecoveryPlan(input: {
     return {
       title: "Use a supported browser",
       detail:
-        "This browser cannot safely coordinate Codever’s encrypted local storage. Reconnecting or using another invitation in this browser will not fix it.",
+        "This browser cannot safely coordinate Codever’s encrypted local storage. Copy this page link and open it in a current Chrome, Edge, or Safari browser.",
       primary: {
-        action: "export-diagnostics",
-        label: "Export diagnostics",
+        action: "copy-page-link",
+        label: "Copy link for another browser",
+      },
+    };
+  }
+
+  if (detail === "matrix_application_control_baseline_too_large") {
+    return {
+      title: "Update Codever",
+      detail:
+        "This version cannot safely process the current conversation snapshot. Install an available update before trying the connection again.",
+      primary: {
+        action: input.nativeRuntimeAvailable
+          ? "update-native-app"
+          : "check-updates",
+        label: input.nativeRuntimeAvailable
+          ? "Update native app"
+          : "Check for updates",
+      },
+    };
+  }
+
+  if (
+    detail === "matrix_application_control_incremental_too_large" ||
+    detail === "matrix_application_control_sync_rejected" ||
+    detail === "matrix_event_ingest_failed"
+  ) {
+    return {
+      title: "Restart from the last verified state",
+      detail:
+        "Codever retained the last verified conversation state. Restart the app to request the update again before exporting diagnostics.",
+      primary: {
+        action: "reload-app",
+        label: "Restart Codever",
       },
     };
   }

@@ -2,6 +2,7 @@ export type ConnectionFailureCode =
   | "matrix_connection_bootstrap_failed"
   | "matrix_crypto_lock_contended"
   | "matrix_native_runtime_unavailable"
+  | "matrix_native_runtime_outdated"
   | "matrix_web_locks_unavailable";
 
 /**

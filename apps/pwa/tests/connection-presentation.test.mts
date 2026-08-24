@@ -33,7 +33,7 @@ test("incomplete setup leads directly to a new invitation", () => {
     hasSavedConnection: false,
   });
   assert.equal(recovery?.primary.action, "new-invitation");
-  assert.equal(recovery?.secondary?.action, "export-diagnostics");
+  assert.equal(recovery?.secondary, undefined);
 });
 
 test("cache recovery is automatic and never suggests replacing saved trust", () => {
@@ -56,7 +56,7 @@ test("authorization failures do not offer a retry that cannot repair them", () =
     hasSavedConnection: true,
   });
   assert.equal(recovery?.primary.action, "new-invitation");
-  assert.equal(recovery?.secondary?.action, "export-diagnostics");
+  assert.equal(recovery?.secondary, undefined);
 });
 
 test("maps native progress codes to calm user-facing copy while retaining diagnostics", () => {
@@ -112,8 +112,7 @@ test("an unrecoverably large Matrix baseline is visible instead of syncing forev
     detail: "matrix_application_control_baseline_too_large",
     hasSavedConnection: true,
   });
-  assert.equal(recovery?.primary.action, "export-diagnostics");
-  assert.equal(recovery?.secondary, undefined);
+  assert.equal(recovery?.primary.action, "check-updates");
 });
 
 test("an oversized incremental response retains the last verified cursor", () => {
@@ -156,6 +155,10 @@ test("only authorization, compatibility, and integrity failures interrupt the us
   );
   assert.equal(
     connectionRecoveryDisposition("matrix_native_runtime_unavailable"),
+    "restart",
+  );
+  assert.equal(
+    connectionRecoveryDisposition("matrix_native_runtime_outdated"),
     "update",
   );
   assert.equal(
@@ -172,11 +175,50 @@ test("only authorization, compatibility, and integrity failures interrupt the us
   );
   const nativePlan = deriveConnectionRecoveryPlan({
     status: "error",
+    detail: "matrix_native_runtime_outdated",
+    hasSavedConnection: true,
+    nativeRuntimeAvailable: true,
+  });
+  assert.equal(nativePlan?.primary.action, "update-native-app");
+  assert.equal(nativePlan?.secondary?.action, "reload-app");
+
+  const unavailablePlan = deriveConnectionRecoveryPlan({
+    status: "error",
     detail: "matrix_native_runtime_unavailable",
     hasSavedConnection: true,
   });
-  assert.equal(nativePlan?.primary.action, "export-diagnostics");
-  assert.match(nativePlan?.detail ?? "", /PWA update button cannot replace/i);
+  assert.equal(unavailablePlan?.primary.action, "reload-app");
+
+  const unsupportedPlan = deriveConnectionRecoveryPlan({
+    status: "error",
+    detail: "matrix_web_locks_unavailable",
+    hasSavedConnection: true,
+  });
+  assert.equal(unsupportedPlan?.primary.action, "copy-page-link");
+});
+
+test("recovery plans use real recovery as the primary action", () => {
+  const cases = [
+    ["matrix_session_repair_required", "new-invitation"],
+    ["matrix_native_runtime_unavailable", "reload-app"],
+    ["matrix_native_runtime_outdated", "update-native-app"],
+    ["matrix_sync_service_build_failed", "update-native-app"],
+    ["matrix_web_locks_unavailable", "copy-page-link"],
+    ["matrix_application_control_baseline_too_large", "update-native-app"],
+    ["matrix_application_control_incremental_too_large", "reload-app"],
+    ["matrix_application_control_sync_rejected", "reload-app"],
+    ["matrix_event_ingest_failed", "reload-app"],
+  ] as const;
+  for (const [detail, expectedAction] of cases) {
+    const plan = deriveConnectionRecoveryPlan({
+      status: "error",
+      detail,
+      hasSavedConnection: true,
+      nativeRuntimeAvailable: true,
+    });
+    assert.equal(plan?.primary.action, expectedAction, detail);
+    assert.notEqual(plan?.primary.action, "export-diagnostics", detail);
+  }
 });
 
 test("missing native session with retained trust is presented as a repairable state", () => {

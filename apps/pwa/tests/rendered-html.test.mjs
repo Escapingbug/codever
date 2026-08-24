@@ -67,6 +67,7 @@ test("ships a complete installable offline shell", async () => {
     source,
     matrixSettings,
     newSession,
+    providerHistory,
     history,
     styles,
   ] = await Promise.all([
@@ -75,6 +76,7 @@ test("ships a complete installable offline shell", async () => {
     readFile(new URL("app/CodeverApp.tsx", appRoot), "utf8"),
     readFile(new URL("app/MatrixSettings.tsx", appRoot), "utf8"),
     readFile(new URL("app/NewSessionDialog.tsx", appRoot), "utf8"),
+    readFile(new URL("app/ProviderHistoryDialog.tsx", appRoot), "utf8"),
     readFile(new URL("app/messageHistory.ts", appRoot), "utf8"),
     readFile(new URL("app/globals.css", appRoot), "utf8"),
   ]);
@@ -101,8 +103,17 @@ test("ships a complete installable offline shell", async () => {
   assert.match(matrixSettings, /Agent notifications/);
   assert.match(matrixSettings, /deriveConnectionRecoveryPlan/);
   assert.match(matrixSettings, /runRecoveryAction\(recoveryPlan\.primary\.action\)/);
+  assert.match(matrixSettings, /case "update-native-app"[\s\S]*onUpdateNativeApp\(\)/);
+  assert.match(matrixSettings, /case "reload-app"[\s\S]*onRestartApp\(\)/);
+  assert.match(matrixSettings, /case "copy-page-link"[\s\S]*onCopyPageLink\(\)/);
+  assert.match(matrixSettings, /onClick=\{onExportDiagnostics\}/);
+  assert.match(
+    matrixSettings,
+    /<details className="settings-build-details">[\s\S]*onClick=\{onExportDiagnostics\}[\s\S]*<\/details>/,
+  );
   assert.match(matrixSettings, /recoveryPlan\.secondary\.label/);
   assert.match(matrixSettings, /setManualRepairReason\("manual"\)/);
+  assert.match(providerHistory, /role="alert"[\s\S]*onClick=\{onRetry\}[\s\S]*Retry/);
   assert.match(
     source,
     /registerPwaUpdates\(setPwaUpdateState, \{[\s\S]*canReload:/,
@@ -118,6 +129,9 @@ test("ships a complete installable offline shell", async () => {
   );
   assert.match(source, /Updating Codever/);
   assert.match(source, /onCheckForUpdates/);
+  assert.match(source, /navigator\.clipboard\?\.writeText/);
+  assert.match(source, /navigator\.clipboard\.writeText\(pageLink\)/);
+  assert.match(source, /onCopyPageLink=\{\(\) => void copyPageLinkForAnotherBrowser\(\)\}/);
   assert.doesNotMatch(source, /const sessions:|const initialMessages|appMode/);
   assert.match(source, /operation: "session\.create"/);
   assert.match(source, /extensions: input\.extensions/);

@@ -2,6 +2,7 @@ export type ConnectionRecoveryDisposition =
   | "automatic"
   | "reauthorize"
   | "update"
+  | "restart"
   | "diagnostics"
   | "unsupported";
 
@@ -12,8 +13,12 @@ const REAUTHORIZE_DETAILS = new Set([
 ]);
 
 const UPDATE_DETAILS = new Set([
-  "matrix_native_runtime_unavailable",
+  "matrix_native_runtime_outdated",
   "matrix_sync_service_build_failed",
+]);
+
+const RESTART_DETAILS = new Set([
+  "matrix_native_runtime_unavailable",
 ]);
 
 const INTEGRITY_DETAILS = new Set([
@@ -34,6 +39,7 @@ export function connectionRecoveryDisposition(
   const code = detail?.trim() ?? "";
   if (REAUTHORIZE_DETAILS.has(code)) return "reauthorize";
   if (UPDATE_DETAILS.has(code)) return "update";
+  if (RESTART_DETAILS.has(code)) return "restart";
   if (INTEGRITY_DETAILS.has(code)) return "diagnostics";
   if (code === "matrix_web_locks_unavailable") return "unsupported";
   return "automatic";

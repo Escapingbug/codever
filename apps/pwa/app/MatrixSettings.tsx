@@ -41,6 +41,7 @@ type Props = {
   invitationReauthRequired: boolean;
   updateState: PwaUpdateState;
   nativeUpdateState: NativeUpdateStatus | null;
+  nativeUpdateBusy: boolean;
   nativeRuntime: CodeverNativeRuntimeInfo | null;
   webPushState: WebPushNotificationState;
   webPushBusy: boolean;
@@ -55,6 +56,9 @@ type Props = {
   onCreateInvitation(password?: string): void;
   onClearInvitation(): void;
   onCheckForUpdates(): void;
+  onUpdateNativeApp(): void;
+  onRestartApp(): void;
+  onCopyPageLink(): void;
   onRefreshNativeUpdate(): void;
   onInstallNativeUpdate(): void;
   onExportDiagnostics(): void;
@@ -83,6 +87,7 @@ function MatrixSettingsDialog({
   invitationReauthRequired,
   updateState,
   nativeUpdateState,
+  nativeUpdateBusy,
   nativeRuntime,
   webPushState,
   webPushBusy,
@@ -97,6 +102,9 @@ function MatrixSettingsDialog({
   onCreateInvitation,
   onClearInvitation,
   onCheckForUpdates,
+  onUpdateNativeApp,
+  onRestartApp,
+  onCopyPageLink,
   onRefreshNativeUpdate,
   onInstallNativeUpdate,
   onExportDiagnostics,
@@ -130,6 +138,7 @@ function MatrixSettingsDialog({
     status,
     detail: connectionDetail,
     hasSavedConnection,
+    nativeRuntimeAvailable: nativeRuntime !== null,
   });
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -152,6 +161,15 @@ function MatrixSettingsDialog({
         return;
       case "check-updates":
         onCheckForUpdates();
+        return;
+      case "update-native-app":
+        onUpdateNativeApp();
+        return;
+      case "reload-app":
+        onRestartApp();
+        return;
+      case "copy-page-link":
+        onCopyPageLink();
         return;
       case "export-diagnostics":
         onExportDiagnostics();
@@ -216,21 +234,36 @@ function MatrixSettingsDialog({
               <button
                 type="button"
                 className="connect-button"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  (recoveryPlan.primary.action === "update-native-app" &&
+                    nativeUpdateBusy)
+                }
                 onClick={() => runRecoveryAction(recoveryPlan.primary.action)}
               >
-                {recoveryPlan.primary.label}
+                {recoveryPlan.primary.action === "update-native-app" &&
+                nativeUpdateBusy
+                  ? "Checking APK…"
+                  : recoveryPlan.primary.label}
               </button>
               {recoveryPlan.secondary && (
                 <button
                   type="button"
-                  disabled={busy && recoveryPlan.secondary.action !== "export-diagnostics"}
+                  disabled={
+                    busy ||
+                    (recoveryPlan.secondary.action === "update-native-app" &&
+                      nativeUpdateBusy)
+                  }
                   onClick={() => runRecoveryAction(recoveryPlan.secondary!.action)}
                 >
                   {recoveryPlan.secondary.label}
                 </button>
               )}
             </div>
+            {recoveryPlan.primary.action === "update-native-app" &&
+              nativeUpdateState && (
+                <small>{nativeUpdateStatusText(nativeUpdateState)}</small>
+              )}
           </section>
         )}
 
@@ -414,66 +447,73 @@ function MatrixSettingsDialog({
         <div className="settings-build-version">
           <details className="settings-build-details">
             <summary>Advanced diagnostics</summary>
-            <span>
-              PWA build <code>{CODEVER_BUILD_VERSION}</code>
-              {nativeRuntime && (
-                <>
-                  <small>
-                    Native APK <code>{nativeRuntime.runtimeVersion}</code>
-                  </small>
-                  <small>
-                    Native build <code>{nativeRuntime.runtimeBuild}</code>
-                  </small>
-                </>
-              )}
-              <small>{updateStatusText(updateState)}</small>
-              {nativeRuntime && (
-                <small>{nativeUpdateStatusText(nativeUpdateState)}</small>
-              )}
-            </span>
+            <div className="settings-build-details-body">
+              <span>
+                PWA build <code>{CODEVER_BUILD_VERSION}</code>
+                {nativeRuntime && (
+                  <>
+                    <small>
+                      Native APK <code>{nativeRuntime.runtimeVersion}</code>
+                    </small>
+                    <small>
+                      Native build <code>{nativeRuntime.runtimeBuild}</code>
+                    </small>
+                  </>
+                )}
+                <small>{updateStatusText(updateState)}</small>
+                {nativeRuntime && (
+                  <small>{nativeUpdateStatusText(nativeUpdateState)}</small>
+                )}
+              </span>
+              <div className="settings-build-actions">
+                <button type="button" onClick={onExportDiagnostics}>
+                  Export diagnostics
+                </button>
+                <button
+                  type="button"
+                  onClick={onCheckForUpdates}
+                  disabled={
+                    updateState.phase === "checking" ||
+                    updateState.phase === "updating" ||
+                    updateState.phase === "waiting"
+                  }
+                >
+                  {updateState.phase === "checking" ? "Checking…" : "Check for updates"}
+                </button>
+                {nativeRuntime && nativeUpdateState && (
+                  <button
+                    type="button"
+                    onClick={onRefreshNativeUpdate}
+                    disabled={
+                      nativeUpdateState.phase === "checking" ||
+                      nativeUpdateState.phase === "downloading" ||
+                      nativeUpdateState.phase === "installing" ||
+                      nativeUpdateBusy
+                    }
+                  >
+                    {nativeUpdateState.phase === "checking" ||
+                    nativeUpdateState.phase === "downloading"
+                      ? "Receiving APK release…"
+                      : "Refresh APK status"}
+                  </button>
+                )}
+                {nativeRuntime && nativeUpdateState && (
+                  nativeUpdateState.phase === "ready" ||
+                  nativeUpdateState.phase === "permission_required"
+                ) && (
+                  <button
+                    type="button"
+                    onClick={onInstallNativeUpdate}
+                    disabled={nativeUpdateBusy}
+                  >
+                    {nativeUpdateState.phase === "permission_required"
+                      ? "Allow and install APK"
+                      : "Install APK update"}
+                  </button>
+                )}
+              </div>
+            </div>
           </details>
-          {(!recoveryPlan || repairRequired) && (
-            <button type="button" onClick={onExportDiagnostics}>
-              Export diagnostics
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onCheckForUpdates}
-            disabled={
-              updateState.phase === "checking" ||
-              updateState.phase === "updating" ||
-              updateState.phase === "waiting"
-            }
-          >
-            {updateState.phase === "checking" ? "Checking…" : "Check for updates"}
-          </button>
-          {nativeRuntime && nativeUpdateState && (
-            <button
-              type="button"
-              onClick={onRefreshNativeUpdate}
-              disabled={
-                nativeUpdateState.phase === "checking" ||
-                nativeUpdateState.phase === "downloading" ||
-                nativeUpdateState.phase === "installing"
-              }
-            >
-              {nativeUpdateState.phase === "checking" ||
-              nativeUpdateState.phase === "downloading"
-                ? "Receiving APK release…"
-                : "Refresh APK status"}
-            </button>
-          )}
-          {nativeRuntime && nativeUpdateState && (
-            nativeUpdateState.phase === "ready" ||
-            nativeUpdateState.phase === "permission_required"
-          ) && (
-            <button type="button" onClick={onInstallNativeUpdate}>
-              {nativeUpdateState.phase === "permission_required"
-                ? "Allow and install APK"
-                : "Install APK update"}
-            </button>
-          )}
         </div>
 
         <footer>
