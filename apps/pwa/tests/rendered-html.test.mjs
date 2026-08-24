@@ -148,6 +148,19 @@ test("ships a complete installable offline shell", async () => {
   assert.match(styles, /\.session-extensions\s*\{/);
   assert.match(styles, /\.permission-details\s*\{/);
   assert.match(source, /className="session-row session-create-pending"/);
+  assert.match(source, /function ProjectFolderIcon\(\{ temporary \}:/);
+  assert.match(source, /className="project-folder-clock"/);
+  assert.match(source, /title=\{project\.temporary \? "Temporary workspace" : "Project"\}/);
+  assert.match(source, /<ProjectDisclosureIcon \/>/);
+  assert.doesNotMatch(source, /project\.temporary \? "◇" : "▱"/);
+  assert.match(
+    styles,
+    /\.project-chevron\.expanded svg\s*\{\s*transform:\s*rotate\(90deg\)/,
+  );
+  assert.match(
+    styles,
+    /\.project-folder-shell\s*\{[\s\S]*?fill:\s*var\(--violet-soft\);[\s\S]*?stroke-width:\s*1\.55/,
+  );
   assert.match(source, /aria-pressed=\{selectedSessionId === session\.id\}/);
   assert.match(source, /"Creating session…"/);
   assert.match(source, /"Session queued…"/);

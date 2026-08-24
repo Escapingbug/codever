@@ -467,6 +467,32 @@ function ArrowDownIcon() {
   );
 }
 
+function ProjectDisclosureIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  );
+}
+
+function ProjectFolderIcon({ temporary }: { temporary: boolean }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path
+        className="project-folder-shell"
+        d="M3.25 7V6.35c0-.75.6-1.35 1.35-1.35h4.1l1.9 2.15h8.8c.75 0 1.35.6 1.35 1.35v9.1c0 .75-.6 1.35-1.35 1.35H4.6c-.75 0-1.35-.6-1.35-1.35V7Z"
+      />
+      <path className="project-folder-seam" d="M3.6 8.4h16.8" />
+      {temporary && (
+        <g className="project-folder-clock">
+          <circle cx="17.25" cy="17" r="4.15" />
+          <path d="M17.25 14.75v2.45l1.55.9" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
 function MobileConnectionIcon({
   state,
 }: {
@@ -5823,6 +5849,7 @@ function CodeverAppRuntime() {
                 className="project-session-toggle"
                 aria-expanded={expanded}
                 aria-controls={contentId}
+                title={project.temporary ? "Temporary workspace" : "Project"}
                 aria-label={`${projectSessionSummaryLabel(
                   project.projectName,
                   projectSummary,
@@ -5833,11 +5860,14 @@ function CodeverAppRuntime() {
                   )
                 }
               >
-                <span className="project-chevron" aria-hidden="true">
-                  {expanded ? "⌄" : "›"}
+                <span
+                  className={`project-chevron${expanded ? " expanded" : ""}`}
+                  aria-hidden="true"
+                >
+                  <ProjectDisclosureIcon />
                 </span>
                 <span className="project-folder" aria-hidden="true">
-                  {project.temporary ? "◇" : "▱"}
+                  <ProjectFolderIcon temporary={project.temporary} />
                 </span>
                 <span className="project-copy">
                   <strong>{project.projectName}</strong>

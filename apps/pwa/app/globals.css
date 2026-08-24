@@ -759,9 +759,26 @@ select:focus-visible {
 }
 
 .project-chevron {
+  display: grid;
+  width: 15px;
+  height: 22px;
+  place-items: center;
   color: #747d90;
-  font-size: 17px;
-  text-align: center;
+}
+
+.project-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  transition: transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.project-chevron.expanded svg {
+  transform: rotate(90deg);
 }
 
 .project-copy {
@@ -852,8 +869,40 @@ select:focus-visible {
 }
 
 .project-folder {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
   color: var(--violet);
-  font-size: 13px;
+}
+
+.project-folder svg {
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.project-folder-shell {
+  fill: var(--violet-soft);
+  stroke-width: 1.55;
+}
+
+.project-folder-seam {
+  opacity: 0.55;
+  stroke-width: 1.25;
+}
+
+.project-folder-clock circle {
+  fill: var(--panel);
+  stroke-width: 1.45;
+}
+
+.project-folder-clock path {
+  stroke-width: 1.35;
 }
 
 .project-session-group > header b {
