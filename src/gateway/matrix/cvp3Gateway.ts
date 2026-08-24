@@ -1134,14 +1134,18 @@ export class MatrixCvp3GatewayRunner {
     }, this.now())
     await this.enqueueTerminalNotification(project, event)
     try {
-      const sent = await this.emit(
+      const queued = await this.enqueueEventDelivery(
         project,
         command.sessionId
           ? project.project.sessions.find(session => session.id === command.sessionId)
           : undefined,
         event,
       )
-      await this.journal.markTerminalDelivered(command, sent.eventId, this.now())
+      void queued.confirmation.then(sent =>
+        this.journal.markTerminalDelivered(command, sent.eventId, this.now())
+      ).catch(error => {
+        this.log(`[cvp3/matrix] terminal delivery queued: ${formatError(error)}`)
+      })
     } catch (error) {
       // The semantic terminal is already fsynced in the command journal and
       // the content layer stages before attempting Matrix delivery. Never
@@ -1160,13 +1164,25 @@ export class MatrixCvp3GatewayRunner {
     })
   }
 
+  private enqueueEventDelivery(
+    project: V3ProjectRuntime,
+    record: PersistedCvp3Session | undefined,
+    event: Cvp3Event,
+  ) {
+    return this.content.enqueueEvent(project.config, event, this.client, {
+      relation: record ? threadRelation(record.threadRootEventId) : undefined,
+    })
+  }
+
   private async emitBestEffort(
     project: V3ProjectRuntime,
     record: PersistedCvp3Session | undefined,
     event: Cvp3Event,
   ): Promise<void> {
     try {
-      await this.emit(project, record, event)
+      await this.content.queueEvent(project.config, event, this.client, {
+        relation: record ? threadRelation(record.threadRootEventId) : undefined,
+      })
     } catch (error) {
       this.log(`[cvp3/matrix] causal event delivery queued: ${formatError(error)}`)
     }

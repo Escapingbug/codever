@@ -80,6 +80,7 @@ describe('MatrixCvp3Port', () => {
       }),
       now: () => 1,
     })
+    expect(port.streamAssistantText).toBe(false)
 
     const sent = await port.send({
       text: 'first',
@@ -92,6 +93,7 @@ describe('MatrixCvp3Port', () => {
       format: 'markdown',
       replyMarkup: { idempotencyKey: 'logical-update-1' },
     }, { terminal: true })
+    await waitFor(() => transport.delivered.length >= 2)
 
     const opened = await Promise.all(transport.delivered.map(async delivery => {
       const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
@@ -115,9 +117,19 @@ describe('MatrixCvp3Port', () => {
       rel_type: 'm.thread',
       event_id: '$root:example.org',
     })
-    expect(transport.delivered[1]?.content['m.relates_to']).toEqual({
-      rel_type: 'm.replace',
-      event_id: transport.delivered[0]?.eventId,
+    expect(transport.delivered[1]?.content['m.relates_to']).toMatchObject({
+      rel_type: 'm.thread',
+      event_id: '$root:example.org',
+    })
+
+    const assistantProjection = new MatrixCvp3Projection()
+    for (const [index, event] of assistantEvents.entries()) {
+      assistantProjection.applyEvent(event, transport.delivered[index]!.eventId)
+    }
+    expect(assistantProjection.sessionMessages('session-1')).toHaveLength(1)
+    expect(assistantProjection.sessionMessages('session-1')[0]).toMatchObject({
+      body: 'updated',
+      version: 2,
     })
 
     const response = port.requestExtensionInteraction({
@@ -245,6 +257,7 @@ describe('MatrixCvp3Port', () => {
       ...projectedTool!.message,
       replyMarkup: { idempotencyKey: 'tool-message-1' },
     })
+    await waitFor(() => transport.delivered.length >= 7)
     const toolDelivery = transport.delivered[6]!
     const toolExtension = toolDelivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
     const toolEnvelope = await openCvp3Envelope(toolExtension.envelope, {

@@ -94,6 +94,10 @@ describe("MatrixCvp3Projection", () => {
     expect(projection.sessions.get("session-b")?.activeTurnId).toBeUndefined();
     expect(projection.completions.get("prompt-a")?.outcome).toBe("interrupted");
     expect(projection.completions.get("prompt-b")?.outcome).toBe("interrupted");
+    expect(toIncomingMessage(projection.messages.get("command-rejected:prompt-a")!)).toMatchObject({
+      kind: "error",
+      text: "The Gateway restarted after dispatch. The command was not executed again.",
+    });
   });
 
   it("repairs a version-four cache that already persisted an interrupted turn as working", () => {

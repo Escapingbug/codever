@@ -51,6 +51,11 @@ export interface OpenedCvp3Command {
   logicalEventId: string
 }
 
+export interface EnqueuedCvp3Event {
+  deliveryId: string
+  confirmation: Promise<MatrixSendEventResult>
+}
+
 /**
  * Thin CVP/3 application-security and delivery boundary.
  *
@@ -64,6 +69,11 @@ export class GatewayCvp3ContentLayer {
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly retryAttempts = new Map<string, number>()
   private readonly transports = new Map<string, MatrixTransport>()
+  private readonly inFlightDeliveries = new Map<string, Promise<MatrixSendEventResult>>()
+  private readonly deliveryConfirmations = new Map<string, {
+    promise: Promise<MatrixSendEventResult>
+    resolve: (result: MatrixSendEventResult) => void
+  }>()
   private deliveryChain: Promise<unknown> = Promise.resolve()
 
   constructor(
@@ -175,8 +185,34 @@ export class GatewayCvp3ContentLayer {
   }
 
   /**
-   * Durably stages an event before attempting Matrix delivery. A transport
-   * failure is reported as queued because the outbox owns subsequent retries.
+   * Fsync the semantic event before handing network delivery to the shared
+   * account lane. Agent execution waits for durable acceptance, not for a
+   * homeserver token bucket or a physical Matrix event ID.
+   */
+  async enqueueEvent(
+    room: MatrixGatewayRoomConfig,
+    eventInput: Cvp3Event,
+    transport: MatrixTransport,
+    options: {
+      transactionId?: string
+      relation?: Record<string, unknown>
+    } = {},
+  ): Promise<EnqueuedCvp3Event> {
+    const delivery = await this.stageEvent(room, eventInput, transport, options)
+    const confirmation = this.confirmationFor(delivery.deliveryId)
+    // deliver() owns a rejection handler that schedules durable retry. The
+    // stable confirmation intentionally remains pending across failed attempts
+    // and resolves when any retry commits the Matrix event.
+    void this.deliver(delivery, transport)
+    return {
+      deliveryId: delivery.deliveryId,
+      confirmation,
+    }
+  }
+
+  /**
+   * Durably stages an event and returns immediately. The outbox owns Matrix
+   * delivery and subsequent retries, so callers must not resend it.
    */
   async queueEvent(
     room: MatrixGatewayRoomConfig,
@@ -187,13 +223,8 @@ export class GatewayCvp3ContentLayer {
       relation?: Record<string, unknown>
     } = {},
   ): Promise<{ status: 'delivered' | 'queued'; eventId?: string }> {
-    const delivery = await this.stageEvent(room, eventInput, transport, options)
-    try {
-      const result = await this.deliver(delivery, transport)
-      return { status: 'delivered', eventId: result.eventId }
-    } catch {
-      return { status: 'queued' }
-    }
+    await this.enqueueEvent(room, eventInput, transport, options)
+    return { status: 'queued' }
   }
 
   private async stageEvent(
@@ -406,6 +437,8 @@ export class GatewayCvp3ContentLayer {
   ): Promise<MatrixSendEventResult> {
     const delivered = this.outbox.deliveredEventId(delivery.deliveryId)
     if (delivered) return Promise.resolve({ eventId: delivered })
+    const inFlight = this.inFlightDeliveries.get(delivery.deliveryId)
+    if (inFlight) return inFlight
     const operation = this.deliveryChain.then(async () => {
       let result: MatrixSendEventResult
       if (delivery.kind === 'event') {
@@ -430,12 +463,44 @@ export class GatewayCvp3ContentLayer {
         })
       }
       await this.outbox.markDelivered(delivery.deliveryId, result.eventId)
+      this.resolveConfirmation(delivery.deliveryId, result)
       this.retryAttempts.delete(delivery.roomId)
       return result
     })
     this.deliveryChain = operation.then(() => undefined, () => undefined)
-    void operation.catch(() => this.scheduleRetry(delivery.roomId, transport))
+    this.inFlightDeliveries.set(delivery.deliveryId, operation)
+    void operation.then(
+      () => {
+        if (this.inFlightDeliveries.get(delivery.deliveryId) === operation) {
+          this.inFlightDeliveries.delete(delivery.deliveryId)
+        }
+      },
+      () => {
+        if (this.inFlightDeliveries.get(delivery.deliveryId) === operation) {
+          this.inFlightDeliveries.delete(delivery.deliveryId)
+        }
+        this.scheduleRetry(delivery.roomId, transport)
+      },
+    )
     return operation
+  }
+
+  private confirmationFor(deliveryId: string): Promise<MatrixSendEventResult> {
+    const delivered = this.outbox.deliveredEventId(deliveryId)
+    if (delivered) return Promise.resolve({ eventId: delivered })
+    const current = this.deliveryConfirmations.get(deliveryId)
+    if (current) return current.promise
+    let resolve!: (result: MatrixSendEventResult) => void
+    const promise = new Promise<MatrixSendEventResult>(done => { resolve = done })
+    this.deliveryConfirmations.set(deliveryId, { promise, resolve })
+    return promise
+  }
+
+  private resolveConfirmation(deliveryId: string, result: MatrixSendEventResult): void {
+    const confirmation = this.deliveryConfirmations.get(deliveryId)
+    if (!confirmation) return
+    this.deliveryConfirmations.delete(deliveryId)
+    confirmation.resolve(result)
   }
 
   private scheduleRetry(roomId: string, transport: MatrixTransport): void {

@@ -132,6 +132,14 @@ export interface ChannelPort {
     readonly coalesceAssistantText?: boolean
 
     /**
+     * Whether token-driven flush timers may publish intermediate versions of
+     * one assistant message. Ordinary chat transports should leave the text
+     * buffered until a tool/message/turn boundary instead of turning the
+     * provider token stream into channel traffic.
+     */
+    readonly streamAssistantText?: boolean
+
+    /**
      * Whether tool-output file:// references should receive channel command
      * hints such as `/file_f1`. First-party clients use structured artifacts.
      */

@@ -857,7 +857,7 @@ export function toIncomingMessage(
     encrypted: true,
     kind: payload?.type === "decision.requested" || payload?.type === "extension.interaction.requested"
       ? "permission"
-      : payload?.type === "turn.failed"
+      : payload?.type === "turn.failed" || payload?.type === "command.rejected"
         ? "error"
         : message.sender === "user"
           ? "user"

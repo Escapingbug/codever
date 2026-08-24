@@ -156,11 +156,10 @@ export class DeliveryOutbox {
                 record.status = 'edited'
             } catch (error) {
                 if (this.deferTimedOutDelivery(record, error, 'edited')) return
-                record.status = 'failed'
-                record.error = error
-                this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
+                    await this.sendEditFallback(record, message)
+                } else {
+                    this.fail(record, error)
                 }
             } finally {
                 if (record.status !== 'queued') record.completedAt = Date.now()
@@ -180,19 +179,8 @@ export class DeliveryOutbox {
                     record.completedAt = Date.now()
                     return
                 }
-                try {
-                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
-                    record.status = 'sent'
-                    record.messageId = result.messageId
-                } catch (error) {
-                    if (this.deferTimedOutDelivery(record, error, 'sent', (result) => {
-                        record.messageId = (result as ChannelSendResult).messageId
-                    })) return
-                    record.status = 'failed'
-                    record.error = error
-                    this.config.onFailure?.(record)
-                }
-                record.completedAt = Date.now()
+                await this.sendEditFallback(record, message)
+                if (record.status !== 'queued') record.completedAt = Date.now()
                 return
             }
 
@@ -206,13 +194,10 @@ export class DeliveryOutbox {
                 record.status = 'edited'
             } catch (error) {
                 if (this.deferTimedOutDelivery(record, error, 'edited')) return
-                record.status = 'failed'
-                record.error = error
-                this.config.onFailure?.(record)
                 if (fallbackToSend) {
-                    const result = await this.withRateLimitRetry(() => this.config.channelPort.send(message), this.timeoutForMessage(message))
-                    record.status = 'sent'
-                    record.messageId = result.messageId
+                    await this.sendEditFallback(record, message)
+                } else {
+                    this.fail(record, error)
                 }
             } finally {
                 if (record.status !== 'queued') record.completedAt = Date.now()
@@ -286,19 +271,36 @@ export class DeliveryOutbox {
     }
 
     private enqueueReliable(lane: DeliveryLane, record: DeliveryRecord, operation: () => Promise<void>): Promise<DeliveryRecord> {
+        const run = (previous: Promise<void>, decrement: () => void): Promise<void> => {
+            const delivery = previous
+                .catch(error => {
+                    this.log(`[delivery] recovered rejected ${lane} lane: ${formatError(error)}`)
+                })
+                .then(operation)
+                .catch(error => {
+                    if (record.status !== 'queued' && record.status !== 'failed') {
+                        this.fail(record, error)
+                    }
+                })
+                .finally(decrement)
+            return delivery.then(() => undefined, () => undefined)
+        }
+
         if (lane === 'control') {
             this.pendingControl += 1
-            this.controlChain = this.controlChain.then(operation).finally(() => {
+            const delivery = run(this.controlChain, () => {
                 this.pendingControl -= 1
             })
-            return this.controlChain.then(() => record)
+            this.controlChain = delivery
+            return delivery.then(() => record)
         }
 
         this.pendingNormal += 1
-        this.normalChain = this.normalChain.then(operation).finally(() => {
+        const delivery = run(this.normalChain, () => {
             this.pendingNormal -= 1
         })
-        return this.normalChain.then(() => record)
+        this.normalChain = delivery
+        return delivery.then(() => record)
     }
 
     private enqueueProgressiveEdit(
@@ -334,7 +336,15 @@ export class DeliveryOutbox {
 
     private ensureProgressiveEditLoop(): void {
         if (this.progressiveEditLoop) return
-        this.progressiveEditLoop = this.runProgressiveEditLoop().finally(() => {
+        this.progressiveEditLoop = this.runProgressiveEditLoop().catch(error => {
+            this.log(`[delivery] progressive edit loop recovered: ${formatError(error)}`)
+            for (const task of this.progressiveEdits.values()) {
+                this.fail(task.record, error)
+                task.record.completedAt = Date.now()
+                task.resolve(task.record)
+            }
+            this.progressiveEdits.clear()
+        }).finally(() => {
             this.progressiveEditLoop = null
             if (this.progressiveEdits.size > 0) {
                 this.ensureProgressiveEditLoop()
@@ -440,6 +450,30 @@ export class DeliveryOutbox {
             return this.config.attachmentDeliveryTimeoutMs ?? DEFAULT_ATTACHMENT_DELIVERY_TIMEOUT_MS
         }
         return this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS
+    }
+
+    private async sendEditFallback(record: DeliveryRecord, message: ChannelMessage): Promise<void> {
+        try {
+            const result = await this.withRateLimitRetry(
+                () => this.config.channelPort.send(message),
+                this.timeoutForMessage(message),
+            )
+            record.status = 'sent'
+            record.messageId = result.messageId
+            record.error = undefined
+        } catch (error) {
+            if (this.deferTimedOutDelivery(record, error, 'sent', result => {
+                record.messageId = (result as ChannelSendResult).messageId
+            })) return
+            this.fail(record, error)
+        }
+    }
+
+    private fail(record: DeliveryRecord, error: unknown): void {
+        record.status = 'failed'
+        record.error = error
+        this.lastFailure = formatError(error)
+        this.config.onFailure?.(record)
     }
 
     private async withRateLimitRetry<T>(operation: () => Promise<T>, timeoutMs = this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS): Promise<T> {

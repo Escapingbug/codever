@@ -338,7 +338,9 @@ describe('MatrixCvp3GatewayRunner', () => {
       path: inboxPath,
       caption: 'Generated report',
       sourceLabel: 'review-agent',
-    })).resolves.toMatchObject({ delivery: 'delivered' })
+    })).resolves.toMatchObject({ delivery: 'queued' })
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event => event.payload.type === 'inbox.file.received'))
     expect(client.delivered.some(delivery =>
       delivery.roomId === '!unpaired-project:example.org'
       && delivery.content[CODEVER_MATRIX_EXTENSION]

@@ -247,6 +247,69 @@ describe('DeliveryOutbox', () => {
         }))
     })
 
+    it('keeps an edit fallback queued when the replacement send completes after its timeout', async () => {
+        vi.useFakeTimers()
+        try {
+            const sent: string[] = []
+            let confirmFallback!: (result: ChannelSendResult) => void
+            const channel = createChannelPort(sent)
+            vi.mocked(channel.edit!).mockRejectedValueOnce(new Error('original edit was rejected'))
+            vi.mocked(channel.send).mockImplementationOnce(async () =>
+                await new Promise<ChannelSendResult>(resolve => {
+                    confirmFallback = resolve
+                }),
+            )
+            const failures: string[] = []
+            const outbox = new DeliveryOutbox({
+                channelPort: channel,
+                deliveryTimeoutMs: 100,
+                maxNetworkRetries: 0,
+                onFailure: record => failures.push(String(record.error)),
+            })
+
+            const fallback = outbox.edit(1, { text: 'latest answer', format: 'plain' })
+            await vi.advanceTimersByTimeAsync(100)
+            await expect(fallback).resolves.toMatchObject({ status: 'queued' })
+
+            const next = outbox.send({ text: 'next answer', format: 'plain' })
+            vi.mocked(channel.send).mockImplementationOnce(async message => {
+                sent.push(message.text)
+                return { messageId: 2 }
+            })
+            await expect(next).resolves.toMatchObject({ status: 'sent' })
+
+            confirmFallback({ messageId: 99 })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(outbox.list()[0]).toMatchObject({ status: 'sent', messageId: 99 })
+            expect(failures).toEqual([])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('heals a reliable lane after an unexpected delivery exception', async () => {
+        const sent: string[] = []
+        const channel = createChannelPort(sent)
+        vi.mocked(channel.send)
+            .mockImplementationOnce(async () => {
+                throw new TypeError('unexpected adapter failure')
+            })
+            .mockImplementationOnce(async message => {
+                sent.push(message.text)
+                return { messageId: 2 }
+            })
+        const outbox = new DeliveryOutbox({
+            channelPort: channel,
+            maxNetworkRetries: 0,
+        })
+
+        await expect(outbox.send({ text: 'first', format: 'plain' }))
+            .resolves.toMatchObject({ status: 'failed' })
+        await expect(outbox.send({ text: 'second', format: 'plain' }))
+            .resolves.toMatchObject({ status: 'sent' })
+        expect(sent).toEqual(['second'])
+    })
+
     it('does not let a rate-limited progressive edit block control sends', async () => {
         vi.useFakeTimers()
         try {

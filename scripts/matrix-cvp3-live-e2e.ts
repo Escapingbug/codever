@@ -907,9 +907,11 @@ async function assertProjectAuthorizationRepair(
             0,
             'Authorization repair must not offer a retry that cannot change authorization.',
         )
-        const downloadPromise = page.waitForEvent('download')
-        await dialog.getByRole('button', { name: 'Export diagnostics' }).click()
-        const download = await downloadPromise
+        await dialog.getByText('Advanced diagnostics', { exact: true }).click()
+        const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            dialog.getByRole('button', { name: 'Export diagnostics' }).click(),
+        ])
         assert.match(download.suggestedFilename(), /^codever-connection-diagnostics-\d+\.json$/u)
         await download.delete()
 

@@ -757,6 +757,116 @@ describe('SemanticSessionRuntime', () => {
         }
     })
 
+    it('keeps continuous token deltas off ordinary chat timelines until a semantic boundary', async () => {
+        vi.useFakeTimers()
+        try {
+            const operations: DeliveryOperation[] = []
+            let finish!: () => void
+            const hold = new Promise<void>(resolve => {
+                finish = resolve
+            })
+            const provider: AgentProvider = {
+                ...createProvider([]),
+                startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                    events: (async function* () {
+                        for (const text of ['这', '是', '一', '句', '完整', '回复']) {
+                            yield { kind: 'text', text, messageId: 'assistant-1' } as AgentEvent
+                            await delay(100)
+                        }
+                        await hold
+                        yield { kind: 'result', status: 'success' } as AgentEvent
+                    })(),
+                    interrupt: vi.fn(),
+                })),
+            }
+            const channel = {
+                ...createChannel([], [], operations),
+                coalesceAssistantText: true,
+                streamAssistantText: false,
+            }
+            const runtime = new SemanticSessionRuntime({
+                sessionId: 'session-1',
+                cwd: '/repo',
+                provider,
+                providerName: 'test-acp',
+                channelPort: channel,
+            })
+
+            const running = runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
+            await vi.advanceTimersByTimeAsync(5_000)
+
+            expect(operations).toEqual([])
+
+            finish()
+            await running
+            expect(operations).toMatchObject([
+                { kind: 'send', message: { text: '这是一句完整回复' }, messageId: 1 },
+            ])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('keeps five parallel ordinary-chat streams within one burst by sending only final text', async () => {
+        vi.useFakeTimers()
+        try {
+            const operations: DeliveryOperation[] = []
+            const releases: Array<() => void> = []
+            const channel = {
+                ...createChannel([], [], operations),
+                coalesceAssistantText: true,
+                streamAssistantText: false,
+            }
+            const runtimes = Array.from({ length: 5 }, (_, index) => {
+                let release!: () => void
+                const hold = new Promise<void>(resolve => {
+                    release = resolve
+                })
+                releases.push(release)
+                const provider: AgentProvider = {
+                    ...createProvider([]),
+                    startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                        events: (async function* () {
+                            for (let chunk = 0; chunk < 20; chunk += 1) {
+                                yield {
+                                    kind: 'text',
+                                    text: `${index}:${chunk};`,
+                                    messageId: `assistant-${index}`,
+                                } as AgentEvent
+                                await delay(100)
+                            }
+                            await hold
+                            yield { kind: 'result', status: 'success' } as AgentEvent
+                        })(),
+                        interrupt: vi.fn(),
+                    })),
+                }
+                return new SemanticSessionRuntime({
+                    sessionId: `session-${index}`,
+                    cwd: '/repo',
+                    provider,
+                    providerName: 'test-acp',
+                    channelPort: channel,
+                })
+            })
+
+            const running = runtimes.map((runtime, index) =>
+                runtime.dispatch({ kind: 'user_message', text: `prompt-${index}`, source: 'channel' }),
+            )
+            await vi.advanceTimersByTimeAsync(5_000)
+            expect(operations).toEqual([])
+
+            for (const release of releases) release()
+            await Promise.all(running)
+
+            expect(operations).toHaveLength(5)
+            expect(operations.every(operation => operation.kind === 'send')).toBe(true)
+            expect(operations.every(operation => operation.message.text.endsWith('19;'))).toBe(true)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('keeps separate assistant messages in separate bubbles around interleaved tools', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []

@@ -400,6 +400,20 @@ export class MatrixCvp3Projection {
         payload,
       });
     }
+    if (payload.type === "command.rejected" && event.sessionId) {
+      this.messages.set(`command-rejected:${payload.commandId}`, {
+        logicalId: `command-rejected:${payload.commandId}`,
+        physicalEventId,
+        sessionId: event.sessionId,
+        sender: "system",
+        timestamp: event.occurredAt,
+        body: payload.message,
+        format: "plain",
+        version: 1,
+        commandId: payload.commandId,
+        payload,
+      });
+    }
     if (payload.type === "tool.activity" && event.sessionId) {
       const key = `tool:${payload.toolCallId}`;
       const current = this.messages.get(key);

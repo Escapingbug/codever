@@ -60,6 +60,10 @@ export interface ResolvedV3Decision {
 export class MatrixCvp3Port implements ChannelPort {
   readonly fileReferenceHints = false
   readonly coalesceAssistantText = true
+  // Matrix replacements are durable room events subject to the same account-
+  // wide message limit as new chat messages. Preserve one logical bubble, but
+  // publish it only at semantic boundaries just like an ordinary chat client.
+  readonly streamAssistantText = false
   private readonly pendingDecisions = new Map<string, PendingDecision>()
   private readonly operationIds = new WeakMap<ChannelMessage, string>()
   private readonly attachmentUploads = new Map<string, Promise<CodeverAttachment[]>>()
@@ -85,7 +89,7 @@ export class MatrixCvp3Port implements ChannelPort {
       const logicalPartId = partId(messageId, index, parts.length)
       const versionKey = partVersionKey(messageId, index)
       const version = this.nextMessageVersion(versionKey)
-      const result = await this.sendAssistantEvent({
+      const queued = await this.sendAssistantEvent({
         eventId: eventId('assistant', logicalPartId, version),
         messageId,
         messageVersion: version,
@@ -100,10 +104,11 @@ export class MatrixCvp3Port implements ChannelPort {
       }, {
         occurredAt: this.messageTimestamp(messageId),
       })
-      this.physicalEventIds.set(logicalPartId, result.eventId)
-      if (index === 0) this.physicalEventIds.set(messageId, result.eventId)
-      this.options.onLog?.(
-        `[cvp3/matrix] assistant ${logicalPartId} v${version} delivered`,
+      this.observeAssistantDelivery(
+        queued.confirmation,
+        logicalPartId,
+        index === 0 ? messageId : undefined,
+        version,
       )
     }
     return { messageId }
@@ -127,7 +132,7 @@ export class MatrixCvp3Port implements ChannelPort {
       const version = this.nextMessageVersion(versionKey)
       const physicalTarget = this.physicalEventIds.get(logicalPartId)
         ?? (index === 0 ? this.physicalEventIds.get(messageId) : undefined)
-      const result = await this.sendAssistantEvent({
+      const queued = await this.sendAssistantEvent({
         eventId: eventId('assistant', logicalPartId, version),
         messageId,
         messageVersion: version,
@@ -150,9 +155,12 @@ export class MatrixCvp3Port implements ChannelPort {
             }
           : {}),
       })
-      this.physicalEventIds.set(logicalPartId, result.eventId)
-      if (index === 0) this.physicalEventIds.set(messageId, result.eventId)
-      this.options.onLog?.(`[cvp3/matrix] assistant ${logicalPartId} v${version} delivered`)
+      this.observeAssistantDelivery(
+        queued.confirmation,
+        logicalPartId,
+        index === 0 ? messageId : undefined,
+        version,
+      )
     }
   }
 
@@ -326,7 +334,7 @@ export class MatrixCvp3Port implements ChannelPort {
     } = {},
   ) {
     const { eventId: logicalEventId, ...eventPayload } = payload
-    return this.options.contentLayer.sendEvent(
+    return this.options.contentLayer.enqueueEvent(
       this.options.room,
       {
         ...this.baseEvent(logicalEventId, options.occurredAt),
@@ -339,6 +347,25 @@ export class MatrixCvp3Port implements ChannelPort {
       this.options.transport,
       { relation: options.relation ?? threadRelation(this.options.threadRootEventId) },
     )
+  }
+
+  private observeAssistantDelivery(
+    confirmation: Promise<{ eventId: string }>,
+    logicalPartId: string,
+    messageId: string | undefined,
+    version: number,
+  ): void {
+    void confirmation.then(result => {
+      this.physicalEventIds.set(logicalPartId, result.eventId)
+      if (messageId) this.physicalEventIds.set(messageId, result.eventId)
+      this.options.onLog?.(
+        `[cvp3/matrix] assistant ${logicalPartId} v${version} delivered`,
+      )
+    }).catch(error => {
+      this.options.onLog?.(
+        `[cvp3/matrix] assistant ${logicalPartId} v${version} queued: ${formatError(error)}`,
+      )
+    })
   }
 
   private baseEvent(

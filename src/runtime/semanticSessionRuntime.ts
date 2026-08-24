@@ -766,13 +766,15 @@ export class SemanticSessionRuntime {
             preserveNormalToolGroup: Boolean(this.config.channelPort.coalesceAssistantText),
         })
         if (event.kind === 'assistant_text_delta') {
-            if (
-                this.config.channelPort.coalesceAssistantText
-                && this.assistantTextMessage === null
-                && event.text.trim()
-            ) {
-                await this.flushBufferedAssistantText('stream-start')
-            } else {
+            const streamsIntermediateText = this.config.channelPort.coalesceAssistantText
+                && this.config.channelPort.streamAssistantText !== false
+            if (streamsIntermediateText) {
+                if (this.assistantTextMessage === null && event.text.trim()) {
+                    await this.flushBufferedAssistantText('stream-start')
+                } else {
+                    this.scheduleAssistantTextFlush()
+                }
+            } else if (!this.config.channelPort.coalesceAssistantText) {
                 this.scheduleAssistantTextFlush()
             }
         }

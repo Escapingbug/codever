@@ -174,4 +174,106 @@ describe('GatewayCvp3ContentLayer', () => {
     await expect(layer.openIncoming({ version: 3, envelope: mismatchedEnvelope }, room))
       .rejects.toThrow('logical event ID')
   })
+
+  it('returns after durable staging while the ordinary chat server is still backpressuring delivery', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-v3-content-'))
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const room = {
+      roomId: '!project:example.org',
+      conversationId: 'legacy-conversation-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }
+    const layer = new GatewayCvp3ContentLayer(
+      'workspace-1',
+      {
+        gatewayDeviceId: 'workspace-1',
+        gatewayKeyPair: await exportDeviceKeyPair(gateway),
+        envelopeReplayLedgerPath: join(directory, 'security'),
+      },
+      [{
+        deviceId: 'phone-1',
+        publicKey: phone.publicJwk,
+        allowedRoomIds: [room.roomId],
+        allowedOperations: ['prompt'],
+        matrixUserId: '@owner:example.org',
+        matrixDeviceId: 'PHONE',
+        matrixDeviceKeys: ['matrix-phone-key'],
+        certificateExpiresAt: Date.now() + 60_000,
+        sequenceEpoch: 'certificate-1',
+      }],
+    )
+    await layer.initialize()
+    let release!: () => void
+    let markStarted!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    let sends = 0
+    const transport = new InMemoryMatrixTransport()
+    transport.sendApplicationTimelineEvent = async () => {
+      sends += 1
+      markStarted()
+      await blocked
+      return { eventId: '$delivered-after-backpressure' }
+    }
+    const event: Cvp3Event = {
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'event-under-backpressure',
+      workspaceId: 'workspace-1',
+      projectId: gatewayProjectIdentity(room.cwd).id,
+      sessionId: 'session-1',
+      occurredAt: 1,
+      payload: {
+        type: 'session.ready',
+        provider: 'test',
+        permissionMode: 'default',
+        projection: {
+          title: 'Session',
+          lifecycle: 'active',
+          activity: 'idle',
+          updatedAt: 1,
+          stateVersion: 1,
+        },
+      },
+    }
+
+    const queued = await layer.enqueueEvent(room, event, transport)
+    await started
+    expect(queued.deliveryId).toBeTruthy()
+    expect(sends).toBe(1)
+    expect(await Promise.race([
+      queued.confirmation.then(() => 'delivered'),
+      Promise.resolve('staged'),
+    ])).toBe('staged')
+
+    const duplicate = await layer.enqueueEvent(room, event, transport)
+    expect(duplicate.confirmation).toBe(queued.confirmation)
+    expect(sends).toBe(1)
+
+    release()
+    await expect(queued.confirmation).resolves.toEqual({
+      eventId: '$delivered-after-backpressure',
+    })
+    await expect(duplicate.confirmation).resolves.toEqual({
+      eventId: '$delivered-after-backpressure',
+    })
+
+    let retryAttempts = 0
+    transport.sendApplicationTimelineEvent = async () => {
+      retryAttempts += 1
+      if (retryAttempts === 1) throw new Error('ordinary chat server is temporarily unavailable')
+      return { eventId: '$delivered-by-durable-retry' }
+    }
+    const retried = await layer.enqueueEvent(room, {
+      ...event,
+      eventId: 'event-retried-after-backpressure',
+      occurredAt: 2,
+    }, transport)
+    await expect(retried.confirmation).resolves.toEqual({
+      eventId: '$delivered-by-durable-retry',
+    })
+    expect(retryAttempts).toBe(2)
+  })
 })
