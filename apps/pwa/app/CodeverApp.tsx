@@ -73,6 +73,7 @@ import {
 } from "./gatewayUiCache";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolGroupCard } from "./ToolGroupCard";
+import { TurnActivityMonitor } from "./TurnActivityMonitor";
 import {
   ExtensionViewCard,
   type ExtensionViewDecisionState,
@@ -231,6 +232,10 @@ import {
   turnPrompt,
   type ObservedCommandCompletion,
 } from "./turnContext";
+import {
+  activeTurnToolMessage,
+  turnTimelineMessages,
+} from "./turnTimeline";
 import {
   readSelectedSession,
   writeSelectedSession,
@@ -1307,6 +1312,14 @@ function CodeverAppRuntime() {
   const gatewayConnected = gatewayAvailable;
   const isStreaming = Boolean(
     selectedSessionId && runningSessionIds.has(selectedSessionId),
+  );
+  const liveToolMessage = useMemo(
+    () => activeTurnToolMessage(messages, isStreaming),
+    [isStreaming, messages],
+  );
+  const timelineMessages = useMemo(
+    () => turnTimelineMessages(messages, liveToolMessage?.id ?? null),
+    [liveToolMessage?.id, messages],
   );
   const isStopping = Boolean(
     selectedSessionId && stoppingSessionIds.has(selectedSessionId),
@@ -6166,10 +6179,13 @@ function CodeverAppRuntime() {
 
 
         <div
-          className="chat-feed"
-          ref={feedRef}
-          onScroll={handleFeedScroll}
+          className={`conversation-workspace ${liveToolMessage?.toolGroup ? "has-live-activity" : ""}`}
         >
+          <div
+            className="chat-feed"
+            ref={feedRef}
+            onScroll={handleFeedScroll}
+          >
           <UiNoticeList
             notices={historyNotices}
             className="history-notices"
@@ -6210,13 +6226,13 @@ function CodeverAppRuntime() {
           {historyLoading && messages.length === 0 && (
             <div className="history-skeleton" aria-hidden="true" />
           )}
-          {messages.map((message, messageIndex) => {
+          {timelineMessages.map((message, messageIndex) => {
             const agentWork = isAgentWorkMessage(message);
             const previousIsAgentWork = isAgentWorkMessage(
-              messages[messageIndex - 1],
+              timelineMessages[messageIndex - 1],
             );
             const nextIsAgentWork = isAgentWorkMessage(
-              messages[messageIndex + 1],
+              timelineMessages[messageIndex + 1],
             );
             const agentTurnClass = agentWork
               ? `${previousIsAgentWork ? "agent-turn-continuation" : "agent-turn-start"} ${nextIsAgentWork ? "" : "agent-turn-end"}`
@@ -6353,7 +6369,7 @@ function CodeverAppRuntime() {
               if (!message.toolGroup) return null;
               return (
                 <div
-                  className={`message-row tool-group-row ${agentTurnClass} ${turnPresentationClass} ${
+                  className={`message-row tool-group-row completed-turn-activity ${agentTurnClass} ${turnPresentationClass} ${
                     message.historical ? "" : "message-enter"
                   }`}
                   key={message.id}
@@ -6502,7 +6518,7 @@ function CodeverAppRuntime() {
               </div>
             );
           })}
-          {agentActivity && (
+            {agentActivity && (
             <div
               className={`agent-activity activity-${agentActivity.phase}`}
               key={`${agentActivity.phase}:${agentActivity.label}:${agentActivity.detail ?? ""}`}
@@ -6522,6 +6538,10 @@ function CodeverAppRuntime() {
                 {agentActivity.detail && <small>{agentActivity.detail}</small>}
               </span>
             </div>
+            )}
+          </div>
+          {liveToolMessage?.toolGroup && (
+            <TurnActivityMonitor group={liveToolMessage.toolGroup} />
           )}
         </div>
 
