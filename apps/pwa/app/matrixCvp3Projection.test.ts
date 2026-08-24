@@ -66,6 +66,44 @@ describe("MatrixCvp3Projection", () => {
     expect(restored.sessions.get("session-a")?.activeTurnId).toBeUndefined();
   });
 
+  it("accepts an authoritative idle recovery at the same state version", () => {
+    const projection = new MatrixCvp3Projection();
+    projection.applyCommand(createCommand("a"), "$root-a");
+    projection.applyCommand(promptCommand("a"), "$prompt-a");
+    projection.applyEvent(turnQueuedEvent("a"), "$queued-a");
+    projection.applyEvent(turnEvent("started", 3, "working", "a"), "$started-a");
+
+    expect(projection.sessions.get("session-a")?.activeTurnId).toBe("prompt-a");
+
+    projection.applyEvent({
+      kind: "codever.event",
+      version: 3,
+      eventId: "gateway-recovery-runtime-2",
+      workspaceId: "workspace-1",
+      projectId: "project-1",
+      sessionId: "session-a",
+      occurredAt: 10,
+      payload: {
+        type: "session.ready",
+        provider: "test",
+        permissionMode: "default",
+        projection: {
+          title: "A",
+          lifecycle: "active",
+          activity: "idle",
+          updatedAt: 3,
+          stateVersion: 3,
+        },
+      },
+    }, "$gateway-recovery");
+
+    expect(projection.sessions.get("session-a")).toMatchObject({
+      activity: "idle",
+      stateVersion: 3,
+    });
+    expect(projection.sessions.get("session-a")?.activeTurnId).toBeUndefined();
+  });
+
   it("settles two interrupted sessions after a Gateway restart despite stale event order", () => {
     const projection = new MatrixCvp3Projection();
     for (const suffix of ["a", "b"]) {

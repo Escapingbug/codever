@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -16,7 +16,12 @@ import {
   signCvp3Command,
 } from '@codever/security'
 import { InMemoryMatrixTransport } from '@/channel/matrix'
-import { GatewayCvp3ContentLayer } from '@/gateway/matrix/cvp3Content'
+import {
+  GatewayCvp3ContentLayer,
+  MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES,
+  MatrixCvp3ContentTooLargeError,
+} from '@/gateway/matrix/cvp3Content'
+import { FileMatrixCvp3Outbox } from '@/gateway/matrix/fileMatrixCvp3Outbox'
 import { gatewayProjectIdentity } from '@/gateway/matrix/project'
 
 describe('GatewayCvp3ContentLayer', () => {
@@ -276,4 +281,137 @@ describe('GatewayCvp3ContentLayer', () => {
     })
     expect(retryAttempts).toBe(2)
   })
+
+  it('rejects an oversized event before it can poison the durable outbox', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-v3-content-'))
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const room = {
+      roomId: '!project:example.org',
+      conversationId: 'legacy-conversation-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }
+    const layer = new GatewayCvp3ContentLayer('workspace-1', {
+      gatewayDeviceId: 'workspace-1',
+      gatewayKeyPair: await exportDeviceKeyPair(gateway),
+      envelopeReplayLedgerPath: join(directory, 'security'),
+    }, [{
+      deviceId: 'phone-1',
+      publicKey: phone.publicJwk,
+      allowedRoomIds: [room.roomId],
+      allowedOperations: ['prompt'],
+      matrixUserId: '@owner:example.org',
+      matrixDeviceId: 'PHONE',
+      matrixDeviceKeys: ['matrix-phone-key'],
+      certificateExpiresAt: Date.now() + 60_000,
+      sequenceEpoch: 'certificate-1',
+    }])
+    await layer.initialize()
+    const transport = new InMemoryMatrixTransport()
+    await layer.provisionProject(room, transport)
+
+    await expect(layer.sendEvent(room, {
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'oversized-event',
+      workspaceId: 'workspace-1',
+      projectId: gatewayProjectIdentity(room.cwd).id,
+      sessionId: 'session-1',
+      occurredAt: 1,
+      payload: {
+        type: 'assistant.message',
+        messageId: 'oversized-message',
+        messageVersion: 1,
+        body: 'complete textual fallback',
+        format: 'plain',
+        final: true,
+        projection: {
+          title: 'Session',
+          lifecycle: 'active',
+          activity: 'working',
+          updatedAt: 1,
+          stateVersion: 1,
+        },
+        ui: { blob: 'x'.repeat(MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES) },
+      },
+    }, transport)).rejects.toBeInstanceOf(MatrixCvp3ContentTooLargeError)
+    expect(transport.delivered).toHaveLength(0)
+  })
+
+  it('quarantines an oversized legacy delivery and continues with the next event', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-v3-content-'))
+    const securityPath = join(directory, 'security')
+    const outboxPath = `${securityPath}.v3-outbox.jsonl`
+    const outbox = new FileMatrixCvp3Outbox(outboxPath)
+    await outbox.initialize()
+    const roomId = '!project:example.org'
+    const poison = outbox.createEvent({
+      roomId,
+      transactionId: 'legacy-poison',
+      content: {
+        msgtype: 'm.notice',
+        body: 'Encrypted Codever event',
+        [CODEVER_MATRIX_EXTENSION]: {
+          version: 3,
+          envelope: { ciphertext: 'x'.repeat(MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES) },
+        },
+      },
+      createdAt: 1,
+    })
+    const valid = outbox.createEvent({
+      roomId,
+      transactionId: 'valid-after-poison',
+      content: { msgtype: 'm.notice', body: 'valid recovered event' },
+      createdAt: 2,
+    })
+    await outbox.stage(poison)
+    await outbox.stage(valid)
+
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const logs: string[] = []
+    const layer = new GatewayCvp3ContentLayer('workspace-1', {
+      gatewayDeviceId: 'workspace-1',
+      gatewayKeyPair: await exportDeviceKeyPair(gateway),
+      envelopeReplayLedgerPath: securityPath,
+    }, [{
+      deviceId: 'phone-1',
+      publicKey: phone.publicJwk,
+      allowedRoomIds: [roomId],
+      allowedOperations: ['prompt'],
+      matrixUserId: '@owner:example.org',
+      matrixDeviceId: 'PHONE',
+      matrixDeviceKeys: ['matrix-phone-key'],
+      certificateExpiresAt: Date.now() + 60_000,
+      sequenceEpoch: 'certificate-1',
+    }], undefined, message => logs.push(message))
+    await layer.initialize()
+    const transport = new InMemoryMatrixTransport()
+    await layer.provisionProject({
+      roomId,
+      conversationId: 'legacy-conversation-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }, transport)
+
+    await waitFor(() => transport.delivered.some(delivery =>
+      delivery.transactionId === 'valid-after-poison'
+    ))
+    layer.stopRetries()
+    expect(transport.delivered.some(delivery => delivery.transactionId === 'legacy-poison'))
+      .toBe(false)
+    expect(logs.some(message => message.includes('superseded permanently undeliverable event')))
+      .toBe(true)
+    expect(await readFile(outboxPath, 'utf8')).toContain('safe limit')
+  })
 })
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`Condition was not met within ${timeoutMs}ms`)
+}

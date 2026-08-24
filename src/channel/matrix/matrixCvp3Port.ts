@@ -16,7 +16,10 @@ import type {
 } from '@/bridge/channelPort'
 import type { SessionExtensionInteractionRequest } from '@/runtime/sessionExtensions'
 import type { MatrixGatewayRoomConfig } from '@/gateway/matrix/config'
-import type { GatewayCvp3ContentLayer } from '@/gateway/matrix/cvp3Content'
+import {
+  MatrixCvp3ContentTooLargeError,
+  type GatewayCvp3ContentLayer,
+} from '@/gateway/matrix/cvp3Content'
 import type { MatrixTransport } from './transport'
 import { uploadCvp3Attachment } from './cvp3Attachment'
 
@@ -323,7 +326,7 @@ export class MatrixCvp3Port implements ChannelPort {
     }
   }
 
-  private sendAssistantEvent(
+  private async sendAssistantEvent(
     payload: Omit<
       Extract<Cvp3Event['payload'], { type: 'assistant.message' }>,
       'type' | 'projection'
@@ -334,19 +337,48 @@ export class MatrixCvp3Port implements ChannelPort {
     } = {},
   ) {
     const { eventId: logicalEventId, ...eventPayload } = payload
-    return this.options.contentLayer.enqueueEvent(
-      this.options.room,
-      {
-        ...this.baseEvent(logicalEventId, options.occurredAt),
-        payload: {
-          type: 'assistant.message',
-          ...eventPayload,
-          projection: this.options.projection(),
-        },
+    const event: Cvp3Event = {
+      ...this.baseEvent(logicalEventId, options.occurredAt),
+      payload: {
+        type: 'assistant.message',
+        ...eventPayload,
+        projection: this.options.projection(),
       },
-      this.options.transport,
-      { relation: options.relation ?? threadRelation(this.options.threadRootEventId) },
-    )
+    }
+    const relation = options.relation ?? threadRelation(this.options.threadRootEventId)
+    try {
+      return await this.options.contentLayer.enqueueEvent(
+        this.options.room,
+        event,
+        this.options.transport,
+        { relation },
+      )
+    } catch (error) {
+      if (!(error instanceof MatrixCvp3ContentTooLargeError) || eventPayload.ui === undefined) {
+        throw error
+      }
+      // The complete textual rendering is already in body (and is split at
+      // 8 KiB). A pathological structured presentation must not suppress the
+      // actual assistant/tool output or poison later deliveries.
+      const { ui: _ui, ...textualPayload } = eventPayload
+      this.options.onLog?.(
+        `[cvp3/matrix] assistant ${logicalEventId} presentation exceeded the `
+        + 'Matrix event budget; delivered the complete textual rendering',
+      )
+      return this.options.contentLayer.enqueueEvent(
+        this.options.room,
+        {
+          ...event,
+          payload: {
+            type: 'assistant.message',
+            ...textualPayload,
+            projection: this.options.projection(),
+          },
+        },
+        this.options.transport,
+        { relation },
+      )
+    }
   }
 
   private observeAssistantDelivery(

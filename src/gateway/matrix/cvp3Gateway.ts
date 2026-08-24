@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
@@ -11,6 +11,7 @@ import {
   type JsonValue,
   type MatrixGatewayCapabilities,
   type NativeClientRelease,
+  type ProviderCommand,
 } from '@codever/protocol'
 import type { AgentProvider, ModelEntry } from '@/providers/provider'
 import { createProviderInstance, getProvider, listProviders } from '@/providers/registry'
@@ -152,6 +153,7 @@ export class MatrixCvp3GatewayRunner {
   private unsubscribe: (() => void) | null = null
   private state: MatrixCvp3GatewayState = 'stopped'
   private publishedClientReleases: NativeClientRelease[] = []
+  private readonly runtimeEpoch = randomUUID()
 
   constructor(
     private readonly config: MatrixGatewayConfig,
@@ -175,6 +177,7 @@ export class MatrixCvp3GatewayRunner {
       config.applicationSecurity,
       config.trustedDevices,
       dependencies.listTrustedDevices,
+      dependencies.onLog,
     )
     this.extensions = dependencies.sessionExtensionRegistry ?? new SessionExtensionRegistry()
     this.webPush = dependencies.webPushService ?? new FileGatewayWebPushService(
@@ -264,6 +267,7 @@ export class MatrixCvp3GatewayRunner {
         await this.client.assertRoomEncrypted(project.config.roomId)
         await this.content.provisionProject(project.config, this.client)
         await this.prepareSessionThreads(project)
+        await this.publishSessionRecovery(project)
         await this.publishProjectSnapshot(project)
       }
       if (this.startupFailure) throw this.startupFailure
@@ -559,7 +563,7 @@ export class MatrixCvp3GatewayRunner {
         ...(command.payload.initialPrompt
           ? { initialPrompt: command.payload.initialPrompt }
           : {}),
-        projection: projection(existing, 'idle', this.extensions),
+        projection: terminalProjection(existing, 'idle', this.extensions),
         provider: existing.provider,
         ...(existing.model ? { model: existing.model } : {}),
         ...(existing.reasoningEffort ? { reasoningEffort: existing.reasoningEffort } : {}),
@@ -633,7 +637,7 @@ export class MatrixCvp3GatewayRunner {
       ...(command.payload.initialPrompt
         ? { initialPrompt: command.payload.initialPrompt }
         : {}),
-      projection: projection(record, 'idle', this.extensions),
+      projection: terminalProjection(record, 'idle', this.extensions),
       provider: record.provider,
       ...(record.model ? { model: record.model } : {}),
       ...(record.reasoningEffort ? { reasoningEffort: record.reasoningEffort } : {}),
@@ -722,7 +726,7 @@ export class MatrixCvp3GatewayRunner {
       type: 'turn.completed',
       turnId: command.commandId,
       outcome: 'succeeded',
-      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      projection: terminalProjection(runtime.record, runtime.activity.phase, this.extensions),
     })
     await this.settleAndDeliver(project, command, completed, 'succeeded')
     this.log(`[cvp3/matrix] turn ${command.commandId} completed`)
@@ -733,6 +737,21 @@ export class MatrixCvp3GatewayRunner {
     command: Cvp3CommandOf<'turn.cancel'>,
   ): Promise<void> {
     const runtime = this.requireActiveSession(project, command.sessionId)
+    if (runtime.activeTurnId === null) {
+      if (runtime.activity.phase !== 'idle') {
+        this.transition(runtime, 'idle')
+        await this.persist(project)
+      }
+      const completed = this.eventFor(project, runtime.record, command, 'turn-already-settled', {
+        type: 'turn.completed',
+        turnId: command.payload.turnId,
+        outcome: 'cancelled',
+        projection: terminalProjection(runtime.record, 'idle', this.extensions),
+      })
+      await this.settleAndDeliver(project, command, completed, 'succeeded')
+      this.log(`[cvp3/matrix] turn ${command.payload.turnId} was already inactive; converged cancel`)
+      return
+    }
     if (runtime.activeTurnId !== command.payload.turnId) {
       throw new Error(`Turn ${command.payload.turnId} is not active`)
     }
@@ -748,7 +767,7 @@ export class MatrixCvp3GatewayRunner {
       type: 'turn.completed',
       turnId: command.payload.turnId,
       outcome: 'cancelled',
-      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      projection: terminalProjection(runtime.record, runtime.activity.phase, this.extensions),
     })
     await this.settleAndDeliver(project, command, completed, 'succeeded')
   }
@@ -859,7 +878,7 @@ export class MatrixCvp3GatewayRunner {
     await this.persist(project)
     const updated = this.eventFor(project, runtime.record, command, 'session-updated', {
       type: 'session.updated',
-      projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+      projection: terminalProjection(runtime.record, runtime.activity.phase, this.extensions),
       patch: patch.extensions === undefined
         ? patch
         : { ...patch, extensions: runtime.record.extensions },
@@ -901,7 +920,7 @@ export class MatrixCvp3GatewayRunner {
     }
     const lifecycle = this.eventFor(project, record, command, 'session-lifecycle', {
       type: 'session.lifecycle',
-      projection: projection(record, 'idle', this.extensions),
+      projection: terminalProjection(record, 'idle', this.extensions),
       state: target,
       ...(alreadyApplied ? { alreadyApplied: true } : {}),
     })
@@ -1101,7 +1120,7 @@ export class MatrixCvp3GatewayRunner {
         turnId: command.commandId,
         code: 'execution_failed',
         message: formatError(error),
-        projection: projection(runtime.record, runtime.activity.phase, this.extensions),
+        projection: terminalProjection(runtime.record, runtime.activity.phase, this.extensions),
       }
     } else {
       payload = {
@@ -1562,6 +1581,38 @@ export class MatrixCvp3GatewayRunner {
     await this.content.publishProjectPointer(project.config, event, result.eventId, this.client)
   }
 
+  private async publishSessionRecovery(project: V3ProjectRuntime): Promise<void> {
+    for (const runtime of project.sessions.values()) {
+      const record = runtime.record
+      const event: Cvp3Event = {
+        kind: 'codever.event',
+        version: 3,
+        eventId: logicalSessionRecoveryEventId(
+          this.config.gatewayId,
+          project.project.projectId,
+          record.id,
+          this.runtimeEpoch,
+        ),
+        workspaceId: this.config.gatewayId,
+        projectId: project.project.projectId,
+        sessionId: record.id,
+        occurredAt: this.now(),
+        payload: {
+          type: 'session.ready',
+          projection: terminalProjection(record, 'idle', this.extensions),
+          provider: record.provider,
+          ...(record.model ? { model: record.model } : {}),
+          ...(record.reasoningEffort ? { reasoningEffort: record.reasoningEffort } : {}),
+          permissionMode: record.permissionMode,
+          extensionBindings: record.extensions,
+        },
+      }
+      await this.content.queueEvent(project.config, event, this.client, {
+        relation: threadRelation(record.threadRootEventId),
+      })
+    }
+  }
+
   private async publishWorkspaceSnapshot(project: V3ProjectRuntime): Promise<void> {
     const capabilities = this.discoverCapabilities(project)
     if (JSON.stringify(project.project.capabilities) !== JSON.stringify(capabilities)) {
@@ -1768,8 +1819,43 @@ function projection(
     stateVersion: record.stateVersion,
     extensions: extensions.summaries(record.extensions),
     extensionRevision: record.extensionRevision,
-    availableCommands: record.availableCommands,
   }
+}
+
+const AVAILABLE_COMMANDS_PROJECTION_BUDGET_BYTES = 16 * 1024
+
+/**
+ * Provider command catalogs are mutable session metadata, not per-message
+ * timeline data. Publish a bounded copy only at durable session boundaries so
+ * every assistant/tool event stays chat-sized even when ACP reports hundreds
+ * of skills with long descriptions.
+ */
+function terminalProjection(
+  record: PersistedCvp3Session,
+  activity: Cvp3SessionProjection['activity'],
+  extensions: SessionExtensionRegistry,
+): Cvp3SessionProjection {
+  return {
+    ...projection(record, activity, extensions),
+    availableCommands: boundedAvailableCommands(record.availableCommands),
+  }
+}
+
+function boundedAvailableCommands(commands: readonly ProviderCommand[]): ProviderCommand[] {
+  const result: ProviderCommand[] = []
+  let bytes = 2
+  for (const command of commands.slice(0, 256)) {
+    const normalized: ProviderCommand = {
+      name: command.name.slice(0, 256),
+      description: command.description.slice(0, 512),
+      inputHint: command.inputHint === null ? null : command.inputHint.slice(0, 256),
+    }
+    const nextBytes = Buffer.byteLength(JSON.stringify(normalized), 'utf8') + 1
+    if (bytes + nextBytes > AVAILABLE_COMMANDS_PROJECTION_BUDGET_BYTES) break
+    result.push(normalized)
+    bytes += nextBytes
+  }
+  return result
 }
 
 function limitProviderHistoryMessages(
@@ -1865,6 +1951,19 @@ function logicalWorkspaceSnapshotEventId(
 ): string {
   return createHash('sha256')
     .update(`codever-v3-workspace-snapshot\0${workspaceId}\0${projectId}\0${snapshotVersion}`)
+    .digest('base64url')
+}
+
+function logicalSessionRecoveryEventId(
+  workspaceId: string,
+  projectId: string,
+  sessionId: string,
+  runtimeEpoch: string,
+): string {
+  return createHash('sha256')
+    .update(
+      `codever-v3-session-recovery\0${workspaceId}\0${projectId}\0${sessionId}\0${runtimeEpoch}`,
+    )
     .digest('base64url')
 }
 

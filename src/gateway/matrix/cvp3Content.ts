@@ -8,10 +8,12 @@ import {
   cvp3EventSchema,
   cvp3ProjectKeyGrantStateSchema,
   canonicalJson,
+  canonicalJsonBytes,
   type Cvp3Command,
   type Cvp3CurrentPointer,
   type Cvp3Event,
   type Cvp3ProjectKeyGrantPlaintext,
+  type JsonValue,
   type SignedCvp3Command,
 } from '@codever/protocol'
 import {
@@ -56,6 +58,18 @@ export interface EnqueuedCvp3Event {
   confirmation: Promise<MatrixSendEventResult>
 }
 
+export const MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES = 40 * 1024
+
+export class MatrixCvp3ContentTooLargeError extends Error {
+  constructor(readonly contentBytes: number) {
+    super(
+      `CVP/3 Matrix timeline content is ${contentBytes} bytes; `
+      + `the safe limit is ${MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES} bytes`,
+    )
+    this.name = 'MatrixCvp3ContentTooLargeError'
+  }
+}
+
 /**
  * Thin CVP/3 application-security and delivery boundary.
  *
@@ -73,6 +87,7 @@ export class GatewayCvp3ContentLayer {
   private readonly deliveryConfirmations = new Map<string, {
     promise: Promise<MatrixSendEventResult>
     resolve: (result: MatrixSendEventResult) => void
+    reject: (error: Error) => void
   }>()
   private deliveryChain: Promise<unknown> = Promise.resolve()
 
@@ -81,6 +96,7 @@ export class GatewayCvp3ContentLayer {
     private readonly config: MatrixGatewayApplicationSecurityConfig,
     private readonly trustedDevices: readonly MatrixGatewayTrustedDevice[],
     private readonly getTrustedDevices?: Cvp3TrustedDeviceProvider,
+    private readonly onLog?: (message: string) => void,
   ) {
     this.projectKeys = new FileTimelineKeyStore(
       `${config.envelopeReplayLedgerPath}.v3-project-keys.json`,
@@ -124,7 +140,12 @@ export class GatewayCvp3ContentLayer {
     await Promise.all(devices.map(device =>
       this.publishKeyGrant(room, ring, device, transport)
     ))
-    await this.retryPending(room.roomId, transport)
+    // Recovery traffic must not hold Gateway startup behind a homeserver
+    // token bucket. The durable outbox continues in the background while new
+    // authoritative snapshots can be staged immediately.
+    void this.retryPending(room.roomId, transport).catch(error => {
+      this.onLog?.(`[cvp3/matrix] outbox recovery paused: ${formatError(error)}`)
+    })
   }
 
   async openIncoming(
@@ -223,7 +244,11 @@ export class GatewayCvp3ContentLayer {
       relation?: Record<string, unknown>
     } = {},
   ): Promise<{ status: 'delivered' | 'queued'; eventId?: string }> {
-    await this.enqueueEvent(room, eventInput, transport, options)
+    const queued = await this.enqueueEvent(room, eventInput, transport, options)
+    // queueEvent deliberately transfers delivery ownership to the durable
+    // outbox. Consume a later permanent rejection because this caller has no
+    // confirmation handle to observe it.
+    void queued.confirmation.catch(() => undefined)
     return { status: 'queued' }
   }
 
@@ -269,6 +294,7 @@ export class GatewayCvp3ContentLayer {
       ...(options.relation ? { 'm.relates_to': structuredClone(options.relation) } : {}),
       [CODEVER_MATRIX_EXTENSION]: { version: 3, envelope },
     }
+    assertTimelineContentSize(content)
     const delivery = this.outbox.createEvent({
       roomId: room.roomId,
       transactionId: options.transactionId ?? matrixTransactionId(event.eventId),
@@ -352,9 +378,20 @@ export class GatewayCvp3ContentLayer {
 
   async retryPending(roomId: string, transport: MatrixTransport): Promise<void> {
     for (const delivery of this.outbox.pending(roomId)) {
+      if (isOversizedTimelineDelivery(delivery)) {
+        await this.supersedePermanentDelivery(
+          delivery,
+          new MatrixCvp3ContentTooLargeError(contentBytes(delivery.content)),
+        )
+        continue
+      }
       try {
         await this.deliver(delivery, transport)
-      } catch {
+      } catch (error) {
+        if (isPermanentMatrixDeliveryError(error)) {
+          await this.supersedePermanentDelivery(delivery, error)
+          continue
+        }
         this.scheduleRetry(roomId, transport)
         return
       }
@@ -475,11 +512,15 @@ export class GatewayCvp3ContentLayer {
           this.inFlightDeliveries.delete(delivery.deliveryId)
         }
       },
-      () => {
+      error => {
         if (this.inFlightDeliveries.get(delivery.deliveryId) === operation) {
           this.inFlightDeliveries.delete(delivery.deliveryId)
         }
-        this.scheduleRetry(delivery.roomId, transport)
+        if (isPermanentMatrixDeliveryError(error)) {
+          void this.supersedePermanentDelivery(delivery, error)
+        } else {
+          this.scheduleRetry(delivery.roomId, transport)
+        }
       },
     )
     return operation
@@ -491,8 +532,12 @@ export class GatewayCvp3ContentLayer {
     const current = this.deliveryConfirmations.get(deliveryId)
     if (current) return current.promise
     let resolve!: (result: MatrixSendEventResult) => void
-    const promise = new Promise<MatrixSendEventResult>(done => { resolve = done })
-    this.deliveryConfirmations.set(deliveryId, { promise, resolve })
+    let reject!: (error: Error) => void
+    const promise = new Promise<MatrixSendEventResult>((done, fail) => {
+      resolve = done
+      reject = fail
+    })
+    this.deliveryConfirmations.set(deliveryId, { promise, resolve, reject })
     return promise
   }
 
@@ -501,6 +546,29 @@ export class GatewayCvp3ContentLayer {
     if (!confirmation) return
     this.deliveryConfirmations.delete(deliveryId)
     confirmation.resolve(result)
+  }
+
+  private rejectConfirmation(deliveryId: string, error: Error): void {
+    const confirmation = this.deliveryConfirmations.get(deliveryId)
+    if (!confirmation) return
+    this.deliveryConfirmations.delete(deliveryId)
+    confirmation.reject(error)
+  }
+
+  private async supersedePermanentDelivery(
+    delivery: MatrixCvp3Delivery,
+    error: unknown,
+  ): Promise<void> {
+    const reason = formatError(error)
+    await this.outbox.markSuperseded(delivery.deliveryId, reason)
+    this.rejectConfirmation(
+      delivery.deliveryId,
+      error instanceof Error ? error : new Error(reason),
+    )
+    this.onLog?.(
+      `[cvp3/matrix] superseded permanently undeliverable event `
+      + `${delivery.deliveryId}: ${reason}`,
+    )
   }
 
   private scheduleRetry(roomId: string, transport: MatrixTransport): void {
@@ -565,4 +633,36 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+function assertTimelineContentSize(content: MatrixRoomMessageContent): void {
+  const bytes = contentBytes(content)
+  if (bytes > MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES) {
+    throw new MatrixCvp3ContentTooLargeError(bytes)
+  }
+}
+
+function contentBytes(content: Record<string, unknown>): number {
+  return canonicalJsonBytes(content as JsonValue).byteLength
+}
+
+function isOversizedTimelineDelivery(delivery: MatrixCvp3Delivery): boolean {
+  return delivery.kind === 'event'
+    && contentBytes(delivery.content) > MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES
+}
+
+function isPermanentMatrixDeliveryError(error: unknown): boolean {
+  if (error instanceof MatrixCvp3ContentTooLargeError) return true
+  const value = asRecord(error)
+  const status = [value?.status, value?.statusCode, value?.httpStatus]
+    .find(candidate => typeof candidate === 'number')
+  if (typeof status === 'number') {
+    return [400, 404, 405, 413, 422].includes(status)
+  }
+  const errcode = typeof value?.errcode === 'string' ? value.errcode : ''
+  return errcode === 'M_TOO_LARGE'
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

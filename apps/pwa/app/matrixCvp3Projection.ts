@@ -277,7 +277,7 @@ export class MatrixCvp3Projection {
     }
     if (payload.type === "session.ready" && event.sessionId && event.projectId) {
       const current = this.sessions.get(event.sessionId);
-      this.sessions.set(event.sessionId, {
+      const ready: V3ProjectedSession = {
         sessionId: event.sessionId,
         projectId: event.projectId,
         threadRootEventId: current?.threadRootEventId || threadRootHint || "",
@@ -287,8 +287,11 @@ export class MatrixCvp3Projection {
         ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
         permissionMode: payload.permissionMode,
         extensionBindings: payload.extensionBindings ?? current?.extensionBindings ?? [],
-        ...(current?.activeTurnId ? { activeTurnId: current.activeTurnId } : {}),
-      });
+        ...(current?.activeTurnId && isActiveSessionActivity(payload.projection.activity)
+          ? { activeTurnId: current.activeTurnId }
+          : {}),
+      };
+      this.sessions.set(event.sessionId, ready);
       if (payload.initialPrompt && payload.rootCommandId) {
         this.addUserPrompt(
           payload.rootCommandId,
@@ -474,13 +477,18 @@ export class MatrixCvp3Projection {
     const sessionId = event.sessionId!;
     const current = this.sessions.get(sessionId);
     if (current && current.stateVersion > next.stateVersion) return;
-    this.sessions.set(sessionId, {
+    const projected: V3ProjectedSession = {
       sessionId,
       projectId: event.projectId ?? current?.projectId ?? "",
       threadRootEventId: current?.threadRootEventId || threadRootHint || "",
       ...current,
       ...next,
-    });
+    };
+    // activeTurnId is transient execution state. A projection at the same or
+    // newer session version that says the session is no longer active is the
+    // authoritative recovery boundary after a Gateway/app restart.
+    if (!isActiveSessionActivity(next.activity)) delete projected.activeTurnId;
+    this.sessions.set(sessionId, projected);
   }
 
   private addUserPrompt(

@@ -556,6 +556,31 @@ describe('MatrixCvp3GatewayRunner', () => {
     expect(dispatched.filter(item => item.text === 'block A')).toHaveLength(1)
     expect(terminalNotifications).toHaveLength(1)
 
+    // A cancel can race a completion or arrive from a stale client after a
+    // Gateway restart. It must converge the client to idle instead of leaving
+    // an unrecoverable "not active" command failure.
+    await send({
+      ...base,
+      commandId: 'cancel-settled-a',
+      sessionId: 'session-a',
+      operation: 'turn.cancel',
+      payload: { operation: 'turn.cancel', turnId: 'prompt-a' },
+    }, '$cancel-settled-a')
+    await waitFor(async () => (await events(client, activeKey.key, roomId, projectId))
+      .some(event =>
+        event.causationCommandId === 'cancel-settled-a'
+        && event.payload.type === 'turn.completed'
+      ))
+    expect((await events(client, activeKey.key, roomId, projectId)).find(event =>
+      event.causationCommandId === 'cancel-settled-a'
+      && event.payload.type === 'turn.completed'
+    )?.payload).toMatchObject({
+      type: 'turn.completed',
+      turnId: 'prompt-a',
+      outcome: 'cancelled',
+      projection: { activity: 'idle' },
+    })
+
     await send({
       ...base,
       commandId: 'archive-a',
@@ -584,6 +609,56 @@ describe('MatrixCvp3GatewayRunner', () => {
       sessions: [expect.objectContaining({ managedSessionId: 'session-a' })],
     }))
     await runner.stop()
+
+    const eventIdsBeforeRestart = new Set(
+      (await events(client, activeKey.key, roomId, projectId)).map(event => event.eventId),
+    )
+    const restarted = new MatrixCvp3GatewayRunner(config, {
+      client,
+      webPushService,
+      sessionExtensionRegistry: new SessionExtensionRegistry([extensionProvider]),
+      sessionFactory: (room, port, session) => {
+        const sessionRecord = createTopicSessionRecord({
+          id: session.id,
+          cwd: room.cwd,
+          providerName: session.provider,
+          groupChatId: -1,
+        })
+        return {
+          receiveInput: () => undefined,
+          dispatch: async () => undefined,
+          destroy: async () => undefined,
+          state: 'idle',
+          sessionRecord,
+          channelPort: port,
+          getProgress: () => null,
+          getDeliveryStatus: () => ({ deliveries: [] }),
+          retryDelivery: async () => ({ status: 'not_found' as const }),
+        } satisfies TopicSession
+      },
+    })
+    await restarted.start()
+    await waitFor(async () => {
+      const recovered = (await events(client, activeKey.key, roomId, projectId)).filter(event =>
+        !eventIdsBeforeRestart.has(event.eventId)
+        && event.payload.type === 'session.ready'
+      )
+      return recovered.some(event => event.sessionId === 'session-b')
+        && recovered.some(event => event.sessionId === 'session-scratch')
+    })
+    const recovered = (await events(client, activeKey.key, roomId, projectId)).filter(event =>
+      !eventIdsBeforeRestart.has(event.eventId)
+      && event.payload.type === 'session.ready'
+    )
+    expect(recovered.map(event => event.sessionId).sort()).toEqual([
+      'session-b',
+      'session-scratch',
+    ])
+    expect(recovered.every(event =>
+      event.payload.type === 'session.ready'
+      && event.payload.projection.activity === 'idle'
+    )).toBe(true)
+    await restarted.stop()
   })
 })
 

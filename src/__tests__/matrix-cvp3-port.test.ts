@@ -11,7 +11,10 @@ import {
   openCvp3ProjectKeyGrant,
 } from '@codever/security'
 import { InMemoryMatrixTransport, MatrixCvp3Port } from '@/channel/matrix'
-import { GatewayCvp3ContentLayer } from '@/gateway/matrix/cvp3Content'
+import {
+  GatewayCvp3ContentLayer,
+  MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES,
+} from '@/gateway/matrix/cvp3Content'
 import { gatewayProjectIdentity } from '@/gateway/matrix/project'
 import { ChannelProjector } from '@/runtime/channelProjector'
 import { MatrixCvp3Projection } from '../../apps/pwa/app/matrixCvp3Projection'
@@ -377,6 +380,37 @@ describe('MatrixCvp3Port', () => {
       growingEvents[0]!.occurredAt,
       growingEvents[0]!.occurredAt,
     ])
+
+    const oversizedPresentationStart = transport.delivered.length
+    await port.send({
+      text: 'Complete textual fallback remains visible',
+      format: 'plain',
+      replyMarkup: {
+        idempotencyKey: 'oversized-presentation-message',
+        ui: { blob: 'x'.repeat(MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES) },
+      },
+    })
+    await waitFor(() => transport.delivered.length === oversizedPresentationStart + 1)
+    const oversizedPresentationDelivery = transport.delivered.at(-1)!
+    const oversizedPresentationExtension = oversizedPresentationDelivery
+      .content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const oversizedPresentationEnvelope = await openCvp3Envelope(
+      oversizedPresentationExtension.envelope,
+      {
+        projectKey: base64UrlDecode(projectKey.key),
+        roomId: room.roomId,
+        projectId: grant.projectId,
+        keyId: projectKey.keyId,
+      },
+    )
+    if (oversizedPresentationEnvelope.plaintext.kind !== 'signed_event') {
+      throw new Error('expected event')
+    }
+    expect(oversizedPresentationEnvelope.plaintext.value.event.payload).toMatchObject({
+      type: 'assistant.message',
+      body: 'Complete textual fallback remains visible',
+    })
+    expect(oversizedPresentationEnvelope.plaintext.value.event.payload).not.toHaveProperty('ui')
   })
 })
 

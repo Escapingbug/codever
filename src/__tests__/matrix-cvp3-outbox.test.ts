@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -78,5 +78,25 @@ describe('FileMatrixCvp3Outbox', () => {
     await outbox.stage(retry)
     expect(outbox.delivery(first.deliveryId)).toEqual(first)
     expect(outbox.pending()).toEqual([first])
+  })
+
+  it('durably supersedes a poison delivery so it cannot block later events after restart', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'codever-v3-outbox-')), 'outbox.jsonl')
+    const first = new FileMatrixCvp3Outbox(path)
+    await first.initialize()
+    const poison = first.createEvent({
+      roomId: '!project:example.org',
+      transactionId: 'poison-event',
+      content: { body: 'oversized ciphertext' },
+      createdAt: 1,
+    })
+    await first.stage(poison)
+    await first.markSuperseded(poison.deliveryId, 'content_too_large', 2)
+    expect(first.pending()).toEqual([])
+
+    const recovered = new FileMatrixCvp3Outbox(path)
+    await recovered.initialize()
+    expect(recovered.pending()).toEqual([])
+    expect(await readFile(path, 'utf8')).toContain('"reason":"content_too_large"')
   })
 })

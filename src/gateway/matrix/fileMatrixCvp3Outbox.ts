@@ -37,6 +37,7 @@ type SupersededEntry = {
   status: 'superseded'
   deliveryId: string
   supersededAt: number
+  reason?: string
 }
 type OutboxEntry = PendingEntry | DeliveredEntry | SupersededEntry
 
@@ -140,6 +141,28 @@ export class FileMatrixCvp3Outbox {
     })
   }
 
+  markSuperseded(
+    deliveryId: string,
+    reason: string,
+    now = Date.now(),
+  ): Promise<void> {
+    return this.serial(async () => {
+      if (this.terminal.has(deliveryId)) return
+      if (!this.pendingEntries.has(deliveryId)) {
+        throw new Error('Cannot supersede an unstaged CVP/3 Matrix delivery')
+      }
+      await this.append({
+        version: 3,
+        status: 'superseded',
+        deliveryId,
+        supersededAt: now,
+        reason: reason.slice(0, 512),
+      })
+      this.pendingEntries.delete(deliveryId)
+      this.terminal.set(deliveryId, {})
+    })
+  }
+
   deliveredEventId(deliveryId: string): string | undefined {
     return this.terminal.get(deliveryId)?.eventId
   }
@@ -222,6 +245,13 @@ function parseEntry(value: unknown, line: number): OutboxEntry {
     (entry.status === 'delivered' || entry.status === 'superseded')
     && typeof entry.deliveryId === 'string'
   ) {
+    if (
+      entry.status === 'superseded'
+      && entry.reason !== undefined
+      && typeof entry.reason !== 'string'
+    ) {
+      throw new Error(`Invalid superseded CVP/3 Matrix delivery at line ${line}`)
+    }
     return entry as DeliveredEntry | SupersededEntry
   }
   throw new Error(`Invalid terminal CVP/3 Matrix delivery at line ${line}`)
