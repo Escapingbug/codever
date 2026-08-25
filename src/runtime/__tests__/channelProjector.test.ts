@@ -277,3 +277,109 @@ describe('ChannelProjector — command_result friendly rendering', () => {
         expect(message).toContain('$0.004')
     })
 })
+
+describe('ChannelProjector — CodeBuddy team state', () => {
+    function teamEvent(
+        overrides: Partial<Extract<ConversationEvent, { kind: 'team_state_update' }>>,
+    ): Extract<ConversationEvent, { kind: 'team_state_update' }> {
+        return {
+            kind: 'team_state_update',
+            action: 'member_status_change',
+            teamName: 'security-review',
+            meta: makeMeta('team-state'),
+            ...overrides,
+        }
+    }
+
+    it('keeps standard session metadata out of the conversation transcript', () => {
+        const projector = new ChannelProjector()
+        const result = projector.project({
+            kind: 'session_metadata_update',
+            title: 'Investigate authentication timeout',
+            updatedAt: '2026-08-25T10:00:00Z',
+            providerMeta: { projectName: 'api-server' },
+            meta: makeMeta('session-info'),
+        })
+
+        expect(result).toEqual([])
+    })
+
+    it('renders and incrementally merges one Team status card', () => {
+        const projector = new ChannelProjector()
+        const created = projector.project(teamEvent({
+            action: 'team_created',
+            isAutoTeam: true,
+        }))
+        const researcher = projector.project(teamEvent({
+            members: [{
+                name: 'researcher',
+                status: 'running',
+                description: 'Analyze the attack surface',
+                sessionId: 'member-session-1',
+                tokenUsage: { lastContextWindow: 42000 },
+                toolCallCount: 5,
+            }],
+        }))
+        const reviewer = projector.project(teamEvent({
+            members: [{
+                name: 'reviewer',
+                status: 'completed',
+                taskId: 'task-2',
+            }],
+        }))
+
+        expect(created[0]).toMatchObject({
+            stateKey: 'team-state:security-review:1',
+            isToolEvent: false,
+        })
+        expect(researcher[0].stateKey).toBe(created[0].stateKey)
+        expect(reviewer[0].stateKey).toBe(created[0].stateKey)
+        expect(reviewer[0].message.text).toContain('researcher')
+        expect(reviewer[0].message.text).toContain('reviewer')
+        expect(reviewer[0].message.text).toContain('42k context')
+        expect(reviewer[0].message.text).toContain('1 running · 1 completed')
+    })
+
+    it('deduplicates identical status cards and preserves Team state across turn resets', () => {
+        const projector = new ChannelProjector()
+        const event = teamEvent({
+            members: [{ name: 'researcher', status: 'running' }],
+        })
+
+        const first = projector.project(event)
+        const duplicate = projector.project(event)
+        projector.resetTurn()
+        const afterTurnReset = projector.project(event)
+
+        expect(first).toHaveLength(1)
+        expect(duplicate).toEqual([])
+        expect(afterTurnReset).toEqual([])
+    })
+
+    it('updates the Team card with terminal state and starts a new card for a new lifecycle', () => {
+        const projector = new ChannelProjector()
+        const running = projector.project(teamEvent({
+            members: [{ name: 'researcher', status: 'running' }],
+        }))
+        const deleted = projector.project(teamEvent({ action: 'team_deleted' }))
+        const recreated = projector.project(teamEvent({ action: 'team_created' }))
+
+        expect(deleted[0]).toMatchObject({
+            stateKey: running[0].stateKey,
+            isTerminal: true,
+        })
+        expect(deleted[0].message.text).toContain('Team ended')
+        expect(recreated[0].stateKey).toBe('team-state:security-review:2')
+    })
+
+    it('tracks Team state silently in quiet mode and renders it when verbosity increases', () => {
+        const projector = new ChannelProjector()
+        const event = teamEvent({
+            members: [{ name: 'researcher', status: 'running' }],
+        })
+
+        expect(projector.project(event, { verboseLevel: 0 })).toEqual([])
+        const visible = projector.project(event, { verboseLevel: 1 })
+        expect(visible[0].message.text).toContain('researcher')
+    })
+})

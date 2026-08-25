@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentToolUseEvent } from '@/providers/types'
+import { isCodebuddyHousekeepingTool, parseCodebuddyTeamUpdate } from '@/providers/codebuddy/semantic'
 import type { ConversationEvent, SemanticMeta } from './semantic'
 
 export interface ProviderAdapterContext {
@@ -12,11 +13,15 @@ export interface ProviderAdapterContext {
 export interface ProviderSemanticAdapter {
     readonly provider: string
     toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[]
+    reset?(): void
 }
 
 export function createProviderSemanticAdapter(provider: string): ProviderSemanticAdapter {
     const normalized = provider.toLowerCase()
-    if (normalized.includes('acp') || normalized.includes('opencode') || normalized.includes('codebuddy') || normalized.includes('agent')) {
+    if (normalized.includes('codebuddy')) {
+        return new CodebuddyProviderSemanticAdapter(provider)
+    }
+    if (normalized.includes('acp') || normalized.includes('opencode') || normalized.includes('agent')) {
         return new AcpProviderSemanticAdapter(provider)
     }
     return new DefaultProviderSemanticAdapter(provider)
@@ -164,8 +169,22 @@ export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
                 return [{ kind: 'command_result', meta, command: 'plan', output: rawRecord }]
             }
 
+            case 'session_info_update': {
+                const providerMeta = rawRecord._meta === null
+                    ? null
+                    : asRecord(rawRecord._meta)
+                const title = nullableString(rawRecord.title)
+                const updatedAt = nullableString(rawRecord.updatedAt)
+                return [{
+                    kind: 'session_metadata_update',
+                    meta,
+                    ...(hasOwn(rawRecord, 'title') && title !== undefined ? { title } : {}),
+                    ...(hasOwn(rawRecord, 'updatedAt') && updatedAt !== undefined ? { updatedAt } : {}),
+                    ...(providerMeta !== undefined ? { providerMeta } : {}),
+                }]
+            }
+
             case 'config_option_update':
-            case 'session_info_update':
             case 'usage_update':
                 return [{ kind: 'command_result', meta, command: sessionUpdate, output: rawRecord }]
 
@@ -231,6 +250,60 @@ export class AcpProviderSemanticAdapter extends DefaultProviderSemanticAdapter {
         const existing = this.toolCalls.get(toolUseId)
         if (!existing?.toolName || event.toolName) return event
         return { ...event, toolName: existing.toolName }
+    }
+}
+
+export class CodebuddyProviderSemanticAdapter extends AcpProviderSemanticAdapter {
+    private suppressedToolCalls = new Set<string>()
+
+    override toConversationEvents(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[] {
+        if (event.kind === 'tool_use' && isCodebuddyHousekeepingTool(event)) {
+            if (event.toolUseId) this.suppressedToolCalls.add(event.toolUseId)
+            return this.toHiddenProviderEvent(event, context)
+        }
+
+        if (event.kind === 'tool_result' && event.toolUseId && this.suppressedToolCalls.has(event.toolUseId)) {
+            this.suppressedToolCalls.delete(event.toolUseId)
+            return this.toHiddenProviderEvent(event, context)
+        }
+
+        const events = super.toConversationEvents(event, context)
+        if (event.kind !== 'raw') return events
+
+        const raw = asRecord(event.rawMessage)
+        if (raw?.sessionUpdate !== 'session_info_update') return events
+
+        const teamUpdate = parseCodebuddyTeamUpdate(raw)
+        if (!teamUpdate) return events
+
+        const baseMeta = events[0]?.meta
+        const meta: SemanticMeta = baseMeta
+            ? { ...baseMeta, id: `${baseMeta.id}:team` }
+            : {
+                id: `${context.turnId}:codebuddy:team:${randomUUID()}`,
+                sessionId: context.sessionId,
+                turnId: context.turnId,
+                provider: context.provider,
+                seq: 0,
+                timestamp: Date.now(),
+                sourcePhase: context.sourcePhase ?? 'live',
+                raw: event,
+            }
+
+        return [...events, { kind: 'team_state_update', meta, ...teamUpdate }]
+    }
+
+    override reset(): void {
+        super.reset()
+        this.suppressedToolCalls.clear()
+    }
+
+    private toHiddenProviderEvent(event: AgentEvent, context: ProviderAdapterContext): ConversationEvent[] {
+        return super.toConversationEvents({
+            kind: 'raw',
+            providerName: 'codebuddy',
+            rawMessage: event,
+        }, context)
     }
 }
 
@@ -335,6 +408,14 @@ function categorizeTool(toolName?: string, toolKind?: string): ToolCategory {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
     return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+    return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function nullableString(value: unknown): string | null | undefined {
+    return value === null || typeof value === 'string' ? value : undefined
 }
 
 function pickString(record: Record<string, unknown>, keys: string[]): string | undefined {

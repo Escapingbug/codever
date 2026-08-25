@@ -165,6 +165,104 @@ describe('SemanticSessionRuntime', () => {
         expect(statuses.map(s => s.state)).toEqual(['querying', 'idle'])
     })
 
+    it('keeps one editable CodeBuddy Team status card across turns', async () => {
+        const sent: ChannelMessage[] = []
+        const statuses: SessionStatus[] = []
+        const operations: DeliveryOperation[] = []
+        let queryNumber = 0
+        const provider: AgentProvider = {
+            ...createProvider([]),
+            name: 'codebuddy',
+            startQuery: vi.fn((_prompt: AgentQueryInput, _config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    queryNumber += 1
+                    if (queryNumber === 1) {
+                        yield {
+                            kind: 'raw',
+                            providerName: 'acp',
+                            rawMessage: {
+                                sessionUpdate: 'session_info_update',
+                                _meta: {
+                                    'codebuddy.ai/teamUpdate': {
+                                        type: 'team_created',
+                                        teamName: 'security-review',
+                                        isAutoTeam: true,
+                                    },
+                                },
+                            },
+                        } as AgentEvent
+                        yield {
+                            kind: 'raw',
+                            providerName: 'acp',
+                            rawMessage: {
+                                sessionUpdate: 'session_info_update',
+                                _meta: {
+                                    'codebuddy.ai/teamUpdate': {
+                                        type: 'member_status_change',
+                                        teamName: 'security-review',
+                                        members: [{
+                                            name: 'researcher',
+                                            status: 'running',
+                                            description: 'Analyze the attack surface',
+                                            tokenUsage: { lastContextWindow: 42000 },
+                                            toolCallCount: 5,
+                                        }],
+                                    },
+                                },
+                            },
+                        } as AgentEvent
+                        yield { kind: 'text', text: 'Research started.' } as AgentEvent
+                    } else {
+                        yield {
+                            kind: 'raw',
+                            providerName: 'acp',
+                            rawMessage: {
+                                sessionUpdate: 'session_info_update',
+                                _meta: {
+                                    'codebuddy.ai/teamUpdate': {
+                                        type: 'member_status_change',
+                                        teamName: 'security-review',
+                                        members: [{ name: 'researcher', status: 'completed' }],
+                                    },
+                                },
+                            },
+                        } as AgentEvent
+                        yield { kind: 'text', text: 'Research completed.' } as AgentEvent
+                    }
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        }
+        const channel = createChannel(sent, statuses, operations)
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'codebuddy',
+            channelPort: channel,
+            providerSettings: { verboseLevel: 1 },
+            outbox: new DeliveryOutbox({
+                channelPort: channel,
+                progressiveEditDebounceMs: 0,
+            }),
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'start review', source: 'channel' })
+        await runtime.dispatch({ kind: 'user_message', text: 'finish review', source: 'channel' })
+
+        const teamOperations = operations.filter(operation => operation.message.text.includes('Agent Team'))
+        expect(teamOperations.filter(operation => operation.kind === 'send')).toHaveLength(1)
+        expect(teamOperations.some(operation => operation.kind === 'edit')).toBe(true)
+        expect(teamOperations.filter(operation => operation.kind === 'edit').every(operation => operation.messageId === teamOperations[0].messageId)).toBe(true)
+        expect(teamOperations.at(-1)?.message.text).toContain('completed')
+        expect(operations.map(operation => operation.message.text).join('\n')).not.toContain('Session Info')
+        expect(runtime.journal.list()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'session_metadata_update' }),
+            expect.objectContaining({ kind: 'team_state_update', teamName: 'security-review' }),
+        ]))
+    })
+
     it('does not pass a stale model when the active provider has no model catalog', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []

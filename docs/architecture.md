@@ -172,6 +172,8 @@ This layer absorbs provider-specific quirks, including:
 - replayed history from ACP `loadSession`;
 - provider command/config updates.
 
+CodeBuddy's ACP metadata extension is parsed under `src/providers/codebuddy/semantic.ts`. The CodeBuddy semantic adapter maps standard `session_info_update` values to silent session metadata and maps `_meta["codebuddy.ai/teamUpdate"]` snapshots to `team_state_update` events. Empty CodeBuddy housekeeping tool calls are retained as hidden raw events rather than rendered as transcript tools.
+
 ACP extension methods keep the same ownership boundary. The shared ACP client manager only exposes generic `extMethod` and `extNotification` hooks; it must not encode provider-specific method names. Provider-specific extensions are registered by the concrete provider. For Cursor's `agent acp` provider, `src/providers/agent/cursorExtensions.ts` owns all `cursor/*` parsing and maps it to existing Codever surfaces:
 
 - `cursor/create_plan` uses the runtime decision handler for plan approval and renders Cursor todos through `TodoWrite`.
@@ -188,6 +190,7 @@ Responsibilities:
 
 - buffer assistant text until a flush boundary;
 - merge tool updates by `toolCallId`;
+- merge session-scoped Team status updates into one state card;
 - format tool bubbles;
 - suppress internal command/config update noise;
 - produce status/error messages for completed, cancelled, or failed turns.

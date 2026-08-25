@@ -1,11 +1,12 @@
 import type { ChannelMessage } from '@/bridge/channelPort'
-import type { ConversationEvent } from './semantic'
+import type { ConversationEvent, TeamMemberState } from './semantic'
 import { escapeHtml } from '@/utils/formatting'
 import { formatToolBubble } from '@/channel/telegram/toolBubble'
 
 export interface ProjectedMessage {
     message: ChannelMessage
     toolUseId?: string
+    stateKey?: string
     isToolEvent: boolean
     isTerminal: boolean
     semanticEvent?: ConversationEvent
@@ -26,11 +27,23 @@ interface ProjectedToolState {
     content?: Array<{ type: 'content'; contentType: string; text?: string } | { type: 'diff'; path?: string; oldText?: string; newText?: string } | { type: 'terminal'; terminalId?: string }>
 }
 
+interface ProjectedTeamState {
+    teamName: string
+    isAutoTeam?: boolean
+    members: Map<string, TeamMemberState>
+    ended: boolean
+    generation: number
+    lastRendered?: string
+}
+
+const MAX_TEAM_CARD_MEMBERS = 12
+
 export class ChannelProjector {
     private textBuffer = ''
     private toolStates = new Map<string, ProjectedToolState>()
     private normalToolGroupKey: string | null = null
     private normalToolGroupIndex = 0
+    private teamStates = new Map<string, ProjectedTeamState>()
 
     project(event: ConversationEvent, options: ChannelProjectorOptions = {}): ProjectedMessage[] {
         switch (event.kind) {
@@ -74,10 +87,16 @@ export class ChannelProjector {
                     },
                 ]
 
+            case 'session_metadata_update':
+                return []
+
+            case 'team_state_update':
+                return this.projectTeamState(event, options)
+
             case 'command_result':
-                // Suppress messages for available_commands_update and config_option_update
+                // Provider metadata updates mutate session state and do not belong in the transcript.
                 const commandLower = event.command.toLowerCase()
-                if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option')) {
+                if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option') || commandLower.includes('session_info')) {
                     return []
                 }
                 const commandText = formatCommandResult(event.command, event.output)
@@ -116,11 +135,16 @@ export class ChannelProjector {
         }
     }
 
-    reset(): void {
+    resetTurn(): void {
         this.textBuffer = ''
         this.toolStates.clear()
         this.normalToolGroupKey = null
         this.normalToolGroupIndex = 0
+    }
+
+    reset(): void {
+        this.resetTurn()
+        this.teamStates.clear()
     }
 
     private flushText(semanticEvent?: ConversationEvent): ProjectedMessage[] {
@@ -203,6 +227,66 @@ export class ChannelProjector {
             semanticEvent: event,
         })
         return messages
+    }
+
+    private projectTeamState(
+        event: Extract<ConversationEvent, { kind: 'team_state_update' }>,
+        options: ChannelProjectorOptions,
+    ): ProjectedMessage[] {
+        const state = this.mergeTeamState(event)
+        const verboseLevel = options.verboseLevel ?? 1
+        if (verboseLevel === 0) return []
+
+        const text = formatTeamState(state, verboseLevel)
+        if (text === state.lastRendered) return []
+        state.lastRendered = text
+
+        return [{
+            message: { text, format: 'html' },
+            stateKey: `team-state:${state.teamName}:${state.generation}`,
+            isToolEvent: false,
+            isTerminal: event.action === 'team_deleted',
+            semanticEvent: event,
+        }]
+    }
+
+    private mergeTeamState(event: Extract<ConversationEvent, { kind: 'team_state_update' }>): ProjectedTeamState {
+        const existing = this.teamStates.get(event.teamName)
+        const startsNewLifecycle = !existing
+            || (existing.ended && event.action !== 'team_deleted')
+        const state: ProjectedTeamState = startsNewLifecycle
+            ? {
+                teamName: event.teamName,
+                members: new Map(),
+                ended: false,
+                generation: (existing?.generation ?? 0) + 1,
+            }
+            : existing
+
+        if (event.isAutoTeam !== undefined) state.isAutoTeam = event.isAutoTeam
+        for (const member of event.members ?? []) this.mergeTeamMember(state, member)
+        state.ended = event.action === 'team_deleted'
+        this.teamStates.set(event.teamName, state)
+        return state
+    }
+
+    private mergeTeamMember(state: ProjectedTeamState, member: TeamMemberState): void {
+        const matchingEntry = Array.from(state.members.entries()).find(([, existing]) => {
+            return existing.sessionId && member.sessionId && existing.sessionId === member.sessionId
+                || existing.taskId && member.taskId && existing.taskId === member.taskId
+                || existing.name === member.name
+        })
+        const existing = matchingEntry?.[1]
+        const merged: TeamMemberState = {
+            ...existing,
+            ...member,
+            ...(existing?.tokenUsage || member.tokenUsage
+                ? { tokenUsage: { ...existing?.tokenUsage, ...member.tokenUsage } }
+                : {}),
+        }
+        const key = merged.sessionId ?? merged.taskId ?? merged.name
+        if (matchingEntry && matchingEntry[0] !== key) state.members.delete(matchingEntry[0])
+        state.members.set(key, merged)
     }
 
     private formatTurnFinishedStatus(event: Extract<ConversationEvent, { kind: 'turn_finished' }>): string {
@@ -300,6 +384,111 @@ export class ChannelProjector {
     }
 }
 
+function formatTeamState(state: ProjectedTeamState, verboseLevel: 1 | 2): string {
+    const autoLabel = state.isAutoTeam ? ' <i>(auto)</i>' : ''
+    const parts = [`<b>👥 Agent Team: ${escapeHtml(state.teamName)}</b>${autoLabel}`]
+    if (state.ended) {
+        parts.push('⏹️ Team ended')
+        const summary = formatTeamSummary(state.members)
+        if (summary) parts.push(summary)
+        return parts.join('\n')
+    }
+
+    const members = Array.from(state.members.values())
+    if (members.length === 0) {
+        parts.push('Team ready')
+        return parts.join('\n')
+    }
+
+    for (const member of members.slice(0, MAX_TEAM_CARD_MEMBERS)) {
+        parts.push(formatTeamMember(member, verboseLevel))
+    }
+    if (members.length > MAX_TEAM_CARD_MEMBERS) {
+        parts.push(`<i>… ${members.length - MAX_TEAM_CARD_MEMBERS} more members</i>`)
+    }
+
+    const summary = formatTeamSummary(state.members)
+    if (summary) parts.push(summary)
+    return parts.join('\n')
+}
+
+function formatTeamMember(member: TeamMemberState, verboseLevel: 1 | 2): string {
+    const status = member.status?.trim() || 'unknown'
+    const lines = [`${teamStatusIcon(status)} <b>${escapeHtml(member.name)}</b> — ${escapeHtml(status)}`]
+    const details: string[] = []
+    if (member.description) details.push(escapeHtml(truncateText(member.description, 120)))
+    if (member.tokenUsage?.lastContextWindow !== undefined) {
+        details.push(`${formatTokenCount(member.tokenUsage.lastContextWindow)} context`)
+    }
+    if (member.toolCallCount !== undefined) {
+        details.push(`${member.toolCallCount} tool${member.toolCallCount === 1 ? '' : 's'}`)
+    }
+    if (details.length > 0) lines.push(`  ${details.join(' · ')}`)
+
+    if (verboseLevel === 2) {
+        const diagnostics: string[] = []
+        if (member.tokenUsage?.inputTokens !== undefined || member.tokenUsage?.outputTokens !== undefined) {
+            diagnostics.push(`${member.tokenUsage?.inputTokens ?? 0} in / ${member.tokenUsage?.outputTokens ?? 0} out`)
+        }
+        if (member.taskId) diagnostics.push(`task <code>${escapeHtml(truncateText(member.taskId, 16))}</code>`)
+        if (member.sessionId) diagnostics.push(`session <code>${escapeHtml(truncateText(member.sessionId, 16))}</code>`)
+        if (diagnostics.length > 0) lines.push(`  ${diagnostics.join(' · ')}`)
+    }
+
+    return lines.join('\n')
+}
+
+function formatTeamSummary(members: Map<string, TeamMemberState>): string {
+    const counts = new Map<string, number>()
+    for (const member of members.values()) {
+        const status = member.status?.trim() || 'unknown'
+        counts.set(status, (counts.get(status) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+        .map(([status, count]) => `${count} ${escapeHtml(status)}`)
+        .join(' · ')
+}
+
+function teamStatusIcon(status: string): string {
+    switch (status.toLowerCase()) {
+        case 'running':
+        case 'in_progress':
+            return '🟡'
+        case 'completed':
+        case 'success':
+        case 'done':
+            return '✅'
+        case 'failed':
+        case 'error':
+            return '❌'
+        case 'blocked':
+            return '⚠️'
+        case 'pending':
+            return '🕓'
+        case 'stopped':
+        case 'cancelled':
+            return '⏹️'
+        case 'idle':
+            return '⚪'
+        default:
+            return '🔵'
+    }
+}
+
+function formatTokenCount(value: number): string {
+    if (Math.abs(value) < 1_000) return String(value)
+    if (Math.abs(value) < 1_000_000) return `${trimDecimal(value / 1_000)}k`
+    return `${trimDecimal(value / 1_000_000)}m`
+}
+
+function trimDecimal(value: number): string {
+    return value.toFixed(value >= 10 ? 0 : 1).replace(/\.0$/, '')
+}
+
+function truncateText(value: string, maxLength: number): string {
+    return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`
+}
+
 function isGenericToolName(toolName: string | undefined): boolean {
     return !toolName || toolName === 'tool' || toolName === 'tool_call'
 }
@@ -390,18 +579,6 @@ function formatCommandResult(command: string, output: unknown): string | null {
                 parts.push(`Cost: $${cost}`)
             }
             if (parts.length === 1) parts.push('Updated')
-            return parts.join('\n')
-        }
-    }
-
-    // session_info_update: show session info
-    if (commandLower.includes('session_info')) {
-        const info = asRecord(output)
-        if (info) {
-            const parts: string[] = ['<b>ℹ️ Session Info</b>']
-            if (info.model) parts.push(`Model: <code>${escapeHtml(String(info.model))}</code>`)
-            if (info.cwd) parts.push(`CWD: <code>${escapeHtml(String(info.cwd))}</code>`)
-            if (info.sessionId) parts.push(`Session: <code>${escapeHtml(String(info.sessionId))}</code>`)
             return parts.join('\n')
         }
     }

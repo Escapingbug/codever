@@ -131,6 +131,7 @@ export class SemanticSessionRuntime {
     private abortController: AbortController | null = null
     private currentHandle: AgentQueryHandle | null = null
     private toolMessageIds = new Map<string, string | number>()
+    private stateMessageIds = new Map<string, string | number>()
     private startingMessageId: string | number | null = null
     private lastToolName: string | null = null
     private turnStartedAt = 0
@@ -298,7 +299,7 @@ export class SemanticSessionRuntime {
         this.turnStartedAt = Date.now()
         this.lastToolName = null
         this.pendingCodeverSendFileCalls.clear()
-        this.projector.reset()
+        this.projector.resetTurn()
         this.toolMessageIds.clear()
         this.currentTurnDelivery = {
             hadAssistantText: false,
@@ -433,6 +434,7 @@ export class SemanticSessionRuntime {
         const abortController = this.abortController
         this.config.providerSessionId = null
         this.config.provider.clearSessionId?.()
+        this.resetSessionProjectionState()
         this.recordCommand('new', { reset: true })
 
         this.state = 'canceling'
@@ -489,7 +491,7 @@ export class SemanticSessionRuntime {
     }
 
     private async projectAndDeliver(event: ConversationEvent): Promise<void> {
-        if (event.kind !== 'assistant_text_delta') {
+        if (event.kind !== 'assistant_text_delta' && event.kind !== 'session_metadata_update' && event.kind !== 'team_state_update') {
             this.cancelScheduledTextFlush()
         }
 
@@ -529,7 +531,7 @@ export class SemanticSessionRuntime {
         for (const projected of messages) {
             const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
             this.captureTables(message)
-            await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
+            await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal, projected.stateKey)
         }
     }
 
@@ -561,7 +563,7 @@ export class SemanticSessionRuntime {
             for (const projected of projectedMessages) {
                 const message = this.withFileReferenceHints(projected.message, projected.semanticEvent)
                 this.captureTables(message)
-                await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal)
+                await this.deliver(message, projected.toolUseId, projected.isToolEvent, projected.isTerminal, projected.stateKey)
             }
         })
         return this.textFlushChain
@@ -585,7 +587,27 @@ export class SemanticSessionRuntime {
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 
-    private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false, isTerminal = false): Promise<void> {
+    private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false, isTerminal = false, stateKey?: string): Promise<void> {
+        if (stateKey && this.stateMessageIds.has(stateKey)) {
+            const delivery = this.outbox.edit(this.stateMessageIds.get(stateKey), message, true, {
+                lane: 'progressive-edit',
+                coalesceKey: stateKey,
+                terminal: isTerminal,
+            })
+            const record = isTerminal ? await waitForDeliveryRecord(delivery, TERMINAL_TOOL_EDIT_GRACE_MS) : undefined
+            if (record) this.noteDeliveryRecord(record)
+            if (record?.messageId !== undefined) {
+                this.stateMessageIds.set(stateKey, record.messageId)
+                return
+            }
+
+            void delivery.then((record) => {
+                this.noteDeliveryRecord(record)
+                if (record.messageId !== undefined) this.stateMessageIds.set(stateKey, record.messageId)
+            })
+            return
+        }
+
         if (isToolEvent && toolUseId && this.toolMessageIds.has(toolUseId)) {
             const delivery = this.outbox.edit(this.toolMessageIds.get(toolUseId), message, isTerminal, {
                 lane: 'progressive-edit',
@@ -613,6 +635,16 @@ export class SemanticSessionRuntime {
         if (isToolEvent && toolUseId && record.messageId !== undefined) {
             this.toolMessageIds.set(toolUseId, record.messageId)
         }
+        if (stateKey && record.messageId !== undefined) {
+            this.stateMessageIds.set(stateKey, record.messageId)
+        }
+    }
+
+    private resetSessionProjectionState(): void {
+        this.adapter.reset?.()
+        this.projector.reset()
+        this.toolMessageIds.clear()
+        this.stateMessageIds.clear()
     }
 
     private async send(message: ChannelMessage, options: DeliveryOptions = {}): Promise<DeliveryRecord> {
@@ -712,6 +744,9 @@ export class SemanticSessionRuntime {
                 this.config.providerSessionId = null
                 this.config.model = null
                 this.adapter = createProviderSemanticAdapter(getProviderType(providerName) ?? providerName)
+                this.projector.reset()
+                this.toolMessageIds.clear()
+                this.stateMessageIds.clear()
                 this.config.onProviderChanged?.(providerName, provider)
                 this.config.onModelChanged?.(null)
                 this.recordCommand('provider', { providerName: this.config.providerName, model: this.config.model })
@@ -719,6 +754,7 @@ export class SemanticSessionRuntime {
             }
             case 'resume':
                 this.config.providerSessionId = args || null
+                this.resetSessionProjectionState()
                 this.recordCommand('resume', { sessionId: this.config.providerSessionId })
                 return
             case 'cwd':
@@ -734,6 +770,7 @@ export class SemanticSessionRuntime {
             case 'new':
                 this.config.providerSessionId = null
                 this.config.provider.clearSessionId?.()
+                this.resetSessionProjectionState()
                 this.recordCommand('new', { reset: true })
                 return
             case 'timeout_continue':

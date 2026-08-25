@@ -98,6 +98,23 @@ export interface DecisionOption {
     style?: 'default' | 'primary' | 'danger'
 }
 
+export interface TeamMemberTokenUsage {
+    inputTokens?: number
+    outputTokens?: number
+    lastContextWindow?: number
+}
+
+export interface TeamMemberState {
+    name: string
+    color?: string
+    description?: string
+    status?: string
+    taskId?: string
+    sessionId?: string
+    tokenUsage?: TeamMemberTokenUsage
+    toolCallCount?: number
+}
+
 export type ConversationEvent =
     | {
         kind: 'turn_started'
@@ -139,6 +156,21 @@ export type ConversationEvent =
         meta: SemanticMeta
         mode: string
         options?: DecisionOption[]
+    }
+    | {
+        kind: 'session_metadata_update'
+        meta: SemanticMeta
+        title?: string | null
+        updatedAt?: string | null
+        providerMeta?: Record<string, unknown> | null
+    }
+    | {
+        kind: 'team_state_update'
+        meta: SemanticMeta
+        action: 'team_created' | 'member_status_change' | 'team_deleted'
+        teamName: string
+        isAutoTeam?: boolean
+        members?: TeamMemberState[]
     }
     | {
         kind: 'command_result'
