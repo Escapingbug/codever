@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DefaultProviderSemanticAdapter } from '@/runtime/providerAdapter'
 import type { AgentEvent } from '@/providers/types'
 import { mapSessionUpdate } from '@/providers/acp/eventAdapter'
+import { ChannelProjector } from '@/runtime/channelProjector'
 
 describe('DefaultProviderSemanticAdapter', () => {
     it('maps provider text into assistant text deltas', () => {
@@ -125,5 +126,50 @@ describe('DefaultProviderSemanticAdapter', () => {
 
         expect(first[0].meta.id).toBe('t1:result')
         expect(second[0].meta.id).toBe('t1:result')
+    })
+})
+
+describe('ChannelProjector durable tool snapshots', () => {
+    it('emits the cumulative tool group once at the turn boundary', () => {
+        const projector = new ChannelProjector()
+        const meta = {
+            id: 'tool-1',
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            provider: 'test',
+            seq: 1,
+            timestamp: 1,
+            sourcePhase: 'live' as const,
+        }
+        projector.project({
+            kind: 'tool',
+            meta,
+            phase: 'completed',
+            toolCallId: 'tool-1',
+            toolName: 'Bash',
+            category: 'execute',
+            input: { command: 'pnpm test' },
+            output: 'complete output',
+        }, { preserveNormalToolGroup: true })
+
+        const terminal = projector.project({
+            kind: 'turn_finished',
+            meta: { ...meta, id: 'turn-1:result', seq: 2, timestamp: 2 },
+            status: 'success',
+        }, { preserveNormalToolGroup: true })
+
+        expect(terminal).toHaveLength(1)
+        expect(terminal[0]).toMatchObject({
+            toolUseId: 'normal-tool-group:1',
+            isToolEvent: true,
+            isTerminal: true,
+            isFinalToolSnapshot: true,
+            message: {
+                presentation: {
+                    kind: 'tool_group',
+                    tools: [{ id: 'tool-1', result: 'complete output' }],
+                },
+            },
+        })
     })
 })

@@ -14,6 +14,8 @@ export interface ProjectedMessage {
     /** This message contains a flushed fragment of the current assistant turn. */
     isAssistantText?: boolean
     isTerminal: boolean
+    /** Turn-boundary tool snapshot; durable chat transports may include deferred full detail. */
+    isFinalToolSnapshot?: boolean
     semanticEvent?: ConversationEvent
 }
 
@@ -270,8 +272,6 @@ export class ChannelProjector {
         const dangling = [...this.toolStates.entries()].filter(([, state]) =>
             state.phase === 'started' || state.phase === 'updated'
         )
-        if (dangling.length === 0) return []
-
         const phase = event.status === 'success' ? 'completed' : 'failed'
         for (const [toolCallId, state] of dangling) {
             this.toolStates.set(toolCallId, {
@@ -304,6 +304,7 @@ export class ChannelProjector {
                 toolUseId: groupKey,
                 isToolEvent: true,
                 isTerminal: true,
+                isFinalToolSnapshot: true,
                 semanticEvent: event,
             }]
         }

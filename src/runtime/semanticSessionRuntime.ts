@@ -787,6 +787,7 @@ export class SemanticSessionRuntime {
                 projected.isToolEvent,
                 projected.isTerminal,
                 projected.isAssistantText,
+                projected.isFinalToolSnapshot,
             )
         }
     }
@@ -841,6 +842,7 @@ export class SemanticSessionRuntime {
                     projected.isToolEvent,
                     projected.isTerminal,
                     projected.isAssistantText,
+                    projected.isFinalToolSnapshot,
                 )
             }
         })
@@ -871,6 +873,7 @@ export class SemanticSessionRuntime {
         isToolEvent = false,
         isTerminal = false,
         isAssistantText = false,
+        isFinalToolSnapshot = false,
     ): Promise<void> {
         if (isAssistantText && this.config.channelPort.coalesceAssistantText) {
             await this.deliverCoalescedAssistantText(message)
@@ -882,6 +885,7 @@ export class SemanticSessionRuntime {
                 lane: 'progressive-edit',
                 coalesceKey: toolUseId,
                 terminal: isTerminal,
+                finalSnapshot: isFinalToolSnapshot,
             })
             const record = isTerminal ? await waitForDeliveryRecord(delivery, TERMINAL_TOOL_EDIT_GRACE_MS) : undefined
             if (record) this.noteDeliveryRecord(record)

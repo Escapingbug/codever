@@ -311,7 +311,32 @@ describe('MatrixCvp3Port', () => {
       replyMarkup: { idempotencyKey: 'tool-output-message-1' },
     })
     await waitFor(() => transport.delivered.length > completeOutputStart)
-    const completeOutputDelivery = transport.delivered[completeOutputStart]!
+    const liveOutputDelivery = transport.delivered[completeOutputStart]!
+    const liveOutputExtension = liveOutputDelivery
+      .content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const liveOutputEnvelope = await openCvp3Envelope(liveOutputExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (liveOutputEnvelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(liveOutputEnvelope.plaintext.value.event.payload).toMatchObject({
+      type: 'assistant.message',
+      body: expect.stringContaining('pnpm test'),
+      ui: {
+        kind: 'tool_group',
+        tools: [expect.not.objectContaining({ result: expect.anything() })],
+      },
+    })
+
+    await port.edit('tool-output-message-1', projectedOutputTool!.message, {
+      progressive: true,
+      terminal: true,
+      finalSnapshot: true,
+    })
+    await waitFor(() => transport.delivered.length > completeOutputStart + 1)
+    const completeOutputDelivery = transport.delivered.at(-1)!
     const completeOutputExtension = completeOutputDelivery
       .content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
     const completeOutputEnvelope = await openCvp3Envelope(completeOutputExtension.envelope, {
@@ -392,6 +417,12 @@ describe('MatrixCvp3Port', () => {
       ...projectedLargeOutputTool!.message,
       replyMarkup: { idempotencyKey: 'large-tool-output-message' },
     })
+    await port.edit('large-tool-output-message', projectedLargeOutputTool!.message, {
+      progressive: true,
+      terminal: true,
+      finalSnapshot: true,
+    })
+    await waitFor(() => transport.delivered.length > largeOutputStart + 1)
     const largeOutputPayloads = await Promise.all(
       transport.delivered.slice(largeOutputStart).map(async delivery => {
         const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
@@ -454,7 +485,7 @@ describe('MatrixCvp3Port', () => {
       {
         type: 'assistant.message',
         messageId: 'growing-agent-message',
-        messageVersion: 1,
+        messageVersion: 2,
         partIndex: 1,
         partCount: 2,
         body: 'Markdown tail',

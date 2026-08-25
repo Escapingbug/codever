@@ -104,6 +104,8 @@ export interface ChannelEditContext {
     terminal?: boolean
     /** This edit is part of a coalesced progressive update stream. */
     progressive?: boolean
+    /** This is the turn-boundary snapshot; transports may include deferred full detail. */
+    finalSnapshot?: boolean
 }
 
 /**

@@ -88,14 +88,14 @@ export class MatrixCvp3Port implements ChannelPort {
     const messageId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
     const presentation = message.presentation ?? messageOptions.ui
     const attachments = await this.uploadAttachments(messageId, message.attachments)
-    const parts = splitMessage(withToolTranscript(message, presentation))
-    const transportPresentation = parts.length > 1
+    const liveToolGroup = isToolGroupPresentation(presentation)
+    const parts = splitMessage(message)
+    const transportPresentation = liveToolGroup
       ? compactToolPresentation(presentation)
       : presentation
+    const version = this.nextMessageVersion(messageId)
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
-      const versionKey = partVersionKey(messageId, index)
-      const version = this.nextMessageVersion(versionKey)
       const queued = await this.sendAssistantEvent({
         eventId: eventId('assistant', logicalPartId, version),
         messageId,
@@ -130,16 +130,19 @@ export class MatrixCvp3Port implements ChannelPort {
     const messageOptions = readMessageOptions(message.replyMarkup)
     const presentation = message.presentation ?? messageOptions.ui
     const attachments = await this.uploadAttachments(messageId, message.attachments)
-    const parts = splitMessage(withToolTranscript(message, presentation))
-    const transportPresentation = parts.length > 1
+    const finalToolSnapshot = context.finalSnapshot === true
+      && isToolGroupPresentation(presentation)
+    const parts = splitMessage(
+      finalToolSnapshot ? withToolTranscript(message, presentation) : message,
+    )
+    const transportPresentation = isToolGroupPresentation(presentation)
+      && (!finalToolSnapshot || parts.length > 1)
       ? compactToolPresentation(presentation)
       : presentation
-    if (parts.length > 1 && context.progressive && !context.terminal) return
+    const version = this.nextMessageVersion(messageId)
 
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
-      const versionKey = partVersionKey(messageId, index)
-      const version = this.nextMessageVersion(versionKey)
       const physicalTarget = this.physicalEventIds.get(logicalPartId)
         ?? (index === 0 ? this.physicalEventIds.get(messageId) : undefined)
       const queued = await this.sendAssistantEvent({
@@ -613,10 +616,6 @@ function threadRelation(rootEventId: string): Record<string, unknown> {
 
 function partId(messageId: string, index: number, count: number): string {
   return count === 1 ? messageId : `${messageId}.part.${index}`
-}
-
-function partVersionKey(messageId: string, index: number): string {
-  return `${messageId}.part.${index}`
 }
 
 function eventId(kind: string, logicalId: string, version: number): string {

@@ -38,7 +38,12 @@ import type {
   MatrixTransport,
 } from '@/channel/matrix'
 import { FileTimelineKeyStore, type TimelineKeyRing } from './fileTimelineKeyStore'
-import { FileMatrixCvp3Outbox, type MatrixCvp3Delivery } from './fileMatrixCvp3Outbox'
+import {
+  FileMatrixCvp3Outbox,
+  type MatrixCvp3Delivery,
+  type MatrixCvp3DeliveryMetadata,
+  type MatrixCvp3EventDelivery,
+} from './fileMatrixCvp3Outbox'
 import { gatewayProjectIdentity } from './project'
 
 export type Cvp3TrustedDeviceProvider = () => Promise<
@@ -56,6 +61,14 @@ export interface OpenedCvp3Command {
 export interface EnqueuedCvp3Event {
   deliveryId: string
   confirmation: Promise<MatrixSendEventResult>
+}
+
+interface MatrixDeliveryJob {
+  delivery: MatrixCvp3Delivery
+  transport: MatrixTransport
+  promise: Promise<MatrixSendEventResult>
+  resolve(result: MatrixSendEventResult): void
+  reject(error: Error): void
 }
 
 export const MAX_CVP3_MATRIX_TIMELINE_CONTENT_BYTES = 40 * 1024
@@ -84,12 +97,13 @@ export class GatewayCvp3ContentLayer {
   private readonly retryAttempts = new Map<string, number>()
   private readonly transports = new Map<string, MatrixTransport>()
   private readonly inFlightDeliveries = new Map<string, Promise<MatrixSendEventResult>>()
+  private readonly deliveryQueue = new Map<string, MatrixDeliveryJob>()
   private readonly deliveryConfirmations = new Map<string, {
     promise: Promise<MatrixSendEventResult>
     resolve: (result: MatrixSendEventResult) => void
     reject: (error: Error) => void
   }>()
-  private deliveryChain: Promise<unknown> = Promise.resolve()
+  private deliveryPump: Promise<void> | null = null
 
   constructor(
     private readonly workspaceId: string,
@@ -137,6 +151,7 @@ export class GatewayCvp3ContentLayer {
       room.roomId,
       devices.map(device => device.deviceId),
     )
+    await this.classifyPendingEvents(room, ring)
     await Promise.all(devices.map(device =>
       this.publishKeyGrant(room, ring, device, transport)
     ))
@@ -224,7 +239,7 @@ export class GatewayCvp3ContentLayer {
     // deliver() owns a rejection handler that schedules durable retry. The
     // stable confirmation intentionally remains pending across failed attempts
     // and resolves when any retry commits the Matrix event.
-    void this.deliver(delivery, transport)
+    void this.deliver(delivery, transport).catch(() => undefined)
     return {
       deliveryId: delivery.deliveryId,
       confirmation,
@@ -300,8 +315,13 @@ export class GatewayCvp3ContentLayer {
       transactionId: options.transactionId ?? matrixTransactionId(event.eventId),
       content,
       createdAt: Date.now(),
+      ...eventDeliveryMetadata(event),
     })
-    await this.outbox.stage(delivery)
+    const superseded = await this.outbox.stage(delivery)
+    this.rejectSupersededConfirmations(superseded)
+    if (superseded.includes(delivery.deliveryId)) {
+      throw supersededDeliveryError(delivery.deliveryId)
+    }
     return (this.outbox.delivery(delivery.deliveryId) ?? delivery) as Extract<
       MatrixCvp3Delivery,
       { kind: 'event' }
@@ -338,7 +358,7 @@ export class GatewayCvp3ContentLayer {
       content: pointer,
       createdAt: Date.now(),
     })
-    await this.outbox.stage(delivery)
+    this.rejectSupersededConfirmations(await this.outbox.stage(delivery))
     return this.deliver(this.outbox.delivery(delivery.deliveryId) ?? delivery, transport)
   }
 
@@ -372,7 +392,7 @@ export class GatewayCvp3ContentLayer {
       content: pointer,
       createdAt: Date.now(),
     })
-    await this.outbox.stage(delivery)
+    this.rejectSupersededConfirmations(await this.outbox.stage(delivery))
     return this.deliver(this.outbox.delivery(delivery.deliveryId) ?? delivery, transport)
   }
 
@@ -385,16 +405,82 @@ export class GatewayCvp3ContentLayer {
         )
         continue
       }
+      void this.deliver(delivery, transport).catch(() => undefined)
+    }
+  }
+
+  private async classifyPendingEvents(
+    room: MatrixGatewayRoomConfig,
+    ring: TimelineKeyRing,
+  ): Promise<void> {
+    const recovered: Array<{
+      delivery: MatrixCvp3EventDelivery
+      event: Cvp3Event
+      metadata: MatrixCvp3DeliveryMetadata
+    }> = []
+    for (const delivery of this.outbox.pending(room.roomId)) {
+      if (delivery.kind !== 'event') continue
       try {
-        await this.deliver(delivery, transport)
+        const extension = asRecord(delivery.content[CODEVER_MATRIX_EXTENSION])
+        const envelope = cvp3ContentEnvelopeSchema.parse(extension?.envelope)
+        const epoch = ring.epochs.find(candidate => candidate.epochId === envelope.keyId)
+        if (!epoch) continue
+        const opened = await openCvp3Envelope(envelope, {
+          projectKey: epoch.key,
+          roomId: room.roomId,
+          projectId: this.projectId(room),
+          keyId: epoch.epochId,
+        })
+        if (opened.plaintext.kind !== 'signed_event') continue
+        recovered.push({
+          delivery,
+          event: opened.plaintext.value.event,
+          metadata: eventDeliveryMetadata(opened.plaintext.value.event),
+        })
       } catch (error) {
-        if (isPermanentMatrixDeliveryError(error)) {
-          await this.supersedePermanentDelivery(delivery, error)
-          continue
-        }
-        this.scheduleRetry(roomId, transport)
-        return
+        this.onLog?.(
+          `[cvp3/matrix] could not classify pending delivery ${delivery.deliveryId}: `
+          + formatError(error),
+        )
       }
+    }
+    // Older builds assigned multipart versions per part. Reconstruct one
+    // monotonic snapshot version from the durable staging order before
+    // converging that backlog, otherwise the tail parts of the newest snapshot
+    // could be mistaken for obsolete version-1 fragments.
+    const legacyGroups = new Map<string, typeof recovered>()
+    for (const item of recovered) {
+      if (item.delivery.supersession || item.event.payload.type !== 'assistant.message') continue
+      const key = item.metadata.supersession?.key
+      if (!key) continue
+      const group = legacyGroups.get(key) ?? []
+      group.push(item)
+      legacyGroups.set(key, group)
+    }
+    for (const group of legacyGroups.values()) {
+      group.sort((left, right) => left.delivery.createdAt - right.delivery.createdAt)
+      let snapshotVersion = 0
+      for (const item of group) {
+        const payload = item.event.payload
+        if (payload.type !== 'assistant.message') continue
+        if (snapshotVersion === 0 || payload.partIndex === undefined || payload.partIndex === 0) {
+          snapshotVersion += 1
+        }
+        if (item.metadata.supersession) {
+          item.metadata.supersession.version = snapshotVersion
+        }
+      }
+    }
+    const classifications = recovered.map(item => ({
+      deliveryId: item.delivery.deliveryId,
+      metadata: item.metadata,
+    }))
+    const superseded = await this.outbox.classifyMany(classifications)
+    this.rejectSupersededConfirmations(superseded)
+    if (superseded.length > 0) {
+      this.onLog?.(
+        `[cvp3/matrix] converged ${superseded.length} obsolete pending message versions`,
+      )
     }
   }
 
@@ -464,7 +550,7 @@ export class GatewayCvp3ContentLayer {
       content,
       createdAt: Date.now(),
     })
-    await this.outbox.stage(delivery)
+    this.rejectSupersededConfirmations(await this.outbox.stage(delivery))
     await this.deliver(this.outbox.delivery(delivery.deliveryId) ?? delivery, transport)
   }
 
@@ -474,56 +560,109 @@ export class GatewayCvp3ContentLayer {
   ): Promise<MatrixSendEventResult> {
     const delivered = this.outbox.deliveredEventId(delivery.deliveryId)
     if (delivered) return Promise.resolve({ eventId: delivered })
+    if (!this.outbox.isPending(delivery.deliveryId)) {
+      return Promise.reject(supersededDeliveryError(delivery.deliveryId))
+    }
     const inFlight = this.inFlightDeliveries.get(delivery.deliveryId)
     if (inFlight) return inFlight
-    const operation = this.deliveryChain.then(async () => {
-      let result: MatrixSendEventResult
-      if (delivery.kind === 'event') {
-        if (!transport.sendApplicationTimelineEvent) {
-          throw new Error('Matrix transport cannot publish CVP/3 timeline events')
-        }
-        result = await transport.sendApplicationTimelineEvent({
-          roomId: delivery.roomId,
-          eventType: 'm.room.message',
-          content: delivery.content as MatrixRoomMessageContent,
-          transactionId: delivery.transactionId,
-        })
-      } else {
-        if (!transport.setApplicationRoomState) {
-          throw new Error('Matrix transport cannot publish CVP/3 state')
-        }
-        result = await transport.setApplicationRoomState({
-          roomId: delivery.roomId,
-          eventType: delivery.eventType,
-          stateKey: delivery.stateKey,
-          content: delivery.content,
-        })
-      }
-      await this.outbox.markDelivered(delivery.deliveryId, result.eventId)
-      this.resolveConfirmation(delivery.deliveryId, result)
-      this.retryAttempts.delete(delivery.roomId)
-      return result
+    let resolve!: (result: MatrixSendEventResult) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<MatrixSendEventResult>((done, fail) => {
+      resolve = done
+      reject = fail
     })
-    this.deliveryChain = operation.then(() => undefined, () => undefined)
-    this.inFlightDeliveries.set(delivery.deliveryId, operation)
-    void operation.then(
-      () => {
-        if (this.inFlightDeliveries.get(delivery.deliveryId) === operation) {
-          this.inFlightDeliveries.delete(delivery.deliveryId)
-        }
-      },
-      error => {
-        if (this.inFlightDeliveries.get(delivery.deliveryId) === operation) {
-          this.inFlightDeliveries.delete(delivery.deliveryId)
-        }
+    const job = { delivery, transport, promise, resolve, reject }
+    this.deliveryQueue.set(delivery.deliveryId, job)
+    this.inFlightDeliveries.set(delivery.deliveryId, promise)
+    this.ensureDeliveryPump()
+    return promise
+  }
+
+  private ensureDeliveryPump(): void {
+    if (this.deliveryPump) return
+    this.deliveryPump = this.runDeliveryPump()
+      .catch(error => {
+        const normalized = error instanceof Error ? error : new Error(formatError(error))
+        this.onLog?.(`[cvp3/matrix] delivery scheduler failed: ${formatError(normalized)}`)
+        this.pauseQueuedAttempts(normalized)
+      })
+      .finally(() => {
+        this.deliveryPump = null
+        if (this.deliveryQueue.size > 0) this.ensureDeliveryPump()
+      })
+  }
+
+  private async runDeliveryPump(): Promise<void> {
+    while (this.deliveryQueue.size > 0) {
+      const job = [...this.deliveryQueue.values()].sort(compareDeliveryJobs)[0]!
+      this.deliveryQueue.delete(job.delivery.deliveryId)
+      if (!this.outbox.isPending(job.delivery.deliveryId)) {
+        this.finishDeliveryJob(job, supersededDeliveryError(job.delivery.deliveryId))
+        continue
+      }
+      try {
+        const result = await this.sendDelivery(job.delivery, job.transport)
+        await this.outbox.markDelivered(job.delivery.deliveryId, result.eventId)
+        this.resolveConfirmation(job.delivery.deliveryId, result)
+        this.retryAttempts.delete(job.delivery.roomId)
+        this.finishDeliveryJob(job, undefined, result)
+      } catch (error) {
+        const normalized = error instanceof Error ? error : new Error(formatError(error))
+        this.finishDeliveryJob(job, normalized)
         if (isPermanentMatrixDeliveryError(error)) {
-          void this.supersedePermanentDelivery(delivery, error)
-        } else {
-          this.scheduleRetry(delivery.roomId, transport)
+          await this.supersedePermanentDelivery(job.delivery, error)
+          continue
         }
-      },
-    )
-    return operation
+        this.pauseQueuedAttempts(normalized)
+        this.scheduleRetry(job.delivery.roomId, job.transport)
+        return
+      }
+    }
+  }
+
+  private async sendDelivery(
+    delivery: MatrixCvp3Delivery,
+    transport: MatrixTransport,
+  ): Promise<MatrixSendEventResult> {
+    if (delivery.kind === 'event') {
+      if (!transport.sendApplicationTimelineEvent) {
+        throw new Error('Matrix transport cannot publish CVP/3 timeline events')
+      }
+      return transport.sendApplicationTimelineEvent({
+        roomId: delivery.roomId,
+        eventType: 'm.room.message',
+        content: delivery.content as MatrixRoomMessageContent,
+        transactionId: delivery.transactionId,
+      })
+    }
+    if (!transport.setApplicationRoomState) {
+      throw new Error('Matrix transport cannot publish CVP/3 state')
+    }
+    return transport.setApplicationRoomState({
+      roomId: delivery.roomId,
+      eventType: delivery.eventType,
+      stateKey: delivery.stateKey,
+      content: delivery.content,
+    })
+  }
+
+  private finishDeliveryJob(
+    job: MatrixDeliveryJob,
+    error?: Error,
+    result?: MatrixSendEventResult,
+  ): void {
+    if (this.inFlightDeliveries.get(job.delivery.deliveryId) === job.promise) {
+      this.inFlightDeliveries.delete(job.delivery.deliveryId)
+    }
+    if (error) job.reject(error)
+    else job.resolve(result!)
+  }
+
+  private pauseQueuedAttempts(error: Error): void {
+    for (const job of this.deliveryQueue.values()) {
+      this.finishDeliveryJob(job, error)
+    }
+    this.deliveryQueue.clear()
   }
 
   private confirmationFor(deliveryId: string): Promise<MatrixSendEventResult> {
@@ -553,6 +692,17 @@ export class GatewayCvp3ContentLayer {
     if (!confirmation) return
     this.deliveryConfirmations.delete(deliveryId)
     confirmation.reject(error)
+  }
+
+  private rejectSupersededConfirmations(deliveryIds: readonly string[]): void {
+    for (const deliveryId of deliveryIds) {
+      const error = supersededDeliveryError(deliveryId)
+      this.rejectConfirmation(deliveryId, error)
+      const queued = this.deliveryQueue.get(deliveryId)
+      if (!queued) continue
+      this.deliveryQueue.delete(deliveryId)
+      this.finishDeliveryJob(queued, error)
+    }
   }
 
   private async supersedePermanentDelivery(
@@ -627,6 +777,101 @@ function matrixTransactionId(logicalEventId: string): string {
   return `codever.v3.${createHash('sha256')
     .update(logicalEventId)
     .digest('hex')}`
+}
+
+function eventDeliveryMetadata(event: Cvp3Event): MatrixCvp3DeliveryMetadata {
+  const payload = event.payload
+  if (payload.type === 'assistant.message') {
+    const ui = asRecord(payload.ui)
+    return {
+      priority: ui?.kind === 'tool_group' ? 'bulk' : 'normal',
+      ...(event.sessionId
+        ? {
+            supersession: {
+              key: `assistant:${event.sessionId}:${payload.messageId}`,
+              version: payload.messageVersion,
+            },
+          }
+        : {}),
+    }
+  }
+  if (payload.type === 'tool.activity') {
+    return {
+      priority: 'bulk',
+      ...(event.sessionId
+        ? {
+            supersession: {
+              key: `tool:${event.sessionId}:${payload.toolCallId}`,
+              version: payload.toolVersion,
+            },
+          }
+        : {}),
+    }
+  }
+  if (payload.type === 'workspace.snapshot') {
+    return {
+      priority: 'control',
+      supersession: {
+        key: `workspace:${event.workspaceId}`,
+        version: payload.snapshotVersion,
+      },
+    }
+  }
+  if (payload.type === 'project.snapshot') {
+    return {
+      priority: 'control',
+      ...(event.projectId
+        ? {
+            supersession: {
+              key: `project:${event.projectId}`,
+              version: payload.snapshotVersion,
+            },
+          }
+        : {}),
+    }
+  }
+  if (
+    payload.type === 'session.ready'
+    || payload.type === 'session.updated'
+    || payload.type === 'session.lifecycle'
+  ) {
+    return {
+      priority: 'urgent',
+      ...(event.sessionId
+        ? {
+            supersession: {
+              key: `session:${event.sessionId}`,
+              version: payload.projection.stateVersion,
+            },
+          }
+        : {}),
+    }
+  }
+  if (payload.type === 'turn.queued' || payload.type === 'turn.started') {
+    return { priority: 'control' }
+  }
+  // Command results, failures and decision requests are directly actionable.
+  // They must be able to overtake replay/history traffic under homeserver
+  // backpressure so the client can leave an obsolete working state promptly.
+  return { priority: 'urgent' }
+}
+
+function compareDeliveryJobs(left: MatrixDeliveryJob, right: MatrixDeliveryJob): number {
+  return deliveryPriority(left.delivery) - deliveryPriority(right.delivery)
+    || left.delivery.createdAt - right.delivery.createdAt
+}
+
+function deliveryPriority(delivery: MatrixCvp3Delivery): number {
+  if (delivery.kind === 'state' || delivery.priority === 'urgent') return 0
+  if (delivery.priority === 'control') return 1
+  if (delivery.priority === 'bulk') return 3
+  return 2
+}
+
+function supersededDeliveryError(deliveryId: string): Error {
+  const error = new Error(`Matrix delivery ${deliveryId} was superseded by a newer logical version`)
+  error.name = 'MatrixCvp3DeliverySupersededError'
+  return error
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

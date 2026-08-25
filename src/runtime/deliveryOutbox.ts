@@ -20,6 +20,7 @@ export interface DeliveryRecord {
     lane?: DeliveryLane
     coalesceKey?: string
     terminal?: boolean
+    finalSnapshot?: boolean
     retryOf?: string
     resolvedBy?: string
     resolvedAt?: number
@@ -43,6 +44,7 @@ export interface DeliveryOptions {
     lane?: DeliveryLane
     coalesceKey?: string
     terminal?: boolean
+    finalSnapshot?: boolean
     retryOf?: string
 }
 
@@ -152,6 +154,7 @@ export class DeliveryOutbox {
                 await this.withRateLimitRetry(() => this.config.channelPort.edit!(messageId, message, {
                     terminal: options.terminal === true,
                     progressive: false,
+                    finalSnapshot: options.finalSnapshot === true,
                 }))
                 record.status = 'edited'
             } catch (error) {
@@ -190,6 +193,7 @@ export class DeliveryOutbox {
                 await this.withRateLimitRetry(() => edit(messageId, message, {
                     terminal: options.terminal === true,
                     progressive: false,
+                    finalSnapshot: options.finalSnapshot === true,
                 }))
                 record.status = 'edited'
             } catch (error) {
@@ -253,6 +257,7 @@ export class DeliveryOutbox {
             ...(options.lane ? { lane: options.lane } : {}),
             ...(options.coalesceKey ? { coalesceKey: options.coalesceKey } : {}),
             ...(options.terminal !== undefined ? { terminal: options.terminal } : {}),
+            ...(options.finalSnapshot !== undefined ? { finalSnapshot: options.finalSnapshot } : {}),
             ...(options.retryOf ? { retryOf: options.retryOf } : {}),
         }
         this.records.push(record)
@@ -379,6 +384,7 @@ export class DeliveryOutbox {
             await withTimeout(this.config.channelPort.edit!(task.messageId, task.message, {
                 terminal: task.record.terminal === true,
                 progressive: true,
+                finalSnapshot: task.record.finalSnapshot === true,
             }), this.config.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS)
             task.record.status = 'edited'
         } catch (error) {

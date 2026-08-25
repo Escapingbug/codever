@@ -99,4 +99,85 @@ describe('FileMatrixCvp3Outbox', () => {
     expect(recovered.pending()).toEqual([])
     expect(await readFile(path, 'utf8')).toContain('"reason":"content_too_large"')
   })
+
+  it('keeps only the newest pending multipart snapshot and prioritizes actionable control', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'codever-v3-outbox-')), 'outbox.jsonl')
+    const outbox = new FileMatrixCvp3Outbox(path)
+    await outbox.initialize()
+    const event = (
+      transactionId: string,
+      version: number,
+      part: number,
+      priority: 'urgent' | 'control' | 'bulk' = 'bulk',
+    ) => outbox.createEvent({
+      roomId: '!project:example.org',
+      transactionId,
+      content: { body: `${version}:${part}` },
+      createdAt: version * 10 + part,
+      priority,
+      ...(priority === 'bulk'
+        ? { supersession: { key: 'assistant:session-1:tool-group-1', version } }
+        : {}),
+    })
+    const old = [event('old-0', 1, 0), event('old-1', 1, 1)]
+    const latest = [event('latest-0', 2, 0), event('latest-1', 2, 1)]
+    const control = event('turn-started', 3, 0, 'control')
+    const urgent = event('turn-completed', 4, 0, 'urgent')
+    for (const delivery of [...old, ...latest, control, urgent]) await outbox.stage(delivery)
+    const lateObsolete = event('late-obsolete', 1, 2)
+    expect(await outbox.stage(lateObsolete)).toContain(lateObsolete.deliveryId)
+
+    expect(outbox.pending().map(delivery => delivery.deliveryId)).toEqual([
+      urgent.deliveryId,
+      control.deliveryId,
+      latest[0]!.deliveryId,
+      latest[1]!.deliveryId,
+    ])
+    expect(await readFile(path, 'utf8')).toContain('newer_logical_version')
+
+    const recovered = new FileMatrixCvp3Outbox(path)
+    await recovered.initialize()
+    expect(recovered.pending().map(delivery => delivery.deliveryId)).toEqual([
+      urgent.deliveryId,
+      control.deliveryId,
+      latest[0]!.deliveryId,
+      latest[1]!.deliveryId,
+    ])
+  })
+
+  it('classifies and converges legacy pending versions in one durable migration', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'codever-v3-outbox-')), 'outbox.jsonl')
+    const outbox = new FileMatrixCvp3Outbox(path)
+    await outbox.initialize()
+    const legacy = [1, 2, 3, 4].map(createdAt => outbox.createEvent({
+      roomId: '!project:example.org',
+      transactionId: `legacy-${createdAt}`,
+      content: { body: `legacy-${createdAt}` },
+      createdAt,
+    }))
+    for (const delivery of legacy) await outbox.stage(delivery)
+
+    const superseded = await outbox.classifyMany(legacy.map((delivery, index) => ({
+      deliveryId: delivery.deliveryId,
+      metadata: {
+        priority: 'bulk' as const,
+        supersession: {
+          key: 'assistant:session-1:tool-group-1',
+          version: index < 2 ? 1 : 2,
+        },
+      },
+    })), 10)
+    expect(superseded).toHaveLength(2)
+    expect(outbox.pending().map(delivery => delivery.deliveryId)).toEqual([
+      legacy[2]!.deliveryId,
+      legacy[3]!.deliveryId,
+    ])
+
+    const recovered = new FileMatrixCvp3Outbox(path)
+    await recovered.initialize()
+    expect(recovered.pending()).toMatchObject([
+      { deliveryId: legacy[2]!.deliveryId, priority: 'bulk', supersession: { version: 2 } },
+      { deliveryId: legacy[3]!.deliveryId, priority: 'bulk', supersession: { version: 2 } },
+    ])
+  })
 })

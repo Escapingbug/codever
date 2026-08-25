@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -280,6 +280,274 @@ describe('GatewayCvp3ContentLayer', () => {
       eventId: '$delivered-by-durable-retry',
     })
     expect(retryAttempts).toBe(2)
+  })
+
+  it('supersedes stale tool snapshots and delivers terminal control ahead of bulk backlog', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-v3-content-'))
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const room = {
+      roomId: '!project:example.org',
+      conversationId: 'legacy-conversation-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }
+    const layer = new GatewayCvp3ContentLayer('workspace-1', {
+      gatewayDeviceId: 'workspace-1',
+      gatewayKeyPair: await exportDeviceKeyPair(gateway),
+      envelopeReplayLedgerPath: join(directory, 'security'),
+    }, [{
+      deviceId: 'phone-1',
+      publicKey: phone.publicJwk,
+      allowedRoomIds: [room.roomId],
+      allowedOperations: ['prompt'],
+      matrixUserId: '@owner:example.org',
+      matrixDeviceId: 'PHONE',
+      matrixDeviceKeys: ['matrix-phone-key'],
+      certificateExpiresAt: Date.now() + 60_000,
+      sequenceEpoch: 'certificate-1',
+    }])
+    await layer.initialize()
+    const transport = new InMemoryMatrixTransport()
+    await layer.provisionProject(room, transport)
+
+    let release!: () => void
+    let markStarted!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const deliveryOrder: string[] = []
+    let first = true
+    transport.sendApplicationTimelineEvent = async request => {
+      const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, any>
+      const logicalEventId = extension.envelope.logicalEventId as string
+      deliveryOrder.push(logicalEventId)
+      if (first) {
+        first = false
+        markStarted()
+        await blocked
+      }
+      return { eventId: `$${logicalEventId}` }
+    }
+    const projection = {
+      title: 'Session',
+      lifecycle: 'active' as const,
+      activity: 'working' as const,
+      updatedAt: 1,
+      stateVersion: 1,
+    }
+    const assistant = (eventId: string, messageVersion: number): Cvp3Event => ({
+      kind: 'codever.event',
+      version: 3,
+      eventId,
+      workspaceId: 'workspace-1',
+      projectId: gatewayProjectIdentity(room.cwd).id,
+      sessionId: 'session-1',
+      occurredAt: messageVersion,
+      payload: {
+        type: 'assistant.message',
+        messageId: 'tool-group-1',
+        messageVersion,
+        body: `tool snapshot ${messageVersion}`,
+        format: 'plain',
+        final: false,
+        projection,
+        ui: { kind: 'tool_group', version: 1, groupId: 'tools', tools: [] },
+      },
+    })
+
+    const old = await layer.enqueueEvent(room, assistant('bulk-old', 1), transport)
+    void old.confirmation.catch(() => undefined)
+    await started
+    const olderControlIds: string[] = []
+    for (let index = 0; index < 10; index += 1) {
+      const eventId = `older-turn-started-${index}`
+      olderControlIds.push(eventId)
+      const queued = await layer.enqueueEvent(room, {
+        kind: 'codever.event',
+        version: 3,
+        eventId,
+        workspaceId: 'workspace-1',
+        projectId: gatewayProjectIdentity(room.cwd).id,
+        sessionId: `older-session-${index}`,
+        occurredAt: 2 + index,
+        payload: {
+          type: 'turn.started',
+          turnId: `older-turn-${index}`,
+          projection: {
+            ...projection,
+            stateVersion: 2,
+            updatedAt: 2 + index,
+          },
+        },
+      }, transport)
+      void queued.confirmation.catch(() => undefined)
+    }
+    let latest = old
+    for (let version = 2; version <= 50; version += 1) {
+      const queued = await layer.enqueueEvent(
+        room,
+        assistant(version === 50 ? 'bulk-latest' : `bulk-stale-${version}`, version),
+        transport,
+      )
+      if (version < 50) void queued.confirmation.catch(() => undefined)
+      latest = queued
+    }
+    const terminal = await layer.enqueueEvent(room, {
+      kind: 'codever.event',
+      version: 3,
+      eventId: 'turn-terminal',
+      workspaceId: 'workspace-1',
+      projectId: gatewayProjectIdentity(room.cwd).id,
+      sessionId: 'session-1',
+      occurredAt: 3,
+      payload: {
+        type: 'turn.completed',
+        turnId: 'turn-1',
+        outcome: 'cancelled',
+        projection: { ...projection, activity: 'idle' },
+      },
+    }, transport)
+    release()
+
+    await expect(terminal.confirmation).resolves.toEqual({ eventId: '$turn-terminal' })
+    await expect(latest.confirmation).resolves.toEqual({ eventId: '$bulk-latest' })
+    // Forty-eight intermediate progress snapshots never reach Matrix. This is
+    // the convergence property that prevents a verbose tool call from turning
+    // into minutes of obsolete timeline traffic under homeserver backpressure.
+    expect(deliveryOrder).toEqual([
+      'bulk-old',
+      'turn-terminal',
+      ...olderControlIds,
+      'bulk-latest',
+    ])
+  })
+
+  it('migrates a legacy multipart backlog and sends only its newest complete snapshot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codever-v3-content-'))
+    const securityPath = join(directory, 'security')
+    const outboxPath = `${securityPath}.v3-outbox.jsonl`
+    const gateway = await generateDeviceKeyPair()
+    const phone = await generateDeviceKeyPair()
+    const room = {
+      roomId: '!project:example.org',
+      conversationId: 'legacy-conversation-unused',
+      cwd: '/repo',
+      providerName: 'test',
+    }
+    const config = {
+      gatewayDeviceId: 'workspace-1',
+      gatewayKeyPair: await exportDeviceKeyPair(gateway),
+      envelopeReplayLedgerPath: securityPath,
+    }
+    const devices = [{
+      deviceId: 'phone-1',
+      publicKey: phone.publicJwk,
+      allowedRoomIds: [room.roomId],
+      allowedOperations: ['prompt'],
+      matrixUserId: '@owner:example.org',
+      matrixDeviceId: 'PHONE',
+      matrixDeviceKeys: ['matrix-phone-key'],
+      certificateExpiresAt: Date.now() + 60_000,
+      sequenceEpoch: 'certificate-1',
+    }]
+    const first = new GatewayCvp3ContentLayer('workspace-1', config, devices)
+    await first.initialize()
+    let failedAttempts = 0
+    const unavailable = new InMemoryMatrixTransport()
+    unavailable.sendApplicationTimelineEvent = async () => {
+      failedAttempts += 1
+      throw new Error('homeserver unavailable while the old build was running')
+    }
+    const projection = {
+      title: 'Session',
+      lifecycle: 'active' as const,
+      activity: 'working' as const,
+      updatedAt: 1,
+      stateVersion: 1,
+    }
+    const legacyPart = (
+      eventId: string,
+      messageVersion: number,
+      partIndex: number,
+      partCount: number,
+    ): Cvp3Event => ({
+      kind: 'codever.event',
+      version: 3,
+      eventId,
+      workspaceId: 'workspace-1',
+      projectId: gatewayProjectIdentity(room.cwd).id,
+      sessionId: 'session-1',
+      occurredAt: 1,
+      payload: {
+        type: 'assistant.message',
+        messageId: 'tool-group-1',
+        messageVersion,
+        body: eventId,
+        format: 'plain',
+        final: false,
+        partIndex,
+        partCount,
+        projection,
+        ui: { kind: 'tool_group', version: 1, groupId: 'tools', tools: [] },
+      },
+    })
+    const oldParts = [
+      legacyPart('old-part-0', 1, 0, 2),
+      legacyPart('old-part-1', 1, 1, 2),
+    ]
+    // Old APK/Gateway builds versioned each physical part separately. When a
+    // snapshot grew, its new tail therefore still carried messageVersion 1.
+    const latestParts = [
+      legacyPart('latest-part-0', 2, 0, 3),
+      legacyPart('latest-part-1', 2, 1, 3),
+      legacyPart('latest-part-2', 1, 2, 3),
+    ]
+    for (const event of [...oldParts, ...latestParts]) {
+      try {
+        const queued = await first.enqueueEvent(room, event, unavailable)
+        void queued.confirmation.catch(() => undefined)
+      } catch (error) {
+        // The current outbox immediately recognizes the legacy mixed-version
+        // tail as obsolete; its WAL pending record is retained below to model
+        // how an old build looked before this convergence metadata existed.
+        expect((error as Error).name).toBe('MatrixCvp3DeliverySupersededError')
+      }
+    }
+    await waitFor(() => failedAttempts >= 4)
+    first.stopRetries()
+
+    // Recreate the pre-migration WAL: old records had neither delivery
+    // priority nor a supersession identity, and every staged version remained
+    // pending after a homeserver outage.
+    const staged = (await readFile(outboxPath, 'utf8'))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map(line => JSON.parse(line) as Record<string, any>)
+      .filter(entry => entry.status === 'pending' && entry.delivery?.kind === 'event')
+      .map(entry => {
+        delete entry.delivery.priority
+        delete entry.delivery.supersession
+        return JSON.stringify(entry)
+      })
+    await writeFile(outboxPath, `${staged.join('\n')}\n`, 'utf8')
+
+    const recovered = new GatewayCvp3ContentLayer('workspace-1', config, devices)
+    await recovered.initialize()
+    const deliveredLogicalIds: string[] = []
+    const restoredTransport = new InMemoryMatrixTransport()
+    restoredTransport.sendApplicationTimelineEvent = async request => {
+      const extension = request.content[CODEVER_MATRIX_EXTENSION] as Record<string, any>
+      const logicalEventId = extension.envelope.logicalEventId as string
+      deliveredLogicalIds.push(logicalEventId)
+      return { eventId: `$${logicalEventId}` }
+    }
+    await recovered.provisionProject(room, restoredTransport)
+    await waitFor(() => deliveredLogicalIds.length === 3)
+    recovered.stopRetries()
+
+    expect(deliveredLogicalIds).toEqual(latestParts.map(event => event.eventId))
+    const durableWal = await readFile(outboxPath, 'utf8')
+    expect(durableWal).toContain('newer_logical_version')
   })
 
   it('rejects an oversized event before it can poison the durable outbox', async () => {
