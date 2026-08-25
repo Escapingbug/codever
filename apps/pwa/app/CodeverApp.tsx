@@ -301,6 +301,13 @@ type ProviderHistoryLoadState = {
   providerSessionId?: string;
 };
 
+type ProviderHistoryPendingCommand = {
+  commandId: string;
+  provider: string;
+  kind: "sessions" | "session";
+  providerSessionId?: string;
+};
+
 type FeedReturnAnchor = {
   sessionId: string;
   messageId: string;
@@ -397,6 +404,7 @@ function sameGatewayUiScope(
 
 const DEVICE_INVITATION_RESULT_TIMEOUT_MS = 95_000;
 const SESSION_CREATE_RESULT_RECOVERY_MS = 15_000;
+const PROVIDER_HISTORY_RESULT_TIMEOUT_MS = 60_000;
 
 class InvitationReauthenticationRequiredError extends Error {
   constructor() {
@@ -1124,6 +1132,8 @@ function CodeverAppRuntime() {
   const providerHistoryLoadRef = useRef<ProviderHistoryLoadState | null>(null);
   const providerHistoryLoadIdRef = useRef(0);
   const providerHistoryLoadedProviderRef = useRef<string | null>(null);
+  const providerHistoryPendingCommandRef =
+    useRef<ProviderHistoryPendingCommand | null>(null);
   const deviceInvitationLifecycleRef = useRef(
     new DeviceInvitationLifecycle<GeneratedDeviceInvitation>(),
   );
@@ -4497,6 +4507,81 @@ function CodeverAppRuntime() {
     activateLocalSession(id);
   }
 
+  function providerHistoryPendingCommandMatches(
+    pending: ProviderHistoryPendingCommand,
+    load: ProviderHistoryLoadState,
+  ): boolean {
+    return pending.provider === load.provider
+      && pending.kind === load.kind
+      && pending.providerSessionId === load.providerSessionId;
+  }
+
+  async function sendOrRecoverProviderHistoryCommand(
+    load: ProviderHistoryLoadState,
+    payload: Extract<
+      CommandPayload,
+      { operation: "provider.sessions.list" | "provider.session.inspect" }
+    >,
+  ): Promise<CodeverCommandSendResult> {
+    const pending = providerHistoryPendingCommandRef.current;
+    if (pending) {
+      if (!providerHistoryPendingCommandMatches(pending, load)) {
+        throw new Error(
+          "Retry the previous provider history request before loading a different provider or session.",
+        );
+      }
+      const connection = codeverClientRef.current;
+      if (!connection || connectionStatus !== "connected") {
+        throw new Error("Reconnect to your computer before retrying provider history.");
+      }
+      const recovered = await connection.recoverCommand(pending.commandId);
+      providerHistoryPendingCommandRef.current = {
+        ...pending,
+        commandId: recovered.commandId,
+      };
+      return recovered;
+    }
+    const sent = await sendRealCommand(payload);
+    if (!sent) {
+      throw new Error(
+        "Provider history could not be sent. Check the connection notice, then retry.",
+      );
+    }
+    providerHistoryPendingCommandRef.current = {
+      commandId: sent.commandId,
+      provider: load.provider,
+      kind: load.kind,
+      ...(load.providerSessionId === undefined
+        ? {}
+        : { providerSessionId: load.providerSessionId }),
+    };
+    return sent;
+  }
+
+  async function finishProviderHistoryCommand(
+    sent: CodeverCommandSendResult,
+  ): Promise<CommandCompletion> {
+    const completion = await waitForCommandCompletion(
+      sent.completion,
+      PROVIDER_HISTORY_RESULT_TIMEOUT_MS,
+    );
+    const pending = providerHistoryPendingCommandRef.current;
+    if (pending?.commandId === sent.commandId) {
+      providerHistoryPendingCommandRef.current = null;
+    }
+    try {
+      await codeverClientRef.current?.releaseCommand(sent.commandId);
+    } catch (error) {
+      showUiNotice(
+        "provider:history-release",
+        "session",
+        "warning",
+        `Provider history finished, but its completed local command could not be cleaned up yet: ${formatUiError(error)}`,
+      );
+    }
+    return completion;
+  }
+
   async function openProviderHistory(requestedProvider?: string) {
     const provider = requestedProvider
       ?? gatewayState?.capabilities.providers.find(candidate =>
@@ -4536,11 +4621,12 @@ function CodeverAppRuntime() {
     };
     providerHistoryLoadRef.current = load;
     setProviderHistoryLoad(load);
-    let sent: CodeverCommandSendResult | null = null;
     try {
-      sent = await sendRealCommand({ operation: "provider.sessions.list", provider });
-      if (!sent) throw new Error("Provider history command was not sent.");
-      const completion = await sent.completion;
+      const sent = await sendOrRecoverProviderHistoryCommand(
+        load,
+        { operation: "provider.sessions.list", provider },
+      );
+      const completion = await finishProviderHistoryCommand(sent);
       if (completion.outcome !== "succeeded") {
         throw new Error(completion.error?.message || "Provider history could not be loaded.");
       }
@@ -4564,7 +4650,6 @@ function CodeverAppRuntime() {
         providerHistoryLoadRef.current = null;
         setProviderHistoryLoad(null);
       }
-      if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
     }
   }
 
@@ -4582,15 +4667,16 @@ function CodeverAppRuntime() {
     };
     providerHistoryLoadRef.current = load;
     setProviderHistoryLoad(load);
-    let sent: CodeverCommandSendResult | null = null;
     try {
-      sent = await sendRealCommand({
-        operation: "provider.session.inspect",
-        provider,
-        providerSessionId: session.sessionId,
-      });
-      if (!sent) throw new Error("Provider session inspection was not sent.");
-      const completion = await sent.completion;
+      const sent = await sendOrRecoverProviderHistoryCommand(
+        load,
+        {
+          operation: "provider.session.inspect",
+          provider,
+          providerSessionId: session.sessionId,
+        },
+      );
+      const completion = await finishProviderHistoryCommand(sent);
       if (completion.outcome !== "succeeded") {
         throw new Error(completion.error?.message || "Provider session could not be inspected.");
       }
@@ -4614,7 +4700,6 @@ function CodeverAppRuntime() {
         providerHistoryLoadRef.current = null;
         setProviderHistoryLoad(null);
       }
-      if (sent) void codeverClientRef.current?.releaseCommand(sent.commandId);
     }
   }
 
@@ -5706,8 +5791,11 @@ function CodeverAppRuntime() {
           <div className="session-header-actions">
             <button
               type="button"
-              className="mobile-history-button"
-              aria-label="Browse provider sessions"
+              className={`mobile-history-button${providerHistoryLoad ? " is-loading" : ""}`}
+              aria-label={providerHistoryLoad
+                ? "Provider sessions are loading"
+                : "Browse provider sessions"}
+              aria-busy={providerHistoryLoad !== null}
               onClick={() => void openProviderHistory()}
               disabled={
                 !gatewayAvailable ||
@@ -5716,7 +5804,7 @@ function CodeverAppRuntime() {
                 )
               }
             >
-              ↺
+              <span aria-hidden="true">↺</span>
             </button>
             <button
               type="button"

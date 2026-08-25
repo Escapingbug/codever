@@ -52,6 +52,12 @@ internal fun isCodeverApplicationControlEvent(rawJson: String): Boolean = runCat
             extension["version"]?.jsonPrimitive?.intOrNull == 3 &&
                 extension["envelope"] is JsonObject
         }
+        CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE -> {
+            val extension = content["io.codever"] as? JsonObject ?: return@runCatching false
+            extension["version"]?.jsonPrimitive?.intOrNull == 1 &&
+                extension["kind"]?.jsonPrimitive?.contentOrNull == "secure_envelope" &&
+                extension["secure_envelope"] is JsonObject
+        }
         else -> false
     }
 }.getOrDefault(false)
@@ -286,6 +292,7 @@ class MatrixApplicationTimelineClient(
             })
             put("types", buildJsonArray {
                 add(JsonPrimitive("m.room.message"))
+                add(JsonPrimitive(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE))
                 add(JsonPrimitive(CVP3_MATRIX_KEY_GRANT_EVENT_TYPE))
                 add(JsonPrimitive(CVP3_MATRIX_PROJECT_POINTER_EVENT_TYPE))
                 add(JsonPrimitive(CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE))
@@ -696,6 +703,7 @@ class MatrixApplicationControlSyncClient(
                     })
                     put("types", buildJsonArray {
                         add(JsonPrimitive("m.room.message"))
+                        add(JsonPrimitive(CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE))
                         // State changes can also appear in the incremental
                         // timeline; accept only CVP/3's bounded discovery state.
                         add(JsonPrimitive(CVP3_MATRIX_KEY_GRANT_EVENT_TYPE))
@@ -870,12 +878,12 @@ class MatrixApplicationControlClient(
             "Matrix control transaction ID is invalid."
         }
         val content = Json.parseToJsonElement(contentJson).jsonObject
-        requireV3Envelope(content)
+        val eventType = requireApplicationControlEnvelope(content)
         val homeserver = MatrixIdentifiers.normalizeHomeserver(session.homeserverUrl)
         val roomId = MatrixIdentifiers.validateRoomBinding(session.roomBinding).roomId
         val endpoint = URI(
             "$homeserver/_matrix/client/v3/rooms/${encode(roomId)}/send/" +
-                "${encode("m.room.message")}/${encode(transactionId)}",
+                "${encode(eventType)}/${encode(transactionId)}",
         )
         val requestBytes = content.toString().toByteArray(Charsets.UTF_8)
         val response = try {
@@ -901,15 +909,27 @@ class MatrixApplicationControlClient(
         }
     }
 
-    private fun requireV3Envelope(content: JsonObject) {
+    private fun requireApplicationControlEnvelope(content: JsonObject): String {
         val extension = content["io.codever"] as? JsonObject
-        require(
-            content["msgtype"]?.jsonPrimitive?.contentOrNull == "m.notice" &&
-                extension?.get("version")?.jsonPrimitive?.intOrNull == 3 &&
-                extension["envelope"] is JsonObject,
+        val isNotice = content["msgtype"]?.jsonPrimitive?.contentOrNull == "m.notice"
+        if (
+            isNotice &&
+            extension?.get("version")?.jsonPrimitive?.intOrNull == 3 &&
+            extension["envelope"] is JsonObject
         ) {
-            "Application control events must contain a CVP/3 project envelope."
+            return "m.room.message"
         }
+        if (
+            isNotice &&
+            extension?.get("version")?.jsonPrimitive?.intOrNull == 1 &&
+            extension["kind"]?.jsonPrimitive?.contentOrNull == "secure_envelope" &&
+            extension["secure_envelope"] is JsonObject
+        ) {
+            return CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE
+        }
+        throw IllegalArgumentException(
+            "Application control events must contain a CVP/3 project envelope."
+        )
     }
 
     private fun encode(value: String): String =

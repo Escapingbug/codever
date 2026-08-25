@@ -19,6 +19,7 @@ export const NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS = 15_000;
 export const NATIVE_HISTORY_PAGE_TIMEOUT_MS = 60_000;
 export const NATIVE_PAIRING_COMPLETE_TIMEOUT_MS = 10 * 60_000;
 export const NATIVE_COMMAND_CONFLICT_TIMEOUT_MS = 60_000;
+export const NATIVE_COMMAND_SEND_TIMEOUT_MS = 3 * 60_000;
 
 export function nativeBridgeRequestTimeoutMs(method: RequestMethod): number {
   switch (method) {
@@ -33,6 +34,10 @@ export function nativeBridgeRequestTimeoutMs(method: RequestMethod): number {
       // A conflict decision must remain usable even if a Native Matrix send
       // that started just before it is still reaching its 45-second deadline.
       return NATIVE_COMMAND_CONFLICT_TIMEOUT_MS;
+    case "codever.command.send":
+      // An older certificate may need one authenticated capability-renewal
+      // pairing before the native runtime can durably enqueue the command.
+      return NATIVE_COMMAND_SEND_TIMEOUT_MS;
     default:
       return NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS;
   }

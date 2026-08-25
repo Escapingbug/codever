@@ -79,6 +79,31 @@ class MatrixApplicationControlClientTest {
     }
 
     @Test
+    fun `sends signed permission renewal through the secure control event type`() = runBlocking {
+        lateinit var endpoint: URI
+        val responseBody = """{"event_id":"${'$'}renewal-event"}""".toByteArray()
+        val client = MatrixApplicationControlClient(
+            MatrixApplicationControlTransport { target, _, _ ->
+                endpoint = target
+                MatrixHttpResponse(200, responseBody)
+            },
+        )
+
+        val eventId = client.send(
+            storedSession(),
+            secureControlContent(),
+            "codever.capability-renewal.request-1",
+        )
+
+        assertEquals("\$renewal-event", eventId)
+        assertTrue(
+            endpoint.toASCIIString().contains(
+                "/send/io.codever.secure_control.v1/",
+            ),
+        )
+    }
+
+    @Test
     fun `recognizes only CVP3 project state and encrypted room messages`() {
         val event = """
             {
@@ -105,6 +130,12 @@ class MatrixApplicationControlClientTest {
             {
               "type":"io.codever.secure_control.v1",
               "content":{"io.codever":{"version":1,"kind":"history_page"}}
+            }
+        """.trimIndent()))
+        assertTrue(isCodeverApplicationControlEvent("""
+            {
+              "type":"io.codever.secure_control.v1",
+              "content":${secureControlContent()}
             }
         """.trimIndent()))
     }
@@ -279,6 +310,7 @@ class MatrixApplicationControlClientTest {
         assertEquals(
             setOf(
                 "m.room.message",
+                "io.codever.secure_control.v1",
                 "io.codever.project.key_grant.v3",
                 "io.codever.project.current.v3",
                 "io.codever.workspace.current.v3",
@@ -661,6 +693,18 @@ class MatrixApplicationControlClientTest {
               "nonce":"AAAAAAAAAAAAAAAA",
               "ciphertext":"AQ"
             }
+          }
+        }
+    """.trimIndent()
+
+    private fun secureControlContent() = """
+        {
+          "msgtype":"m.notice",
+          "body":"Encrypted Codever device permission renewal",
+          "io.codever":{
+            "version":1,
+            "kind":"secure_envelope",
+            "secure_envelope":{}
           }
         }
     """.trimIndent()

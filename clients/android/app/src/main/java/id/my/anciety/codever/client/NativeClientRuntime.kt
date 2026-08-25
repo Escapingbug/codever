@@ -44,6 +44,7 @@ import id.my.anciety.codever.diagnostics.NativeDiagnosticLog
 import id.my.anciety.codever.update.NativeUpdateStore
 import id.my.anciety.codever.update.NativeUpdateManager
 import id.my.anciety.codever.matrix.MatrixBootstrap
+import id.my.anciety.codever.matrix.CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE
 import id.my.anciety.codever.matrix.MatrixDecryptedEvent
 import id.my.anciety.codever.matrix.MatrixIdentifiers
 import id.my.anciety.codever.matrix.MatrixLoginTokenIssueResult
@@ -55,6 +56,9 @@ import id.my.anciety.codever.security.SecretCipher
 import id.my.anciety.codever.security.codever.AndroidKeystoreP256Identity
 import id.my.anciety.codever.security.codever.Base64Url
 import id.my.anciety.codever.security.codever.CanonicalJson
+import id.my.anciety.codever.security.codever.CapabilityRenewalCodec
+import id.my.anciety.codever.security.codever.CapabilityRenewalOffer
+import id.my.anciety.codever.security.codever.CapabilityRenewalRequest
 import id.my.anciety.codever.security.codever.CodeverCrypto
 import id.my.anciety.codever.security.codever.CodeverPrivateIdentity
 import id.my.anciety.codever.security.codever.CodeverSecurityException
@@ -67,11 +71,16 @@ import id.my.anciety.codever.security.codever.CVP3_MATRIX_PROJECT_POINTER_EVENT_
 import id.my.anciety.codever.security.codever.CVP3_MATRIX_WORKSPACE_POINTER_EVENT_TYPE
 import id.my.anciety.codever.security.codever.MatrixCvp3Protocol
 import id.my.anciety.codever.security.codever.PairingCodec
+import id.my.anciety.codever.security.codever.PairingOperation
 import id.my.anciety.codever.security.codever.PairingRequest
 import id.my.anciety.codever.security.codever.PairingSecurity
 import id.my.anciety.codever.security.codever.SignedPairingOffer
 import id.my.anciety.codever.security.codever.SignedPairingRequest
 import id.my.anciety.codever.security.codever.SignedPairingResponse
+import id.my.anciety.codever.security.codever.SecureEnvelopeBindings
+import id.my.anciety.codever.security.codever.SecureEnvelopeCodec
+import id.my.anciety.codever.security.codever.SecureEnvelopeDirection
+import id.my.anciety.codever.security.codever.SecureEnvelopes
 import java.security.SecureRandom
 import java.security.MessageDigest
 import java.util.ArrayDeque
@@ -157,10 +166,16 @@ class NativeClientRuntime(
         val job: Job,
     )
 
+    private data class CapabilityRenewalWaiter(
+        val certificateId: String,
+        val result: CompletableDeferred<CapabilityRenewalOffer>,
+    )
+
     val deviceId: String = identity.publicIdentity.keyId
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val capabilityRenewalMutex = Mutex()
     // History pagination is an explicit, per-conversation user action. Never
     // serialize unrelated sessions behind one slow Matrix relation page.
     private val historyMutexes = ConcurrentHashMap<String, Mutex>()
@@ -282,6 +297,8 @@ class NativeClientRuntime(
     private val commandRecoveryJobs = ConcurrentHashMap<String, Job>()
     private val commandRecoveryAttempts = ConcurrentHashMap<String, Int>()
     private val automaticRevisionRetryAttempts = ConcurrentHashMap<String, Int>()
+    private val capabilityRenewalWaiters =
+        ConcurrentHashMap<String, CapabilityRenewalWaiter>()
     private val json = Json { isLenient = false; allowSpecialFloatingPointValues = false }
     private val restoredTrust = runCatching { trustStore.load() }
     private val restoredPairing: Result<PersistedPairingTransaction?> = runCatching {
@@ -637,16 +654,18 @@ class NativeClientRuntime(
             assertOfferRoute(pending.offer)
             trust?.takeIf { pending.repairingSession }?.let { activeTrust ->
                 MatrixSessionRepairPolicy.requirePinnedOffer(activeTrust, pending.offer)
-                MatrixSessionRepairPolicy.requireReplacement(
-                    activeTrust,
-                    MatrixTransportBinding(
-                        homeserver = session.homeserver,
-                        roomId = session.roomBinding.roomId,
-                        userId = session.userId,
-                        deviceId = transport.deviceId,
-                        ed25519 = transport.ed25519,
-                    ),
-                )
+                if (MatrixSessionRepairPolicy.required(activeTrust, session)) {
+                    MatrixSessionRepairPolicy.requireReplacement(
+                        activeTrust,
+                        MatrixTransportBinding(
+                            homeserver = session.homeserver,
+                            roomId = session.roomBinding.roomId,
+                            userId = session.userId,
+                            deviceId = transport.deviceId,
+                            ed25519 = transport.ed25519,
+                        ),
+                    )
+                }
             }
             val signedRequest = existingRequest ?: run {
                 val issuedAt = now()
@@ -822,8 +841,10 @@ class NativeClientRuntime(
         true
     }
 
-    suspend fun sendCommand(idempotencyKey: String, payload: JsonObject): DurableReceipt =
-        mutex.withLock {
+    suspend fun sendCommand(idempotencyKey: String, payload: JsonObject): DurableReceipt {
+        val validatedPayload = CommandPayloadValidator.validate(payload)
+        ensureCommandCapability(validatedPayload.operation)
+        return mutex.withLock {
             val activeTrust = trust
                 ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
             check(
@@ -832,7 +853,7 @@ class NativeClientRuntime(
                 matrix.commandTransportReady
             ) { "Gateway command transport is not synchronized yet." }
             CommandAuthorizationPolicy.requireAuthorized(
-                CommandPayloadValidator.validate(payload),
+                validatedPayload,
                 activeTrust.certificate.allowedOperations,
             )
             val receipt = outbox.enqueue(
@@ -846,6 +867,7 @@ class NativeClientRuntime(
             }
             publicReceipt(outbox.get(receipt.commandId) ?: current)
         }
+    }
 
     suspend fun cancelCommand(
         idempotencyKey: String,
@@ -1558,6 +1580,191 @@ class NativeClientRuntime(
         return eventId
     }
 
+    private suspend fun ensureCommandCapability(operation: CommandOperation) {
+        val requiredOperation = PairingOperation.parse(operation.wireName)
+        val currentTrust = mutex.withLock {
+            val activeTrust = trust
+                ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
+            check(
+                gatewayState != null &&
+                    gatewayStateSynchronized &&
+                    matrix.commandTransportReady
+            ) { "Gateway command transport is not synchronized yet." }
+            activeTrust
+        }
+        if (requiredOperation in currentTrust.certificate.allowedOperations) return
+        capabilityRenewalMutex.withLock renewal@{
+            var activeTrust = mutex.withLock {
+                trust ?: throw NativeTrustRequiredException("Pair the Gateway before sending commands.")
+            }
+            if (requiredOperation in activeTrust.certificate.allowedOperations) {
+                return@renewal
+            }
+            require(PairingOperation.DEVICE_INVITE in activeTrust.certificate.allowedOperations) {
+                "This device certificate cannot renew its permissions. Pair this device again with a new invitation."
+            }
+
+            val resumable = mutex.withLock {
+                pendingPairing?.takeIf { pending ->
+                    pending.repairingSession &&
+                        requiredOperation in pending.offer.offer.allowedOperations
+                }
+            }
+            if (resumable != null) {
+                completePairing(
+                    resumable.offer.offer.offerId,
+                    activeTrust.certificate.deviceName,
+                )
+                activeTrust = mutex.withLock {
+                    trust ?: throw NativeTrustRequiredException(
+                        "The renewed Gateway trust was not saved.",
+                    )
+                }
+                if (requiredOperation in activeTrust.certificate.allowedOperations) {
+                    return@renewal
+                }
+            }
+
+            val renewal = requestCapabilityRenewalOffer(activeTrust, listOf(requiredOperation))
+            val offer = PairingCodec.decodePairingLink(renewal.pairingLink)
+            PairingSecurity.verifyOffer(offer, now = now())
+            assertOfferRoute(offer)
+            MatrixSessionRepairPolicy.requirePinnedOffer(activeTrust, offer)
+            require(requiredOperation in offer.offer.allowedOperations) {
+                "The Gateway renewal offer does not authorize ${requiredOperation.wireName}."
+            }
+            val pending = mutex.withLock {
+                pendingPairing?.let { existing ->
+                    check(existing.request == null) {
+                        "A confirmed pairing transaction must finish before permissions can be renewed."
+                    }
+                    pairingStore.clear()
+                }
+                pairingStore.save(PersistedPairingTransaction(offer, null, null))
+                PendingPairing(offer, repairingSession = true).also { pendingPairing = it }
+            }
+            completePairing(
+                pending.offer.offer.offerId,
+                activeTrust.certificate.deviceName,
+            )
+            activeTrust = mutex.withLock {
+                trust ?: throw NativeTrustRequiredException(
+                    "The renewed Gateway trust was not saved.",
+                )
+            }
+            require(requiredOperation in activeTrust.certificate.allowedOperations) {
+                "The renewed device certificate does not authorize ${requiredOperation.wireName}."
+            }
+        }
+    }
+
+    private suspend fun requestCapabilityRenewalOffer(
+        activeTrust: GatewayTrust,
+        requestedOperations: List<PairingOperation>,
+    ): CapabilityRenewalOffer {
+        val session = matrix.publicSession()
+            ?: throw IllegalStateException("A native Matrix session is required to renew permissions.")
+        val issuedAt = now()
+        val request = CapabilityRenewalRequest(
+            requestId = UUID.randomUUID().toString(),
+            gatewayId = activeTrust.gatewayId,
+            deviceId = activeTrust.certificate.deviceId,
+            certificateId = activeTrust.certificate.certificateId,
+            requestedOperations = requestedOperations.distinct(),
+            issuedAt = issuedAt,
+            expiresAt = issuedAt + CAPABILITY_RENEWAL_REQUEST_MS,
+        )
+        val waiter = CapabilityRenewalWaiter(
+            certificateId = request.certificateId,
+            result = CompletableDeferred(),
+        )
+        check(capabilityRenewalWaiters.putIfAbsent(request.requestId, waiter) == null)
+        try {
+            val plaintext = buildJsonObject {
+                put("msgtype", "m.notice")
+                put("body", "Encrypted Codever device permission renewal")
+                put("io.codever", request.toJson())
+            }
+            val secureEnvelope = SecureEnvelopes.sealSecureEnvelope(
+                bindings = SecureEnvelopeBindings(
+                    gatewayId = activeTrust.gatewayId,
+                    conversationId = session.roomBinding.conversationId,
+                    direction = SecureEnvelopeDirection.DEVICE_TO_GATEWAY,
+                    senderDeviceId = activeTrust.certificate.deviceId,
+                    recipientDeviceId = activeTrust.certificate.gatewayId,
+                    senderKeyId = identity.publicIdentity.keyId,
+                    recipientKeyId = activeTrust.gatewayKey.keyId,
+                ),
+                plaintext = plaintext,
+                senderIdentity = identity,
+                recipientPublicKey = activeTrust.gatewayKey,
+                envelopeId = "capability-renewal.${request.requestId}",
+                now = issuedAt,
+                lifetimeMs = CAPABILITY_RENEWAL_REQUEST_MS,
+            )
+            val content = buildJsonObject {
+                put("msgtype", "m.notice")
+                put("body", "Encrypted Codever device permission renewal")
+                put("io.codever", buildJsonObject {
+                    put("version", 1)
+                    put("kind", "secure_envelope")
+                    put("secure_envelope", secureEnvelope.toJson())
+                })
+            }
+            sendTrustedControlMessage(
+                content.toString(),
+                "codever.capability-renewal.${request.requestId}",
+            )
+            return try {
+                withTimeout(CAPABILITY_RENEWAL_TIMEOUT_MS) { waiter.result.await() }
+            } catch (_: TimeoutCancellationException) {
+                throw IllegalStateException(
+                    "The Gateway did not renew this device's permissions in time.",
+                )
+            }
+        } finally {
+            capabilityRenewalWaiters.remove(request.requestId, waiter)
+        }
+    }
+
+    private fun acceptCapabilityRenewalOffer(
+        event: MatrixDecryptedEvent,
+        extension: JsonObject,
+    ) {
+        val activeTrust = trust ?: return
+        if (event.sender != activeTrust.transportTrust.currentTransport.userId) return
+        require(extension.long("version") == 1L)
+        require(extension.string("kind") == "secure_envelope")
+        val session = matrix.publicSession()
+            ?: throw IllegalStateException("The Matrix room binding is unavailable.")
+        val signed = SecureEnvelopeCodec.parse(
+            extension.objectValue("secure_envelope").toString(),
+        )
+        val opened = SecureEnvelopes.openSecureEnvelope(
+            signed = signed,
+            recipientIdentity = identity,
+            senderPublicKey = activeTrust.gatewayKey,
+            expected = SecureEnvelopeBindings(
+                gatewayId = activeTrust.gatewayId,
+                conversationId = session.roomBinding.conversationId,
+                direction = SecureEnvelopeDirection.GATEWAY_TO_DEVICE,
+                senderDeviceId = activeTrust.certificate.gatewayId,
+                recipientDeviceId = activeTrust.certificate.deviceId,
+                senderKeyId = activeTrust.gatewayKey.keyId,
+                recipientKeyId = identity.publicIdentity.keyId,
+            ),
+            replayStore = replayStore,
+            now = now(),
+        )
+        val offer = CapabilityRenewalCodec.parseOfferContent(opened.plaintext)
+        require(offer.expiresAt > now()) { "The capability renewal offer has expired." }
+        val waiter = capabilityRenewalWaiters[offer.requestId] ?: return
+        require(waiter.certificateId == offer.certificateId) {
+            "The capability renewal offer is bound to a different certificate."
+        }
+        waiter.result.complete(offer)
+    }
+
     private suspend fun processMatrixEvent(event: MatrixDecryptedEvent) {
         if (event.roomId != matrix.publicSession()?.roomBinding?.roomId) return
         val root = json.parseToJsonElement(event.rawJson).jsonObject
@@ -1566,6 +1773,12 @@ class NativeClientRuntime(
         if (processMatrixCvp3Event(event, root, content, eventType)) return
         val extension = content["io.codever"] as? JsonObject ?: return
         val kind = extension.string("kind") ?: return
+        if (eventType == CODEVER_MATRIX_APPLICATION_CONTROL_EVENT_TYPE) {
+            if (kind == "secure_envelope") {
+                acceptCapabilityRenewalOffer(event, extension)
+            }
+            return
+        }
         if (kind == "pairing_response") {
             acceptPairingResponse(event, extension)
             return
@@ -2532,6 +2745,8 @@ class NativeClientRuntime(
         const val MAX_PRE_TRUST_EVENTS = 256
         const val PAIRING_REQUEST_MS = 2 * 60_000L
         const val PAIRING_RESPONSE_TIMEOUT_MS = 60_000L
+        const val CAPABILITY_RENEWAL_REQUEST_MS = 2 * 60_000L
+        const val CAPABILITY_RENEWAL_TIMEOUT_MS = 60_000L
         const val PAIRING_AUTO_RESUME_DELAY_MS = 30_000L
         const val GATEWAY_TRANSPORT_PROFILE_FIELD = "io.codever.gateway_transport"
         const val COMMAND_LIFETIME_MS = 5 * 60_000L

@@ -429,6 +429,10 @@ select:focus-visible {
   opacity: 0.35;
 }
 
+.mobile-history-button.is-loading span {
+  animation: motion-spin 900ms linear infinite;
+}
+
 .round-button {
   display: grid;
   width: 44px;

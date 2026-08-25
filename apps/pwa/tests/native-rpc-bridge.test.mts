@@ -5,6 +5,7 @@ import { NATIVE_BRIDGE_LIMITS } from "@codever/native-bridge";
 import {
   NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS,
   NATIVE_COMMAND_CONFLICT_TIMEOUT_MS,
+  NATIVE_COMMAND_SEND_TIMEOUT_MS,
   NATIVE_HISTORY_PAGE_TIMEOUT_MS,
   NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
   NativeRpcBridge,
@@ -148,11 +149,12 @@ test("does not poison future handoffs when an unmanaged owner is attached", asyn
   replacement.close();
 });
 
-test("allows native Matrix response time for history, pairing, and conflict recovery", () => {
+test("allows native Matrix response time for history, pairing, renewal, and conflict recovery", () => {
   assert.equal(NATIVE_BRIDGE_DEFAULT_TIMEOUT_MS, 15_000);
   assert.equal(NATIVE_COMMAND_CONFLICT_TIMEOUT_MS, 60_000);
   assert.equal(NATIVE_HISTORY_PAGE_TIMEOUT_MS, 60_000);
   assert.equal(NATIVE_PAIRING_COMPLETE_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(NATIVE_COMMAND_SEND_TIMEOUT_MS, 3 * 60_000);
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.command.resolveConflict"),
     NATIVE_COMMAND_CONFLICT_TIMEOUT_MS,
@@ -164,6 +166,10 @@ test("allows native Matrix response time for history, pairing, and conflict reco
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.pairing.complete"),
     NATIVE_PAIRING_COMPLETE_TIMEOUT_MS,
+  );
+  assert.equal(
+    nativeBridgeRequestTimeoutMs("codever.command.send"),
+    NATIVE_COMMAND_SEND_TIMEOUT_MS,
   );
   assert.equal(
     nativeBridgeRequestTimeoutMs("codever.client.snapshot"),
