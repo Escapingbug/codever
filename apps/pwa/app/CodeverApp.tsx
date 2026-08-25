@@ -181,6 +181,7 @@ import {
   sessionListSignal,
   sessionSignalLabel,
   summarizeProjectSessions,
+  type SessionListSignal,
 } from "./sessionListOrder";
 import { canonicalGatewayProjects } from "./projectCatalog";
 import {
@@ -489,6 +490,29 @@ function ProjectFolderIcon({ temporary }: { temporary: boolean }) {
           <path d="M17.25 14.75v2.45l1.55.9" />
         </g>
       )}
+    </svg>
+  );
+}
+
+function SessionSignalIcon({
+  signal,
+}: {
+  signal: Exclude<SessionListSignal, "idle">;
+}) {
+  if (signal === "working") {
+    return <i className="session-signal-spinner" />;
+  }
+  if (signal === "ready") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M11.7 3.8c.7 4.1 2.4 5.8 6.5 6.5-4.1.7-5.8 2.4-6.5 6.5-.7-4.1-2.4-5.8-6.5-6.5 4.1-.7 5.8-2.4 6.5-6.5Z" />
+        <path d="M18.2 3.6v3.6M20 5.4h-3.6" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="m8.1 8.1 7.8 7.8M15.9 8.1l-7.8 7.8" />
     </svg>
   );
 }
@@ -5874,17 +5898,32 @@ function CodeverAppRuntime() {
                   <small>{project.cwd}</small>
                 </span>
                 <span className="project-indicators" aria-hidden="true">
-                  {projectSummary.needsUser > 0 && (
-                    <i className="project-needs-user">
-                      <span>●</span>
-                      <b>{projectSummary.needsUser}</b>
-                    </i>
+                  {projectSummary.failed > 0 && (
+                    <span
+                      className="project-signal project-signal-failed"
+                      title={`${projectSummary.failed} failed`}
+                    >
+                      <SessionSignalIcon signal="failed" />
+                      <b>{projectSummary.failed}</b>
+                    </span>
+                  )}
+                  {projectSummary.ready > 0 && (
+                    <span
+                      className="project-signal project-signal-ready"
+                      title={`${projectSummary.ready} new`}
+                    >
+                      <SessionSignalIcon signal="ready" />
+                      <b>{projectSummary.ready}</b>
+                    </span>
                   )}
                   {projectSummary.working > 0 && (
-                    <i className="project-working">
-                      <span />
+                    <span
+                      className="project-signal project-signal-working"
+                      title={`${projectSummary.working} working`}
+                    >
+                      <SessionSignalIcon signal="working" />
                       <b>{projectSummary.working}</b>
-                    </i>
+                    </span>
                   )}
                 </span>
                 <b aria-hidden="true">{project.sessions.length}</b>
@@ -5908,6 +5947,10 @@ function CodeverAppRuntime() {
                 }${
                   session.reasoningEffort ? ` · ${session.reasoningEffort}` : ""
                 }`;
+                const visualSignal = lifecycleAction ? "working" : signal;
+                const visualSignalLabel = lifecycleAction
+                  ? statusSummary
+                  : sessionSignalLabel(signal);
                 return (
                 <button
                   key={session.id}
@@ -5915,6 +5958,7 @@ function CodeverAppRuntime() {
                   data-project-name={session.projectName}
                   aria-label={`${session.title}. ${statusSummary}. ${technicalSummary}. Updated ${formatSessionTime(session.updatedAt)}`}
                   title={`${session.title} · ${statusSummary}`}
+                  data-session-signal={visualSignal}
                   aria-pressed={selectedSessionId === session.id}
                   className={`session-row ${
                     selectedSessionId === session.id
@@ -5926,23 +5970,26 @@ function CodeverAppRuntime() {
                 >
                   <span className="session-avatar violet">
                     {sessionInitials(session.title)}
-                    {signal === "working" && (
-                      <i
-                        className={`agent-active ${gatewayConnected ? "" : "is-paused"}`}
-                        aria-hidden="true"
-                      />
-                    )}
-                    {signal === "ready" && (
-                      <i className="agent-ready" aria-hidden="true" />
-                    )}
-                    {signal === "failed" && (
-                      <i className="agent-failed" aria-hidden="true">!</i>
-                    )}
                   </span>
                   <span className="session-copy">
                     <span className="session-title-line">
                       <strong>{session.title}</strong>
-                      <time>{formatSessionTime(session.updatedAt)}</time>
+                      <span className="session-title-meta">
+                        <time>{formatSessionTime(session.updatedAt)}</time>
+                        {visualSignal !== "idle" && (
+                          <span
+                            className={`session-signal-mark signal-${visualSignal} ${
+                              visualSignal === "working" && !gatewayConnected
+                                ? "is-paused"
+                                : ""
+                            }`}
+                            title={visualSignalLabel ?? undefined}
+                            aria-hidden="true"
+                          >
+                            <SessionSignalIcon signal={visualSignal} />
+                          </span>
+                        )}
+                      </span>
                     </span>
                     {(lifecycleAction || session.extensions.length > 0) && (
                       <span className="session-preview-line">

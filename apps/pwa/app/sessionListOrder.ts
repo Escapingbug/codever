@@ -7,7 +7,8 @@ import {
 export type SessionListSignal = "failed" | "ready" | "working" | "idle";
 
 export type ProjectSessionSummary = Readonly<{
-  needsUser: number;
+  failed: number;
+  ready: number;
   working: number;
   total: number;
 }>;
@@ -57,14 +58,16 @@ export function summarizeProjectSessions(
   sessions: readonly GatewaySessionSummary[],
   readState: SessionReadState,
 ): ProjectSessionSummary {
-  let needsUser = 0;
+  let failed = 0;
+  let ready = 0;
   let working = 0;
   for (const session of sessions) {
     const signal = sessionListSignal(session, readState);
-    if (signal === "failed" || signal === "ready") needsUser += 1;
+    if (signal === "failed") failed += 1;
+    if (signal === "ready") ready += 1;
     if (signal === "working") working += 1;
   }
-  return { needsUser, working, total: sessions.length };
+  return { failed, ready, working, total: sessions.length };
 }
 
 export function projectSessionSummaryLabel(
@@ -72,9 +75,14 @@ export function projectSessionSummaryLabel(
   summary: ProjectSessionSummary,
 ): string {
   const parts = [projectName];
-  if (summary.needsUser > 0) {
+  if (summary.failed > 0) {
     parts.push(
-      `${summary.needsUser} ${summary.needsUser === 1 ? "conversation needs" : "conversations need"} you`,
+      `${summary.failed} ${summary.failed === 1 ? "conversation failed" : "conversations failed"}`,
+    );
+  }
+  if (summary.ready > 0) {
+    parts.push(
+      `${summary.ready} new ${summary.ready === 1 ? "result" : "results"}`,
     );
   }
   if (summary.working > 0) {

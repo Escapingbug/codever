@@ -73,7 +73,7 @@ test("sorts sessions and projects by action before recency", () => {
   );
 });
 
-test("summarizes project urgency without visible status prose", () => {
+test("summarizes project urgency into distinct compact signals", () => {
   const summary = summarizeProjectSessions(
     [
       session("failed", "failed", 20),
@@ -83,9 +83,9 @@ test("summarizes project urgency without visible status prose", () => {
     ],
     readState,
   );
-  assert.deepEqual(summary, { needsUser: 2, working: 1, total: 4 });
+  assert.deepEqual(summary, { failed: 1, ready: 1, working: 1, total: 4 });
   assert.equal(
     projectSessionSummaryLabel("Project A", summary),
-    "Project A, 2 conversations need you, 1 conversation is working, 4 conversations",
+    "Project A, 1 conversation failed, 1 new result, 1 conversation is working, 4 conversations",
   );
 });

@@ -824,40 +824,53 @@ select:focus-visible {
   gap: 4px;
 }
 
-.project-indicators i {
-  display: flex;
-  height: 18px;
+.project-signal {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
   align-items: center;
+  justify-content: center;
   gap: 3px;
-  color: #6f7789;
-  font-size: 9px;
-  font-style: normal;
+  padding: 0 5px 0 4px;
+  border-radius: 10px;
   font-weight: 700;
   white-space: nowrap;
 }
 
-.project-indicators i > span {
-  display: block;
+.project-signal svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
 }
 
-.project-indicators i > b {
+.project-signal > b {
   font-size: 9px;
   font-weight: 750;
 }
 
-.project-needs-user > span {
-  color: #5b49ca;
-  font-size: 8px;
-  line-height: 1;
+.project-signal-ready {
+  background: #ece8ff;
+  color: #5c49d2;
 }
 
-.project-working > span {
-  width: 9px;
-  height: 9px;
-  border: 1.5px solid #b9ded0;
-  border-top-color: #2a9d73;
-  border-radius: 50%;
-  animation: session-status-spin 1.2s linear infinite;
+.project-signal-failed {
+  background: #fae7e9;
+  color: #b6424e;
+}
+
+.project-signal-working {
+  background: #e4f5ed;
+  color: #278762;
+}
+
+.project-signal .session-signal-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
 }
 
 .project-session-group > header {
@@ -944,11 +957,26 @@ select:focus-visible {
 }
 
 .session-row.session-signal-ready:not(.selected) {
-  box-shadow: inset 3px 0 0 var(--violet);
+  background: #f7f5ff;
+  box-shadow: inset 0 0 0 1px rgb(105 87 229 / 14%);
+}
+
+.session-row.session-signal-ready:not(.selected):hover {
+  background: #f2efff;
+}
+
+.session-row.session-signal-failed:not(.selected) {
+  background: #fff7f7;
+  box-shadow: inset 0 0 0 1px rgb(194 81 92 / 13%);
+}
+
+.session-row.session-signal-failed:not(.selected):hover {
+  background: #fff1f2;
 }
 
 .session-row.unread .session-title-line strong {
-  font-weight: 780;
+  color: #1d2333;
+  font-weight: 730;
 }
 
 .session-row.is-busy {
@@ -1144,49 +1172,6 @@ select:focus-visible {
   background: linear-gradient(145deg, #df7f9e, #b94e74);
 }
 
-.agent-active {
-  position: absolute;
-  inset: -3px;
-  border: 2px solid rgb(63 199 137 / 32%);
-  border-top-color: #32b47c;
-  border-radius: 16px;
-  animation: session-status-spin 1.35s linear infinite;
-}
-
-.agent-active.is-paused {
-  border-color: #aeb4c0;
-  border-style: dashed;
-  animation: none;
-}
-
-.agent-ready {
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 12px;
-  height: 12px;
-  border: 2px solid white;
-  border-radius: 50%;
-  background: var(--violet);
-  box-shadow: 0 0 0 3px rgb(105 87 229 / 11%);
-}
-
-.agent-failed {
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  display: grid;
-  width: 16px;
-  height: 16px;
-  place-items: center;
-  border: 2px solid white;
-  border-radius: 50%;
-  background: #c2515c;
-  color: white;
-  font-size: 8px;
-  font-style: normal;
-}
-
 @keyframes session-status-spin {
   to {
     transform: rotate(360deg);
@@ -1223,6 +1208,74 @@ select:focus-visible {
   flex: 0 0 auto;
   color: #9aa1b1;
   font-size: 10px;
+}
+
+.session-title-meta {
+  display: inline-flex;
+  min-width: fit-content;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.session-signal-mark {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+}
+
+.session-signal-mark svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.session-signal-mark.signal-ready {
+  background: var(--violet);
+  box-shadow: 0 3px 9px rgb(105 87 229 / 24%);
+  color: white;
+  animation: state-confirm var(--motion-panel) var(--motion-ease-out);
+}
+
+.session-signal-mark.signal-failed {
+  background: #c2515c;
+  box-shadow: 0 3px 9px rgb(194 81 92 / 22%);
+  color: white;
+  animation: state-confirm var(--motion-panel) var(--motion-ease-out);
+}
+
+.session-signal-mark.signal-working {
+  background: #e4f5ed;
+  color: #278762;
+}
+
+.session-signal-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgb(39 135 98 / 24%);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  font-style: normal;
+  animation: session-status-spin 900ms linear infinite;
+}
+
+.session-signal-mark.is-paused {
+  background: #eff0f4;
+  color: #9299a7;
+}
+
+.session-signal-mark.is-paused .session-signal-spinner {
+  border-color: currentColor;
+  border-style: dashed;
+  animation: none;
 }
 
 .session-row.selected .session-title-line time {
