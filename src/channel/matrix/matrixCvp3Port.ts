@@ -10,6 +10,7 @@ import type {
   ChannelMessage,
   ChannelPort,
   ChannelSendResult,
+  ChannelToolGroupPresentation,
   DecisionRequest,
   DecisionResponse,
   SessionStatus,
@@ -87,7 +88,10 @@ export class MatrixCvp3Port implements ChannelPort {
     const messageId = messageOptions.idempotencyKey ?? this.operationIdFor(message)
     const presentation = message.presentation ?? messageOptions.ui
     const attachments = await this.uploadAttachments(messageId, message.attachments)
-    const parts = splitMessage(message)
+    const parts = splitMessage(withToolTranscript(message, presentation))
+    const transportPresentation = parts.length > 1
+      ? compactToolPresentation(presentation)
+      : presentation
     for (const [index, part] of parts.entries()) {
       const logicalPartId = partId(messageId, index, parts.length)
       const versionKey = partVersionKey(messageId, index)
@@ -100,8 +104,8 @@ export class MatrixCvp3Port implements ChannelPort {
         format: part.format === 'markdown' ? 'markdown' : 'plain',
         final: true,
         ...(parts.length > 1 ? { partIndex: index, partCount: parts.length } : {}),
-        ...(presentation !== undefined
-          ? { ui: presentation as JsonValue }
+        ...(transportPresentation !== undefined
+          ? { ui: transportPresentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),
       }, {
@@ -126,7 +130,10 @@ export class MatrixCvp3Port implements ChannelPort {
     const messageOptions = readMessageOptions(message.replyMarkup)
     const presentation = message.presentation ?? messageOptions.ui
     const attachments = await this.uploadAttachments(messageId, message.attachments)
-    const parts = splitMessage(message)
+    const parts = splitMessage(withToolTranscript(message, presentation))
+    const transportPresentation = parts.length > 1
+      ? compactToolPresentation(presentation)
+      : presentation
     if (parts.length > 1 && context.progressive && !context.terminal) return
 
     for (const [index, part] of parts.entries()) {
@@ -143,8 +150,8 @@ export class MatrixCvp3Port implements ChannelPort {
         format: part.format === 'markdown' ? 'markdown' : 'plain',
         final: context.terminal ?? !context.progressive,
         ...(parts.length > 1 ? { partIndex: index, partCount: parts.length } : {}),
-        ...(presentation !== undefined
-          ? { ui: presentation as JsonValue }
+        ...(transportPresentation !== undefined
+          ? { ui: transportPresentation as JsonValue }
           : {}),
         ...(index === 0 && attachments.length > 0 ? { attachments } : {}),
       }, {
@@ -357,6 +364,31 @@ export class MatrixCvp3Port implements ChannelPort {
       if (!(error instanceof MatrixCvp3ContentTooLargeError) || eventPayload.ui === undefined) {
         throw error
       }
+      const compactUi = compactToolPresentation(eventPayload.ui)
+      if (compactUi !== eventPayload.ui) {
+        try {
+          this.options.onLog?.(
+            `[cvp3/matrix] assistant ${logicalEventId} presentation exceeded the `
+            + 'Matrix event budget; retrying with the full transcript in the body',
+          )
+          return await this.options.contentLayer.enqueueEvent(
+            this.options.room,
+            {
+              ...event,
+              payload: {
+                type: 'assistant.message',
+                ...eventPayload,
+                ui: compactUi as JsonValue,
+                projection: this.options.projection(),
+              },
+            },
+            this.options.transport,
+            { relation },
+          )
+        } catch (compactError) {
+          if (!(compactError instanceof MatrixCvp3ContentTooLargeError)) throw compactError
+        }
+      }
       // The complete textual rendering is already in body (and is split at
       // 8 KiB). A pathological structured presentation must not suppress the
       // actual assistant/tool output or poison later deliveries.
@@ -484,6 +516,71 @@ function splitMessage(message: ChannelMessage): ChannelMessage[] {
     text,
     format: message.format === 'html' ? 'plain' : message.format,
   }))
+}
+
+function withToolTranscript(
+  message: ChannelMessage,
+  presentation: unknown,
+): ChannelMessage {
+  if (!isToolGroupPresentation(presentation)) return message
+  const needsTranscript = presentation.tools.some(tool =>
+    Boolean(tool.result?.trim()) || (tool.detail?.length ?? 0) > 512
+  )
+  if (!needsTranscript) return message
+  const tools = presentation.tools.map((tool, index) => {
+    const sections = [`[${index + 1}] ${tool.name} — ${tool.phase}`]
+    if (tool.detail?.trim()) sections.push(`Details:\n${tool.detail}`)
+    if (tool.result?.trim()) sections.push(`Output:\n${tool.result}`)
+    return sections.join('\n')
+  }).join('\n\n')
+  const transcript = `Tool transcript\n\n${tools}`
+  return transcript.trim()
+    ? { ...message, text: transcript, format: 'plain' }
+    : message
+}
+
+function compactToolPresentation(value: unknown): unknown {
+  if (!isToolGroupPresentation(value)) return value
+  return {
+    ...value,
+    groupId: compactPreview(value.groupId, 256),
+    tools: value.tools.map(tool => {
+      const { result: _result, ...summary } = tool
+      return {
+        ...summary,
+        name: compactPreview(tool.name, 128),
+        title: compactPreview(tool.title, 256),
+        ...(tool.detail?.trim()
+          ? { detail: compactPreview(tool.detail, 512) }
+          : {}),
+      }
+    }),
+  } satisfies ChannelToolGroupPresentation
+}
+
+function compactPreview(value: string, limit: number): string {
+  const normalized = value.replace(/\s+/gu, ' ').trim()
+  return normalized.length > limit
+    ? `${normalized.slice(0, limit - 1)}…`
+    : normalized
+}
+
+function isToolGroupPresentation(value: unknown): value is ChannelToolGroupPresentation {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return record.kind === 'tool_group'
+    && record.version === 1
+    && typeof record.groupId === 'string'
+    && Array.isArray(record.tools)
+    && record.tools.every(tool => {
+      if (!tool || typeof tool !== 'object') return false
+      const item = tool as Record<string, unknown>
+      return typeof item.id === 'string'
+        && typeof item.name === 'string'
+        && typeof item.title === 'string'
+        && (item.detail === undefined || typeof item.detail === 'string')
+        && (item.result === undefined || typeof item.result === 'string')
+    })
 }
 
 const MESSAGE_PART_BYTES = 8 * 1024

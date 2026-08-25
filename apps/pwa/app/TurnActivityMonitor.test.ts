@@ -7,6 +7,7 @@ describe("TurnActivityMonitor", () => {
   it("shows the current tool and a compact history trail together", () => {
     const html = renderToStaticMarkup(
       createElement(TurnActivityMonitor, {
+        fullText: "[2] Bash — updated\nOutput:\ncomplete live output",
         group: {
           kind: "tool_group",
           version: 1,
@@ -26,6 +27,9 @@ describe("TurnActivityMonitor", () => {
     expect(html).toContain('aria-current="step"');
     expect(html).toContain("src/read.ts");
     expect(html).toContain("pnpm test");
+    expect(html).toContain("turn-activity-tool-details");
+    expect(html).toContain("Full tool transcript");
+    expect(html).toContain("complete live output");
   });
 });
 

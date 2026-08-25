@@ -451,7 +451,11 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
     ]);
 
   assert.match(app, /<MarkdownContent content=\{message\.text \?\? ""\}/);
-  assert.match(app, /<ToolGroupCard group=\{message\.toolGroup\}/);
+  assert.match(
+    app,
+    /<ToolGroupCard[\s\S]*?group=\{message\.toolGroup\}[\s\S]*?fullText=\{fullToolTranscript\(message\.text\)\}/,
+  );
+  assert.match(app, /text\?\.startsWith\("Tool transcript\\n\\n"\)/);
   assert.doesNotMatch(app, /legacyCommandText|legacyToolGroupPresentation/);
   assert.match(app, /className="failed-message-retry"/);
   assert.match(app, /className="jump-to-latest"/);
@@ -464,6 +468,8 @@ test("renders safe Markdown and keeps consecutive tools in an accessible folded 
   assert.match(toolGroup, /aria-expanded=\{expanded\}/);
   assert.match(toolGroup, /group\.tools\.map/);
   assert.match(toolGroup, /copyDetails/);
+  assert.match(toolGroup, /className="tool-item-result"/);
+  assert.match(toolGroup, /Full tool transcript/);
   assert.match(presentation, /const TOOL_LIMIT = 200/);
   assert.match(packageJson, /"react-markdown"/);
   assert.match(packageJson, /"remark-gfm"/);

@@ -285,6 +285,51 @@ describe('MatrixCvp3Port', () => {
       },
     })
 
+    const completeOutput = `first line\n${'visible output '.repeat(80)}\nimportant final line`
+    const outputProjector = new ChannelProjector()
+    const [projectedOutputTool] = outputProjector.project({
+      kind: 'tool',
+      meta: {
+        id: 'turn-1:tool:bash-output:1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        provider: 'acp',
+        seq: 2,
+        timestamp: 2,
+        sourcePhase: 'live',
+      },
+      phase: 'completed',
+      toolCallId: 'bash-output',
+      toolName: 'Bash',
+      category: 'execute',
+      input: { command: 'pnpm test' },
+      output: completeOutput,
+    }, { verboseLevel: 2 })
+    const completeOutputStart = transport.delivered.length
+    await port.send({
+      ...projectedOutputTool!.message,
+      replyMarkup: { idempotencyKey: 'tool-output-message-1' },
+    })
+    await waitFor(() => transport.delivered.length > completeOutputStart)
+    const completeOutputDelivery = transport.delivered[completeOutputStart]!
+    const completeOutputExtension = completeOutputDelivery
+      .content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+    const completeOutputEnvelope = await openCvp3Envelope(completeOutputExtension.envelope, {
+      projectKey: base64UrlDecode(projectKey.key),
+      roomId: room.roomId,
+      projectId: grant.projectId,
+      keyId: projectKey.keyId,
+    })
+    if (completeOutputEnvelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+    expect(completeOutputEnvelope.plaintext.value.event.payload).toMatchObject({
+      type: 'assistant.message',
+      body: expect.stringContaining('important final line'),
+      ui: {
+        kind: 'tool_group',
+        tools: [{ result: completeOutput }],
+      },
+    })
+
     const longToolStart = transport.delivered.length
     await port.send({
       ...projectedTool!.message,
@@ -319,6 +364,58 @@ describe('MatrixCvp3Port', () => {
         partCount: 2,
         body: '尾',
         ui: expect.objectContaining({ kind: 'tool_group', groupId: 'read-1' }),
+      }),
+    ]))
+
+    const largeOutput = `${'complete output '.repeat(700)}important large-output tail`
+    const largeOutputProjector = new ChannelProjector()
+    const [projectedLargeOutputTool] = largeOutputProjector.project({
+      kind: 'tool',
+      meta: {
+        id: 'turn-1:tool:large-output:1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        provider: 'acp',
+        seq: 3,
+        timestamp: 3,
+        sourcePhase: 'live',
+      },
+      phase: 'completed',
+      toolCallId: 'large-output',
+      toolName: 'Bash',
+      category: 'execute',
+      input: { command: 'long-running-command' },
+      output: largeOutput,
+    }, { verboseLevel: 2 })
+    const largeOutputStart = transport.delivered.length
+    await port.send({
+      ...projectedLargeOutputTool!.message,
+      replyMarkup: { idempotencyKey: 'large-tool-output-message' },
+    })
+    const largeOutputPayloads = await Promise.all(
+      transport.delivered.slice(largeOutputStart).map(async delivery => {
+        const extension = delivery.content[CODEVER_MATRIX_EXTENSION] as Record<string, unknown>
+        const envelope = await openCvp3Envelope(extension.envelope, {
+          projectKey: base64UrlDecode(projectKey.key),
+          roomId: room.roomId,
+          projectId: grant.projectId,
+          keyId: projectKey.keyId,
+        })
+        if (envelope.plaintext.kind !== 'signed_event') throw new Error('expected event')
+        return envelope.plaintext.value.event.payload
+      }),
+    )
+    expect(largeOutputPayloads.length).toBeGreaterThan(1)
+    expect(largeOutputPayloads.map(payload =>
+      payload.type === 'assistant.message' ? payload.body : '',
+    ).join('')).toContain('important large-output tail')
+    expect(largeOutputPayloads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'assistant.message',
+        ui: expect.objectContaining({
+          kind: 'tool_group',
+          tools: [expect.not.objectContaining({ result: expect.anything() })],
+        }),
       }),
     ]))
 

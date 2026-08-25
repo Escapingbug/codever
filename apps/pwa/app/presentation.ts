@@ -45,7 +45,9 @@ export type ExtensionViewPresentation = {
 };
 
 const TOOL_LIMIT = 200;
-const TEXT_LIMIT = 512;
+const IDENTITY_TEXT_LIMIT = 512;
+const TOOL_DETAIL_LIMIT = 4_096;
+const TOOL_RESULT_LIMIT = 64 * 1024;
 
 export function messageFormat(value: unknown): MessageFormat {
   return value === "markdown" || value === "html" || value === "plain"
@@ -79,7 +81,7 @@ export function parseToolGroupPresentation(
   return {
     kind: "tool_group",
     version: 1,
-    groupId: boundedText(record.groupId),
+    groupId: boundedText(record.groupId, IDENTITY_TEXT_LIMIT),
     tools,
   };
 }
@@ -110,9 +112,9 @@ export function parseExtensionViewPresentation(
   }
   return {
     extension: {
-      id: boundedText(extension.id),
-      name: boundedText(extension.name),
-      version: boundedText(extension.version),
+      id: boundedText(extension.id, IDENTITY_TEXT_LIMIT),
+      name: boundedText(extension.name, IDENTITY_TEXT_LIMIT),
+      version: boundedText(extension.version, IDENTITY_TEXT_LIMIT),
     },
     view: parsedView.data,
     cancelActionId: cancelActionId as string,
@@ -141,14 +143,14 @@ function parseToolPresentationItem(
   }
 
   return {
-    id: boundedText(record.id),
-    name: boundedText(record.name),
-    title: boundedText(record.title),
+    id: boundedText(record.id, IDENTITY_TEXT_LIMIT),
+    name: boundedText(record.name, IDENTITY_TEXT_LIMIT),
+    title: boundedText(record.title, IDENTITY_TEXT_LIMIT),
     ...(typeof record.detail === "string" && record.detail.trim()
-      ? { detail: boundedText(record.detail) }
+      ? { detail: boundedText(record.detail, TOOL_DETAIL_LIMIT, true) }
       : {}),
     ...(typeof record.result === "string" && record.result.trim()
-      ? { result: boundedText(record.result) }
+      ? { result: boundedText(record.result, TOOL_RESULT_LIMIT, true) }
       : {}),
     category: record.category,
     phase: record.phase,
@@ -183,10 +185,17 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function boundedText(value: string): string {
-  const normalized = value.trim();
-  return normalized.length > TEXT_LIMIT
-    ? `${normalized.slice(0, TEXT_LIMIT - 1)}…`
+function boundedText(
+  value: string,
+  limit: number,
+  preserveLeadingWhitespace = false,
+): string {
+  const normalizedLineEndings = value.replace(/\r\n?/gu, "\n");
+  const normalized = preserveLeadingWhitespace
+    ? normalizedLineEndings.trimEnd()
+    : normalizedLineEndings.trim();
+  return normalized.length > limit
+    ? `${normalized.slice(0, limit - 1)}…`
     : normalized;
 }
 

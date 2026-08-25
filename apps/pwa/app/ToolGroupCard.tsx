@@ -11,9 +11,11 @@ import type {
 export function ToolGroupCard({
   group,
   time,
+  fullText,
 }: {
   group: ToolGroupPresentation;
   time?: string;
+  fullText?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
@@ -27,8 +29,7 @@ export function ToolGroupCard({
   const latest = group.tools.at(-1);
 
   async function copyDetails() {
-    const value =
-      group.tools.length === 1
+    const structuredDetails = group.tools.length === 1
         ? [latest?.detail || latest?.title || latest?.name, latest?.result]
             .filter(Boolean)
             .join("\n")
@@ -39,6 +40,7 @@ export function ToolGroupCard({
                 .join("\n"),
             )
             .join("\n\n");
+    const value = fullText?.trim() || structuredDetails;
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
@@ -91,7 +93,7 @@ export function ToolGroupCard({
           role="region"
           aria-label="Tool call details"
         >
-          {(group.tools.length > 1 || latest?.result) && (
+          {(group.tools.length > 1 || latest?.detail || latest?.result) && (
             <ol>
               {group.tools.map((tool) => (
                 <li key={tool.id} className={tool.isError ? "has-error" : ""}>
@@ -101,13 +103,15 @@ export function ToolGroupCard({
                   >
                     {toolIcon(tool.category)}
                   </span>
-                  <span className="tool-item-copy">
+                  <div className="tool-item-copy">
                     <strong>{tool.name}</strong>
                     {(tool.detail || tool.title !== tool.name) && (
                       <code>{tool.detail || tool.title}</code>
                     )}
-                    {tool.result && <small>{tool.result}</small>}
-                  </span>
+                    {tool.result && (
+                      <pre className="tool-item-result">{tool.result}</pre>
+                    )}
+                  </div>
                   <ToolState
                     phase={tool.phase}
                     label={toolPhaseLabel(tool.phase)}
@@ -116,6 +120,12 @@ export function ToolGroupCard({
                 </li>
               ))}
             </ol>
+          )}
+          {fullText?.trim() && (
+            <details className="tool-raw-transcript">
+              <summary>Full tool transcript</summary>
+              <pre>{fullText}</pre>
+            </details>
           )}
           <footer className="tool-group-footer">
             {time && <time>{time}</time>}

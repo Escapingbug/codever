@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, type SyntheticEvent } from "react";
 import type {
   ToolCategory,
   ToolGroupPresentation,
@@ -9,8 +9,10 @@ import type {
 
 export function TurnActivityMonitor({
   group,
+  fullText,
 }: {
   group: ToolGroupPresentation;
+  fullText?: string;
 }) {
   const trailRef = useRef<HTMLOListElement | null>(null);
   const currentRef = useRef<HTMLLIElement | null>(null);
@@ -42,7 +44,16 @@ export function TurnActivityMonitor({
     followLatestRef.current =
       trail.scrollWidth > trail.clientWidth + 1
         ? horizontalRemaining <= 18
-        : verticalRemaining <= 18;
+      : verticalRemaining <= 18;
+  }
+
+  function revealExpandedDetails(event: SyntheticEvent<HTMLDetailsElement>) {
+    if (!event.currentTarget.open) return;
+    event.currentTarget.parentElement?.scrollIntoView({
+      behavior: "auto",
+      block: "nearest",
+      inline: "nearest",
+    });
   }
 
   return (
@@ -79,25 +90,45 @@ export function TurnActivityMonitor({
               className={`${isCurrent ? "is-current" : ""} ${tool.isError || tool.phase === "failed" ? "has-error" : ""}`}
               key={tool.id}
               ref={isCurrent ? currentRef : undefined}
-              title={`${tool.name}${tool.detail ? ` · ${tool.detail}` : ""}`}
             >
-              <span
-                className={`turn-activity-tool-icon category-${tool.category}`}
-                aria-hidden="true"
+              <details
+                className="turn-activity-tool-details"
+                onToggle={revealExpandedDetails}
               >
-                {toolIcon(tool.category)}
-              </span>
-              <span className="turn-activity-tool-copy">
-                <strong>
-                  <i>{index + 1}</i>
-                  {tool.name}
-                </strong>
-                <small>{tool.detail || tool.title}</small>
-              </span>
-              <ToolTrailState tool={tool} />
+                <summary
+                  title={`${tool.name}${tool.detail ? ` · ${tool.detail}` : ""}`}
+                >
+                  <span
+                    className={`turn-activity-tool-icon category-${tool.category}`}
+                    aria-hidden="true"
+                  >
+                    {toolIcon(tool.category)}
+                  </span>
+                  <span className="turn-activity-tool-copy">
+                    <strong>
+                      <i>{index + 1}</i>
+                      {tool.name}
+                    </strong>
+                    <small>{tool.detail || tool.title}</small>
+                  </span>
+                  <ToolTrailState tool={tool} />
+                </summary>
+                <div className="turn-activity-tool-full-text">
+                  <code>{tool.detail || tool.title}</code>
+                  {tool.result && <pre>{tool.result}</pre>}
+                </div>
+              </details>
             </li>
           );
         })}
+        {fullText?.trim() && (
+          <li className="turn-activity-full-transcript">
+            <details onToggle={revealExpandedDetails}>
+              <summary>Full tool transcript</summary>
+              <pre>{fullText}</pre>
+            </details>
+          </li>
+        )}
       </ol>
     </aside>
   );

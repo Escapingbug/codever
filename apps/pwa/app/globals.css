@@ -1792,8 +1792,9 @@ select:focus-visible {
 .turn-activity-monitor {
   display: grid;
   min-width: 0;
+  max-height: min(56vh, 480px);
   flex: 0 0 auto;
-  grid-template-rows: 39px 46px;
+  grid-template-rows: 39px minmax(46px, auto);
   margin: 0 8px 6px;
   overflow: hidden;
   border: 1px solid #d9d5f2;
@@ -1882,10 +1883,11 @@ select:focus-visible {
 .turn-activity-trail {
   display: flex;
   min-width: 0;
+  align-items: flex-start;
   gap: 5px;
   margin: 0;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: auto;
   padding: 4px 7px 5px;
   list-style: none;
   overscroll-behavior-x: contain;
@@ -1895,16 +1897,34 @@ select:focus-visible {
 }
 
 .turn-activity-trail li {
-  display: grid;
   width: min(174px, 48vw);
   min-width: min(174px, 48vw);
+  overflow: hidden;
+  border: 1px solid #e7e6ed;
+  border-radius: 8px;
+  background: #f8f9fb;
+}
+
+.turn-activity-tool-details > summary {
+  display: grid;
+  min-height: 36px;
   grid-template-columns: 24px minmax(0, 1fr) 17px;
   align-items: center;
   gap: 6px;
   padding: 3px 6px;
-  border: 1px solid #e7e6ed;
-  border-radius: 8px;
-  background: #f8f9fb;
+  cursor: pointer;
+  list-style: none;
+}
+
+.turn-activity-tool-details > summary::-webkit-details-marker,
+.turn-activity-full-transcript summary::-webkit-details-marker,
+.tool-raw-transcript summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-activity-trail li:has(.turn-activity-tool-details[open]) {
+  width: min(360px, 82vw);
+  min-width: min(360px, 82vw);
 }
 
 .turn-activity-trail li.is-current {
@@ -2004,6 +2024,62 @@ select:focus-visible {
   color: #b84751;
 }
 
+.turn-activity-tool-full-text {
+  display: grid;
+  max-height: min(36vh, 320px);
+  gap: 7px;
+  overflow: auto;
+  padding: 8px;
+  border-top: 1px solid #e7e6ed;
+  background: white;
+  scrollbar-color: #cbc6e9 transparent;
+}
+
+.turn-activity-tool-full-text code,
+.turn-activity-tool-full-text pre,
+.turn-activity-full-transcript pre {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #4e586c;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.turn-activity-tool-full-text pre {
+  padding-top: 7px;
+  border-top: 1px solid #eceef3;
+}
+
+.turn-activity-trail li.turn-activity-full-transcript {
+  width: min(220px, 62vw);
+  min-width: min(220px, 62vw);
+  border-style: dashed;
+  background: white;
+}
+
+.turn-activity-full-transcript summary {
+  min-height: 36px;
+  padding: 10px;
+  color: #6658ac;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 720;
+  list-style: none;
+}
+
+.turn-activity-trail li.turn-activity-full-transcript:has(details[open]) {
+  width: min(420px, 84vw);
+  min-width: min(420px, 84vw);
+}
+
+.turn-activity-full-transcript pre {
+  max-height: min(36vh, 320px);
+  overflow: auto;
+  padding: 0 10px 10px;
+}
+
 .completed-turn-activity {
   opacity: 0.82;
 }
@@ -2067,6 +2143,13 @@ select:focus-visible {
     width: 100%;
     min-width: 0;
     flex: 0 0 auto;
+  }
+
+  .turn-activity-trail li:has(.turn-activity-tool-details[open]),
+  .turn-activity-trail li.turn-activity-full-transcript,
+  .turn-activity-trail li.turn-activity-full-transcript:has(details[open]) {
+    width: 100%;
+    min-width: 0;
   }
 
   .conversation-workspace.has-live-activity + .composer-area .jump-to-latest {
@@ -3212,6 +3295,48 @@ select:focus-visible {
 .tool-item-copy small {
   color: #5d687c;
   font-family: inherit;
+}
+
+.tool-item-copy .tool-item-result {
+  max-height: min(46vh, 440px);
+  margin: 5px 0 0;
+  overflow: auto;
+  padding: 8px 9px;
+  border: 1px solid #e6e8ee;
+  border-radius: 7px;
+  background: #f8f9fb;
+  color: #4f596c;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tool-raw-transcript {
+  border-top: 1px solid #eef0f4;
+}
+
+.tool-raw-transcript summary {
+  padding: 9px 11px;
+  color: #6456ab;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.tool-raw-transcript pre {
+  max-height: min(50vh, 480px);
+  margin: 0;
+  overflow: auto;
+  padding: 0 11px 11px;
+  color: #4f596c;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .tool-group-footer {

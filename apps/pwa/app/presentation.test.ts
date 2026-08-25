@@ -43,6 +43,31 @@ describe('PWA structured presentation parsing', () => {
         })
     })
 
+    it('preserves tool details and results beyond the former preview limit', () => {
+        const detail = `printf '${'input '.repeat(120)}'`
+        const result = `first line\n${'output '.repeat(180)}\nimportant final line`
+        const parsed = parseToolGroupPresentation({
+            kind: 'tool_group',
+            version: 1,
+            groupId: 'long-tool-group',
+            tools: [{
+                id: 'long-tool',
+                name: 'Bash',
+                title: 'Bash',
+                detail,
+                result,
+                category: 'execute',
+                phase: 'completed',
+                isError: false,
+                startedAt: 1_000,
+                updatedAt: 2_000,
+            }],
+        })
+
+        expect(parsed?.tools[0]?.detail).toBe(detail)
+        expect(parsed?.tools[0]?.result).toBe(result)
+    })
+
     it('rejects malformed tool groups and unsafe format declarations', () => {
         expect(parseToolGroupPresentation({
             kind: 'tool_group',

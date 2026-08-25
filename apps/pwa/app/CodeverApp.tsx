@@ -6404,7 +6404,11 @@ function CodeverAppRuntime() {
                   }`}
                   key={message.id}
                 >
-                  <ToolGroupCard group={message.toolGroup} time={message.time} />
+                  <ToolGroupCard
+                    group={message.toolGroup}
+                    time={message.time}
+                    fullText={fullToolTranscript(message.text)}
+                  />
                 </div>
               );
             }
@@ -6571,7 +6575,10 @@ function CodeverAppRuntime() {
             )}
           </div>
           {liveToolMessage?.toolGroup && (
-            <TurnActivityMonitor group={liveToolMessage.toolGroup} />
+            <TurnActivityMonitor
+              group={liveToolMessage.toolGroup}
+              fullText={fullToolTranscript(liveToolMessage.text)}
+            />
           )}
         </div>
 
@@ -7455,6 +7462,10 @@ function sessionLifecyclePayload(
 
 function formatUiError(error: unknown): string {
   return formatUserFacingError(error);
+}
+
+function fullToolTranscript(text: string | undefined): string | undefined {
+  return text?.startsWith("Tool transcript\n\n") ? text : undefined;
 }
 
 function deviceInvitationFromLink(link: string): boolean {

@@ -460,13 +460,13 @@ function toolPresentationItem(
         ? state.displayTitle
         : state.toolName
     const detail = toolPresentationDetail(state)
-    const result = allowedToolOutput(state)
+    const result = toolPresentationOutput(state)
     return {
         id: toolCallId,
         name,
         title: state.displayTitle ?? name,
         ...(detail ? { detail } : {}),
-        ...(result ? { result: truncatePresentationText(result) } : {}),
+        ...(result ? { result } : {}),
         category: state.category ?? 'unknown',
         phase: state.phase,
         isError: state.phase === 'failed' || Boolean(state.isError),
@@ -480,7 +480,7 @@ function toolPresentationDetail(state: ProjectedToolState): string | undefined {
     const value = state.displayTitle
         ?? pickInputText(input, detailKeysForTool(state.toolName, state.category))
         ?? (typeof state.input === 'string' ? state.input : undefined)
-    return value ? truncatePresentationText(value) : undefined
+    return value?.trim() ? normalizePresentationText(value) : undefined
 }
 
 function detailKeysForTool(
@@ -520,11 +520,14 @@ function pickInputText(
     return undefined
 }
 
-function truncatePresentationText(value: string, limit = 240): string {
-    const normalized = value.replace(/\s+/gu, ' ').trim()
-    return normalized.length > limit
-        ? `${normalized.slice(0, limit - 1)}…`
-        : normalized
+function toolPresentationOutput(state: ProjectedToolState): string | undefined {
+    if (state.output === undefined || state.output === null) return undefined
+    const output = normalizePresentationText(formatUnknown(state.output))
+    return output.trim() ? output : undefined
+}
+
+function normalizePresentationText(value: string): string {
+    return value.replace(/\r\n?/gu, '\n').trimEnd()
 }
 
 function isGenericToolName(toolName: string | undefined): boolean {

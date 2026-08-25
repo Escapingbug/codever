@@ -165,6 +165,25 @@ describe('ChannelProjector — patch merge', () => {
         ])
     })
 
+    it('preserves complete multiline tool details and output in the structured presentation', () => {
+        const detail = `node -e "${'command-part '.repeat(60)}"`
+        const output = `first line\n${'important output '.repeat(80)}\nlast line`
+        const result = projector.project(makeToolEvent({
+            toolCallId: 'long-output',
+            phase: 'completed',
+            toolName: 'Bash',
+            category: 'execute',
+            input: { command: detail },
+            output,
+            meta: makeMeta('long-output'),
+        }), { verboseLevel: 1 })
+
+        expect(result[0]?.message.presentation?.tools[0]).toMatchObject({
+            detail,
+            result: output,
+        })
+    })
+
     it('starts a new tool group after a decision even without buffered assistant text', () => {
         const first = projector.project(makeToolEvent({
             toolCallId: 'before-decision',
