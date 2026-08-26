@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
 import type { ChannelMessage, DecisionRequest, SessionStatus } from '@/bridge/channelPort'
 import type { Bot } from 'grammy'
-import { clearPendingDecisionsForTests, completePendingDecision, pendingDecisionCount } from '@/channel/telegram/decisionRegistry'
+import { clearPendingDecisionsForTests, handlePendingDecisionCallback, pendingDecisionCount } from '@/channel/telegram/decisionRegistry'
 
 function createMockBot(): { bot: Bot; apiCalls: { method: string; args: unknown[] }[] } {
     const apiCalls: { method: string; args: unknown[] }[] = []
@@ -257,12 +257,38 @@ describe('TelegramPort', () => {
 
             const options = apiCalls[0].args[2] as { reply_markup: { inline_keyboard: Array<Array<{ callback_data: string }>> } }
             const callbackData = options.reply_markup.inline_keyboard[0][1].callback_data
-            const [, decisionId, encodedValue] = callbackData.split(':')
-            expect(decodeURIComponent(encodedValue)).toBe('deny')
+            const [, decisionId, namespace, action, optionIndex] = callbackData.split(':')
+            expect(namespace).toBe('ui')
+            expect(action).toBe('select')
+            expect(optionIndex).toBe('1')
 
-            expect(completePendingDecision(decisionId, decodeURIComponent(encodedValue))).toBe(true)
+            expect(handlePendingDecisionCallback(decisionId, action, Number(optionIndex))).toMatchObject({ status: 'completed' })
             await expect(promise).resolves.toEqual({ value: 'deny' })
             expect(pendingDecisionCount()).toBe(0)
+        })
+
+        it('resolves a multi-select question immediately when Telegram send fails', async () => {
+            const { bot } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+            vi.mocked(bot.api.sendMessage).mockRejectedValueOnce(new Error('network unavailable'))
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+            try {
+                const promise = port.requestDecision({
+                    type: 'question',
+                    title: 'Choose areas',
+                    multiple: true,
+                    options: [
+                        { label: 'API', value: 'API' },
+                        { label: 'UI', value: 'UI' },
+                    ],
+                })
+
+                await expect(promise).resolves.toEqual({ value: [] })
+                expect(pendingDecisionCount()).toBe(0)
+            } finally {
+                errorSpy.mockRestore()
+            }
         })
     })
 })

@@ -509,18 +509,44 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         await expect(promise).resolves.toEqual({ value: 'deny' })
     })
 
+    it('decision callbacks toggle and confirm multi-select requests', async () => {
+        const bot = createBot()
+        registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map() })
+        const { decisionId, promise } = registerPendingDecision({
+            multiple: true,
+            decisionOptions: [
+                { label: 'API', value: 'API' },
+                { label: 'UI', value: 'UI' },
+            ],
+        })
+        const editMessageReplyMarkup = vi.fn(async () => {})
+
+        await bot.runCallback(`decision:${decisionId}:ui:toggle:1`, { editMessageReplyMarkup })
+
+        expect(editMessageReplyMarkup).toHaveBeenCalledWith({
+            reply_markup: expect.objectContaining({
+                inline_keyboard: expect.arrayContaining([
+                    [expect.objectContaining({ text: '✅ UI' })],
+                ]),
+            }),
+        })
+
+        await bot.runCallback(`decision:${decisionId}:ui:done`)
+        await expect(promise).resolves.toEqual({ value: ['UI'] })
+    })
+
     it('decision callback dispatches semantic decision response when no pending port request exists', async () => {
         const bot = createBot()
         const session = createSession('idle')
         const topicSessions = new Map([['-100:10', session]])
         registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
 
-        await bot.runCallback('decision:plan-1:accept')
+        await bot.runCallback('decision:plan-1:select')
 
         expect(session.dispatch).toHaveBeenCalledWith({
             kind: 'decision_response',
             decisionId: 'plan-1',
-            value: 'accept',
+            value: 'select',
             source: 'channel',
         })
     })

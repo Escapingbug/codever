@@ -31,6 +31,12 @@ export interface AcpClientManagerConfig {
     args: string[]
     env?: Record<string, string>
     cwd?: string
+    resolvePermissionToolName?: (toolCall: RequestPermissionRequest['toolCall']) => string | undefined
+    mapPermissionResponse?: (
+        response: RequestPermissionResponse,
+        result: AgentPermissionResult,
+        request: RequestPermissionRequest,
+    ) => RequestPermissionResponse
 }
 
 export interface AcpClientManagerOptions {
@@ -77,6 +83,7 @@ export class AcpClientManager {
 
     private permissionHandler: AgentPermissionHandler | null = null
     private extensionHandler: AcpExtensionHandler | null = null
+    private permissionToolContexts = new Map<string, { toolName?: string; rawInput?: unknown }>()
     private permissionResolvers = new Map<string, {
         resolve: (response: RequestPermissionResponse) => void
     }>()
@@ -483,6 +490,7 @@ export class AcpClientManager {
         this.activePrompt = null
         this.cancellingSessionIds.clear()
         this.permissionResolvers.clear()
+        this.permissionToolContexts.clear()
         this.extensionHandler = null
         this.sessionUpdateSeqs.clear()
         this.historicalSeqBoundaries.clear()
@@ -522,6 +530,7 @@ export class AcpClientManager {
         this.sessionUpdateSeqs.clear()
         this.historicalSeqBoundaries.clear()
         this.permissionResolvers.clear()
+        this.permissionToolContexts.clear()
         this.extensionHandler = null
     }
 
@@ -649,19 +658,28 @@ export class AcpClientManager {
 
             requestPermission: async (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
                 const sessionId = params.sessionId
-                const toolName = params.toolCall.title ?? 'unknown'
+                const contextKey = permissionToolContextKey(sessionId, params.toolCall.toolCallId)
+                const cachedContext = this.permissionToolContexts.get(contextKey)
+                const toolName = this.config.resolvePermissionToolName?.(params.toolCall)
+                    ?? cachedContext?.toolName
+                    ?? params.toolCall.title
+                    ?? 'unknown'
+                const finishPermission = (response: RequestPermissionResponse): RequestPermissionResponse => {
+                    this.permissionToolContexts.delete(contextKey)
+                    return response
+                }
 
                 // Auto-deny during cancel
                 if (this.cancellingSessionIds.has(sessionId)) {
                     console.error(`[acp] Auto-denying permission for ${toolName} (session being cancelled)`)
-                    return { outcome: { outcome: 'cancelled' } }
+                    return finishPermission({ outcome: { outcome: 'cancelled' } })
                 }
 
                 console.error(`[acp] Permission request: tool=${toolName}, options=${params.options.map(o => o.kind).join(', ')}`)
 
                 if (this.permissionHandler) {
                     try {
-                        const input = params.toolCall.rawInput
+                        const input = params.toolCall.rawInput ?? cachedContext?.rawInput
                         const result: AgentPermissionResult = await this.permissionHandler.handleToolCall(
                             toolName,
                             input,
@@ -680,12 +698,13 @@ export class AcpClientManager {
                             }
                             if (allowOption) {
                                 console.error(`[acp] Allowing ${toolName} with ${allowOption.kind}`)
-                                return {
+                                const response: RequestPermissionResponse = {
                                     outcome: {
                                         outcome: 'selected',
                                         optionId: allowOption.optionId,
                                     },
                                 }
+                                return finishPermission(this.config.mapPermissionResponse?.(response, result, params) ?? response)
                             }
                         }
 
@@ -693,17 +712,17 @@ export class AcpClientManager {
                             o.kind === 'reject_once' || o.kind === 'reject_always'
                         )
                         if (rejectOption) {
-                            return {
+                            return finishPermission({
                                 outcome: {
                                     outcome: 'selected',
                                     optionId: rejectOption.optionId,
                                 },
-                            }
+                            })
                         }
 
-                        return { outcome: { outcome: 'cancelled' } }
+                        return finishPermission({ outcome: { outcome: 'cancelled' } })
                     } catch {
-                        return { outcome: { outcome: 'cancelled' } }
+                        return finishPermission({ outcome: { outcome: 'cancelled' } })
                     }
                 }
 
@@ -711,15 +730,15 @@ export class AcpClientManager {
                     o.kind === 'allow_once' || o.kind === 'allow_always'
                 )
                 if (allowOption) {
-                    return {
+                    return finishPermission({
                         outcome: {
                             outcome: 'selected',
                             optionId: allowOption.optionId,
                         },
-                    }
+                    })
                 }
 
-                return { outcome: { outcome: 'cancelled' } }
+                return finishPermission({ outcome: { outcome: 'cancelled' } })
             },
 
             readTextFile: async (_params: ReadTextFileRequest): Promise<ReadTextFileResponse> => {
@@ -763,6 +782,8 @@ export class AcpClientManager {
             return
         }
 
+        this.capturePermissionToolContext(params)
+
         const updateType = (params.update as any)?.sessionUpdate ?? '?'
         const waiters = this.sessionWaiters.get(sessionId)
         if (waiters && waiters.length > 0) {
@@ -781,10 +802,35 @@ export class AcpClientManager {
         console.error(`[acp] Session update → queue: sessionId=${sessionId?.slice(0,8)} updateType=${updateType} seq=${seq} queueLen=${queue.length}`)
     }
 
+    private capturePermissionToolContext(params: SessionNotification): void {
+        if (!this.config.resolvePermissionToolName && !this.config.mapPermissionResponse) return
+        const update = params.update as unknown as Record<string, unknown>
+        if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') return
+        if (typeof update.toolCallId !== 'string' || !update.toolCallId) return
+
+        const key = permissionToolContextKey(params.sessionId, update.toolCallId)
+        if (update.status === 'completed' || update.status === 'failed') {
+            this.permissionToolContexts.delete(key)
+            return
+        }
+        const existing = this.permissionToolContexts.get(key)
+        const toolName = this.config.resolvePermissionToolName?.(update as RequestPermissionRequest['toolCall'])
+            ?? existing?.toolName
+        const rawInput = update.rawInput ?? existing?.rawInput
+        this.permissionToolContexts.set(key, {
+            ...(toolName ? { toolName } : {}),
+            ...(rawInput !== undefined ? { rawInput } : {}),
+        })
+    }
+
     private requireConnection(): ClientSideConnection {
         if (!this.connection || !this._connected) {
             throw new Error('ACP client not connected. Call init() first.')
         }
         return this.connection
     }
+}
+
+function permissionToolContextKey(sessionId: string, toolCallId: string): string {
+    return `${sessionId}:${toolCallId}`
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TelegramPort } from '@/channel/telegram/telegramPort'
-import { clearPendingDecisionsForTests, completePendingDecision } from '@/channel/telegram/decisionRegistry'
+import { clearPendingDecisionsForTests, handlePendingDecisionCallback } from '@/channel/telegram/decisionRegistry'
 
 const renderMocks = vi.hoisted(() => ({
     tgmdConvert: vi.fn(),
@@ -65,16 +65,16 @@ describe('TelegramPort integration', () => {
             message_thread_id: 10,
             reply_markup: {
                 inline_keyboard: [[
-                    expect.objectContaining({ text: 'Allow', callback_data: expect.stringContaining('allow') }),
-                    expect.objectContaining({ text: 'Deny', callback_data: expect.stringContaining('deny') }),
+                    expect.objectContaining({ text: 'Allow', callback_data: expect.stringMatching(/:ui:select:0$/) }),
+                    expect.objectContaining({ text: 'Deny', callback_data: expect.stringMatching(/:ui:select:1$/) }),
                 ]],
             },
         }))
 
         const markup = bot.api.sendMessage.mock.calls[0][2].reply_markup
         const callbackData = markup.inline_keyboard[0][0].callback_data
-        const [, decisionId, encodedValue] = callbackData.split(':')
-        completePendingDecision(decisionId, decodeURIComponent(encodedValue))
+        const [, decisionId, , action, optionIndex] = callbackData.split(':')
+        handlePendingDecisionCallback(decisionId, action, Number(optionIndex))
         await expect(response).resolves.toEqual({ value: 'allow' })
     })
 
@@ -228,9 +228,9 @@ describe('TelegramPort integration', () => {
 
         const markup = bot.api.sendMessage.mock.calls[0][2].reply_markup
         const callbackData = markup.inline_keyboard[0][0].callback_data
-        expect(callbackData).toMatch(/^decision:[^:]+:plan$/)
-        const [, decisionId, encodedValue] = callbackData.split(':')
-        completePendingDecision(decisionId, decodeURIComponent(encodedValue))
+        expect(callbackData).toMatch(/^decision:[^:]+:ui:select:0$/)
+        const [, decisionId, , action, optionIndex] = callbackData.split(':')
+        handlePendingDecisionCallback(decisionId, action, Number(optionIndex))
         await expect(response).resolves.toEqual({ value: 'plan' })
     })
 })

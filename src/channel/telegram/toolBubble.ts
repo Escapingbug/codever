@@ -8,6 +8,7 @@ export interface ToolBubbleState {
     isError?: boolean
     displayTitle?: string
     category?: 'read' | 'edit' | 'write' | 'execute' | 'search' | 'agent' | 'unknown'
+    showGenericInput?: boolean
     content?: Array<{ type: 'content'; contentType: string; text?: string } | { type: 'diff'; path?: string; oldText?: string; newText?: string } | { type: 'terminal'; terminalId?: string }>
 }
 
@@ -38,7 +39,13 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     task: 'Task',
     skill: 'Skill',
     'loaded skill': 'Skill',
+    askuserquestion: 'AskUserQuestion',
+    ask_user_question: 'AskUserQuestion',
+    'ask user question': 'AskUserQuestion',
 }
+
+const SENSITIVE_INPUT_KEY = /api.?key|authorization|cookie|credential|password|private.?key|secret|token/i
+const MAX_GENERIC_INPUT_PREVIEW = 1_200
 
 function normalizeToolName(name: string): string {
     return TOOL_NAME_ALIASES[name.toLowerCase()] || name
@@ -54,7 +61,7 @@ export function formatToolBubble(state: ToolBubbleState): string {
 
     // If displayTitle exists and toolName is canonical, show "ToolName: displayTitle"
     // If displayTitle exists and toolName is generic, show displayTitle as the header
-    const header = renderToolHeader(name, input, state.displayTitle, state.content, state.output)
+    const header = renderToolHeader(name, input, state.displayTitle, state.content, state.output, state.showGenericInput)
     parts.push(header)
 
     for (const path of getContentFilePaths(state.content)) {
@@ -81,6 +88,7 @@ function renderToolHeader(
     displayTitle?: string,
     content?: ToolBubbleState['content'],
     output?: string,
+    showGenericInput = false,
 ): string {
     const isEmptyInput = !input || (typeof input === 'object' && Object.keys(input).length === 0)
 
@@ -168,15 +176,91 @@ function renderToolHeader(
             if (displayDesc) return `⚡ <b>Skill</b>: <code>${escapeHtml(displayDesc)}</code>`
             return `⚡ <b>Skill</b>`
         }
+        case 'AskUserQuestion': {
+            return renderAskUserQuestion(input)
+        }
         default: {
             // For generic tool names, displayTitle might be the actual descriptive name
             if (isGenericToolName(name) && displayTitle) {
                 return `🔧 <b>${escapeHtml(displayTitle)}</b>`
             }
-            if (isEmptyInput) return `🔧 <b>${escapeHtml(name)}</b>`
-            return `🔧 <b>${escapeHtml(name)}</b>`
+            const genericHeader = `🔧 <b>${escapeHtml(name)}</b>`
+            if (isEmptyInput || !showGenericInput) return genericHeader
+            const preview = renderGenericInputPreview(input)
+            return preview ? `${genericHeader}\n<pre>${escapeHtml(preview)}</pre>` : genericHeader
         }
     }
+}
+
+function renderAskUserQuestion(input: Record<string, unknown> | undefined): string {
+    const questions = Array.isArray(input?.questions) ? input.questions : []
+    if (questions.length === 0) return '❓ <b>AskUserQuestion</b>'
+
+    const parts = ['❓ <b>Question</b>']
+    for (const [index, value] of questions.slice(0, 4).entries()) {
+        const question = asRecord(value)
+        const text = stringValue(question?.question)
+        if (!text) continue
+        const header = stringValue(question?.header)
+        const prefix = questions.length > 1 ? `${index + 1}. ` : ''
+        parts.push(`${prefix}${header ? `<b>${escapeHtml(truncate(header, 80))}</b>\n` : ''}${escapeHtml(truncate(text, 400))}`)
+
+        const options = Array.isArray(question?.options) ? question.options : []
+        for (const optionValue of options.slice(0, 6)) {
+            const option = asRecord(optionValue)
+            const label = stringValue(option?.label)
+            if (!label) continue
+            const description = stringValue(option?.description)
+            parts.push(`• <b>${escapeHtml(truncate(label, 120))}</b>${description ? ` — ${escapeHtml(truncate(description, 240))}` : ''}`)
+        }
+        if (question?.multiSelect === true) parts.push('<i>Multiple selections allowed</i>')
+    }
+    return truncate(parts.join('\n'), 3_200)
+}
+
+function renderGenericInputPreview(input: unknown): string | undefined {
+    try {
+        const sanitized = sanitizeInput(input, 0, new WeakSet<object>())
+        const text = JSON.stringify(sanitized, null, 2)
+        return text ? truncate(text, MAX_GENERIC_INPUT_PREVIEW) : undefined
+    } catch {
+        return undefined
+    }
+}
+
+function sanitizeInput(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+    if (typeof value === 'string') return truncate(value, 300)
+    if (value === null || typeof value !== 'object') return value
+    if (seen.has(value)) return '[Circular]'
+    if (depth >= 4) return '[Nested value]'
+    seen.add(value)
+
+    if (Array.isArray(value)) {
+        return value.slice(0, 10).map(item => sanitizeInput(item, depth + 1, seen))
+    }
+
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+            .slice(0, 16)
+            .map(([key, item]) => [
+                key,
+                SENSITIVE_INPUT_KEY.test(key) ? '[REDACTED]' : sanitizeInput(item, depth + 1, seen),
+            ]),
+    )
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined
+}
+
+function stringValue(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function truncate(value: string, maxLength: number): string {
+    return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`
 }
 
 function getExitPlanContent(

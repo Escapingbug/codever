@@ -10,7 +10,7 @@ import { splitHtmlChunks } from '@/utils/formatting'
 import { InputFile } from 'grammy'
 import { basename } from 'node:path'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
-import { completePendingDecision, registerPendingDecision } from './decisionRegistry'
+import { buildPendingDecisionReplyMarkup, cancelPendingDecision, registerPendingDecision } from './decisionRegistry'
 
 const MAX_MESSAGE_LENGTH = 4000
 const TABLE_IMAGE_SEND_TIMEOUT_MS = 10_000
@@ -112,16 +112,11 @@ export class TelegramPort implements ChannelPort {
 
     requestDecision(request: DecisionRequest): Promise<DecisionResponse> {
         const { decisionId, promise } = registerPendingDecision({
-            fallbackValue: request.type === 'permission' ? 'deny' : '',
+            fallbackValue: request.type === 'permission' ? 'deny' : request.multiple ? [] : '',
+            decisionOptions: request.options,
+            multiple: request.multiple,
         })
-        const keyboard = {
-            inline_keyboard: [
-                request.options.map(opt => ({
-                    text: opt.label,
-                    callback_data: `decision:${decisionId}:${encodeURIComponent(opt.value)}`,
-                })),
-            ],
-        }
+        const keyboard = buildPendingDecisionReplyMarkup(decisionId)
 
         const text = request.type === 'permission'
             ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
@@ -133,7 +128,7 @@ export class TelegramPort implements ChannelPort {
             ...buildMessageThreadParams(this.threadId),
         }).catch((e) => {
             console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
-            completePendingDecision(decisionId, request.type === 'permission' ? 'deny' : '')
+            cancelPendingDecision(decisionId, request.type === 'permission' ? 'deny' : request.multiple ? [] : '')
         })
 
         return promise

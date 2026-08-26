@@ -11,7 +11,7 @@
  * callback and are forwarded to the PushableAsyncIterable for consumption.
  */
 
-import type { AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput, ModelEntry } from '@/providers/provider'
+import type { AgentPermissionResult, AgentProvider, AgentQueryConfig, AgentQueryHandle, AgentQueryInput, ModelEntry } from '@/providers/provider'
 import type { AgentEvent } from '@/providers/types'
 import type { RichMediaPart, RichUserInput } from '@/runtime/semantic'
 import { normalizeUserInput } from '@/runtime/semantic'
@@ -19,7 +19,7 @@ import { PushableAsyncIterable } from '@/utils/PushableAsyncIterable'
 import { AcpClientManager, type AcpClientManagerConfig, type AcpExtensionHandler } from './AcpClientManager'
 import { adaptStopReason, mapSessionUpdate, parseRawInput as _parseRawInput, type AcpDebugLog } from './eventAdapter'
 import { unwrapToolOutput } from '@/utils/unwrapToolOutput'
-import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
+import type { SessionNotification, SessionUpdate, ContentBlock as AcpContentBlock, RequestPermissionRequest, RequestPermissionResponse } from '@agentclientprotocol/sdk'
 import { resolve, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -371,6 +371,12 @@ export interface AcpProviderConfig {
     args: string[]
     env?: Record<string, string>
     cwd?: string
+    resolvePermissionToolName?: (toolCall: RequestPermissionRequest['toolCall']) => string | undefined
+    mapPermissionResponse?: (
+        response: RequestPermissionResponse,
+        result: AgentPermissionResult,
+        request: RequestPermissionRequest,
+    ) => RequestPermissionResponse
 }
 
 export class AcpProvider implements AgentProvider {
@@ -393,6 +399,8 @@ export class AcpProvider implements AgentProvider {
             args: config.args,
             env: config.env,
             cwd: config.cwd,
+            resolvePermissionToolName: config.resolvePermissionToolName,
+            mapPermissionResponse: config.mapPermissionResponse,
         }
         this.clientManager = new AcpClientManager(managerConfig)
     }

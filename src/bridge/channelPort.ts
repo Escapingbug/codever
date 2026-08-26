@@ -33,10 +33,12 @@ export interface DecisionRequest {
     title: string
     details?: string
     options: DecisionOption[]
+    /** Allow the user to toggle several options before confirming. */
+    multiple?: boolean
 }
 
 export interface DecisionResponse {
-    value: string
+    value: string | string[]
 }
 
 export interface SessionStatus {

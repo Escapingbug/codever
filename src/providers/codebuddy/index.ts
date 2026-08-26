@@ -10,6 +10,10 @@
  */
 
 import { AcpProvider, type AcpProviderConfig } from '@/providers/acp'
+import {
+    addCodebuddyAnswersToPermissionResponse,
+    resolveCodebuddyPermissionToolName,
+} from './askUserQuestion'
 
 const CODEBUDDY_ACP_COMMAND = 'codebuddy'
 const CODEBUDDY_ACP_ARGS = ['acp']
@@ -30,6 +34,8 @@ export class CodebuddyProvider extends AcpProvider {
             args: options.args ?? CODEBUDDY_ACP_ARGS,
             ...(options.env ? { env: options.env } : {}),
             ...(options.cwd ? { cwd: options.cwd } : {}),
+            resolvePermissionToolName: resolveCodebuddyPermissionToolName,
+            mapPermissionResponse: addCodebuddyAnswersToPermissionResponse,
         })
     }
 }

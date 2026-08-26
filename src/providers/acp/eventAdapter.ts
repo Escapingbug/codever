@@ -44,6 +44,9 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
     task: 'Task',
     skill: 'Skill',
     'loaded skill': 'Skill',
+    askuserquestion: 'AskUserQuestion',
+    ask_user_question: 'AskUserQuestion',
+    'ask user question': 'AskUserQuestion',
 }
 
 /** Canonical ACP tool names (normalized) that we trust as real tool names */
@@ -51,6 +54,7 @@ const KNOWN_CANONICAL_TOOL_NAMES = new Set([
     'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep',
     'WebSearch', 'WebFetch', 'TodoWrite', 'ExitPlanMode',
     'Task', 'Skill', 'Agent',
+    'AskUserQuestion',
 ])
 
 /** Check if a title string looks like a trusted canonical tool name */

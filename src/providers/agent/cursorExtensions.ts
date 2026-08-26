@@ -94,7 +94,8 @@ async function handleAskQuestion(
         })),
     })
 
-    const [questionId, optionId] = response.value.split(':')
+    const responseValue = Array.isArray(response.value) ? response.value[0] ?? '' : response.value
+    const [questionId, optionId] = responseValue.split(':')
     if (!questionId || !optionId) {
         return { outcome: { outcome: 'skipped', reason: 'No option selected' } }
     }

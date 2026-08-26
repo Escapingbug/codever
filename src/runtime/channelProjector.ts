@@ -308,7 +308,7 @@ export class ChannelProjector {
         const state = this.mergeToolState(event)
         return {
             message: {
-                text: this.formatToolState(state),
+                text: this.formatToolState(state, true),
                 format: 'html',
             },
             toolUseId: event.toolCallId,
@@ -354,7 +354,7 @@ export class ChannelProjector {
         return state
     }
 
-    private formatToolState(state: ProjectedToolState): string {
+    private formatToolState(state: ProjectedToolState, showGenericInput = false): string {
         const status = state.phase === 'failed'
             ? 'interrupted'
             : state.phase === 'completed'
@@ -379,6 +379,7 @@ export class ChannelProjector {
             isError: state.isError,
             displayTitle: state.displayTitle,
             category: state.category,
+            showGenericInput,
             content: state.content,
         })
     }

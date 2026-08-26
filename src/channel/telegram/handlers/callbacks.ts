@@ -16,7 +16,7 @@ import type { TopicSession } from '@/bridge/channelPort'
 import { getCwdForChat, performResume, persistModelSettings, sendSessionList } from './settings'
 import { consumePendingCwdPath } from './groupCommands'
 import { mkdirSync } from 'node:fs'
-import { completePendingDecision } from '@/channel/telegram/decisionRegistry'
+import { completePendingDecision, handlePendingDecisionCallback } from '@/channel/telegram/decisionRegistry'
 
 export interface CallbackHandlerContext {
     sessionManager: SessionManager
@@ -143,10 +143,30 @@ async function handleFileCallback(c: Context, data: string, topicSessions: Map<s
 async function handleDecisionCallback(c: Context, data: string, topicSessions: Map<string, TopicSession>): Promise<void> {
     const parts = data.split(':')
     const decisionId = parts[1]
+    const action = parts[2]
     const value = decodeURIComponent(parts.slice(2).join(':') || '')
 
     if (!decisionId) {
         await c.answerCallbackQuery('Invalid decision')
+        return
+    }
+
+    if (action === 'ui') {
+        const uiAction = parts[3]
+        const rawIndex = parts[4]
+        const optionIndex = rawIndex !== undefined && /^\d+$/.test(rawIndex) ? Number(rawIndex) : undefined
+        const result = handlePendingDecisionCallback(decisionId, uiAction, optionIndex)
+        if (result.status === 'completed') {
+            await c.answerCallbackQuery(result.notice)
+            try { await c.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }) } catch {}
+            return
+        }
+        if (result.status === 'updated') {
+            await c.answerCallbackQuery(result.notice)
+            try { await c.editMessageReplyMarkup({ reply_markup: result.replyMarkup }) } catch {}
+            return
+        }
+        await c.answerCallbackQuery(result.status === 'missing' ? 'Request expired or already handled' : 'Invalid decision')
         return
     }
 

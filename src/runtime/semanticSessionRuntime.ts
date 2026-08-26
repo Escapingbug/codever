@@ -6,6 +6,7 @@ import { basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChannelPort, ChannelMessage, SessionStatus } from '@/bridge/channelPort'
 import type { AgentPermissionHandler, AgentProvider, AgentQueryHandle } from '@/providers/provider'
+import { parseCodebuddyAskUserQuestion, type CodebuddyQuestion } from '@/providers/codebuddy/askUserQuestion'
 import type { AgentEvent } from '@/providers/types'
 import type { ConversationEvent, RichFilePart, RichUserInput, SessionInput } from './semantic'
 import { normalizeUserInput } from './semantic'
@@ -1236,6 +1237,40 @@ export class SemanticSessionRuntime {
     private createPermissionHandler(): AgentPermissionHandler {
         return {
             handleToolCall: async (toolName, input, options) => {
+                if (this.config.providerName.toLowerCase().includes('codebuddy')) {
+                    const questionInput = parseCodebuddyAskUserQuestion(toolName, input)
+                    if (questionInput) {
+                        const answers: Record<string, string> = {}
+                        for (let index = 0; index < questionInput.questions.length; index++) {
+                            const question = questionInput.questions[index]
+                            const response = await this.config.channelPort.requestDecision({
+                                type: 'question',
+                                title: formatCodebuddyQuestionTitle(question, index, questionInput.questions.length),
+                                details: formatCodebuddyQuestionDetails(question),
+                                options: question.options.map(option => ({
+                                    label: option.label,
+                                    value: option.label,
+                                })),
+                                ...(question.multiSelect ? { multiple: true } : {}),
+                            })
+                            if (options.signal.aborted) return { behavior: 'deny', message: 'aborted' }
+
+                            const selected = Array.isArray(response.value)
+                                ? response.value
+                                : response.value ? [response.value] : []
+                            if (selected.length === 0) {
+                                return { behavior: 'deny', message: 'question unanswered' }
+                            }
+                            answers[question.question] = selected.join(', ')
+                        }
+
+                        return {
+                            behavior: 'allow',
+                            updatedInput: { ...questionInput.input, answers },
+                        }
+                    }
+                }
+
                 const response = await this.config.channelPort.requestDecision({
                     type: 'permission',
                     title: `Allow ${toolName}?`,
@@ -1340,6 +1375,23 @@ export class SemanticSessionRuntime {
     private log(message: string): void {
         this.config.onLog?.(message)
     }
+}
+
+function formatCodebuddyQuestionTitle(question: CodebuddyQuestion, index: number, total: number): string {
+    const title = total > 1
+        ? `${question.header} (${index + 1}/${total})`
+        : question.header
+    return truncateForNotice(title, 120)
+}
+
+function formatCodebuddyQuestionDetails(question: CodebuddyQuestion): string {
+    const lines = [question.question]
+    const describedOptions = question.options.filter(option => option.description)
+    if (describedOptions.length > 0) {
+        lines.push('', ...describedOptions.map(option => `• ${option.label} — ${option.description}`))
+    }
+    if (question.multiSelect) lines.push('', 'Select one or more options, then confirm.')
+    return truncateForNotice(lines.join('\n'), 3_000)
 }
 
 function isPathInside(path: string, base: string): boolean {

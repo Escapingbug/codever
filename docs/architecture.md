@@ -69,7 +69,7 @@ Provider permission request
   -> provider receives allow/deny
 ```
 
-Permission UI is a channel concern. Runtime records the decision event and bridges the result back to the provider.
+Permission UI is a channel concern. Runtime bridges the selected result back to the provider. Structured provider questions use the same `ChannelPort.requestDecision()` boundary; Telegram supports both single-choice buttons and multi-select toggles followed by confirmation.
 
 ### 3.4 Scheduled and MCP Messages
 
@@ -172,7 +172,7 @@ This layer absorbs provider-specific quirks, including:
 - replayed history from ACP `loadSession`;
 - provider command/config updates.
 
-CodeBuddy's ACP metadata extension is parsed under `src/providers/codebuddy/semantic.ts`. The CodeBuddy semantic adapter maps standard `session_info_update` values to silent session metadata and maps `_meta["codebuddy.ai/teamUpdate"]` snapshots to `team_state_update` events. Empty CodeBuddy housekeeping tool calls are retained as hidden raw events rather than rendered as transcript tools.
+CodeBuddy's ACP metadata extensions are parsed under `src/providers/codebuddy/`. The CodeBuddy semantic adapter maps standard `session_info_update` values to silent session metadata and maps `_meta["codebuddy.ai/teamUpdate"]` snapshots to `team_state_update` events. Empty CodeBuddy housekeeping tool calls are retained as hidden raw events rather than rendered as transcript tools. `askUserQuestion.ts` owns CodeBuddy's `codebuddy.ai/toolName`, `AskUserQuestion` schema, and permission-response `answers` extension. The shared ACP client exposes generic tool-name and permission-response hooks and caches `rawInput` by `toolCallId`; it does not encode CodeBuddy field names.
 
 ACP extension methods keep the same ownership boundary. The shared ACP client manager only exposes generic `extMethod` and `extNotification` hooks; it must not encode provider-specific method names. Provider-specific extensions are registered by the concrete provider. For Cursor's `agent acp` provider, `src/providers/agent/cursorExtensions.ts` owns all `cursor/*` parsing and maps it to existing Codever surfaces:
 
@@ -267,6 +267,7 @@ src/
     acp/                            # shared ACP implementation
     opencode/                       # opencode provider
     codebuddy/                      # codebuddy provider
+      askUserQuestion.ts            # CodeBuddy question schema and ACP answer extension
     agent/                          # Cursor agent ACP provider
 
   mcp/

@@ -865,6 +865,84 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.sent.map(m => m.text)).toContain('permission:allow')
     })
 
+    it('collects CodeBuddy AskUserQuestion answers instead of showing a generic permission', async () => {
+        let permissionResult: Awaited<ReturnType<NonNullable<AgentQueryConfig['permissionHandler']>['handleToolCall']>> | undefined
+        const provider = createProvider([], {
+            name: 'codebuddy',
+            startQuery: vi.fn((_prompt: string, config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    permissionResult = await config.permissionHandler!.handleToolCall(
+                        'AskUserQuestion',
+                        {
+                            questions: [
+                                {
+                                    header: 'Database',
+                                    question: 'Which database?',
+                                    options: [
+                                        { label: 'PostgreSQL', description: 'Relational' },
+                                        { label: 'MongoDB', description: 'Document' },
+                                    ],
+                                    multiSelect: false,
+                                },
+                                {
+                                    header: 'Scope',
+                                    question: 'Which areas should change?',
+                                    options: [
+                                        { label: 'API', description: 'Backend API' },
+                                        { label: 'UI', description: 'Frontend UI' },
+                                    ],
+                                    multiSelect: true,
+                                },
+                            ],
+                        },
+                        { signal: config.signal },
+                    )
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        })
+        const channel = createChannel()
+        channel.requestDecision = vi.fn(async (request): Promise<DecisionResponse> => {
+            channel.decisions.push(request)
+            return request.multiple
+                ? { value: ['API', 'UI'] }
+                : { value: 'PostgreSQL' }
+        })
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'codebuddy',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'ask me', source: 'channel' })
+
+        expect(channel.decisions).toEqual([
+            expect.objectContaining({
+                type: 'question',
+                title: 'Database (1/2)',
+                details: expect.stringContaining('Which database?'),
+            }),
+            expect.objectContaining({
+                type: 'question',
+                title: 'Scope (2/2)',
+                multiple: true,
+                details: expect.stringContaining('Which areas should change?'),
+            }),
+        ])
+        expect(permissionResult).toMatchObject({
+            behavior: 'allow',
+            updatedInput: {
+                answers: {
+                    'Which database?': 'PostgreSQL',
+                    'Which areas should change?': 'API, UI',
+                },
+            },
+        })
+    })
+
     it('applies model, timeout, and permission mode as runtime config commands', async () => {
         const provider = createProvider([])
         const channel = createChannel()

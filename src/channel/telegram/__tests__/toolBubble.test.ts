@@ -95,6 +95,62 @@ describe('toolBubble — displayTitle support', () => {
     })
 })
 
+describe('toolBubble — interactive and unknown tool inputs', () => {
+    it('renders CodeBuddy AskUserQuestion questions, choices, and descriptions', () => {
+        const result = formatToolBubble({
+            toolName: 'AskUserQuestion',
+            input: {
+                questions: [{
+                    header: 'Database',
+                    question: 'Which database should we use?',
+                    options: [
+                        { label: 'PostgreSQL', description: 'Relational database' },
+                        { label: 'MongoDB', description: 'Document database' },
+                    ],
+                    multiSelect: false,
+                }],
+            },
+            status: 'running',
+        })
+
+        expect(result).toContain('Which database should we use?')
+        expect(result).toContain('PostgreSQL')
+        expect(result).toContain('Relational database')
+    })
+
+    it('shows redacted, bounded input for otherwise unknown tools', () => {
+        const result = formatToolBubble({
+            toolName: 'DeployWidget',
+            input: {
+                environment: 'staging',
+                apiKey: 'super-secret-value',
+                accessToken: 'another-secret-value',
+            },
+            status: 'running',
+            showGenericInput: true,
+        })
+
+        expect(result).toContain('environment')
+        expect(result).toContain('staging')
+        expect(result).toContain('[REDACTED]')
+        expect(result).not.toContain('super-secret-value')
+        expect(result).not.toContain('another-secret-value')
+        expect(result.length).toBeLessThan(1_500)
+    })
+
+    it('keeps unknown tool payloads hidden unless verbose input is requested', () => {
+        const result = formatToolBubble({
+            toolName: 'DeployWidget',
+            input: { environment: 'staging' },
+            status: 'running',
+        })
+
+        expect(result).toContain('DeployWidget')
+        expect(result).not.toContain('environment')
+        expect(result).not.toContain('staging')
+    })
+})
+
 describe('toolBubble — Read/Edit/Write path support', () => {
     it('Read supports file_path, filePath, and path', () => {
         const inputs = [
