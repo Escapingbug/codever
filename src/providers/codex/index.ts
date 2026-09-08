@@ -10,7 +10,7 @@ import { AcpProvider } from '@/providers/acp'
 import type { ModelEntry } from '@/providers/provider'
 
 const CODEX_ACP_COMMAND = 'npx'
-const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp']
+const CODEX_ACP_ARGS = ['-y', '@agentclientprotocol/codex-acp@1.10.0']
 const CODEX_MODELS_COMMAND = 'codex'
 const CODEX_MODELS_ARGS = ['debug', 'models']
 const CODEX_MODEL_PROVIDER = 'openai'
