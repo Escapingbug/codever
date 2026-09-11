@@ -837,8 +837,8 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
         })
     })
 
-    describe('Additional: usage_update rendered friendly', () => {
-        it('should render usage_update with token/cost info', async () => {
+    describe('Additional: usage_update remains internal metadata', () => {
+        it('should suppress standard token/cost usage updates', async () => {
             const usageUpdate = {
                 sessionUpdate: 'usage_update',
                 inputTokens: 1000,
@@ -853,16 +853,21 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
                 provider: 'opencode',
             })
 
-            expect(results.length).toBe(1)
-            const message = results[0].text
+            expect(results).toEqual([])
+        })
 
-            expect(message).toContain('Usage')
-            expect(message).toContain('1000')
-            expect(message).toContain('500')
-            expect(message).toContain('$0.015')
+        it('should suppress CodeBuddy size/used usage updates', async () => {
+            const results = await processAcpUpdate({
+                sessionUpdate: 'usage_update',
+                size: 258400,
+                used: 82818,
+            }, {
+                sessionId: 'sess-1',
+                turnId,
+                provider: 'codebuddy',
+            })
 
-            // Should NOT be JSON dump
-            expect(message).not.toContain('{"inputTokens"')
+            expect(results).toEqual([])
         })
     })
 

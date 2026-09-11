@@ -1341,6 +1341,7 @@ describe('Semantic runtime integration chain', () => {
             expect.objectContaining({ kind: 'command_result', command: 'usage_update' }),
         ]))
         expect(channel.sent.map(m => m.text).join('\n')).toContain('Mode:')
+        expect(channel.sent.map(m => m.text).join('\n')).not.toContain('Usage')
     })
 
     it('applies resume as a runtime command before the next provider turn', async () => {

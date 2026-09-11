@@ -217,7 +217,7 @@ describe('ChannelProjector — command_result friendly rendering', () => {
         expect(message).not.toContain('Exited plan mode')
     })
 
-    it('renders usage_update with token/cost info', () => {
+    it('suppresses usage_update with token/cost info', () => {
         const event: Extract<ConversationEvent, { kind: 'command_result' }> = {
             kind: 'command_result',
             command: 'usage_update',
@@ -238,16 +238,10 @@ describe('ChannelProjector — command_result friendly rendering', () => {
             },
         }
 
-        const result = projector.project(event)
-        const message = result[0]?.message.text || ''
-
-        expect(message).toContain('Usage')
-        expect(message).toContain('1000')
-        expect(message).toContain('500')
-        expect(message).toContain('$0.015')
+        expect(projector.project(event)).toEqual([])
     })
 
-    it('renders usage_update snake_case token/cost fields', () => {
+    it('suppresses usage_update snake_case token/cost fields', () => {
         const event: Extract<ConversationEvent, { kind: 'command_result' }> = {
             kind: 'command_result',
             command: 'usage_update',
@@ -268,13 +262,7 @@ describe('ChannelProjector — command_result friendly rendering', () => {
             },
         }
 
-        const result = projector.project(event)
-        const message = result[0]?.message.text || ''
-
-        expect(message).toContain('Usage')
-        expect(message).toContain('11')
-        expect(message).toContain('22')
-        expect(message).toContain('$0.004')
+        expect(projector.project(event)).toEqual([])
     })
 })
 

@@ -96,7 +96,7 @@ export class ChannelProjector {
             case 'command_result':
                 // Provider metadata updates mutate session state and do not belong in the transcript.
                 const commandLower = event.command.toLowerCase()
-                if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option') || commandLower.includes('session_info')) {
+                if (commandLower.includes('available_commands') || commandLower.includes('commands_update') || commandLower.includes('config_option') || commandLower.includes('session_info') || commandLower.includes('usage')) {
                     return []
                 }
                 const commandText = formatCommandResult(event.command, event.output)
@@ -559,29 +559,6 @@ function formatCommandResult(command: string, output: unknown): string | null {
             return `<b>📋 Plan</b>\n${escapeHtml(planText)}`
         }
         return null
-    }
-
-    // usage_update: show token/cost info
-    if (commandLower.includes('usage')) {
-        const usage = asRecord(output)
-        if (usage) {
-            const parts: string[] = ['<b>📊 Usage</b>']
-            const inputTokens = usage.inputTokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.prompt_tokens
-            const outputTokens = usage.outputTokens ?? usage.output_tokens ?? usage.completionTokens ?? usage.completion_tokens
-            const totalTokens = usage.totalTokens ?? usage.total_tokens
-            const cost = usage.costUSD ?? usage.costUsd ?? usage.cost_usd ?? usage.totalCost ?? usage.total_cost
-            if (inputTokens !== undefined || outputTokens !== undefined) {
-                parts.push(`Tokens: ${inputTokens ?? 0} in / ${outputTokens ?? 0} out`)
-            }
-            if (totalTokens !== undefined) {
-                parts.push(`Total: ${totalTokens}`)
-            }
-            if (cost !== undefined) {
-                parts.push(`Cost: $${cost}`)
-            }
-            if (parts.length === 1) parts.push('Updated')
-            return parts.join('\n')
-        }
     }
 
     // config_option_update: show config changes
