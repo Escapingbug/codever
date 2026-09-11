@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AcpProvider, formatAgentQueryError } from '@/providers/acp'
+import { AcpProvider, formatAgentQueryError, type AcpSessionConfiguration } from '@/providers/acp'
 import type { AgentEvent } from '@/providers/types'
 
 interface FakeSessionNotification {
@@ -23,6 +23,8 @@ class FakeAcpClientManager {
     promptCapabilities = {}
     promptText = 'final tail'
     loadSessionHistoryText: string | null = null
+    setModelCalls: Array<{ sessionId: string; modelId: string }> = []
+    setConfigOptionCalls: Array<{ sessionId: string; configId: string; value: string }> = []
 
     private queue: FakeSessionNotification[] = []
     private waiters: FakeWaiter[] = []
@@ -33,8 +35,22 @@ class FakeAcpClientManager {
     clearStderrBuffer(): void {}
     getStderrError(): string | null { return null }
 
-    async newSession(): Promise<{ sessionId: string }> {
+    async newSession(): Promise<{
+        sessionId: string
+        models?: { currentModelId: string; availableModels: Array<{ modelId: string; name: string }> }
+        configOptions?: Array<{ id: string; name: string; category?: string }>
+    }> {
         return { sessionId: 'session-1' }
+    }
+
+    async setSessionModel(params: { sessionId: string; modelId: string }): Promise<Record<string, never>> {
+        this.setModelCalls.push(params)
+        return {}
+    }
+
+    async setSessionConfigOption(params: { sessionId: string; configId: string; value: string }): Promise<{ configOptions: [] }> {
+        this.setConfigOptionCalls.push(params)
+        return { configOptions: [] }
     }
 
     async loadSession(): Promise<unknown> {
@@ -214,6 +230,41 @@ describe('AcpProvider tail drain', () => {
             expect.objectContaining({ kind: 'text', text: 'old history from loadSession' }),
         ]))
         expect(clientManager.pendingWaiterCount).toBe(0)
+    })
+
+    it('resolves the selected alias against session models before calling ACP setters', async () => {
+        class ModelResolvingProvider extends AcpProvider {
+            protected override resolveSessionModel(_model: string, configuration: AcpSessionConfiguration | undefined): string | undefined {
+                return configuration?.models?.availableModels[0]?.modelId
+            }
+        }
+
+        const provider = new ModelResolvingProvider({ name: 'cursor-test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.newSession = async () => ({
+            sessionId: 'session-1',
+            models: {
+                currentModelId: 'auto-smart[optimize_for=balanced]',
+                availableModels: [{ modelId: 'kimi-k3[reasoning=max]', name: 'kimi-k3' }],
+            },
+            configOptions: [{ id: 'model', name: 'Model', category: 'model' }],
+        })
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            model: 'kimi-k3',
+            signal: new AbortController().signal,
+        })
+        for await (const _event of handle.events) {}
+
+        expect(clientManager.setModelCalls).toEqual([
+            { sessionId: 'session-1', modelId: 'kimi-k3[reasoning=max]' },
+        ])
+        expect(clientManager.setConfigOptionCalls).toEqual([
+            { sessionId: 'session-1', configId: 'model', value: 'kimi-k3[reasoning=max]' },
+        ])
     })
 })
 

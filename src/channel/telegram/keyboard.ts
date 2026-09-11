@@ -28,7 +28,8 @@ export function verboseKeyboard(): InlineKeyboard {
         .text('📢 Verbose', 'verbose:2')
 }
 
-const MODELS_PER_PAGE = 10
+export const MODELS_PER_PAGE = 10
+export const MODEL_SEARCH_THRESHOLD = MODELS_PER_PAGE * 4
 const MODEL_PROVIDERS_PER_PAGE = 10
 
 export function modelKeyboard(models: ModelEntry[], page: number = 0): InlineKeyboard {

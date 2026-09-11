@@ -8,12 +8,14 @@ import {
     modelKeyboard,
     modelProviderKeyboard,
     modelProviderDetailKeyboard,
+    MODEL_SEARCH_THRESHOLD,
+    MODELS_PER_PAGE,
     verboseKeyboard,
     providerKeyboard,
     resumeSessionKeyboard,
 } from '@/channel/telegram/keyboard'
-import type { SessionEntry } from '@/providers/provider'
-import { escapeHtml } from '@/utils/formatting'
+import type { ModelEntry, SessionEntry } from '@/providers/provider'
+import { escapeHtml, splitHtmlChunks } from '@/utils/formatting'
 import type { TopicSession } from '@/bridge/channelPort'
 
 export interface SettingsHandlerContext {
@@ -44,8 +46,19 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             const models = provider.getAvailableModels()
             const found = models.find(m => m.id.toLowerCase() === modelToSet || m.name.toLowerCase() === modelToSet)
             if (!found) {
-                const modelNames = models.map(m => m.id).join(', ')
-                await c.reply(`Model "<b>${args}</b>" not found.\n\nAvailable: ${modelNames}`, { parse_mode: 'HTML' })
+                const matches = filterModels(models, args)
+                if (matches.length === 0) {
+                    await c.reply(`No models found for <b>${escapeHtml(args)}</b>. Try a shorter keyword.`, { parse_mode: 'HTML' })
+                    return
+                }
+                const visibleMatches = matches.slice(0, MODELS_PER_PAGE)
+                const suffix = matches.length > visibleMatches.length
+                    ? ` Showing the first ${visibleMatches.length}; use a more specific keyword to narrow the results.`
+                    : ''
+                await c.reply(`Found <b>${matches.length}</b> models matching <b>${escapeHtml(args)}</b>.${suffix}`, {
+                    parse_mode: 'HTML',
+                    reply_markup: modelKeyboard(visibleMatches),
+                })
                 return
             }
             if (topicSession) {
@@ -73,6 +86,16 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
                 parse_mode: 'HTML',
             })
+            return
+        }
+        if (models.length > MODEL_SEARCH_THRESHOLD) {
+            await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nThis provider has <b>${models.length}</b> models. The complete list follows below.\n\nSearch with <code>/model &lt;keyword&gt;</code>, or select an exact ID with <code>/model &lt;model-id&gt;</code>.`, {
+                parse_mode: 'HTML',
+                reply_markup: modelProviderKeyboard(models),
+            })
+            for (const chunk of formatModelCatalogChunks(models)) {
+                await c.reply(chunk, { parse_mode: 'HTML' })
+            }
             return
         }
         await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a model provider:`, {
@@ -214,6 +237,24 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         }
         await performResume(c, c.chat.id, sessionId, messageThreadId, sessionManager, topicSessions)
     })
+}
+
+export function filterModels(models: ModelEntry[], query: string): ModelEntry[] {
+    const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    if (terms.length === 0) return []
+    return models.filter(model => {
+        const searchable = `${model.id} ${model.name} ${model.provider ?? ''}`.toLowerCase()
+        return terms.every(term => searchable.includes(term))
+    })
+}
+
+export function formatModelCatalogChunks(models: ModelEntry[], maxLength = 3_800): string[] {
+    const lines = models.map(model => {
+        const id = model.id.replace(/\s+/g, ' ').trim()
+        const name = model.name.replace(/\s+/g, ' ').trim()
+        return name && name !== id ? `${id} — ${name}` : id
+    })
+    return splitHtmlChunks(`<pre>${escapeHtml(lines.join('\n'))}</pre>`, maxLength)
 }
 
 function isSelectableModel(model: string, models: Array<{ id: string; name: string }>): boolean {

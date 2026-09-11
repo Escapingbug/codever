@@ -341,6 +341,50 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(ctx.replies[0].text).toContain('Reasoning effort: <b>medium</b>')
     })
 
+    it('/model switches large catalogs to keyword search instead of deep pagination', async () => {
+        providerModels.splice(0, providerModels.length, ...Array.from({ length: 250 }, (_, index) => ({
+            id: `model-${index}`,
+            name: `Model ${index}`,
+            provider: 'large-provider',
+        })))
+        const bot = createBot()
+        registerSettingsHandlers(bot, { sessionManager: createSessionManager(), topicSessions: new Map() })
+        const ctx = createContext()
+
+        await bot.runCommand('model', ctx)
+
+        expect(ctx.replies[0].text).toContain('This provider has <b>250</b> models')
+        expect(ctx.replies[0].text).toContain('/model &lt;keyword&gt;')
+        expect(ctx.replies[0].options).toHaveProperty('reply_markup')
+        expect(ctx.replies.length).toBeGreaterThan(2)
+        expect(ctx.replies.slice(1).every(reply => reply.text.length <= 4_000)).toBe(true)
+        expect(ctx.replies.slice(1).map(reply => reply.text).join('\n')).toContain('model-0 — Model 0')
+        expect(ctx.replies.slice(1).map(reply => reply.text).join('\n')).toContain('model-249 — Model 249')
+    })
+
+    it('/model keyword search returns at most one page of clickable matches', async () => {
+        providerModels.splice(0, providerModels.length, ...Array.from({ length: 15 }, (_, index) => ({
+            id: `gpt-5.6-variant-${index}`,
+            name: `GPT 5.6 Variant ${index}`,
+            provider: 'cursor',
+        })))
+        const bot = createBot()
+        const session = createSession('idle')
+        registerSettingsHandlers(bot, {
+            sessionManager: createSessionManager(),
+            topicSessions: new Map([['-100:10', session]]),
+        })
+        const ctx = createContext('gpt 5.6')
+
+        await bot.runCommand('model', ctx)
+
+        expect(session.dispatch).not.toHaveBeenCalled()
+        expect(ctx.replies[0].text).toContain('Found <b>15</b> models')
+        expect(ctx.replies[0].text).toContain('Showing the first 10')
+        const rows = (ctx.replies[0].options as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard
+        expect(rows.flat()).toHaveLength(10)
+    })
+
     it('/resume should dispatch runtime resume command after resolving the provider session id', async () => {
         const bot = createBot()
         const session = createSession('idle')

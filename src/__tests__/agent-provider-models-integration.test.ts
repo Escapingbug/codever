@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { AgentProvider, parseAgentModels } from '@/providers/agent'
+import { AgentProvider, parseAgentModels, resolveCursorSessionModel } from '@/providers/agent'
+import type { AcpSessionConfiguration } from '@/providers/acp'
 import { modelKeyboard, modelProviderDetailKeyboard, modelProviderKeyboard, providerKeyboard } from '@/channel/telegram/keyboard'
 import type { ModelEntry } from '@/providers/provider'
 
@@ -75,7 +76,8 @@ describe('AgentProvider model discovery integration', () => {
             throw new Error(`unexpected spawnSync call: ${command}`)
         })
 
-        const models = new AgentProvider().getAvailableModels()
+        const provider = new AgentProvider()
+        const models = provider.getAvailableModels()
 
         expect(spawnSyncMock).toHaveBeenCalledWith('agent models', expect.objectContaining({ shell: true }))
         expect(models).toEqual([
@@ -83,12 +85,68 @@ describe('AgentProvider model discovery integration', () => {
             { id: 'composer-2-fast', name: 'Composer 2 Fast (default)', provider: 'cursor' },
             { id: 'gpt-5.5-medium', name: 'GPT-5.5 1M', provider: 'cursor' },
         ])
+        expect(provider.getAvailableModels()).toEqual(models)
+        expect(spawnSyncMock).toHaveBeenCalledTimes(1)
     })
 
     it('parses model lines and ignores headings or tips from agent models output', () => {
         expect(parseAgentModels('Available models\n\nauto - Auto\nTip: use --model <id>\n')).toEqual([
             { id: 'auto', name: 'Auto', provider: 'cursor' },
         ])
+    })
+
+    it('maps Cursor CLI aliases to the exact model id advertised by the ACP session', () => {
+        const availableModels = [
+            { modelId: 'gpt-5.6-sol[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.6-sol' },
+            { modelId: 'claude-opus-5[thinking=true,context=300k,effort=high,fast=true]', name: 'claude-opus-5' },
+            { modelId: 'kimi-k3[reasoning=max]', name: 'kimi-k3' },
+        ]
+
+        expect(resolveCursorSessionModel('gpt-5.6-sol', availableModels)).toBe(availableModels[0].modelId)
+        expect(resolveCursorSessionModel('claude-opus-5-thinking-high-fast', availableModels)).toBe(availableModels[1].modelId)
+        expect(resolveCursorSessionModel(availableModels[2].modelId, availableModels)).toBe(availableModels[2].modelId)
+        expect(resolveCursorSessionModel('kimi-k3-high', availableModels)).toBe(availableModels[2].modelId)
+        expect(resolveCursorSessionModel('unknown-high', availableModels)).toBeUndefined()
+    })
+
+    it('uses CLI variant parameters to disambiguate multiple ACP ids in one model family', () => {
+        const availableModels = [
+            { modelId: 'gpt-5.6-sol[reasoning=medium,fast=false]', name: 'gpt-5.6-sol' },
+            { modelId: 'gpt-5.6-sol[reasoning=high,fast=true]', name: 'gpt-5.6-sol' },
+        ]
+
+        expect(resolveCursorSessionModel('gpt-5.6-sol-high-fast', availableModels)).toBe(availableModels[1].modelId)
+        expect(resolveCursorSessionModel('gpt-5.6-sol-low', availableModels)).toBeUndefined()
+    })
+
+    it('keeps the CLI catalog intact after Cursor advertises ACP session models', () => {
+        class TestAgentProvider extends AgentProvider {
+            capture(configuration: AcpSessionConfiguration): void {
+                this.captureSessionConfiguration(configuration)
+            }
+        }
+        const provider = new TestAgentProvider()
+        spawnSyncMock.mockReturnValue({
+            status: 0,
+            error: undefined,
+            stdout: 'Available models\n\nkimi-k3-high - Kimi K3 High\nkimi-k3-max - Kimi K3 Max\n',
+            stderr: '',
+        })
+        provider.capture({
+            models: {
+                currentModelId: 'auto-smart[optimize_for=balanced]',
+                availableModels: [
+                    { modelId: 'auto-smart[optimize_for=balanced]', name: 'Auto Balance' },
+                    { modelId: 'kimi-k3[reasoning=max]', name: 'kimi-k3' },
+                ],
+            },
+        })
+
+        expect(provider.getAvailableModels()).toEqual([
+            { id: 'kimi-k3-high', name: 'Kimi K3 High', provider: 'cursor' },
+            { id: 'kimi-k3-max', name: 'Kimi K3 Max', provider: 'cursor' },
+        ])
+        expect(provider.resolveModel('kimi-k3')).toBe('kimi-k3')
     })
 
     it('does not show unsupported hard-coded model fallbacks when discovery returns no models', () => {
