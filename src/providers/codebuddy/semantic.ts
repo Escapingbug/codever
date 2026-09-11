@@ -1,4 +1,4 @@
-import type { AgentToolUseEvent } from '@/providers/types'
+import type { AgentToolResultEvent, AgentToolUseEvent, ToolResultContentBlock } from '@/providers/types'
 import type { TeamMemberState } from '@/runtime/semantic'
 
 export interface CodebuddyTeamUpdate {
@@ -32,10 +32,23 @@ export function parseCodebuddyTeamUpdate(raw: Record<string, unknown>): Codebudd
 }
 
 export function isCodebuddyHousekeepingTool(event: AgentToolUseEvent): boolean {
-    if (!isGenericToolName(event.toolName) || event.toolKind || event.content?.length || event.locations?.length) return false
-    if (isUsefulInput(event.input) || (typeof event.rawInput === 'string' && event.rawInput.trim())) return false
+    if (!isGenericToolName(event.toolName) || !isCodebuddyHousekeepingTitle(event.displayTitle)) return false
+    if (event.locations?.length || hasMeaningfulContent(event.content)) return false
+    if (isMeaningfulValue(event.input) || isMeaningfulRawInput(event.rawInput)) return false
 
-    const title = event.displayTitle
+    return true
+}
+
+export function isCodebuddyHousekeepingResult(event: AgentToolResultEvent): boolean {
+    if (!isGenericToolName(event.toolName) || !isCodebuddyHousekeepingTitle(event.displayTitle)) return false
+    if (event.isError || hasMeaningfulContent(event.content)) return false
+    if (isMeaningfulValue(event.output) || isMeaningfulValue(event.structuredOutput)) return false
+
+    return true
+}
+
+function isCodebuddyHousekeepingTitle(displayTitle: string | undefined): boolean {
+    const title = displayTitle
         ?.trim()
         .toLowerCase()
         .replace(/[_-]+/g, ' ')
@@ -92,10 +105,29 @@ function isGenericToolName(toolName: string | undefined): boolean {
     return !toolName || toolName === 'tool' || toolName === 'tool_call'
 }
 
-function isUsefulInput(value: unknown): boolean {
+function isMeaningfulValue(value: unknown): boolean {
     if (value === undefined || value === null) return false
-    if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length === 0) return false
+    if (typeof value === 'string') return value.trim().length > 0
+    if (Array.isArray(value)) return value.some(isMeaningfulValue)
+    if (typeof value === 'object') return Object.values(value as Record<string, unknown>).some(isMeaningfulValue)
     return true
+}
+
+function isMeaningfulRawInput(rawInput: string | undefined): boolean {
+    if (!rawInput?.trim()) return false
+    try {
+        return isMeaningfulValue(JSON.parse(rawInput))
+    } catch {
+        return true
+    }
+}
+
+function hasMeaningfulContent(content: ToolResultContentBlock[] | undefined): boolean {
+    return content?.some(block => {
+        if (block.type === 'content') return Boolean(block.text?.trim())
+        if (block.type === 'diff') return Boolean(block.path?.trim() || block.oldText?.trim() || block.newText?.trim())
+        return Boolean(block.terminalId?.trim())
+    }) ?? false
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

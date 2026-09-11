@@ -203,4 +203,55 @@ describe('ACP provider semantics', () => {
             displayTitle: 'Deploy application',
         })
     })
+
+    it('suppresses CodeBuddy housekeeping placeholders even when ACP supplies a kind and empty containers', () => {
+        const adapter = createProviderSemanticAdapter('codebuddy')
+        const started = adapter.toConversationEvents({
+            kind: 'tool_use',
+            toolName: 'tool_call',
+            toolUseId: 'session-info-1',
+            input: [],
+            rawInput: '{}',
+            toolKind: 'other',
+            content: [{ type: 'content', contentType: 'text', text: '' }],
+            displayTitle: 'Session_Info_Update',
+            status: 'running',
+        }, context)
+        const completed = adapter.toConversationEvents({
+            kind: 'tool_result',
+            toolUseId: 'session-info-1',
+            output: '',
+            structuredOutput: {},
+            content: [{ type: 'content', contentType: 'text', text: '   ' }],
+            isError: false,
+        }, context)
+
+        expect(started[0]).toMatchObject({ kind: 'provider_raw' })
+        expect(completed[0]).toMatchObject({ kind: 'provider_raw' })
+    })
+
+    it('suppresses an empty terminal-only housekeeping result but preserves meaningful tools', () => {
+        const adapter = createProviderSemanticAdapter('codebuddy')
+        const housekeeping = adapter.toConversationEvents({
+            kind: 'tool_result',
+            toolName: 'tool',
+            toolUseId: 'usage-1',
+            displayTitle: 'Usage Update',
+            output: '',
+            structuredOutput: [],
+            isError: false,
+        }, context)
+        const meaningful = adapter.toConversationEvents({
+            kind: 'tool_use',
+            toolName: 'tool_call',
+            toolUseId: 'status-with-content',
+            input: { command: 'deploy' },
+            toolKind: 'execute',
+            displayTitle: 'Status Update',
+            status: 'running',
+        }, context)
+
+        expect(housekeeping[0]).toMatchObject({ kind: 'provider_raw' })
+        expect(meaningful[0]).toMatchObject({ kind: 'tool', input: { command: 'deploy' } })
+    })
 })

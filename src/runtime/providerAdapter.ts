@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentToolUseEvent } from '@/providers/types'
-import { isCodebuddyHousekeepingTool, parseCodebuddyTeamUpdate } from '@/providers/codebuddy/semantic'
+import { isCodebuddyHousekeepingResult, isCodebuddyHousekeepingTool, parseCodebuddyTeamUpdate } from '@/providers/codebuddy/semantic'
 import type { ConversationEvent, SemanticMeta } from './semantic'
 
 export interface ProviderAdapterContext {
@@ -264,6 +264,13 @@ export class CodebuddyProviderSemanticAdapter extends AcpProviderSemanticAdapter
 
         if (event.kind === 'tool_result' && event.toolUseId && this.suppressedToolCalls.has(event.toolUseId)) {
             this.suppressedToolCalls.delete(event.toolUseId)
+            return this.toHiddenProviderEvent(event, context)
+        }
+
+        // A provider may emit only the terminal update (for example after replay
+        // or reconnect), so do not require a preceding tool_use to hide a known
+        // empty housekeeping result.
+        if (event.kind === 'tool_result' && isCodebuddyHousekeepingResult(event)) {
             return this.toHiddenProviderEvent(event, context)
         }
 
