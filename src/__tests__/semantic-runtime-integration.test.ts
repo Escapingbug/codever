@@ -865,6 +865,56 @@ describe('Semantic runtime integration chain', () => {
         expect(channel.sent.map(m => m.text)).toContain('permission:allow')
     })
 
+    it('round-trips provider-defined ACP choices for Kimi questions and plans', async () => {
+        let permissionResult: Awaited<ReturnType<NonNullable<AgentQueryConfig['permissionHandler']>['handleToolCall']>> | undefined
+        const provider = createProvider([], {
+            name: 'kimi',
+            startQuery: vi.fn((_prompt: string, config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    permissionResult = await config.permissionHandler!.handleToolCall(
+                        'AskUserQuestion',
+                        { question: 'Choose a database' },
+                        {
+                            signal: config.signal,
+                            permissionOptions: [
+                                { optionId: 'q0_opt_0', name: 'PostgreSQL', kind: 'allow_once' },
+                                { optionId: 'q0_opt_1', name: 'MongoDB', kind: 'allow_once' },
+                                { optionId: 'q0_skip', name: 'Skip', kind: 'reject_once' },
+                            ],
+                        },
+                    )
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        })
+        const channel = createChannel()
+        channel.requestDecision = vi.fn(async (request): Promise<DecisionResponse> => {
+            channel.decisions.push(request)
+            return { value: 'q0_opt_1' }
+        })
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'kimi',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'ask me', source: 'channel' })
+
+        expect(channel.decisions[0]?.options).toEqual([
+            { label: 'PostgreSQL', value: 'q0_opt_0' },
+            { label: 'MongoDB', value: 'q0_opt_1' },
+            { label: 'Skip', value: 'q0_skip' },
+        ])
+        expect(permissionResult).toEqual({
+            behavior: 'allow',
+            optionId: 'q0_opt_1',
+            permanent: false,
+        })
+    })
+
     it('collects CodeBuddy AskUserQuestion answers instead of showing a generic permission', async () => {
         let permissionResult: Awaited<ReturnType<NonNullable<AgentQueryConfig['permissionHandler']>['handleToolCall']>> | undefined
         const provider = createProvider([], {

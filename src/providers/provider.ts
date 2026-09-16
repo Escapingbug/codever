@@ -11,9 +11,17 @@ export class ProviderNotReadyError extends Error {
 
 export interface AgentPermissionResult {
     behavior: 'allow' | 'deny'
+    /** Select a specific provider-supplied ACP permission option. */
+    optionId?: string
     updatedInput?: Record<string, unknown>
     message?: string
     permanent?: boolean
+}
+
+export interface AgentPermissionOption {
+    optionId: string
+    name: string
+    kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
 }
 
 export interface ToolCallRecord {
@@ -22,7 +30,11 @@ export interface ToolCallRecord {
 }
 
 export interface AgentPermissionHandler {
-    handleToolCall(toolName: string, input: unknown, options: { signal: AbortSignal; recentToolCalls?: ToolCallRecord[] }): Promise<AgentPermissionResult>
+    handleToolCall(toolName: string, input: unknown, options: {
+        signal: AbortSignal
+        recentToolCalls?: ToolCallRecord[]
+        permissionOptions?: AgentPermissionOption[]
+    }): Promise<AgentPermissionResult>
     onEvent?(event: AgentEvent): void
     reset(): void
 }

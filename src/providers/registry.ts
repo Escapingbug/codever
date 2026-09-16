@@ -56,6 +56,7 @@ function inferProviderType(name: string): string {
     if (normalized.includes('codebuddy')) return 'codebuddy'
     if (normalized === 'agent' || normalized.includes('cursor')) return 'agent'
     if (normalized.includes('codex')) return 'codex'
+    if (normalized.includes('kimi')) return 'kimi'
     if (normalized.includes('acp')) return 'acp'
     return normalized
 }

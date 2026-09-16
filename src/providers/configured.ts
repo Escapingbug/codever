@@ -6,10 +6,11 @@ import type { AgentProvider } from '@/providers/provider'
 import { AgentProvider as CursorAgentProvider } from '@/providers/agent'
 import { CodebuddyProvider } from '@/providers/codebuddy'
 import { CodexProvider } from '@/providers/codex'
+import { KimiProvider } from '@/providers/kimi'
 import { OpencodeProvider } from '@/providers/opencode'
 import { registerProvider } from './registry'
 
-export type ProviderProfileType = 'opencode' | 'codebuddy' | 'agent' | 'codex' | 'acp'
+export type ProviderProfileType = 'opencode' | 'codebuddy' | 'agent' | 'codex' | 'kimi' | 'acp'
 
 export interface ProviderProfile {
     id: string
@@ -47,6 +48,7 @@ const BUILTIN_PROVIDER_PROFILES: ProviderProfile[] = [
     { id: 'codebuddy', type: 'codebuddy' },
     { id: 'agent', type: 'agent' },
     { id: 'codex', type: 'codex' },
+    { id: 'kimi', type: 'kimi' },
 ]
 
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/
@@ -168,6 +170,16 @@ export function createProviderFromProfile(profile: ProviderProfile): AgentProvid
                 modelsCommand: profile.modelsCommand,
                 modelsArgs: profile.modelsArgs,
             })
+        case 'kimi':
+            return new KimiProvider({
+                name: profile.id,
+                command: profile.command,
+                args: profile.args,
+                env: profile.env,
+                cwd: profile.cwd,
+                modelsCommand: profile.modelsCommand,
+                modelsArgs: profile.modelsArgs,
+            })
         case 'acp':
             if (!profile.command) {
                 throw new Error(`Provider profile "${profile.id}" of type "acp" requires command`)
@@ -213,6 +225,7 @@ function isProviderProfileType(value: string): value is ProviderProfileType {
         || value === 'codebuddy'
         || value === 'agent'
         || value === 'codex'
+        || value === 'kimi'
         || value === 'acp'
 }
 

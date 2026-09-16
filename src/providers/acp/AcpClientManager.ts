@@ -683,8 +683,29 @@ export class AcpClientManager {
                         const result: AgentPermissionResult = await this.permissionHandler.handleToolCall(
                             toolName,
                             input,
-                            { signal: new AbortController().signal },
+                            {
+                                signal: new AbortController().signal,
+                                permissionOptions: params.options.map(option => ({
+                                    optionId: option.optionId,
+                                    name: option.name,
+                                    kind: option.kind,
+                                })),
+                            },
                         )
+
+                        if (result.optionId) {
+                            const selectedOption = params.options.find(option => option.optionId === result.optionId)
+                            if (selectedOption) {
+                                console.error(`[acp] Selecting provider option ${selectedOption.optionId} for ${toolName}`)
+                                const response: RequestPermissionResponse = {
+                                    outcome: {
+                                        outcome: 'selected',
+                                        optionId: selectedOption.optionId,
+                                    },
+                                }
+                                return finishPermission(this.config.mapPermissionResponse?.(response, result, params) ?? response)
+                            }
+                        }
 
                         if (result.behavior === 'allow') {
                             const preferAlways = result.permanent === true

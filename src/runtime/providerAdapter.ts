@@ -21,7 +21,7 @@ export function createProviderSemanticAdapter(provider: string): ProviderSemanti
     if (normalized.includes('codebuddy')) {
         return new CodebuddyProviderSemanticAdapter(provider)
     }
-    if (normalized.includes('acp') || normalized.includes('opencode') || normalized.includes('agent')) {
+    if (normalized.includes('acp') || normalized.includes('opencode') || normalized.includes('agent') || normalized.includes('kimi')) {
         return new AcpProviderSemanticAdapter(provider)
     }
     return new DefaultProviderSemanticAdapter(provider)

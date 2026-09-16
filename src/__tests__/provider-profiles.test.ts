@@ -68,6 +68,7 @@ describe('provider profiles', () => {
         expect(resolveProviderProfiles(parsed)).toEqual(expect.arrayContaining([
             { id: 'opencode', type: 'opencode' },
             { id: 'agent', type: 'agent' },
+            { id: 'kimi', type: 'kimi' },
             {
                 id: 'opencode-fast',
                 type: 'opencode',
@@ -105,8 +106,9 @@ describe('provider profiles', () => {
             const registered = registerConfiguredProviders(file)
 
             expect(registered.defaultProvider).toBe('opencode-fast')
-            expect(listProviders()).toEqual(expect.arrayContaining(['opencode', 'opencode-fast', 'agent', 'codex']))
+            expect(listProviders()).toEqual(expect.arrayContaining(['opencode', 'opencode-fast', 'agent', 'codex', 'kimi']))
             expect(getProviderType('opencode-fast')).toBe('opencode')
+            expect(getProviderType('kimi')).toBe('kimi')
             expect(createProviderInstance('opencode-fast')?.name).toBe('opencode-fast')
         } finally {
             rmSync(dir, { recursive: true, force: true })

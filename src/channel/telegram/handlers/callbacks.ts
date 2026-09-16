@@ -304,7 +304,7 @@ async function handleModelListCallback(c: Context, data: string, sessionManager:
 }
 
 async function handleModelProviderCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
-    const provider = data.split(':')[1]
+    const provider = decodeURIComponent(data.split(':')[1] ?? '')
     if (!c.callbackQuery) return
     const chatId = c.callbackQuery.message?.chat.id
     const messageThreadId = c.callbackQuery.message?.message_thread_id
@@ -351,7 +351,7 @@ async function handleModelProviderListCallback(c: Context, data: string, session
 
 async function handleModelProviderPageCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
     const parts = data.split(':')
-    const provider = parts[1]
+    const provider = decodeURIComponent(parts[1] ?? '')
     const page = parseInt(parts[2], 10)
     if (!c.callbackQuery) return
     const chatId = c.callbackQuery.message?.chat.id

@@ -98,7 +98,7 @@ export function modelProviderKeyboard(models: ModelEntry[], page: number = 0): I
     for (let i = 0; i < pageProviders.length; i++) {
         const provider = pageProviders[i]
         const count = groups.get(provider)!.length
-        kb.text(`${provider} (${count})`, `mprov:${provider}`)
+        kb.text(`${provider} (${count})`, `mprov:${encodeURIComponent(provider)}`)
         if (i % 2 === 1) kb.row()
     }
 
@@ -146,12 +146,13 @@ export function modelProviderDetailKeyboard(
 
     // Pagination row
     if (totalPages > 1) {
+        const encodedProvider = encodeURIComponent(provider)
         if (page > 0) {
-            kb.text('⬅️ Prev', `mprovpage:${provider}:${page - 1}`)
+            kb.text('⬅️ Prev', `mprovpage:${encodedProvider}:${page - 1}`)
         }
-        kb.text(`${page + 1}/${totalPages}`, `mprovpage:${provider}:${page}`)
+        kb.text(`${page + 1}/${totalPages}`, `mprovpage:${encodedProvider}:${page}`)
         if (page < totalPages - 1) {
-            kb.text('Next ➡️', `mprovpage:${provider}:${page + 1}`)
+            kb.text('Next ➡️', `mprovpage:${encodedProvider}:${page + 1}`)
         }
         kb.row()
     }

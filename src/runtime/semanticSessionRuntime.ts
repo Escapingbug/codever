@@ -1271,6 +1271,28 @@ export class SemanticSessionRuntime {
                     }
                 }
 
+                const providerOptions = options.permissionOptions ?? []
+                if (providerOptions.length > 0) {
+                    const response = await this.config.channelPort.requestDecision({
+                        type: 'permission',
+                        title: toolName,
+                        details: formatUnknown(input),
+                        options: providerOptions.map(option => ({
+                            label: option.name,
+                            value: option.optionId,
+                        })),
+                    })
+                    if (options.signal.aborted) return { behavior: 'deny', message: 'aborted' }
+                    const selectedId = Array.isArray(response.value) ? response.value[0] : response.value
+                    const selected = providerOptions.find(option => option.optionId === selectedId)
+                    if (!selected) return { behavior: 'deny', message: 'no option selected' }
+                    return {
+                        behavior: selected.kind.startsWith('allow_') ? 'allow' : 'deny',
+                        optionId: selected.optionId,
+                        permanent: selected.kind === 'allow_always',
+                    }
+                }
+
                 const response = await this.config.channelPort.requestDecision({
                     type: 'permission',
                     title: `Allow ${toolName}?`,

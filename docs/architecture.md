@@ -180,6 +180,8 @@ ACP extension methods keep the same ownership boundary. The shared ACP client ma
 - `cursor/ask_question` uses the runtime decision handler and returns Cursor's selected option response shape.
 - `cursor/update_todos`, `cursor/task`, and `cursor/generate_image` are notifications rendered as existing tool/text events.
 
+Kimi Code uses the shared ACP transport through `src/providers/kimi/`. Its provider owns Kimi CLI discovery (`kimi provider list --json` and `kimi session list --json`) plus the mapping from Codever reasoning/mode settings to Kimi's `thinking` and `mode` ACP config options. Provider-defined ACP permission options remain generic protocol data and are round-tripped through the runtime decision UI so Kimi questions and plan choices keep their exact option ids.
+
 If another ACP provider adds extension methods, implement its mapping under that provider directory rather than adding provider-specific cases to `runtime/providerAdapter.ts`, `ChannelProjector`, or the shared ACP client.
 
 ### 4.8 `ChannelProjector`
@@ -269,6 +271,8 @@ src/
     codebuddy/                      # codebuddy provider
       askUserQuestion.ts            # CodeBuddy question schema and ACP answer extension
     agent/                          # Cursor agent ACP provider
+    codex/                          # OpenAI Codex ACP adapter provider
+    kimi/                           # Kimi Code CLI provider
 
   mcp/
     stdio.ts                        # active MCP stdio server entry

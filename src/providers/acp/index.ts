@@ -377,6 +377,12 @@ export interface AcpProviderConfig {
     args: string[]
     env?: Record<string, string>
     cwd?: string
+    /** ACP config option used for Codever's reasoning-effort setting. */
+    reasoningConfigId?: string
+    /** ACP config option used for Codever's permission/mode setting. */
+    permissionModeConfigId?: string
+    /** Provider-owned values accepted by permissionModeConfigId. */
+    permissionModeValues?: string[]
     resolvePermissionToolName?: (toolCall: RequestPermissionRequest['toolCall']) => string | undefined
     mapPermissionResponse?: (
         response: RequestPermissionResponse,
@@ -391,6 +397,9 @@ export class AcpProvider implements AgentProvider {
     private _initError: string | null = null
     private initialized = false
     private initPromise: Promise<void> | null = null
+    private readonly reasoningConfigId: string
+    private readonly permissionModeConfigId?: string
+    private readonly permissionModeValues?: Set<string>
 
     /** Track the active sessionId for the current query (for interrupt support) */
     private activeSessionId: string | null = null
@@ -400,6 +409,11 @@ export class AcpProvider implements AgentProvider {
 
     constructor(config: AcpProviderConfig) {
         this.name = config.name
+        this.reasoningConfigId = config.reasoningConfigId ?? 'reasoning_effort'
+        this.permissionModeConfigId = config.permissionModeConfigId
+        this.permissionModeValues = config.permissionModeValues
+            ? new Set(config.permissionModeValues)
+            : undefined
         const managerConfig: AcpClientManagerConfig = {
             command: config.command,
             args: config.args,
@@ -464,22 +478,43 @@ export class AcpProvider implements AgentProvider {
         }
     }
 
-    private async applyProviderConfigOptions(sessionId: string, config: AgentQueryConfig): Promise<void> {
+    protected async applyProviderConfigOptions(sessionId: string, config: AgentQueryConfig): Promise<void> {
         const reasoningEffort = typeof config.providerSettings?.reasoningEffort === 'string'
             ? config.providerSettings.reasoningEffort.trim()
             : ''
-        if (!reasoningEffort) return
+        if (reasoningEffort) {
+            try {
+                await this.clientManager.setSessionConfigOption({
+                    sessionId,
+                    configId: this.reasoningConfigId,
+                    value: reasoningEffort,
+                })
+                console.error(`[acp:${this.name}] Set ${this.reasoningConfigId} to ${reasoningEffort}`)
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                console.error(`[acp:${this.name}] Failed to set ${this.reasoningConfigId}: ${msg}`)
+            }
+        }
 
-        try {
-            await this.clientManager.setSessionConfigOption({
-                sessionId,
-                configId: 'reasoning_effort',
-                value: reasoningEffort,
-            })
-            console.error(`[acp:${this.name}] Set reasoning effort to ${reasoningEffort}`)
-        } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e)
-            console.error(`[acp:${this.name}] Failed to set reasoning effort: ${msg}`)
+        const permissionMode = typeof config.providerSettings?.permissionMode === 'string'
+            ? config.providerSettings.permissionMode.trim()
+            : ''
+        if (
+            permissionMode
+            && this.permissionModeConfigId
+            && (!this.permissionModeValues || this.permissionModeValues.has(permissionMode))
+        ) {
+            try {
+                await this.clientManager.setSessionConfigOption({
+                    sessionId,
+                    configId: this.permissionModeConfigId,
+                    value: permissionMode,
+                })
+                console.error(`[acp:${this.name}] Set ${this.permissionModeConfigId} to ${permissionMode}`)
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                console.error(`[acp:${this.name}] Failed to set ${this.permissionModeConfigId}: ${msg}`)
+            }
         }
     }
 

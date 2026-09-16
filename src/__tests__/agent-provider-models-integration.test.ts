@@ -195,6 +195,16 @@ describe('AgentProvider model discovery integration', () => {
         ])
     })
 
+    it('encodes Kimi managed-provider ids in Telegram callback data', () => {
+        const models: ModelEntry[] = [{
+            id: 'kimi-code/kimi-for-coding',
+            name: 'Kimi for Coding',
+            provider: 'managed:kimi-code',
+        }]
+
+        expect(flattenButtonCallbacks(modelProviderKeyboard(models))).toContain('mprov:managed%3Akimi-code')
+    })
+
     it('paginates provider groups when there are many providers', () => {
         const models = Array.from({ length: 12 }, (_, index): ModelEntry => ({
             id: `provider-${index}/model`,

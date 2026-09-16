@@ -7,7 +7,7 @@ The current implementation is a Telegram topic session gateway: each Telegram fo
 ## Features
 
 - **Telegram remote agent UI**: send prompts from Telegram and receive assistant text, tool progress, errors, and final status.
-- **ACP providers**: supports `opencode acp`, `codebuddy acp`, and Cursor CLI's `agent acp`.
+- **ACP providers**: supports `opencode acp`, `codebuddy acp`, Cursor CLI's `agent acp`, OpenAI Codex, and `kimi acp`.
 - **Topic-based sessions**: each Telegram topic can map to a separate project/session; the general topic is reserved for control commands.
 - **Permission handling**: provider permission requests are shown as Telegram inline buttons.
 - **Session controls**: interrupt, reset, archive, list, and resume sessions from Telegram.
@@ -23,7 +23,8 @@ The current implementation is a Telegram topic session gateway: each Telegram fo
 - At least one supported provider command available in `PATH`:
   - `opencode` with `opencode acp`;
   - `codebuddy` with `codebuddy acp`;
-  - `agent` with `agent acp` for Cursor CLI Agent.
+  - `agent` with `agent acp` for Cursor CLI Agent;
+  - `kimi` with `kimi acp` for Kimi Code CLI.
 
 ## Installation
 
@@ -170,8 +171,20 @@ Codever registers built-in provider profiles:
 | `codebuddy` | `codebuddy acp` | ACP-based Codebuddy integration. |
 | `agent` | `agent acp` | Cursor CLI Agent integration. Uses `agent models` for model discovery and maps Cursor ACP extensions such as plans, questions, todos, tasks, and images into Codever events. |
 | `codex` | `npx -y @agentclientprotocol/codex-acp@1.10.0` | ACP adapter for OpenAI Codex. Uses `codex debug models` for model discovery. |
+| `kimi` | `kimi acp` | Native Kimi Code CLI integration. Uses `kimi provider list --json` for model/reasoning choices and `kimi session list --json` for resumable sessions. |
 
 Providers are initialized when the daemon starts. A provider that is missing or misconfigured is marked not ready, but other providers can still be used.
+
+For Kimi Code, install the current Node.js-based CLI and sign in before starting Codever:
+
+```bash
+curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+kimi login
+```
+
+The npm alternative, `npm install -g @moonshot-ai/kimi-code`, requires Node.js 22.19 or newer.
+
+After restarting Codever, choose `kimi` with `/provider`. `/model` lists the model aliases configured by Kimi Code and includes its available thinking-effort choices. `/mode` exposes Kimi's `default`, `plan`, `auto`, and `yolo` ACP modes. Codever also preserves Kimi's provider-defined approval, plan, and question choices in Telegram.
 
 You can add provider profiles in `~/.config/codever/providers.json`. A profile `id` is the name shown by `/provider`; `type` selects the provider implementation and model handling strategy. This lets one provider type have multiple configurations:
 
@@ -265,7 +278,7 @@ Channel Projector   -> converts ConversationEvent into ChannelMessage
 Delivery Outbox     -> serializes Telegram send/edit operations
 TelegramPort        -> implements ChannelPort for Telegram API details
 MCP Layer           -> exposes Codever resources and tools to agents
-Provider Layer      -> ACP providers: opencode, codebuddy, agent
+Provider Layer      -> ACP providers: opencode, codebuddy, agent, codex, kimi
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full current design.
