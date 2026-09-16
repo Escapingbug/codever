@@ -83,7 +83,7 @@ export class AcpClientManager {
 
     private permissionHandler: AgentPermissionHandler | null = null
     private extensionHandler: AcpExtensionHandler | null = null
-    private permissionToolContexts = new Map<string, { toolName?: string; rawInput?: unknown }>()
+    private permissionToolContexts = new Map<string, { toolName?: string; rawInput?: unknown; content?: unknown }>()
     private permissionResolvers = new Map<string, {
         resolve: (response: RequestPermissionResponse) => void
     }>()
@@ -680,6 +680,7 @@ export class AcpClientManager {
                 if (this.permissionHandler) {
                     try {
                         const input = params.toolCall.rawInput ?? cachedContext?.rawInput
+                        const toolCallContent = params.toolCall.content ?? cachedContext?.content
                         const result: AgentPermissionResult = await this.permissionHandler.handleToolCall(
                             toolName,
                             input,
@@ -690,6 +691,7 @@ export class AcpClientManager {
                                     name: option.name,
                                     kind: option.kind,
                                 })),
+                                ...(toolCallContent !== undefined ? { toolCallContent } : {}),
                             },
                         )
 
@@ -824,7 +826,6 @@ export class AcpClientManager {
     }
 
     private capturePermissionToolContext(params: SessionNotification): void {
-        if (!this.config.resolvePermissionToolName && !this.config.mapPermissionResponse) return
         const update = params.update as unknown as Record<string, unknown>
         if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') return
         if (typeof update.toolCallId !== 'string' || !update.toolCallId) return
@@ -836,11 +837,13 @@ export class AcpClientManager {
         }
         const existing = this.permissionToolContexts.get(key)
         const toolName = this.config.resolvePermissionToolName?.(update as RequestPermissionRequest['toolCall'])
-            ?? existing?.toolName
+            ?? (typeof update.title === 'string' ? update.title : existing?.toolName)
         const rawInput = update.rawInput ?? existing?.rawInput
+        const content = update.content ?? existing?.content
         this.permissionToolContexts.set(key, {
             ...(toolName ? { toolName } : {}),
             ...(rawInput !== undefined ? { rawInput } : {}),
+            ...(content !== undefined ? { content } : {}),
         })
     }
 

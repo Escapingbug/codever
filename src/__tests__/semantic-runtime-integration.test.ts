@@ -915,6 +915,58 @@ describe('Semantic runtime integration chain', () => {
         })
     })
 
+    it('shows Kimi ExitPlanMode content before asking for approval', async () => {
+        const provider = createProvider([], {
+            name: 'kimi',
+            startQuery: vi.fn((_prompt: string, config: AgentQueryConfig): AgentQueryHandle => ({
+                events: (async function* () {
+                    await config.permissionHandler!.handleToolCall(
+                        'ExitPlanMode',
+                        {},
+                        {
+                            signal: config.signal,
+                            toolCallContent: [{
+                                type: 'content',
+                                content: {
+                                    type: 'text',
+                                    text: '# Implementation Plan\n1. Inspect the provider\n2. Add the adapter\n3. Run tests',
+                                },
+                            }],
+                            permissionOptions: [
+                                { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+                                { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+                            ],
+                        },
+                    )
+                    yield { kind: 'result', status: 'success' } as AgentEvent
+                })(),
+                interrupt: vi.fn(),
+            })),
+        })
+        const channel = createChannel()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            provider,
+            providerName: 'kimi',
+            channelPort: channel,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'make a plan', source: 'channel' })
+
+        expect(channel.decisions[0]).toMatchObject({
+            type: 'permission',
+            title: 'ExitPlanMode',
+            details: expect.stringContaining('Inspect the provider'),
+            options: [
+                { label: 'Approve', value: 'approve' },
+                { label: 'Reject', value: 'reject' },
+            ],
+        })
+        expect(channel.decisions[0]?.details).toContain('Run tests')
+        expect(channel.decisions[0]?.details).not.toContain('{}')
+    })
+
     it('collects CodeBuddy AskUserQuestion answers instead of showing a generic permission', async () => {
         let permissionResult: Awaited<ReturnType<NonNullable<AgentQueryConfig['permissionHandler']>['handleToolCall']>> | undefined
         const provider = createProvider([], {

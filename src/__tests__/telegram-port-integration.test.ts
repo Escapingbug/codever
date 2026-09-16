@@ -78,6 +78,27 @@ describe('TelegramPort integration', () => {
         await expect(response).resolves.toEqual({ value: 'allow' })
     })
 
+    it('splits long decision details and keeps the keyboard on the final message', async () => {
+        const bot = createBot()
+        const port = new TelegramPort(bot, -100, 10)
+
+        port.requestDecision({
+            type: 'permission',
+            title: 'ExitPlanMode',
+            details: `# Plan\n${'Implement the next plan step.\n'.repeat(250)}`,
+            options: [
+                { label: 'Approve', value: 'approve' },
+                { label: 'Reject', value: 'reject' },
+            ],
+        })
+        await vi.waitFor(() => expect(bot.api.sendMessage.mock.calls.length).toBeGreaterThan(1))
+
+        const calls = bot.api.sendMessage.mock.calls
+        expect(calls[0][2].reply_markup).toBeUndefined()
+        expect(calls.at(-1)?.[2].reply_markup).toBeDefined()
+        expect(calls.map((call: unknown[]) => String(call[1])).join('')).toContain('Implement the next plan step.')
+    })
+
     it('tracks rendered markdown tables so /tables can return raw table markdown', async () => {
         renderMocks.tgmdSplit.mockResolvedValue([
             { kind: 'text', text: 'before table', entities: [] },

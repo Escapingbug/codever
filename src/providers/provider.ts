@@ -34,6 +34,8 @@ export interface AgentPermissionHandler {
         signal: AbortSignal
         recentToolCalls?: ToolCallRecord[]
         permissionOptions?: AgentPermissionOption[]
+        /** Provider-supplied ACP content shown alongside the permission request. */
+        toolCallContent?: unknown
     }): Promise<AgentPermissionResult>
     onEvent?(event: AgentEvent): void
     reset(): void

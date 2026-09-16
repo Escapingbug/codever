@@ -122,11 +122,7 @@ export class TelegramPort implements ChannelPort {
             ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
             : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
 
-        this.bot.api.sendMessage(this.chatId, text, {
-            parse_mode: 'HTML',
-            reply_markup: keyboard,
-            ...buildMessageThreadParams(this.threadId),
-        }).catch((e) => {
+        this.sendHtml(text, keyboard).catch((e) => {
             console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)
             cancelPendingDecision(decisionId, request.type === 'permission' ? 'deny' : request.multiple ? [] : '')
         })

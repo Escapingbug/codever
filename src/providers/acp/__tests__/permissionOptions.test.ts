@@ -46,4 +46,48 @@ describe('ACP provider-defined permission options', () => {
             },
         })
     })
+
+    it('retains permission display content from an earlier tool update when raw input does not contain the plan', async () => {
+        const manager = new AcpClientManager({ command: 'unused', args: [] })
+        const handleToolCall = vi.fn(async () => ({ behavior: 'allow' as const }))
+        manager.setPermissionHandler({ handleToolCall, reset: vi.fn() })
+
+        const client = (manager as any).createClientHandler()
+        await client.sessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'exit-plan-1',
+                title: 'ExitPlanMode',
+                status: 'pending',
+                content: [{
+                    type: 'content',
+                    content: { type: 'text', text: '# Plan\n1. Inspect\n2. Implement' },
+                }],
+            },
+        })
+        await client.requestPermission({
+            sessionId: 'session-1',
+            toolCall: {
+                toolCallId: 'exit-plan-1',
+                title: 'ExitPlanMode',
+                rawInput: {},
+            },
+            options: [
+                { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+                { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+            ],
+        })
+
+        expect(handleToolCall).toHaveBeenCalledWith(
+            'ExitPlanMode',
+            {},
+            expect.objectContaining({
+                toolCallContent: [{
+                    type: 'content',
+                    content: { type: 'text', text: '# Plan\n1. Inspect\n2. Implement' },
+                }],
+            }),
+        )
+    })
 })

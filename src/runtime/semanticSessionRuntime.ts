@@ -1276,7 +1276,7 @@ export class SemanticSessionRuntime {
                     const response = await this.config.channelPort.requestDecision({
                         type: 'permission',
                         title: toolName,
-                        details: formatUnknown(input),
+                        details: formatPermissionDetails(input, options.toolCallContent),
                         options: providerOptions.map(option => ({
                             label: option.name,
                             value: option.optionId,
@@ -1296,7 +1296,7 @@ export class SemanticSessionRuntime {
                 const response = await this.config.channelPort.requestDecision({
                     type: 'permission',
                     title: `Allow ${toolName}?`,
-                    details: formatUnknown(input),
+                    details: formatPermissionDetails(input, options.toolCallContent),
                     options: [
                         { label: 'Allow', value: 'allow' },
                         { label: 'Deny', value: 'deny' },
@@ -1585,4 +1585,46 @@ function formatUnknown(value: unknown): string {
     } catch {
         return String(value)
     }
+}
+
+function formatPermissionDetails(input: unknown, toolCallContent: unknown): string {
+    const displayText = extractPermissionDisplayText(toolCallContent)
+    const inputText = isEmptyPermissionInput(input) ? '' : formatUnknown(input)
+
+    if (!displayText) return inputText
+    if (!inputText || displayText.includes(inputText)) return displayText
+    return `${displayText}\n\nParameters:\n${inputText}`
+}
+
+function extractPermissionDisplayText(value: unknown): string {
+    const blocks = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value]
+    const texts: string[] = []
+
+    for (const block of blocks) {
+        if (typeof block === 'string') {
+            if (block.trim()) texts.push(block.trim())
+            continue
+        }
+        if (!block || typeof block !== 'object') continue
+
+        const record = block as Record<string, unknown>
+        const nested = record.content
+        if (typeof record.text === 'string' && record.text.trim()) {
+            texts.push(record.text.trim())
+        } else if (typeof nested === 'string' && nested.trim()) {
+            texts.push(nested.trim())
+        } else if (nested && typeof nested === 'object') {
+            const text = (nested as Record<string, unknown>).text
+            if (typeof text === 'string' && text.trim()) texts.push(text.trim())
+        }
+    }
+
+    return texts.join('\n\n')
+}
+
+function isEmptyPermissionInput(value: unknown): boolean {
+    if (value === undefined || value === null || value === '') return true
+    if (Array.isArray(value)) return value.length === 0
+    if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length === 0
+    return false
 }
