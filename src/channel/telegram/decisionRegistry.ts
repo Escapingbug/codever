@@ -1,4 +1,5 @@
 import type { DecisionOption, DecisionResponse } from '@/bridge/channelPort'
+import { formatDecisionButtonLabel } from '@/runtime/decisionPresentation'
 
 interface PendingDecision {
     resolve: (response: DecisionResponse) => void
@@ -120,17 +121,17 @@ export function buildPendingDecisionReplyMarkup(decisionId: string): PendingDeci
 
     if (!pending.multiple) {
         return {
-            inline_keyboard: [[...pending.options.map((option, index) => ({
-                text: option.label,
+            inline_keyboard: pending.options.map((option, index) => [{
+                text: formatDecisionButtonLabel(option.label, index),
                 callback_data: `decision:${decisionId}:ui:select:${index}`,
-            }))]],
+            }]),
         }
     }
 
     return {
         inline_keyboard: [
             ...pending.options.map((option, index) => [{
-                text: `${pending.selectedIndexes.has(index) ? '✅' : '⬜'} ${option.label}`,
+                text: `${pending.selectedIndexes.has(index) ? '✅' : '⬜'} ${formatDecisionButtonLabel(option.label, index)}`,
                 callback_data: `decision:${decisionId}:ui:toggle:${index}`,
             }]),
             [{

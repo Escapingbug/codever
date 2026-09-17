@@ -16,10 +16,28 @@ describe('Telegram decision registry', () => {
         })
 
         const callbackData = buildPendingDecisionReplyMarkup(decisionId).inline_keyboard[0][0].callback_data
+        const buttonText = buildPendingDecisionReplyMarkup(decisionId).inline_keyboard[0][0].text
         expect(callbackData.length).toBeLessThanOrEqual(64)
         expect(callbackData).not.toContain(longValue)
+        expect(buttonText).toBe('1 · Long option')
         expect(handlePendingDecisionCallback(decisionId, 'select', 0)).toMatchObject({ status: 'completed' })
         await expect(promise).resolves.toEqual({ value: longValue })
+    })
+
+    it('uses numbered compact button labels while preserving full option values', async () => {
+        const longLabel = 'Use the migration approach that keeps both schemas available during rollout'
+        const { decisionId, promise } = registerPendingDecision({
+            decisionOptions: [{ label: longLabel, value: 'expand-contract' }],
+        })
+
+        const markup = buildPendingDecisionReplyMarkup(decisionId)
+        expect(markup.inline_keyboard).toHaveLength(1)
+        expect(markup.inline_keyboard[0][0].text).toMatch(/^1 · Use the migration approach/)
+        expect(markup.inline_keyboard[0][0].text).toContain('…')
+        expect(markup.inline_keyboard[0][0].text).not.toContain('during rollout')
+
+        handlePendingDecisionCallback(decisionId, 'select', 0)
+        await expect(promise).resolves.toEqual({ value: 'expand-contract' })
     })
 
     it('toggles multiple options and preserves their original order on confirmation', async () => {

@@ -11,6 +11,7 @@ import { InputFile } from 'grammy'
 import { basename } from 'node:path'
 import { buildMessageThreadParams, buildChatActionThreadParams } from '@/bridge/sessionManager'
 import { buildPendingDecisionReplyMarkup, cancelPendingDecision, registerPendingDecision } from './decisionRegistry'
+import { formatDecisionOptionList } from '@/runtime/decisionPresentation'
 
 const MAX_MESSAGE_LENGTH = 4000
 const TABLE_IMAGE_SEND_TIMEOUT_MS = 10_000
@@ -117,10 +118,13 @@ export class TelegramPort implements ChannelPort {
             multiple: request.multiple,
         })
         const keyboard = buildPendingDecisionReplyMarkup(decisionId)
+        const optionDetails = request.options.length > 0
+            ? `\n\n<b>Options</b>\n${this.escapeHtml(formatDecisionOptionList(request.options))}`
+            : ''
 
         const text = request.type === 'permission'
-            ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
-            : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}`
+            ? `🔐 <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}${optionDetails}`
+            : `❓ <b>${this.escapeHtml(request.title)}</b>${request.details ? `\n\n${this.escapeHtml(request.details)}` : ''}${optionDetails}`
 
         this.sendHtml(text, keyboard).catch((e) => {
             console.error('[TelegramPort] Failed to send decision request:', e instanceof Error ? e.message : e)

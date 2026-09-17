@@ -644,7 +644,10 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
                 planId: 'plan-1',
                 title: 'Implementation Plan',
                 content: 'Please approve this plan',
-                options: ['Approve', 'Reject'],
+                options: [
+                    'Keep both schemas available while clients migrate gradually',
+                    'Switch every client in one coordinated deployment window',
+                ],
             }
 
             const results = await processAcpUpdate(planUpdate, {
@@ -659,6 +662,14 @@ describe('Integration: ACP -> Semantic Adapter -> Projector -> Telegram Renderin
 
             expect(message).toContain('Implementation Plan')
             expect(message).toContain('Please approve this plan')
+            expect(message).toContain('1. Keep both schemas available while clients migrate gradually')
+            expect(message).toContain('2. Switch every client in one coordinated deployment window')
+            expect(outbox.sends[0].message.replyMarkup).toEqual({
+                inline_keyboard: [
+                    [expect.objectContaining({ text: expect.stringMatching(/^1 · Keep both schemas/) })],
+                    [expect.objectContaining({ text: expect.stringMatching(/^2 · Switch every client/) })],
+                ],
+            })
         })
 
         it('should render ExitPlanMode plan content from Cursor-style completed output', async () => {

@@ -256,7 +256,7 @@ describe('TelegramPort', () => {
             expect(resolved).toBe(false)
 
             const options = apiCalls[0].args[2] as { reply_markup: { inline_keyboard: Array<Array<{ callback_data: string }>> } }
-            const callbackData = options.reply_markup.inline_keyboard[0][1].callback_data
+            const callbackData = options.reply_markup.inline_keyboard[1][0].callback_data
             const [, decisionId, namespace, action, optionIndex] = callbackData.split(':')
             expect(namespace).toBe('ui')
             expect(action).toBe('select')

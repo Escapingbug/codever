@@ -1,6 +1,7 @@
 import type { ChannelMessage } from '@/bridge/channelPort'
 import type { ConversationEvent, TeamMemberState } from './semantic'
 import { escapeHtml } from '@/utils/formatting'
+import { formatDecisionButtonLabel, formatDecisionOptionList } from './decisionPresentation'
 import { formatToolBubble } from '@/channel/telegram/toolBubble'
 
 export interface ProjectedMessage {
@@ -55,19 +56,22 @@ export class ChannelProjector {
                 return this.projectToolByVerbosity(event, options)
 
             case 'decision_request':
+                const optionDetails = event.options.length > 0
+                    ? `\n\n<b>Options</b>\n${escapeHtml(formatDecisionOptionList(event.options))}`
+                    : ''
                 return [
                     ...this.flushText(),
                     {
                         message: {
-                            text: `<b>${escapeHtml(event.title)}</b>${event.body ? `\n\n${escapeHtml(event.body)}` : ''}`,
+                            text: `<b>${escapeHtml(event.title)}</b>${event.body ? `\n\n${escapeHtml(event.body)}` : ''}${optionDetails}`,
                             format: 'html',
                             replyMarkup: {
-                                inline_keyboard: [
-                                    event.options.map(option => ({
-                                        text: option.label,
+                                inline_keyboard: event.options.map((option, index) => [
+                                    {
+                                        text: formatDecisionButtonLabel(option.label, index),
                                         callback_data: `decision:${event.decisionId}:${option.id}`,
-                                    })),
-                                ],
+                                    },
+                                ]),
                             },
                         },
                         isToolEvent: false,

@@ -570,7 +570,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(editMessageReplyMarkup).toHaveBeenCalledWith({
             reply_markup: expect.objectContaining({
                 inline_keyboard: expect.arrayContaining([
-                    [expect.objectContaining({ text: '✅ UI' })],
+                    [expect.objectContaining({ text: '✅ 2 · UI' })],
                 ]),
             }),
         })

@@ -64,18 +64,46 @@ describe('TelegramPort integration', () => {
             parse_mode: 'HTML',
             message_thread_id: 10,
             reply_markup: {
-                inline_keyboard: [[
-                    expect.objectContaining({ text: 'Allow', callback_data: expect.stringMatching(/:ui:select:0$/) }),
-                    expect.objectContaining({ text: 'Deny', callback_data: expect.stringMatching(/:ui:select:1$/) }),
-                ]],
+                inline_keyboard: [
+                    [expect.objectContaining({ text: '1 · Allow', callback_data: expect.stringMatching(/:ui:select:0$/) })],
+                    [expect.objectContaining({ text: '2 · Deny', callback_data: expect.stringMatching(/:ui:select:1$/) })],
+                ],
             },
         }))
+        expect(bot.api.sendMessage.mock.calls[0][1]).toContain('<b>Options</b>')
+        expect(bot.api.sendMessage.mock.calls[0][1]).toContain('1. Allow')
+        expect(bot.api.sendMessage.mock.calls[0][1]).toContain('2. Deny')
 
         const markup = bot.api.sendMessage.mock.calls[0][2].reply_markup
         const callbackData = markup.inline_keyboard[0][0].callback_data
         const [, decisionId, , action, optionIndex] = callbackData.split(':')
         handlePendingDecisionCallback(decisionId, action, Number(optionIndex))
         await expect(response).resolves.toEqual({ value: 'allow' })
+    })
+
+    it('shows complete long option labels in the message and compact numbered buttons', async () => {
+        const bot = createBot()
+        const port = new TelegramPort(bot, -100, 10)
+        const firstOption = 'Keep both database schemas available during rollout so older clients continue working'
+        const secondOption = 'Switch every client and database reader in one coordinated deployment window'
+
+        port.requestDecision({
+            type: 'question',
+            title: 'Choose the migration approach',
+            details: 'Select the approach whose trade-offs fit this release.',
+            options: [
+                { label: firstOption, value: 'expand-contract' },
+                { label: secondOption, value: 'coordinated-cutover' },
+            ],
+        })
+
+        const [message, options] = bot.api.sendMessage.mock.calls[0].slice(1)
+        expect(message).toContain(`1. ${firstOption}`)
+        expect(message).toContain(`2. ${secondOption}`)
+        expect(options.reply_markup.inline_keyboard).toHaveLength(2)
+        expect(options.reply_markup.inline_keyboard[0][0].text).toMatch(/^1 · Keep both database schemas/)
+        expect(options.reply_markup.inline_keyboard[0][0].text).not.toContain('older clients')
+        expect(options.reply_markup.inline_keyboard[1][0].text).toMatch(/^2 · Switch every client/)
     })
 
     it('splits long decision details and keeps the keyboard on the final message', async () => {
