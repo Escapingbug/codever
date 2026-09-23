@@ -170,7 +170,7 @@ Codever registers built-in provider profiles:
 | `opencode` | `opencode acp` | Default provider unless changed in config. Also uses `opencode models` and `opencode session list --format json` for model/session lists. |
 | `codebuddy` | `codebuddy acp` | ACP-based Codebuddy integration. |
 | `agent` | `agent acp` | Cursor CLI Agent integration. Uses `agent models` for model discovery and maps Cursor ACP extensions such as plans, questions, todos, tasks, and images into Codever events. |
-| `codex` | `npx -y @agentclientprotocol/codex-acp@1.10.0` | ACP adapter for OpenAI Codex. Uses `codex debug models` for model discovery. |
+| `codex` | `npx -y --package=@openai/codex@0.156.1 --package=@agentclientprotocol/codex-acp@1.13.0 codex-acp` | ACP adapter for OpenAI Codex, pinned with its Codex CLI version. Uses `npx -y @openai/codex@0.156.1 debug models` for model discovery. |
 | `kimi` | `kimi acp` | Native Kimi Code CLI integration. Uses `kimi provider list --json` for model/reasoning choices and `kimi session list --json` for resumable sessions. |
 
 Providers are initialized when the daemon starts. A provider that is missing or misconfigured is marked not ready, but other providers can still be used.

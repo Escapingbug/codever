@@ -39,7 +39,12 @@ describe('CodexProvider', () => {
             {
                 name: 'codex',
                 command: 'npx',
-                args: ['-y', '@agentclientprotocol/codex-acp@1.10.0'],
+                args: [
+                    '-y',
+                    '--package=@openai/codex@0.156.1',
+                    '--package=@agentclientprotocol/codex-acp@1.13.0',
+                    'codex-acp',
+                ],
             },
         ])
     })
@@ -79,7 +84,15 @@ describe('CodexProvider', () => {
                 ],
             },
         ])
-        expect(spawnSyncMock).toHaveBeenCalled()
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+            'npx',
+            ['-y', '@openai/codex@0.156.1', 'debug', 'models'],
+            expect.objectContaining({
+                encoding: 'utf-8',
+                timeout: 10_000,
+                windowsHide: true,
+            }),
+        )
     })
 })
 
