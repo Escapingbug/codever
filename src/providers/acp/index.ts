@@ -445,7 +445,7 @@ export class AcpProvider implements AgentProvider {
         return model
     }
 
-    private async applySessionModel(sessionId: string, model: string, configuration: AcpSessionConfiguration | undefined, queryConfig: AgentQueryConfig): Promise<void> {
+    private async applySessionModel(sessionId: string, model: string, configuration: AcpSessionConfiguration | undefined, queryConfig: AgentQueryConfig): Promise<string> {
         const resolvedModel = this.resolveSessionModel(model, configuration, queryConfig)
         if (!resolvedModel) {
             const message = `Selected model ${model} is not advertised by this ACP session`
@@ -497,6 +497,8 @@ export class AcpProvider implements AgentProvider {
                 throw new ModelSelectionError(`Could not apply selected model ${model}: session/set_model=${first}; session/set_config_option=${msg}. Prompt was not sent.`)
             }
         }
+
+        return resolvedModel
     }
 
     protected async applyProviderConfigOptions(sessionId: string, config: AgentQueryConfig): Promise<void> {
@@ -623,6 +625,7 @@ export class AcpProvider implements AgentProvider {
             let updateConsumerAbort: AbortController | null = null
             let sessionId = config.sessionId
             let sessionConfiguration: AcpSessionConfiguration | undefined
+            let appliedModel: string | undefined
 
             try {
                 let isResumingSession = false
@@ -721,7 +724,7 @@ export class AcpProvider implements AgentProvider {
 
                     // Set model if specified
                     if (config.model) {
-                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
+                        appliedModel = await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
                     }
                     await this.applyProviderConfigOptions(sessionId!, config)
                 } else {
@@ -832,7 +835,7 @@ export class AcpProvider implements AgentProvider {
 
                     // Set model if specified (user may have changed model mid-session)
                     if (config.model) {
-                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
+                        appliedModel = await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
                     }
                     await this.applyProviderConfigOptions(sessionId!, config)
                 }
@@ -842,6 +845,7 @@ export class AcpProvider implements AgentProvider {
                     events.push({
                         kind: 'session_init',
                         sessionId,
+                        ...(appliedModel ? { model: appliedModel } : {}),
                         cwd: config.cwd,
                         // Flag: true when a stale conversationId could not be recovered
                         // and a brand-new session was created instead. The bridge can
@@ -959,8 +963,8 @@ export class AcpProvider implements AgentProvider {
                         resultEvent.status = 'error'
                         resultEvent.summary = truncateErrorSummary(stderrError)
                     }
-                    if (resultEvent.status === 'success' && config.model) {
-                        resultEvent.appliedModel = config.model
+                    if (resultEvent.status === 'success' && appliedModel) {
+                        resultEvent.appliedModel = appliedModel
                     }
                     if (resultEvent.status === 'error' && /model metadata for .+ not found/i.test(resultEvent.summary ?? '')) {
                         resultEvent.errorCode = 'model_selection_failed'

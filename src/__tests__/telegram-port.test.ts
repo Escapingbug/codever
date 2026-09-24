@@ -175,7 +175,7 @@ describe('TelegramPort', () => {
     })
 
     describe('notifyStatus', () => {
-        it('sends an acknowledgement with provider, cwd, and unverified model request when a query starts', () => {
+        it('sends an acknowledgement with provider, cwd, and the model awaiting verification when a query starts', () => {
             const { bot, apiCalls } = createMockBot()
             const port = new TelegramPort(bot, -100123, 42)
 
@@ -189,7 +189,7 @@ describe('TelegramPort', () => {
                         '🔄 Agent started working...',
                         'Provider: <code>test&amp;provider</code>',
                         'Cwd: <code>/tmp/&lt;repo&gt;</code>',
-                        'Model: <code>unverified</code>',
+                        'Model: <code>pending verification</code>',
                         'Requested: <code>model&lt;1&gt;</code>',
                     ].join('\n'),
                     expect.objectContaining({
@@ -200,7 +200,7 @@ describe('TelegramPort', () => {
             })
         })
 
-        it('marks the model unverified when no model is requested', () => {
+        it('reports an unconfigured model as a provider default', () => {
             const { bot, apiCalls } = createMockBot()
             const port = new TelegramPort(bot, -100123, 42)
 
@@ -210,8 +210,37 @@ describe('TelegramPort', () => {
                 '🔄 Agent started working...',
                 'Provider: <code>test</code>',
                 'Cwd: <code>/tmp</code>',
-                'Model: <code>unverified</code>',
+                'Model: <code>provider default (not reported)</code>',
             ].join('\n'))
+        })
+
+        it('edits the acknowledgement with the exact model after provider verification', async () => {
+            const { bot, apiCalls } = createMockBot()
+            const port = new TelegramPort(bot, -100123, 42)
+
+            port.notifyStatus({ state: 'querying', cwd: '/tmp', provider: 'codex', requestedModel: 'gpt-5.6-sol' })
+            port.notifyStatus({
+                state: 'querying', cwd: '/tmp', provider: 'codex',
+                model: 'gpt-5.6-sol[xhigh]', requestedModel: 'gpt-5.6-sol',
+            })
+
+            await vi.waitFor(() => expect(apiCalls).toHaveLength(2))
+            expect(apiCalls[1]).toEqual({
+                method: 'editMessageText',
+                args: [
+                    -100123,
+                    1,
+                    [
+                        '🔄 Agent started working...',
+                        'Provider: <code>codex</code>',
+                        'Cwd: <code>/tmp</code>',
+                        'Model: <code>gpt-5.6-sol[xhigh]</code>',
+                        'Model status: <code>verified</code>',
+                        'Requested: <code>gpt-5.6-sol</code>',
+                    ].join('\n'),
+                    expect.objectContaining({ parse_mode: 'HTML', message_thread_id: 42 }),
+                ],
+            })
         })
 
         it('does not send status messages for idle transitions', () => {

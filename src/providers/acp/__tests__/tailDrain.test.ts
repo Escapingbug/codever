@@ -269,7 +269,8 @@ describe('AcpProvider tail drain', () => {
             model: 'kimi-k3',
             signal: new AbortController().signal,
         })
-        for await (const _event of handle.events) {}
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
 
         expect(clientManager.setModelCalls).toEqual([
             { sessionId: 'session-1', modelId: 'kimi-k3[reasoning=max]' },
@@ -277,6 +278,10 @@ describe('AcpProvider tail drain', () => {
         expect(clientManager.setConfigOptionCalls).toEqual([
             { sessionId: 'session-1', configId: 'model', value: 'kimi-k3[reasoning=max]' },
         ])
+        expect(events).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: 'session_init', model: 'kimi-k3[reasoning=max]' }),
+            expect.objectContaining({ kind: 'result', status: 'success', appliedModel: 'kimi-k3[reasoning=max]' }),
+        ]))
     })
 
     it.each([false, true])('stops before the prompt when both model setters reject (resumed=%s)', async (resumed) => {

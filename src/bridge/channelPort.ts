@@ -78,7 +78,7 @@ export interface ChannelPort {
  * Represents a user's continuous interaction within a Telegram topic.
  */
 export interface TopicSession {
-    /** Verified model from a successful turn and the next requested model. */
+    /** Model confirmed by the provider and the next requested model. */
     getModelStatus?(): { verifiedModel: string | null; requestedModel: string | null }
     /** Push a user message into the session */
     receiveInput(input: { text: string; username?: string; richInput?: RichUserInput }): void

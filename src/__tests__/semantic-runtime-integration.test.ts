@@ -110,16 +110,26 @@ describe('Semantic runtime integration chain', () => {
         expect(provider.startQuery).toHaveBeenCalledTimes(2)
     })
 
-    it('records a model only after the provider confirms a successful turn', async () => {
-        const provider = createProvider([{ kind: 'result', status: 'success', appliedModel: 'gpt-6-sol' }])
+    it('records and reports the exact model as soon as the provider confirms it', async () => {
+        const provider = createProvider([
+            { kind: 'session_init', sessionId: 'provider-session', model: 'gpt-6-sol[high]' },
+            { kind: 'result', status: 'success', appliedModel: 'gpt-6-sol[high]' },
+        ])
+        const channel = createChannel()
         const runtime = new SemanticSessionRuntime({
             sessionId: 'session-1', cwd: '/repo', provider, providerName: 'mock-acp',
-            model: 'gpt-6-sol', channelPort: createChannel(),
+            model: 'gpt-6-sol', channelPort: channel,
         })
 
         expect(runtime.getModelStatus().verifiedModel).toBeNull()
         await runtime.dispatch({ kind: 'user_message', text: 'hello', source: 'channel' })
-        expect(runtime.getModelStatus()).toEqual({ verifiedModel: 'gpt-6-sol', requestedModel: 'gpt-6-sol' })
+        expect(runtime.getModelStatus()).toEqual({ verifiedModel: 'gpt-6-sol[high]', requestedModel: 'gpt-6-sol' })
+        expect(channel.statuses).toEqual([
+            expect.objectContaining({ state: 'querying', requestedModel: 'gpt-6-sol' }),
+            expect.objectContaining({ state: 'querying', requestedModel: 'gpt-6-sol', model: 'gpt-6-sol[high]' }),
+            expect.objectContaining({ state: 'idle' }),
+        ])
+        expect(channel.statuses[0]).not.toHaveProperty('model')
     })
     it('routes TopicSession input through the semantic runtime path', async () => {
         const { topicSession, provider, channel, sessionRecord } = createTopicHarness([
@@ -310,7 +320,7 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
-    it('sends a Telegram start acknowledgement with provider, cwd, and unverified requested model through TopicSession', async () => {
+    it('sends a Telegram start acknowledgement with provider, cwd, and a pending requested model through TopicSession', async () => {
         const provider = createProvider([{ kind: 'result', status: 'success' }])
         const bot = {
             api: {
@@ -339,7 +349,7 @@ describe('Semantic runtime integration chain', () => {
             '🔄 Agent started working...',
             'Provider: <code>mock&amp;acp</code>',
             'Cwd: <code>/repo/&lt;project&gt;</code>',
-            'Model: <code>unverified</code>',
+            'Model: <code>pending verification</code>',
             'Requested: <code>sonnet&lt;4&gt;</code>',
         ].join('\n'), expect.objectContaining({
             parse_mode: 'HTML',

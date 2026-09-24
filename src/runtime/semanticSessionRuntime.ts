@@ -151,6 +151,7 @@ export class SemanticSessionRuntime {
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
     private lastVerifiedModel: string | null = null
+    private activeTurnModel: string | null = null
     private modelSelectionBlocked = false
 
     constructor(private config: SemanticSessionRuntimeConfig) {
@@ -322,6 +323,7 @@ export class SemanticSessionRuntime {
         this.pendingCodeverSendFileCalls.clear()
         this.projector.resetTurn()
         this.toolMessageIds.clear()
+        this.activeTurnModel = null
         this.currentTurnDelivery = {
             hadAssistantText: false,
             deliveryFailures: [],
@@ -354,15 +356,26 @@ export class SemanticSessionRuntime {
                 if (providerEvent.kind === 'result') {
                     if (providerEvent.status === 'success' && providerEvent.appliedModel) {
                         this.lastVerifiedModel = providerEvent.appliedModel
+                        if (this.activeTurnModel !== providerEvent.appliedModel) {
+                            this.activeTurnModel = providerEvent.appliedModel
+                            this.notifyStatus('querying')
+                        }
                     }
                     if (providerEvent.errorCode === 'model_selection_failed' && activeModel) {
                         this.lastVerifiedModel = null
                         if (requestedModel && this.config.model === requestedModel) this.rejectModel(requestedModel)
                     }
                 }
-                if (providerEvent.kind === 'session_init' && providerEvent.sessionId) {
-                    this.config.providerSessionId = providerEvent.sessionId
-                    this.config.onProviderSessionId?.(providerEvent.sessionId)
+                if (providerEvent.kind === 'session_init') {
+                    if (providerEvent.model) {
+                        this.activeTurnModel = providerEvent.model
+                        this.lastVerifiedModel = providerEvent.model
+                        this.notifyStatus('querying')
+                    }
+                    if (providerEvent.sessionId) {
+                        this.config.providerSessionId = providerEvent.sessionId
+                        this.config.onProviderSessionId?.(providerEvent.sessionId)
+                    }
                 }
                 if (providerEvent.kind === 'commands_update') {
                     this.availableCommands = providerEvent.commands
@@ -620,6 +633,7 @@ export class SemanticSessionRuntime {
 
     private rejectModel(model: string): void {
         this.lastVerifiedModel = null
+        this.activeTurnModel = null
         if (this.config.model !== model) return
         this.modelSelectionBlocked = true
         this.config.model = null
@@ -1422,6 +1436,7 @@ export class SemanticSessionRuntime {
         this.startingMessageId = null
         this.config.channelPort.notifyStatus({
             state,
+            ...(state === 'querying' && this.activeTurnModel ? { model: this.activeTurnModel } : {}),
             ...(state === 'querying' && this.config.model ? { requestedModel: this.config.model } : {}),
             cwd: this.config.cwd,
             provider: this.config.providerName,

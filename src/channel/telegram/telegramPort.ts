@@ -30,6 +30,7 @@ export class TelegramPort implements ChannelPort {
     private tableHistory: TableRecord[] = []
     /** Timestamp of the last user message received */
     private lastUserMessageTime: number = 0
+    private statusMessagePromise: Promise<number | null> | null = null
 
     constructor(
         private bot: Bot,
@@ -142,8 +143,18 @@ export class TelegramPort implements ChannelPort {
             `Provider: <code>${this.escapeHtml(status.provider)}</code>`,
             `Cwd: <code>${this.escapeHtml(status.cwd)}</code>`,
         ]
-        details.push('Model: <code>unverified</code>')
-        if (status.requestedModel) details.push(`Requested: <code>${this.escapeHtml(status.requestedModel)}</code>`)
+        if (status.model) {
+            details.push(`Model: <code>${this.escapeHtml(status.model)}</code>`)
+            details.push('Model status: <code>verified</code>')
+            if (status.requestedModel && status.requestedModel !== status.model) {
+                details.push(`Requested: <code>${this.escapeHtml(status.requestedModel)}</code>`)
+            }
+        } else if (status.requestedModel) {
+            details.push('Model: <code>pending verification</code>')
+            details.push(`Requested: <code>${this.escapeHtml(status.requestedModel)}</code>`)
+        } else {
+            details.push('Model: <code>provider default (not reported)</code>')
+        }
 
         const text = details.join('\n')
         const options = {
@@ -151,17 +162,34 @@ export class TelegramPort implements ChannelPort {
             ...buildMessageThreadParams(this.threadId),
         }
 
-        if (status.editMessageId != null) {
-            this.bot.api.editMessageText(this.chatId, Number(status.editMessageId), text, options).catch((e) => {
+        const sendStatusMessage = async (): Promise<number | null> => {
+            try {
+                const sent = await this.bot.api.sendMessage(this.chatId, text, options)
+                return sent.message_id
+            } catch (e) {
+                console.error('[TelegramPort] Failed to send status notification:', e instanceof Error ? e.message : e)
+                return null
+            }
+        }
+
+        const editStatusMessage = async (messageId: number): Promise<number | null> => {
+            try {
+                await this.bot.api.editMessageText(this.chatId, messageId, text, options)
+                return messageId
+            } catch (e) {
                 console.error('[TelegramPort] Failed to edit status notification, falling back to send:', e instanceof Error ? e.message : e)
-                this.bot.api.sendMessage(this.chatId, text, options).catch((e2) => {
-                    console.error('[TelegramPort] Failed to send status notification:', e2 instanceof Error ? e2.message : e2)
-                })
+                return await sendStatusMessage()
+            }
+        }
+
+        if (status.editMessageId != null) {
+            this.statusMessagePromise = editStatusMessage(Number(status.editMessageId))
+        } else if (status.model && this.statusMessagePromise) {
+            this.statusMessagePromise = this.statusMessagePromise.then(async (messageId) => {
+                return messageId == null ? await sendStatusMessage() : await editStatusMessage(messageId)
             })
         } else {
-            this.bot.api.sendMessage(this.chatId, text, options).catch((e) => {
-                console.error('[TelegramPort] Failed to send status notification:', e instanceof Error ? e.message : e)
-            })
+            this.statusMessagePromise = sendStatusMessage()
         }
     }
 

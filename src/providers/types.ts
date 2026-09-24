@@ -51,6 +51,7 @@ export type ToolResultContentBlock =
 export interface AgentSessionInitEvent {
     kind: 'session_init'
     sessionId?: string
+    /** Exact model accepted by the provider before the prompt starts. */
     model?: string
     cwd?: string
     /** True when a stale conversationId could not be recovered and a brand-new
