@@ -117,6 +117,7 @@ export interface SemanticSessionRuntimeConfig {
     onProviderSessionId?: (sessionId: string) => void
     onProviderChanged?: (providerName: string, provider: AgentProvider) => void
     onModelChanged?: (model: string | null) => void
+    onModelRejected?: (model: string) => void
     onReasoningEffortChanged?: (reasoningEffort: string | null) => void
     onAvailableCommands?: (commands: ProviderCommand[]) => void
     destroyTimeoutMs?: number
@@ -149,6 +150,8 @@ export class SemanticSessionRuntime {
     private currentTurnDelivery: TurnDeliveryState | null = null
     private recordedDeliveryFailureIds = new Set<string>()
     private queuedUserInputs: QueuedUserInput[] = []
+    private lastVerifiedModel: string | null = null
+    private modelSelectionBlocked = false
 
     constructor(private config: SemanticSessionRuntimeConfig) {
         this.adapter = config.adapter ?? createProviderSemanticAdapter(getProviderType(config.providerName) ?? config.providerName)
@@ -161,6 +164,10 @@ export class SemanticSessionRuntime {
                 this.recordDeliveryFailure(record)
             },
         })
+    }
+
+    getModelStatus(): { verifiedModel: string | null; requestedModel: string | null } {
+        return { verifiedModel: this.lastVerifiedModel, requestedModel: this.config.model ?? null }
     }
 
     dispatch(input: SessionInput): Promise<unknown> {
@@ -289,9 +296,22 @@ export class SemanticSessionRuntime {
     }
 
     private async runTurn(prompt: string | RichUserInput): Promise<void> {
+        if (this.modelSelectionBlocked) {
+            await this.send({ text: '❌ Model selection failed. Select a model with /model before sending another message.', format: 'html' })
+            return
+        }
         if (!this.config.provider.isReady()) {
             await this.handleProviderNotReady()
             if (!this.config.provider.isReady()) return
+        }
+
+        const requestedModel = this.config.model
+        const activeModel = this.getActiveModel()
+        if (this.config.model && !activeModel) {
+            const rejectedModel = this.config.model
+            this.rejectModel(rejectedModel)
+            await this.send({ text: `❌ Selected model ${escapeHtml(rejectedModel)} is not available for ${escapeHtml(this.config.providerName)}. Prompt was not sent.`, format: 'html' })
+            return
         }
 
         await this.flushBufferedAssistantText('pre-turn')
@@ -313,7 +333,6 @@ export class SemanticSessionRuntime {
         })
 
         this.abortController = new AbortController()
-        const activeModel = this.getActiveModel()
         const handle = this.config.provider.startQuery(this.prepareProviderInput(prompt), {
             cwd: this.config.cwd,
             sessionId: this.config.providerSessionId ?? undefined,
@@ -332,6 +351,15 @@ export class SemanticSessionRuntime {
         try {
             for await (const providerEvent of handle.events) {
                 if (this.isStopping()) break
+                if (providerEvent.kind === 'result') {
+                    if (providerEvent.status === 'success' && providerEvent.appliedModel) {
+                        this.lastVerifiedModel = providerEvent.appliedModel
+                    }
+                    if (providerEvent.errorCode === 'model_selection_failed' && activeModel) {
+                        this.lastVerifiedModel = null
+                        if (requestedModel && this.config.model === requestedModel) this.rejectModel(requestedModel)
+                    }
+                }
                 if (providerEvent.kind === 'session_init' && providerEvent.sessionId) {
                     this.config.providerSessionId = providerEvent.sessionId
                     this.config.onProviderSessionId?.(providerEvent.sessionId)
@@ -434,6 +462,8 @@ export class SemanticSessionRuntime {
         const handle = this.currentHandle
         const abortController = this.abortController
         this.config.providerSessionId = null
+        this.lastVerifiedModel = null
+        this.modelSelectionBlocked = false
         this.config.provider.clearSessionId?.()
         this.resetSessionProjectionState()
         this.recordCommand('new', { reset: true })
@@ -588,6 +618,17 @@ export class SemanticSessionRuntime {
         return availableModels.some(entry => entry.id === model || entry.name === model) ? model : undefined
     }
 
+    private rejectModel(model: string): void {
+        this.lastVerifiedModel = null
+        if (this.config.model !== model) return
+        this.modelSelectionBlocked = true
+        this.config.model = null
+        this.config.providerSettings = { ...(this.config.providerSettings ?? {}), reasoningEffort: undefined }
+        this.config.onModelChanged?.(null)
+        this.config.onReasoningEffortChanged?.(null)
+        this.config.onModelRejected?.(model)
+    }
+
     private async deliver(message: ChannelMessage, toolUseId?: string, isToolEvent = false, isTerminal = false, stateKey?: string): Promise<void> {
         if (stateKey && this.stateMessageIds.has(stateKey)) {
             const delivery = this.outbox.edit(this.stateMessageIds.get(stateKey), message, true, {
@@ -704,6 +745,7 @@ export class SemanticSessionRuntime {
         switch (name) {
             case 'model':
                 this.config.model = args || null
+                this.modelSelectionBlocked = false
                 this.config.onModelChanged?.(this.config.model)
                 this.recordCommand('model', { model: this.config.model })
                 return
@@ -744,6 +786,8 @@ export class SemanticSessionRuntime {
                 this.config.providerName = providerName
                 this.config.providerSessionId = null
                 this.config.model = null
+                this.lastVerifiedModel = null
+                this.modelSelectionBlocked = false
                 this.adapter = createProviderSemanticAdapter(getProviderType(providerName) ?? providerName)
                 this.projector.reset()
                 this.toolMessageIds.clear()
@@ -755,6 +799,8 @@ export class SemanticSessionRuntime {
             }
             case 'resume':
                 this.config.providerSessionId = args || null
+                this.lastVerifiedModel = null
+                this.modelSelectionBlocked = false
                 this.resetSessionProjectionState()
                 this.recordCommand('resume', { sessionId: this.config.providerSessionId })
                 return
@@ -770,6 +816,8 @@ export class SemanticSessionRuntime {
                 return
             case 'new':
                 this.config.providerSessionId = null
+                this.lastVerifiedModel = null
+                this.modelSelectionBlocked = false
                 this.config.provider.clearSessionId?.()
                 this.resetSessionProjectionState()
                 this.recordCommand('new', { reset: true })
@@ -1372,10 +1420,9 @@ export class SemanticSessionRuntime {
     private notifyStatus(state: SessionStatus['state']): void {
         const editMessageId = this.startingMessageId
         this.startingMessageId = null
-        const activeModel = this.getActiveModel()
         this.config.channelPort.notifyStatus({
             state,
-            ...(activeModel ? { model: activeModel } : {}),
+            ...(state === 'querying' && this.config.model ? { requestedModel: this.config.model } : {}),
             cwd: this.config.cwd,
             provider: this.config.providerName,
             ...(editMessageId != null ? { editMessageId } : {}),

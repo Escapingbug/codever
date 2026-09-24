@@ -72,24 +72,29 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
                 model: found.id,
                 reasoningEffort,
             })
-            await c.reply(`${formatModelStatus(`Model selected: <b>${escapeHtml(found.id)}</b>`, reasoningEffort)}\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' })
+            await c.reply(`${formatModelStatus(`Model requested: <b>${escapeHtml(found.id)}</b>`, reasoningEffort)}\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' })
             return
         }
 
-        const configuredCurrent = genericTopic
-            ? groupSettings?.model || 'default'
-            : sessionRecord?.model || topicSettings?.model || groupSettings?.model || 'default'
+        const activeModelStatus = topicSession?.getModelStatus?.()
+        const configuredCurrent = activeModelStatus
+            ? activeModelStatus.requestedModel
+            : genericTopic
+                ? groupSettings?.model
+                : sessionRecord?.model || topicSettings?.model || groupSettings?.model
         const models = provider.getAvailableModels()
-        const current = isSelectableModel(configuredCurrent, models) ? configuredCurrent : 'default'
+        const verifiedModel = activeModelStatus?.verifiedModel
+        const status = `Last verified model: <b>${escapeHtml(verifiedModel || 'unknown')}</b>`
+            + (configuredCurrent ? `\nRequested for next turn: <b>${escapeHtml(configuredCurrent)}</b>` : '')
         const currentReasoningEffort = getConfiguredReasoningEffort(genericTopic, sessionRecord, topicSettings, groupSettings)
         if (models.length === 0) {
-            await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
+            await c.reply(`${formatModelStatus(status, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
                 parse_mode: 'HTML',
             })
             return
         }
         if (models.length > MODEL_SEARCH_THRESHOLD) {
-            await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nThis provider has <b>${models.length}</b> models. The complete list follows below.\n\nSearch with <code>/model &lt;keyword&gt;</code>, or select an exact ID with <code>/model &lt;model-id&gt;</code>.`, {
+            await c.reply(`${formatModelStatus(status, currentReasoningEffort)}\nThis provider has <b>${models.length}</b> models. The complete list follows below.\n\nSearch with <code>/model &lt;keyword&gt;</code>, or select an exact ID with <code>/model &lt;model-id&gt;</code>.`, {
                 parse_mode: 'HTML',
                 reply_markup: modelProviderKeyboard(models),
             })
@@ -98,7 +103,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             }
             return
         }
-        await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a model provider:`, {
+        await c.reply(`${formatModelStatus(status, currentReasoningEffort)}\nSelect a model provider:`, {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models)
         })
@@ -255,13 +260,6 @@ export function formatModelCatalogChunks(models: ModelEntry[], maxLength = 3_800
         return name && name !== id ? `${id} — ${name}` : id
     })
     return splitHtmlChunks(`<pre>${escapeHtml(lines.join('\n'))}</pre>`, maxLength)
-}
-
-function isSelectableModel(model: string, models: Array<{ id: string; name: string }>): boolean {
-    if (model === 'default') return true
-    if (models.length === 0) return false
-    const normalized = model.toLowerCase()
-    return models.some(entry => entry.id.toLowerCase() === normalized || entry.name.toLowerCase() === normalized)
 }
 
 export function getDefaultReasoningEffort(model: { defaultReasoningLevel?: string; supportedReasoningLevels?: Array<{ effort: string }> }): string | undefined {

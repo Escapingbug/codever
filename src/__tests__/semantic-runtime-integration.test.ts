@@ -81,6 +81,46 @@ function createTopicHarness(events: AgentEvent[]) {
 }
 
 describe('Semantic runtime integration chain', () => {
+    it('clears a rejected model and never reports it as verified', async () => {
+        const provider = createProvider([{
+            kind: 'result', status: 'error', errorCode: 'model_selection_failed',
+            summary: 'model metadata for gpt-6-sol not found',
+        }])
+        const channel = createChannel()
+        const onModelChanged = vi.fn()
+        const onModelRejected = vi.fn()
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1', cwd: '/repo', provider, providerName: 'mock-acp',
+            model: 'gpt-6-sol', channelPort: channel, onModelChanged, onModelRejected,
+        })
+
+        await runtime.dispatch({ kind: 'user_message', text: 'hello', source: 'channel' })
+
+        expect(runtime.getModelStatus()).toEqual({ verifiedModel: null, requestedModel: null })
+        expect(onModelChanged).toHaveBeenCalledWith(null)
+        expect(onModelRejected).toHaveBeenCalledWith('gpt-6-sol')
+        expect(channel.sent.some(message => message.text.includes('model metadata for gpt-6-sol not found'))).toBe(true)
+
+        await runtime.dispatch({ kind: 'user_message', text: 'queued follow-up', source: 'channel' })
+        expect(provider.startQuery).toHaveBeenCalledTimes(1)
+        expect(channel.sent.at(-1)?.text).toContain('Select a model with /model')
+
+        await runtime.dispatch({ kind: 'command', name: 'model', args: 'gpt-6-astra', source: 'channel' })
+        await runtime.dispatch({ kind: 'user_message', text: 'retry', source: 'channel' })
+        expect(provider.startQuery).toHaveBeenCalledTimes(2)
+    })
+
+    it('records a model only after the provider confirms a successful turn', async () => {
+        const provider = createProvider([{ kind: 'result', status: 'success', appliedModel: 'gpt-6-sol' }])
+        const runtime = new SemanticSessionRuntime({
+            sessionId: 'session-1', cwd: '/repo', provider, providerName: 'mock-acp',
+            model: 'gpt-6-sol', channelPort: createChannel(),
+        })
+
+        expect(runtime.getModelStatus().verifiedModel).toBeNull()
+        await runtime.dispatch({ kind: 'user_message', text: 'hello', source: 'channel' })
+        expect(runtime.getModelStatus()).toEqual({ verifiedModel: 'gpt-6-sol', requestedModel: 'gpt-6-sol' })
+    })
     it('routes TopicSession input through the semantic runtime path', async () => {
         const { topicSession, provider, channel, sessionRecord } = createTopicHarness([
             { kind: 'session_init', sessionId: 'provider-session' },
@@ -270,7 +310,7 @@ describe('Semantic runtime integration chain', () => {
         }
     })
 
-    it('sends a Telegram start acknowledgement with provider, cwd, and selected model through TopicSession', async () => {
+    it('sends a Telegram start acknowledgement with provider, cwd, and unverified requested model through TopicSession', async () => {
         const provider = createProvider([{ kind: 'result', status: 'success' }])
         const bot = {
             api: {
@@ -299,7 +339,8 @@ describe('Semantic runtime integration chain', () => {
             '🔄 Agent started working...',
             'Provider: <code>mock&amp;acp</code>',
             'Cwd: <code>/repo/&lt;project&gt;</code>',
-            'Model: <code>sonnet&lt;4&gt;</code>',
+            'Model: <code>unverified</code>',
+            'Requested: <code>sonnet&lt;4&gt;</code>',
         ].join('\n'), expect.objectContaining({
             parse_mode: 'HTML',
             message_thread_id: 10,
@@ -783,7 +824,7 @@ describe('Semantic runtime integration chain', () => {
         }))
     })
 
-    it('does not pass a persisted model that is unavailable for the active provider', async () => {
+    it('rejects a persisted model that is unavailable for the active provider', async () => {
         const provider = createProvider([{ kind: 'result', status: 'success' }], {
             getAvailableModels: vi.fn(() => [{ id: 'cursor-model', name: 'cursor-model' }]),
         })
@@ -799,10 +840,9 @@ describe('Semantic runtime integration chain', () => {
 
         await runtime.dispatch({ kind: 'user_message', text: 'start cursor', source: 'channel' })
 
-        expect(provider.startQuery).toHaveBeenCalledWith('start cursor', expect.not.objectContaining({
-            model: 'opencode-model',
-        }))
-        expect(channel.statuses[0]).not.toHaveProperty('model')
+        expect(provider.startQuery).not.toHaveBeenCalled()
+        expect(channel.sent.at(-1)?.text).toContain('Prompt was not sent')
+        expect(runtime.getModelStatus()).toEqual({ verifiedModel: null, requestedModel: null })
     })
 
     it('uses resumed provider session id on the next turn and updates it from session_init', async () => {

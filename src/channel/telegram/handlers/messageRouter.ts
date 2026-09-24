@@ -376,6 +376,14 @@ export function registerMessageRouter(bot: any, ctx: MessageRouterContext): void
             sessionRecord,
             provider,
             channelPort,
+            onModelRejected: (model) => {
+                if (sessionManager.getTopicSettings(groupChatId, messageThreadId)?.model === model) {
+                    sessionManager.setTopicSettings(groupChatId, messageThreadId, { model: undefined, reasoningEffort: undefined })
+                }
+                if (sessionManager.getGroupSettings(groupChatId)?.model === model) {
+                    sessionManager.setGroupSettings(groupChatId, { model: undefined, reasoningEffort: undefined })
+                }
+            },
             logger: logger ? { group: (chatId: number, line: string) => logger.group(chatId, line) } : undefined,
         })
 

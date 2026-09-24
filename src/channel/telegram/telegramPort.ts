@@ -142,9 +142,8 @@ export class TelegramPort implements ChannelPort {
             `Provider: <code>${this.escapeHtml(status.provider)}</code>`,
             `Cwd: <code>${this.escapeHtml(status.cwd)}</code>`,
         ]
-        if (status.model) {
-            details.push(`Model: <code>${this.escapeHtml(status.model)}</code>`)
-        }
+        details.push('Model: <code>unverified</code>')
+        if (status.requestedModel) details.push(`Requested: <code>${this.escapeHtml(status.requestedModel)}</code>`)
 
         const text = details.join('\n')
         const options = {

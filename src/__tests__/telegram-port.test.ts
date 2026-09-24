@@ -175,11 +175,11 @@ describe('TelegramPort', () => {
     })
 
     describe('notifyStatus', () => {
-        it('sends an acknowledgement with provider, cwd, and model when a query starts', () => {
+        it('sends an acknowledgement with provider, cwd, and unverified model request when a query starts', () => {
             const { bot, apiCalls } = createMockBot()
             const port = new TelegramPort(bot, -100123, 42)
 
-            port.notifyStatus({ state: 'querying', cwd: '/tmp/<repo>', provider: 'test&provider', model: 'model<1>' })
+            port.notifyStatus({ state: 'querying', cwd: '/tmp/<repo>', provider: 'test&provider', requestedModel: 'model<1>' })
 
             expect(apiCalls[0]).toEqual({
                 method: 'sendMessage',
@@ -189,7 +189,8 @@ describe('TelegramPort', () => {
                         '🔄 Agent started working...',
                         'Provider: <code>test&amp;provider</code>',
                         'Cwd: <code>/tmp/&lt;repo&gt;</code>',
-                        'Model: <code>model&lt;1&gt;</code>',
+                        'Model: <code>unverified</code>',
+                        'Requested: <code>model&lt;1&gt;</code>',
                     ].join('\n'),
                     expect.objectContaining({
                         parse_mode: 'HTML',
@@ -199,7 +200,7 @@ describe('TelegramPort', () => {
             })
         })
 
-        it('omits model from the acknowledgement when no model is selected', () => {
+        it('marks the model unverified when no model is requested', () => {
             const { bot, apiCalls } = createMockBot()
             const port = new TelegramPort(bot, -100123, 42)
 
@@ -209,6 +210,7 @@ describe('TelegramPort', () => {
                 '🔄 Agent started working...',
                 'Provider: <code>test</code>',
                 'Cwd: <code>/tmp</code>',
+                'Model: <code>unverified</code>',
             ].join('\n'))
         })
 

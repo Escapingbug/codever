@@ -62,6 +62,10 @@ export interface AgentResultEvent {
     kind: 'result'
     status: 'success' | 'error' | 'max_turns'
     summary?: string
+    /** Model accepted by the provider for this successful turn. */
+    appliedModel?: string
+    /** The requested model was rejected before or during the turn. */
+    errorCode?: 'model_selection_failed'
     tokenCount?: number
     costUsd?: number
     durationMs?: number

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AcpProvider, formatAgentQueryError, type AcpSessionConfiguration } from '@/providers/acp'
 import type { AgentEvent } from '@/providers/types'
 
@@ -325,6 +325,44 @@ describe('AcpProvider tail drain', () => {
 
         expect(clientManager.promptCalls).toBe(1)
         expect(events.at(-1)).toMatchObject({ kind: 'result', status: 'success' })
+    })
+
+    it('rejects a Codex model when the setter fails even if config echoes the requested value', async () => {
+        const provider = new AcpProvider({ name: 'codex', command: 'fake', args: [], requireModelSetter: true })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.setModelError = new Error('Internal error')
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo', model: 'gpt-6-sol', signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.promptCalls).toBe(0)
+        expect(clientManager.setConfigOptionCalls).toEqual([])
+        expect(events.at(-1)).toMatchObject({
+            kind: 'result', status: 'error', errorCode: 'model_selection_failed',
+            summary: expect.stringContaining('Prompt was not sent'),
+        })
+    })
+
+    it('does not resume or load a new Codex session before its first prompt', async () => {
+        const provider = new AcpProvider({ name: 'codex', command: 'fake', args: [], deferInitialSessionReconnect: true })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.supportsResumeSession = true
+        const resume = vi.spyOn(clientManager, 'resumeSession')
+        const load = vi.spyOn(clientManager, 'loadSession')
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', { cwd: '/repo', signal: new AbortController().signal })
+        for await (const _event of handle.events) {}
+
+        expect(resume).not.toHaveBeenCalled()
+        expect(load).not.toHaveBeenCalled()
+        expect(clientManager.promptCalls).toBe(1)
     })
 
     it.each(['different', 'missing'])('rejects an unconfirmed config model after the ACP model method fails (%s)', async (responseKind) => {

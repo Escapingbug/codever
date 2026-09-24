@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseCodexModels } from '../index'
 
 const { acpProviderConfigs } = vi.hoisted(() => ({
@@ -29,6 +29,28 @@ vi.mock('@/providers/acp', () => ({
 }))
 
 describe('CodexProvider', () => {
+    beforeEach(() => acpProviderConfigs.splice(0))
+    it('uses the ACP-advertised model ID with the requested reasoning effort', async () => {
+        const { CodexProvider } = await import('../index')
+        const provider = new CodexProvider() as any
+        const configuration = {
+            models: {
+                currentModelId: 'gpt-6-astra[high]',
+                availableModels: [
+                    { modelId: 'gpt-6-sol[medium]', name: 'GPT-6-Sol (medium)' },
+                    { modelId: 'gpt-6-sol[high]', name: 'GPT-6-Sol (high)' },
+                ],
+            },
+        }
+
+        expect(provider.resolveSessionModel('gpt-6-sol', configuration, {
+            providerSettings: { reasoningEffort: 'high' },
+        })).toBe('gpt-6-sol[high]')
+        expect(provider.resolveSessionModel('gpt-6-luna', configuration, {
+            providerSettings: { reasoningEffort: 'high' },
+        })).toBe('gpt-6-luna[high]')
+    })
+
     it('launches Codex through the ACP adapter over stdio', async () => {
         const { CodexProvider } = await import('../index')
 
@@ -38,6 +60,9 @@ describe('CodexProvider', () => {
         expect(acpProviderConfigs).toEqual([
             {
                 name: 'codex',
+                requireModelSetter: true,
+                deferInitialSessionReconnect: true,
+                env: { CODEX_PATH: 'codex' },
                 command: 'npx',
                 args: [
                     '-y',

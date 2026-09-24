@@ -6,8 +6,8 @@
  */
 
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process'
-import { AcpProvider } from '@/providers/acp'
-import type { ModelEntry } from '@/providers/provider'
+import { AcpProvider, type AcpSessionConfiguration } from '@/providers/acp'
+import type { AgentQueryConfig, ModelEntry } from '@/providers/provider'
 
 const CODEX_ACP_COMMAND = 'npx'
 const CODEX_CLI_PACKAGE = '@openai/codex@0.156.1'
@@ -50,17 +50,36 @@ export class CodexProvider extends AcpProvider {
     private readonly cwd?: string
 
     constructor(options: CodexProviderOptions = {}) {
+        const acpEnv = options.command
+            ? options.env
+            : { CODEX_PATH: 'codex', ...options.env }
         super({
             name: options.name ?? 'codex',
             command: options.command ?? CODEX_ACP_COMMAND,
             args: options.args ?? CODEX_ACP_ARGS,
-            ...(options.env ? { env: options.env } : {}),
+            requireModelSetter: true,
+            deferInitialSessionReconnect: true,
+            ...(acpEnv ? { env: acpEnv } : {}),
             ...(options.cwd ? { cwd: options.cwd } : {}),
         })
         this.modelsCommand = options.modelsCommand ?? CODEX_MODELS_COMMAND
         this.modelsArgs = options.modelsArgs ?? CODEX_MODELS_ARGS
         this.env = options.env
         this.cwd = options.cwd
+    }
+
+    protected override resolveSessionModel(model: string, configuration: AcpSessionConfiguration | undefined, queryConfig: AgentQueryConfig): string | undefined {
+        const advertised = configuration?.models?.availableModels ?? []
+        if (advertised.some(entry => entry.modelId === model)) return model
+        const candidates = advertised.map(entry => entry.modelId).filter(id => id.startsWith(`${model}[`))
+        const requestedEffort = queryConfig.providerSettings?.reasoningEffort
+        if (typeof requestedEffort === 'string' && requestedEffort.trim()) {
+            // The ACP catalog can lag its model setter. Let the setter decide.
+            return `${model}[${requestedEffort.trim()}]`
+        }
+        const currentId = configuration?.models?.currentModelId
+        if (currentId && candidates.includes(currentId)) return currentId
+        return candidates.includes(`${model}[medium]`) ? `${model}[medium]` : candidates[0] ?? `${model}[medium]`
     }
 
     getAvailableModels(): ModelEntry[] {

@@ -51,10 +51,11 @@ export interface TopicSessionConfig {
     channelPort: ChannelPort
     /** Optional group logger */
     logger?: { group(chatId: number, line: string): void }
+    onModelRejected?: (model: string) => void
 }
 
 export function createTopicSession(options: TopicSessionConfig): TopicSession {
-    const { sessionRecord, provider, channelPort, logger } = options
+    const { sessionRecord, provider, channelPort, logger, onModelRejected } = options
     const chatId = sessionRecord.groupChatId!
 
     function glog(line: string): void {
@@ -74,6 +75,7 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
         onModelChanged: (model) => {
             sessionRecord.setModel(model)
         },
+        onModelRejected,
         onReasoningEffortChanged: (reasoningEffort) => {
             sessionRecord.setReasoningEffort(reasoningEffort)
         },
@@ -124,6 +126,9 @@ export function createTopicSession(options: TopicSessionConfig): TopicSession {
     }
 
     return {
+        getModelStatus() {
+            return runtime.getModelStatus()
+        },
         receiveInput,
         dispatch(input) {
             return runtime.dispatch(input)

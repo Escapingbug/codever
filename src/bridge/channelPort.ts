@@ -44,6 +44,7 @@ export interface DecisionResponse {
 export interface SessionStatus {
     state: SessionState
     model?: string
+    requestedModel?: string
     cwd: string
     provider: string
     /** If set, edit this existing message instead of sending a new one */
@@ -77,6 +78,8 @@ export interface ChannelPort {
  * Represents a user's continuous interaction within a Telegram topic.
  */
 export interface TopicSession {
+    /** Verified model from a successful turn and the next requested model. */
+    getModelStatus?(): { verifiedModel: string | null; requestedModel: string | null }
     /** Push a user message into the session */
     receiveInput(input: { text: string; username?: string; richInput?: RichUserInput }): void
 

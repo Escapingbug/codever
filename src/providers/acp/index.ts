@@ -30,6 +30,8 @@ const ACP_HISTORY_DRAIN_IDLE_MS = 150
 const ACP_HISTORY_DRAIN_MAX_MS = 3_000
 const MAX_AGENT_ERROR_SUMMARY_LENGTH = 1_500
 
+class ModelSelectionError extends Error {}
+
 /**
  * Resolve the command used to launch the codever MCP stdio server.
  *
@@ -377,6 +379,10 @@ export interface AcpProviderConfig {
     args: string[]
     env?: Record<string, string>
     cwd?: string
+    /** Require the ACP model setter; config option echoes alone are insufficient. */
+    requireModelSetter?: boolean
+    /** Some agents cannot resume/load a new session until its first prompt completes. */
+    deferInitialSessionReconnect?: boolean
     /** ACP config option used for Codever's reasoning-effort setting. */
     reasoningConfigId?: string
     /** ACP config option used for Codever's permission/mode setting. */
@@ -400,6 +406,8 @@ export class AcpProvider implements AgentProvider {
     private readonly reasoningConfigId: string
     private readonly permissionModeConfigId?: string
     private readonly permissionModeValues?: Set<string>
+    private readonly requireModelSetter: boolean
+    private readonly deferInitialSessionReconnect: boolean
 
     /** Track the active sessionId for the current query (for interrupt support) */
     private activeSessionId: string | null = null
@@ -409,6 +417,8 @@ export class AcpProvider implements AgentProvider {
 
     constructor(config: AcpProviderConfig) {
         this.name = config.name
+        this.requireModelSetter = config.requireModelSetter ?? false
+        this.deferInitialSessionReconnect = config.deferInitialSessionReconnect ?? false
         this.reasoningConfigId = config.reasoningConfigId ?? 'reasoning_effort'
         this.permissionModeConfigId = config.permissionModeConfigId
         this.permissionModeValues = config.permissionModeValues
@@ -431,16 +441,16 @@ export class AcpProvider implements AgentProvider {
 
     protected captureSessionConfiguration(_configuration: AcpSessionConfiguration): void {}
 
-    protected resolveSessionModel(model: string, _configuration: AcpSessionConfiguration | undefined): string | undefined {
+    protected resolveSessionModel(model: string, _configuration: AcpSessionConfiguration | undefined, _queryConfig: AgentQueryConfig): string | undefined {
         return model
     }
 
-    private async applySessionModel(sessionId: string, model: string, configuration: AcpSessionConfiguration | undefined): Promise<void> {
-        const resolvedModel = this.resolveSessionModel(model, configuration)
+    private async applySessionModel(sessionId: string, model: string, configuration: AcpSessionConfiguration | undefined, queryConfig: AgentQueryConfig): Promise<void> {
+        const resolvedModel = this.resolveSessionModel(model, configuration, queryConfig)
         if (!resolvedModel) {
             const message = `Selected model ${model} is not advertised by this ACP session`
             console.error(`[acp:${this.name}] ${message}`)
-            throw new Error(message)
+            throw new ModelSelectionError(message)
         }
 
         let setModelError: unknown
@@ -453,32 +463,38 @@ export class AcpProvider implements AgentProvider {
             setModelError = e
             const msg = e instanceof Error ? e.message : String(e)
             console.error(`[acp:${this.name}] Failed to set model: ${msg}`)
+            // Codex's config option can echo a requested model even when the
+            // actual model setter rejects it. That echo is not confirmation.
+            if (this.requireModelSetter) {
+                throw new ModelSelectionError(`Could not apply selected model ${model}: session/set_model=${msg}. Prompt was not sent.`)
+            }
         }
 
         const configId = findModelConfigId(configuration) ?? 'model'
+        const configValue = this.requireModelSetter ? model : resolvedModel
         let configReportedMismatch = false
         try {
             const response = await this.clientManager.setSessionConfigOption({
                 sessionId,
                 configId,
-                value: resolvedModel,
+                value: configValue,
             })
             const reportedValue = response.configOptions.find(option => option.id === configId)?.currentValue
-            if (reportedValue !== undefined && reportedValue !== resolvedModel) {
+            if (reportedValue !== undefined && reportedValue !== configValue) {
                 configReportedMismatch = true
-                throw new Error(`ACP reported ${String(reportedValue)} instead of ${resolvedModel}`)
+                throw new Error(`ACP reported ${String(reportedValue)} instead of ${configValue}`)
             }
             if (reportedValue === undefined && !modelApplied) {
                 throw new Error(`ACP did not confirm the selected model in its config response`)
             }
-            console.error(`[acp:${this.name}] Set config model to ${resolvedModel}`)
+            console.error(`[acp:${this.name}] Set config model to ${configValue}`)
             modelApplied = true
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
             if (!modelApplied || configReportedMismatch) {
                 const first = setModelError === undefined ? 'accepted' : setModelError instanceof Error ? setModelError.message : String(setModelError)
-                throw new Error(`Could not apply selected model ${model}: session/set_model=${first}; session/set_config_option=${msg}. Prompt was not sent.`)
+                throw new ModelSelectionError(`Could not apply selected model ${model}: session/set_model=${first}; session/set_config_option=${msg}. Prompt was not sent.`)
             }
         }
     }
@@ -646,7 +662,9 @@ export class AcpProvider implements AgentProvider {
                     //   Some agents (e.g. Cursor's `agent` CLI) don't support resumeSession, and
                     //   their loadSession only works on persisted sessions (after a prompt completes).
                     //   For those, we skip Phase 2 and inject full MCP config after the first prompt.
-                    if (supportsResume) {
+                    if (this.deferInitialSessionReconnect) {
+                        console.error(`[acp:${this.name}] Deferring MCP session reconnect until after the first prompt`)
+                    } else if (supportsResume) {
                         try {
                             const response = await clientManager.resumeSession({
                                 sessionId,
@@ -703,7 +721,7 @@ export class AcpProvider implements AgentProvider {
 
                     // Set model if specified
                     if (config.model) {
-                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration)
+                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
                     }
                     await this.applyProviderConfigOptions(sessionId!, config)
                 } else {
@@ -769,7 +787,9 @@ export class AcpProvider implements AgentProvider {
                             isResumingSession = false
 
                             // Try to inject full MCP config for the new session
-                            if (supportsResume) {
+                            if (this.deferInitialSessionReconnect) {
+                                console.error(`[acp:${this.name}] Deferring fallback session reconnect until after the first prompt`)
+                            } else if (supportsResume) {
                                 try {
                                     const response = await clientManager.resumeSession({
                                         sessionId,
@@ -812,7 +832,7 @@ export class AcpProvider implements AgentProvider {
 
                     // Set model if specified (user may have changed model mid-session)
                     if (config.model) {
-                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration)
+                        await this.applySessionModel(sessionId!, config.model, sessionConfiguration, config)
                     }
                     await this.applyProviderConfigOptions(sessionId!, config)
                 }
@@ -939,6 +959,12 @@ export class AcpProvider implements AgentProvider {
                         resultEvent.status = 'error'
                         resultEvent.summary = truncateErrorSummary(stderrError)
                     }
+                    if (resultEvent.status === 'success' && config.model) {
+                        resultEvent.appliedModel = config.model
+                    }
+                    if (resultEvent.status === 'error' && /model metadata for .+ not found/i.test(resultEvent.summary ?? '')) {
+                        resultEvent.errorCode = 'model_selection_failed'
+                    }
                     events.push(resultEvent)
                     events.end()
                 }
@@ -947,7 +973,11 @@ export class AcpProvider implements AgentProvider {
                 const summary = formatAgentQueryError(e, { provider: this.name, phase: 'query', sessionId })
                 console.error(`[acp:${this.name}] Query failed: ${summary}`)
                 if (!events.done) {
-                    events.push({ kind: 'result', status: 'error', summary })
+                    events.push({
+                        kind: 'result', status: 'error', summary,
+                        ...((e instanceof ModelSelectionError || /model metadata for .+ not found/i.test(summary))
+                            ? { errorCode: 'model_selection_failed' as const } : {}),
+                    })
                     events.end()
                 }
             }

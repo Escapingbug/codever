@@ -263,7 +263,7 @@ describe('SemanticSessionRuntime', () => {
         ]))
     })
 
-    it('does not pass a stale model when the active provider has no model catalog', async () => {
+    it('rejects a stale model from another provider when the active provider has no model catalog', async () => {
         const sent: ChannelMessage[] = []
         const statuses: SessionStatus[] = []
         const provider = createProvider([
@@ -280,8 +280,9 @@ describe('SemanticSessionRuntime', () => {
 
         await runtime.dispatch({ kind: 'user_message', text: 'hi', source: 'channel' })
 
-        expect(provider.startQuery).toHaveBeenCalledWith('hi', expect.not.objectContaining({ model: 'lmstudio/hy3-preview-ioa' }))
-        expect(statuses.find(status => status.state === 'querying')).not.toHaveProperty('model')
+        expect(provider.startQuery).not.toHaveBeenCalled()
+        expect(sent.at(-1)?.text).toContain('Prompt was not sent')
+        expect(runtime.getModelStatus()).toEqual({ verifiedModel: null, requestedModel: null })
     })
 
     it('notifies visibly when an assistant reply cannot be delivered', async () => {

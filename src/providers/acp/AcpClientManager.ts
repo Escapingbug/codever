@@ -139,6 +139,7 @@ export class AcpClientManager {
             /APIKeyError/i,
             /AuthenticationError/i,
             /RateLimitError/i,
+            /model metadata for .+ not found/i,
         ]
         for (const line of this.stderrBuffer) {
             for (const pattern of fatalPatterns) {

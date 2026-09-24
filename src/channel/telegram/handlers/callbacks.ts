@@ -236,8 +236,8 @@ async function handleModelCallback(c: Context, data: string, sessionManager: Ses
     const provider = getProvider(providerName) ?? getDefaultProvider()
     const modelEntry = provider.getAvailableModels().find(m => m.id === model)
     const displayName = modelEntry?.name || model
-    await c.answerCallbackQuery(`Model selected: ${displayName}`)
-    try { await c.editMessageText(`Model selected: <b>${escapeHtml(displayName)}</b>\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' }) } catch {}
+    await c.answerCallbackQuery(`Model requested: ${displayName}`)
+    try { await c.editMessageText(`Model requested: <b>${escapeHtml(displayName)}</b>\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' }) } catch {}
 }
 
 async function handleReasoningEffortCallback(c: Context, data: string, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>): Promise<void> {
@@ -271,8 +271,8 @@ async function handleReasoningEffortCallback(c: Context, data: string, sessionMa
     persistModelSettings(sessionManager, chatId, messageThreadId, Boolean(sessionRecord), { model, reasoningEffort })
 
     const displayName = modelEntry?.name || model
-    await c.answerCallbackQuery(`Model selected: ${displayName}`)
-    try { await c.editMessageText(`Model selected: <b>${escapeHtml(displayName)}</b>\nReasoning effort: <b>${escapeHtml(reasoningEffort)}</b>\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' }) } catch {}
+    await c.answerCallbackQuery(`Model requested: ${displayName}`)
+    try { await c.editMessageText(`Model requested: <b>${escapeHtml(displayName)}</b>\nReasoning effort: <b>${escapeHtml(reasoningEffort)}</b>\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' }) } catch {}
 }
 
 function getModelSelectionProvider(chatId: number, messageThreadId: number | undefined, sessionManager: SessionManager, topicSessions: Map<string, TopicSession>) {

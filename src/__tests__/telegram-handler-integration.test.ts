@@ -472,7 +472,8 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         await bot.runCommand('model', ctx)
 
-        expect(ctx.replies[0].text).toContain('Selected model: <b>default</b>')
+        expect(ctx.replies[0].text).toContain('Last verified model: <b>unknown</b>')
+        expect(ctx.replies[0].text).toContain('Requested for next turn: <b>old-model</b>')
         expect(ctx.replies[0].text).toContain('No models are available for provider <b>mock-acp</b>')
     })
 
@@ -495,8 +496,23 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         await bot.runCommand('model', ctx)
 
-        expect(ctx.replies[0].text).toContain('Selected model: <b>old-model</b>')
+        expect(ctx.replies[0].text).toContain('Last verified model: <b>unknown</b>')
+        expect(ctx.replies[0].text).toContain('Requested for next turn: <b>old-model</b>')
         expect(ctx.replies[0].text).toContain('Reasoning effort: <b>high</b>')
+    })
+
+    it('/model uses active runtime status after a failed selection instead of persisted defaults', async () => {
+        const bot = createBot()
+        const session = createSession('idle')
+        session.getModelStatus = vi.fn(() => ({ verifiedModel: null, requestedModel: null }))
+        const topicSessions = new Map([['-100:10', session]])
+        registerSettingsHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
+        const ctx = createContext()
+
+        await bot.runCommand('model', ctx)
+
+        expect(ctx.replies[0].text).toContain('Last verified model: <b>unknown</b>')
+        expect(ctx.replies[0].text).not.toContain('old-model')
     })
 
     it('provider callback should dispatch runtime provider switch command', async () => {
