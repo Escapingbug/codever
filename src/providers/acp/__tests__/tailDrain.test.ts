@@ -25,6 +25,11 @@ class FakeAcpClientManager {
     loadSessionHistoryText: string | null = null
     setModelCalls: Array<{ sessionId: string; modelId: string }> = []
     setConfigOptionCalls: Array<{ sessionId: string; configId: string; value: string }> = []
+    setModelError: Error | null = null
+    setConfigOptionError: Error | null = null
+    reportedConfigValue: string | null = null
+    omitConfigOption = false
+    promptCalls = 0
 
     private queue: FakeSessionNotification[] = []
     private waiters: FakeWaiter[] = []
@@ -45,12 +50,18 @@ class FakeAcpClientManager {
 
     async setSessionModel(params: { sessionId: string; modelId: string }): Promise<Record<string, never>> {
         this.setModelCalls.push(params)
+        if (this.setModelError) throw this.setModelError
         return {}
     }
 
-    async setSessionConfigOption(params: { sessionId: string; configId: string; value: string }): Promise<{ configOptions: [] }> {
+    async setSessionConfigOption(params: { sessionId: string; configId: string; value: string }): Promise<{ configOptions: Array<{ id: string; currentValue: string }> }> {
         this.setConfigOptionCalls.push(params)
-        return { configOptions: [] }
+        if (this.setConfigOptionError) throw this.setConfigOptionError
+        return { configOptions: this.omitConfigOption ? [] : [{ id: params.configId, currentValue: this.reportedConfigValue ?? params.value }] }
+    }
+
+    async resumeSession(): Promise<{ sessionId: string }> {
+        return { sessionId: 'session-1' }
     }
 
     async loadSession(): Promise<unknown> {
@@ -69,6 +80,7 @@ class FakeAcpClientManager {
     }
 
     async prompt(): Promise<{ stopReason: string }> {
+        this.promptCalls += 1
         this.sessionUpdateProcessing = new Promise(resolve => {
             setTimeout(() => {
                 this.emit({
@@ -265,6 +277,98 @@ describe('AcpProvider tail drain', () => {
         expect(clientManager.setConfigOptionCalls).toEqual([
             { sessionId: 'session-1', configId: 'model', value: 'kimi-k3[reasoning=max]' },
         ])
+    })
+
+    it.each([false, true])('stops before the prompt when both model setters reject (resumed=%s)', async (resumed) => {
+        const provider = new AcpProvider({ name: 'codex-test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.supportsResumeSession = resumed
+        clientManager.setModelError = new Error('Internal error')
+        clientManager.setConfigOptionError = new Error('Invalid params')
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            ...(resumed ? { sessionId: 'session-1' } : {}),
+            model: 'gpt-6-sol',
+            signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.promptCalls).toBe(0)
+        expect(clientManager.setModelCalls).toEqual([{ sessionId: 'session-1', modelId: 'gpt-6-sol' }])
+        expect(clientManager.setConfigOptionCalls).toEqual([{ sessionId: 'session-1', configId: 'model', value: 'gpt-6-sol' }])
+        expect(events).toEqual([expect.objectContaining({
+            kind: 'result',
+            status: 'error',
+            summary: expect.stringContaining('Could not apply selected model gpt-6-sol'),
+        })])
+        expect((events[0] as Extract<AgentEvent, { kind: 'result' }>).summary).toContain('Prompt was not sent')
+    })
+
+    it('uses the config option when the ACP model method is unsupported', async () => {
+        const provider = new AcpProvider({ name: 'codex-test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.setModelError = new Error('Method not found')
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            model: 'gpt-6-sol',
+            signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.promptCalls).toBe(1)
+        expect(events.at(-1)).toMatchObject({ kind: 'result', status: 'success' })
+    })
+
+    it.each(['different', 'missing'])('rejects an unconfirmed config model after the ACP model method fails (%s)', async (responseKind) => {
+        const provider = new AcpProvider({ name: 'codex-test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.setModelError = new Error('Internal error')
+        clientManager.reportedConfigValue = responseKind === 'different' ? 'gpt-6-astra' : null
+        clientManager.omitConfigOption = responseKind === 'missing'
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            model: 'gpt-6-sol',
+            signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.promptCalls).toBe(0)
+        expect(events.at(-1)).toMatchObject({ kind: 'result', status: 'error', summary: expect.stringContaining('gpt-6-sol') })
+    })
+
+    it('stops when the config response reports a different model even if set_model was accepted', async () => {
+        const provider = new AcpProvider({ name: 'codex-test-acp', command: 'fake', args: [] })
+        const clientManager = new FakeAcpClientManager()
+        clientManager.reportedConfigValue = 'gpt-6-astra'
+        ;(provider as any).clientManager = clientManager
+        ;(provider as any).initialized = true
+
+        const handle = provider.startQuery('hi', {
+            cwd: '/repo',
+            model: 'gpt-6-sol',
+            signal: new AbortController().signal,
+        })
+        const events: AgentEvent[] = []
+        for await (const event of handle.events) events.push(event)
+
+        expect(clientManager.promptCalls).toBe(0)
+        expect(events.at(-1)).toMatchObject({
+            kind: 'result',
+            status: 'error',
+            summary: expect.stringContaining('ACP reported gpt-6-astra instead of gpt-6-sol'),
+        })
     })
 })
 

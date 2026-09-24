@@ -435,17 +435,12 @@ export class AcpProvider implements AgentProvider {
         return model
     }
 
-    protected requiresAdvertisedSessionModel(): boolean {
-        return false
-    }
-
     private async applySessionModel(sessionId: string, model: string, configuration: AcpSessionConfiguration | undefined): Promise<void> {
         const resolvedModel = this.resolveSessionModel(model, configuration)
         if (!resolvedModel) {
             const message = `Selected model ${model} is not advertised by this ACP session`
             console.error(`[acp:${this.name}] ${message}`)
-            if (this.requiresAdvertisedSessionModel()) throw new Error(message)
-            return
+            throw new Error(message)
         }
 
         let setModelError: unknown
@@ -460,20 +455,30 @@ export class AcpProvider implements AgentProvider {
             console.error(`[acp:${this.name}] Failed to set model: ${msg}`)
         }
 
+        const configId = findModelConfigId(configuration) ?? 'model'
+        let configReportedMismatch = false
         try {
-            await this.clientManager.setSessionConfigOption({
+            const response = await this.clientManager.setSessionConfigOption({
                 sessionId,
-                configId: findModelConfigId(configuration) ?? 'model',
+                configId,
                 value: resolvedModel,
             })
+            const reportedValue = response.configOptions.find(option => option.id === configId)?.currentValue
+            if (reportedValue !== undefined && reportedValue !== resolvedModel) {
+                configReportedMismatch = true
+                throw new Error(`ACP reported ${String(reportedValue)} instead of ${resolvedModel}`)
+            }
+            if (reportedValue === undefined && !modelApplied) {
+                throw new Error(`ACP did not confirm the selected model in its config response`)
+            }
             console.error(`[acp:${this.name}] Set config model to ${resolvedModel}`)
             modelApplied = true
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             console.error(`[acp:${this.name}] Failed to set config model: ${msg}`)
-            if (this.requiresAdvertisedSessionModel() && !modelApplied) {
-                const first = setModelError instanceof Error ? setModelError.message : String(setModelError)
-                throw new Error(`Cursor rejected model ${resolvedModel}: session/set_model=${first}; session/set_config_option=${msg}`)
+            if (!modelApplied || configReportedMismatch) {
+                const first = setModelError === undefined ? 'accepted' : setModelError instanceof Error ? setModelError.message : String(setModelError)
+                throw new Error(`Could not apply selected model ${model}: session/set_model=${first}; session/set_config_option=${msg}. Prompt was not sent.`)
             }
         }
     }

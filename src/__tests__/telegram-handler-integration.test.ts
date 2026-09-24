@@ -339,6 +339,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'gpt-5.5', source: 'channel' })
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'reasoningEffort', args: 'medium', source: 'channel' })
         expect(ctx.replies[0].text).toContain('Reasoning effort: <b>medium</b>')
+        expect(ctx.replies[0].text).toContain('will be applied and checked before the next turn')
     })
 
     it('/model switches large catalogs to keyword search instead of deep pagination', async () => {
@@ -404,9 +405,11 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
         const topicSessions = new Map([['-100:10', session]])
         registerCallbackHandlers(bot, { sessionManager: createSessionManager(), topicSessions })
 
-        await bot.runCallback('model:sonnet')
+        const ctx = createCallbackContext('model:sonnet')
+        await bot.runCallback('model:sonnet', ctx)
 
         expect(session.dispatch).toHaveBeenCalledWith({ kind: 'command', name: 'model', args: 'sonnet', source: 'channel' })
+        expect(ctx.editMessageText).toHaveBeenCalledWith(expect.stringContaining('will be applied and checked before the next turn'), expect.any(Object))
     })
 
     it('model callback asks for reasoning effort when the selected model supports it', async () => {
@@ -469,7 +472,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         await bot.runCommand('model', ctx)
 
-        expect(ctx.replies[0].text).toContain('Current model: <b>default</b>')
+        expect(ctx.replies[0].text).toContain('Selected model: <b>default</b>')
         expect(ctx.replies[0].text).toContain('No models are available for provider <b>mock-acp</b>')
     })
 
@@ -492,7 +495,7 @@ describe('Telegram handler integration with semantic runtime dispatch', () => {
 
         await bot.runCommand('model', ctx)
 
-        expect(ctx.replies[0].text).toContain('Current model: <b>old-model</b>')
+        expect(ctx.replies[0].text).toContain('Selected model: <b>old-model</b>')
         expect(ctx.replies[0].text).toContain('Reasoning effort: <b>high</b>')
     })
 

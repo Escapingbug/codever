@@ -103,10 +103,6 @@ export class AgentProvider extends AcpProvider {
             ?? this.sessionModelIds.get(model)
     }
 
-    protected override requiresAdvertisedSessionModel(): boolean {
-        return true
-    }
-
     protected override createExtensionHandler(events: PushableAsyncIterable<AgentEvent>, config: AgentQueryConfig): AcpExtensionHandler | null {
         return createCursorAcpExtensionHandler(events, config)
     }

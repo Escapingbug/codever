@@ -72,7 +72,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
                 model: found.id,
                 reasoningEffort,
             })
-            await c.reply(formatModelStatus(`Model set to: <b>${escapeHtml(found.id)}</b>`, reasoningEffort), { parse_mode: 'HTML' })
+            await c.reply(`${formatModelStatus(`Model selected: <b>${escapeHtml(found.id)}</b>`, reasoningEffort)}\nThe selection will be applied and checked before the next turn.`, { parse_mode: 'HTML' })
             return
         }
 
@@ -83,13 +83,13 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
         const current = isSelectableModel(configuredCurrent, models) ? configuredCurrent : 'default'
         const currentReasoningEffort = getConfiguredReasoningEffort(genericTopic, sessionRecord, topicSettings, groupSettings)
         if (models.length === 0) {
-            await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
+            await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nNo models are available for provider <b>${escapeHtml(providerName)}</b>.`, {
                 parse_mode: 'HTML',
             })
             return
         }
         if (models.length > MODEL_SEARCH_THRESHOLD) {
-            await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nThis provider has <b>${models.length}</b> models. The complete list follows below.\n\nSearch with <code>/model &lt;keyword&gt;</code>, or select an exact ID with <code>/model &lt;model-id&gt;</code>.`, {
+            await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nThis provider has <b>${models.length}</b> models. The complete list follows below.\n\nSearch with <code>/model &lt;keyword&gt;</code>, or select an exact ID with <code>/model &lt;model-id&gt;</code>.`, {
                 parse_mode: 'HTML',
                 reply_markup: modelProviderKeyboard(models),
             })
@@ -98,7 +98,7 @@ export function registerSettingsHandlers(bot: any, ctx: SettingsHandlerContext):
             }
             return
         }
-        await c.reply(`${formatModelStatus(`Current model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a model provider:`, {
+        await c.reply(`${formatModelStatus(`Selected model: <b>${escapeHtml(current)}</b>`, currentReasoningEffort)}\nSelect a model provider:`, {
             parse_mode: 'HTML',
             reply_markup: modelProviderKeyboard(models)
         })
